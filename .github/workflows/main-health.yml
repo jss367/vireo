@@ -6,29 +6,21 @@ name: Main health
 # (test-main.yml) is where cross-cutting and platform-specific breakage shows
 # up first. Nothing used to react to it: the PR agent's fix-ci only handles
 # failures on PRs. This workflow keeps one open issue labelled ``main-red``
-# while main is failing (a new failing run comments on it), closes it on the
-# next green run, and — when the ``MAIN_HEALTH_ENABLE_FIX_MAIN`` repository
-# variable is ``true`` — asks the PR agent routine for a fix PR (``Task:
-# fix-main``). The routine labels that PR ``fix-main``; while one is open,
-# after three attempts on the same issue, or while an earlier attempt is
-# still in flight (marker posted but no matching PR yet), later failures
-# only update the issue so a stuck fix can't loop.
+# while main is failing (each newer failing run comments on it) and closes it
+# on the next green run.
 #
-# The routine dispatch is gated on ``MAIN_HEALTH_ENABLE_FIX_MAIN`` because
-# the stored routine prompt at claude.ai/code/routines is pasted in by
-# hand: an unrecognised ``fix-main`` task returns 2xx from the routine
-# provider (burning one of the three attempts) but never opens a PR.
-# The maintainer flips the variable once ``docs/pr-agent-routine-prompt.md``
-# has been pasted into the routine.
+# When a failing run opens a new ``main-red`` issue, and only then, it also
+# asks the PR agent routine for a fix PR (``Task: fix-main``, labelled
+# ``fix-main``). One automatic attempt per incident keeps this free of
+# reservation and retry bookkeeping; later failures only update the issue,
+# and closing the issue while main is still red makes the next red run open
+# a fresh incident and try again.
 #
-# The in-flight (``pending``) guard expires after a couple of hours: an
-# accepted routine session may still terminate without a PR — step 8 of
-# the ``fix-main`` task comments on the issue and opens no PR when it
-# cannot fix the failure, and a crash after acceptance has the same
-# result. Without expiry, a stale marker would keep every subsequent
-# failing run stuck at the pending check and prevent the advertised
-# second and third attempts. Total ``attempts`` is not expired, so the
-# hard MAX_FIX_ATTEMPTS cap survives.
+# The dispatch is gated on the ``MAIN_HEALTH_ENABLE_FIX_MAIN`` repository
+# variable because the routine prompt at claude.ai/code/routines is pasted in
+# by hand: until it knows ``fix-main``, a fire would be accepted and do
+# nothing. Flip the variable once ``docs/pr-agent-routine-prompt.md`` has been
+# pasted into the routine.
 
 on:
   workflow_run:
@@ -50,8 +42,6 @@ concurrency:
 env:
   RED_LABEL: main-red
   FIX_LABEL: fix-main
-  MAX_FIX_ATTEMPTS: "3"
-  FIRED_MARKER: "<!-- main-health-fired -->"
 
 jobs:
   report:
@@ -87,20 +77,15 @@ jobs:
           # id and creation time), so a rerun of an old run cannot masquerade
           # as the latest completed run; that newest run's own workflow_run
           # event drives the issue state.
-          #
-          # Filter to conclusion in success/failure. The job condition above
-          # only lets those two conclusions reach this step, but ``gh run list
-          # --status completed`` also returns cancelled/skipped/neutral runs.
-          # When concurrency cancels a queued Full tests run (three pushes
-          # while one is active), the cancelled run has completed status but
-          # a later createdAt than the older failure: it would win the sort,
-          # this run would exit as ``superseded``, and the failure would go
-          # unreported — permanently if the newest queued run also ends
-          # without success or failure.
+          # Only conclusive runs count: GitHub cancels a pending run when a
+          # newer one queues behind the active run, and that cancelled run's
+          # later createdAt must not make the active run's real result look
+          # superseded.
           latest_id=$(gh run list --repo "$REPO" --workflow "$WORKFLOW_ID" \
             --branch main --status completed --limit 20 \
             --json databaseId,createdAt,conclusion \
-            --jq '[.[] | select(.conclusion == "success" or .conclusion == "failure")] | sort_by(.createdAt) | reverse | .[0].databaseId // empty')
+            --jq '[.[] | select(.conclusion == "success" or .conclusion == "failure")]
+                  | sort_by(.createdAt) | reverse | .[0].databaseId // empty')
           if [[ -n "$latest_id" && "$latest_id" != "$RUN_ID" ]]; then
             echo "Run $RUN_ID is superseded by run $latest_id; skipping."
             exit 0
@@ -142,100 +127,18 @@ jobs:
             url=$(gh issue create --repo "$REPO" --label "$RED_LABEL" \
               --title "Full tests failing on main" --body-file "$body")
             issue=${url##*/}
+            # A new incident gets one automatic fix attempt.
+            echo "fire=true" >> "$GITHUB_OUTPUT"
           else
             gh issue comment "$issue" --repo "$REPO" --body-file "$body"
           fi
           echo "issue=$issue" >> "$GITHUB_OUTPUT"
 
-          # Scope the guard to this incident: an unrelated fix-main PR left
-          # open after its own incident closed would otherwise permanently
-          # block firing for a later, unrelated failure. The routine writes
-          # ``Refs #$ISSUE`` into every fix-main PR body, so a body match
-          # identifies a PR that belongs to this incident.
-          open_fixes=$(gh pr list --repo "$REPO" --label "$FIX_LABEL" --state open \
-            --json body \
-            --jq "[.[] | select((.body // \"\") | contains(\"Refs #$issue\"))] | length")
-          # Only count marker comments authored by this workflow's bot
-          # identity. Otherwise, since this is a public repo, any commenter
-          # could post $FIRED_MARKER three times to force ``attempts`` past
-          # MAX_FIX_ATTEMPTS and permanently block automated repair.
-          attempts=$(gh api "repos/$REPO/issues/$issue/comments" --paginate \
-            --jq "[.[] | select(.user.login == \"github-actions[bot]\" and (.body | contains(\"$FIRED_MARKER\")))] | length" \
-            | awk '{s += $1} END {print s + 0}')
-          # A prior attempt whose fix-main PR has not yet been opened is
-          # still in flight in the routine. Skip until that attempt either
-          # produces a PR or the reservation is released, so a second
-          # concurrent red run cannot fire a duplicate routine session for
-          # the same incident. The reserve-before-fire step below posts the
-          # marker atomically before the routine POST, so recent_attempts
-          # includes any reservation held by an earlier serialized run.
-          #
-          # ``recent_attempts`` filters to markers posted within the last
-          # $RESERVATION_TTL_SECS seconds. The routine can accept the POST
-          # (fired=true, marker kept) and still terminate without a PR:
-          # step 8 of the fix-main task explicitly comments on the issue
-          # and opens no PR when it cannot fix the failure, and a crash
-          # after acceptance has the same result. A stale marker would
-          # then keep ``pending > 0`` forever and block the advertised
-          # second and third attempts. Expiring the reservation gate
-          # after the TTL releases those hung reservations without giving
-          # up the concurrency guard for genuinely in-flight sessions
-          # (the routine's own diagnose-and-publish takes minutes, not
-          # hours). Stale reservations still count in ``attempts`` above
-          # so they still charge against MAX_FIX_ATTEMPTS.
-          #
-          # ``pending`` pairs each reservation with the earliest fix-main
-          # PR opened AFTER it that no earlier reservation already claimed
-          # (a two-pointer walk over both timelines sorted ascending). A
-          # reservation with no matching later PR is still in flight.
-          # Comparing counts alone (``recent_attempts - fix_prs``) is not
-          # enough: the routine posts its reservation minutes before it
-          # opens the PR, so within the same TTL window an expired
-          # reservation's PR can still be live and mask a fresh
-          # reservation whose routine has not yet published — the counts
-          # net to zero and let a second concurrent red run fire a
-          # duplicate session. Order-based pairing pins each PR to the
-          # reservation it was actually opened after, so a stale PR
-          # paired with an older reservation cannot cover for a fresh
-          # in-flight one. ``open_fixes`` above stays untimed because an
-          # open PR blocks firing regardless of when it was created.
-          RESERVATION_TTL_SECS=7200
-          now_epoch=$(date -u +%s)
-          recent_reservations=$(gh api "repos/$REPO/issues/$issue/comments" --paginate \
-            --jq "[.[] | select(.user.login == \"github-actions[bot]\" and (.body | contains(\"$FIRED_MARKER\"))) | .created_at]" \
-            | jq -s --argjson now "$now_epoch" --argjson ttl "$RESERVATION_TTL_SECS" \
-              '[.[][] | fromdate | select(($now - .) < $ttl)] | sort')
-          recent_attempts=$(echo "$recent_reservations" | jq 'length')
-          recent_fix_prs=$(gh pr list --repo "$REPO" --label "$FIX_LABEL" --state all \
-            --json body,createdAt \
-            --jq "[.[] | select((.body // \"\") | contains(\"Refs #$issue\")) | .createdAt]" \
-            | jq -s --argjson now "$now_epoch" --argjson ttl "$RESERVATION_TTL_SECS" \
-              '[.[][] | fromdate | select(($now - .) < $ttl)] | sort')
-          fix_prs=$(echo "$recent_fix_prs" | jq 'length')
-          pending=$(jq -n --argjson rs "$recent_reservations" --argjson ps "$recent_fix_prs" '
-            def walk($ri; $pi; $count):
-              if $ri >= ($rs | length) then $count
-              elif $pi >= ($ps | length) then $count + ($rs | length) - $ri
-              elif $ps[$pi] <= $rs[$ri] then walk($ri; $pi + 1; $count)
-              else walk($ri + 1; $pi + 1; $count)
-              end;
-            walk(0; 0; 0)')
-          if (( pending > 0 )); then
-            echo "A fix-main routine for #${issue} is already in flight (attempts=${attempts}, recent reservations=${recent_attempts}, recent PRs=${fix_prs}); not asking for another."
-          elif [[ "$open_fixes" != "0" ]]; then
-            echo "A fix-main PR for #${issue} is already open; not asking for another."
-          elif (( attempts >= MAX_FIX_ATTEMPTS )); then
-            echo "Already asked for ${attempts} fixes on #${issue}; leaving it to a human."
-          else
-            echo "attempt=$((attempts + 1))" >> "$GITHUB_OUTPUT"
-            echo "fire=true" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Note that fix-main dispatch is gated
         if: steps.issue.outputs.fire == 'true' && vars.MAIN_HEALTH_ENABLE_FIX_MAIN != 'true'
         run: |
           echo "The repository variable MAIN_HEALTH_ENABLE_FIX_MAIN is not 'true'; the fix-main routine dispatch is gated."
-          echo "The routine prompt at claude.ai/code/routines is edited by hand and is not synced from the repo. A fix-main POST that returns 2xx while the stored prompt does not yet recognise the task would still burn one of the ${MAX_FIX_ATTEMPTS} attempts without producing a PR, and the workflow cannot verify the stored prompt from here."
+          echo "The routine prompt at claude.ai/code/routines is edited by hand and is not synced from the repo; until it knows the fix-main task, a fire would be accepted and do nothing."
           echo "Set MAIN_HEALTH_ENABLE_FIX_MAIN=true once docs/pr-agent-routine-prompt.md has been pasted into the routine."
 
       - uses: actions/checkout@v5
@@ -243,28 +146,6 @@ jobs:
         with:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
-
-      - name: Reserve the fix attempt
-        id: reserve
-        if: steps.issue.outputs.fire == 'true' && vars.MAIN_HEALTH_ENABLE_FIX_MAIN == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          ISSUE: ${{ steps.issue.outputs.issue }}
-          ATTEMPT: ${{ steps.issue.outputs.attempt }}
-        run: |
-          set -euo pipefail
-          # Reserve BEFORE the fire so the FIRED_MARKER is already visible to
-          # any concurrently queued run before the routine POST is sent. With
-          # the ``main-health`` concurrency group serialising runs and the
-          # pre-check's ``pending > 0`` gate above, this posts an atomic
-          # reservation the next queued run must observe. The release step
-          # below deletes the reservation if the routine rejects the POST.
-          comment_id=$(gh api "repos/$REPO/issues/$ISSUE/comments" \
-            --method POST \
-            --field "body=Asked the PR agent for a fix PR (attempt ${ATTEMPT} of ${MAX_FIX_ATTEMPTS}). ${FIRED_MARKER}" \
-            --jq '.id')
-          echo "comment_id=$comment_id" >> "$GITHUB_OUTPUT"
 
       - name: Ask the PR agent for a fix
         id: fire
@@ -280,15 +161,12 @@ jobs:
             Workflow run: ${{ github.event.workflow_run.id }}
             Head SHA: ${{ github.event.workflow_run.head_sha }}
 
-      - name: Release the reservation if the routine rejected the request
-        if: always() && steps.reserve.outputs.comment_id != '' && steps.fire.outputs.fired != 'true'
+      - name: Record the fix request on the issue
+        if: steps.fire.outputs.fired == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          COMMENT_ID: ${{ steps.reserve.outputs.comment_id }}
+          ISSUE: ${{ steps.issue.outputs.issue }}
         run: |
-          # An accepted POST records the reservation as this attempt. When the
-          # routine provider rejects the POST (or the credentials are missing),
-          # delete the reservation so the next run can retry without burning an
-          # attempt for a routine session that never began.
-          gh api --method DELETE "repos/$REPO/issues/comments/$COMMENT_ID"
+          gh issue comment "$ISSUE" --repo "$REPO" \
+            --body "Asked the PR agent for a fix PR (label \`fix-main\`). To try again later, close this issue; the next red run opens a new one."

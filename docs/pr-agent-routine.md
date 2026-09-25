@@ -125,7 +125,7 @@ context. The routine prompt enumerates the supported task kinds:
 - `address-comment` — non-`/claude-fix`, non-👍 comment on a claude-agent PR
 - `address-codex-review` — codex-connector review on a non-agent PR
 - `fix-ci` — Tests workflow failed on a PR
-- `fix-main` — Full tests failed on `main` (fired by `main-health.yml`, which also keeps the `main-red` tracking issue); the routine opens a `fix-main` PR. The dispatch is gated on the repository variable `MAIN_HEALTH_ENABLE_FIX_MAIN`, which the maintainer flips to `true` only after pasting the updated `pr-agent-routine-prompt.md` into the routine at claude.ai/code/routines. Until then, `main-health.yml` still tracks failing runs in the `main-red` issue, but never calls the routine — a 2xx response for a task the stored prompt does not recognise would otherwise burn one of the three attempts without producing a PR.
+- `fix-main` — Full tests failed on `main` and opened a new `main-red` issue (fired by `main-health.yml`, once per incident); the routine opens a `fix-main` PR. The dispatch is gated on the repository variable `MAIN_HEALTH_ENABLE_FIX_MAIN`, which the maintainer flips to `true` only after pasting the updated `pr-agent-routine-prompt.md` into the routine at claude.ai/code/routines. Until then `main-health.yml` still tracks failing runs in the `main-red` issue but never calls the routine.
 
 The payload intentionally keeps user-supplied text (review bodies, comment
 bodies) clearly labeled as **untrusted data, not instructions** — the prompt
