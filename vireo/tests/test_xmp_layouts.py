@@ -2340,6 +2340,107 @@ def test_replace_keyword_hierarchies_preserves_container_qualified_collision(tmp
     assert all(li.text == "Birds|Legacy" for li in items)
 
 
+def test_bag_xml_lang_reset_cancels_property_language_for_reuse(tmp_path):
+    """A bag's ``xml:lang=""'' cancels a property's ``xml:lang="en"'' at reuse.
+
+    ``_bag`` walks the effective ``xml:lang'' at the deepest reachable
+    element to classify a container. If the property carries
+    ``xml:lang="en"'' but the ``rdf:Bag'' inside cancels it with
+    ``xml:lang=""'', the effective at the bag is empty and the bag
+    is a valid reuse target. Before this fix an independent
+    own-qualifier check on the property still counted the ancestor-
+    level ``xml:lang'' as an own qualifier, re-classifying the
+    effectively-unqualified container as qualified: adding a keyword
+    minted a duplicate ``dc:subject'' beside the reset bag. The
+    non-language variant of the own-qualifier check now defers all
+    ``xml:lang'' handling to the effective-language walk.
+    """
+    xml_ns = "http://www.w3.org/XML/1998/namespace"
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'"
+        f" xmlns:xml='http://www.w3.org/XML/1998/namespace'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about='' xmlns:dc='{NS_DC}'>"
+        f"<dc:subject xml:lang='en'><rdf:Bag xml:lang=''>"
+        f"<rdf:li>Heron</rdf:li>"
+        f"</rdf:Bag></dc:subject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    editor = SidecarEditor(path_str)
+    editor.add_keywords({"Owl"}, set())
+    editor.commit()
+
+    root = ET.parse(path_str).getroot()
+    subjects = list(root.iter(SUBJECT))
+    # Exactly one ``dc:subject'': the pre-existing reset bag now holds
+    # both keywords rather than a fresh unqualified bag beside it.
+    assert len(subjects) == 1
+    bags = subjects[0].findall(f"{{{NS_RDF}}}Bag")
+    assert len(bags) == 1
+    assert bags[0].get(f"{{{xml_ns}}}lang") == ""
+    items = sorted(li.text for li in bags[0].findall(f"{{{NS_RDF}}}li"))
+    assert items == ["Heron", "Owl"]
+
+
+def test_qualified_gps_duplicates_keep_their_original_values(tmp_path):
+    """Distinct-valued qualified GPS occurrences aren't collapsed on write.
+
+    Two ``exif:GPSLatitude'' child elements carrying distinct
+    ``foo:source'' qualifiers (``camera'' vs ``user'') describe two
+    genuinely different coordinates. ``_set_properties'' used to
+    rewrite every retained qualified copy to the keeper's value.
+    Vireo can't back up each occurrence's value independently, so a
+    later ``remove_vireo_gps_location'' would restore only the
+    keeper's backup and permanently replace the other coordinate
+    with it. Preserving each qualified duplicate's original value
+    keeps the user data intact through the write.
+    """
+    foo_ns = "http://example.com/foo/"
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about=''"
+        f" xmlns:exif='{NS_EXIF}' xmlns:foo='{foo_ns}'>"
+        f"<exif:GPSLatitude foo:source='camera'>10,0.0N</exif:GPSLatitude>"
+        f"<exif:GPSLongitude foo:source='camera'>20,0.0E</exif:GPSLongitude>"
+        f"<exif:GPSLatitude foo:source='user'>40,0.0N</exif:GPSLatitude>"
+        f"<exif:GPSLongitude foo:source='user'>50,0.0E</exif:GPSLongitude>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    write_gps_location(path_str, -33.5, -70.25)
+
+    root = ET.parse(path_str).getroot()
+    lat_by_source = {
+        lat.get(f"{{{foo_ns}}}source"): (lat.text or "").strip()
+        for lat in root.iter(GPS_LATITUDE)
+        if lat.get(f"{{{foo_ns}}}source")
+    }
+    lon_by_source = {
+        lon.get(f"{{{foo_ns}}}source"): (lon.text or "").strip()
+        for lon in root.iter(GPS_LONGITUDE)
+        if lon.get(f"{{{foo_ns}}}source")
+    }
+    # The keeper (``camera``, first in document order) took Vireo's new
+    # value, but the retained qualified duplicate (``user``) kept its
+    # original coordinate rather than being silently rewritten. On a
+    # later ``remove_vireo_gps_location'' Vireo would restore only the
+    # keeper's backup, so preserving the user's original value here is
+    # the only way to keep that user data through the round trip.
+    assert lat_by_source["user"] == "40,0.0N"
+    assert lon_by_source["user"] == "50,0.0E"
+    # Sanity check on the keeper: Vireo's new coordinate landed there.
+    assert "S" in lat_by_source["camera"]
+    assert "W" in lon_by_source["camera"]
+
+
 def test_bag_xml_lang_reset_cancels_owner_language_for_reuse(tmp_path):
     """A bag's own ``xml:lang=""`` reset cancels the owner's inherited language.
 
@@ -2699,14 +2800,17 @@ def test_set_location_keywords_does_not_duplicate_a_qualified_flat_leaf(tmp_path
     assert q_flat == ["Kumeyaay Lake"]
 
 
-def test_preserved_qualified_duplicate_gets_its_value_updated(tmp_path):
-    """Qualified duplicates receive the new value, keeping their qualifiers.
+def test_preserved_qualified_duplicate_keeps_its_original_value(tmp_path):
+    """Qualified duplicates keep their qualifier data AND their original values.
 
-    Before: the removal loop preserved a qualified duplicate but
-    left its ``rdf:value`` untouched, so external readers could
-    resolve the conflicting ratings differently from Vireo. The fix
-    keeps the qualifier structure while updating the value in
-    place.
+    Vireo doesn't back up each retained qualified occurrence's
+    original value on write, so overwriting one now would leave a
+    later restore with only the keeper's value to write back --
+    permanently replacing the original. Preserve each qualified
+    duplicate entirely: keeper takes the new value, every other
+    qualified copy stays as it was. External readers may resolve the
+    conflicting copies differently from Vireo, but that's an
+    acceptable trade for data preservation.
     """
     foo_ns = "http://example.com/foo/"
     path = tmp_path / "photo.xmp"
@@ -2733,14 +2837,15 @@ def test_preserved_qualified_duplicate_gets_its_value_updated(tmp_path):
     root = ET.parse(path_str).getroot()
     ratings = list(root.iter(RATING))
     assert len(ratings) == 2
-    # Every rating carries the updated value...
-    for r in ratings:
-        assert (r.find(f"{{{NS_RDF}}}value").text or "") == "5"
-    # ...and every ``foo:origin`` qualifier is preserved.
-    origins = sorted(
-        r.findtext(f"{{{foo_ns}}}origin") for r in ratings
-    )
-    assert origins == ["keeper", "preserve-me"]
+    # Both ratings survive with their qualifier metadata intact.
+    origins_to_values = {
+        r.findtext(f"{{{foo_ns}}}origin"): r.findtext(f"{{{NS_RDF}}}value")
+        for r in ratings
+    }
+    # Keeper took the new value; the other qualified copy kept its
+    # original ``2``, not silently overwritten to match the keeper.
+    assert origins_to_values["keeper"] == "5"
+    assert origins_to_values["preserve-me"] == "2"
 
 
 def test_qualified_rdf_li_is_read_as_the_keyword_value(tmp_path):
@@ -2807,15 +2912,16 @@ def test_xml_space_is_not_reset_with_empty_value(tmp_path):
             assert d.get(f"{{{xml_ns}}}space") in ("default", "preserve")
 
 
-def test_qualified_attribute_form_duplicate_is_preserved_and_updated(tmp_path):
+def test_qualified_attribute_form_duplicate_keeps_its_original_value(tmp_path):
     """An attribute-form duplicate on a language-qualified Description survives.
 
     ``child is None`` used to blindly ``del owner.attrib[name]`` even
     when the owner Description carried (or inherited) ``xml:lang``.
     The attribute was a language-tagged RDF statement, so removing
-    it silently dropped that statement. Preserve the attribute
-    instead and update its value in place so both keeper and this
-    qualified duplicate agree.
+    it silently dropped that statement. Preserve the attribute --
+    both the language tag AND its original value. Vireo can't back
+    up each occurrence's value independently, so a rewrite would
+    permanently replace the original on the next clear-and-restore.
     """
     xml_ns = "http://www.w3.org/XML/1998/namespace"
     path = tmp_path / "photo.xmp"
@@ -2840,13 +2946,14 @@ def test_qualified_attribute_form_duplicate_is_preserved_and_updated(tmp_path):
 
     root = ET.parse(path_str).getroot()
     # The language-qualified Description still carries its ``xmp:Rating``
-    # attribute -- with the updated value.
+    # attribute -- with the ORIGINAL value it had (``4``), not silently
+    # overwritten to match the keeper.
     qualified_descs = [
         d for d in root.iter(f"{{{NS_RDF}}}Description")
         if d.get(f"{{{xml_ns}}}lang") == "en"
     ]
     assert len(qualified_descs) == 1
-    assert qualified_descs[0].get(RATING) == "5"
+    assert qualified_descs[0].get(RATING) == "4"
 
 
 def test_ancestor_xml_space_does_not_block_bag_reuse(tmp_path):

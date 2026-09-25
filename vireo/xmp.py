@@ -780,6 +780,34 @@ def _li_carries_qualifier(li, parent_map):
     )
 
 
+def _has_own_non_language_qualifier(elem):
+    """True if ``elem`` carries a non-language, value-semantic own qualifier.
+
+    Same as :func:`_has_own_value_qualifier`, except ANY ``xml:lang''
+    (including a non-empty one) is skipped. Callers that already
+    apply an effective-language check through the ancestor chain --
+    ``_bag``'s ``_prop_is_qualified`` walks
+    :func:`_ancestor_carries_xml_qualifier` at the deepest reachable
+    element -- must not also count language on the property or a
+    wrapper as a standalone qualifier: otherwise
+    ``xml:lang="en"`` on a property whose ``rdf:Bag'' cancels it
+    with ``xml:lang=""`` re-classifies the effectively-unqualified
+    container as qualified, and the caller mints a duplicate bag
+    instead of reusing the reset one.
+    """
+    xml_lang = f"{{{NS_XML}}}lang"
+    xml_space = f"{{{NS_XML}}}space"
+    xml_base = f"{{{NS_XML}}}base"
+    rdf_value = f"{{{NS_RDF}}}value"
+    for name in elem.attrib:
+        if name in _STRUCTURAL_RDF_ATTRIBUTES:
+            continue
+        if name in (xml_lang, xml_space, xml_base, rdf_value):
+            continue
+        return True
+    return False
+
+
 def _has_own_value_qualifier(elem):
     """True if ``elem`` carries a non-structural attribute that changes value semantics.
 
@@ -1487,13 +1515,16 @@ class SidecarEditor:
             return _ancestor_carries_xml_qualifier(elem, parent_map)
 
         _owner_inherits_qualifier = _has_inherited_qualifier
-        # An empty ``xml:lang=""`` reset on the property, wrapper or
-        # bag is cancel-inheritance, not a value qualifier -- see
-        # ``_has_own_value_qualifier``. Otherwise a keyword add against
-        # a sidecar whose only ``dc:subject`` bag carries the reset
-        # would create a second ``dc:subject`` beside the perfectly
-        # reusable one.
-        _has_own_qualifier = _has_own_value_qualifier
+        # The effective-language check on the deepest element already
+        # walks every ``xml:lang'' in the ancestor chain (honoring
+        # any local reset), so counting ``xml:lang'' on the property,
+        # wrapper or bag as a standalone own qualifier here would
+        # double-classify a container whose reset already made it
+        # effectively unqualified. Use the non-language variant of
+        # ``_has_own_value_qualifier'' -- it still counts every
+        # non-language value qualifier (``foo:source'', identity
+        # attributes, ``rdf:datatype'', ...).
+        _has_own_qualifier = _has_own_non_language_qualifier
 
         def _prop_is_qualified(owner, prop):
             bag_el, wrappers = _property_bag_and_wrappers(prop)
@@ -1680,14 +1711,19 @@ class SidecarEditor:
                     if _ancestor_carries_xml_qualifier(owner, parent_map):
                         # The attribute is a value-qualified RDF
                         # statement in its own right (the owner or an
-                        # ancestor carries ``xml:lang`` / ``xml:base``),
-                        # so removing it silently drops the qualifier.
-                        # Update the attribute's value in place to
-                        # match the keeper instead of deleting it, so
-                        # every occurrence agrees on the value.
-                        if owner.get(name) != value:
-                            owner.set(name, value)
-                            changed = True
+                        # ancestor carries ``xml:lang'' / ``xml:base''),
+                        # so it carries data Vireo doesn't own and
+                        # can't back up per-occurrence. Leave both the
+                        # attribute AND its original value alone -- a
+                        # later restore of Vireo's own backup only
+                        # touches the keeper, so overwriting this
+                        # occurrence's value now would permanently
+                        # replace it with the keeper's on the next
+                        # clear. External readers may resolve the
+                        # conflicting copies differently from Vireo,
+                        # but that's an acceptable trade for data
+                        # preservation.
+                        pass
                     else:
                         del owner.attrib[name]
                         changed = True
@@ -1700,17 +1736,19 @@ class SidecarEditor:
                     # ``rdf:ID``, a ``foo:source`` attribute-form
                     # qualifier, a sibling qualifier element alongside
                     # ``rdf:value``, etc.) OR its owner's inherited
-                    # ``xml:lang`` / ``xml:base`` -- the child text
-                    # inside a language-qualified owner Description is
-                    # a language-tagged statement in its own right, so
+                    # ``xml:lang'' -- the child text inside a
+                    # language-qualified owner Description is a
+                    # language-tagged statement in its own right, so
                     # dropping it would silently lose the tag. Leave
-                    # it in place so its data survives, BUT still
-                    # update its own value to the requested one so
-                    # every occurrence agrees; otherwise external
-                    # readers could resolve the conflicting copies
-                    # differently from Vireo.
-                    if _update_simple_property_value(child, value):
-                        changed = True
+                    # it entirely alone (both the element and its
+                    # original value): Vireo can't back up this
+                    # occurrence's value independently, so overwriting
+                    # would leave a later restore with only the
+                    # keeper's value to write back and permanently
+                    # replace this one. External readers may resolve
+                    # the conflicting copies differently from Vireo,
+                    # but that's an acceptable trade for data
+                    # preservation.
                     continue
                 else:
                     owner.remove(child)
