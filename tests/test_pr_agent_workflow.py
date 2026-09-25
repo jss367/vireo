@@ -520,6 +520,38 @@ def test_each_incident_gets_one_accepted_fix_request():
     assert 'contains(\\"Refs #$ISSUE\\")' not in prompt
 
 
+def test_fix_main_revalidates_workflow_run_before_diagnosing_and_publishing():
+    prompt = _read(ROUTINE_PROMPT)
+
+    # The main-health fire is one-shot per incident, so the accepted-request
+    # marker prevents any newer red run from firing a second session. If a
+    # newer commit concludes a different failure while this session is queued
+    # or working, diagnosing the original run and branching from current main
+    # leaves the newer failure unhandled — verify WORKFLOW_RUN is still the
+    # newest conclusive Full tests run before diagnosis, and again before
+    # publication (mirrors main-health.yml's own supersession lookup).
+    fix_main_start = prompt.index("## Task: `fix-main`")
+    fix_main_end = prompt.index("## Absolute Rules", fix_main_start)
+    section = prompt[fix_main_start:fix_main_end]
+
+    supersede_lookup = (
+        'gh run list --workflow "Full tests" --branch main '
+        "\\\n     --status completed --limit 100 "
+        "\\\n     --json databaseId,createdAt,conclusion "
+        "\\\n     --jq '[.[] | select(.conclusion == \"success\" or .conclusion == \"failure\")]"
+        "\n           | sort_by(.createdAt) | reverse"
+    )
+    assert section.count(supersede_lookup) == 2
+
+    # Pre-diagnosis: switch to the newer failure, or exit silently if the
+    # newer run went green (main is now healthy).
+    assert '[ "$latest_conclusion" = "failure" ] || exit 0' in section
+    assert 'WORKFLOW_RUN="$latest_id"' in section
+
+    # Pre-publication: any newer conclusive run makes this fix stale.
+    assert '[ -z "$latest_id" ] || [ "$latest_id" = "$WORKFLOW_RUN" ] || exit 0' in section
+
+
 def test_fix_main_dispatch_is_gated_until_stored_routine_prompt_is_synced():
     steps = _main_health_steps()
 

@@ -314,7 +314,31 @@ the open `main-red` tracking issue, and `Workflow run` is the failing run.
    test "$(gh pr list --label fix-main --state open --json body \
      -q "[.[] | select((.body // \"\") | test(\"Refs #$ISSUE([^0-9]|$)\"))] | length")" = 0 || exit 0
    ```
-2. Read the failure. The run covers Linux, macOS and Windows; a test that
+2. Revalidate that `WORKFLOW_RUN` is still the newest conclusive `Full
+   tests` run on main. Diagnosis, branching from current `main`, and
+   validation all take real wall-clock, so a newer commit may have
+   concluded a different `Full tests` run since `main-health.yml` fired
+   this session. Only `success` and `failure` count: GitHub can cancel a
+   pending run when a newer one queues, and that cancelled run's later
+   `createdAt` must not make the current diagnosis look superseded. If a
+   newer failure has concluded, switch `WORKFLOW_RUN` to it (its failing
+   tests are what actually need fixing, and `main-health.yml` will not fire
+   a second time for this incident). If a newer success has concluded, stop
+   silently — `main` is now green and the issue will close on its own:
+   ```bash
+   latest=$(gh run list --workflow "Full tests" --branch main \
+     --status completed --limit 100 \
+     --json databaseId,createdAt,conclusion \
+     --jq '[.[] | select(.conclusion == "success" or .conclusion == "failure")]
+           | sort_by(.createdAt) | reverse | .[0]')
+   latest_id=$(printf %s "$latest" | jq -r '.databaseId // empty')
+   latest_conclusion=$(printf %s "$latest" | jq -r '.conclusion // empty')
+   if [ -n "$latest_id" ] && [ "$latest_id" != "$WORKFLOW_RUN" ]; then
+     [ "$latest_conclusion" = "failure" ] || exit 0
+     WORKFLOW_RUN="$latest_id"
+   fi
+   ```
+3. Read the failure. The run covers Linux, macOS and Windows; a test that
    fails on one OS only is usually a platform assumption in the test or the
    code (path separators, case-insensitive filesystems, line endings,
    encodings):
@@ -322,32 +346,41 @@ the open `main-red` tracking issue, and `Workflow run` is the failing run.
    gh run view "$WORKFLOW_RUN" --json jobs --jq '.jobs[] | "\(.name) \(.conclusion)"'
    gh run view "$WORKFLOW_RUN" --log-failed
    ```
-3. Branch from the current `main`, not `Head SHA` (main may have moved; the
+4. Branch from the current `main`, not `Head SHA` (main may have moved; the
    fix must apply to it):
    ```bash
    git fetch origin main
    git checkout -b "claude/fix-main-$WORKFLOW_RUN" origin/main
    ```
-4. Fix the root cause. Do not skip, xfail, or delete a failing test unless
+5. Fix the root cause. Do not skip, xfail, or delete a failing test unless
    the test is wrong, and then say why in the PR body. An OS-specific skip is
    acceptable only when the behaviour genuinely cannot exist on that OS.
-5. Validate with the failing tests plus the files that contain them, then
+6. Validate with the failing tests plus the files that contain them, then
    `ruff check vireo/ tests/`. If the failure is OS-specific and you are on
    another OS, say so in the PR body; the PR's own CI and the next
    post-merge run are the check.
-6. Immediately before pushing, repeat both checks from step 1. Diagnosis and
-   validation take real wall-clock, and in that window a newer `Full tests`
-   run may have gone green (closing the issue), or another accepted routine
-   invocation may have opened its own `fix-main` PR for this issue.
-   Publishing on top of stale checks produces an unnecessary or duplicate
-   fix; stop silently instead. This mirrors the reconciliation flow's
-   revalidation of live state right before publication:
+7. Immediately before pushing, repeat both checks from step 1 AND the
+   supersession check from step 2. Diagnosis and validation take real
+   wall-clock, and in that window a newer `Full tests` run may have gone
+   green (closing the issue), another accepted routine invocation may have
+   opened its own `fix-main` PR for this issue, or a newer failure may have
+   completed with different failing tests that the current fix does not
+   address. Publishing on top of stale checks produces an unnecessary or
+   duplicate fix, or one that leaves main red for a different reason; stop
+   silently instead. This mirrors the reconciliation flow's revalidation
+   of live state right before publication:
    ```bash
    test "$(gh issue view "$ISSUE" --json state -q .state)" = OPEN || exit 0
    test "$(gh pr list --label fix-main --state open --json body \
      -q "[.[] | select((.body // \"\") | test(\"Refs #$ISSUE([^0-9]|$)\"))] | length")" = 0 || exit 0
+   latest_id=$(gh run list --workflow "Full tests" --branch main \
+     --status completed --limit 100 \
+     --json databaseId,createdAt,conclusion \
+     --jq '[.[] | select(.conclusion == "success" or .conclusion == "failure")]
+           | sort_by(.createdAt) | reverse | .[0].databaseId // empty')
+   [ -z "$latest_id" ] || [ "$latest_id" = "$WORKFLOW_RUN" ] || exit 0
    ```
-7. Commit, push, and open a ready-for-review PR against `main` with the
+8. Commit, push, and open a ready-for-review PR against `main` with the
    `fix-main` label. The body names the failing run, lists each failure with
    its root cause and fix, and ends with `Refs #$ISSUE` (not `Fixes`: the
    issue closes itself on the next green run) and
@@ -355,7 +388,7 @@ the open `main-red` tracking issue, and `Workflow run` is the failing run.
    ```bash
    gh pr create --base main --label fix-main --title "fix: <what broke> on main" --body-file <file>
    ```
-8. If you cannot fix it, comment on the issue instead, explaining what you
+9. If you cannot fix it, comment on the issue instead, explaining what you
    found and what is left, ending with `<!-- pr-agent-generated -->`, and
    open no PR.
 
