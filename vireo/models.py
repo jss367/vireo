@@ -443,6 +443,52 @@ def _model_is_managed(entry):
     return False
 
 
+def _weights_shared_by_other(weights_path, model_id, models):
+    """True if ``weights_path`` resolves to a directory (or file) that
+    another registered entry OR a ``KNOWN_MODELS`` default directory
+    also references.
+
+    ``remove_model`` uses this to keep files that would otherwise be
+    ``rmtree``'d out from under a second, still-registered consumer.
+    Concrete collision: a legacy ``download_hf_model`` entry with id
+    ``hf-imageomics-bioclip-2.5-vith14`` shares its download directory
+    with the ``bioclip-2.5-vith14`` known-model install
+    (``~/.vireo/models/bioclip-2.5-vith14``); removing either one must
+    not delete the other's weights.
+
+    Comparison is by ``os.path.realpath`` so a symlinked path still
+    matches its target. A path that cannot be resolved (dangling
+    symlink, missing intermediate) short-circuits to False — the caller
+    then falls back to the ordinary managed / inside-models-dir checks.
+    """
+    try:
+        target = os.path.realpath(weights_path)
+    except OSError:
+        return False
+    for m in models:
+        if m.get("id") == model_id:
+            continue
+        other = m.get("weights_path") or ""
+        if not other:
+            continue
+        try:
+            if os.path.realpath(other) == target:
+                return True
+        except OSError:
+            continue
+    for km in KNOWN_MODELS:
+        if km.get("id") == model_id:
+            continue
+        try:
+            if os.path.realpath(
+                os.path.join(DEFAULT_MODELS_DIR, km["id"])
+            ) == target:
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def _check_onnx_downloaded(model_dir, files):
     """Check if all required model files exist and look usable.
 
@@ -705,7 +751,10 @@ def remove_model(model_id):
             known = {km["id"]: km for km in KNOWN_MODELS}
             if model_id in known:
                 path = os.path.join(DEFAULT_MODELS_DIR, model_id)
-                if os.path.isdir(path) and _inside_models_dir(path):
+                if (
+                    os.path.isdir(path) and _inside_models_dir(path)
+                    and not _weights_shared_by_other(path, model_id, models)
+                ):
                     shutil.rmtree(path)
                     return {"files_deleted": True, "kept_path": None}
             return None
@@ -714,13 +763,17 @@ def remove_model(model_id):
         kept_path = None
         weights_path = found.get("weights_path") or ""
         managed = _model_is_managed(found)
+        shared = (
+            bool(weights_path)
+            and _weights_shared_by_other(weights_path, model_id, models)
+        )
         if weights_path and os.path.lexists(weights_path):
-            if not managed or not _inside_models_dir(weights_path):
+            if shared or not managed or not _inside_models_dir(weights_path):
                 log.info(
                     "Unregistering model %s without deleting %s "
-                    "(managed=%s, inside_models_dir=%s)",
+                    "(managed=%s, inside_models_dir=%s, shared=%s)",
                     model_id, weights_path, managed,
-                    _inside_models_dir(weights_path),
+                    _inside_models_dir(weights_path), shared,
                 )
                 kept_path = weights_path
             elif os.path.isdir(weights_path) and not os.path.islink(weights_path):

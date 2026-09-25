@@ -631,6 +631,127 @@ def test_remove_legacy_entry_at_standard_layout_deletes(tmp_path, monkeypatch):
     assert not weights.exists()
 
 
+def test_remove_model_keeps_weights_shared_with_another_registered_entry(
+    tmp_path, monkeypatch,
+):
+    """When two registered entries share a directory (e.g. a legacy
+    ``hf-imageomics-bioclip-2.5-vith14`` entry and the
+    ``bioclip-2.5-vith14`` known-model install both live at
+    ``~/.vireo/models/bioclip-2.5-vith14``), removing one must not
+    ``rmtree`` the other's weights.
+    """
+    import models
+
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
+    (tmp_path / "models").mkdir()
+
+    shared = tmp_path / "models" / "bioclip-2.5-vith14"
+    shared.mkdir()
+    (shared / "image_encoder.onnx").write_bytes(b"w")
+
+    # Two managed entries pointing at the same directory. Removing the
+    # legacy HF entry must not delete the known-model install's files.
+    (tmp_path / "models.json").write_text(json.dumps({
+        "models": [
+            {
+                "id": "bioclip-2.5-vith14",
+                "name": "BioCLIP-2.5",
+                "model_str": "hf-hub:imageomics/bioclip-2.5-vith14",
+                "weights_path": str(shared),
+                "managed": True,
+            },
+            {
+                "id": "hf-imageomics-bioclip-2.5-vith14",
+                "name": "BioCLIP 2.5 (HF)",
+                "model_str": "hf-hub:imageomics/bioclip-2.5-vith14",
+                "weights_path": str(shared),
+                "managed": True,
+            },
+        ],
+        "active_model": None,
+    }))
+
+    result = models.remove_model("hf-imageomics-bioclip-2.5-vith14")
+    assert result == {"files_deleted": False, "kept_path": str(shared)}
+    assert (shared / "image_encoder.onnx").exists()
+
+    remaining = {m["id"] for m in models._load_config()["models"]}
+    assert remaining == {"bioclip-2.5-vith14"}
+
+
+def test_remove_model_keeps_weights_shared_with_known_model_default(
+    tmp_path, monkeypatch,
+):
+    """A single registered entry whose ``weights_path`` matches a
+    ``KNOWN_MODELS`` default install directory must not be deleted
+    either — removing it would strand the known model with no files.
+    """
+    import models
+
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
+    (tmp_path / "models").mkdir()
+
+    # bioclip-vit-b-16 is a KNOWN_MODELS id; its default install path is
+    # DEFAULT_MODELS_DIR/bioclip-vit-b-16. A registered entry with a
+    # different id but that weights_path must not rmtree it.
+    shared = tmp_path / "models" / "bioclip-vit-b-16"
+    shared.mkdir()
+    (shared / "image_encoder.onnx").write_bytes(b"w")
+
+    (tmp_path / "models.json").write_text(json.dumps({
+        "models": [{
+            "id": "hf-imageomics-bioclip",
+            "name": "BioCLIP (HF)",
+            "model_str": "hf-hub:imageomics/bioclip",
+            "weights_path": str(shared),
+            "managed": True,
+        }],
+        "active_model": None,
+    }))
+
+    result = models.remove_model("hf-imageomics-bioclip")
+    assert result == {"files_deleted": False, "kept_path": str(shared)}
+    assert (shared / "image_encoder.onnx").exists()
+
+
+def test_remove_known_model_by_default_path_skips_when_shared(
+    tmp_path, monkeypatch,
+):
+    """The ``if not found`` early path that ``rmtree``s a known model's
+    default install directory must also skip when another registered
+    entry references that directory."""
+    import models
+
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
+    (tmp_path / "models").mkdir()
+
+    shared = tmp_path / "models" / "bioclip-vit-b-16"
+    shared.mkdir()
+    (shared / "image_encoder.onnx").write_bytes(b"w")
+
+    # bioclip-vit-b-16 is not registered, but another entry with a
+    # different id references its default install directory.
+    (tmp_path / "models.json").write_text(json.dumps({
+        "models": [{
+            "id": "custom-user-copy",
+            "name": "User copy",
+            "model_str": "ViT-B-16",
+            "weights_path": str(shared),
+            "managed": True,
+        }],
+        "active_model": None,
+    }))
+
+    result = models.remove_model("bioclip-vit-b-16")
+    # Unknown to the registered set → None; the early rmtree must be
+    # skipped because ``custom-user-copy`` still references the path.
+    assert result is None
+    assert (shared / "image_encoder.onnx").exists()
+
+
 def test_remove_legacy_hf_download_at_repo_slug_layout_deletes(
     tmp_path, monkeypatch,
 ):
@@ -640,6 +761,11 @@ def test_remove_legacy_hf_download_at_repo_slug_layout_deletes(
     misses it. ``_model_is_managed`` recognizes the legacy layout via the
     ``hf-hub:<owner>/<repo>`` model_str so removal actually deletes the
     downloaded weights instead of leaving gigabytes on disk.
+
+    The repo slug used here must not collide with a ``KNOWN_MODELS`` id —
+    when it does, the shared-directory guard correctly preserves the
+    files (that case is covered by
+    ``test_remove_model_keeps_weights_shared_with_known_model_default``).
     """
     import models
 
@@ -647,21 +773,22 @@ def test_remove_legacy_hf_download_at_repo_slug_layout_deletes(
     monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
     (tmp_path / "models").mkdir()
 
-    weights = tmp_path / "models" / "bioclip-2.5-vith14"
+    # A repo slug that does NOT match any KNOWN_MODELS id.
+    weights = tmp_path / "models" / "custom-hf-repo"
     weights.mkdir()
     (weights / "image_encoder.onnx").write_bytes(b"w")
 
     (tmp_path / "models.json").write_text(json.dumps({
         "models": [{
-            "id": "hf-imageomics-bioclip-2.5-vith14",
-            "name": "BioCLIP 2.5",
-            "model_str": "hf-hub:imageomics/bioclip-2.5-vith14",
+            "id": "hf-imageomics-custom-hf-repo",
+            "name": "Custom HF",
+            "model_str": "hf-hub:imageomics/custom-hf-repo",
             "weights_path": str(weights),
         }],
         "active_model": None,
     }))
 
-    result = models.remove_model("hf-imageomics-bioclip-2.5-vith14")
+    result = models.remove_model("hf-imageomics-custom-hf-repo")
     assert result == {"files_deleted": True, "kept_path": None}
     assert not weights.exists()
 
