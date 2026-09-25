@@ -2547,6 +2547,51 @@ def _li_value_local(li):
     return li.text
 
 
+def test_hierarchy_replacement_preserves_qualified_collision(tmp_path):
+    """A qualified duplicate created by hierarchy replacement survives.
+
+    ``replace_keyword_hierarchies({"Birds|Legacy": "Birds|Canonical"})``
+    on a bag that also contains an unqualified ``Birds|Canonical``
+    used to remove the qualified ``Birds|Legacy`` outright when its
+    resolved value collided with the previously-kept item's — silently
+    dropping any ``foo:source`` sibling qualifier. Keep the qualified
+    item in place so its metadata survives; the deduplicate-by-text
+    contract still holds for plain duplicates.
+    """
+    foo_ns = "http://example.com/foo/"
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about=''"
+        f" xmlns:lr='{NS_LR}' xmlns:foo='{foo_ns}'>"
+        f"<lr:hierarchicalSubject><rdf:Bag>"
+        f"<rdf:li>Birds|Canonical</rdf:li>"
+        f"<rdf:li rdf:parseType='Resource'>"
+        f"<rdf:value>Birds|Legacy</rdf:value>"
+        f"<foo:source>user</foo:source>"
+        f"</rdf:li>"
+        f"</rdf:Bag></lr:hierarchicalSubject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    editor = SidecarEditor(path_str)
+    editor.replace_keyword_hierarchies({"Birds|Legacy": "Birds|Canonical"})
+    editor.commit()
+
+    root = ET.parse(path_str).getroot()
+    lis = list(root.iter(f"{{{NS_RDF}}}li"))
+    # The qualified item wins the keeper slot -- the plain-text
+    # duplicate was removed, its ``rdf:value`` was rewritten to the
+    # canonical string, and its ``foo:source`` qualifier survives.
+    qualified = [li for li in lis if li.find(f"{{{foo_ns}}}source") is not None]
+    assert len(qualified) == 1
+    assert (qualified[0].find(f"{{{NS_RDF}}}value").text or "") == "Birds|Canonical"
+    assert qualified[0].findtext(f"{{{foo_ns}}}source") == "user"
+
+
 @pytest.mark.skipif(shutil.which("exiftool") is None, reason="exiftool not installed")
 def test_exiftool_reads_what_vireo_wrote_in_both_layouts(layout_xmp):
     """ExifTool must see Vireo's values, not a stale copy it wrote itself."""

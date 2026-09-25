@@ -1582,15 +1582,48 @@ class SidecarEditor:
             return tuple(keyword_match_key(part) for part in path.split('|'))
         by_key = {key(source): target for source, target in replacements.items()}
         for bag in _photo_scoped_bags(self._root, f"{{{NS_LR}}}hierarchicalSubject"):
-            seen = set()
+            keeper = {}
             for li in list(bag.findall(f"{{{NS_RDF}}}li")):
                 old = _li_value(li) or ''
                 value = by_key.get(key(old), old)
-                if value is None or value in seen:
+                if value is None:
+                    # Removal target. A qualified item carries user
+                    # metadata we mustn't silently drop; leave it in
+                    # place. Plain duplicates are safe to remove.
+                    if _simple_prop_carries_qualifier(li):
+                        continue
                     bag.remove(li)
                     self._dirty = True
                     continue
-                seen.add(value)
+                if value in keeper:
+                    # Duplicate of a value we already kept. Prefer the
+                    # qualified item as the keeper so its ``foo:source``,
+                    # ``xml:lang``, ``rdf:ID`` etc. survive. If the
+                    # existing keeper is plain-text and this new item is
+                    # qualified, swap them.
+                    existing = keeper[value]
+                    this_qualified = _simple_prop_carries_qualifier(li)
+                    existing_qualified = _simple_prop_carries_qualifier(existing)
+                    if this_qualified and not existing_qualified:
+                        bag.remove(existing)
+                        keeper[value] = li
+                        if value != old and _update_simple_property_value(
+                            li, value,
+                        ):
+                            pass
+                        self._dirty = True
+                    elif this_qualified:
+                        # Both qualified -- keep both so no qualifier
+                        # metadata is lost.
+                        if value != old and _update_simple_property_value(
+                            li, value,
+                        ):
+                            self._dirty = True
+                    else:
+                        bag.remove(li)
+                        self._dirty = True
+                    continue
+                keeper[value] = li
                 if value != old and _update_simple_property_value(li, value):
                     self._dirty = True
 
