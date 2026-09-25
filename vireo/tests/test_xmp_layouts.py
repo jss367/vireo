@@ -424,6 +424,42 @@ def test_merging_duplicate_bags_preserves_rdf_li_qualifiers(tmp_path):
     assert set(read_keywords(path)) == {"Heron", "Egret", "Kiwi"}
 
 
+def test_merging_duplicate_bags_keeps_shared_text_with_distinct_qualifiers(tmp_path):
+    """Two rdf:li items with the same text but different qualifiers both survive."""
+    path = tmp_path / "photo.xmp"
+    xml_ns = "http://www.w3.org/XML/1998/namespace"
+    body = EXIFTOOL_XMP.replace(
+        "<rdf:li>Heron</rdf:li>",
+        "<rdf:li xml:lang='en'>Heron</rdf:li>",
+    ).replace(
+        "<rdf:Description rdf:about='' xmlns:dc",
+        f"<rdf:Description rdf:about='' xmlns:dc='{NS_DC}'>\n"
+        "  <dc:subject><rdf:Bag>"
+        "<rdf:li xml:lang='fr'>Heron</rdf:li>"
+        "</rdf:Bag></dc:subject>\n"
+        " </rdf:Description>\n <rdf:Description rdf:about='' xmlns:dc",
+        1,
+    )
+    path.write_text(body)
+    path = str(path)
+
+    editor = SidecarEditor(path)
+    editor.add_keywords({"Kiwi"}, set())
+    editor.commit()
+
+    assert _copies(path, SUBJECT) == 1
+    root = ET.parse(path).getroot()
+    bags = list(root.iter(f"{{{NS_RDF}}}Bag"))
+    heron_lis = [
+        li for bag in bags
+        for li in bag.findall(f"{{{NS_RDF}}}li")
+        if (li.text or "") == "Heron"
+    ]
+    assert len(heron_lis) == 2
+    langs = sorted((li.get(f"{{{xml_ns}}}lang") or "") for li in heron_lis)
+    assert langs == ["en", "fr"]
+
+
 @pytest.mark.skipif(shutil.which("exiftool") is None, reason="exiftool not installed")
 def test_exiftool_reads_what_vireo_wrote_in_both_layouts(layout_xmp):
     """ExifTool must see Vireo's values, not a stale copy it wrote itself."""

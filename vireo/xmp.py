@@ -296,6 +296,23 @@ def _read_bag_values(bag):
     return values
 
 
+def _li_signature(elem):
+    """Structural fingerprint of an rdf:li, including qualifiers and children.
+
+    Two items with the same text but different qualifiers -- an ``xml:lang``
+    of ``en`` vs ``fr``, an ``rdf:parseType``, or any other attribute or
+    child element -- get distinct fingerprints, so a merge that collapses
+    duplicate bags can drop only the items that truly match and keep every
+    qualified value the sidecar carried.
+    """
+    return (
+        elem.tag,
+        elem.text or "",
+        tuple(sorted(elem.attrib.items())),
+        tuple(_li_signature(child) for child in elem),
+    )
+
+
 # Attribute recording the location keyword path Vireo last wrote into this
 # sidecar, e.g. ``United States|California|Kumeyaay Lake``. Location keywords
 # are the one keyword kind Vireo owns end to end -- the user assigns a place
@@ -827,14 +844,18 @@ class SidecarEditor:
         if bag is None:
             bag = ET.SubElement(elem, f"{{{NS_RDF}}}Bag")
             self._dirty = True
+        seen = {_li_signature(li) for li in bag.findall(f"{{{NS_RDF}}}li")}
         for owner, extra in found[1:]:
-            existing = _read_bag_values(bag)
             extra_bag = extra.find(f"{{{NS_RDF}}}Bag")
             if extra_bag is not None:
                 for li in extra_bag.findall(f"{{{NS_RDF}}}li"):
-                    if li.text and li.text not in existing:
-                        bag.append(copy.deepcopy(li))
-                        existing.add(li.text)
+                    if not li.text:
+                        continue
+                    sig = _li_signature(li)
+                    if sig in seen:
+                        continue
+                    bag.append(copy.deepcopy(li))
+                    seen.add(sig)
             owner.remove(extra)
             self._dirty = True
         return bag
