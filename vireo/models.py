@@ -5,6 +5,7 @@ HuggingFace repository into ~/.vireo/models/{model-id}/.
 """
 
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -210,9 +211,44 @@ def _default_config():
     return {"models": [], "active_model": None}
 
 
+def _atomic_write_bytes(dest, raw_bytes):
+    """Write ``raw_bytes`` to ``dest`` atomically via a tempfile + os.replace.
+
+    The tempfile lives in ``dest``'s directory so ``os.replace`` stays
+    on the same filesystem (rename-atomic). A failed write leaves the
+    tempfile behind briefly; the ``finally``-style cleanup removes it,
+    and the exception propagates so callers can refuse to proceed.
+    """
+    dest_dir = os.path.dirname(dest) or "."
+    os.makedirs(dest_dir, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(
+        dir=dest_dir, prefix=".models.corrupt.", suffix=".tmp",
+    )
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(raw_bytes)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, dest)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_path)
+        raise
+
+
+def _file_bytes_equal(path, raw_bytes):
+    """True if ``path`` exists and holds exactly ``raw_bytes``."""
+    try:
+        with open(path, "rb") as f:
+            return f.read() == raw_bytes
+    except (FileNotFoundError, OSError):
+        return False
+
+
 def _write_corrupt_backup(raw_bytes):
-    """Write ``raw_bytes`` (what was actually read from ``CONFIG_PATH``)
-    to ``models.json.corrupt`` atomically.
+    """Preserve ``raw_bytes`` (what ``_load_config`` actually read from
+    ``CONFIG_PATH``) so a subsequent mutation cannot atomically replace
+    the malformed original without leaving a copy behind.
 
     Reading from ``CONFIG_PATH`` again for the backup would race a
     concurrent mutator that has since taken ``_CONFIG_LOCK``, preserved
@@ -221,28 +257,37 @@ def _write_corrupt_backup(raw_bytes):
     ``.corrupt`` with the repaired bytes, destroying the only backup of
     the malformed data.
 
-    If the backup already exists it is left alone — the first observer
-    of a corrupt file wins so a later reader who saw a partially-repaired
-    state cannot overwrite the true original.
+    Every distinct corrupt version is preserved. Each specific corrupt-
+    bytes value is always written to a content-addressed
+    ``models.json.corrupt.<sha1[:12]>`` file — idempotent, so re-observing
+    the same bytes is a no-op, and byte-distinct observations never
+    overwrite one another. In addition, a stable ``models.json.corrupt``
+    primary is populated on first observation; a stale primary from a
+    prior recovery is *not* overwritten (its aux copy still exists
+    somewhere by design), but it can no longer mask a fresh distinct
+    corruption because that fresh corruption has its own aux backup.
+
+    Backup failures propagate rather than being suppressed: a following
+    ``register_model`` / ``set_active_model`` / ``remove_model`` would
+    otherwise atomically overwrite the (only remaining, possibly
+    corrupt) original with normalized state.
     """
-    backup_path = CONFIG_PATH + ".corrupt"
-    if os.path.exists(backup_path):
-        return
-    backup_dir = os.path.dirname(backup_path) or "."
-    os.makedirs(backup_dir, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(
-        dir=backup_dir, prefix=".models.corrupt.", suffix=".tmp",
-    )
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(raw_bytes)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_path, backup_path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp_path)
-        raise
+    primary = CONFIG_PATH + ".corrupt"
+    digest = hashlib.sha1(raw_bytes).hexdigest()[:12]
+    aux = f"{primary}.{digest}"
+
+    # Content-addressed aux: idempotent for the same corrupt bytes,
+    # distinct for byte-distinct corruptions. Nothing can overwrite it
+    # with different bytes because its name is derived from those bytes.
+    if not _file_bytes_equal(aux, raw_bytes):
+        _atomic_write_bytes(aux, raw_bytes)
+
+    # Stable primary name for humans / external tools. Do not overwrite
+    # an existing primary — it either matches raw_bytes (idempotent) or
+    # is an older distinct corruption we must not lose. Either way its
+    # bytes are safe in an aux backup.
+    if not _file_bytes_equal(primary, raw_bytes) and not os.path.exists(primary):
+        _atomic_write_bytes(primary, raw_bytes)
 
 
 def _load_config():

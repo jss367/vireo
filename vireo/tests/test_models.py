@@ -804,6 +804,62 @@ def test_load_config_propagates_backup_oserror(tmp_path, monkeypatch):
     assert not (tmp_path / "models.json.corrupt").exists()
 
 
+def test_load_config_preserves_distinct_corruptions(tmp_path, monkeypatch):
+    """A later corruption with different bytes must not be masked by a
+    stale ``.corrupt`` backup from a prior recovery.
+
+    If the primary backup from an earlier distinct corruption were treated
+    as "already backed up, skip", a following ``register_model`` /
+    ``set_active_model`` / ``remove_model`` could atomically overwrite the
+    current corruption with normalized state while only the unrelated
+    older backup remained — losing any recoverable registrations from the
+    newer file. Content-addressed aux backups preserve each distinct
+    corrupt version; the primary stays stable for humans / external tools.
+    """
+    import hashlib
+
+    import models
+
+    cfg_path = tmp_path / "models.json"
+    monkeypatch.setattr(models, "CONFIG_PATH", str(cfg_path))
+
+    first_corrupt = '{"models": [{"id": "first"'
+    cfg_path.write_text(first_corrupt)
+    assert models._load_config() == {"models": [], "active_model": None}
+    primary = tmp_path / "models.json.corrupt"
+    assert primary.read_text() == first_corrupt
+
+    # A distinct second corruption arrives later.
+    second_corrupt = '{"models": [{"id": "second"'
+    cfg_path.write_text(second_corrupt)
+    assert models._load_config() == {"models": [], "active_model": None}
+
+    # Primary keeps the first observation (stable name for tools) rather
+    # than being silently overwritten by later distinct bytes.
+    assert primary.read_text() == first_corrupt
+
+    # Both distinct corruptions live in content-addressed aux backups.
+    first_digest = hashlib.sha1(first_corrupt.encode()).hexdigest()[:12]
+    second_digest = hashlib.sha1(second_corrupt.encode()).hexdigest()[:12]
+    assert (tmp_path / f"models.json.corrupt.{first_digest}").read_text() == first_corrupt
+    assert (tmp_path / f"models.json.corrupt.{second_digest}").read_text() == second_corrupt
+
+    # A subsequent mutation cannot silently discard the second corruption
+    # from disk — its aux backup is content-addressed and independent of
+    # what CONFIG_PATH holds.
+    models.register_model("new", "N", "s", "/w", "d")
+    assert (tmp_path / f"models.json.corrupt.{first_digest}").read_text() == first_corrupt
+    assert (tmp_path / f"models.json.corrupt.{second_digest}").read_text() == second_corrupt
+
+    # Re-observing the same corrupt bytes is idempotent — the same aux
+    # file already exists, so nothing gets rewritten (mtime unchanged).
+    cfg_path.write_text(first_corrupt)
+    aux_first = tmp_path / f"models.json.corrupt.{first_digest}"
+    mtime_before = aux_first.stat().st_mtime_ns
+    assert models._load_config() == {"models": [], "active_model": None}
+    assert aux_first.stat().st_mtime_ns == mtime_before
+
+
 def test_load_config_backup_uses_bytes_actually_read(tmp_path, monkeypatch):
     """The ``.corrupt`` backup preserves the bytes ``_load_config`` read,
     not whatever is at ``CONFIG_PATH`` when the backup is written.
