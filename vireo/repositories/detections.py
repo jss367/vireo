@@ -166,6 +166,13 @@ class DetectionsRepository:
                     and previous["input_fingerprint"] != input_fingerprint
                 )
             )
+            # No authoritative run record but detection rows may still exist
+            # (legacy state, or rows written via ``save_detections`` which
+            # never touches ``detector_runs``). A forced replace means the
+            # caller wants a full retirement, so treat this like an identity
+            # change: without the DELETE, ``upsert_rows``' same-runtime sweep
+            # would leave any other-runtime rows behind.
+            no_run_replace = previous is None and force_runtime_replace
             if (
                 identity_changed
                 and not force_runtime_replace
@@ -179,7 +186,7 @@ class DetectionsRepository:
                 ).fetchall()
                 return [row["id"] for row in rows]
 
-            if identity_changed:
+            if identity_changed or no_run_replace:
                 # Runtime ownership changes are an explicit retirement event.
                 # Deleting first prevents old-runtime rows from surviving the
                 # new run's same-runtime stale-row sweep.
