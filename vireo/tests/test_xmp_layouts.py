@@ -2045,6 +2045,52 @@ def test_empty_xml_lang_reset_lets_next_write_reuse_the_description(tmp_path):
     assert reset_items == ["Kiwi", "Owl"]
 
 
+def test_empty_xml_lang_reset_on_bag_lets_add_keyword_reuse_it(tmp_path):
+    """An empty ``xml:lang="" `` reset on the bag doesn't force a duplicate bag.
+
+    A bag whose only ``xml:*`` is a cancel-inheritance ``xml:lang=""``
+    carries no distinctive language qualifier: the reset just says
+    "items here have no known language". The old own-qualifier check
+    saw the attribute and refused to reuse the bag, so a subsequent
+    keyword add created a second ``dc:subject`` beside the perfectly
+    reusable one -- and consumers reading only the first bag would
+    then miss the freshly-written keyword. The check must apply
+    ``xml:lang`` reset semantics on the bag itself, just as it already
+    does at the owning Description level.
+    """
+    xml_ns = "http://www.w3.org/XML/1998/namespace"
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'"
+        f" xmlns:xml='http://www.w3.org/XML/1998/namespace'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about='' xmlns:dc='{NS_DC}'>"
+        f"<dc:subject><rdf:Bag xml:lang=''>"
+        f"<rdf:li>Heron</rdf:li>"
+        f"</rdf:Bag></dc:subject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    editor = SidecarEditor(path_str)
+    editor.add_keywords({"Owl"}, set())
+    editor.commit()
+
+    root = ET.parse(path_str).getroot()
+    subjects = list(root.iter(SUBJECT))
+    # Exactly one ``dc:subject`` bag survives: the pre-existing one
+    # kept its ``xml:lang=""`` reset and both keywords now live in it,
+    # instead of a fresh unqualified ``dc:subject`` bag sitting beside
+    # a lone ``Heron`` bag.
+    assert len(subjects) == 1
+    bags = subjects[0].findall(f"{{{NS_RDF}}}Bag")
+    assert len(bags) == 1
+    assert bags[0].get(f"{{{xml_ns}}}lang") == ""
+    items = sorted(li.text for li in bags[0].findall(f"{{{NS_RDF}}}li"))
+    assert items == ["Heron", "Owl"]
+
+
 def test_rdf_value_attribute_abbreviation_is_read_and_updated(tmp_path):
     """A qualified property whose value lives in ``rdf:value=`` is honored.
 

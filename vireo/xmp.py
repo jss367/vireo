@@ -708,6 +708,33 @@ def _has_non_structural_attribute(elem):
     )
 
 
+def _has_own_value_qualifier(elem):
+    """True if ``elem`` carries a non-structural attribute that changes value semantics.
+
+    Same as :func:`_has_non_structural_attribute`, except ``xml:lang=""``
+    is treated as no qualifier. ``xml:lang=""`` is XML's
+    cancel-inheritance form: it doesn't itself attach a language to the
+    element's descendants, it just says "no known language" on the way
+    in. A bag or wrapper carrying only an empty reset is therefore just
+    as reusable as one with no ``xml:*`` at all -- otherwise a keyword
+    add against a sidecar whose only ``dc:subject`` bag carries the
+    reset would mint a duplicate ``dc:subject`` beside it. Callers that
+    also gate on the owning Description's inherited effective language
+    (via :func:`_ancestor_carries_xml_qualifier`) already refuse to
+    merge into a target with a different effective language, so the
+    reset can be dropped safely: the target we pick has the same "no
+    language" effective semantics.
+    """
+    xml_lang = f"{{{NS_XML}}}lang"
+    for name, value in elem.attrib.items():
+        if name in _STRUCTURAL_RDF_ATTRIBUTES:
+            continue
+        if name == xml_lang and value == "":
+            continue
+        return True
+    return False
+
+
 def _wrappers_carry_qualifier(prop):
     """True if the value structure has a sibling qualifier element.
 
@@ -1342,7 +1369,13 @@ class SidecarEditor:
             return _ancestor_carries_xml_qualifier(elem, parent_map)
 
         _owner_inherits_qualifier = _has_inherited_qualifier
-        _has_own_qualifier = _has_non_structural_attribute
+        # An empty ``xml:lang=""`` reset on the property, wrapper or
+        # bag is cancel-inheritance, not a value qualifier -- see
+        # ``_has_own_value_qualifier``. Otherwise a keyword add against
+        # a sidecar whose only ``dc:subject`` bag carries the reset
+        # would create a second ``dc:subject`` beside the perfectly
+        # reusable one.
+        _has_own_qualifier = _has_own_value_qualifier
 
         def _prop_is_qualified(owner, prop):
             bag_el, wrappers = _property_bag_and_wrappers(prop)
