@@ -2697,6 +2697,8 @@ _SQLITE_NUMERIC_TEXT_RE = re.compile(
     re.ASCII,
 )
 _SQLITE_INTEGER_TEXT_RE = re.compile(r"^[+-]?\d+$", re.ASCII)
+# The exact byte set sqlite3Isspace() skips before numeric conversion.
+_SQLITE_NUMERIC_WHITESPACE = " \t\n\v\f\r"
 
 
 def _photo_id_key(value):
@@ -2725,6 +2727,12 @@ def _photo_id_key(value):
     so we mirror that by parsing pure-integer spellings with ``int`` and only
     falling back to ``float`` for decimal or exponent forms (where SQLite's
     own REAL conversion loses the same precision).
+
+    Trim only the whitespace SQLite's numeric affinity itself skips (space,
+    tab, newline, vertical tab, form feed, carriage return). ``str.strip()``
+    without arguments also removes Unicode whitespace like ``\\xa0`` (NBSP)
+    and ``\\u2000``-``\\u3000``, but SQLite leaves those bytes in place and
+    the TEXT then stays TEXT, never matching an integer id.
     """
     if isinstance(value, bool):
         return 1 if value else 0
@@ -2735,7 +2743,7 @@ def _photo_id_key(value):
             return int(value)
         return None
     if isinstance(value, str):
-        text = value.strip()
+        text = value.strip(_SQLITE_NUMERIC_WHITESPACE)
         if not text or not _SQLITE_NUMERIC_TEXT_RE.match(text):
             return None
         if _SQLITE_INTEGER_TEXT_RE.match(text):

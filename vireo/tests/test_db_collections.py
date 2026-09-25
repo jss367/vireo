@@ -396,6 +396,35 @@ def test_remap_collection_photo_ids_normalizes_float_and_stringified_ids(db):
     assert stored == [{"field": "photo_ids", "value": [7]}]
 
 
+def test_remap_collection_photo_ids_leaves_unicode_whitespace_wrapped_ids_alone(db):
+    """SQLite's numeric affinity only skips ASCII whitespace before parsing.
+
+    A rule value like ``"\\xa01\\xa0"`` (NBSP-wrapped) never matches photo 1
+    through the rules engine because SQLite leaves the NBSP bytes in place,
+    the value stays TEXT, and TEXT never coerces to an integer id. Remapping
+    id 1 must therefore leave that spelling alone — rewriting it would remove
+    an entry the deleted photo never actually owned.
+    """
+    from repositories.collections import remap_collection_photo_ids
+
+    other_ws = db.create_workspace("Other")
+    rules = [
+        {"field": "photo_ids", "value": [" 1 ", " 1 ", "1"]},
+    ]
+    cid = db.conn.execute(
+        "INSERT INTO collections (name, rules, workspace_id) VALUES (?, ?, ?)",
+        ("mixed-ws", json.dumps(rules), other_ws),
+    ).lastrowid
+    assert remap_collection_photo_ids(db.conn, {1: 7}) == 1
+    stored = json.loads(db.conn.execute(
+        "SELECT rules FROM collections WHERE id = ?", (cid,),
+    ).fetchone()[0])
+    # Only the plain ``"1"`` (which SQLite does match to id 1) is rewritten;
+    # the NBSP- and U+2000-wrapped spellings stay verbatim so the collection
+    # still says what the user saved.
+    assert stored == [{"field": "photo_ids", "value": [" 1 ", " 1 ", 7]}]
+
+
 def test_photo_id_key_normalizes_the_spellings_sqlite_matches():
     from repositories.collections import _photo_id_key
 
@@ -430,6 +459,22 @@ def test_photo_id_key_normalizes_the_spellings_sqlite_matches():
     assert _photo_id_key("٢") is None
     assert _photo_id_key("١٢٣") is None
     assert _photo_id_key("०") is None
+    # SQLite's numeric affinity skips only ASCII space/tab/newline/vtab/
+    # form feed/CR before conversion. ``str.strip()`` without arguments
+    # additionally removes Unicode whitespace like NBSP and the U+2000
+    # range, but SQLite leaves those bytes in place so the value stays
+    # TEXT and never matches an integer id; accepting them here would
+    # rewrite an unrelated collection entry.
+    assert _photo_id_key(" 1 ") is None
+    assert _photo_id_key(" 1 ") is None
+    assert _photo_id_key("　1　") is None
+    assert _photo_id_key(" 1") is None
+    # ASCII whitespace SQLite does skip must still parse.
+    assert _photo_id_key("\t1\t") == 1
+    assert _photo_id_key("\n1\n") == 1
+    assert _photo_id_key("\v1\v") == 1
+    assert _photo_id_key("\f1\f") == 1
+    assert _photo_id_key("\r1\r") == 1
     # Digit-only spellings must not lose precision above 2^53: Python's
     # ``float`` rounds them, but SQLite stores TEXT with integer affinity
     # as a 64-bit INTEGER exactly, so we mirror SQLite by parsing pure
