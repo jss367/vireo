@@ -785,10 +785,29 @@ def ingest(
     # file's EXIF time for the duplicate gate — reuse those reads and only
     # add the mtime fallback. In verify/no-skip modes, batch the
     # EXIF/ExifTool prepass over just the survivors.
+    #
+    # Also resolve timestamps for filtered card siblings that share a stem
+    # with a survivor. ``_sibling_blocks_slot`` computes each sibling's
+    # destination folder to decide whether an unrelated same-stem file at
+    # the survivor's slot would strand the pair; a filtered sibling with
+    # no timestamp would fall back to ``unsorted`` and be skipped, so we'd
+    # miss the split when a filtered RAW's JPEG survives (or vice versa)
+    # and the destination folder holds an unrelated same-stem file.
+    to_copy_set = set(to_copy)
+    survivor_stems = {
+        (str(sf.parent), sf.stem.casefold()) for sf in to_copy
+    }
+    timestamp_files = list(to_copy)
+    for source_file in files:
+        if source_file in to_copy_set:
+            continue
+        key = (str(source_file.parent), source_file.stem.casefold())
+        if key in survivor_stems:
+            timestamp_files.append(source_file)
     timestamps = _source_file_timestamps(
-        to_copy,
+        timestamp_files,
         capture_times=(
-            {str(f): checker.capture_time(f) for f in to_copy}
+            {str(f): checker.capture_time(f) for f in timestamp_files}
             if checker is not None and not checker.verify_by_hash
             else None
         ),
@@ -810,8 +829,16 @@ def ingest(
     # source folder + stem; ``companion_slots`` records the numeric suffix
     # (0 = original name) each group's first copied member took, keyed by
     # destination folder too.
+    # Include EVERY discovered card file, not just survivors. When
+    # ``skip_duplicates`` drops one member of a card pair in pass 1 (e.g.
+    # the RAW is already cataloged elsewhere while its JPEG is new),
+    # iterating over ``to_copy`` alone would make the JPEG look like a
+    # singleton and land at the unsuffixed slot, even when the
+    # destination folder holds an unrelated same-stem file. Feeding the
+    # filtered sibling in lets ``_sibling_blocks_slot`` see that the pair
+    # would meet a different file at slot 0 and force a shared suffix.
     companion_siblings: dict[tuple, list[Path]] = {}
-    for source_file in to_copy:
+    for source_file in files:
         companion_siblings.setdefault(
             (str(source_file.parent), source_file.stem.casefold()), [],
         ).append(source_file)
@@ -974,6 +1001,7 @@ def ingest(
 
             slot = 0
             matched_existing = False
+            matched_zero_byte = False
             if needs_suffix:
                 stem = source_file.stem
                 suffix = source_file.suffix
@@ -995,17 +1023,30 @@ def ingest(
                         # found this exact match, and the non-anchored
                         # case avoids the same duplicate-copy on retry.
                         try:
-                            if (dest_file.is_file()
-                                and dest_file.stat().st_size == src_size
-                                and src_size != 0):
-                                src_hash = (
-                                    checker.content_hash(source_file)
-                                    if checker is not None
-                                    else compute_file_hash(str(source_file))
-                                )
-                                dest_hash = compute_file_hash(str(dest_file))
-                                if (src_hash is not None
-                                        and src_hash == dest_hash):
+                            if dest_file.is_file():
+                                dest_size = dest_file.stat().st_size
+                                # Zero-byte ↔ zero-byte is bit-identical
+                                # (every empty file is), but zero-byte
+                                # files carry no duplicate identity, so
+                                # a hash-driven adoption would miss it
+                                # and the loop would keep copying empty
+                                # placeholders under _2, _3, ... on
+                                # every retry. Adopt without touching
+                                # the checker, mirroring slot 0.
+                                zero_byte = src_size == 0 and dest_size == 0
+                                same_bytes = zero_byte
+                                if not zero_byte and dest_size == src_size:
+                                    src_hash = (
+                                        checker.content_hash(source_file)
+                                        if checker is not None
+                                        else compute_file_hash(str(source_file))
+                                    )
+                                    dest_hash = compute_file_hash(str(dest_file))
+                                    same_bytes = (
+                                        src_hash is not None
+                                        and src_hash == dest_hash
+                                    )
+                                if same_bytes:
                                     # Same companion gate as a fresh
                                     # copy below: adopting here must not
                                     # strand a sibling that would meet a
@@ -1015,6 +1056,7 @@ def ingest(
                                     ):
                                         continue
                                     matched_existing = True
+                                    matched_zero_byte = zero_byte
                                     break
                         except OSError:
                             pass
@@ -1027,7 +1069,7 @@ def ingest(
 
             if matched_existing:
                 skipped_duplicate += 1
-                if checker is not None:
+                if checker is not None and not matched_zero_byte:
                     for token in checker.record(source_file):
                         batch_dest_folders[token] = str(dest_folder)
                 duplicate_folders.add(str(dest_folder))

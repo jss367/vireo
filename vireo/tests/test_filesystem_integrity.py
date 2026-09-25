@@ -1157,3 +1157,104 @@ def test_unrejecting_a_duplicate_loser_forgets_that_the_resolver_rejected_it(
 
     assert db.reopen_duplicate_group("H") == 0
     assert _flag_map(db, [loser]) == {loser: "rejected"}
+
+
+# -- companion-slot planning: filtered siblings and zero-byte anchors ---------
+
+
+def test_ingest_filtered_card_sibling_still_forces_suffix_on_survivor(tmp_path):
+    """Codex P1: when ``skip_duplicates`` drops a card RAW that is already
+    cataloged, the surviving JPEG must still see its filtered RAW sibling in
+    slot planning. Without it the JPEG lands at ``IMG_0001.JPG`` alongside an
+    unrelated ``IMG_0001.CR3`` in the destination folder — the scan then pairs
+    them (when metadata is missing or compatible). The JPEG must move to
+    ``IMG_0001_1.JPG`` and leave the unrelated RAW alone.
+    """
+    from ingest import compute_file_hash, ingest
+
+    day = datetime(2026, 3, 28, 10, 0, 0)
+    dst = tmp_path / "nas"
+    day_dir = dst / "2026" / "2026-03-28"
+    day_dir.mkdir(parents=True)
+    unrelated_raw = b"unrelated RAW bytes " * 64
+    (day_dir / "IMG_0001.CR3").write_bytes(unrelated_raw)
+
+    card = tmp_path / "card"
+    _card_pair(card, day)
+    card_raw = card / "IMG_0001.CR3"
+    card_raw_hash = compute_file_hash(str(card_raw))
+
+    db = Database(str(tmp_path / "test.db"))
+    # Pre-catalog the card RAW under an unrelated archive folder so the
+    # duplicate checker (verify_by_hash) filters it out of ``to_copy``,
+    # exercising the code path where a survivor's card sibling isn't in
+    # ``to_copy`` and companion_siblings needs to see it anyway.
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    (other / "IMG_0001.CR3").write_bytes(card_raw.read_bytes())
+    folder_id = db.add_folder(str(other))
+    db.add_photo(
+        folder_id=folder_id, filename="IMG_0001.CR3", extension=".CR3",
+        file_size=card_raw.stat().st_size,
+        file_mtime=card_raw.stat().st_mtime,
+        file_hash=card_raw_hash,
+    )
+
+    result = ingest(
+        str(card), str(dst), db=db, verify_by_hash=True,
+    )
+
+    assert result["failed"] == 0
+    # The unrelated archive RAW must NOT be paired with the card's JPEG.
+    assert sorted(os.listdir(day_dir)) == [
+        "IMG_0001.CR3", "IMG_0001_1.JPG",
+    ]
+    assert (day_dir / "IMG_0001.CR3").read_bytes() == unrelated_raw
+
+
+def test_ingest_retry_adopts_zero_byte_sibling_at_anchored_suffix(tmp_path):
+    """Codex P2: an interrupted paired import already left both siblings at
+    ``_1`` — one of them zero bytes. The retry used to adopt the non-empty
+    sibling at ``_1`` but copy the zero-byte sibling under ``_2`` because the
+    anchored-slot adoption guard excluded zero-byte matches. Both members
+    must adopt at ``_1`` and leave no ``_2``.
+    """
+    from ingest import ingest
+
+    day = datetime(2026, 3, 28, 10, 0, 0)
+    dst = tmp_path / "nas"
+    day_dir = dst / "2026" / "2026-03-28"
+    day_dir.mkdir(parents=True)
+    # Slot 0 is taken by an unrelated RAW from another body — the retry
+    # anchors both card siblings on the shared ``_1`` suffix.
+    (day_dir / "IMG_0001.CR3").write_bytes(b"body A raw")
+    (day_dir / "IMG_0001.JPG").write_bytes(b"body A jpeg " * 32)
+
+    card = tmp_path / "card"
+    card.mkdir()
+    # Zero-byte RAW plus a real JPEG. The card RAW is empty (an odd but
+    # valid on-disk state — the DuplicateChecker skips zero-byte identity
+    # everywhere, so ``skip_duplicates`` never filters it).
+    (card / "IMG_0001.CR3").write_bytes(b"")
+    _jpeg(card / "IMG_0001.JPG", "green", mtime=day)
+    ts = day.timestamp()
+    for name in ("IMG_0001.CR3", "IMG_0001.JPG"):
+        os.utime(str(card / name), (ts, ts))
+
+    # Previous interrupted run already landed both siblings at ``_1``.
+    (day_dir / "IMG_0001_1.CR3").write_bytes(b"")
+    (day_dir / "IMG_0001_1.JPG").write_bytes(
+        (card / "IMG_0001.JPG").read_bytes()
+    )
+
+    db = Database(str(tmp_path / "test.db"))
+    result = ingest(str(card), str(dst), db=db)
+
+    assert result["failed"] == 0
+    assert result["copied"] == 0
+    # Both siblings adopt ``_1``; no ``_2`` placeholder is created.
+    assert sorted(os.listdir(day_dir)) == [
+        "IMG_0001.CR3", "IMG_0001.JPG",
+        "IMG_0001_1.CR3", "IMG_0001_1.JPG",
+    ]
+    assert (day_dir / "IMG_0001_1.CR3").stat().st_size == 0
