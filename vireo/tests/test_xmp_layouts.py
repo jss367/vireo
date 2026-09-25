@@ -2386,6 +2386,75 @@ def test_bag_xml_lang_reset_cancels_property_language_for_reuse(tmp_path):
     assert items == ["Heron", "Owl"]
 
 
+def test_remove_vireo_gps_restore_leaves_post_write_qualified_copy_alone(tmp_path):
+    """A post-write qualified GPS survives ``remove_vireo_gps_location'''s restore.
+
+    Sidecar had a plain GPS before Vireo wrote, so Vireo captured a
+    ``vireo:previousGPS*'' backup. Another tool then added a
+    qualified GPS occurrence (say ``foo:source="user"'') alongside
+    Vireo's plain occurrence. On removal the previous flow ran
+    ``_set_properties(desc, {gps_attr: previous})'' -- which ranked
+    the qualified copy above Vireo's plain one, overwrote the
+    external's value with the backup, and deleted the plain one.
+    The external's original coordinate was permanently lost. The
+    restore now targets only plain occurrences, so the qualified
+    copy keeps its metadata AND its value.
+    """
+    foo_ns = "http://example.com/foo/"
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about='' xmlns:exif='{NS_EXIF}'>"
+        f"<exif:GPSLatitude>10,30.0N</exif:GPSLatitude>"
+        f"<exif:GPSLongitude>20,15.0E</exif:GPSLongitude>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    # First Vireo write -- captures the plain coordinate as the
+    # ``vireo:previousGPS*`` backup and overwrites Vireo's own plain
+    # occurrence with the new coordinate.
+    write_gps_location(path_str, -33.5, -70.25)
+
+    # An external tool adds a qualified copy with a distinct value.
+    with open(path_str, encoding="utf-8") as fh:
+        text = fh.read()
+    text = text.replace(
+        "</rdf:Description>",
+        (
+            f"<exif:GPSLatitude xmlns:foo='{foo_ns}'"
+            f" foo:source='user'>40,0.0N</exif:GPSLatitude>"
+            f"<exif:GPSLongitude xmlns:foo='{foo_ns}'"
+            f" foo:source='user'>50,0.0E</exif:GPSLongitude>"
+            "</rdf:Description>"
+        ),
+        1,
+    )
+    with open(path_str, "w", encoding="utf-8") as fh:
+        fh.write(text)
+
+    remove_vireo_gps_location(path_str)
+
+    root = ET.parse(path_str).getroot()
+    # The user's qualified pair is intact with its ``foo:source''
+    # and its ORIGINAL coordinates (``40N''/``50E'') rather than
+    # having Vireo's backup written over it.
+    qualified_lat = [
+        (lat.text or "").strip()
+        for lat in root.iter(GPS_LATITUDE)
+        if lat.get(f"{{{foo_ns}}}source") == "user"
+    ]
+    qualified_lon = [
+        (lon.text or "").strip()
+        for lon in root.iter(GPS_LONGITUDE)
+        if lon.get(f"{{{foo_ns}}}source") == "user"
+    ]
+    assert qualified_lat == ["40,0.0N"]
+    assert qualified_lon == ["50,0.0E"]
+
+
 def test_remove_vireo_gps_preserves_externally_added_qualified_copy(tmp_path):
     """A tool-added qualified GPS occurrence survives ``remove_vireo_gps_location''.
 

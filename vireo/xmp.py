@@ -1810,6 +1810,53 @@ class SidecarEditor:
             self._dirty = True
         return removed
 
+    def _restore_plain_property_value(self, name, value):
+        """Restore ``value'' to only plain (unqualified) copies of a property.
+
+        Vireo's own writes land on plain occurrences, so a restore of
+        a backed-up value belongs there too. A qualified occurrence
+        added by another tool AFTER Vireo's initial write carries
+        data we can't restore per-occurrence -- and it's not what
+        Vireo overwrote anyway, so overwriting it now with the
+        backup would permanently destroy the external data. Leave
+        qualified duplicates entirely alone: their metadata and
+        their values both survive. "Plain" here is the same
+        classification :meth:`_delete_plain_property_copies` uses;
+        the short qualified-serialization form (``rdf:parseType=
+        "Resource"'' with a bare ``rdf:value'' child and nothing
+        else) is treated as plain because Vireo's own writes
+        preserve it and update through it.
+        """
+        found = _property_occurrences(self._root, name)
+        if not found:
+            return False
+        parent_map = _build_parent_map(self._root)
+        changed = False
+        for owner, child in found:
+            if child is None:
+                if _ancestor_carries_xml_qualifier(owner, parent_map):
+                    continue
+                if owner.get(name) != value:
+                    owner.set(name, value)
+                    changed = True
+            elif _simple_prop_carries_qualifier(child) or (
+                _ancestor_carries_xml_qualifier(child, parent_map)
+            ):
+                continue
+            else:
+                # Update whichever spelling actually carries the
+                # value -- text, attribute-abbreviated ``rdf:value'',
+                # or a nested ``rdf:value'' child -- so a plain
+                # short-form qualified serialization (a bare
+                # ``rdf:parseType="Resource"'' wrapping just an
+                # ``rdf:value'') is restored correctly instead of
+                # having the value written into the wrapper's text.
+                if _update_simple_property_value(child, value):
+                    changed = True
+        if changed:
+            self._dirty = True
+        return changed
+
     # ── Mutations ───────────────────────────────────────────────────────
 
     def add_keywords(self, flat_keywords=(), hierarchical_keywords=()):
@@ -2074,7 +2121,14 @@ class SidecarEditor:
             previous_attr = f"{{{NS_VIREO}}}previous{name}"
             previous = self._get(previous_attr)
             if previous is not None:
-                self._set_properties(desc, {gps_attr: previous})
+                # Restore the backup only onto plain (unqualified)
+                # copies -- those are what Vireo overwrote. A
+                # qualified copy another tool added between the
+                # initial Vireo write and this removal isn't ours
+                # to touch: we didn't overwrite it and we can't
+                # back it up per-occurrence, so leave its metadata
+                # AND its value alone.
+                self._restore_plain_property_value(gps_attr, previous)
                 self._delete_property(previous_attr)
                 removed = True
             elif self._delete_plain_property_copies(gps_attr):
