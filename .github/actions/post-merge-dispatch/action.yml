@@ -33,9 +33,11 @@ runs:
         gh workflow run test-main.yml --repo "$REPO" --ref main
         echo "Dispatched Full tests on main after merging #${PR}."
         # deploy-website.yml deploys on pushes that touch website/**. The
-        # files endpoint is paginated so a large PR can't hide the change.
-        if gh api "repos/$REPO/pulls/$PR/files" --paginate --jq '.[].filename' \
-            | grep -q '^website/'; then
+        # files endpoint is paginated so a large PR can't hide the change;
+        # the list is captured first because grep -q exiting early would
+        # SIGPIPE gh and fail the pipeline under pipefail.
+        files=$(gh api "repos/$REPO/pulls/$PR/files" --paginate --jq '.[].filename')
+        if grep -q '^website/' <<< "$files"; then
           gh workflow run deploy-website.yml --repo "$REPO" --ref main
           echo "Dispatched the website deploy: #${PR} changed website/."
         fi
