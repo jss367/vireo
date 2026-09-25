@@ -5033,6 +5033,7 @@ function toggleSpeciesDropdown(event, encIdx, burstIdx, pos) {
 function closeAllDropdowns() {
   clearTimeout(_searchTimer);
   _searchTimer = null;
+  _speciesSearchSeq++;
   document.querySelectorAll('.species-dropdown.open').forEach(function(d) {
     d.classList.remove('open');
     d.replaceChildren();
@@ -5049,6 +5050,9 @@ document.addEventListener('click', function(e) {
 });
 
 var _searchTimer = null;
+// Bumped on every keystroke and on close, so a search already in flight can
+// tell it is stale and not fill the list with results for an older query.
+var _speciesSearchSeq = 0;
 function renderSpeciesDropdownSearchOptions() {
   document.querySelectorAll('.species-dropdown-match-case').forEach(function(btn) {
     btn.classList.toggle('active', speciesDropdownSearchOptions.matchCase);
@@ -5080,6 +5084,12 @@ function searchSpecies(event, encIdx, burstIdx, pos) {
   var targetId = 'spSearch_' + encIdx + '_' + (burstIdx != null ? burstIdx : 'enc') + '_' + pos;
   var container = document.getElementById(targetId);
   if (!container) return;
+  // Cancel the pending search before the early returns below: typing "ro"
+  // then clearing the field must not let the "ro" search fire and fill the
+  // list afterwards.
+  clearTimeout(_searchTimer);
+  _searchTimer = null;
+  var seq = ++_speciesSearchSeq;
   if (!q) { container.innerHTML = ''; return; }
 
   function renderInto(target, typed, results) {
@@ -5115,12 +5125,16 @@ function searchSpecies(event, encIdx, burstIdx, pos) {
     return;
   }
 
-  clearTimeout(_searchTimer);
   _searchTimer = setTimeout(async function() {
     var params = new URLSearchParams({q: q});
     VireoTextSearch.appendParams(params, speciesDropdownSearchOptions);
-    var results = await safeFetch('/api/species/search?' + params.toString(), {}, { toast: false });
-    if (!container.isConnected) return;
+    var results;
+    try {
+      results = await safeFetch('/api/species/search?' + params.toString(), {}, { toast: false });
+    } catch (e) {
+      results = [];
+    }
+    if (seq !== _speciesSearchSeq || !container.isConnected) return;
     if (!results || !Array.isArray(results)) results = [];
     renderInto(container, q, results);
   }, 250);

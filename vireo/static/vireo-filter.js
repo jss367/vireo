@@ -1336,7 +1336,25 @@
 
   // ---- typeahead --------------------------------------------------------
 
+  // Every show or hide bumps suggestSeq, so a /api/filters/values response
+  // that lands after a newer keystroke (or after Escape closed the list) is
+  // dropped instead of replacing the current list or reopening a closed one.
+  let suggestSeq = 0;
+
+  // Typing is debounced so each keystroke doesn't fire its own request.
+  function scheduleValueSuggest(input) {
+    clearTimeout(suggestTimer);
+    suggestSeq++;
+    suggestTimer = setTimeout(() => {
+      suggestTimer = null;
+      if (document.contains(input)) showValueSuggest(input);
+    }, 150);
+  }
+
   function showValueSuggest(input) {
+    clearTimeout(suggestTimer);
+    suggestTimer = null;
+    const seq = ++suggestSeq;
     const wrap = input.closest('.vf-value-wrap');
     if (!wrap) return;
     const drop = wrap.querySelector('.vf-suggest');
@@ -1369,16 +1387,19 @@
       if (scope.collection_id != null) params.set('collection_id', scope.collection_id);
     }
     fetchJson(`/api/filters/values?${params}`).then((data) => {
-      if (!document.contains(input)) return;
+      if (seq !== suggestSeq || !document.contains(input)) return;
       if (!data.values.length) { drop.hidden = true; return; }
       drop.innerHTML = `<div class="vf-suggest-hint">In your photos · counts respect other filters</div>` +
         data.values.map((entry) =>
           `<button class="vf-value-option" data-suggest-value="${esc(entry.value)}" data-path="${input.dataset.path}" type="button"><span>${esc(entry.value)}</span><em>${entry.count}</em></button>`).join('');
       drop.hidden = false;
-    }).catch(() => { drop.hidden = true; });
+    }).catch(() => { if (seq === suggestSeq) drop.hidden = true; });
   }
 
   function hideSuggests() {
+    clearTimeout(suggestTimer);
+    suggestTimer = null;
+    suggestSeq++;
     $$('.vf-suggest').forEach((d) => { d.hidden = true; });
   }
 
@@ -1691,7 +1712,7 @@
           if (document.contains(target)) handleRuleEdit(target, true);
         }, 250);
       }
-      if (e.target.dataset.suggest) showValueSuggest(e.target);
+      if (e.target.dataset.suggest) scheduleValueSuggest(e.target);
     });
     tree.addEventListener('focusin', (e) => {
       if (e.target.dataset && e.target.dataset.suggest) showValueSuggest(e.target);
