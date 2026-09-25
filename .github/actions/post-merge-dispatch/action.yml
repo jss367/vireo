@@ -35,8 +35,12 @@ runs:
         # deploy-website.yml deploys on pushes that touch website/**. The
         # files endpoint is paginated so a large PR can't hide the change;
         # the list is captured first because grep -q exiting early would
-        # SIGPIPE gh and fail the pipeline under pipefail.
-        files=$(gh api "repos/$REPO/pulls/$PR/files" --paginate --jq '.[].filename')
+        # SIGPIPE gh and fail the pipeline under pipefail. Renames put the
+        # new path in .filename and the old path in .previous_filename, so
+        # both are scanned: a file renamed OUT of website/ still removed
+        # content from the site and needs the deploy.
+        files=$(gh api "repos/$REPO/pulls/$PR/files" --paginate \
+          --jq '.[] | (.filename, .previous_filename) | select(. != null)')
         if grep -q '^website/' <<< "$files"; then
           gh workflow run deploy-website.yml --repo "$REPO" --ref main
           echo "Dispatched the website deploy: #${PR} changed website/."

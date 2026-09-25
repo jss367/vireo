@@ -739,4 +739,8 @@ def test_every_bot_merge_starts_the_post_merge_suite():
     action = _read(POST_MERGE_ACTION)
     assert 'gh workflow run test-main.yml --repo "$REPO" --ref main' in action
     assert "deploy-website.yml" in action
+    # A rename OUT of website/ (new path elsewhere, old path only in
+    # .previous_filename) still removed content from the site, so both
+    # fields must feed the website-deploy check.
+    assert ".previous_filename" in action
     assert "workflow_dispatch" in _read(FULL_TEST_WORKFLOW)
