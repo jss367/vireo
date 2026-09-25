@@ -501,6 +501,25 @@ def _photo_scoped_bags(root, tag):
                 yield bag
 
 
+def _qualified_value_element(child):
+    """Return the ``rdf:value`` element inside a qualified property, or None.
+
+    A qualified simple property is spelled either as the short form,
+    where ``rdf:value`` and the qualifiers are direct children of the
+    property element (``rdf:parseType='Resource'``), or as the long
+    form, where the property wraps an ``rdf:Description`` that holds
+    ``rdf:value`` and the qualifiers. Both serializations are
+    semantically identical and readers/writers must accept both.
+    """
+    rdf_value = child.find(f"{{{NS_RDF}}}value")
+    if rdf_value is not None:
+        return rdf_value
+    nested = child.find(f"{{{NS_RDF}}}Description")
+    if nested is not None:
+        return nested.find(f"{{{NS_RDF}}}value")
+    return None
+
+
 def _get_property(root, name):
     """Return a simple property's value from whichever form stores it."""
     for desc, child in _property_occurrences(root, name):
@@ -510,13 +529,19 @@ def _get_property(root, name):
             # Qualified property, e.g.
             #   <xmp:Rating rdf:parseType="Resource">
             #     <rdf:value>3</rdf:value><...qualifiers.../>
+            #   </xmp:Rating>
+            # or the equivalent long form
+            #   <xmp:Rating>
+            #     <rdf:Description>
+            #       <rdf:value>3</rdf:value><...qualifiers.../>
+            #     </rdf:Description>
             #   </xmp:Rating>.
             # The actual value lives in the nested ``rdf:value``; the
             # container's own ``text`` is whitespace between its children,
             # so returning it would hide the rating/GPS from every reader
             # and let ``set_gps_location`` back up an empty string that
             # later restores empty coordinates instead of the original.
-            rdf_value = child.find(f"{{{NS_RDF}}}value")
+            rdf_value = _qualified_value_element(child)
             if rdf_value is not None:
                 return (rdf_value.text or "").strip()
             return None
@@ -859,6 +884,37 @@ class SidecarEditor:
         descriptions = _top_descriptions(self._root)
         return descriptions[0] if descriptions else None
 
+    def _unqualified_photo_description(self):
+        """Return a photo-scoped Description free of inherited ``xml:*``.
+
+        ``xml:lang`` (and the other ``xml:*`` attributes) on a
+        Description are inherited by every property inside it, so any
+        new property added under such a Description would silently
+        carry that qualifier. Return the first photo-scoped Description
+        that has no ``xml:*`` attribute of its own; create a fresh
+        empty-subject Description when none exists.
+        """
+        for desc in _top_descriptions(self._root):
+            if not any(
+                name.startswith(f"{{{NS_XML}}}") for name in desc.attrib
+            ):
+                return desc
+        if self._root.tag == f"{{{NS_RDF}}}RDF":
+            rdf = self._root
+        else:
+            rdf = self._root.find(f"{{{NS_RDF}}}RDF")
+            if rdf is None:
+                rdf = ET.SubElement(self._root, f"{{{NS_RDF}}}RDF")
+                self._dirty = True
+        desc = ET.SubElement(rdf, f"{{{NS_RDF}}}Description")
+        about, node = _photo_subject(self._root)
+        if about:
+            desc.set(f"{{{NS_RDF}}}about", about)
+        if node:
+            desc.set(f"{{{NS_RDF}}}nodeID", node)
+        self._dirty = True
+        return desc
+
     def _bag(self, desc, tag_ns, tag_name):
         """Find or create the rdf:Bag of a namespaced array property.
 
@@ -897,22 +953,31 @@ class SidecarEditor:
             # owning Description, on the property element, or on its
             # ``rdf:Bag``, or any other RDF attribute) that applies to
             # every ``rdf:li`` under it. If every existing occurrence is
-            # qualified, create a fresh unqualified property under
-            # ``desc`` so new items land somewhere they carry no
-            # inherited qualifier; the qualified copies are left alone
-            # in the loop below.
+            # qualified, create a fresh unqualified property under a
+            # Description that has no inherited ``xml:*`` attribute of
+            # its own -- ``desc`` itself may be the language-qualified
+            # Description we're trying to avoid, so the new property has
+            # to land somewhere the qualifier does not reach. The
+            # qualified copies are left alone in the loop below.
             unqualified_idx = next(
                 (i for i, (owner, child) in enumerate(found)
                  if not _prop_is_qualified(owner, child)),
                 None,
             )
             if unqualified_idx is None:
-                elem = ET.SubElement(desc, tag)
+                elem = ET.SubElement(
+                    self._unqualified_photo_description(), tag,
+                )
                 self._dirty = True
             else:
                 elem = found[unqualified_idx][1]
         else:
-            elem = ET.SubElement(desc, tag)
+            # No existing occurrence at all. Create the new property on
+            # an unqualified Description for the same reason as above.
+            target = desc
+            if _owner_inherits_qualifier(desc):
+                target = self._unqualified_photo_description()
+            elem = ET.SubElement(target, tag)
             self._dirty = True
         bag = elem.find(f"{{{NS_RDF}}}Bag")
         if bag is None:
@@ -979,18 +1044,37 @@ class SidecarEditor:
                     owner.set(name, value)
                     changed = True
             elif len(child):
-                # Qualified property, e.g.
+                # Qualified property. The value may live under the
+                # property in the short form
                 #   <xmp:Rating rdf:parseType="Resource">
                 #     <rdf:value>3</rdf:value><...qualifiers.../>
+                #   </xmp:Rating>
+                # or under a nested ``rdf:Description`` in the
+                # equivalent long form
+                #   <xmp:Rating>
+                #     <rdf:Description>
+                #       <rdf:value>3</rdf:value><...qualifiers.../>
+                #     </rdf:Description>
                 #   </xmp:Rating>.
-                # Update the nested ``rdf:value`` instead of blowing away
-                # the children and writing plain text into the container:
-                # that would strip every qualifier and leave
-                # ``rdf:parseType="Resource"`` on a text-only element,
-                # which is invalid RDF.
+                # Update the existing ``rdf:value`` (creating it under
+                # the ``rdf:Description`` when the property uses the
+                # long form) instead of blowing away the children and
+                # writing plain text into the container: that would
+                # strip every qualifier and leave the qualified
+                # structure holding invalid RDF, and appending a
+                # second ``rdf:value`` beside the nested Description
+                # would leave the stale value in place.
                 rdf_value = child.find(f"{{{NS_RDF}}}value")
+                value_owner = child
                 if rdf_value is None:
-                    rdf_value = ET.SubElement(child, f"{{{NS_RDF}}}value")
+                    nested = child.find(f"{{{NS_RDF}}}Description")
+                    if nested is not None:
+                        value_owner = nested
+                        rdf_value = nested.find(f"{{{NS_RDF}}}value")
+                if rdf_value is None:
+                    rdf_value = ET.SubElement(
+                        value_owner, f"{{{NS_RDF}}}value"
+                    )
                     rdf_value.text = value
                     changed = True
                 elif (rdf_value.text or "") != value:

@@ -1036,6 +1036,131 @@ def test_description_level_xml_lang_counts_as_a_container_qualifier(tmp_path):
     assert u_items == ["Heron", "Kiwi"]
 
 
+def test_qualified_simple_property_in_long_form_round_trips(tmp_path):
+    """A qualified rating/GPS stored under ``rdf:Description`` reads and updates.
+
+    XMP's qualified simple properties have two equivalent RDF/XML
+    spellings. The short form nests ``rdf:value`` and the qualifiers
+    directly under the property with ``rdf:parseType='Resource'``. The
+    long form wraps them in a ``rdf:Description``:
+
+        <xmp:Rating><rdf:Description>
+          <rdf:value>3</rdf:value><xmp:someQualifier>foo</xmp:someQualifier>
+        </rdf:Description></xmp:Rating>
+
+    Readers must accept both spellings, and writers must update the
+    existing nested ``rdf:value`` rather than appending a second one
+    beside the ``rdf:Description``. Otherwise the sync preview hides the
+    rating, and a rating update leaves the stale value in place while
+    adding a second, ambiguous one.
+    """
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about='' xmlns:xmp='{NS_XMP}' xmlns:exif='{NS_EXIF}'>"
+        f"<xmp:Rating>"
+        f"<rdf:Description>"
+        f"<rdf:value>3</rdf:value>"
+        f"<xmp:someQualifier>foo</xmp:someQualifier>"
+        f"</rdf:Description>"
+        f"</xmp:Rating>"
+        f"<exif:GPSLatitude>"
+        f"<rdf:Description>"
+        f"<rdf:value>10,30.0N</rdf:value>"
+        f"</rdf:Description>"
+        f"</exif:GPSLatitude>"
+        f"<exif:GPSLongitude>"
+        f"<rdf:Description>"
+        f"<rdf:value>20,15.0E</rdf:value>"
+        f"</rdf:Description>"
+        f"</exif:GPSLongitude>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    metadata = read_sync_preview_metadata(path_str)
+    assert metadata["rating"] == "3"
+    assert metadata["location"]["latitude"] == pytest.approx(10.5)
+    assert metadata["location"]["longitude"] == pytest.approx(20.25)
+
+    write_rating(path_str, 5)
+
+    root = ET.parse(path_str).getroot()
+    ratings = list(root.iter(RATING))
+    assert len(ratings) == 1
+    nested_descs = ratings[0].findall(f"{{{NS_RDF}}}Description")
+    assert len(nested_descs) == 1
+    values = nested_descs[0].findall(f"{{{NS_RDF}}}value")
+    assert len(values) == 1
+    assert values[0].text == "5"
+    assert ratings[0].find(f"{{{NS_RDF}}}value") is None
+    qualifiers = nested_descs[0].findall(f"{{{NS_XMP}}}someQualifier")
+    assert len(qualifiers) == 1 and qualifiers[0].text == "foo"
+
+    assert read_sync_preview_metadata(path_str)["rating"] == "5"
+
+
+def test_add_keywords_when_only_owner_is_qualified_creates_fresh_description(tmp_path):
+    """Fallback creation never inherits a Description-level ``xml:lang``.
+
+    When every existing ``dc:subject`` occurrence sits under a
+    Description that carries ``xml:lang`` (so target selection has no
+    unqualified occurrence to reuse), a plain ``add_keywords()`` must
+    create the fallback property under a fresh empty-subject
+    Description rather than under the qualified one. Otherwise the new
+    keyword silently inherits the language qualifier it was intended to
+    avoid.
+    """
+    xml_ns = "http://www.w3.org/XML/1998/namespace"
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about=''"
+        f" xmlns:dc='{NS_DC}' xmlns:lr='{NS_LR}'"
+        f" xmlns:xml='http://www.w3.org/XML/1998/namespace'"
+        f" xml:lang='en'>"
+        f"<dc:subject><rdf:Bag><rdf:li>Sparrow</rdf:li></rdf:Bag></dc:subject>"
+        f"<lr:hierarchicalSubject>"
+        f"<rdf:Bag><rdf:li>Birds|Sparrow</rdf:li></rdf:Bag>"
+        f"</lr:hierarchicalSubject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    editor = SidecarEditor(path_str)
+    editor.add_keywords({"Kiwi"}, {"Birds|Kiwi"})
+    editor.commit()
+
+    root = ET.parse(path_str).getroot()
+
+    qualified_descs = [
+        d for d in root.iter(f"{{{NS_RDF}}}Description")
+        if d.get(f"{{{xml_ns}}}lang") == "en"
+    ]
+    assert len(qualified_descs) == 1
+    q_items = sorted(
+        li.text for li in qualified_descs[0].iter(f"{{{NS_RDF}}}li") if li.text
+    )
+    assert q_items == ["Birds|Sparrow", "Sparrow"]
+
+    unqualified_descs = [
+        d for d in root.iter(f"{{{NS_RDF}}}Description")
+        if d.get(f"{{{xml_ns}}}lang") is None
+        and (d.get(f"{{{NS_RDF}}}about") or "") == ""
+    ]
+    u_items = sorted(
+        li.text
+        for d in unqualified_descs
+        for li in d.iter(f"{{{NS_RDF}}}li")
+        if li.text
+    )
+    assert u_items == ["Birds|Kiwi", "Kiwi"]
+
+
 @pytest.mark.skipif(shutil.which("exiftool") is None, reason="exiftool not installed")
 def test_exiftool_reads_what_vireo_wrote_in_both_layouts(layout_xmp):
     """ExifTool must see Vireo's values, not a stale copy it wrote itself."""
