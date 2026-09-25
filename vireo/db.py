@@ -13865,6 +13865,20 @@ class Database:
             self.update_prediction_status(pred_id, 'accepted')
             accepted_by_scope.setdefault(scope, set()).add(pred_id)
         history.reject_accept_siblings(accepted_by_scope)
+        # Group apply also rejects a sibling that was already ``accepted``
+        # (see ``_accept_group_pick_rows``), which ``reject_accept_siblings``
+        # leaves alone. Its snapshot records that prior ``accepted``, so
+        # re-reject exactly those rows to match the original apply.
+        accepted_ids = {int(p) for p in pred_ids}
+        for pred_id_str, status in (old_meta.get("prior_statuses") or {}).items():
+            if status != "accepted":
+                continue
+            try:
+                pred_id = int(pred_id_str)
+            except (TypeError, ValueError):
+                continue
+            if pred_id not in accepted_ids:
+                self.update_prediction_status(pred_id, 'rejected')
 
     # -- species_replace --------------------------------------------------
     #

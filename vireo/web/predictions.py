@@ -1292,46 +1292,60 @@ def create_predictions_blueprint(
         return by_photo
 
     def _snapshot_pick_prior_statuses(db, pick_pred_ids):
-        """Prior review status of each pick row keyed by photo id.
+        """Prior review status of every row a group pick can rewrite, by photo.
 
-        Returns ``{photo_id: {pred_id: status}}`` covering only rows with an
-        explicit ``prediction_review`` entry in the active workspace. A pick
-        with no row is omitted — the generic reset in
+        Returns ``{photo_id: {pred_id: status}}`` covering each pick row and
+        every sibling in its (detection, classifier model, label set) scope
+        that has an explicit ``prediction_review`` entry in the active
+        workspace — exactly the rows ``_accept_group_pick_rows`` may write.
+        A row with no entry is omitted: the generic reset in
         ``Database._undo_prediction_accept_statuses`` lands it at
         ``alternative`` / ``pending`` on undo, which matches "no row".
 
-        Rows carrying a non-default status (``accepted`` / ``rejected`` /
-        ``reviewed``) are the ones this snapshot protects: a re-open of an
-        already-applied burst can pick a member the user previously
-        rejected, and the generic scope reset would drop that decision.
+        Two re-open cases need this. A pick can promote a member the user
+        previously rejected, and a pick can settle a sibling the user had
+        already accepted (an accepted alternative, whose grouped primary was
+        rejected). The generic scope reset would restore neither decision.
         """
-        pairs = [(pid, pred_id)
-                 for pid, ids in pick_pred_ids.items()
-                 for pred_id in ids]
-        if not pairs:
+        pick_to_photo = {pred_id: pid
+                         for pid, ids in pick_pred_ids.items()
+                         for pred_id in ids}
+        if not pick_to_photo:
             return {}
         ws = db._ws_id()
-        pred_to_photo = {pred_id: pid for pid, pred_id in pairs}
         out = {}
-        for chunk in chunked(sorted(pred_to_photo)):
+        for chunk in chunked(sorted(pick_to_photo)):
             placeholders = ",".join("?" for _ in chunk)
             for row in db.conn.execute(
-                f"""SELECT prediction_id, status FROM prediction_review
-                    WHERE workspace_id = ?
-                      AND prediction_id IN ({placeholders})""",
+                f"""SELECT pick.id AS pick_id, pr.id AS prediction_id,
+                           pr_rev.status AS status
+                    FROM predictions pick
+                    JOIN predictions pr
+                      ON pr.detection_id = pick.detection_id
+                     AND pr.classifier_model = pick.classifier_model
+                     AND pr.labels_fingerprint = pick.labels_fingerprint
+                    JOIN prediction_review pr_rev
+                      ON pr_rev.prediction_id = pr.id
+                     AND pr_rev.workspace_id = ?
+                    WHERE pick.id IN ({placeholders})""",
                 (ws, *chunk),
             ):
-                photo_id = pred_to_photo[row["prediction_id"]]
+                photo_id = pick_to_photo[row["pick_id"]]
                 out.setdefault(photo_id, {})[row["prediction_id"]] = row["status"]
         return out
 
     def _accept_group_pick_rows(db, pick_pred_ids):
-        """Accept each pick's rows and reject their open siblings, in-transaction.
+        """Accept each pick's rows and settle their siblings, in-transaction.
 
         Mirrors a single Accept: within each accepted row's (detection,
         classifier model, label set) scope, ``pending`` and ``alternative``
-        siblings become ``rejected``. Undo of the resulting
-        ``prediction_accept`` entry resets the same scopes.
+        siblings become ``rejected``. Unlike a single Accept, an ``accepted``
+        sibling is rejected too: the burst modal re-opens decided bursts, so
+        a pick can promote a grouped primary whose alternative the user had
+        accepted earlier, and leaving that alternative accepted would leave
+        two accepted rows in one scope. ``_snapshot_pick_prior_statuses``
+        records the sibling's prior ``accepted`` so undo restores it, and
+        ``Database._redo_prediction_accept_statuses`` re-rejects it on redo.
         """
         ws = db._ws_id()
         accepted_by_scope = {}
@@ -1356,7 +1370,7 @@ def create_predictions_blueprint(
                       AND pr.labels_fingerprint = ?
                       AND pr.id NOT IN ({placeholders})
                       AND COALESCE(pr_rev.status, 'pending')
-                          IN ('pending', 'alternative')""",
+                          IN ('pending', 'alternative', 'accepted')""",
                 (ws, *scope, *sorted(accepted_ids)),
             )]
             for sid in sibling_ids:
@@ -2121,13 +2135,14 @@ def create_predictions_blueprint(
             pick_pred_ids = _group_pick_prediction_ids(
                 db, actionable_picks, observed,
             )
-            # Snapshot each pick row's pre-apply status before the accept
-            # writes so undo restores it. Without this, a re-open of an
-            # already-applied burst that promotes a previously rejected
-            # member into the pick would undo back to ``pending`` and drop
-            # the earlier reject; the generic scope reset in
+            # Snapshot the pre-apply status of every row the accept can
+            # rewrite (the picks and their scope siblings) so undo restores
+            # it. Without this, a re-open of an already-applied burst would
+            # undo a previously rejected pick back to ``pending``, and a
+            # previously accepted sibling back to ``alternative``; the
+            # generic scope reset in
             # ``Database._undo_prediction_accept_statuses`` cannot tell that
-            # the row wasn't at the default state before the accept.
+            # a row wasn't at the default state before the accept.
             prior_pick_statuses = _snapshot_pick_prior_statuses(
                 db, pick_pred_ids,
             )

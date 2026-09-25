@@ -1552,6 +1552,53 @@ def test_group_apply_undo_restores_pick_prior_rejected_status(app_and_db):
     assert db.get_review_status(pred_a, ws) == 'rejected'
 
 
+def test_group_apply_repick_rejects_accepted_sibling_and_undo_restores(app_and_db):
+    """A re-pick of a grouped primary settles an already accepted alternative.
+
+    Accepting an alternative leaves the grouped primary ``rejected`` but
+    still in the burst, so the user can re-open the burst and pick the
+    primary. The apply must reject the accepted alternative — otherwise one
+    (detection, model, label set) scope ends up with two accepted rows —
+    and undo must put both rows back exactly: primary ``rejected``,
+    alternative ``accepted``. Redo re-applies the same split.
+    """
+    app, db = app_and_db
+    (pred_a, pick), (_pred_b, reject) = _seed_burst_group(db, 'gsibling')
+    ws = db._active_workspace_id
+    client = app.test_client()
+
+    det = db.conn.execute(
+        "SELECT detection_id FROM predictions WHERE id = ?", (pred_a,)
+    ).fetchone()['detection_id']
+    db.add_prediction(detection_id=det, species='Steller Jay',
+                      confidence=0.4, model='test-model', category='new',
+                      status='alternative')
+    alt = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id = ? AND species = ?",
+        (det, 'Steller Jay'),
+    ).fetchone()['id']
+    # The earlier decision: the alternative was accepted, the primary lost.
+    db.update_prediction_status(alt, 'accepted')
+    db.update_prediction_status(pred_a, 'rejected')
+
+    resp = client.post('/api/predictions/group/apply', json={
+        'picks': [pick], 'rejects': [reject], 'removed': [],
+        'species': 'Azure Jay',
+        'observed': {str(pred_a): 'rejected'},
+    })
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    assert db.get_review_status(pred_a, ws) == 'accepted'
+    assert db.get_review_status(alt, ws) == 'rejected'
+
+    assert client.post('/api/undo').status_code == 200
+    assert db.get_review_status(pred_a, ws) == 'rejected'
+    assert db.get_review_status(alt, ws) == 'accepted'
+
+    assert client.post('/api/redo').status_code == 200
+    assert db.get_review_status(pred_a, ws) == 'accepted'
+    assert db.get_review_status(alt, ws) == 'rejected'
+
+
 def test_undo_replay_is_one_transaction(app_and_db, monkeypatch):
     """Undo holds the caller's transaction for the whole replay.
 
