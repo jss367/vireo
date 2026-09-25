@@ -2386,6 +2386,53 @@ def test_bag_xml_lang_reset_cancels_property_language_for_reuse(tmp_path):
     assert items == ["Heron", "Owl"]
 
 
+def test_qualified_only_gps_survives_vireo_write_then_remove_round_trip(tmp_path):
+    """A pre-Vireo qualified-only GPS survives a Vireo write-then-remove.
+
+    When the only GPS present before Vireo's first write is a
+    qualified child (say a ``foo:source="camera"''-annotated
+    coordinate), Vireo used to select and overwrite it -- and the
+    later restore-from-backup only touched plain copies, so the
+    qualified copy kept Vireo's assigned coordinate permanently.
+    ``set_gps_location'' now lands on a fresh plain occurrence and
+    leaves the qualified original entirely alone; on remove, the
+    plain occurrence is cleaned up and the qualified original still
+    holds its user-authored coordinate.
+    """
+    foo_ns = "http://example.com/foo/"
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about=''"
+        f" xmlns:exif='{NS_EXIF}' xmlns:foo='{foo_ns}'>"
+        f"<exif:GPSLatitude foo:source='camera'>10,0.0N</exif:GPSLatitude>"
+        f"<exif:GPSLongitude foo:source='camera'>20,0.0E</exif:GPSLongitude>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    write_gps_location(path_str, -33.5, -70.25)
+    remove_vireo_gps_location(path_str)
+
+    root = ET.parse(path_str).getroot()
+    lats = [
+        (lat.text or "").strip()
+        for lat in root.iter(GPS_LATITUDE)
+        if lat.get(f"{{{foo_ns}}}source") == "camera"
+    ]
+    lons = [
+        (lon.text or "").strip()
+        for lon in root.iter(GPS_LONGITUDE)
+        if lon.get(f"{{{foo_ns}}}source") == "camera"
+    ]
+    # The qualified original survives, still carrying ``10,0.0N'' /
+    # ``20,0.0E'' rather than Vireo's assigned coordinate.
+    assert lats == ["10,0.0N"]
+    assert lons == ["20,0.0E"]
+
+
 def test_remove_vireo_gps_restore_leaves_post_write_qualified_copy_alone(tmp_path):
     """A post-write qualified GPS survives ``remove_vireo_gps_location'''s restore.
 
@@ -2507,13 +2554,13 @@ def test_qualified_gps_duplicates_keep_their_original_values(tmp_path):
 
     Two ``exif:GPSLatitude'' child elements carrying distinct
     ``foo:source'' qualifiers (``camera'' vs ``user'') describe two
-    genuinely different coordinates. ``_set_properties'' used to
-    rewrite every retained qualified copy to the keeper's value.
-    Vireo can't back up each occurrence's value independently, so a
-    later ``remove_vireo_gps_location'' would restore only the
-    keeper's backup and permanently replace the other coordinate
-    with it. Preserving each qualified duplicate's original value
-    keeps the user data intact through the write.
+    genuinely different coordinates. Vireo can't back up each
+    occurrence's value independently, so overwriting either would
+    silently destroy user data on a later clear-and-restore round
+    trip. ``set_gps_location'' therefore lands its write on a plain
+    occurrence (creating one if none exists) and leaves every
+    qualified copy entirely alone; the ``vireo:gpsSource'' marker
+    records the assignment.
     """
     foo_ns = "http://example.com/foo/"
     path = tmp_path / "photo.xmp"
@@ -2544,17 +2591,22 @@ def test_qualified_gps_duplicates_keep_their_original_values(tmp_path):
         for lon in root.iter(GPS_LONGITUDE)
         if lon.get(f"{{{foo_ns}}}source")
     }
-    # The keeper (``camera``, first in document order) took Vireo's new
-    # value, but the retained qualified duplicate (``user``) kept its
-    # original coordinate rather than being silently rewritten. On a
-    # later ``remove_vireo_gps_location'' Vireo would restore only the
-    # keeper's backup, so preserving the user's original value here is
-    # the only way to keep that user data through the round trip.
+    # Both qualified GPS entries kept their original coordinates.
+    assert lat_by_source["camera"] == "10,0.0N"
+    assert lon_by_source["camera"] == "20,0.0E"
     assert lat_by_source["user"] == "40,0.0N"
     assert lon_by_source["user"] == "50,0.0E"
-    # Sanity check on the keeper: Vireo's new coordinate landed there.
-    assert "S" in lat_by_source["camera"]
-    assert "W" in lon_by_source["camera"]
+    # Vireo's ``gpsSource'' marker records the assignment.
+    markers = list(root.iter(f"{{{NS_VIREO}}}gpsSource"))
+    all_marker_values = [
+        m.text
+        for m in markers
+    ] + [
+        d.get(f"{{{NS_VIREO}}}gpsSource")
+        for d in root.iter(f"{{{NS_RDF}}}Description")
+        if d.get(f"{{{NS_VIREO}}}gpsSource")
+    ]
+    assert "assigned" in [v for v in all_marker_values if v]
 
 
 def test_bag_xml_lang_reset_cancels_owner_language_for_reuse(tmp_path):

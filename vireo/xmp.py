@@ -1810,6 +1810,72 @@ class SidecarEditor:
             self._dirty = True
         return removed
 
+    def _is_plain_occurrence(self, entry, parent_map):
+        """True when the ``(owner, child)`` entry is a plain occurrence.
+
+        Same predicate used by :meth:`_delete_plain_property_copies`
+        and :meth:`_restore_plain_property_value`: an attribute form
+        is plain when its owner Description has no effective inherited
+        ``xml:lang''; a child element is plain when it carries no own
+        qualifier structure or attributes AND no effective inherited
+        ``xml:lang'' reaches it.
+        """
+        owner, child = entry
+        if child is None:
+            return not _ancestor_carries_xml_qualifier(owner, parent_map)
+        if _simple_prop_carries_qualifier(child):
+            return False
+        return not _ancestor_carries_xml_qualifier(child, parent_map)
+
+    def _set_plain_property_value(self, desc, name, value):
+        """Set a simple property's value, landing only on plain occurrences.
+
+        Callers use this instead of :meth:`_set_properties` for
+        properties whose qualified copies carry data Vireo shouldn't
+        overwrite. A GPS coordinate stored with ``foo:source="camera"''
+        is one such property: overwriting it would silently destroy
+        the pre-existing user-authored value, and Vireo's backup
+        (``vireo:previousGPS*'') only holds one value it could later
+        restore. The write lands on the first plain occurrence and
+        collapses any other plain duplicates; if none exists a fresh
+        plain occurrence is created under an unqualified Description.
+        Qualified occurrences are left entirely alone -- their
+        metadata AND their values both survive. Returns True when
+        the tree changed.
+        """
+        parent_map = _build_parent_map(self._root)
+        found = _property_occurrences(self._root, name)
+        plain = [
+            entry for entry in found
+            if self._is_plain_occurrence(entry, parent_map)
+        ]
+        changed = False
+        if plain:
+            owner, child = plain[0]
+            if child is None:
+                if owner.get(name) != value:
+                    owner.set(name, value)
+                    changed = True
+            elif _update_simple_property_value(child, value):
+                changed = True
+            for owner, child in plain[1:]:
+                if child is None:
+                    if name in owner.attrib:
+                        del owner.attrib[name]
+                        changed = True
+                else:
+                    owner.remove(child)
+                    changed = True
+        else:
+            target = desc
+            if _ancestor_carries_xml_qualifier(desc, parent_map):
+                target = self._unqualified_photo_description()
+            target.set(name, value)
+            changed = True
+        if changed:
+            self._dirty = True
+        return changed
+
     def _restore_plain_property_value(self, name, value):
         """Restore ``value'' to only plain (unqualified) copies of a property.
 
@@ -2094,13 +2160,25 @@ class SidecarEditor:
                         desc, {f"{{{NS_VIREO}}}previous{name}": existing},
                     )
 
-        changed |= self._set_properties(desc, {
+        # Write the GPS attrs through the plain-only path so an
+        # externally-authored qualified copy (say ``foo:source="camera"'')
+        # isn't overwritten -- Vireo's single ``vireo:previousGPS*''
+        # backup can't restore that value per-occurrence, so a later
+        # clear would permanently replace the external's coordinate
+        # with Vireo's assigned one. The Vireo-owned ``vireo:gpsSource''
+        # marker has no external qualified copies to preserve, so
+        # the standard writer still handles it.
+        gps_values = {
             exif_attrs["GPSLatitude"]: _format_gps_coordinate(lat, "N", "S"),
             exif_attrs["GPSLongitude"]: _format_gps_coordinate(lon, "E", "W"),
             exif_attrs["GPSMapDatum"]: "WGS-84",
             exif_attrs["GPSVersionID"]: "2.3.0.0",
-            marker: source or "assigned",
-        })
+        }
+        for attr, val in gps_values.items():
+            changed |= self._set_plain_property_value(desc, attr, val)
+        changed |= self._set_properties(
+            desc, {marker: source or "assigned"},
+        )
         return changed
 
     def remove_vireo_gps_location(self):
