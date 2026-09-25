@@ -181,7 +181,7 @@ Automated review cycle managed by `.github/workflows/pr-agent.yml`.
 4. When **Codex Connect** submits a review on any PR, Claude addresses the feedback by pushing to the branch and adds the `claude-agent` label so future comments are handled automatically.
 5. When the **Tests workflow fails** on any PR, Claude reads the failure logs and pushes a fix directly to the PR branch. Loop prevention: skips if the failing commit was already a CI fix attempt.
 6. When **Full tests fails on `main`**, `main-health.yml` opens (or comments on) a `main-red` issue and closes it on the next green run. It also fires the routine with `Task: fix-main` until one request per incident has been accepted (the issue records it), and the routine opens a `fix-main` PR; to retry after that, close the issue and the next red run opens a new one. The fire is gated on the repository variable `MAIN_HEALTH_ENABLE_FIX_MAIN`, off by default because the stored routine prompt is not synced from the repo; flip it to `true` after pasting `pr-agent-routine-prompt.md` into the routine. Runs on `main` are never cancelled mid-run (a burst of merges queues one run for the newest), so main always gets a complete result.
-7. When an **approving review** is submitted or someone comments **👍**, the PR is squash-merged.
+7. When an **approving review** is submitted or someone comments **👍**, the PR is squash-merged. Merges made with `GITHUB_TOKEN` start no push workflows, so each merge job then dispatches `Full tests` on main (and the website deploy when `website/` changed) through `.github/actions/post-merge-dispatch`.
 8. Branches are deleted after merge.
 
 ### Key files
@@ -189,6 +189,7 @@ Automated review cycle managed by `.github/workflows/pr-agent.yml`.
 - `.github/workflows/pr-agent.yml` — Event forwarder + pure-bash merge jobs
 - `.github/workflows/main-health.yml` — Tracks red `Full tests` runs on `main` and fires `fix-main`
 - `.github/actions/fire-routine/action.yml` — Composite action that POSTs to the routine `/fire` endpoint
+- `.github/actions/post-merge-dispatch/action.yml` — Starts `Full tests` (and the website deploy) on main after a bot merge
 - `docs/pr-agent-routine.md` — Setup guide for the Claude Code routine that does the LLM work
 - `docs/pr-agent-routine-prompt.md` — The routine's prompt (paste into claude.ai/code/routines)
 

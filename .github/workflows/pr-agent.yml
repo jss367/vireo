@@ -741,7 +741,7 @@ jobs:
       cancel-in-progress: false
     runs-on: ubuntu-latest
     permissions:
-      actions: read
+      actions: write
       contents: write
       issues: read
       pull-requests: write
@@ -764,6 +764,7 @@ jobs:
           codex-tests-run-id: ${{ matrix.target.tests_run_id }}
 
       - name: Squash-merge Codex-approved head
+        id: merge
         if: steps.ready.outputs.ready == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -784,6 +785,20 @@ jobs:
             exit 1
           fi
           echo "Merged PR #${PR} after Codex approved head ${HEAD_SHA}."
+          {
+            echo "merged=true"
+            echo "pr=$PR"
+          } >> "$GITHUB_OUTPUT"
+
+      # Merges made with GITHUB_TOKEN start no push workflows on main,
+      # so start the post-merge suite explicitly.
+      - name: Start post-merge workflows on main
+        if: steps.merge.outputs.merged == 'true'
+        uses: ./.github/actions/post-merge-dispatch
+        with:
+          repo: ${{ github.repository }}
+          pr: ${{ steps.merge.outputs.pr }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
   # A human approval authorizes only the reviewed head. Current unresolved
   # threads, stale heads, forks, stacked children, non-main bases, and a Tests
@@ -828,7 +843,7 @@ jobs:
       cancel-in-progress: false
     runs-on: ubuntu-latest
     permissions:
-      actions: read
+      actions: write
       contents: write
       issues: read
       pull-requests: write
@@ -850,6 +865,7 @@ jobs:
           approval-id: ${{ github.event.review.id }}
 
       - name: Squash-merge authorized head
+        id: merge
         if: steps.ready.outputs.ready == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -870,6 +886,20 @@ jobs:
             exit 1
           fi
           echo "Merged PR #${PR} at authorized head ${HEAD_SHA}."
+          {
+            echo "merged=true"
+            echo "pr=$PR"
+          } >> "$GITHUB_OUTPUT"
+
+      # Merges made with GITHUB_TOKEN start no push workflows on main,
+      # so start the post-merge suite explicitly.
+      - name: Start post-merge workflows on main
+        if: steps.merge.outputs.merged == 'true'
+        uses: ./.github/actions/post-merge-dispatch
+        with:
+          repo: ${{ github.repository }}
+          pr: ${{ steps.merge.outputs.pr }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
   # For repositories where the PR author cannot submit an approving review,
   # require an explicit human command bound to the final head SHA. Ambiguous
@@ -924,7 +954,7 @@ jobs:
       cancel-in-progress: false
     runs-on: ubuntu-latest
     permissions:
-      actions: read
+      actions: write
       contents: write
       issues: read
       pull-requests: write
@@ -946,6 +976,7 @@ jobs:
           merge-comment-id: ${{ github.event.comment.id }}
 
       - name: Squash-merge authorized head
+        id: merge
         if: steps.ready.outputs.ready == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -966,6 +997,20 @@ jobs:
             exit 1
           fi
           echo "Merged PR #${PR} at authorized head ${HEAD_SHA}."
+          {
+            echo "merged=true"
+            echo "pr=$PR"
+          } >> "$GITHUB_OUTPUT"
+
+      # Merges made with GITHUB_TOKEN start no push workflows on main,
+      # so start the post-merge suite explicitly.
+      - name: Start post-merge workflows on main
+        if: steps.merge.outputs.merged == 'true'
+        uses: ./.github/actions/post-merge-dispatch
+        with:
+          repo: ${{ github.repository }}
+          pr: ${{ steps.merge.outputs.pr }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
   # If a human authorized the current head while Tests was still running,
   # retry once that exact head's Tests workflow succeeds. Authorization is
@@ -981,7 +1026,7 @@ jobs:
       cancel-in-progress: false
     runs-on: ubuntu-latest
     permissions:
-      actions: read
+      actions: write
       contents: write
       issues: read
       pull-requests: write
@@ -1091,6 +1136,7 @@ jobs:
           merge-comment-id: ${{ steps.authorization.outputs.merge_comment_id }}
 
       - name: Squash-merge authorized tested head
+        id: merge
         if: steps.ready.outputs.ready == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -1111,3 +1157,17 @@ jobs:
             exit 1
           fi
           echo "Merged PR #${PR} after Tests succeeded at authorized head ${HEAD_SHA}."
+          {
+            echo "merged=true"
+            echo "pr=$PR"
+          } >> "$GITHUB_OUTPUT"
+
+      # Merges made with GITHUB_TOKEN start no push workflows on main,
+      # so start the post-merge suite explicitly.
+      - name: Start post-merge workflows on main
+        if: steps.merge.outputs.merged == 'true'
+        uses: ./.github/actions/post-merge-dispatch
+        with:
+          repo: ${{ github.repository }}
+          pr: ${{ steps.merge.outputs.pr }}
+          token: ${{ secrets.GITHUB_TOKEN }}
