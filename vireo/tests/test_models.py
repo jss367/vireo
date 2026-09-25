@@ -415,6 +415,7 @@ def test_remove_model_deletes_weights_file(tmp_path, monkeypatch):
             "id": "test-model",
             "name": "Test",
             "weights_path": str(weights),
+            "managed": True,
         }],
         "active_model": "test-model",
     })
@@ -445,6 +446,7 @@ def test_remove_model_deletes_weights_directory(tmp_path, monkeypatch):
             "id": "dir-model",
             "name": "Dir Model",
             "weights_path": str(weights_dir),
+            "managed": True,
         }],
         "active_model": None,
     })
@@ -562,6 +564,73 @@ def test_remove_custom_model_keeps_weights_nested_under_models_dir(
     assert not downloaded.exists()
 
 
+def test_remove_legacy_entry_preserves_nonstandard_layout(tmp_path, monkeypatch):
+    """A legacy entry (no ``managed`` field, non-``custom-`` id) with a
+    ``weights_path`` inside ``DEFAULT_MODELS_DIR`` but NOT at the standard
+    download layout (``DEFAULT_MODELS_DIR/<id>``) must be preserved on
+    removal. Location under the download root alone is not proof Vireo
+    downloaded it — a hand-edited entry or a user-parked path can look
+    identical.
+    """
+    import models
+
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
+    (tmp_path / "models").mkdir()
+
+    # Weights live inside DEFAULT_MODELS_DIR but at a path that does not
+    # match the standard layout (DEFAULT_MODELS_DIR/<id>).
+    weights = tmp_path / "models" / "user-owned-directory"
+    weights.mkdir()
+    (weights / "weights.onnx").write_bytes(b"w")
+
+    # Write a legacy-style entry directly (no ``managed`` key, id doesn't
+    # start with ``custom-``).
+    (tmp_path / "models.json").write_text(json.dumps({
+        "models": [{
+            "id": "some-id",
+            "name": "Some",
+            "model_str": "x",
+            "weights_path": str(weights),
+        }],
+        "active_model": None,
+    }))
+
+    result = models.remove_model("some-id")
+    assert result == {"files_deleted": False, "kept_path": str(weights)}
+    assert (weights / "weights.onnx").exists()
+
+
+def test_remove_legacy_entry_at_standard_layout_deletes(tmp_path, monkeypatch):
+    """A legacy entry whose ``weights_path`` matches the standard Vireo
+    download layout (``DEFAULT_MODELS_DIR/<id>``) is still treated as
+    Vireo-owned for backward compatibility with pre-``managed`` registries.
+    """
+    import models
+
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
+    (tmp_path / "models").mkdir()
+
+    weights = tmp_path / "models" / "legacy-model"
+    weights.mkdir()
+    (weights / "weights.onnx").write_bytes(b"w")
+
+    (tmp_path / "models.json").write_text(json.dumps({
+        "models": [{
+            "id": "legacy-model",
+            "name": "Legacy",
+            "model_str": "x",
+            "weights_path": str(weights),
+        }],
+        "active_model": None,
+    }))
+
+    result = models.remove_model("legacy-model")
+    assert result == {"files_deleted": True, "kept_path": None}
+    assert not weights.exists()
+
+
 def test_api_remove_custom_model_keeps_user_folder(app_and_db, tmp_path):
     app, _db = app_and_db
     client = app.test_client()
@@ -625,6 +694,48 @@ def test_load_config_backs_up_schema_invalid_models_field(tmp_path, monkeypatch)
     # A subsequent write does not overwrite the backed-up original.
     models.register_model("new", "N", "s", "/w", "d")
     assert (tmp_path / "models.json.corrupt").read_text() == original
+
+
+def test_load_config_propagates_backup_oserror(tmp_path, monkeypatch):
+    """If the ``.corrupt`` backup fails, the read must not silently discard
+    a recoverable schema-invalid registry.
+
+    Suppressing the ``OSError`` from ``shutil.copy2`` while still returning
+    the normalized empty default lets the next
+    ``register_model`` / ``set_active_model`` / ``remove_model`` overwrite
+    the original models.json — the only remaining copy of the recoverable
+    data — via ``_save_config``. Let the copy error propagate instead so
+    every subsequent mutation refuses too, keeping the original on disk.
+    """
+    import shutil as _shutil
+
+    import models
+
+    cfg_path = tmp_path / "models.json"
+    monkeypatch.setattr(models, "CONFIG_PATH", str(cfg_path))
+    original = json.dumps({
+        "models": {
+            "m1": {"id": "m1", "name": "One", "weights_path": "/w1"},
+        },
+        "active_model": "m1",
+    })
+    cfg_path.write_text(original)
+
+    def failing_copy2(src, dst, *args, **kwargs):
+        raise PermissionError(13, "Permission denied", str(dst))
+
+    monkeypatch.setattr(_shutil, "copy2", failing_copy2)
+    with pytest.raises(OSError):
+        models._load_config()
+    with pytest.raises(OSError):
+        models.register_model("new", "N", "s", "/w", "d")
+    with pytest.raises(OSError):
+        models.set_active_model("m1")
+    with pytest.raises(OSError):
+        models.remove_model("m1")
+
+    assert cfg_path.read_text() == original
+    assert not (tmp_path / "models.json.corrupt").exists()
 
 
 def test_load_config_propagates_read_oserror(tmp_path, monkeypatch):

@@ -225,7 +225,11 @@ def _load_config():
     edited ``models.json`` where ``models`` is a mapping of id → entry —
     is normalized to an empty list in memory, but the original file is
     preserved as ``models.json.corrupt`` first so a subsequent write does
-    not overwrite the only copy of the recoverable data.
+    not overwrite the only copy of the recoverable data. If that backup
+    copy itself fails (unwritable directory, disk full), the ``OSError``
+    propagates rather than being suppressed: otherwise the same follow-up
+    write would still overwrite the recoverable original with an empty
+    registry.
     """
     try:
         with open(CONFIG_PATH) as f:
@@ -235,13 +239,11 @@ def _load_config():
     except ValueError:
         log.warning("Could not parse %s; treating it as empty", CONFIG_PATH,
                     exc_info=True)
-        with contextlib.suppress(OSError):
-            shutil.copy2(CONFIG_PATH, CONFIG_PATH + ".corrupt")
+        shutil.copy2(CONFIG_PATH, CONFIG_PATH + ".corrupt")
         return _default_config()
     if not isinstance(config, dict):
         log.warning("%s is not a JSON object; treating it as empty", CONFIG_PATH)
-        with contextlib.suppress(OSError):
-            shutil.copy2(CONFIG_PATH, CONFIG_PATH + ".corrupt")
+        shutil.copy2(CONFIG_PATH, CONFIG_PATH + ".corrupt")
         return _default_config()
     if not isinstance(config.get("models"), list):
         log.warning(
@@ -249,8 +251,7 @@ def _load_config():
             "normalizing to an empty list",
             CONFIG_PATH, type(config.get("models")).__name__,
         )
-        with contextlib.suppress(OSError):
-            shutil.copy2(CONFIG_PATH, CONFIG_PATH + ".corrupt")
+        shutil.copy2(CONFIG_PATH, CONFIG_PATH + ".corrupt")
         config["models"] = []
     return config
 
@@ -298,18 +299,31 @@ def _model_is_managed(entry):
     Backward compatibility: entries written before the ``managed`` field
     existed have neither key. Ids issued by ``/api/models/custom`` start
     with ``custom-`` (see ``api_add_custom_model``) so they are treated
-    as unmanaged; anything else that still resolves strictly inside
-    ``DEFAULT_MODELS_DIR`` is treated as a Vireo download.
+    as unmanaged. Anything else is treated as a Vireo download only when
+    its ``weights_path`` resolves to the standard download layout —
+    ``DEFAULT_MODELS_DIR/<entry_id>`` — which every internal downloader
+    produces. A legacy entry pointing anywhere else beneath
+    ``~/.vireo/models`` (e.g. a user-registered ``~/.vireo/models/my-model``
+    whose id is not ``my-model``, or a hand-edited path that just happens
+    to live inside the download root) is preserved rather than deleted.
     """
     if not isinstance(entry, dict):
         return False
     managed = entry.get("managed")
     if isinstance(managed, bool):
         return managed
-    if str(entry.get("id", "")).startswith("custom-"):
+    entry_id = str(entry.get("id", ""))
+    if entry_id.startswith("custom-") or not entry_id:
         return False
     weights_path = entry.get("weights_path") or ""
-    return bool(weights_path) and _inside_models_dir(weights_path)
+    if not weights_path:
+        return False
+    try:
+        expected = os.path.realpath(os.path.join(DEFAULT_MODELS_DIR, entry_id))
+        actual = os.path.realpath(weights_path)
+    except OSError:
+        return False
+    return actual == expected
 
 
 def _check_onnx_downloaded(model_dir, files):
