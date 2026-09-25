@@ -2076,3 +2076,254 @@ def test_tree_of_life_models_share_sentinel_without_label_collision(tmp_path):
     assert result["classifier_runs_applied"] == 2
     assert {r[0] for r in db.conn.execute("SELECT classifier_model FROM classifier_runs")} == {"model-a", "model-b"}
     db.close()
+
+
+def _materialized_classifier_runtime(db):
+    rows = db.conn.execute(
+        "SELECT runtime_fingerprint FROM classifier_runs"
+    ).fetchall()
+    return [r["runtime_fingerprint"] for r in rows]
+
+
+def test_materialize_prefers_installed_classifier_runtime(tmp_path):
+    """Two trusted classifier runtimes for one logical run must not churn:
+    the runtime already installed stays, and re-applying the store is a no-op
+    instead of replacing the predictions on every call."""
+    from computation_cache import materialize_artifacts
+
+    db, _folder_id, _photo_id = _database_with_photo(tmp_path / "db.db", "p.jpg")
+    db.upsert_labels_fingerprint("3" * 12, "L", [], 1, full_fingerprint="3" * 64)
+    r_old = runtime_fingerprint({"rev": "old-taxonomy"})
+    r_new = runtime_fingerprint({"rev": "new-taxonomy"})
+    a_old = classification_artifact(
+        classifier_runtime=r_old, candidates=[{"species": "Robin", "confidence": 0.9}],
+    )
+    a_new = classification_artifact(
+        classifier_runtime=r_new,
+        candidates=[{"species": "American Robin", "confidence": 0.9}],
+    )
+    trusted = {r_old, r_new}
+    # The catalog holds a local r_new run, whichever runtime sorts first.
+    materialize_artifacts(
+        db, [detection_artifact(), a_new],
+        known_runtimes={RUNTIME}, known_classifier_runtimes=trusted,
+    )
+    for _ in range(2):
+        result = materialize_artifacts(
+            db, [detection_artifact(), a_old, a_new],
+            known_runtimes={RUNTIME}, known_classifier_runtimes=trusted,
+        )
+        assert result["classifier_runs_applied"] == 0
+        assert _materialized_classifier_runtime(db) == [r_new]
+        species = [r["species"] for r in db.conn.execute("SELECT species FROM predictions")]
+        assert species == ["American Robin"]
+
+
+def test_materialize_ignores_unrecognized_existing_classifier_runtime(tmp_path):
+    """When the catalog holds an obsolete (no longer recognized) classifier
+    runtime for a photo but the store also carries an artifact for the
+    currently recognized runtime, materialize must install the recognized
+    one instead of pinning the obsolete artifact only to have the
+    recognition gate quarantine it (which would discard the recognized
+    competitor and leave stale predictions in place)."""
+    from computation_cache import materialize_artifacts
+
+    db, _folder_id, _photo_id = _database_with_photo(tmp_path / "db.db", "p.jpg")
+    db.upsert_labels_fingerprint("3" * 12, "L", [], 1, full_fingerprint="3" * 64)
+    r_old = runtime_fingerprint({"rev": "old-taxonomy"})
+    r_new = runtime_fingerprint({"rev": "new-taxonomy"})
+    a_old = classification_artifact(
+        classifier_runtime=r_old, candidates=[{"species": "Robin", "confidence": 0.9}],
+    )
+    a_new = classification_artifact(
+        classifier_runtime=r_new,
+        candidates=[{"species": "American Robin", "confidence": 0.9}],
+    )
+    # Prime the catalog with the obsolete r_old run while both runtimes
+    # are still trusted (mirrors a catalog restored from an install with
+    # a since-removed classifier runtime).
+    materialize_artifacts(
+        db, [detection_artifact(), a_old],
+        known_runtimes={RUNTIME}, known_classifier_runtimes={r_old, r_new},
+    )
+    assert _materialized_classifier_runtime(db) == [r_old]
+    # Now only r_new is recognized. Re-materializing must swap the
+    # catalog to r_new (or leave it alone through the deferred path),
+    # never pin r_old only to have it quarantined below.
+    result = materialize_artifacts(
+        db, [detection_artifact(), a_old, a_new],
+        known_runtimes={RUNTIME}, known_classifier_runtimes={r_new},
+    )
+    assert _materialized_classifier_runtime(db) == [r_new]
+    species = [r["species"] for r in db.conn.execute("SELECT species FROM predictions")]
+    assert species == ["American Robin"]
+    assert result["unknown_classifier_runtime"] == 0
+
+
+def test_materialize_competing_classifier_runtimes_settle_on_one(tmp_path):
+    """With nothing installed, one runtime is chosen and later calls leave it."""
+    from computation_cache import materialize_artifacts
+
+    db, _folder_id, _photo_id = _database_with_photo(tmp_path / "db.db", "p.jpg")
+    db.upsert_labels_fingerprint("3" * 12, "L", [], 1, full_fingerprint="3" * 64)
+    r_a = runtime_fingerprint({"rev": "a"})
+    r_b = runtime_fingerprint({"rev": "b"})
+    artifacts = [
+        detection_artifact(),
+        classification_artifact(classifier_runtime=r_a),
+        classification_artifact(classifier_runtime=r_b),
+    ]
+    first = materialize_artifacts(
+        db, artifacts, known_runtimes={RUNTIME}, known_classifier_runtimes={r_a, r_b},
+    )
+    assert first["classifier_runs_applied"] == 1
+    installed = _materialized_classifier_runtime(db)
+    again = materialize_artifacts(
+        db, artifacts, known_runtimes={RUNTIME}, known_classifier_runtimes={r_a, r_b},
+    )
+    assert again["classifier_runs_applied"] == 0
+    assert _materialized_classifier_runtime(db) == installed
+
+
+def test_materialize_keeps_every_per_detection_classification(tmp_path):
+    """A photo with multiple detected subjects publishes one classification
+    artifact per detection, each with a different ``input_fingerprint`` and
+    subject box. Grouping without the input identity used to collapse the
+    whole photo to a single artifact so only one detection got predictions
+    and a ``classifier_runs`` row while the rest stayed unclassified on
+    every reapply.
+    """
+    from computation_cache import materialize_artifacts
+
+    db, _folder_id, _photo_id = _database_with_photo(tmp_path / "db.db", "p.jpg")
+    db.upsert_labels_fingerprint("3" * 12, "L", [], 1, full_fingerprint="3" * 64)
+    box_a = {"x": 0.10, "y": 0.10, "w": 0.20, "h": 0.20}
+    box_b = {"x": 0.60, "y": 0.60, "w": 0.20, "h": 0.20}
+    detections = detection_artifact(subjects=[
+        {"key": "d0", "kind": "box", "box": box_a,
+         "confidence": 0.9, "category": "animal"},
+        {"key": "d1", "kind": "box", "box": box_b,
+         "confidence": 0.8, "category": "animal"},
+    ])
+    # promote_and_publish_classifier_run publishes one artifact per
+    # detection with the detection's own single subject keyed "d0".
+    subject_a = {"key": "d0", "kind": "box", "box": box_a, "category": "animal"}
+    subject_b = {"key": "d0", "kind": "box", "box": box_b, "category": "animal"}
+    input_a, input_fp_a = classification_input(PHOTO_HASH, RUNTIME, [subject_a])
+    input_b, input_fp_b = classification_input(PHOTO_HASH, RUNTIME, [subject_b])
+    assert input_fp_a != input_fp_b
+    classifier_runtime = runtime_fingerprint({"rev": "cls"})
+
+    def _cls(subject, input_block, input_fp, species):
+        subject_with_candidates = {**subject, "candidates": [
+            {"species": species, "confidence": 0.9},
+        ]}
+        return {
+            "artifact_schema": 1,
+            "type": "classification",
+            "classifier_model": "bioclip-2.5",
+            "detector_model": "megadetector-v6",
+            "detector_runtime_fingerprint": RUNTIME,
+            "labels": {"fingerprint": "3" * 64, "short_fingerprint": "3" * 12},
+            "photo_sha256": PHOTO_HASH,
+            "runtime_fingerprint": classifier_runtime,
+            "input_fingerprint": input_fp,
+            "input": input_block,
+            "completed": True,
+            "subjects": [subject_with_candidates],
+        }
+
+    result = materialize_artifacts(
+        db,
+        [
+            detections,
+            _cls(subject_a, input_a, input_fp_a, "Robin"),
+            _cls(subject_b, input_b, input_fp_b, "Sparrow"),
+        ],
+        known_runtimes={RUNTIME},
+        known_classifier_runtimes={classifier_runtime},
+    )
+    assert result["classifier_runs_applied"] == 2
+    species = sorted(
+        r["species"] for r in db.conn.execute(
+            "SELECT species FROM predictions"
+        )
+    )
+    assert species == ["Robin", "Sparrow"]
+    input_fps = sorted(
+        r["input_fingerprint"] for r in db.conn.execute(
+            "SELECT input_fingerprint FROM classifier_runs"
+        )
+    )
+    assert input_fps == sorted([input_fp_a, input_fp_b])
+
+
+def test_exported_classification_keeps_input_recipe(tmp_path):
+    """A raw-subject classification run keeps its input_recipe through
+    export and import instead of arriving as NULL (a standard crops run)."""
+    from computation_cache import exportable_artifacts, materialize_artifacts
+
+    source, _folder_id, photo_id = _database_with_photo(tmp_path / "s.db", "a.jpg")
+    box = {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}
+    _block, detector_fp = source_input(PHOTO_HASH, "vireo-detector-source-v1")
+    detection_id = source.write_detection_batch(
+        photo_id, "megadetector-v6",
+        [{"box": box, "confidence": 0.9, "category": "animal"}],
+        runtime_fingerprint=RUNTIME, input_fingerprint=detector_fp,
+    )[0]
+    _block, classifier_fp = classification_input(
+        PHOTO_HASH, RUNTIME,
+        [{"key": "d0", "kind": "box", "box": box, "category": "animal"}],
+    )
+    full = "3" * 64
+    source.add_prediction(
+        detection_id, "Robin", 0.9, "bioclip-2.5",
+        labels_fingerprint=full[:12], labels_fingerprint_full=full,
+    )
+    source.record_classifier_run(
+        detection_id, "bioclip-2.5", full[:12], prediction_count=1,
+        labels_fingerprint_full=full, runtime_fingerprint=CLASSIFIER_RUNTIME,
+        input_fingerprint=classifier_fp, input_recipe="raw-subject-v1",
+    )
+    artifacts, _summary = exportable_artifacts(source)
+    classification = [a for a in artifacts if a["type"] == "classification"]
+    assert [a["input_recipe"] for a in classification] == ["raw-subject-v1"]
+
+    dest, _folder_id, _photo_id = _database_with_photo(tmp_path / "d.db", "a.jpg")
+    materialize_artifacts(
+        dest, artifacts, known_runtimes={RUNTIME},
+        known_classifier_runtimes={CLASSIFIER_RUNTIME},
+    )
+    recipes = [r[0] for r in dest.conn.execute("SELECT input_recipe FROM classifier_runs")]
+    assert recipes == ["raw-subject-v1"]
+
+
+def test_concurrent_trust_records_keep_every_runtime(tmp_path, monkeypatch):
+    """Two bundle imports recording trust at once must both survive: the
+    read-merge-replace of trust.json is serialized."""
+    import threading
+    import time
+
+    root = tmp_path / "cache"
+    real_read = ArtifactStore.trusted_runtimes
+
+    def slow_read(self):
+        result = real_read(self)
+        time.sleep(0.05)  # widen the read-then-write window
+        return result
+
+    monkeypatch.setattr(ArtifactStore, "trusted_runtimes", slow_read)
+    runtimes = [runtime_fingerprint({"rev": str(i)}) for i in range(4)]
+    threads = [
+        threading.Thread(
+            target=ArtifactStore(root).record_trusted_runtimes,
+            kwargs={"detector_runtimes": {value}},
+        )
+        for value in runtimes
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    detector, _classifier = real_read(ArtifactStore(root))
+    assert detector == set(runtimes)

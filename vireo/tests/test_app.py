@@ -8835,6 +8835,21 @@ def test_highlight_score_bucket_picked_first_false_unchanged():
     assert [p["id"] for p in photos] == [2, 3, 1]
 
 
+def test_highlight_score_missing_bg_tenengrad_gets_neutral_noise():
+    """A photo with no bg_tenengrad must not rank as the least noisy: it gets
+    the neutral 0.5 noise term, between the measured photos."""
+    from highlights_payload import _highlight_score_bucket
+
+    base = {"quality_score": 0.5, "subject_y_median": 115.0, "flag": "none"}
+    photos = [
+        dict(base, id=1, bg_tenengrad=None),
+        dict(base, id=2, bg_tenengrad=10.0),
+        dict(base, id=3, bg_tenengrad=50.0),
+    ]
+    _highlight_score_bucket(photos, picked_first=False)
+    assert [p["id"] for p in photos] == [2, 1, 3]
+
+
 def test_bucket_unanalyzed_count_counts_unscored_non_picks_only():
     from highlights_payload import _bucket_unanalyzed_count
 

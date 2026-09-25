@@ -53,7 +53,7 @@ def _highlight_score_bucket(photos, picked_first=False):
     """
     subject_values = [p.get("subject_tenengrad") for p in photos]
     eye_values = [p.get("eye_tenengrad") for p in photos if p.get("eye_tenengrad") is not None]
-    bg_values = [p.get("bg_tenengrad") for p in photos]
+    bg_values = [p.get("bg_tenengrad") for p in photos if p.get("bg_tenengrad") is not None]
     bg_sep_values = [p.get("bg_separation") for p in photos if p.get("bg_separation") is not None]
     noise_values = [p.get("noise_estimate") for p in photos if p.get("noise_estimate") is not None]
     max_bg_sep = max(bg_sep_values) if bg_sep_values else None
@@ -86,8 +86,10 @@ def _highlight_score_bucket(photos, picked_first=False):
         area = _highlight_area_score(p.get("subject_size"))
         if p.get("noise_estimate") is not None and noise_values:
             noise = 1.0 - _rank01(p.get("noise_estimate"), noise_values)
+        elif p.get("bg_tenengrad") is not None and bg_values:
+            noise = 1.0 - _rank01(p.get("bg_tenengrad"), bg_values)
         else:
-            noise = 1.0 - _rank01(p.get("bg_tenengrad"), bg_values) if bg_values else 0.5
+            noise = 0.5
 
         rich_available = any(
             p.get(k) is not None

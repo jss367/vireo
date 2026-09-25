@@ -901,6 +901,25 @@ RANK_ORDER = [
 COMMON_NAME_IDENTITY_VERSION = 1
 
 
+def _scientific_entries(data):
+    """Every taxon in a taxonomy.json, one entry per taxon.
+
+    ``taxa_by_scientific`` holds one entry per name, so a cross-kingdom
+    homonym (the bird and plant genera *Prunella*) keeps only one there;
+    ``scientific_homonyms`` lists every taxon under such a name.
+    """
+    seen = set()
+    for entries in ([*data.get("taxa_by_scientific", {}).values()],
+                    *data.get("scientific_homonyms", {}).values()):
+        for entry in entries:
+            identity = entry.get("taxon_id")
+            if identity is not None:
+                if identity in seen:
+                    continue
+                seen.add(identity)
+            yield entry
+
+
 def _common_name_ambiguity(data):
     """Recover retained collisions and distrust lossy, unversioned DWCA indexes.
 
@@ -913,7 +932,7 @@ def _common_name_ambiguity(data):
             and data.get("common_name_identity_version") != COMMON_NAME_IDENTITY_VERSION):
         ambiguous.update(data.get("taxa_by_common", {}))
     targets = {}
-    for entry in data.get("taxa_by_scientific", {}).values():
+    for entry in _scientific_entries(data):
         name = (entry.get("common_name") or "").lower().strip()
         if not name:
             continue
@@ -937,6 +956,9 @@ class Taxonomy:
             data = json.load(f)
         self._by_common = data.get("taxa_by_common", {})
         self._by_scientific = data.get("taxa_by_scientific", {})
+        # A name shared by several taxa can't identify one: lookups by that
+        # name return None rather than an arbitrary kingdom's lineage.
+        self._scientific_homonyms = data.get("scientific_homonyms", {})
         from species_identity import COMMON_NAME_CORRECTIONS, correct_common_name_index
         self._ambiguous_common = _common_name_ambiguity(data) - set(COMMON_NAME_CORRECTIONS)
         for name in self._ambiguous_common:
@@ -1002,10 +1024,12 @@ class Taxonomy:
         """
         key = name.lower().strip()
         if key in getattr(self, "_ambiguous_common", set()):
-            return self._by_scientific.get(key)
+            return self._scientific(key)
         result = self._by_common.get(key)
         if result:
             return result
+        if key in getattr(self, "_scientific_homonyms", {}):
+            return None
         result = self._by_scientific.get(key)
         if result:
             return result
@@ -1014,7 +1038,7 @@ class Taxonomy:
         # (e.g. "Bubulcus ibis" -> current entry for "Ardea ibis").
         current_name = load_scientific_synonyms().get(key)
         if current_name:
-            result = self._by_scientific.get(current_name.lower())
+            result = self._scientific(current_name.lower())
             if result:
                 return result
 
@@ -1023,6 +1047,12 @@ class Taxonomy:
             return None
         return self._by_common_normalized.get(self._normalize(name))
 
+    def _scientific(self, key):
+        """The one taxon named ``key``, or None when the name is a homonym."""
+        if key in getattr(self, "_scientific_homonyms", {}):
+            return None
+        return self._by_scientific.get(key)
+
     def is_taxon(self, name):
         """Check if a name is a recognized taxon."""
         return self.lookup(name) is not None
@@ -1030,8 +1060,14 @@ class Taxonomy:
     def lookup_id(self, taxon_id):
         """Resolve a source ID even after its scientific/common names change."""
         if not hasattr(self, "_by_taxon_id"):
-            self._by_taxon_id = {entry["taxon_id"]: entry for entry in self._by_scientific.values()
-                                 if entry.get("taxon_id") is not None}
+            self._by_taxon_id = {
+                entry["taxon_id"]: entry
+                for entry in _scientific_entries({
+                    "taxa_by_scientific": self._by_scientific,
+                    "scientific_homonyms": getattr(self, "_scientific_homonyms", {}),
+                })
+                if entry.get("taxon_id") is not None
+            }
         return self._by_taxon_id.get(taxon_id)
 
     def api_lookup(self, name):
@@ -1072,7 +1108,7 @@ class Taxonomy:
                 continue
             # Found a match — look up by the taxon's scientific name first
             sci = result.get("name", "").lower()
-            existing = self._by_scientific.get(sci)
+            existing = self.lookup_id(result.get("id")) or self._scientific(sci)
             if existing:
                 # Cache this alternate name for future lookups
                 alt_key = name.lower().strip()
@@ -1362,8 +1398,8 @@ def populate_taxa_db_from_json(db, taxonomy_json_path, progress_callback=None):
     # Dedupe by inat_id (same entry appears in both indices and multiple
     # common-name keys can point to the same entry).
     entries_by_inat_id = {}
-    for source in (taxa_by_sci, taxa_by_common):
-        for entry in source.values():
+    for source in (list(_scientific_entries(data)), taxa_by_common.values()):
+        for entry in source:
             if entry.get("rank") not in _DB_MAJOR_RANKS:
                 continue
             inat_id = entry.get("taxon_id")
@@ -1798,7 +1834,7 @@ def download_taxonomy(output_path, progress_callback=None):
         # Build the lookup dictionaries
         _status(f"Building lineages for {len(taxa_by_id):,} taxa...")
         taxa_by_common = {}
-        taxa_by_scientific = {}
+        entries_by_scientific = {}
         entries_by_taxon = {}
 
         for taxon_id, taxon in taxa_by_id.items():
@@ -1820,7 +1856,17 @@ def download_taxonomy(output_path, progress_callback=None):
 
             # Index by scientific name
             sci_key = taxon["scientific_name"].lower()
-            taxa_by_scientific[sci_key] = entry
+            entries_by_scientific.setdefault(sci_key, []).append(entry)
+
+        # Scientific names are unique only within a kingdom: keep every
+        # homonym, and index the lowest taxon id so the choice is stable.
+        taxa_by_scientific = {}
+        scientific_homonyms = {}
+        for sci_key, entries in entries_by_scientific.items():
+            entries.sort(key=lambda e: e["taxon_id"])
+            taxa_by_scientific[sci_key] = entries[0]
+            if len(entries) > 1:
+                scientific_homonyms[sci_key] = entries
 
         # Index preferred common names first so they always win.
         # Keep the first mapping when two taxa share a preferred name.
@@ -1855,6 +1901,7 @@ def download_taxonomy(output_path, progress_callback=None):
             "source": "iNaturalist DWCA",
             "taxa_by_common": taxa_by_common,
             "taxa_by_scientific": taxa_by_scientific,
+            "scientific_homonyms": scientific_homonyms,
         }
 
         _status(

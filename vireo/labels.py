@@ -716,8 +716,9 @@ def set_active_labels(labels_files):
     config_path = os.path.expanduser("~/.vireo/labels_active.json")
     if isinstance(labels_files, str):
         labels_files = [labels_files]
-    with open(config_path, "w") as f:
-        json.dump({"active_labels": labels_files}, f, indent=2)
+    # Atomic: a torn in-place write reads back as [] in get_active_labels,
+    # silently dropping every active label set.
+    _atomic_write_text(config_path, json.dumps({"active_labels": labels_files}, indent=2))
 
 
 def load_merged_labels(label_sets):

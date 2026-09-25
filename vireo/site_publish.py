@@ -21,7 +21,9 @@ from export import (
 )
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
-_PRIVATE_PHOTO_FIELDS = {"mask_path"}
+# Local filesystem details: a published site must never reveal where the
+# originals live on the user's disk.
+_PRIVATE_PHOTO_FIELDS = {"mask_path", "folder_path", "folder_name"}
 _PUBLISH_LOCKS = WeakValueDictionary()
 _PUBLISH_LOCKS_GUARD = threading.Lock()
 
@@ -98,18 +100,35 @@ def _write_json(path, payload):
         f.write("\n")
 
 
-def _strip_private_photo_fields(highlights):
+def _highlight_photos(highlights):
+    for bucket in highlights.get("buckets", []):
+        yield from bucket.get("photos") or []
+    unidentified = highlights.get("unidentified") or {}
+    yield from unidentified.get("photos") or []
+
+
+def _strip_private_photo_fields(db, highlights, include_locations):
     highlights.pop("folders", None)
 
-    for bucket in highlights.get("buckets", []):
-        for photo in bucket.get("photos") or []:
-            for field in _PRIVATE_PHOTO_FIELDS:
-                photo.pop(field, None)
-
-    unidentified = highlights.get("unidentified") or {}
-    for photo in unidentified.get("photos") or []:
+    photos = list(_highlight_photos(highlights))
+    for photo in photos:
         for field in _PRIVATE_PHOTO_FIELDS:
             photo.pop(field, None)
+
+    if include_locations:
+        return
+    # ``keyword_names`` is a comma-joined list of every keyword on the photo,
+    # location keywords included. Rebuild it from the typed rows rather than
+    # splitting the string, since keyword names can themselves contain commas.
+    ids = [p["id"] for p in photos if p.get("id") and "keyword_names" in p]
+    keywords = db.get_keywords_for_photos(ids) if ids else {}
+    for photo in photos:
+        if "keyword_names" not in photo:
+            continue
+        photo["keyword_names"] = ",".join(
+            k["name"] for k in keywords.get(photo.get("id"), [])
+            if k.get("type") != "location"
+        )
 
 
 def publish_site(db, vireo_dir, destination, life_list, highlights=None, options=None,
@@ -159,7 +178,7 @@ def _publish_site(db, vireo_dir, destination, staging, life_list, highlights,
 
     published_life_list = copy.deepcopy(life_list)
     published_highlights = copy.deepcopy(highlights)
-    _strip_private_photo_fields(published_highlights)
+    _strip_private_photo_fields(db, published_highlights, include_locations)
     if not include_locations:
         for entry in published_life_list.get("species", []):
             entry["locations"] = []
