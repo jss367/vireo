@@ -430,6 +430,10 @@ def test_sidecar_alias_missing_sidecars_on_case_insensitive_volume(
     upper.mkdir()
     with contextlib.suppress(FileExistsError):
         lower.mkdir()
+    # A case-insensitive volume folds names inside the directory too, so
+    # a case-swap probe on any existing entry resolves back. Give the
+    # probe something to probe (the sidecars themselves are still missing).
+    (upper / "keep.txt").write_bytes(b"x")
     ws = db._active_workspace_id
     fu = db.add_folder(str(upper), name="Dir")
     fl = db.add_folder(str(lower), name="dir")
@@ -440,10 +444,15 @@ def test_sidecar_alias_missing_sidecars_on_case_insensitive_volume(
     real_samefile = os.path.samefile
     upper_str = str(upper)
     lower_str = str(lower)
+    keep = str(upper / "keep.txt")
+    keep_swapped = str(upper / "KEEP.TXT")
 
     def fake_samefile(a, b):
-        if {a, b} == {upper_str, lower_str}:
-            return True
+        pair = {str(a), str(b)}
+        if pair == {upper_str, lower_str}:
+            return True  # grandparent folds case on directory lookup
+        if pair == {keep, keep_swapped}:
+            return True  # inside dir also folds case (case-insensitive volume)
         return real_samefile(a, b)
 
     monkeypatch.setattr("vireo.repositories.sync.os.path.samefile", fake_samefile)
@@ -451,9 +460,11 @@ def test_sidecar_alias_missing_sidecars_on_case_insensitive_volume(
         "vireo.repositories.sync.os.path.normcase", lambda p: p.lower()
     )
     # Sidecars do not exist yet, so path-level samefile raises. The parent
-    # directory samefile shim shows the fs folds case: return True so a
-    # cancellation queues its inverse and the sibling's write cannot leave
-    # the cancelled keyword on the shared sidecar.
+    # samefile shim shows the fs aliases the directories, and the child
+    # probe shows the fs folds case for entries inside them: the missing
+    # sidecars will alias, so a cancellation queues its inverse and the
+    # sibling's write cannot leave the cancelled keyword on the shared
+    # sidecar.
     assert db._pending_keyword_sidecar_alias(pu, ws, "Robin") is True
 
 
@@ -549,6 +560,99 @@ def test_sidecar_alias_case_sensitive_folder_inside_case_insensitive_parent(
         return real_samefile(a, b)
 
     monkeypatch.setattr(os.path, "samefile", per_directory_samefile)
+    assert db._pending_keyword_sidecar_alias(pu, ws, "Robin") is False
+
+
+def test_sidecar_alias_case_sensitive_child_reached_via_case_variant_parents(
+    db, tmp_path, monkeypatch
+):
+    """Two photos in case-variant parent folders that ``samefile`` to the
+    same case-sensitive child directory: names inside the resolved folder
+    are still distinct, so the missing sidecars must not alias."""
+    parent = tmp_path / "photos"
+    parent.mkdir()
+    (parent / "A.raw").write_bytes(b"raw")
+    alias_parent = tmp_path / "PHOTOS"
+    ws = db._active_workspace_id
+    fu = db.add_folder(str(parent), name="photos")
+    fl = db.add_folder(str(alias_parent), name="PHOTOS")
+    pu = db.add_photo(fu, "A.raw", ".raw", 1, 1.0)
+    pl = db.add_photo(fl, "a.jpg", ".jpg", 1, 1.0)
+    _insert(db, pl, "keyword_add", "Robin", ws)
+    parent_pair = {str(parent), str(alias_parent)}
+    entry_pair = {str(parent / "A.raw"), str(parent / "a.RAW")}
+    real_samefile = os.path.samefile
+
+    def per_directory_samefile(a, b):
+        pair = {str(a), str(b)}
+        if pair == parent_pair:
+            return True  # grandparent folds case on the folder name lookup
+        if pair == entry_pair:
+            raise FileNotFoundError(str(parent / "a.RAW"))  # child is case-sensitive
+        return real_samefile(a, b)
+
+    monkeypatch.setattr(os.path, "samefile", per_directory_samefile)
+    assert db._pending_keyword_sidecar_alias(pu, ws, "Robin") is False
+
+
+def test_sidecar_alias_ignores_case_swapped_hard_link_pair(
+    db, tmp_path, monkeypatch
+):
+    """A hard link with a case-swapped name on a case-sensitive directory
+    aliases via ``samefile`` even though the directory itself does not
+    fold case. The probe must ignore that pair or it would queue a
+    destructive inverse against an unrelated sidecar."""
+    parent = tmp_path / "photos"
+    parent.mkdir()
+    (parent / "A.raw").write_bytes(b"raw")
+    # Simulate a case-swapped hard link entry regardless of the host fs.
+    hard_link_names = ["A.raw", "a.RAW"]
+    real_scandir = os.scandir
+
+    class _FakeEntry:
+        def __init__(self, name, dir_path):
+            self.name = name
+            self.path = os.path.join(dir_path, name)
+
+    class _FakeScandir:
+        def __init__(self, dir_path):
+            self._dir_path = dir_path
+            self._real = None
+            if os.fspath(dir_path) != str(parent):
+                self._real = real_scandir(dir_path)
+
+        def __enter__(self):
+            if self._real is not None:
+                return iter(self._real.__enter__())
+            return iter(
+                _FakeEntry(name, str(parent)) for name in hard_link_names
+            )
+
+        def __exit__(self, exc_type, exc, tb):
+            if self._real is not None:
+                return self._real.__exit__(exc_type, exc, tb)
+            return False
+
+    monkeypatch.setattr("vireo.repositories.sync.os.scandir", _FakeScandir)
+
+    real_samefile = os.path.samefile
+    entry_pair = {str(parent / "A.raw"), str(parent / "a.RAW")}
+
+    def hardlinked_samefile(a, b):
+        # The two spellings point to the same inode (hard link) even
+        # though the directory is case-sensitive.
+        if {str(a), str(b)} == entry_pair:
+            return True
+        return real_samefile(a, b)
+
+    monkeypatch.setattr(os.path, "samefile", hardlinked_samefile)
+    ws = db._active_workspace_id
+    folder = db.add_folder(str(parent), name="photos")
+    pu = db.add_photo(folder, "A.raw", ".raw", 1, 1.0)
+    pl = db.add_photo(folder, "a.jpg", ".jpg", 1, 1.0)
+    _insert(db, pl, "keyword_add", "Robin", ws)
+    # Hard-linked entry pair is ignored; no other entry to probe, so the
+    # answer stays conservatively False and no inverse is queued.
     assert db._pending_keyword_sidecar_alias(pu, ws, "Robin") is False
 
 

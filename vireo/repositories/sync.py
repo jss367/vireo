@@ -33,54 +33,78 @@ def _parents_case_alias(own_raw, raw):
     Called only after the sidecar paths have already been shown to differ
     but case-fold to the same string, and after ``samefile`` on the paths
     themselves has raised (both sidecars are missing). The containing
-    directories do exist on disk in production (photos live there), so
-    ``samefile`` on the parents is diagnostic when the parent spellings
-    differ: a case-insensitive filesystem folds "Dir" and "dir" to one
-    inode, and the future sidecars will alias too -- matching what
-    ``_sidecar_target_identities`` in ``vireo/sync.py`` does with missing
-    case-fold groups. A case-sensitive filesystem keeps the parents
-    distinct (or one is missing), so the answer stays False and a
-    cancellation does not queue a destructive inverse against an unrelated
-    file. When the parents are byte-identical strings the parent-samefile
-    cannot distinguish the two cases (it would succeed on any existing
-    directory regardless of case sensitivity), so we probe the parent's
-    filesystem directly for case-folding via ``_dir_folds_case``: a shared
-    directory whose fs folds case (macOS default, Windows without per-dir
-    case sensitivity) still aliases sibling sidecars whose stems differ
-    only by case, and sync would group them as one target.
+    directories do exist on disk in production (photos live there). Two
+    checks must both pass for the future sidecars to alias:
+
+    1. The parents resolve to the same directory. When the parent
+       spellings differ, ``samefile`` on the parents decides: a case-
+       insensitive filesystem folds "Dir" and "dir" to one inode, a
+       case-sensitive one keeps them distinct (or one is missing) and the
+       answer stays False. When the parents are byte-identical strings,
+       parent-``samefile`` cannot distinguish the two cases (it would
+       succeed on any existing directory regardless of case sensitivity),
+       so we skip that check.
+    2. The (resolved) directory folds case for its own entries. Windows
+       per-directory case sensitivity lets a case-sensitive child dir sit
+       inside a case-insensitive grandparent, so parents that ``samefile``
+       via a case-insensitive parent lookup can still hold distinct
+       ``A.xmp`` and ``a.xmp`` sidecars. ``_dir_folds_case`` asks the
+       resolved directory itself.
+
+    Both checks are required because ``sync.py``'s
+    ``_sidecar_target_identities`` only groups missing case-fold aliases
+    when both the parent lookup and the sidecar spelling would fold.
+    Returning True elsewhere would let a cancellation queue a destructive
+    inverse keyword removal against an unrelated file.
     """
     own_parent = os.path.dirname(own_raw) or os.curdir
     other_parent = os.path.dirname(raw) or os.curdir
-    if own_parent == other_parent:
-        return _dir_folds_case(own_parent)
-    try:
-        return os.path.samefile(own_parent, other_parent)
-    except OSError:
-        return False
+    if own_parent != other_parent:
+        try:
+            if not os.path.samefile(own_parent, other_parent):
+                return False
+        except OSError:
+            return False
+    return _dir_folds_case(own_parent)
 
 
 def _dir_folds_case(dir_path):
     """Whether lookups inside ``dir_path`` fold case.
 
     Case sensitivity belongs to the directory holding the names (Windows
-    sets it per directory), so probe one of ``dir_path``'s own entries: ask
-    ``samefile`` whether the entry's case-swapped spelling resolves to the
-    same file. The photos live here, so an entry exists in production. A
-    case-insensitive directory folds the spellings; a case-sensitive one
-    raises ``FileNotFoundError`` (or finds a distinct file). With no entry to
-    probe we stay conservative (False), so a cancellation does not queue a
-    destructive inverse against an unrelated file.
+    sets it per directory), so probe ``dir_path``'s own entries: ask
+    ``samefile`` whether an entry's case-swapped spelling resolves to the
+    same file. The photos live here, so an entry exists in production.
+
+    A same-inode result is only trusted when the case-swapped spelling is
+    not itself another entry in the listing: a directory can hold a hard
+    link or symlink at the case-swapped name on a case-sensitive fs, and
+    that pair aliases without the directory folding case. Skipping such
+    entries means the probe only trusts case-folding when the FS itself
+    resolves a spelling that has no separate directory entry. With no
+    usable entry to probe we stay conservative (False), so a cancellation
+    does not queue a destructive inverse against an unrelated file.
     """
     try:
         with os.scandir(dir_path) as entries:
-            for entry in entries:
-                swapped = entry.name.swapcase()
-                if swapped != entry.name:
-                    return os.path.samefile(
-                        entry.path, os.path.join(dir_path, swapped),
-                    )
+            names = [entry.name for entry in entries]
     except OSError:
         return False
+    name_set = set(names)
+    for name in names:
+        swapped = name.swapcase()
+        if swapped == name or swapped in name_set:
+            # Nothing to probe (symmetric-case name) or the swapped
+            # spelling already appears in the listing: a same-inode
+            # match then indicates a hard link, not case folding.
+            continue
+        try:
+            return os.path.samefile(
+                os.path.join(dir_path, name),
+                os.path.join(dir_path, swapped),
+            )
+        except OSError:
+            return False
     return False
 
 
@@ -255,13 +279,12 @@ class SyncRepository:
                         # case-insensitive fs may still alias them. samefile
                         # is the definitive check once both files exist. When
                         # it raises (both sidecars missing), fall back to
-                        # samefile on the containing directories: a case-
-                        # insensitive volume folds "Dir" and "dir" to the same
-                        # inode, so the future sidecars will alias too --
-                        # matching sync.py's _sidecar_target_identities
-                        # grouping of missing case-fold aliases. A truly
-                        # case-sensitive volume keeps the parents distinct
-                        # (or one missing) and the answer stays False, so a
+                        # _parents_case_alias, which requires both the
+                        # containing directories to alias and the resolved
+                        # directory itself to fold case for its own entries.
+                        # Matches sync.py's _sidecar_target_identities
+                        # grouping of missing case-fold aliases. Anything
+                        # short of both keeps the answer False, so a
                         # cancellation does not queue a destructive inverse
                         # against an unrelated sidecar.
                         try:
