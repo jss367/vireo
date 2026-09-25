@@ -422,6 +422,14 @@ def test_photo_id_key_normalizes_the_spellings_sqlite_matches():
     assert _photo_id_key("") is None
     assert _photo_id_key("   ") is None
     assert _photo_id_key("abc") is None
+    # Spellings Python parses but SQLite does not: PEP 515 underscores and
+    # Unicode digits never reach an integer id through SQLite's numeric
+    # affinity, so accepting them would rewrite the wrong photo.
+    assert _photo_id_key("1_0") is None
+    assert _photo_id_key("1_000") is None
+    assert _photo_id_key("٢") is None
+    assert _photo_id_key("١٢٣") is None
+    assert _photo_id_key("०") is None
 
 
 def test_needs_review_rule(db, folder):

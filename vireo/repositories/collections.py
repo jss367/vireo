@@ -28,6 +28,7 @@ id lists, ``create_default_collections_for_all_workspaces``) stay on
 
 import json
 import math
+import re
 
 from keyword_identity import identity_sql
 
@@ -2691,6 +2692,12 @@ class CollectionRepository:
         return updated
 
 
+_SQLITE_NUMERIC_TEXT_RE = re.compile(
+    r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$",
+    re.ASCII,
+)
+
+
 def _photo_id_key(value):
     """The integer photo id a ``photo_ids`` rule value names, or None.
 
@@ -2702,6 +2709,13 @@ def _photo_id_key(value):
     (``_is_scalar`` accepts bool alongside int/float/str), so a remap that
     missed them would leave a stale entry for the deleted id and silently
     rejoin the next photo that reuses it.
+
+    Python's numeric grammar is broader than SQLite's — ``str.isdigit`` and
+    ``int`` accept Unicode digits (``int("٢") == 2``), and ``float`` accepts
+    PEP 515 underscores (``float("1_0") == 10.0``). Neither reaches SQLite's
+    numeric affinity, so binding ``"٢"`` or ``"1_0"`` stays TEXT and never
+    matches an integer id. Only accept strings SQLite would convert with
+    numeric affinity so we do not rewrite an unrelated id.
     """
     if isinstance(value, bool):
         return 1 if value else 0
@@ -2713,10 +2727,8 @@ def _photo_id_key(value):
         return None
     if isinstance(value, str):
         text = value.strip()
-        if not text:
+        if not text or not _SQLITE_NUMERIC_TEXT_RE.match(text):
             return None
-        if text.lstrip("-").isdigit():
-            return int(text)
         try:
             as_float = float(text)
         except ValueError:
