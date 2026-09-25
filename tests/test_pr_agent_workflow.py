@@ -494,6 +494,22 @@ def test_superseded_and_inconclusive_runs_do_not_drive_the_issue():
     assert '"$latest_id" != "$RUN_ID"' in workflow
 
 
+def test_stale_attempt_events_of_the_latest_run_are_skipped():
+    workflow = _read(MAIN_HEALTH_WORKFLOW)
+
+    # GitHub keeps the same databaseId across reruns while incrementing
+    # ``run_attempt`` and potentially changing the conclusion, so the
+    # ``latest_id == RUN_ID`` check alone lets a stale attempt's completion
+    # (the original failure event delivered after a rerun succeeded, or a
+    # rerun's failure delivered before an even later rerun's success) drive
+    # the issue. Compare this event's attempt AND conclusion against the
+    # run's current state before continuing.
+    assert "RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}" in workflow
+    assert '--json attempt,conclusion' in workflow
+    assert '"$current_attempt" != "$RUN_ATTEMPT"' in workflow
+    assert '"$current_conclusion" != "$CONCLUSION"' in workflow
+
+
 def test_each_incident_gets_one_accepted_fix_request():
     workflow = _read(MAIN_HEALTH_WORKFLOW)
     prompt = _read(ROOT / "docs/pr-agent-routine-prompt.md")

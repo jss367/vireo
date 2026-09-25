@@ -61,6 +61,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
           RUN_URL: ${{ github.event.workflow_run.html_url }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           CONCLUSION: ${{ github.event.workflow_run.conclusion }}
@@ -90,6 +91,24 @@ jobs:
                   | sort_by(.createdAt) | reverse | .[0].databaseId // empty')
           if [[ -n "$latest_id" && "$latest_id" != "$RUN_ID" ]]; then
             echo "Run $RUN_ID is superseded by run $latest_id; skipping."
+            exit 0
+          fi
+
+          # GitHub keeps the same databaseId across reruns; only run_attempt
+          # (and potentially the conclusion) changes. If this event describes
+          # an earlier attempt of the same run — the original failure queued
+          # behind a rerun that succeeded, or a rerun's failure delivered
+          # before an even later rerun's success — skip it: the newest
+          # attempt's own workflow_run event drives the issue state, and
+          # runs are serialized so the newest attempt will (or already did)
+          # reach this workflow.
+          current=$(gh run view "$RUN_ID" --repo "$REPO" \
+            --json attempt,conclusion --jq '"\(.attempt) \(.conclusion)"')
+          current_attempt=${current%% *}
+          current_conclusion=${current##* }
+          if [[ "$current_attempt" != "$RUN_ATTEMPT" \
+              || "$current_conclusion" != "$CONCLUSION" ]]; then
+            echo "Run $RUN_ID attempt $RUN_ATTEMPT ($CONCLUSION) is superseded by attempt $current_attempt ($current_conclusion); skipping."
             exit 0
           fi
 
