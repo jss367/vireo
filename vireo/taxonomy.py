@@ -1025,11 +1025,14 @@ class Taxonomy:
         key = name.lower().strip()
         if key in getattr(self, "_ambiguous_common", set()):
             return self._scientific(key)
+        # A scientific homonym is unresolvable by bare name — check before
+        # _by_common so an api_lookup that cached a query as a common name
+        # (or any other stale entry) can't shadow the ambiguity.
+        if key in getattr(self, "_scientific_homonyms", {}):
+            return None
         result = self._by_common.get(key)
         if result:
             return result
-        if key in getattr(self, "_scientific_homonyms", {}):
-            return None
         result = self._by_scientific.get(key)
         if result:
             return result
@@ -1087,6 +1090,13 @@ class Taxonomy:
             return None
         if norm_name in self._api_misses:
             return None
+        # A query that is itself a scientific homonym must stay ambiguous:
+        # the API returns whichever kingdom's row scored highest, so caching
+        # its first ID-resolved hit as a common name would shadow the homonym
+        # gate on every future lookup. Reject before touching the network.
+        alt_key = name.lower().strip()
+        if alt_key in getattr(self, "_scientific_homonyms", {}):
+            return None
 
         import urllib.request
 
@@ -1111,7 +1121,6 @@ class Taxonomy:
             existing = self.lookup_id(result.get("id")) or self._scientific(sci)
             if existing:
                 # Cache this alternate name for future lookups
-                alt_key = name.lower().strip()
                 self._by_common[alt_key] = existing
                 self._by_common_normalized[norm_name] = existing
                 self._dirty = True

@@ -3154,6 +3154,70 @@ def test_download_taxonomy_keeps_cross_kingdom_homonyms(tmp_path, monkeypatch):
     assert {r["child"]: r["parent"] for r in rows} == {11: 10, 12: 11, 21: 20, 22: 21}
 
 
+def test_lookup_rejects_scientific_homonym_cached_as_common_name(tmp_path, monkeypatch):
+    """A cached common-name entry must not shadow the scientific-homonym gate.
+
+    ``_by_common`` used to be read before the homonym check, so any prior
+    write that landed a scientific homonym in the common-name index (a
+    previous ``api_lookup`` cache, an alternate-name index hit, a
+    hand-maintained mapping) turned every future ``lookup("Prunella")``
+    into that one arbitrary kingdom's lineage — the exact regression the
+    homonym index was meant to prevent. Whatever the source of the stale
+    entry, the query must still resolve as ambiguous.
+    """
+    import taxonomy as tax_mod
+
+    monkeypatch.setattr(tax_mod, "_download_with_resume", _fake_homonym_dwca_download)
+    output_path = tmp_path / "taxonomy.json"
+    tax_mod.download_taxonomy(str(output_path))
+
+    tax = tax_mod.Taxonomy(str(output_path))
+    plant_entry = tax.lookup_id(21)
+    assert plant_entry is not None
+    # Simulate any cache path that could have written the homonym: a stale
+    # api_lookup cache, an alternate-name index, or a hand-edited file.
+    tax._by_common["prunella"] = plant_entry
+    tax._by_common_normalized["prunella"] = plant_entry
+
+    assert tax.lookup("Prunella") is None
+
+
+def test_api_lookup_rejects_homonym_query_and_leaves_cache_clean(tmp_path, monkeypatch):
+    """A homonym query must not reach the API or cache an arbitrary kingdom.
+
+    ``api_lookup`` used to resolve the API's first matching row by taxon id
+    and cache it under the query's normalized key. For a scientific homonym
+    like "Prunella", whichever kingdom the API happened to return first
+    won: the cache entry then answered every subsequent bare-name lookup
+    from the wrong lineage. The query is now rejected before the network
+    call — no request, no cache write, no return value — so the homonym
+    stays ambiguous and no bandwidth is spent on an unresolvable name.
+    """
+    import taxonomy as tax_mod
+
+    monkeypatch.setattr(tax_mod, "_download_with_resume", _fake_homonym_dwca_download)
+    output_path = tmp_path / "taxonomy.json"
+    tax_mod.download_taxonomy(str(output_path))
+
+    tax = tax_mod.Taxonomy(str(output_path))
+
+    calls = {"n": 0}
+
+    def fake_urlopen(req, timeout=None, context=None):
+        calls["n"] += 1
+        raise AssertionError("api_lookup must not hit the network for a homonym query")
+
+    import urllib.request as _urlreq
+    monkeypatch.setattr(_urlreq, "urlopen", fake_urlopen)
+
+    assert tax.api_lookup("Prunella") is None
+    assert calls["n"] == 0
+    assert "prunella" not in tax._by_common
+    assert "prunella" not in tax._by_common_normalized
+    # Bare-name lookup stays ambiguous too.
+    assert tax.lookup("Prunella") is None
+
+
 def test_atomic_write_creates_a_new_target_without_a_mode_to_copy(tmp_path):
     """A first-time write has no existing file to copy permissions from.
 
