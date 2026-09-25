@@ -486,6 +486,45 @@ def _property_occurrences(root, name):
     return found
 
 
+def _property_bag_and_wrappers(prop):
+    """Return ``(bag, wrappers)`` for a keyword-array property.
+
+    A ``dc:subject`` / ``lr:hierarchicalSubject`` value has four
+    equivalent serializations:
+
+    * direct child: ``<dc:subject><rdf:Bag>...``.
+    * short qualified form: ``<dc:subject rdf:parseType='Resource'>
+      <rdf:value><rdf:Bag>...``.
+    * long form: ``<dc:subject><rdf:Description><rdf:Bag>...``.
+    * long qualified form: ``<dc:subject><rdf:Description>
+      <rdf:value><rdf:Bag>...``.
+
+    Callers need the bag itself, and they need the intermediate
+    elements (an ``rdf:value``, an ``rdf:Description``) so an
+    inherited qualifier on any of them is honored.  Returns ``(None,
+    [])`` when no bag is found.
+    """
+    bag = prop.find(f"{{{NS_RDF}}}Bag")
+    if bag is not None:
+        return bag, []
+    rdf_value = prop.find(f"{{{NS_RDF}}}value")
+    if rdf_value is not None:
+        bag = rdf_value.find(f"{{{NS_RDF}}}Bag")
+        if bag is not None:
+            return bag, [rdf_value]
+    nested = prop.find(f"{{{NS_RDF}}}Description")
+    if nested is not None:
+        bag = nested.find(f"{{{NS_RDF}}}Bag")
+        if bag is not None:
+            return bag, [nested]
+        rdf_value = nested.find(f"{{{NS_RDF}}}value")
+        if rdf_value is not None:
+            bag = rdf_value.find(f"{{{NS_RDF}}}Bag")
+            if bag is not None:
+                return bag, [nested, rdf_value]
+    return None, []
+
+
 def _photo_scoped_bags(root, tag):
     """Yield each ``rdf:Bag`` under a photo-scoped Description's property.
 
@@ -497,19 +536,15 @@ def _photo_scoped_bags(root, tag):
     import someone else's ``dc:subject`` or ``lr:hierarchicalSubject`` as
     the photo's keywords, and delete or rewrite them during a sync.
 
-    A qualified keyword array wraps the bag in an ``rdf:value`` resource
-    form (``<dc:subject><rdf:value><rdf:Bag>...``), so also follow that
-    one-level indirection; otherwise readers hide the keywords and a
-    keyword addition creates a second unqualified property beside the
+    A qualified keyword array wraps the bag in an ``rdf:value``, an
+    ``rdf:Description``, or both, so follow whichever indirection the
+    sidecar uses; otherwise readers hide the keywords and a keyword
+    addition creates a second unqualified property beside the
     qualified one instead of merging with it.
     """
     for desc in _top_descriptions(root):
         for prop in desc.findall(tag):
-            bag = prop.find(f"{{{NS_RDF}}}Bag")
-            if bag is None:
-                rdf_value = prop.find(f"{{{NS_RDF}}}value")
-                if rdf_value is not None:
-                    bag = rdf_value.find(f"{{{NS_RDF}}}Bag")
+            bag, _wrappers = _property_bag_and_wrappers(prop)
             if bag is not None:
                 yield bag
 
@@ -995,21 +1030,17 @@ class SidecarEditor:
 
         _owner_inherits_qualifier = _has_inherited_qualifier
 
-        def _property_bag(prop):
-            # The bag is normally a direct child, but the qualified
-            # resource form wraps it inside ``rdf:value``.
-            bag = prop.find(f"{{{NS_RDF}}}Bag")
-            if bag is None:
-                rdf_value = prop.find(f"{{{NS_RDF}}}value")
-                if rdf_value is not None:
-                    bag = rdf_value.find(f"{{{NS_RDF}}}Bag")
-            return bag
-
         def _prop_is_qualified(owner, prop):
-            bag_el = _property_bag(prop)
+            bag_el, wrappers = _property_bag_and_wrappers(prop)
+            # Every wrapper (an ``rdf:value``, an ``rdf:Description``,
+            # or both) between the property and the bag is also an
+            # ancestor of the ``rdf:li`` items, so an ``xml:lang`` or
+            # other inherited qualifier on any of them attaches to
+            # every item just as if it were on the bag itself.
             return (
                 _has_inherited_qualifier(owner)
                 or _has_inherited_qualifier(prop)
+                or any(_has_inherited_qualifier(w) for w in wrappers)
                 or (bag_el is not None and _has_inherited_qualifier(bag_el))
             )
 
@@ -1045,7 +1076,7 @@ class SidecarEditor:
                 target = self._unqualified_photo_description()
             elem = ET.SubElement(target, tag)
             self._dirty = True
-        bag = _property_bag(elem)
+        bag, _wrappers = _property_bag_and_wrappers(elem)
         if bag is None:
             bag = ET.SubElement(elem, f"{{{NS_RDF}}}Bag")
             self._dirty = True
@@ -1053,9 +1084,10 @@ class SidecarEditor:
         for owner, extra in found:
             if extra is elem:
                 continue
-            extra_bag = _property_bag(extra)
+            extra_bag, extra_wrappers = _property_bag_and_wrappers(extra)
             # Container-level qualifiers (an ``xml:lang`` on the owning
-            # Description, the property element, or its ``rdf:Bag``)
+            # Description, the property element, an ``rdf:value`` /
+            # ``rdf:Description`` wrapper, or the ``rdf:Bag`` itself)
             # apply to every item inside the container; folding the
             # items into the target bag would silently drop the
             # qualifier when this duplicate is removed. Leave a
@@ -1066,6 +1098,7 @@ class SidecarEditor:
             if (
                 _has_inherited_qualifier(owner)
                 or _has_inherited_qualifier(extra)
+                or any(_has_inherited_qualifier(w) for w in extra_wrappers)
                 or (
                     extra_bag is not None
                     and _has_inherited_qualifier(extra_bag)

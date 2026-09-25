@@ -1444,6 +1444,122 @@ def test_new_simple_property_lands_on_unqualified_description(tmp_path):
     assert keywords == ["Heron"]
 
 
+def test_qualified_keyword_bag_in_long_form_is_read_and_merged(tmp_path):
+    """A long-form ``<dc:subject><rdf:Description><rdf:value><rdf:Bag>...``
+    is read as the photo's keywords and merged into on ``add_keywords``.
+
+    The qualified array has two equivalent serializations: the short
+    form wraps the bag directly under ``rdf:value``, the long form
+    also inserts an ``rdf:Description`` between the property and the
+    ``rdf:value``. Readers must accept both, and ``_bag`` must find
+    the existing bag through both layers so a keyword addition
+    merges into it rather than creating a second unqualified property
+    beside the qualified one.
+    """
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about='' xmlns:dc='{NS_DC}'>"
+        f"<dc:subject>"
+        f"<rdf:Description>"
+        f"<rdf:value>"
+        f"<rdf:Bag><rdf:li>Heron</rdf:li></rdf:Bag>"
+        f"</rdf:value>"
+        f"</rdf:Description>"
+        f"</dc:subject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    assert read_keywords(path_str) == {"Heron"}
+
+    editor = SidecarEditor(path_str)
+    editor.add_keywords({"Kiwi"}, set())
+    editor.commit()
+
+    root = ET.parse(path_str).getroot()
+    subjects = list(root.iter(SUBJECT))
+    assert len(subjects) == 1
+    bags = list(subjects[0].iter(f"{{{NS_RDF}}}Bag"))
+    assert len(bags) == 1
+    items = sorted(li.text for li in bags[0].findall(f"{{{NS_RDF}}}li"))
+    assert items == ["Heron", "Kiwi"]
+
+    assert read_keywords(path_str) == {"Heron", "Kiwi"}
+
+
+def test_xml_lang_on_rdf_value_wrapper_counts_as_container_qualifier(tmp_path):
+    """An ``xml:lang`` on the ``rdf:value`` wrapper qualifies the array.
+
+    The ``rdf:value`` element sits between the property and the bag,
+    so an ``xml:lang`` on it is inherited by every ``rdf:li`` inside
+    just as if it were on the property or the bag itself. Target
+    selection must treat the property as qualified: an unqualified
+    duplicate's items must not fold into the language-qualified bag,
+    and newly added keywords must land under a fresh unqualified
+    property rather than inheriting the language.
+    """
+    xml_ns = "http://www.w3.org/XML/1998/namespace"
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about=''"
+        f" xmlns:dc='{NS_DC}'"
+        f" xmlns:xml='http://www.w3.org/XML/1998/namespace'>"
+        f"<dc:subject rdf:parseType='Resource'>"
+        f"<rdf:value xml:lang='en'>"
+        f"<rdf:Bag><rdf:li>Sparrow</rdf:li></rdf:Bag>"
+        f"</rdf:value>"
+        f"</dc:subject>"
+        f"<dc:subject><rdf:Bag><rdf:li>Heron</rdf:li></rdf:Bag></dc:subject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    editor = SidecarEditor(path_str)
+    editor.add_keywords({"Kiwi"}, set())
+    editor.commit()
+
+    root = ET.parse(path_str).getroot()
+
+    # The language-qualified array still holds only its original item.
+    qualified_values = [
+        v for v in root.iter(f"{{{NS_RDF}}}value")
+        if v.get(f"{{{xml_ns}}}lang") == "en"
+    ]
+    assert len(qualified_values) == 1
+    q_items = sorted(
+        li.text for li in qualified_values[0].iter(f"{{{NS_RDF}}}li")
+        if li.text
+    )
+    assert q_items == ["Sparrow"]
+
+    # The unqualified array picked up the new keyword next to Heron.
+    unqualified_bags = [
+        b for b in root.iter(f"{{{NS_RDF}}}Bag")
+        if b.get(f"{{{xml_ns}}}lang") is None
+        and (b.getparent() is None if hasattr(b, "getparent") else True)
+    ]
+    all_bags = list(root.iter(f"{{{NS_RDF}}}Bag"))
+    unqualified_items = set()
+    for bag in all_bags:
+        # Skip the bag inside the qualified rdf:value.
+        if any(
+            v.get(f"{{{xml_ns}}}lang") == "en"
+            for v in qualified_values
+            if bag in list(v.iter(f"{{{NS_RDF}}}Bag"))
+        ):
+            continue
+        for li in bag.findall(f"{{{NS_RDF}}}li"):
+            if li.text:
+                unqualified_items.add(li.text)
+    assert unqualified_items == {"Heron", "Kiwi"}
+
+
 @pytest.mark.skipif(shutil.which("exiftool") is None, reason="exiftool not installed")
 def test_exiftool_reads_what_vireo_wrote_in_both_layouts(layout_xmp):
     """ExifTool must see Vireo's values, not a stale copy it wrote itself."""
