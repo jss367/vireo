@@ -15,12 +15,48 @@ lives with the other place routes in ``web/locations.py``.
 from __future__ import annotations
 
 import logging
+import math
 
 from flask import Blueprint, jsonify, request
 from services.pending_changes import queue_keyword_add, queue_keyword_remove
 from web.settings import LOCATION_KEYWORDS_SETTING, workspace_effective_setting
 
 log = logging.getLogger(__name__)
+
+# The fields PUT /api/keywords/<id> may change, with the coordinate range for
+# latitude and longitude. update_keyword accepts the same names.
+_COORDINATE_LIMITS = {"latitude": 90.0, "longitude": 180.0}
+_KEYWORD_UPDATE_FIELDS = {"name", "type", "taxon_id", *_COORDINATE_LIMITS}
+
+
+def _keyword_update_fields(body):
+    """Return ``(fields, error)`` for a keyword PUT body.
+
+    ``fields`` keeps only the keys update_keyword may write. The body used
+    to be splatted into ``update_keyword(keyword_id, **body)``, so a stray
+    ``keyword_id`` key raised a TypeError (500), and a string or object
+    latitude was stored as-is. ``error`` names the first invalid field, or
+    is None.
+    """
+    fields = {k: v for k, v in body.items() if k in _KEYWORD_UPDATE_FIELDS}
+    if "name" in fields and not isinstance(fields["name"], str):
+        return fields, "name must be a string"
+    if "taxon_id" in fields and fields["taxon_id"] is not None and (
+        not isinstance(fields["taxon_id"], int)
+        or isinstance(fields["taxon_id"], bool)
+    ):
+        return fields, "taxon_id must be an integer or null"
+    for key, limit in _COORDINATE_LIMITS.items():
+        if key not in fields or fields[key] is None:
+            continue
+        value = fields[key]
+        if (
+            isinstance(value, bool) or not isinstance(value, int | float)
+            or not math.isfinite(value) or not -limit <= value <= limit
+        ):
+            return fields, f"{key} must be a number from {-limit:g} to {limit:g} or null"
+        fields[key] = float(value)
+    return fields, None
 
 
 def create_keywords_blueprint(get_db, json_error):
@@ -148,6 +184,9 @@ def create_keywords_blueprint(get_db, json_error):
     def api_update_keyword(keyword_id):
         db = get_db()
         body = request.get_json(silent=True) or {}
+        body, invalid = _keyword_update_fields(body)
+        if invalid is not None:
+            return json_error(invalid, 400)
         # Capture old identity and tagged photos BEFORE the update: a rename
         # or retype can merge this row into a normalized same-slot peer, in
         # which case the original id and its photo_keywords rows are gone
@@ -157,6 +196,8 @@ def create_keywords_blueprint(get_db, json_error):
                FROM keywords WHERE id = ?""",
             (keyword_id,),
         ).fetchone()
+        if old_row is None:
+            return json_error("keyword not found", 404)
         affected = []
         # Capture affected photos whenever a rename OR a retype is being
         # requested: update_keyword's merge-into-peer path can move photo

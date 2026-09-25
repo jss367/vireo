@@ -3196,6 +3196,7 @@ async function loadConfig() {
     document.getElementById('cfgInatToken').value = cfg.inat_token || '';
     if (cfg.inat_token) validateInatToken();
     document.getElementById('cfgGoogleMapsApiKey').value = cfg.google_maps_api_key || '';
+    _rememberSavedSecrets(_readSecretFields());
     document.getElementById('cfgGoogleMapsPreferEnglish').checked = cfg.google_maps_prefer_english !== false;
     document.getElementById('cfgKeywordCase').value = cfg.keyword_case || 'auto';
     document.getElementById('cfgMaxEditHistory').value = cfg.max_edit_history != null ? cfg.max_edit_history : 1000;
@@ -3427,6 +3428,40 @@ function _saveConfigNow(gen) {
     return _serializedSave('config', function() { return _postConfigSnapshot(gen); });
 }
 
+// The secret fields and the value each one held when the page loaded it or
+// last saved it. Every autosave posts the whole form, so sending these
+// unconditionally let any save (a photos-per-page change in another tab)
+// write back the token the page loaded with, over one saved since, and
+// cancel an in-flight iNat token validation. Only a field the user changed
+// here is sent; the server keeps the stored value for an absent key.
+var _SECRET_FIELDS = {
+  hf_token: 'cfgHfToken',
+  inat_token: 'cfgInatToken',
+  google_maps_api_key: 'cfgGoogleMapsApiKey',
+};
+var _savedSecrets = {};
+
+function _readSecretFields() {
+  var values = {};
+  Object.keys(_SECRET_FIELDS).forEach(function(key) {
+    values[key] = document.getElementById(_SECRET_FIELDS[key]).value.trim();
+  });
+  return values;
+}
+
+function _editedSecrets() {
+  var current = _readSecretFields();
+  var edited = {};
+  Object.keys(current).forEach(function(key) {
+    if (current[key] !== _savedSecrets[key]) edited[key] = current[key];
+  });
+  return edited;
+}
+
+function _rememberSavedSecrets(values) {
+  Object.keys(values).forEach(function(key) { _savedSecrets[key] = values[key]; });
+}
+
 async function _postConfigSnapshot(gen) {
     // Runs only once any earlier config POST has settled; reads the form
     // now so the snapshot reflects every edit made while waiting.
@@ -3434,7 +3469,7 @@ async function _postConfigSnapshot(gen) {
     var grouping = parseInt(document.getElementById('cfgGroupingWindow').value, 10);
     if (isNaN(grouping)) grouping = 10;
     var similarity = parseInt(document.getElementById('cfgSimilarity').value, 10) / 100;
-    var hfToken = document.getElementById('cfgHfToken').value.trim();
+    var secrets = _editedSecrets();
     var keywordCase = document.getElementById('cfgKeywordCase').value;
     var maxEditHistory = parseInt(document.getElementById('cfgMaxEditHistory').value, 10);
     if (isNaN(maxEditHistory)) maxEditHistory = 1000;
@@ -3443,15 +3478,12 @@ async function _postConfigSnapshot(gen) {
       await safeFetch('/api/config', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
+        body: JSON.stringify(Object.assign({}, secrets, {
           classification_threshold: threshold,
           grouping_window_seconds: grouping,
           similarity_threshold: similarity,
           keyword_case: keywordCase,
           max_edit_history: maxEditHistory,
-          hf_token: hfToken,
-          inat_token: document.getElementById('cfgInatToken').value.trim(),
-          google_maps_api_key: document.getElementById('cfgGoogleMapsApiKey').value.trim(),
           google_maps_prefer_english: document.getElementById('cfgGoogleMapsPreferEnglish').checked,
           external_editors: collectExternalEditors(),
           remote_targets: collectRemoteTargets(),
@@ -3541,12 +3573,13 @@ async function _postConfigSnapshot(gen) {
             merge_score: parseInt(document.getElementById('cfgMergeScore').value, 10) / 100,
             merge_max_gap: parseInt(document.getElementById('cfgMergeMaxGap').value, 10) || 60,
           },
-        }),
+        })),
       });
     } catch (e) {
       _saveStatusMark('config', 'error', gen);
       throw e;
     }
+    _rememberSavedSecrets(secrets);
     _saveStatusMark('config', 'ok', gen);
     if (typeof loadPreviewCacheStatus === 'function') loadPreviewCacheStatus();
     // Drop the cached editor list so the next "Open in Editor" action

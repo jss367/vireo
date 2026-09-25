@@ -154,6 +154,39 @@ def write_workspace_overrides(db, overrides):
     )
 
 
+def _validate_config_snapshot(body):
+    """Validate and coerce, in place, every schema setting in a ``/api/config`` body.
+
+    The curated forms post whole snapshots, and a value stored unvalidated
+    (``null`` from an empty number field, ``"abc"``) used to be written
+    verbatim and then break every reader of that setting, Browse included.
+    Each schema leaf present in ``body`` goes through the same
+    ``validate_value`` as the settings PATCH, and a scalar where a schema
+    section (``pipeline``, ``ingest``) belongs is refused. Keys outside the
+    schema keep their dedicated handling in the route.
+
+    Returns an error message for the first invalid setting, or None.
+    """
+    import config_schema as schema
+
+    missing = object()
+    for prefix in sorted(schema.schema_parent_prefixes()):
+        value = schema.get_dotted(body, prefix, default=missing)
+        if value is not missing and not isinstance(value, dict):
+            return f"{prefix} must be a JSON object"
+    for key in sorted(schema.SCHEMA):
+        value = schema.get_dotted(body, key, default=missing)
+        if value is missing:
+            continue
+        if isinstance(value, dict):
+            return f"{key} must be a JSON scalar, not an object"
+        try:
+            schema.set_dotted(body, key, schema.validate_value(key, value))
+        except schema.ValidationError as e:
+            return f"invalid value for {key}: {e}"
+    return None
+
+
 def create_settings_blueprint(
     get_db,
     json_error,
@@ -318,6 +351,9 @@ def create_settings_blueprint(
         import config_schema as schema
 
         body = request.get_json(silent=True) or {}
+        invalid = _validate_config_snapshot(body)
+        if invalid is not None:
+            return json_error(invalid, status=400)
         # Share the schema-driven settings write lock so an autosave in the
         # All-settings region can't race with the curated form's full-snapshot
         # save and silently overwrite a recently-saved schema value.
@@ -464,7 +500,9 @@ def create_settings_blueprint(
                             f"unknown process id: {pid}", status=400
                         )
             cfg.save(current)
-            if "inat_token" in body:
+            # The curated form sends the token on every autosave; only a
+            # changed value supersedes an in-flight modal validation.
+            if current.get("inat_token") != previous.get("inat_token"):
                 advance_inat_token_generation()
             _settings_post_save_side_effects(current, previous)
         return jsonify({"ok": True})
@@ -1090,9 +1128,13 @@ def create_settings_blueprint(
             if confirmation is not None:
                 return confirmation
             cfg.save(payload)
-            if "inat_token" in payload:
+            # Absent secrets were just filled from disk above, so the payload
+            # always carries the token; only a changed value supersedes an
+            # in-flight modal validation.
+            saved = cfg.load()
+            if saved.get("inat_token") != previous.get("inat_token"):
                 advance_inat_token_generation()
-            _settings_post_save_side_effects(cfg.load(), previous)
+            _settings_post_save_side_effects(saved, previous)
         return jsonify({"ok": True})
 
     return blueprint

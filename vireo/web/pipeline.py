@@ -1233,11 +1233,22 @@ def create_pipeline_blueprint(
             effective = db.get_effective_config(cfg.load())
             return jsonify(effective.get("pipeline", {}))
 
+        import config_schema as schema
+
         body = request.get_json(silent=True) or {}
         allowed_keys = {"sam2_variant", "dinov2_variant", "proxy_longest_edge"}
         pipeline_updates = {k: v for k, v in body.items() if k in allowed_keys}
         if not pipeline_updates:
             return json_error("No valid pipeline config keys provided")
+        # An unknown variant or a non-numeric edge used to be stored as-is,
+        # and every later pipeline job then failed resolving it.
+        for key, value in pipeline_updates.items():
+            try:
+                pipeline_updates[key] = schema.validate_value(
+                    f"pipeline.{key}", value,
+                )
+            except schema.ValidationError as e:
+                return json_error(f"invalid value for {key}: {e}")
 
         # Share the schema-driven settings write lock so a concurrent schema
         # autosave can't read this same overrides snapshot and overwrite the

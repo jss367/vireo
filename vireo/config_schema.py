@@ -957,3 +957,56 @@ def validate_value(key, raw):
                 )
 
     return value
+
+
+_MISSING = object()
+
+
+def _usable_number(value):
+    return (
+        isinstance(value, int | float)
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
+
+
+def repair_types(config, defaults):
+    """Replace numeric and boolean leaves that cannot be read as their type.
+
+    Older write paths stored settings without validating them, so a
+    ``config.json`` or a workspace's overrides can hold ``null``, ``"abc"``
+    or an object where a number belongs, and every reader doing ``float()``
+    or a comparison on it then fails. Each such leaf falls back to its
+    value in ``defaults``, or is dropped when ``defaults`` has none (for a
+    workspace, dropping it inherits the global value). A numeric string
+    such as ``"0.5"`` is converted rather than discarded.
+
+    Only the type is repaired. A number outside the schema's range is left
+    alone: that may be a deliberate hand edit, and the write paths already
+    refuse new out-of-range values. ``config`` is modified in place and
+    returned.
+    """
+    for key, spec in SCHEMA.items():
+        kind = spec["type"]
+        if kind not in ("int", "float", "bool"):
+            continue
+        value = get_dotted(config, key, default=_MISSING)
+        if value is _MISSING:
+            continue
+        if value is None and spec.get("nullable"):
+            continue
+        if kind == "bool" and isinstance(value, bool):
+            continue
+        if kind != "bool" and _usable_number(value):
+            continue
+        try:
+            if kind != "bool" and not isinstance(value, str):
+                raise ValidationError(f"{key} is not a number")
+            repaired = _coerce(value, kind)
+        except ValidationError:
+            repaired = get_dotted(defaults, key, default=_MISSING)
+        if repaired is _MISSING:
+            delete_dotted(config, key)
+        else:
+            set_dotted(config, key, repaired)
+    return config

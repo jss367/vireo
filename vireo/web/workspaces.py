@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sqlite3
 
 from config import settings_write_lock
 from db import ALL_NAV_IDS, DEFAULT_TABS
@@ -261,18 +262,54 @@ def create_workspace_blueprint(
                 return json_error(f"unknown process id: {pid}")
         return None
 
+    def _workspace_name_error(db, name, *, ws_id=None):
+        """Why ``name`` can't name a workspace, or None when it can.
+
+        ``workspaces.name`` is UNIQUE, so a taken name used to surface as a
+        500 from the IntegrityError; ``ws_id`` is the workspace being
+        renamed, which may keep its own name.
+        """
+        if not isinstance(name, str) or not name.strip():
+            return json_error("Name is required")
+        taken = db.conn.execute(
+            "SELECT id FROM workspaces WHERE name = ?", (name.strip(),),
+        ).fetchone()
+        if taken is not None and taken["id"] != ws_id:
+            return json_error(
+                f"A workspace named {name.strip()!r} already exists", 409,
+            )
+        return None
+
     @blueprint.route("/api/workspaces", methods=["POST"])
     def api_create_workspace():
         db = get_db()
         body = request.get_json(silent=True) or {}
-        name = body.get("name", "").strip()
-        if not name:
-            return json_error("Name is required")
+        name = body.get("name", "")
+        err = _workspace_name_error(db, name)
+        if err is not None:
+            return err
+        name = name.strip()
         config_overrides = body.get("config_overrides")
         err = _validate_workspace_config_overrides(config_overrides, db)
         if err is not None:
             return err
         folder_ids = body.get("folder_ids", [])
+        # Check every id before creating anything: a bad id used to fail
+        # halfway through linking, after the workspace row was committed,
+        # so each retry of the same request left another workspace behind.
+        if not isinstance(folder_ids, list) or any(
+            not isinstance(fid, int) or isinstance(fid, bool)
+            for fid in folder_ids
+        ):
+            return json_error("folder_ids must be a list of integers")
+        unknown = [
+            fid for fid in dict.fromkeys(folder_ids)
+            if db.conn.execute(
+                "SELECT 1 FROM folders WHERE id = ?", (fid,),
+            ).fetchone() is None
+        ]
+        if unknown:
+            return json_error(f"Unknown folder ids: {unknown}", 404)
         # A folder already covered by another workspace's
         # local_workspace_folders row points at that workspace's managed local
         # copy, not the original NAS path. Silently linking it into a
@@ -325,7 +362,10 @@ def create_workspace_blueprint(
         body = request.get_json(silent=True) or {}
         kwargs = {}
         if "name" in body:
-            kwargs["name"] = body["name"]
+            err = _workspace_name_error(db, body["name"], ws_id=ws_id)
+            if err is not None:
+                return err
+            kwargs["name"] = body["name"].strip()
         overrides_changing = "config_overrides" in body
         if overrides_changing:
             overrides = body["config_overrides"]
@@ -350,7 +390,14 @@ def create_workspace_blueprint(
                 global_cfg,
                 LOCATION_KEYWORDS_SETTING,
             )
-        db.update_workspace(ws_id, **kwargs)
+        try:
+            db.update_workspace(ws_id, **kwargs)
+        except sqlite3.IntegrityError:
+            # A concurrent rename took the name after the check above.
+            db.conn.rollback()
+            return json_error(
+                f"A workspace named {kwargs.get('name')!r} already exists", 409,
+            )
         ws = db.get_workspace(ws_id)
         if overrides_changing and prev_effective_location_keywords:
             new_effective = workspace_effective_setting(
@@ -725,6 +772,30 @@ def create_workspace_blueprint(
         body = request.get_json(silent=True) or {}
         # Only allow workspace-overridable keys
         allowed = {"classification_threshold", "grouping_window_seconds", "similarity_threshold", "detector_confidence", "review_min_confidence"}
+        import math
+
+        import config_schema as schema
+
+        def _invalid(k, v):
+            """Why ``v`` can't be stored for ``k``, or None when it can.
+
+            review_min_confidence is Pipeline Review's confidence slider,
+            kept only as a workspace override, so it has no schema entry;
+            the slider posts a percentage.
+            """
+            if k == "review_min_confidence":
+                if (
+                    isinstance(v, bool) or not isinstance(v, int | float)
+                    or not math.isfinite(v) or not 0 <= v <= 100
+                ):
+                    return "review_min_confidence must be a number from 0 to 100"
+                return None
+            try:
+                schema.validate_value(k, v)
+            except schema.ValidationError as e:
+                return f"invalid value for {k}: {e}"
+            return None
+
         # Share the schema-driven settings write lock so an autosave in the
         # All-settings region can't race with a curated workspace-form save
         # and silently drop a recent override.
@@ -738,12 +809,29 @@ def create_workspace_blueprint(
                     pass
             if not isinstance(existing, dict):
                 existing = {}
+            # A stored "abc" or {} used to write through here and then fail
+            # every reader of the setting. Pipeline Review posts the whole
+            # override object back with only its slider changed, so a value
+            # equal to what is already stored is not a new write: refusing
+            # it would block the slider behind a value stored before this
+            # check existed (readers fall back past it, see
+            # ``config_schema.repair_types``).
+            updates = {}
             for k, v in body.items():
-                if k in allowed:
-                    if v is None:
-                        existing.pop(k, None)
-                    else:
-                        existing[k] = v
+                if k not in allowed:
+                    continue
+                if v is not None and v != existing.get(k):
+                    error = _invalid(k, v)
+                    if error is not None:
+                        return json_error(error)
+                    if k != "review_min_confidence":
+                        v = schema.validate_value(k, v)
+                updates[k] = v
+            for k, v in updates.items():
+                if v is None:
+                    existing.pop(k, None)
+                else:
+                    existing[k] = v
             db.update_workspace(db._active_workspace_id, config_overrides=existing if existing else None)
         return jsonify({"ok": True, "overrides": existing})
 
