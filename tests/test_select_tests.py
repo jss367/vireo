@@ -1036,3 +1036,94 @@ def test_plugin_exits_zero_when_nothing_matches(tmp_path):
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert "1 deselected" in result.stdout
+
+
+def _run_plugin(tmp_path, *args):
+    return subprocess.run(
+        [
+            sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-p", "selected_tests_plugin",
+            "--rootdir", str(tmp_path), "-o", "addopts=", "-q", "-rA", *args,
+        ],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": str(ROOT / "scripts")},
+        capture_output=True,
+        text=True,
+    )
+
+
+def _passed_ids(stdout):
+    return {
+        line.split("PASSED ", 1)[1].strip()
+        for line in stdout.splitlines()
+        if line.startswith("PASSED ")
+    }
+
+
+def test_plugin_shards_partition_the_collected_tests(tmp_path):
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_one.py").write_text(
+        "".join(f"def test_a{i}(): pass\n" for i in range(5))
+    )
+    (tests_dir / "test_two.py").write_text(
+        "".join(f"def test_b{i}(): pass\n" for i in range(4))
+    )
+
+    shards = []
+    for index in (1, 2, 3):
+        result = _run_plugin(tmp_path, "--shard", f"{index}/3", str(tests_dir))
+        assert result.returncode == 0, result.stdout + result.stderr
+        shards.append(_passed_ids(result.stdout))
+
+    assert [len(ids) for ids in shards] == [3, 3, 3]
+    assert set.union(*shards) == {
+        *(f"tests/test_one.py::test_a{i}" for i in range(5)),
+        *(f"tests/test_two.py::test_b{i}" for i in range(4)),
+    }
+    assert sum(len(ids) for ids in shards) == len(set.union(*shards))
+
+
+def test_plugin_shards_apply_after_selection(tmp_path):
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_one.py").write_text(
+        "".join(f"def test_a{i}(): pass\n" for i in range(4))
+    )
+    (tests_dir / "test_two.py").write_text("def test_c(): pass\n")
+    selection = tmp_path / "selected.txt"
+    selection.write_text("tests/test_one.py\n")
+
+    shards = []
+    for index in (1, 2):
+        result = _run_plugin(
+            tmp_path, "--selected-tests", str(selection), "--shard", f"{index}/2",
+            str(tests_dir),
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        shards.append(_passed_ids(result.stdout))
+
+    assert [len(ids) for ids in shards] == [2, 2]
+    assert set.union(*shards) == {f"tests/test_one.py::test_a{i}" for i in range(4)}
+
+
+def test_plugin_empty_shard_exits_zero(tmp_path):
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_one.py").write_text("def test_a(): pass\n")
+
+    result = _run_plugin(tmp_path, "--shard", "2/4", str(tests_dir))
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "1 deselected" in result.stdout
+
+
+@pytest.mark.parametrize("value", ["0/4", "5/4", "2", "a/b"])
+def test_plugin_rejects_malformed_shard(tmp_path, value):
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_one.py").write_text("def test_a(): pass\n")
+
+    result = _run_plugin(tmp_path, "--shard", value, str(tests_dir))
+
+    assert result.returncode == pytest.ExitCode.USAGE_ERROR
+    assert "--shard expects" in result.stderr

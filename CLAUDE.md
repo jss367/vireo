@@ -47,7 +47,7 @@ python scripts/select_tests.py --run -- -n auto -q   # run the selection
 python scripts/select_tests.py --explain             # just print what would run and why
 ```
 
-CI does the same: PRs (`test.yml`) run the selected subset on Linux; every push to `main` (`test-main.yml`) runs the complete suite on Linux/macOS/Windows, enforces the coverage threshold, and publishes a fresh map to the Actions cache and as the `test-impact-map` artifact. The `ci-full-suite` PR label forces the full suite on a PR.
+CI does the same: PRs (`test.yml`) run the selected subset on Linux, split across four parallel jobs with `--shard K/4` (also usable locally); every push to `main` (`test-main.yml`) runs the complete suite on Linux/macOS/Windows, enforces the coverage threshold, and publishes a fresh map to the Actions cache and as the `test-impact-map` artifact. The `ci-full-suite` PR label forces the full suite on a PR.
 
 Do not monkeypatch `sqlite3.connect` globally in tests: coverage flushes per-test contexts to its own SQLite file at every test boundary, so a global fake crashes the xdist worker. Fake only the connection for the database path under test (see `test_pipeline_queue.py`).
 
