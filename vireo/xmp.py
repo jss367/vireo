@@ -884,19 +884,27 @@ def _update_simple_property_value(child, value):
     return True
 
 
-def _property_occurrence_score(entry):
+def _property_occurrence_score(entry, parent_map=None):
     """How authoritative an ``(owner, child)`` occurrence is.
 
     A qualified child (child-element form, the RDF/XML attribute
     abbreviation with an ``rdf:value`` attribute, OR a plain-text
     child carrying any non-structural attribute -- ``rdf:datatype``,
-    ``foo:source``, ``xml:lang``) is the most authoritative; an
-    unqualified child element ranks next; a plain attribute is the
-    least authoritative. Readers and writers both use this so they
-    agree on which copy holds the truth, and the write path leaves
-    that copy in place while removing the others -- ``set_gps_location``
-    would otherwise back up the attribute's stale value and later
-    restore that instead of the qualified coordinate the write kept.
+    ``foo:source``, ``xml:lang``) is the most authoritative; a plain
+    child whose effective inherited ``xml:lang`` (walked through the
+    child's ancestor chain and honoring any ``xml:lang=""`` reset)
+    resolves to a non-empty language ranks the same, since that
+    language qualifies the child's literal value just as an attribute
+    on the child would. An unqualified child element ranks next; a
+    plain attribute is the least authoritative. Readers and writers
+    both use this so they agree on which copy holds the truth, and
+    the write path leaves that copy in place while removing the
+    others -- ``set_gps_location`` would otherwise back up the
+    attribute's stale value and later restore that instead of the
+    qualified coordinate the write kept.
+
+    ``parent_map`` is optional so legacy callers still work; without
+    it the owner-inherited language qualification is not considered.
     """
     _, child = entry
     if child is None:
@@ -907,6 +915,10 @@ def _property_occurrence_score(entry):
         or _has_non_structural_attribute(child)
     ):
         return 2
+    if parent_map is not None and _ancestor_carries_xml_qualifier(
+        child, parent_map,
+    ):
+        return 2
     return 1
 
 
@@ -915,7 +927,11 @@ def _get_property(root, name):
     found = _property_occurrences(root, name)
     if not found:
         return None
-    desc, child = max(found, key=_property_occurrence_score)
+    parent_map = _build_parent_map(root)
+    desc, child = max(
+        found,
+        key=lambda entry: _property_occurrence_score(entry, parent_map),
+    )
     if child is None:
         return desc.get(name)
     # Any qualified form -- element or RDF/XML attribute abbreviation,
@@ -1379,20 +1395,26 @@ class SidecarEditor:
 
         def _prop_is_qualified(owner, prop):
             bag_el, wrappers = _property_bag_and_wrappers(prop)
-            # The owner Description is not itself being removed here,
-            # so only inherited qualifiers on it matter (``xml:*`` on
-            # a Description reaches its descendants). Every wrapper
-            # (an ``rdf:value``, an ``rdf:Description``, or both) and
-            # the bag itself would be dropped if this occurrence
-            # merged into the target, so any non-structural attribute
-            # they carry counts -- including RDF's attribute
-            # abbreviation for a nested property, like
+            # Compute the effective ``xml:lang`` at the deepest
+            # relevant element (the bag when present, else the
+            # property). Walking from there upward honors a local
+            # ``xml:lang=""`` reset at any level -- on the bag, on a
+            # wrapper, on the property itself, or on the owning
+            # Description -- so a bag that cancels the owner's ``en''
+            # is correctly seen as effectively unqualified and stays
+            # a valid reuse target. Every wrapper (an ``rdf:value``,
+            # an ``rdf:Description``, or both) and the bag itself
+            # would be dropped if this occurrence merged into the
+            # target, so any *non-language* attribute they carry
+            # counts -- including RDF's attribute abbreviation for a
+            # nested property, like
             # ``<rdf:Description foo:source="camera">``, which is
             # equivalent to a sibling ``<foo:source>...</foo:source>``
             # of ``rdf:value``. Sibling qualifier ELEMENTS inside the
             # qualified property carry their own meaning too.
+            deepest = bag_el if bag_el is not None else prop
             return (
-                _has_inherited_qualifier(owner)
+                _ancestor_carries_xml_qualifier(deepest, parent_map)
                 or _has_own_qualifier(prop)
                 or any(_has_own_qualifier(w) for w in wrappers)
                 or (bag_el is not None and _has_own_qualifier(bag_el))
@@ -1440,20 +1462,25 @@ class SidecarEditor:
             if extra is elem:
                 continue
             extra_bag, extra_wrappers = _property_bag_and_wrappers(extra)
-            # Owner-inherited qualifiers (``xml:*`` on the source's
-            # Description) would follow the items into a target that
-            # doesn't share them, so treat them as blockers. Every
-            # other element that would be removed -- the property, an
-            # ``rdf:value`` / ``rdf:Description`` wrapper, or the
-            # ``rdf:Bag`` itself -- carries its own meaning if it has
-            # any non-structural attribute (including RDF's attribute
-            # abbreviation, e.g. ``<rdf:Description foo:source=...>``,
-            # equivalent to a nested qualifier property). Sibling
-            # qualifier ELEMENTS alongside the value do too. Any of
-            # these leaves the qualified container in place; plain
-            # duplicates left by earlier writes still collapse.
+            # A source whose items live under a non-empty effective
+            # ``xml:lang`` (from the owner Description, a wrapper, or
+            # the bag itself) would silently drop that language when
+            # merged into a target that doesn't share it, so walk from
+            # the deepest element to catch a local reset at any level
+            # and refuse to merge whenever the effective language is
+            # non-empty. Every other element that would be removed --
+            # the property, an ``rdf:value`` / ``rdf:Description``
+            # wrapper, or the ``rdf:Bag`` itself -- carries its own
+            # meaning if it has any non-language non-structural
+            # attribute (including RDF's attribute abbreviation, e.g.
+            # ``<rdf:Description foo:source=...>``, equivalent to a
+            # nested qualifier property). Sibling qualifier ELEMENTS
+            # alongside the value do too. Any of these leaves the
+            # qualified container in place; plain duplicates left by
+            # earlier writes still collapse.
+            extra_deepest = extra_bag if extra_bag is not None else extra
             if (
-                _has_inherited_qualifier(owner)
+                _ancestor_carries_xml_qualifier(extra_deepest, parent_map)
                 or _has_own_qualifier(extra)
                 or any(_has_own_qualifier(w) for w in extra_wrappers)
                 or (
@@ -1520,7 +1547,9 @@ class SidecarEditor:
                 continue
             best_idx = max(
                 range(len(found)),
-                key=lambda i: _property_occurrence_score(found[i]),
+                key=lambda i: _property_occurrence_score(
+                    found[i], parent_map,
+                ),
             )
             keeper = found[best_idx]
             rest = [

@@ -2045,6 +2045,91 @@ def test_empty_xml_lang_reset_lets_next_write_reuse_the_description(tmp_path):
     assert reset_items == ["Kiwi", "Owl"]
 
 
+def test_gps_write_honors_owner_inherited_xml_lang_for_authority(tmp_path):
+    """Owner-inherited ``xml:lang`` promotes a plain child to the qualified rank.
+
+    ``_property_occurrence_score`` used to look only at the child's
+    own attributes: two plain-child GPS occurrences (one under an
+    ``xml:lang="en"`` Description, one under a language-free
+    Description in document order first) tied at score 1. ``max`` on
+    a tie picks the first, so ``_get_property`` read the earlier
+    stale value; ``set_gps_location`` then backed up that value and
+    the later restore path could rewrite the owner-qualified
+    coordinate with the stale copy. Owner-inherited effective
+    ``xml:lang`` on a plain child now boosts it to score 2, matching
+    the qualified rank of a child that carries the attribute itself.
+    """
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'"
+        f" xmlns:xml='http://www.w3.org/XML/1998/namespace'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about='' xmlns:exif='{NS_EXIF}'>"
+        f"<exif:GPSLatitude>10,0.0N</exif:GPSLatitude>"
+        f"<exif:GPSLongitude>20,0.0E</exif:GPSLongitude>"
+        f"</rdf:Description>"
+        f"<rdf:Description rdf:about='' xml:lang='en'"
+        f" xmlns:exif='{NS_EXIF}'>"
+        f"<exif:GPSLatitude>40,0.0N</exif:GPSLatitude>"
+        f"<exif:GPSLongitude>50,0.0E</exif:GPSLongitude>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    # Reads must pick the owner-qualified pair (score 2), not the
+    # plain earlier one in document order.
+    metadata = read_sync_preview_metadata(path_str)
+    assert metadata["location"]["latitude"] == pytest.approx(40.0)
+    assert metadata["location"]["longitude"] == pytest.approx(50.0)
+
+
+def test_bag_xml_lang_reset_cancels_owner_language_for_reuse(tmp_path):
+    """A bag's own ``xml:lang=""`` reset cancels the owner's inherited language.
+
+    The owner Description carries ``xml:lang="en"``, so its
+    ``dc:subject`` items would inherit English unless a nearer
+    ancestor cancels it. The bag's ``xml:lang=""`` reset does
+    exactly that -- the items' effective language is "no known" --
+    and the effectively-unqualified bag is a valid reuse target.
+    Before this fix the owner-only check saw ``en``, treated the
+    prop as qualified, and minted a second ``dc:subject`` beside the
+    reset bag; readers walking to the first occurrence would then
+    miss the freshly-written keyword.
+    """
+    xml_ns = "http://www.w3.org/XML/1998/namespace"
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'"
+        f" xmlns:xml='http://www.w3.org/XML/1998/namespace'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about='' xml:lang='en'"
+        f" xmlns:dc='{NS_DC}'>"
+        f"<dc:subject><rdf:Bag xml:lang=''>"
+        f"<rdf:li>Heron</rdf:li>"
+        f"</rdf:Bag></dc:subject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    editor = SidecarEditor(path_str)
+    editor.add_keywords({"Owl"}, set())
+    editor.commit()
+
+    root = ET.parse(path_str).getroot()
+    subjects = list(root.iter(SUBJECT))
+    # Exactly one ``dc:subject`` bag: the pre-existing reset bag now
+    # holds both keywords, rather than a fresh empty-language bag
+    # sitting under a new Description.
+    assert len(subjects) == 1
+    bags = subjects[0].findall(f"{{{NS_RDF}}}Bag")
+    assert len(bags) == 1
+    assert bags[0].get(f"{{{xml_ns}}}lang") == ""
+    items = sorted(li.text for li in bags[0].findall(f"{{{NS_RDF}}}li"))
+    assert items == ["Heron", "Owl"]
+
+
 def test_empty_xml_lang_reset_on_bag_lets_add_keyword_reuse_it(tmp_path):
     """An empty ``xml:lang="" `` reset on the bag doesn't force a duplicate bag.
 
