@@ -13,6 +13,22 @@ resolver this repository feeds.
 import os
 
 
+class _DeferredPlan:
+    """Singleton sentinel returned by ``resolution_plan`` when at least one
+    candidate is on an offline volume, so the resolver can't safely pick a
+    winner yet. Distinct from ``None`` (which still means "fewer than 2
+    non-rejected candidates, nothing to do") so callers can tell the two
+    apart and communicate deferral back to the user.
+    """
+    __slots__ = ()
+
+    def __repr__(self):
+        return "DEFERRED_PLAN"
+
+
+DEFERRED_PLAN = _DeferredPlan()
+
+
 def _volume_offline(path):
     """True when ``path`` sits on a mount-shaped volume that is not reachable.
 
@@ -122,8 +138,11 @@ class DuplicatesRepository:
     def resolution_plan(self, photo_ids):
         """Pick a winner among the non-rejected ``photo_ids``.
 
-        Returns ``(winner_id, loser_ids)``, or None when fewer than 2
-        non-rejected candidates remain. Writes nothing.
+        Returns ``(winner_id, loser_ids)``, or ``None`` when fewer than 2
+        non-rejected candidates remain, or the ``DEFERRED_PLAN`` sentinel
+        when at least one candidate lives on an offline volume (state
+        unknown; the resolver can't safely pick a winner until the volume
+        returns). Writes nothing.
         """
         from duplicates import DupCandidate, resolve_duplicates
 
@@ -187,8 +206,12 @@ class DuplicatesRepository:
         # the volume returns and the scan re-runs. Defer instead and let
         # the interactive duplicate scan surface the group; that scan
         # treats offline as "state unknown" for the user to resolve.
+        # ``DEFERRED_PLAN`` is distinct from ``None`` so callers (and the
+        # ``/api/duplicates/apply`` route) can tell "state unknown, keep
+        # the group visible" apart from "fewer than 2 candidates, nothing
+        # to do" and communicate the deferral back to the user.
         if any_offline:
-            return None
+            return DEFERRED_PLAN
         winner_id, losers_with_reasons = resolve_duplicates(candidates)
         loser_ids = [lid for lid, _reason in losers_with_reasons]
         return winner_id, loser_ids

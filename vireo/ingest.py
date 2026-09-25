@@ -996,8 +996,21 @@ def ingest(
                         # case avoids the same duplicate-copy on retry.
                         try:
                             if (dest_file.is_file()
-                                and dest_file.stat().st_size == src_size
-                                and src_size != 0):
+                                and dest_file.stat().st_size == src_size):
+                                if src_size == 0:
+                                    # Zero-byte ↔ zero-byte is the same
+                                    # file (mirrors the slot-0 branch
+                                    # above and ``_sibling_blocks_slot``,
+                                    # which both treat two empty files as
+                                    # identical). Without this branch, a
+                                    # retry of an interrupted paired
+                                    # import that already left both empty
+                                    # siblings at a suffix would keep
+                                    # advancing past the anchor and copy
+                                    # another empty placeholder at every
+                                    # further suffix, splitting the pair.
+                                    matched_existing = True
+                                    break
                                 src_hash = (
                                     checker.content_hash(source_file)
                                     if checker is not None

@@ -824,6 +824,56 @@ def test_sibling_blocks_slot_allows_same_hash_claim_with_checker(tmp_path):
     ) is False
 
 
+def test_ingest_adopts_zero_byte_pair_at_anchored_suffix(tmp_path):
+    """Codex P2 on 6d750fc: an interrupted paired import left both
+    zero-byte siblings at slot ``_1``. On retry, the anchored-suffix
+    adoption must recognise the zero-byte match at the anchor slot the
+    same way the slot-0 branch and ``_sibling_blocks_slot`` do (both
+    treat two empty files as the same file) — otherwise the retry keeps
+    advancing past the anchor and copies another empty placeholder at
+    every further suffix, splitting the pair.
+    """
+    from ingest import ingest
+
+    day = datetime(2026, 3, 28, 10, 0, 0)
+    dst = tmp_path / "nas"
+    day_dir = dst / "2026" / "2026-03-28"
+    day_dir.mkdir(parents=True)
+    # Unrelated body's RAW blocks slot 0 for ``IMG_0001.CR3``.
+    (day_dir / "IMG_0001.CR3").write_bytes(b"body A raw payload")
+    # Prior interrupted retry landed both empty placeholders at ``_1``.
+    (day_dir / "IMG_0001_1.CR3").write_bytes(b"")
+    (day_dir / "IMG_0001_1.JPG").write_bytes(b"")
+
+    # Card's paired files are themselves zero-byte (e.g. a corrupted
+    # card). Give them a real ``.CR3`` / ``.JPG`` extension so ingest
+    # accepts them.
+    card = tmp_path / "card"
+    card.mkdir()
+    raw = card / "IMG_0001.CR3"
+    jpeg = card / "IMG_0001.JPG"
+    raw.write_bytes(b"")
+    jpeg.write_bytes(b"")
+    ts = day.timestamp()
+    for path in (raw, jpeg):
+        os.utime(str(path), (ts, ts))
+
+    db = Database(str(tmp_path / "test.db"))
+    result = ingest(str(tmp_path / "card"), str(dst), db=db)
+
+    # No third copy at ``_2`` — both empty siblings adopted the anchored
+    # ``_1`` slot, matching the retry's intent.
+    assert result["failed"] == 0
+    assert sorted(os.listdir(day_dir)) == [
+        "IMG_0001.CR3", "IMG_0001_1.CR3", "IMG_0001_1.JPG",
+    ]
+    # The prior anchored placeholders are untouched (adoption, not copy).
+    assert (day_dir / "IMG_0001_1.CR3").read_bytes() == b""
+    assert (day_dir / "IMG_0001_1.JPG").read_bytes() == b""
+    # Skipped-duplicate accounting captured the adoption.
+    assert result["skipped_duplicate"] >= 2
+
+
 # -- duplicate scan: offline volumes and hand rejections ----------------------
 
 
@@ -1049,14 +1099,19 @@ def test_resolution_plan_probes_reachability_before_stat(
 
     # Auto-resolution defers while any candidate is offline: the NAS row
     # might have been deleted while the volume was down, and picking it
-    # by path/mtime would reject the only reachable copy.
-    assert plan is None
+    # by path/mtime would reject the only reachable copy. The distinct
+    # ``DEFERRED_PLAN`` sentinel (not None) lets callers tell "state
+    # unknown, keep the group visible" apart from "fewer than 2
+    # candidates, nothing to do".
+    assert plan is duplicates_repo.DEFERRED_PLAN
 
 
 def test_resolution_plan_defers_when_any_candidate_offline(tmp_path, monkeypatch):
     """Verify the deferral end-to-end: ``apply_duplicate_resolution`` writes
-    nothing and returns the no-op shape when a hash group has an offline
-    twin, so the reachable copy is not rejected while the volume is down."""
+    nothing and returns a ``deferred: True`` result when a hash group has
+    an offline twin, so the reachable copy is not rejected while the
+    volume is down and the caller (``/api/duplicates/apply``) can tell
+    deferrals apart from real no-ops."""
     from repositories import duplicates as duplicates_repo
 
     db = Database(str(tmp_path / "t.db"))
@@ -1083,7 +1138,12 @@ def test_resolution_plan_defers_when_any_candidate_offline(tmp_path, monkeypatch
 
     photo_ids = [r["id"] for r in db.conn.execute("SELECT id FROM photos")]
     result = db.apply_duplicate_resolution(photo_ids)
-    assert result == {"winner_id": None, "loser_ids": [], "rejected": 0}
+    assert result == {
+        "winner_id": None,
+        "loser_ids": [],
+        "rejected": 0,
+        "deferred": True,
+    }
 
     # No photo was rejected — the reachable laptop copy is intact.
     flags = [r["flag"] for r in db.conn.execute("SELECT flag FROM photos")]
