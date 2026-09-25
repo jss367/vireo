@@ -411,6 +411,81 @@ def test_sidecar_alias_case_variant_distinct_files(db, tmp_path):
     assert db._pending_keyword_sidecar_alias(pu, ws, "Robin") is False
 
 
+def test_sidecar_alias_missing_sidecars_on_case_insensitive_volume(
+    db, tmp_path, monkeypatch
+):
+    """Missing case-fold-aliased sidecars queue inverse on case-insensitive fs.
+
+    Mirrors ``_sidecar_target_identities`` in ``vireo/sync.py``, which
+    groups missing case-fold aliases as one write target. Simulates a
+    case-insensitive volume (e.g. a normal Windows drive) by folding
+    ``normcase`` to lowercase and making ``samefile`` treat case-different
+    parent directory spellings as the same inode.
+    """
+    upper = tmp_path / "Dir"
+    lower = tmp_path / "dir"
+    upper.mkdir()
+    with contextlib.suppress(FileExistsError):
+        lower.mkdir()
+    ws = db._active_workspace_id
+    fu = db.add_folder(str(upper), name="Dir")
+    fl = db.add_folder(str(lower), name="dir")
+    pu = db.add_photo(fu, "a.jpg", ".jpg", 1, 1.0)
+    pl = db.add_photo(fl, "a.png", ".png", 1, 1.0)
+    _insert(db, pl, "keyword_add", "Robin", ws)
+
+    real_samefile = os.path.samefile
+    upper_str = str(upper)
+    lower_str = str(lower)
+
+    def fake_samefile(a, b):
+        if {a, b} == {upper_str, lower_str}:
+            return True
+        return real_samefile(a, b)
+
+    monkeypatch.setattr("vireo.repositories.sync.os.path.samefile", fake_samefile)
+    monkeypatch.setattr(
+        "vireo.repositories.sync.os.path.normcase", lambda p: p.lower()
+    )
+    # Sidecars do not exist yet, so path-level samefile raises. The parent
+    # directory samefile shim shows the fs folds case: return True so a
+    # cancellation queues its inverse and the sibling's write cannot leave
+    # the cancelled keyword on the shared sidecar.
+    assert db._pending_keyword_sidecar_alias(pu, ws, "Robin") is True
+
+
+def test_sidecar_alias_missing_sidecars_on_case_sensitive_windows(
+    db, tmp_path, monkeypatch
+):
+    """Case-sensitive Windows: missing case-fold sidecars stay distinct.
+
+    Simulates per-directory case-sensitive Windows (opt-in via fsutil):
+    ``normcase`` still folds case but the two directories are kept as
+    distinct inodes on disk. The alias check must not queue a destructive
+    inverse removal against the unrelated sidecar.
+    """
+    upper = tmp_path / "Dir"
+    lower = tmp_path / "dir"
+    upper.mkdir()
+    if lower.exists():
+        pytest.skip("tmp_path is on a case-insensitive filesystem")
+    lower.mkdir()
+    ws = db._active_workspace_id
+    fu = db.add_folder(str(upper), name="Dir")
+    fl = db.add_folder(str(lower), name="dir")
+    pu = db.add_photo(fu, "a.jpg", ".jpg", 1, 1.0)
+    pl = db.add_photo(fl, "a.png", ".png", 1, 1.0)
+    _insert(db, pl, "keyword_add", "Robin", ws)
+    monkeypatch.setattr(
+        "vireo.repositories.sync.os.path.normcase", lambda p: p.lower()
+    )
+    # Real samefile keeps the two directories distinct because the fs is
+    # case-sensitive. Sidecars are missing, path-level samefile raises,
+    # and the parent-samefile fallback returns False -- no destructive
+    # inverse queued.
+    assert db._pending_keyword_sidecar_alias(pu, ws, "Robin") is False
+
+
 # -- remove_pending_changes ------------------------------------------------------------
 
 

@@ -21,11 +21,39 @@ caller owns the transaction, and no method here commits unless the
 ``Database`` method it backs did.
 """
 
-import contextlib
 import os
 import uuid
 
 from keyword_normalization import keyword_match_key, normalize_keyword_display
+
+
+def _parents_case_alias(own_raw, raw):
+    """Whether two missing sidecars will alias once written.
+
+    Called only after the sidecar paths have already been shown to differ
+    but case-fold to the same string, and after ``samefile`` on the paths
+    themselves has raised (both sidecars are missing). The containing
+    directories do exist on disk in production (photos live there), so
+    ``samefile`` on the parents is diagnostic when the parent spellings
+    differ: a case-insensitive filesystem folds "Dir" and "dir" to one
+    inode, and the future sidecars will alias too -- matching what
+    ``_sidecar_target_identities`` in ``vireo/sync.py`` does with missing
+    case-fold groups. A case-sensitive filesystem keeps the parents
+    distinct (or one is missing), so the answer stays False and a
+    cancellation does not queue a destructive inverse against an unrelated
+    file. When the parents are byte-identical strings the parent-samefile
+    cannot distinguish the two cases (it would succeed on any existing
+    directory regardless of case sensitivity); we stay conservative there
+    and return False.
+    """
+    own_parent = os.path.dirname(own_raw) or os.curdir
+    other_parent = os.path.dirname(raw) or os.curdir
+    if own_parent == other_parent:
+        return False
+    try:
+        return os.path.samefile(own_parent, other_parent)
+    except OSError:
+        return False
 
 
 class SyncRepository:
@@ -197,12 +225,22 @@ class SyncRepository:
                         # collapses "Dir" and "dir", but per-directory case
                         # sensitivity can keep them distinct on disk, and a
                         # case-insensitive fs may still alias them. samefile
-                        # is the definitive check. If it raises (missing
-                        # file), leave the answer False so a cancellation
-                        # does not queue a destructive inverse against an
-                        # unrelated sidecar.
-                        with contextlib.suppress(OSError):
+                        # is the definitive check once both files exist. When
+                        # it raises (both sidecars missing), fall back to
+                        # samefile on the containing directories: a case-
+                        # insensitive volume folds "Dir" and "dir" to the same
+                        # inode, so the future sidecars will alias too --
+                        # matching sync.py's _sidecar_target_identities
+                        # grouping of missing case-fold aliases. A truly
+                        # case-sensitive volume keeps the parents distinct
+                        # (or one missing) and the answer stays False, so a
+                        # cancellation does not queue a destructive inverse
+                        # against an unrelated sidecar.
+                        try:
                             needs_inverse = os.path.samefile(own_raw, raw)
+                        except OSError:
+                            if _parents_case_alias(own_raw, raw):
+                                needs_inverse = True
                         if needs_inverse:
                             break
         return needs_inverse
