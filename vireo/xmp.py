@@ -362,6 +362,49 @@ def _parse_xmp(xmp_path):
     return tree.getroot(), tree
 
 
+def _top_descriptions(root):
+    """Return the top-level ``rdf:Description`` elements, in document order.
+
+    A sidecar may split its properties across several Descriptions: ExifTool
+    writes one per namespace, and XMP allows any number. Nested Descriptions
+    (struct values inside a property) are not included -- their attributes
+    belong to that struct, not to the photo.
+    """
+    if root.tag == f"{{{NS_RDF}}}RDF":
+        rdfs = [root]
+    else:
+        rdfs = root.findall(f"{{{NS_RDF}}}RDF")
+    return [
+        desc for rdf in rdfs for desc in rdf.findall(f"{{{NS_RDF}}}Description")
+    ]
+
+
+def _property_occurrences(root, name):
+    """Return ``(desc, element)`` for every place a simple property is stored.
+
+    XMP spells a simple property either as an attribute of a Description
+    (``element`` is None) or as a child element holding the value as text,
+    which is ExifTool's layout. Readers and writers must honour both, or a
+    write lands beside the existing value instead of replacing it.
+    """
+    found = []
+    for desc in _top_descriptions(root):
+        if name in desc.attrib:
+            found.append((desc, None))
+        for child in desc.findall(name):
+            found.append((desc, child))
+    return found
+
+
+def _get_property(root, name):
+    """Return a simple property's value from whichever form stores it."""
+    for desc, child in _property_occurrences(root, name):
+        if child is None:
+            return desc.get(name)
+        return (child.text or "").strip()
+    return None
+
+
 def _format_gps_coordinate(value, positive_ref, negative_ref):
     """Return an XMP GPSCoordinate string such as ``48,51.398N``."""
     ref = positive_ref if value >= 0 else negative_ref
@@ -424,10 +467,7 @@ def read_vireo_location_keywords(xmp_path):
     if result is None:
         return None
     root, _tree = result
-    desc = root.find(f".//{{{NS_RDF}}}Description")
-    if desc is None:
-        return None
-    return desc.get(LOCATION_KEYWORDS_MARKER)
+    return _get_property(root, LOCATION_KEYWORDS_MARKER)
 
 
 def read_vireo_location_keywords_owned(xmp_path):
@@ -442,10 +482,7 @@ def read_vireo_location_keywords_owned(xmp_path):
     if result is None:
         return None
     root, _tree = result
-    desc = root.find(f".//{{{NS_RDF}}}Description")
-    if desc is None:
-        return None
-    return desc.get(LOCATION_KEYWORDS_OWNED)
+    return _get_property(root, LOCATION_KEYWORDS_OWNED)
 
 
 def location_keyword_entries(marker_value):
@@ -505,12 +542,10 @@ def _parse_gps_coordinate(value):
     return decimal
 
 
-def _sync_preview_gps_pair(desc, namespace=NS_EXIF, prefix=""):
+def _sync_preview_gps_pair(root, namespace=NS_EXIF, prefix=""):
     """Read one current or backed-up GPS pair for sync-review display."""
-    lat_attr = f"{{{namespace}}}{prefix}GPSLatitude"
-    lon_attr = f"{{{namespace}}}{prefix}GPSLongitude"
-    raw_latitude = desc.get(lat_attr)
-    raw_longitude = desc.get(lon_attr)
+    raw_latitude = _get_property(root, f"{{{namespace}}}{prefix}GPSLatitude")
+    raw_longitude = _get_property(root, f"{{{namespace}}}{prefix}GPSLongitude")
     if raw_latitude is None and raw_longitude is None:
         return None
     return {
@@ -567,8 +602,7 @@ def read_sync_preview_metadata(xmp_path):
         if li.text:
             hierarchical_keywords.add(li.text)
 
-    desc = root.find(f".//{{{NS_RDF}}}Description")
-    if desc is None:
+    if not _top_descriptions(root):
         return {
             **empty,
             "status": "ok",
@@ -577,21 +611,21 @@ def read_sync_preview_metadata(xmp_path):
         }
 
     pick_to_flag = {"1": "flagged", "0": "none", "-1": "rejected"}
-    raw_pick = desc.get(f"{{{NS_XMPDM}}}pick")
+    raw_pick = _get_property(root, f"{{{NS_XMPDM}}}pick")
     return {
         "status": "ok",
         "keywords": keywords,
         "hierarchical_keywords": hierarchical_keywords,
-        "rating": desc.get(f"{{{NS_XMP}}}Rating"),
+        "rating": _get_property(root, f"{{{NS_XMP}}}Rating"),
         "rating_writable": True,
         "flag": pick_to_flag.get(raw_pick, raw_pick),
-        "location": _sync_preview_gps_pair(desc),
+        "location": _sync_preview_gps_pair(root),
         "previous_location": _sync_preview_gps_pair(
-            desc, namespace=NS_VIREO, prefix="previous",
+            root, namespace=NS_VIREO, prefix="previous",
         ),
-        "location_source": desc.get(f"{{{NS_VIREO}}}gpsSource"),
-        "location_keywords": desc.get(LOCATION_KEYWORDS_MARKER),
-        "edit_recipe": desc.get(f"{{{NS_VIREO}}}editRecipe"),
+        "location_source": _get_property(root, f"{{{NS_VIREO}}}gpsSource"),
+        "location_keywords": _get_property(root, LOCATION_KEYWORDS_MARKER),
+        "edit_recipe": _get_property(root, f"{{{NS_VIREO}}}editRecipe"),
     }
 
 
@@ -664,45 +698,119 @@ class SidecarEditor:
     # ── Tree access ─────────────────────────────────────────────────────
 
     def _description(self):
-        """Return the rdf:Description, creating the scaffolding if needed."""
-        self._load()
-        rdf = self._root.find(f"{{{NS_RDF}}}RDF")
-        if rdf is None:
-            rdf = ET.SubElement(self._root, f"{{{NS_RDF}}}RDF")
-            self._dirty = True
-        desc = rdf.find(f"{{{NS_RDF}}}Description")
-        if desc is None:
-            desc = ET.SubElement(rdf, f"{{{NS_RDF}}}Description")
-            self._dirty = True
+        """Return the first rdf:Description, creating the scaffolding if needed.
+
+        New properties are written here. Existing ones are updated wherever
+        they already live (see :meth:`_set_properties`), because ExifTool
+        spreads them across one Description per namespace.
+        """
+        desc = self._find_description()
+        if desc is not None:
+            return desc
+        if self._root.tag == f"{{{NS_RDF}}}RDF":
+            rdf = self._root
+        else:
+            rdf = self._root.find(f"{{{NS_RDF}}}RDF")
+            if rdf is None:
+                rdf = ET.SubElement(self._root, f"{{{NS_RDF}}}RDF")
+                self._dirty = True
+        desc = ET.SubElement(rdf, f"{{{NS_RDF}}}Description")
+        self._dirty = True
         return desc
 
     def _find_description(self):
-        """Return the first rdf:Description, or None when there is none."""
+        """Return the first top-level rdf:Description, or None when there is none."""
         self._load()
-        return self._root.find(f".//{{{NS_RDF}}}Description")
+        descriptions = _top_descriptions(self._root)
+        return descriptions[0] if descriptions else None
 
     def _bag(self, desc, tag_ns, tag_name):
-        """Find or create an rdf:Bag under a namespaced element."""
+        """Find or create the rdf:Bag of a namespaced array property.
+
+        The property is looked up in every top-level Description, and only
+        created under ``desc`` when none carries it; otherwise a second copy
+        would sit beside the one another tool wrote. Copies left by an
+        earlier write that made that mistake are merged into the first, so
+        every reader sees the same list.
+        """
         tag = f"{{{tag_ns}}}{tag_name}"
-        elem = desc.find(tag)
-        if elem is None:
+        found = [
+            (owner, child)
+            for owner in _top_descriptions(self._root)
+            for child in owner.findall(tag)
+        ]
+        if found:
+            elem = found[0][1]
+        else:
             elem = ET.SubElement(desc, tag)
             self._dirty = True
         bag = elem.find(f"{{{NS_RDF}}}Bag")
         if bag is None:
             bag = ET.SubElement(elem, f"{{{NS_RDF}}}Bag")
             self._dirty = True
+        for owner, extra in found[1:]:
+            existing = _read_bag_values(bag)
+            extra_bag = extra.find(f"{{{NS_RDF}}}Bag")
+            if extra_bag is not None:
+                for li in extra_bag.findall(f"{{{NS_RDF}}}li"):
+                    if li.text and li.text not in existing:
+                        ET.SubElement(bag, f"{{{NS_RDF}}}li").text = li.text
+                        existing.add(li.text)
+            owner.remove(extra)
+            self._dirty = True
         return bag
 
-    def _set_attributes(self, desc, values):
-        """Set attributes, marking the tree dirty only for real changes."""
+    def _get(self, name):
+        """Return a simple property's current value, or None when absent."""
+        self._load()
+        return _get_property(self._root, name)
+
+    def _set_properties(self, desc, values):
+        """Set simple properties, marking the tree dirty only for real changes.
+
+        A property the sidecar already carries is updated in place, as an
+        attribute or as a child element, whichever form it uses; ``desc`` only
+        receives properties that are new. Any further copies of the property
+        are removed so no reader can pick up a stale value.
+        """
         changed = False
-        for attr, value in values.items():
-            if desc.get(attr) != value:
-                desc.set(attr, value)
-                self._dirty = True
+        for name, value in values.items():
+            found = _property_occurrences(self._root, name)
+            if not found:
+                desc.set(name, value)
                 changed = True
+                continue
+            owner, child = found[0]
+            if child is None:
+                if owner.get(name) != value:
+                    owner.set(name, value)
+                    changed = True
+            elif (child.text or "").strip() != value or len(child):
+                for grandchild in list(child):
+                    child.remove(grandchild)
+                child.text = value
+                changed = True
+            for owner, child in found[1:]:
+                if child is None:
+                    del owner.attrib[name]
+                else:
+                    owner.remove(child)
+                changed = True
+        if changed:
+            self._dirty = True
         return changed
+
+    def _delete_property(self, name):
+        """Remove every copy of a simple property; True when one existed."""
+        found = _property_occurrences(self._root, name)
+        for owner, child in found:
+            if child is None:
+                owner.attrib.pop(name, None)
+            else:
+                owner.remove(child)
+        if found:
+            self._dirty = True
+        return bool(found)
 
     # ── Mutations ───────────────────────────────────────────────────────
 
@@ -820,7 +928,7 @@ class SidecarEditor:
         and skip it again, while the queued change was already cleared.
         """
         if create:
-            return self._set_attributes(
+            return self._set_properties(
                 self._description(), {f"{{{NS_XMP}}}Rating": str(rating)},
             )
         if not self._dirty and not self._readable():
@@ -828,7 +936,7 @@ class SidecarEditor:
         desc = self._find_description()
         if desc is None:
             return False
-        return self._set_attributes(desc, {f"{{{NS_XMP}}}Rating": str(rating)})
+        return self._set_properties(desc, {f"{{{NS_XMP}}}Rating": str(rating)})
 
     def set_pick_flag(self, flag):
         """Set the Lightroom-compatible pick state, creating a sidecar if needed."""
@@ -840,7 +948,7 @@ class SidecarEditor:
         if flag not in values:
             raise ValueError("flag must be 'none', 'flagged', or 'rejected'")
         desc = self._description()
-        return self._set_attributes(desc, {f"{{{NS_XMPDM}}}pick": values[flag]})
+        return self._set_properties(desc, {f"{{{NS_XMPDM}}}pick": values[flag]})
 
     def set_gps_location(self, latitude, longitude, source="assigned"):
         """Write Lightroom-compatible GPS coordinates, creating a sidecar if needed."""
@@ -864,14 +972,15 @@ class SidecarEditor:
         # so clearing the Vireo-assigned location can restore it. Rewrites of
         # an existing Vireo GPS keep the original backup.
         changed = False
-        if marker not in desc.attrib:
+        if self._get(marker) is None:
             for name, attr in exif_attrs.items():
-                if attr in desc.attrib:
-                    changed |= self._set_attributes(
-                        desc, {f"{{{NS_VIREO}}}previous{name}": desc.attrib[attr]},
+                existing = self._get(attr)
+                if existing is not None:
+                    changed |= self._set_properties(
+                        desc, {f"{{{NS_VIREO}}}previous{name}": existing},
                     )
 
-        changed |= self._set_attributes(desc, {
+        changed |= self._set_properties(desc, {
             exif_attrs["GPSLatitude"]: _format_gps_coordinate(lat, "N", "S"),
             exif_attrs["GPSLongitude"]: _format_gps_coordinate(lon, "E", "W"),
             exif_attrs["GPSMapDatum"]: "WGS-84",
@@ -889,27 +998,22 @@ class SidecarEditor:
             return False
 
         marker = f"{{{NS_VIREO}}}gpsSource"
-        if marker not in desc.attrib:
+        if self._get(marker) is None:
             return False
 
         removed = False
         for name in ("GPSLatitude", "GPSLongitude", "GPSMapDatum", "GPSVersionID"):
             gps_attr = f"{{{NS_EXIF}}}{name}"
             previous_attr = f"{{{NS_VIREO}}}previous{name}"
-            if previous_attr in desc.attrib:
-                desc.set(gps_attr, desc.attrib[previous_attr])
-                del desc.attrib[previous_attr]
+            previous = self._get(previous_attr)
+            if previous is not None:
+                self._set_properties(desc, {gps_attr: previous})
+                self._delete_property(previous_attr)
                 removed = True
-            elif gps_attr in desc.attrib:
-                del desc.attrib[gps_attr]
+            elif self._delete_property(gps_attr):
                 removed = True
 
-        if marker in desc.attrib:
-            del desc.attrib[marker]
-            removed = True
-
-        if removed:
-            self._dirty = True
+        removed |= self._delete_property(marker)
         return removed
 
     def set_location_keywords(self, path_parts):
@@ -962,8 +1066,8 @@ class SidecarEditor:
         path = "|".join(parts)
         was_dirty = self._dirty
         desc = self._description()
-        previous = desc.get(LOCATION_KEYWORDS_MARKER)
-        previous_owned = desc.get(LOCATION_KEYWORDS_OWNED)
+        previous = self._get(LOCATION_KEYWORDS_MARKER)
+        previous_owned = self._get(LOCATION_KEYWORDS_OWNED)
         if previous and previous != path:
             self._remove_location_keyword_entries(previous, previous_owned)
 
@@ -1036,7 +1140,7 @@ class SidecarEditor:
             owns_flat = added_flat
             owns_hier = added_hier
 
-        self._set_attributes(
+        self._set_properties(
             desc,
             {
                 LOCATION_KEYWORDS_MARKER: path,
@@ -1054,17 +1158,16 @@ class SidecarEditor:
         desc = self._find_description()
         if desc is None:
             return False
-        previous = desc.get(LOCATION_KEYWORDS_MARKER)
+        previous = self._get(LOCATION_KEYWORDS_MARKER)
         if not previous:
             return False
         self._remove_location_keyword_entries(
-            previous, desc.get(LOCATION_KEYWORDS_OWNED),
+            previous, self._get(LOCATION_KEYWORDS_OWNED),
         )
         # Clearing the marker is itself a change worth publishing: it is what
         # keeps a later re-enable from treating stale entries as ours.
-        del desc.attrib[LOCATION_KEYWORDS_MARKER]
-        if LOCATION_KEYWORDS_OWNED in desc.attrib:
-            del desc.attrib[LOCATION_KEYWORDS_OWNED]
+        self._delete_property(LOCATION_KEYWORDS_MARKER)
+        self._delete_property(LOCATION_KEYWORDS_OWNED)
         self._dirty = True
         return True
 
@@ -1088,10 +1191,10 @@ class SidecarEditor:
         desc = self._find_description()
         if desc is None:
             return False
-        previous = desc.get(LOCATION_KEYWORDS_MARKER)
+        previous = self._get(LOCATION_KEYWORDS_MARKER)
         if not previous:
             return False
-        owned = desc.get(LOCATION_KEYWORDS_OWNED)
+        owned = self._get(LOCATION_KEYWORDS_OWNED)
         owns_flat, owns_hier = _parse_location_keywords_owned(owned)
         if not owns_flat:
             return False
@@ -1101,10 +1204,10 @@ class SidecarEditor:
             return False
         for kw in keywords:
             if keyword_match_key(kw) == leaf_key:
-                desc.set(
-                    LOCATION_KEYWORDS_OWNED,
-                    _format_location_keywords_owned(False, owns_hier),
-                )
+                self._set_properties(desc, {
+                    LOCATION_KEYWORDS_OWNED:
+                        _format_location_keywords_owned(False, owns_hier),
+                })
                 self._dirty = True
                 return True
         return False
@@ -1195,7 +1298,7 @@ class SidecarEditor:
 
         if recipe_json:
             desc = self._description()
-            return self._set_attributes(
+            return self._set_properties(
                 desc, {recipe_attr: recipe_json, version_attr: "1"},
             )
 
@@ -1206,11 +1309,7 @@ class SidecarEditor:
             return False
         removed = False
         for attr in (recipe_attr, version_attr):
-            if attr in desc.attrib:
-                del desc.attrib[attr]
-                removed = True
-        if removed:
-            self._dirty = True
+            removed |= self._delete_property(attr)
         return removed
 
     # ── Publication ─────────────────────────────────────────────────────
