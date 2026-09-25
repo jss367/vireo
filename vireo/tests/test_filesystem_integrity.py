@@ -316,6 +316,63 @@ def test_promote_by_placeholder_closes_claim_fd_before_rollback(
     assert _no_partials(dst.parent) == []
 
 
+def test_copy_via_temp_no_hardlink_fallback_preserves_copy2_metadata(
+    tmp_path, monkeypatch,
+):
+    """The fallback claims a fresh inode at ``dst`` rather than promoting
+    ``tmp``'s inode via ``os.link``, so extended metadata that
+    ``shutil.copy2`` placed on ``tmp`` (xattrs on Linux, ``st_flags`` on
+    macOS/BSD, ACL-related xattrs, resource-fork xattrs, Finder tags)
+    is not carried across for free. Without an explicit transfer,
+    ``move_photos`` would then delete the source after silently losing
+    that metadata. ``_apply_metadata`` must run ``shutil.copystat`` from
+    ``tmp`` to ``dst`` after the fd-based times/mode ops so all of
+    ``copy2``'s metadata reaches ``dst``.
+    """
+    import errno
+
+    src = _jpeg(tmp_path / "a.jpg", "red")
+    dst = tmp_path / "out" / "a.jpg"
+    dst.parent.mkdir()
+
+    def no_hardlinks(*_a, **_kw):
+        raise OSError(errno.EOPNOTSUPP, "hard links not supported")
+
+    monkeypatch.setattr(staged_copy.os, "link", no_hardlinks)
+
+    calls = []
+    real_copystat = staged_copy.shutil.copystat
+
+    def tracking_copystat(src_arg, dst_arg, *, follow_symlinks=True):
+        calls.append((str(src_arg), str(dst_arg), follow_symlinks))
+        return real_copystat(src_arg, dst_arg, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(staged_copy.shutil, "copystat", tracking_copystat)
+
+    staged_copy.copy_via_temp(str(src), str(dst))
+
+    assert dst.read_bytes() == src.read_bytes()
+    assert _no_partials(dst.parent) == []
+    # ``shutil.copy2(src, tmp)`` internally runs ``copystat(src, tmp)``,
+    # so the tracker sees that call first. What matters here is the
+    # follow-up ``copystat(tmp, dst)`` inside the placeholder promote —
+    # that transfer is what carries xattrs/flags/ACLs to ``dst`` when
+    # ``os.link`` cannot promote ``tmp``'s inode.
+    tmp_to_dst = [
+        call for call in calls
+        if call[1] == str(dst)
+    ]
+    assert len(tmp_to_dst) == 1, calls
+    src_arg, dst_arg, follow = tmp_to_dst[0]
+    assert dst_arg == str(dst)
+    assert follow is True
+    # The tmp is a hidden sibling in dst's directory; it is unlinked
+    # after the promote returns, but during the copystat call it lives
+    # alongside dst.
+    assert os.path.dirname(src_arg) == str(dst.parent)
+    assert os.path.basename(src_arg).endswith(".partial")
+
+
 # -- ingest: a failed copy leaves nothing behind ------------------------------
 
 

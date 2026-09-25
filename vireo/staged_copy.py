@@ -131,6 +131,7 @@ def _promote_by_placeholder(tmp, dst):
                 claim_fd, dst, claim_ino,
                 (src_stat.st_atime_ns, src_stat.st_mtime_ns),
                 src_stat.st_mode,
+                tmp,
             )
         except BaseException:
             # Release the O_EXCL claim BEFORE running the rollback. On
@@ -221,14 +222,27 @@ def _rollback_placeholder(dst, claim_ino):
         os.unlink(scratch)
 
 
-def _apply_metadata(fd, dst, claim_ino, times_ns, mode):
-    """Copy atime/mtime/mode from the temp onto the claimed destination.
+def _apply_metadata(fd, dst, claim_ino, times_ns, mode, tmp):
+    """Copy metadata from the temp onto the claimed destination.
 
-    Uses fd-based ops where the platform supports them (Unix). On
-    platforms where they aren't available (Windows), falls back to
-    path-based ops guarded by an inode re-check both before and after
-    so a concurrent unlink+recreate cannot leak our metadata onto
-    another writer's file.
+    Uses fd-based ops where the platform supports them (Unix) for
+    times and mode. On platforms where they aren't available
+    (Windows), falls back to path-based ops guarded by an inode
+    re-check both before and after so a concurrent unlink+recreate
+    cannot leak our metadata onto another writer's file.
+
+    ``shutil.copy2(src, tmp)`` upstream also transferred extended
+    metadata (xattrs on Linux, ``st_flags`` on macOS/BSD, ACLs where
+    the stdlib helper handles them) onto ``tmp``. On the hard-link
+    path ``os.link`` promotes ``tmp``'s inode to ``dst`` so those
+    carry across for free, but the placeholder fallback claimed a
+    fresh inode at ``dst`` and none of that metadata reached it —
+    ``move_photos`` would then delete the source after silently
+    losing Finder tags, resource-fork xattrs, ACL-related xattrs or
+    platform flags. Copy them from ``tmp`` to ``dst`` with
+    ``shutil.copystat`` (path-based, guarded by the same inode
+    re-check). It also re-applies times/mode, which is a harmless
+    no-op on top of the fd-based ops above.
     """
     if _UTIME_SUPPORTS_FD:
         os.utime(fd, ns=times_ns)
@@ -238,6 +252,10 @@ def _apply_metadata(fd, dst, claim_ino, times_ns, mode):
         os.fchmod(fd, mode)
     else:
         _guarded_path_op(dst, claim_ino, lambda: os.chmod(dst, mode))
+    _guarded_path_op(
+        dst, claim_ino,
+        lambda: shutil.copystat(tmp, dst, follow_symlinks=True),
+    )
 
 
 def _guarded_path_op(dst, claim_ino, op):
