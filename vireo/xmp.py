@@ -708,6 +708,26 @@ def _has_non_structural_attribute(elem):
     )
 
 
+def _li_carries_qualifier(li, parent_map):
+    """True if an ``rdf:li`` carries qualifier metadata a bare-text drop would lose.
+
+    An item is qualified either by its own structure or attributes
+    (see :func:`_simple_prop_carries_qualifier`) OR by an effective
+    ``xml:lang`` inherited from any container -- the ``rdf:Bag``, the
+    property, the owner Description, or higher -- so long as the
+    inheritance is not cancelled by a nearer ``xml:lang=""`` reset.
+    A ``<dc:subject xml:lang="fr">`` around a plain ``<rdf:li>paris
+    </rdf:li>`` makes the item a language-tagged statement in its own
+    right: removing the item and re-adding a fresh unqualified ``rdf:li``
+    silently drops the language. Callers that need "truly plain" items
+    (a Vireo authored one, safe to swap or remove) negate this check.
+    """
+    return (
+        _simple_prop_carries_qualifier(li)
+        or _ancestor_carries_xml_qualifier(li, parent_map)
+    )
+
+
 def _has_own_value_qualifier(elem):
     """True if ``elem`` carries a non-structural attribute that changes value semantics.
 
@@ -1989,10 +2009,16 @@ class SidecarEditor:
         # qualified ``<rdf:li rdf:parseType='Resource'><rdf:value>paris
         # </rdf:value><foo:source>user</foo:source></rdf:li>`` wholesale
         # (as ``remove_keywords`` does below) would silently drop
-        # ``foo:source``. Update its nested value to the canonical
-        # spelling instead; the subsequent ``add_keywords`` will see
-        # it as already present and skip inserting a plain duplicate.
+        # ``foo:source``. An item under a container-qualified bag
+        # (say ``<dc:subject xml:lang="fr"><rdf:Bag><rdf:li>paris
+        # </rdf:li></rdf:Bag></dc:subject>``) is language-tagged too,
+        # even though the ``rdf:li`` itself is bare-text: dropping and
+        # re-adding it would silently lose the ``fr`` tag. Update its
+        # nested value to the canonical spelling instead; the
+        # subsequent ``add_keywords`` will see it as already present
+        # and skip inserting a plain duplicate.
         if leaf_key:
+            parent_map = _build_parent_map(self._root)
             for bag in _photo_scoped_bags(
                 self._root, f"{{{NS_DC}}}subject",
             ):
@@ -2002,7 +2028,7 @@ class SidecarEditor:
                         li_value
                         and li_value != parts[-1]
                         and keyword_match_key(li_value) == leaf_key
-                        and _simple_prop_carries_qualifier(li)
+                        and _li_carries_qualifier(li, parent_map)
                         and _update_simple_property_value(li, parts[-1])
                     ):
                         self._dirty = True
@@ -2173,6 +2199,7 @@ class SidecarEditor:
         leaf_key = keyword_match_key(leaf)
         path_keys = [keyword_match_key(part) for part in path.split("|")]
         removed = []
+        parent_map = _build_parent_map(self._root)
 
         # Collect PLAIN exact matches across every photo-scoped bag
         # first. If Vireo's own canonical entry lives in one bag and a
@@ -2181,16 +2208,20 @@ class SidecarEditor:
         # there) and the canonical from the second. Fall back to a
         # normalized match only when no plain exact match survives
         # anywhere. Vireo's own writes create plain-text
-        # ``<rdf:li>Value</rdf:li>`` entries, never qualified ones. A
-        # qualified exact match is therefore a user- or tool-added
-        # duplicate carrying its own metadata (a ``foo:source``, an
-        # ``xml:lang``, etc.), and removing it would silently discard
-        # that data. Prefer plain exact occurrences; preserve
-        # qualified duplicates; a qualified exact-match duplicate must
-        # NOT suppress the normalized fallback that removes Vireo's
-        # owned spelling variant (say Vireo has plain ``paris`` and a
-        # user added qualified ``Paris``): otherwise the ownership
-        # marker clears while Vireo's ``paris`` stays behind forever.
+        # ``<rdf:li>Value</rdf:li>`` entries, never qualified ones,
+        # and never under a container-qualified bag. A qualified exact
+        # match -- item-level (``foo:source``, an own ``xml:lang``,
+        # ``rdf:parseType``) OR container-level (an ``xml:lang="fr"``
+        # on the ``dc:subject`` or ``rdf:Bag`` that reaches this item
+        # by inheritance) -- is therefore a user- or tool-added
+        # duplicate carrying its own metadata, and removing it would
+        # silently discard that data. Prefer plain exact occurrences;
+        # preserve qualified duplicates; a qualified exact-match
+        # duplicate must NOT suppress the normalized fallback that
+        # removes Vireo's owned spelling variant (say Vireo has plain
+        # ``paris`` and a user added qualified ``Paris``): otherwise
+        # the ownership marker clears while Vireo's ``paris`` stays
+        # behind forever.
         if owns_flat and leaf_key:
             flat_bags = list(_photo_scoped_bags(
                 self._root, f"{{{NS_DC}}}subject",
@@ -2200,7 +2231,7 @@ class SidecarEditor:
                 for bag in flat_bags
                 for li in bag.findall(f"{{{NS_RDF}}}li")
                 if _li_value(li) == leaf
-                and not _simple_prop_carries_qualifier(li)
+                and not _li_carries_qualifier(li, parent_map)
             ]
             if plain_exact_targets:
                 # Vireo authored one entry, not many. Remove a single
@@ -2224,7 +2255,7 @@ class SidecarEditor:
                             (bag, li) for li in bag.findall(f"{{{NS_RDF}}}li")
                             if _li_value(li)
                             and keyword_match_key(_li_value(li)) == leaf_key
-                            and not _simple_prop_carries_qualifier(li)
+                            and not _li_carries_qualifier(li, parent_map)
                         ),
                         None,
                     )
@@ -2244,7 +2275,7 @@ class SidecarEditor:
                 for bag in hier_bags
                 for li in bag.findall(f"{{{NS_RDF}}}li")
                 if _li_value(li) == path
-                and not _simple_prop_carries_qualifier(li)
+                and not _li_carries_qualifier(li, parent_map)
             ]
             if plain_exact_targets:
                 # See the flat branch above: only remove one plain
@@ -2267,7 +2298,7 @@ class SidecarEditor:
                                 for s in _li_value(li).split("|")
                             ]
                             == path_keys
-                            and not _simple_prop_carries_qualifier(li)
+                            and not _li_carries_qualifier(li, parent_map)
                         ),
                         None,
                     )

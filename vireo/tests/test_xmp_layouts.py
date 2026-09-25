@@ -3036,6 +3036,114 @@ def test_remove_location_preserves_qualified_exact_duplicate(tmp_path):
     assert remaining[0].findtext(f"{{{foo_ns}}}source") == "user"
 
 
+def test_set_location_keywords_canonicalizes_container_qualified_leaf_in_place(tmp_path):
+    """A container-``xml:lang'' leaf is canonicalized in place, not dropped.
+
+    A user's flat variant may sit as bare-text ``<rdf:li>paris</rdf:li>``
+    under a ``<dc:subject xml:lang="fr">``: the language qualifier is
+    inherited from the container, not carried on the ``rdf:li``. Before
+    this fix, ``set_location_keywords`` treated the item as plain (no
+    own qualifiers), so the canonicalization step let the following
+    ``remove_keywords`` drop the language-qualified statement entirely
+    and re-add an unqualified ``Paris`` on a fresh unqualified bag.
+    The check now walks the ancestor chain for effective ``xml:lang``
+    on each ``rdf:li`` and canonicalizes qualified spellings in place,
+    preserving the container's ``fr`` on the surviving ``rdf:li``.
+    """
+    xml_ns = "http://www.w3.org/XML/1998/namespace"
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'"
+        f" xmlns:xml='http://www.w3.org/XML/1998/namespace'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about='' xmlns:dc='{NS_DC}'>"
+        f"<dc:subject xml:lang='fr'><rdf:Bag>"
+        f"<rdf:li>paris</rdf:li>"
+        f"</rdf:Bag></dc:subject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    editor = SidecarEditor(path_str)
+    editor.set_location_keywords(["Places", "Paris"])
+    editor.commit()
+
+    root = ET.parse(path_str).getroot()
+    subjects = list(root.iter(SUBJECT))
+    # The qualified ``<dc:subject xml:lang="fr">`` survives, its
+    # ``paris`` was renamed to the canonical ``Paris`` in place, and
+    # no unqualified duplicate landed beside it.
+    fr_subjects = [s for s in subjects if s.get(f"{{{xml_ns}}}lang") == "fr"]
+    assert len(fr_subjects) == 1
+    fr_items = [
+        li.text
+        for li in fr_subjects[0].iter(f"{{{NS_RDF}}}li")
+        if li.text
+    ]
+    assert fr_items == ["Paris"]
+
+
+def test_remove_location_preserves_container_qualified_exact_duplicate(tmp_path):
+    """A container-``xml:lang'' duplicate isn't picked as Vireo's plain removal target.
+
+    When Vireo's owned plain ``<rdf:li>Paris</rdf:li>`` coexists in a
+    plain bag with a user-authored ``<rdf:li>Paris</rdf:li>`` under a
+    sibling ``<dc:subject xml:lang="fr">``, both matched the previous
+    "plain exact" filter because it only inspected the ``rdf:li`` itself.
+    ``plain_exact_targets[0]`` could then take the user's language-qualified
+    occurrence, leave Vireo's plain copy behind, and still clear the
+    ownership marker. The removal filter now walks the item's effective
+    inherited ``xml:lang`` and skips any item under a language-qualified
+    container.
+    """
+    xml_ns = "http://www.w3.org/XML/1998/namespace"
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'"
+        f" xmlns:xml='http://www.w3.org/XML/1998/namespace'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about=''"
+        f" xmlns:dc='{NS_DC}' xmlns:lr='{NS_LR}' xmlns:vireo='{NS_VIREO}'"
+        f" vireo:locationKeywords='Places|Paris'"
+        f" vireo:locationKeywordsOwned='flat,hier'>"
+        f"<dc:subject xml:lang='fr'><rdf:Bag>"
+        f"<rdf:li>Paris</rdf:li>"
+        f"</rdf:Bag></dc:subject>"
+        f"<dc:subject><rdf:Bag>"
+        f"<rdf:li>Paris</rdf:li>"
+        f"</rdf:Bag></dc:subject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    editor = SidecarEditor(path_str)
+    editor.remove_vireo_location_keywords()
+    editor.commit()
+
+    root = ET.parse(path_str).getroot()
+    # The user's ``fr`` bag still holds ``Paris``. Vireo's own plain
+    # ``dc:subject`` bag no longer holds ``Paris`` -- it's the one
+    # entry removal was allowed to touch.
+    fr_items = [
+        li.text
+        for subj in root.iter(SUBJECT)
+        for li in subj.iter(f"{{{NS_RDF}}}li")
+        for a in [subj.get(f"{{{xml_ns}}}lang")]
+        if a == "fr" and li.text
+    ]
+    plain_items = [
+        li.text
+        for subj in root.iter(SUBJECT)
+        for li in subj.iter(f"{{{NS_RDF}}}li")
+        for a in [subj.get(f"{{{xml_ns}}}lang")]
+        if a is None and li.text
+    ]
+    assert fr_items == ["Paris"]
+    assert plain_items == []
+
+
 def test_remove_location_falls_back_past_qualified_exact_duplicate(tmp_path):
     """A qualified exact duplicate must not block the normalized-owned fallback.
 
