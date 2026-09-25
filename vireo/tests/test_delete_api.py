@@ -1470,6 +1470,33 @@ def test_api_batch_delete_rejects_non_integer_ids(app_and_db):
     assert resp.status_code == 400
 
 
+def test_api_batch_delete_rejects_fractional_ids(app_and_db):
+    """A fractional id like ``1.9`` must not be silently truncated to 1
+    and then delete photo 1's row and original. The fixture's bird1 has
+    id 1, so a bare ``int(1.9)`` would take it out."""
+    app, db = app_and_db
+    client = app.test_client()
+
+    existing_ids = [p["id"] for p in db.get_photos()]
+    assert 1 in existing_ids
+
+    for mode in ("vireo", "disk", "disk_permanent"):
+        resp = client.post("/api/batch/delete", json={
+            "photo_ids": [1.9], "mode": mode,
+        })
+        assert resp.status_code == 400
+        assert db.get_photo(1) is not None
+
+    resp = client.post("/api/jobs/batch-delete", json={
+        "photo_ids": [1.9], "mode": "disk_permanent",
+    })
+    assert resp.status_code == 200
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "failed"
+    assert any("integer" in err.lower() for err in (job.get("errors") or []))
+    assert db.get_photo(1) is not None
+
+
 def test_batch_delete_with_null_photo_ids_reports_route_result(app_and_db):
     """The request-logging hook runs after the view; a null ``photo_ids``
     must not turn the view's response into a bare 500."""

@@ -109,12 +109,14 @@ class PhotoDeletion:
             raise ValueError("mode must be 'vireo', 'disk', or 'disk_permanent'")
         requested_ids = []
         for raw_id in photo_ids:
-            if isinstance(raw_id, bool):
+            # ``int(raw_id)`` would silently truncate a float like ``1.9``
+            # to ``1``: the workspace filter would then accept photo 1 and
+            # the mode could delete it and its original even though the
+            # caller never asked for it. Require an actual int (matching
+            # ``parse_selection_photo_ids``).
+            if isinstance(raw_id, bool) or not isinstance(raw_id, int):
                 raise ValueError("photo_ids must be integers")
-            try:
-                requested_ids.append(int(raw_id))
-            except (TypeError, ValueError):
-                raise ValueError("photo_ids must be integers") from None
+            requested_ids.append(raw_id)
         photo_ids = db.filter_photo_ids_in_workspace(requested_ids)
         if not photo_ids:
             emit("Finishing", 1, 1)
