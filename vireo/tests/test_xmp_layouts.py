@@ -2386,6 +2386,53 @@ def test_bag_xml_lang_reset_cancels_property_language_for_reuse(tmp_path):
     assert items == ["Heron", "Owl"]
 
 
+def test_remove_vireo_gps_preserves_externally_added_qualified_copy(tmp_path):
+    """A tool-added qualified GPS occurrence survives ``remove_vireo_gps_location''.
+
+    When Vireo originally created the GPS field there's no backup;
+    ``remove_vireo_gps_location'' used ``_delete_property'', which
+    swept every occurrence -- including a qualified copy another
+    tool added afterwards. That silently discarded user-authored
+    metadata (a ``foo:source''-tagged coordinate, say) even though
+    Vireo had never owned it. The removal now only touches plain
+    (unqualified) copies; a qualified duplicate keeps its metadata
+    AND its original value.
+    """
+    foo_ns = "http://example.com/foo/"
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about=''"
+        f" xmlns:exif='{NS_EXIF}' xmlns:vireo='{NS_VIREO}'"
+        f" xmlns:foo='{foo_ns}'"
+        f" vireo:gpsSource='assigned'>"
+        f"<exif:GPSLatitude>33,30.000000S</exif:GPSLatitude>"
+        f"<exif:GPSLongitude>70,15.000000W</exif:GPSLongitude>"
+        f"<exif:GPSLatitude foo:source='user'>40,0.0N</exif:GPSLatitude>"
+        f"<exif:GPSLongitude foo:source='user'>50,0.0E</exif:GPSLongitude>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    editor = SidecarEditor(path_str)
+    editor.remove_vireo_gps_location()
+    editor.commit()
+
+    root = ET.parse(path_str).getroot()
+    remaining_lat = list(root.iter(GPS_LATITUDE))
+    remaining_lon = list(root.iter(GPS_LONGITUDE))
+    # The plain Vireo-assigned pair is gone; the user's qualified
+    # pair survives with its ``foo:source'' AND its original value.
+    assert len(remaining_lat) == 1
+    assert (remaining_lat[0].text or "").strip() == "40,0.0N"
+    assert remaining_lat[0].get(f"{{{foo_ns}}}source") == "user"
+    assert len(remaining_lon) == 1
+    assert (remaining_lon[0].text or "").strip() == "50,0.0E"
+    assert remaining_lon[0].get(f"{{{foo_ns}}}source") == "user"
+
+
 def test_qualified_gps_duplicates_keep_their_original_values(tmp_path):
     """Distinct-valued qualified GPS occurrences aren't collapsed on write.
 
@@ -2798,6 +2845,43 @@ def test_set_location_keywords_does_not_duplicate_a_qualified_flat_leaf(tmp_path
         for li in subj.iter(f"{{{NS_RDF}}}li") if li.text
     )
     assert q_flat == ["Kumeyaay Lake"]
+
+
+def test_child_xml_lang_reset_lets_effectively_unqualified_duplicate_be_removed(tmp_path):
+    """A duplicate whose ``xml:lang="" '' cancels the owner's language is removed.
+
+    ``_set_properties'' used to walk the effective language from the
+    OWNER Description, so a duplicate child whose own
+    ``xml:lang=""'' cancelled the owner's ``xml:lang="en"'' looked
+    like a language-qualified statement (owner effective was
+    non-empty), and its stale value stayed in the sidecar. Walking
+    from the child correctly surfaces the reset's "no known
+    language" effective, so the effectively-unqualified duplicate
+    can be removed instead of leaving a stale reading in place.
+    """
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'"
+        f" xmlns:xml='http://www.w3.org/XML/1998/namespace'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about='' xml:lang='en'"
+        f" xmlns:xmp='{NS_XMP}'>"
+        f"<xmp:Rating>3</xmp:Rating>"
+        f"<xmp:Rating xml:lang=''>2</xmp:Rating>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    write_rating(path_str, 5)
+
+    root = ET.parse(path_str).getroot()
+    ratings = list(root.iter(RATING))
+    values = [(r.text or "").strip() for r in ratings]
+    # Only the keeper survives after write, holding the new value;
+    # the reset duplicate (effective "no known language") is removed
+    # rather than left in place with stale ``2''.
+    assert values == ["5"]
 
 
 def test_preserved_qualified_duplicate_keeps_its_original_value(tmp_path):

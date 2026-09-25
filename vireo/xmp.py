@@ -1729,26 +1729,32 @@ class SidecarEditor:
                         changed = True
                 elif (
                     _simple_prop_carries_qualifier(child)
-                    or _ancestor_carries_xml_qualifier(owner, parent_map)
+                    or _ancestor_carries_xml_qualifier(child, parent_map)
                 ):
                     # Removing this duplicate would silently drop its
                     # qualifier attributes or elements (a distinct
                     # ``rdf:ID``, a ``foo:source`` attribute-form
                     # qualifier, a sibling qualifier element alongside
-                    # ``rdf:value``, etc.) OR its owner's inherited
+                    # ``rdf:value``, etc.) OR its effective inherited
                     # ``xml:lang'' -- the child text inside a
-                    # language-qualified owner Description is a
-                    # language-tagged statement in its own right, so
-                    # dropping it would silently lose the tag. Leave
-                    # it entirely alone (both the element and its
-                    # original value): Vireo can't back up this
-                    # occurrence's value independently, so overwriting
-                    # would leave a later restore with only the
-                    # keeper's value to write back and permanently
-                    # replace this one. External readers may resolve
-                    # the conflicting copies differently from Vireo,
-                    # but that's an acceptable trade for data
-                    # preservation.
+                    # language-qualified context is a language-tagged
+                    # statement in its own right, so dropping it
+                    # would silently lose the tag. Walk from the
+                    # CHILD, not the owner, so a nearer
+                    # ``xml:lang=""'' reset on the child correctly
+                    # cancels the owner's language and leaves the
+                    # effectively-unqualified duplicate open to
+                    # removal (its value would otherwise persist as
+                    # stale on a keeper-only rewrite). Leave every
+                    # genuinely-qualified duplicate entirely alone
+                    # (both the element and its original value):
+                    # Vireo can't back up this occurrence's value
+                    # independently, so overwriting would leave a
+                    # later restore with only the keeper's value to
+                    # write back and permanently replace this one.
+                    # External readers may resolve the conflicting
+                    # copies differently from Vireo, but that's an
+                    # acceptable trade for data preservation.
                     continue
                 else:
                     owner.remove(child)
@@ -1768,6 +1774,41 @@ class SidecarEditor:
         if found:
             self._dirty = True
         return bool(found)
+
+    def _delete_plain_property_copies(self, name):
+        """Remove only plain (unqualified) copies of a simple property.
+
+        Callers that own the plain occurrence (Vireo's own writes) but
+        cannot vouch for qualified duplicates -- another tool may have
+        added a language-tagged or ``foo:source''-annotated occurrence
+        after the initial write -- use this instead of
+        :meth:`_delete_property`. Retained qualified duplicates keep
+        their metadata AND their original values, matching the
+        preservation invariant that ``_set_properties`` applies. True
+        when at least one plain copy existed.
+        """
+        found = _property_occurrences(self._root, name)
+        if not found:
+            return False
+        parent_map = _build_parent_map(self._root)
+        removed = False
+        for owner, child in found:
+            if child is None:
+                if _ancestor_carries_xml_qualifier(owner, parent_map):
+                    continue
+                if name in owner.attrib:
+                    owner.attrib.pop(name, None)
+                    removed = True
+            elif _simple_prop_carries_qualifier(child) or (
+                _ancestor_carries_xml_qualifier(child, parent_map)
+            ):
+                continue
+            else:
+                owner.remove(child)
+                removed = True
+        if removed:
+            self._dirty = True
+        return removed
 
     # ── Mutations ───────────────────────────────────────────────────────
 
@@ -2036,7 +2077,13 @@ class SidecarEditor:
                 self._set_properties(desc, {gps_attr: previous})
                 self._delete_property(previous_attr)
                 removed = True
-            elif self._delete_property(gps_attr):
+            elif self._delete_plain_property_copies(gps_attr):
+                # Vireo originally created this field, so only its
+                # plain occurrence is ours to remove. A qualified
+                # duplicate another tool added after the initial write
+                # carries data we can't restore per-occurrence -- and
+                # there's no backup to restore anyway -- so leave it
+                # in place with its metadata AND original value intact.
                 removed = True
 
         removed |= self._delete_property(marker)
