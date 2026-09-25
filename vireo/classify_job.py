@@ -1325,7 +1325,7 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
 
             processed_ids.add(photo["id"])
 
-    except ResourceWaitCancelled:
+    except ResourceWaitCancelled as exc:
         # Cooperative cancellation during a MegaDetector inference-lease
         # wait — the reclassify Stop path. Must propagate: the caller
         # already called ``clear_detections(photo["id"])`` for this
@@ -1337,6 +1337,9 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
         # ``ResourceWaitCancelled`` subclasses ``RuntimeError``, so
         # this narrow arm MUST precede the broad one.
         sync_reclassified_subjects()
+        _attach_partial_detect_result(
+            exc, detection_map, detected, processed_ids,
+        )
         raise
     except (ImportError, RuntimeError) as e:
         # Detection unavailable (missing weights/backend) — non-fatal, the
@@ -1359,13 +1362,48 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
     # subject analyses after cancel would silently publish work past the
     # stop button, so probe before each photo and inside ``analyze_photo``'s
     # lock-guarded commit points via the checkpoint callback.
-    from subjects import analyze_photo
-
     def _subject_analysis_checkpoint():
         if runner is not None and runner.is_cancelled(job["id"]):
             raise ResourceWaitCancelled(
                 "Cancelled during subject analysis"
             )
+
+    try:
+        _analyze_subjects(
+            photos, folders, db, reclassify, det_conf_threshold,
+            cached_detections, processed_ids, vireo_dir,
+            _subject_analysis_checkpoint,
+        )
+    except ResourceWaitCancelled as exc:
+        # Detection rows for these photos are already committed, so the
+        # caller must still see them as processed: a reclassify Stop
+        # rebuilds predictions for exactly the photos whose boxes were
+        # replaced, and the in-flight photo is one of them.
+        _attach_partial_detect_result(
+            exc, detection_map, detected, processed_ids,
+        )
+        raise
+
+    return detection_map, detected, processed_ids
+
+
+def _attach_partial_detect_result(exc, detection_map, detected, processed_ids):
+    """Record ``_detect_batch``'s committed work on a propagating cancel.
+
+    A ``ResourceWaitCancelled`` unwinds past the ``return``, so without this
+    the caller loses the photos whose detections were already rewritten.
+    Callers read it back as ``exc.partial_detect_result``, the same
+    ``(detection_map, detected_count, processed_ids)`` triple a normal
+    return yields.
+    """
+    exc.partial_detect_result = (detection_map, detected, processed_ids)
+
+
+def _analyze_subjects(photos, folders, db, reclassify, det_conf_threshold,
+                      cached_detections, processed_ids, vireo_dir,
+                      checkpoint):
+    """Subject-analysis pass of ``_detect_batch`` (see its comments)."""
+    from subjects import analyze_photo
 
     # Resolve the working-copy JPEG first when the caller supplied a
     # ``vireo_dir``: cached-detection photos on an offline NAS still
@@ -1396,7 +1434,7 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
         # (Codex r4056646676).
         if photo["id"] not in processed_ids and not reclassify:
             continue
-        _subject_analysis_checkpoint()
+        checkpoint()
         if vireo_dir:
             image_path = get_canonical_image_path(photo, vireo_dir, folders)
         else:
@@ -1404,14 +1442,12 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
         try:
             analyze_photo(db, photo["id"], image_path,
                           min_conf=det_conf_threshold, force=reclassify,
-                          checkpoint=_subject_analysis_checkpoint)
+                          checkpoint=checkpoint)
         except ResourceWaitCancelled:
             raise
         except Exception:
             db.conn.rollback()
             log.warning("Subject analysis unavailable for photo %s", photo["id"], exc_info=True)
-
-    return detection_map, detected, processed_ids
 
 
 def _detect_subjects(photos, folders, runner, job, reclassify, db, vireo_dir=None):
@@ -1621,12 +1657,26 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db, vireo_dir=Non
             # failure (``detect_animals`` returning None) leaves the old
             # rows untouched. The per-model predictions purge stays in the
             # classification loop, which only reaches photos it rebuilds.
-            batch_map, batch_detected, batch_processed = _detect_batch(
-                [photo], folders, runner, job, reclassify, db,
-                det_conf_threshold=det_conf_threshold,
-                already_detected_ids=already_detected_ids,
-                vireo_dir=vireo_dir,
-            )
+            try:
+                batch_map, batch_detected, batch_processed = _detect_batch(
+                    [photo], folders, runner, job, reclassify, db,
+                    det_conf_threshold=det_conf_threshold,
+                    already_detected_ids=already_detected_ids,
+                    vireo_dir=vireo_dir,
+                )
+            except ResourceWaitCancelled as exc:
+                # A Stop during this photo's subject analysis lands after
+                # its detections were committed. Keep that committed result
+                # so the cancel recovery still rebuilds the photo's
+                # predictions instead of stranding its replaced boxes.
+                partial = getattr(exc, "partial_detect_result", None)
+                if partial is not None:
+                    batch_map, batch_detected, batch_processed = partial
+                    if reclassify:
+                        processed_for_rebuild.update(batch_processed)
+                    detection_map.update(batch_map)
+                    detected += batch_detected
+                raise
             if reclassify:
                 processed_for_rebuild.update(batch_processed)
             detection_map.update(batch_map)

@@ -314,6 +314,43 @@ def test_stop_during_detection_keeps_committed_boxes(db, tmp_path):
     ]
 
 
+def test_stop_during_subject_analysis_keeps_in_flight_photo(db, tmp_path):
+    """A Stop raised by the subject-analysis checkpoint lands after the
+    photo's detections were replaced. ``_detect_batch`` unwound past its
+    return, so the in-flight photo was missing from the processed set and
+    the reclassify cancel recovery never rebuilt its predictions.
+    """
+    from classify_job import _detect_subjects
+
+    photos = _add_photos(db, 2)
+    state = {"cancel": False}
+
+    def analyze(db_, photo_id, image_path, *, checkpoint, **kwargs):
+        state["cancel"] = True
+        checkpoint()
+
+    patches = _detector_patches(
+        lambda path: [{"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3},
+                       "confidence": 0.9, "category": "animal"}]
+    )
+    patches[-1] = patch("subjects.analyze_photo", analyze)
+    runner = _Runner(lambda job_id: state["cancel"])
+    job = _job()
+    detection_map, detected = _run_patched(
+        patches,
+        lambda: _detect_subjects(
+            photos, {db.folder_id: str(tmp_path)}, runner, job, True, db,
+        ),
+    )
+
+    first = photos[0]["id"]
+    assert job["_detect_cancelled"] is True
+    assert job["errors"] == []
+    assert set(job["_detect_processed_ids"]) == {first}
+    assert list(detection_map) == [first]
+    assert detected == 1
+
+
 def test_stop_during_detector_setup_returns_empty_map(db, tmp_path):
     """A Stop raised before the detection loop starts must still reach the
     cancel arm with a defined (empty) result."""
