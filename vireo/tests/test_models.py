@@ -631,6 +631,72 @@ def test_remove_legacy_entry_at_standard_layout_deletes(tmp_path, monkeypatch):
     assert not weights.exists()
 
 
+def test_remove_legacy_hf_download_at_repo_slug_layout_deletes(
+    tmp_path, monkeypatch,
+):
+    """A legacy ``download_hf_model`` entry has id ``hf-<owner>-<repo>`` but
+    weights at ``DEFAULT_MODELS_DIR/<repo>`` (see download_hf_model's
+    independent id/local_dir construction), so the standard-layout check
+    misses it. ``_model_is_managed`` recognizes the legacy layout via the
+    ``hf-hub:<owner>/<repo>`` model_str so removal actually deletes the
+    downloaded weights instead of leaving gigabytes on disk.
+    """
+    import models
+
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
+    (tmp_path / "models").mkdir()
+
+    weights = tmp_path / "models" / "bioclip-2.5-vith14"
+    weights.mkdir()
+    (weights / "image_encoder.onnx").write_bytes(b"w")
+
+    (tmp_path / "models.json").write_text(json.dumps({
+        "models": [{
+            "id": "hf-imageomics-bioclip-2.5-vith14",
+            "name": "BioCLIP 2.5",
+            "model_str": "hf-hub:imageomics/bioclip-2.5-vith14",
+            "weights_path": str(weights),
+        }],
+        "active_model": None,
+    }))
+
+    result = models.remove_model("hf-imageomics-bioclip-2.5-vith14")
+    assert result == {"files_deleted": True, "kept_path": None}
+    assert not weights.exists()
+
+
+def test_remove_legacy_hf_entry_outside_repo_slug_layout_preserves(
+    tmp_path, monkeypatch,
+):
+    """An ``hf-*`` legacy entry whose weights live somewhere other than
+    ``DEFAULT_MODELS_DIR/<repo-slug>`` (a user-relocated download, a
+    hand-edited path) still falls through to the preserve branch."""
+    import models
+
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
+    (tmp_path / "models").mkdir()
+
+    weights = tmp_path / "models" / "somewhere-else"
+    weights.mkdir()
+    (weights / "image_encoder.onnx").write_bytes(b"w")
+
+    (tmp_path / "models.json").write_text(json.dumps({
+        "models": [{
+            "id": "hf-imageomics-bioclip-2.5-vith14",
+            "name": "BioCLIP 2.5",
+            "model_str": "hf-hub:imageomics/bioclip-2.5-vith14",
+            "weights_path": str(weights),
+        }],
+        "active_model": None,
+    }))
+
+    result = models.remove_model("hf-imageomics-bioclip-2.5-vith14")
+    assert result == {"files_deleted": False, "kept_path": str(weights)}
+    assert (weights / "image_encoder.onnx").exists()
+
+
 def test_api_remove_custom_model_keeps_user_folder(app_and_db, tmp_path):
     app, _db = app_and_db
     client = app.test_client()

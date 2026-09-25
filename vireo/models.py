@@ -299,13 +299,24 @@ def _model_is_managed(entry):
     Backward compatibility: entries written before the ``managed`` field
     existed have neither key. Ids issued by ``/api/models/custom`` start
     with ``custom-`` (see ``api_add_custom_model``) so they are treated
-    as unmanaged. Anything else is treated as a Vireo download only when
-    its ``weights_path`` resolves to the standard download layout —
-    ``DEFAULT_MODELS_DIR/<entry_id>`` — which every internal downloader
-    produces. A legacy entry pointing anywhere else beneath
-    ``~/.vireo/models`` (e.g. a user-registered ``~/.vireo/models/my-model``
-    whose id is not ``my-model``, or a hand-edited path that just happens
-    to live inside the download root) is preserved rather than deleted.
+    as unmanaged. Anything else is treated as a Vireo download when its
+    ``weights_path`` resolves to a layout an internal downloader would
+    have produced:
+
+    - Standard layout: ``DEFAULT_MODELS_DIR/<entry_id>`` — every
+      ``download_model`` call and current ``download_hf_model`` call
+      (whose id was set to match its download directory) produces this.
+    - Legacy Hugging Face layout: ``DEFAULT_MODELS_DIR/<repo-slug>``
+      paired with an id of ``hf-<owner>-<repo>`` and a ``model_str`` of
+      ``hf-hub:<owner>/<repo>``. ``download_hf_model`` built the id and
+      the download directory independently, so the standard-layout check
+      alone would leave gigabytes of Vireo-downloaded weights on disk
+      when the user removes such a legacy entry.
+
+    A legacy entry that matches neither layout (e.g. a user-registered
+    ``~/.vireo/models/my-model`` whose id is not ``my-model``, or a
+    hand-edited path that just happens to live inside the download root)
+    is preserved rather than deleted.
     """
     if not isinstance(entry, dict):
         return False
@@ -319,11 +330,29 @@ def _model_is_managed(entry):
     if not weights_path:
         return False
     try:
-        expected = os.path.realpath(os.path.join(DEFAULT_MODELS_DIR, entry_id))
         actual = os.path.realpath(weights_path)
     except OSError:
         return False
-    return actual == expected
+    try:
+        expected = os.path.realpath(os.path.join(DEFAULT_MODELS_DIR, entry_id))
+    except OSError:
+        expected = None
+    if expected is not None and actual == expected:
+        return True
+    if entry_id.startswith("hf-"):
+        model_str = str(entry.get("model_str") or "")
+        if model_str.startswith("hf-hub:"):
+            slug = model_str.removeprefix("hf-hub:").rsplit("/", 1)[-1]
+            if slug:
+                try:
+                    legacy_expected = os.path.realpath(
+                        os.path.join(DEFAULT_MODELS_DIR, slug)
+                    )
+                except OSError:
+                    return False
+                if actual == legacy_expected:
+                    return True
+    return False
 
 
 def _check_onnx_downloaded(model_dir, files):
