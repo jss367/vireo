@@ -2105,42 +2105,64 @@ class SidecarEditor:
         path_keys = [keyword_match_key(part) for part in path.split("|")]
         removed = []
 
+        # Collect exact matches across every photo-scoped bag first.
+        # If Vireo's own canonical entry lives in one bag and a user
+        # variant lives in another, per-bag fallback would delete both:
+        # the variant as the first bag's fallback (no exact there) and
+        # the canonical from the second. Fall back to a normalized
+        # match only when NO exact match survives anywhere.
         if owns_flat and leaf_key:
-            for bag in _photo_scoped_bags(self._root, f"{{{NS_DC}}}subject"):
-                exact = [
-                    li for li in bag.findall(f"{{{NS_RDF}}}li")
-                    if _li_value(li) == leaf
-                ]
-                if exact:
-                    targets = exact
-                else:
+            flat_bags = list(_photo_scoped_bags(
+                self._root, f"{{{NS_DC}}}subject",
+            ))
+            exact_targets = [
+                (bag, li)
+                for bag in flat_bags
+                for li in bag.findall(f"{{{NS_RDF}}}li")
+                if _li_value(li) == leaf
+            ]
+            if exact_targets:
+                for bag, li in exact_targets:
+                    removed.append(_li_value(li))
+                    bag.remove(li)
+            else:
+                fallback = None
+                for bag in flat_bags:
                     fallback = next(
                         (
-                            li for li in bag.findall(f"{{{NS_RDF}}}li")
+                            (bag, li) for li in bag.findall(f"{{{NS_RDF}}}li")
                             if _li_value(li)
                             and keyword_match_key(_li_value(li)) == leaf_key
                         ),
                         None,
                     )
-                    targets = [fallback] if fallback is not None else []
-                for li in targets:
+                    if fallback is not None:
+                        break
+                if fallback is not None:
+                    bag, li = fallback
                     removed.append(_li_value(li))
                     bag.remove(li)
 
         if owns_hier:
-            for bag in _photo_scoped_bags(
-                self._root, f"{{{NS_LR}}}hierarchicalSubject"
-            ):
-                exact = [
-                    li for li in bag.findall(f"{{{NS_RDF}}}li")
-                    if _li_value(li) == path
-                ]
-                if exact:
-                    targets = exact
-                else:
+            hier_bags = list(_photo_scoped_bags(
+                self._root, f"{{{NS_LR}}}hierarchicalSubject",
+            ))
+            exact_targets = [
+                (bag, li)
+                for bag in hier_bags
+                for li in bag.findall(f"{{{NS_RDF}}}li")
+                if _li_value(li) == path
+            ]
+            if exact_targets:
+                for bag, li in exact_targets:
+                    removed.append(_li_value(li))
+                    bag.remove(li)
+            else:
+                fallback = None
+                for bag in hier_bags:
                     fallback = next(
                         (
-                            li for li in bag.findall(f"{{{NS_RDF}}}li")
+                            (bag, li) for li in bag.findall(f"{{{NS_RDF}}}li")
                             if _li_value(li)
                             and [
                                 keyword_match_key(s)
@@ -2150,8 +2172,10 @@ class SidecarEditor:
                         ),
                         None,
                     )
-                    targets = [fallback] if fallback is not None else []
-                for li in targets:
+                    if fallback is not None:
+                        break
+                if fallback is not None:
+                    bag, li = fallback
                     removed.append(_li_value(li))
                     bag.remove(li)
 

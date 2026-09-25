@@ -2703,6 +2703,60 @@ def test_rdf_datatype_child_ranks_as_qualified_keeper(tmp_path):
     assert (typed[0].text or "").strip() == "5"
 
 
+def test_remove_location_prefers_exact_across_bags_over_per_bag_fallback(tmp_path):
+    """Cross-bag exact match beats a per-bag variant fallback.
+
+    ``_remove_location_keyword_entries`` used to run its
+    exact-then-fallback logic INSIDE each bag. When Vireo's owned
+    canonical entry lived in one photo-scoped bag and a user's
+    normalized variant lived in another, both were deleted: the
+    variant as the first bag's fallback (no exact there) and the
+    canonical from the second. Collect exact matches across every
+    bag first; only fall back to a normalized match when none
+    exists anywhere.
+
+    Set up the state directly with a Vireo ownership marker so this
+    test focuses on the ``_remove_location_keyword_entries`` matcher
+    without depending on the whole set-then-remove flow.
+    """
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about=''"
+        f" xmlns:dc='{NS_DC}' xmlns:lr='{NS_LR}' xmlns:vireo='{NS_VIREO}'"
+        f" vireo:locationKeywords='Places|Paris'"
+        f" vireo:locationKeywordsOwned='flat,hier'>"
+        f"<dc:subject><rdf:Bag>"
+        f"<rdf:li>paris</rdf:li>"
+        f"</rdf:Bag></dc:subject>"
+        f"</rdf:Description>"
+        f"<rdf:Description rdf:about='' xmlns:dc='{NS_DC}'>"
+        f"<dc:subject><rdf:Bag>"
+        f"<rdf:li>Paris</rdf:li>"
+        f"</rdf:Bag></dc:subject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    editor = SidecarEditor(path_str)
+    editor.remove_vireo_location_keywords()
+    editor.commit()
+
+    root = ET.parse(path_str).getroot()
+    # Only Vireo's exact ``Paris`` is removed. The user's ``paris``
+    # variant in the sibling bag survives -- per-bag fallback would
+    # have deleted it too.
+    all_flat = sorted(
+        li.text
+        for subj in root.iter(SUBJECT)
+        for li in subj.iter(f"{{{NS_RDF}}}li")
+        if li.text
+    )
+    assert all_flat == ["paris"]
+
+
 @pytest.mark.skipif(shutil.which("exiftool") is None, reason="exiftool not installed")
 def test_exiftool_reads_what_vireo_wrote_in_both_layouts(layout_xmp):
     """ExifTool must see Vireo's values, not a stale copy it wrote itself."""
