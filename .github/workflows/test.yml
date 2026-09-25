@@ -104,10 +104,20 @@ jobs:
   # these workflows, vireo/data) or the ``ci-full-suite`` label force the
   # full suite here. No map (cache miss) also falls back to the full suite,
   # so selection can only ever narrow a run, never skip one by accident.
+  #
+  # The run is split across four parallel jobs (``--shard K/4`` from
+  # ``scripts/selected_tests_plugin.py``): every shard makes the same
+  # selection and runs every fourth test of it, so a full-suite fallback
+  # takes about a quarter of the wall time. The ``test`` gate below
+  # requires all four.
   unit:
     needs: changes
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
 
     steps:
       - name: Skip Python tests
@@ -163,6 +173,7 @@ jobs:
             fi
           fi
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          if [ "${{ matrix.shard }}" != "1" ]; then exit 0; fi
           {
             echo "## Unit test selection"
             echo
@@ -172,7 +183,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload test selection
-        if: needs.changes.outputs.python == 'true'
+        if: needs.changes.outputs.python == 'true' && matrix.shard == 1
         uses: actions/upload-artifact@v6
         with:
           name: test-selection
@@ -189,11 +200,14 @@ jobs:
         if: needs.changes.outputs.python == 'true' && steps.select.outputs.mode == 'subset'
         run: >-
           python -m pytest tests/ vireo/tests/ --selected-tests .test-impact/selected.txt
+          --shard ${{ matrix.shard }}/4
           -n 2 -v --tb=short --timeout=120 --timeout-method=thread
 
       - name: Run full suite
         if: needs.changes.outputs.python == 'true' && steps.select.outputs.mode == 'full'
-        run: python -m pytest tests/ vireo/tests/ -n 2 -v --tb=short --timeout=120 --timeout-method=thread
+        run: >-
+          python -m pytest tests/ vireo/tests/ --shard ${{ matrix.shard }}/4
+          -n 2 -v --tb=short --timeout=120 --timeout-method=thread
 
       - name: No unit tests exercise this change
         if: needs.changes.outputs.python == 'true' && steps.select.outputs.mode == 'none'
