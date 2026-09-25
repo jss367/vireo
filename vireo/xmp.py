@@ -538,6 +538,108 @@ def _property_bag_and_wrappers(prop):
     return None, []
 
 
+def _build_parent_map(root):
+    """Return a ``{child: parent}`` map for ``root`` and all its descendants."""
+    return {child: parent for parent in root.iter() for child in parent}
+
+
+def _walk_ancestors(elem, parent_map):
+    """Yield ``elem``, its parent, its grandparent, up to the tree root."""
+    current = elem
+    while current is not None:
+        yield current
+        current = parent_map.get(current)
+
+
+def _ancestor_carries_xml_qualifier(elem, parent_map):
+    """True if elem or any ancestor carries an ``xml:*`` attribute."""
+    for ancestor in _walk_ancestors(elem, parent_map):
+        if any(name.startswith(f"{{{NS_XML}}}") for name in ancestor.attrib):
+            return True
+    return False
+
+
+def _ancestor_xml_attributes(elem, parent_map):
+    """Return the ``xml:*`` attributes carried by ``elem`` or its ancestors.
+
+    When the same attribute appears at multiple levels, the closest
+    (deepest) one wins, matching XML's inheritance rules.
+    """
+    result = {}
+    for ancestor in _walk_ancestors(elem, parent_map):
+        for name, value in ancestor.attrib.items():
+            if name.startswith(f"{{{NS_XML}}}") and name not in result:
+                result[name] = value
+    return result
+
+
+def _inherited_xml_attributes(elem, parent_map):
+    """Return the ``xml:*`` attributes ``elem`` inherits from its ancestors.
+
+    Only the strictly-ancestor values are returned; ``elem``'s own
+    ``xml:*`` attributes are not included.
+    """
+    inherited = {}
+    seen_self = False
+    for ancestor in _walk_ancestors(elem, parent_map):
+        if not seen_self:
+            seen_self = True
+            continue
+        for name, value in ancestor.attrib.items():
+            if name.startswith(f"{{{NS_XML}}}") and name not in inherited:
+                inherited[name] = value
+    return inherited
+
+
+def _simple_prop_carries_qualifier(prop):
+    """True if a simple property occurrence carries qualifier data.
+
+    Distinguishes a plain unqualified spelling (which is safe to
+    remove as a duplicate) from any form that carries qualifier
+    attributes or elements the removal would silently drop. Plain
+    forms:
+
+    * attribute on the Description (handled separately by the caller).
+    * a child element with just text (``<xmp:Rating>3</xmp:Rating>``).
+    * the short qualified form with just ``rdf:value`` and nothing
+      else (``<xmp:Rating rdf:parseType='Resource'><rdf:value>3
+      </rdf:value></xmp:Rating>``).
+    * the long form with just a nested ``rdf:Description`` holding
+      only ``rdf:value``.
+
+    Anything else -- a non-structural attribute anywhere, a sibling
+    qualifier element alongside ``rdf:value``, an identity attribute
+    on the property or a nested Description -- is a qualifier.
+    """
+    if _has_non_structural_attribute(prop):
+        return True
+    if len(prop) == 0:
+        return False
+    for child in prop:
+        tag = child.tag
+        if tag == f"{{{NS_RDF}}}value":
+            if _has_non_structural_attribute(child):
+                return True
+            if len(child) and not all(
+                c.tag == f"{{{NS_RDF}}}Bag" for c in child
+            ):
+                return True
+        elif tag == f"{{{NS_RDF}}}Description":
+            if _simple_prop_carries_qualifier(child):
+                return True
+        else:
+            # Any child that isn't a wrapper is a qualifier sibling.
+            return True
+    return False
+
+
+def _has_non_structural_attribute(elem):
+    """True if elem carries any attribute that isn't a structural RDF one."""
+    return any(
+        name not in _STRUCTURAL_RDF_ATTRIBUTES for name in elem.attrib
+    )
+
+
 def _wrappers_carry_qualifier(prop):
     """True if the value structure has a sibling qualifier element.
 
@@ -1005,17 +1107,21 @@ class SidecarEditor:
     def _unqualified_photo_description(self):
         """Return a photo-scoped Description free of inherited ``xml:*``.
 
-        ``xml:lang`` (and the other ``xml:*`` attributes) on a
-        Description are inherited by every property inside it, so any
-        new property added under such a Description would silently
-        carry that qualifier. Return the first photo-scoped Description
-        that has no ``xml:*`` attribute of its own; create a fresh
-        Description scoped to the photo when none exists.
+        ``xml:lang`` (and the other ``xml:*`` attributes) are
+        inherited from every ancestor, so any new property added
+        under a Description that has one of its own -- or inherits
+        one from ``rdf:RDF`` / ``x:xmpmeta`` above -- would silently
+        carry that qualifier. Prefer an existing photo-scoped
+        Description that carries none of its own; when none exists,
+        create a fresh Description scoped to the photo and
+        explicitly reset any ``xml:*`` an ancestor carries so the new
+        Description starts clean.
         """
+        parent_map = _build_parent_map(self._root)
         for desc in _top_descriptions(self._root):
             if not any(
                 name.startswith(f"{{{NS_XML}}}") for name in desc.attrib
-            ):
+            ) and not _inherited_xml_attributes(desc, parent_map):
                 return desc
         # Capture the photo's subject BEFORE inserting the new
         # Description. If every existing photo Description is qualified
@@ -1040,6 +1146,17 @@ class SidecarEditor:
             desc.set(f"{{{NS_RDF}}}nodeID", node)
         if rid:
             desc.set(f"{{{NS_RDF}}}ID", rid)
+        # Explicitly reset every ``xml:*`` attribute inherited from an
+        # ancestor. ``xml:lang=""`` is XML's way of saying "no known
+        # language" -- it cancels an inherited language on the new
+        # Description's descendants, so a numeric rating or a GPS
+        # coordinate we later add under here does not silently
+        # language-tag itself with the sidecar's outer language. The
+        # new Description isn't in ``parent_map`` yet, so walk from
+        # its known parent (``rdf``) upward: those attributes are
+        # what it would inherit.
+        for xml_attr in _ancestor_xml_attributes(rdf, parent_map):
+            desc.set(xml_attr, "")
         self._dirty = True
         return desc
 
@@ -1059,35 +1176,23 @@ class SidecarEditor:
             for child in owner.findall(tag)
         ]
 
+        parent_map = _build_parent_map(self._root)
+
         def _has_inherited_qualifier(elem):
-            # ``xml:lang``, ``xml:base`` and ``xml:space`` are inherited by
-            # every descendant, so any of them on an ancestor of the
-            # ``rdf:li`` items counts. Structural RDF attributes like
+            # ``xml:lang``, ``xml:base`` and ``xml:space`` are inherited
+            # from any ancestor, including ``rdf:RDF`` or
+            # ``x:xmpmeta`` above the owner Description. Walk the whole
+            # ancestor chain so a qualifier declared at the sidecar
+            # root still counts. Structural RDF attributes like
             # ``rdf:parseType`` describe serialization form rather than
             # value semantics and do not count -- otherwise a keyword
             # array stored in the qualified resource form
             # ``<dc:subject rdf:parseType='Resource'><rdf:value><rdf:Bag>...``
             # would look qualified and force a second bag beside it.
-            return any(
-                name.startswith(f"{{{NS_XML}}}") for name in elem.attrib
-            )
+            return _ancestor_carries_xml_qualifier(elem, parent_map)
 
         _owner_inherits_qualifier = _has_inherited_qualifier
-
-        def _has_own_qualifier(elem):
-            # Every non-structural attribute on the property, one of its
-            # wrappers, or the ``rdf:Bag`` itself counts as a qualifier
-            # that removing the element would silently drop. Includes
-            # ``xml:*`` and RDF's attribute abbreviation for nested
-            # properties (a namespaced attribute like ``foo:source``,
-            # equivalent to a nested ``<foo:source>...`` sibling of
-            # ``rdf:value``). Excludes only structural RDF attributes
-            # that describe serialization form or resource identity
-            # (``rdf:about``, ``rdf:nodeID``, ``rdf:ID``,
-            # ``rdf:parseType``, ``rdf:datatype``).
-            return any(
-                name not in _STRUCTURAL_RDF_ATTRIBUTES for name in elem.attrib
-            )
+        _has_own_qualifier = _has_non_structural_attribute
 
         def _prop_is_qualified(owner, prop):
             bag_el, wrappers = _property_bag_and_wrappers(prop)
@@ -1206,23 +1311,26 @@ class SidecarEditor:
         """
         changed = False
         new_desc = None
+        parent_map = _build_parent_map(self._root)
         for name, value in values.items():
             found = _property_occurrences(self._root, name)
             if not found:
                 # Adding under ``desc`` directly would let an ``xml:lang``
-                # (or another ``xml:*`` attribute) on that Description
-                # attach to a numeric rating, a GPS coordinate, or a
-                # Vireo marker -- language-tagging a value that carries
-                # no natural language is invalid XMP semantics and
-                # ``_photo_scoped_bags`` already avoids the same trap for
-                # keyword arrays. Fall back to a Description with no
-                # ``xml:*`` of its own for the same reason.
+                # (or another ``xml:*`` attribute) on that Description --
+                # or on an ancestor above it, like ``rdf:RDF`` or
+                # ``x:xmpmeta`` -- attach to a numeric rating, a GPS
+                # coordinate, or a Vireo marker: language-tagging a
+                # value that carries no natural language is invalid
+                # XMP semantics and ``_photo_scoped_bags`` already
+                # avoids the same trap for keyword arrays. Fall back
+                # to a Description free of inherited ``xml:*``.
                 target = desc
-                if any(
-                    n.startswith(f"{{{NS_XML}}}") for n in desc.attrib
-                ):
+                if _ancestor_carries_xml_qualifier(desc, parent_map):
                     if new_desc is None:
                         new_desc = self._unqualified_photo_description()
+                        # ``_unqualified_photo_description`` may have
+                        # mutated the tree, so refresh the parent map.
+                        parent_map = _build_parent_map(self._root)
                     target = new_desc
                 target.set(name, value)
                 changed = True
@@ -1283,9 +1391,19 @@ class SidecarEditor:
             for owner, child in rest:
                 if child is None:
                     del owner.attrib[name]
+                    changed = True
+                elif _simple_prop_carries_qualifier(child):
+                    # Removing this duplicate would silently drop its
+                    # qualifier attributes or elements (a distinct
+                    # ``rdf:ID``, a ``foo:source`` attribute-form
+                    # qualifier, a sibling qualifier element alongside
+                    # ``rdf:value``, etc.). Leave it in place so its
+                    # data survives; the keeper we updated above still
+                    # holds the value most readers will see.
+                    continue
                 else:
                     owner.remove(child)
-                changed = True
+                    changed = True
         if changed:
             self._dirty = True
         return changed

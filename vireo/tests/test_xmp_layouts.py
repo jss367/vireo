@@ -1803,6 +1803,91 @@ def test_rdf_id_on_wrapper_blocks_bag_collapse(tmp_path):
     assert u_items == {"Heron", "Kiwi"}
 
 
+def test_xml_lang_on_rdf_rdf_reaches_every_bag_and_new_property(tmp_path):
+    """``xml:lang`` on the outer ``rdf:RDF`` reaches every descendant.
+
+    Ancestors above the owner Description propagate ``xml:*``
+    qualifiers just like the owner does. When a new keyword is
+    added, the qualifier-check must see the outer ``rdf:RDF`` /
+    ``x:xmpmeta`` attribute -- otherwise a fresh photo Description
+    would silently inherit that language and every rating / GPS
+    coordinate written under it would end up language-tagged.
+    """
+    xml_ns = "http://www.w3.org/XML/1998/namespace"
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'"
+        f" xmlns:xml='http://www.w3.org/XML/1998/namespace'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}' xml:lang='en'>"
+        f"<rdf:Description rdf:about='' xmlns:dc='{NS_DC}'>"
+        f"<dc:subject><rdf:Bag><rdf:li>Heron</rdf:li></rdf:Bag></dc:subject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    editor = SidecarEditor(path_str)
+    editor.add_keywords({"Kiwi"}, set())
+    editor.set_rating(4)
+    editor.commit()
+
+    root = ET.parse(path_str).getroot()
+
+    # The rating landed on a Description that explicitly resets
+    # inherited ``xml:lang``: an ``xml:lang=""`` cancels the
+    # inheritance from the outer ``rdf:RDF``.
+    rated = [
+        d for d in root.iter(f"{{{NS_RDF}}}Description")
+        if d.get(RATING) == "4"
+    ]
+    assert len(rated) == 1
+    assert rated[0].get(f"{{{xml_ns}}}lang") == ""
+
+
+def test_qualified_simple_property_duplicates_are_preserved(tmp_path):
+    """A qualified duplicate of a simple property is not silently deleted.
+
+    When two occurrences of ``xmp:Rating`` are both qualified and one
+    carries an independent qualifier (an ``rdf:ID``, an attribute-form
+    property, or a sibling qualifier element), the current write kept
+    only one and removed the other -- silently discarding that
+    qualifier. Update the value on the keeper as before, but leave
+    the qualified duplicate in place so its data survives.
+    """
+    path = tmp_path / "photo.xmp"
+    foo_ns = "http://example.com/foo/"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about=''"
+        f" xmlns:xmp='{NS_XMP}' xmlns:foo='{foo_ns}'>"
+        f"<xmp:Rating rdf:parseType='Resource'>"
+        f"<rdf:value>3</rdf:value>"
+        f"<foo:origin>keeper</foo:origin>"
+        f"</xmp:Rating>"
+        f"<xmp:Rating rdf:parseType='Resource'>"
+        f"<rdf:value>2</rdf:value>"
+        f"<foo:origin>preserve-me</foo:origin>"
+        f"</xmp:Rating>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    write_rating(path_str, 5)
+
+    root = ET.parse(path_str).getroot()
+    ratings = list(root.iter(RATING))
+    # Both qualified copies survive.
+    assert len(ratings) == 2
+
+    origins = sorted(
+        r.findtext(f"{{{foo_ns}}}origin") for r in ratings
+    )
+    # Neither ``foo:origin`` was silently dropped.
+    assert origins == ["keeper", "preserve-me"]
+
+
 @pytest.mark.skipif(shutil.which("exiftool") is None, reason="exiftool not installed")
 def test_exiftool_reads_what_vireo_wrote_in_both_layouts(layout_xmp):
     """ExifTool must see Vireo's values, not a stale copy it wrote itself."""
