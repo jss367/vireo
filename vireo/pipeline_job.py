@@ -2001,6 +2001,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         collected_photo_ids = []
         collection_ready = threading.Event()
         models_ready = threading.Event()
+        # Set when the model loader fails for a reason other than cancel; the
+        # orchestrator turns it into ``abort`` once the model-free stages have
+        # finished (see model_loader_stage).
+        model_loader_failed = threading.Event()
         loaded_models = {}  # populated by model_loader thread
 
         def _put_scan_item(item):
@@ -3246,10 +3250,31 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
 
         def collection_stage():
             """Wait for scan to finish, build collection, signal classifier."""
+            # Every exit must set ``collection_ready``: detect_stage waits on it
+            # unconditionally, so an exception that skipped the set (e.g. the
+            # snapshot resolver hitting a locked DB) would hang the job and
+            # pin one of the pipeline slots forever. A failure is recorded as a
+            # failed ``collection`` stage so the job reports failed rather than
+            # completing with every downstream stage "Skipped".
+            try:
+                _collection_stage_body()
+            except Exception as e:
+                errors.append(f"[collection] Fatal: {e}")
+                log.exception("Pipeline collection stage failed")
+                abort.set()
+                stages["collection"] = {
+                    "status": "failed",
+                    "label": "Building collection",
+                    "error": str(e),
+                }
+                _update_stages(runner, job["id"], stages)
+            finally:
+                collection_ready.set()
+
+        def _collection_stage_body():
             nonlocal collection_id, snapshot_photo_ids
 
             if skip_scan:
-                collection_ready.set()
                 return
 
             # Wait for scanner to complete (don't check abort -- we want the
@@ -3315,26 +3340,18 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 ]
 
             if not collected_photo_ids:
-                collection_ready.set()
                 return
 
-            try:
-                thread_db = Database(db_path)
-                thread_db.set_active_workspace(workspace_id)
-                from datetime import datetime as dt
+            thread_db = Database(db_path)
+            thread_db.set_active_workspace(workspace_id)
+            from datetime import datetime as dt
 
-                name = "Pipeline " + dt.now().strftime("%Y-%m-%d %H:%M")
-                collection_id = thread_db.add_collection(
-                    name,
-                    json.dumps([{"field": "photo_ids", "value": collected_photo_ids}]),
-                )
-                result["collection_id"] = collection_id
-            except Exception as e:
-                errors.append(f"[collection] Fatal: {e}")
-                log.exception("Pipeline collection stage failed")
-                abort.set()
-            finally:
-                collection_ready.set()
+            name = "Pipeline " + dt.now().strftime("%Y-%m-%d %H:%M")
+            collection_id = thread_db.add_collection(
+                name,
+                json.dumps([{"field": "photo_ids", "value": collected_photo_ids}]),
+            )
+            result["collection_id"] = collection_id
 
         def thumbnail_stage():
             stages["thumbnails"]["status"] = "running"
@@ -4483,7 +4500,6 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 runner.update_step(job["id"], "model_loader", status="completed",
                                    summary=summary)
             except Exception as e:
-                abort.set()
                 is_classification_cancelled = (
                     e.__class__.__name__ == "ClassificationCancelled"
                 )
@@ -4492,12 +4508,21 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     or is_classification_cancelled
                     or str(e) == "classification cancelled"
                 ):
+                    abort.set()
                     stages["model_loader"]["status"] = "skipped"
                     runner.update_step(
                         job["id"], "model_loader",
                         status="completed", summary="Skipped (cancelled)",
                     )
                 else:
+                    # Don't set ``abort`` here. It is also the scanner's and
+                    # thumbnailer's cancel signal, so setting it mid-phase-one
+                    # stopped a scan that doesn't need the model and labeled
+                    # it "Cancelled" although nobody cancelled. The run
+                    # orchestrator sets ``abort`` once the model-free stages
+                    # (scan, thumbnails, previews) have finished, so every
+                    # model-dependent stage still skips.
+                    model_loader_failed.set()
                     errors.append(f"[model_loader] Fatal: {e}")
                     log.exception("Pipeline model loader stage failed")
                     stages["model_loader"]["status"] = "failed"
@@ -8693,22 +8718,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     # claiming workspace-level freshness would let the pipeline
                     # page hide a real stale state.
                     from pipeline import (
-                        _resolve_collection_photo_ids,
+                        collection_covers_workspace,
                         compute_group_fingerprint,
                     )
-                    collection_photo_ids = _resolve_collection_photo_ids(
-                        thread_db, collection_id,
-                    )
-                    ws_photo_ids = {
-                        r["id"] for r in thread_db.conn.execute(
-                            """SELECT p.id
-                                 FROM photos p
-                                 JOIN workspace_folders wf
-                                   ON wf.folder_id = p.folder_id
-                                WHERE wf.workspace_id = ?""",
-                            (workspace_id,),
-                        ).fetchall()
-                    }
                     # A per-run eye override that differs from the
                     # workspace's own effective ``eye_detect_enabled`` means
                     # this run's KEEP/REJECT decisions came from scoring
@@ -8731,7 +8743,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     )
                     covered_full_workspace = (
                         not params.exclude_photo_ids
-                        and ws_photo_ids.issubset(collection_photo_ids)
+                        and collection_covers_workspace(
+                            thread_db, workspace_id, collection_id,
+                        )
                         and not per_run_eye_override_differs
                     )
                     if covered_full_workspace:
@@ -8957,6 +8971,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         # persisted as "pending" with no finished_at, forever. Each stage
         # checks abort internally and marks itself "Skipped".
         _run_pause_participant("previews", previews_stage)
+
+        # A model-loader failure deferred its abort so the model-free stages
+        # above could finish; from here on every stage needs the model (or
+        # its output), so stop them now.
+        if model_loader_failed.is_set():
+            abort.set()
 
         # Phase 2: detect (needs collection; runs MegaDetector once across all
         # photos so each per-model classify step reuses cached detections

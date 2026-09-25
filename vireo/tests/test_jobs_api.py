@@ -4184,6 +4184,103 @@ def test_jobs_regroup_rejects_visual_collection(app_and_db):
         assert "visual-search clause" in resp.get_json()["error"]
 
 
+def _stub_regroup_pipeline(monkeypatch, photos, saved):
+    """Replace the regroup job's feature load, grouping and cache save."""
+    import pipeline
+
+    monkeypatch.setattr(pipeline, "load_photo_features", lambda *a, **k: photos)
+    monkeypatch.setattr(
+        pipeline, "run_full_pipeline",
+        lambda photos, **k: {"summary": {"encounters": 1}, "photos": photos},
+    )
+    monkeypatch.setattr(
+        pipeline, "save_results",
+        lambda results, cache_dir, ws_id, **k: saved.append(ws_id),
+    )
+
+
+def _group_fingerprint(db):
+    return db.conn.execute(
+        "SELECT last_group_fingerprint FROM workspaces WHERE id = ?",
+        (db._active_workspace_id,),
+    ).fetchone()[0]
+
+
+def test_jobs_regroup_no_photos_records_failure(app_and_db, monkeypatch):
+    """With no pipeline features the regroup job must be recorded as failed;
+    it used to return a bare ``{"error": ...}``, which JobRunner recorded as
+    completed while its "load" step showed failed."""
+    app, _ = app_and_db
+    saved = []
+    _stub_regroup_pipeline(monkeypatch, [], saved)
+    with app.test_client() as client:
+        job_id = client.post("/api/jobs/regroup", json={}).get_json()["job_id"]
+        job = wait_for_job_via_client(client, job_id)
+    assert job["status"] == "failed"
+    assert saved == []
+
+
+def test_jobs_regroup_collection_scope_clears_group_fingerprint(app_and_db, monkeypatch):
+    """A collection-scoped regroup replaces the whole workspace cache with
+    subset output, so it must clear ``last_group_fingerprint``; otherwise the
+    pipeline page keeps reporting Group as done-prior for a partial cache."""
+    app, db = app_and_db
+    ws_id = db._active_workspace_id
+    db.set_workspace_group_state(workspace_id=ws_id, fingerprint="stale", when_ts=1)
+    first = db.conn.execute("SELECT MIN(id) FROM photos").fetchone()[0]
+    col_id = db.add_collection(
+        "Subset", json.dumps([{"field": "photo_ids", "value": [first]}]),
+    )
+    saved = []
+    _stub_regroup_pipeline(monkeypatch, [{"id": first}], saved)
+    with app.test_client() as client:
+        job_id = client.post(
+            "/api/jobs/regroup", json={"collection_id": col_id},
+        ).get_json()["job_id"]
+        job = wait_for_job_via_client(client, job_id)
+    assert job["status"] == "completed"
+    assert saved == [ws_id]
+    assert _group_fingerprint(db) is None
+
+
+def test_jobs_regroup_full_workspace_stamps_group_fingerprint(app_and_db, monkeypatch):
+    """A whole-workspace regroup stamps the current grouping fingerprint."""
+    from pipeline import compute_group_fingerprint
+
+    import config as cfg
+
+    app, db = app_and_db
+    saved = []
+    _stub_regroup_pipeline(monkeypatch, [{"id": 1}], saved)
+    with app.test_client() as client:
+        job_id = client.post("/api/jobs/regroup", json={}).get_json()["job_id"]
+        job = wait_for_job_via_client(client, job_id)
+    assert job["status"] == "completed"
+    assert _group_fingerprint(db) == compute_group_fingerprint(
+        db.get_effective_config(cfg.load()),
+    )
+
+
+def test_jobs_regroup_waits_for_workspace_regroup_lock(app_and_db, monkeypatch):
+    """The regroup job must hold the workspace regroup lock across its save,
+    like reflow and regroup-live, so it can't land between a pipeline's
+    regroup and miss stages or overwrite a concurrent grouping edit."""
+    from pipeline_locks import acquire_workspace_regroup
+
+    app, db = app_and_db
+    saved = []
+    _stub_regroup_pipeline(monkeypatch, [{"id": 1}], saved)
+    lock = acquire_workspace_regroup(db._active_workspace_id)
+    with app.test_client() as client:
+        with lock:
+            job_id = client.post("/api/jobs/regroup", json={}).get_json()["job_id"]
+            time.sleep(0.5)
+            assert saved == [], "regroup saved results without the regroup lock"
+        job = wait_for_job_via_client(client, job_id)
+    assert job["status"] == "completed"
+    assert saved == [db._active_workspace_id]
+
+
 def test_jobs_extract_masks_rejects_visual_collection(app_and_db):
     """``/api/jobs/extract-masks`` (SAM2 mask extraction) reads
     ``get_collection_photos``; reject visual collections at the boundary."""

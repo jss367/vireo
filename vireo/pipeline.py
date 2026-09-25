@@ -139,6 +139,31 @@ def _resolve_collection_photo_ids(db, collection_id):
     return {r["id"] for r in rows} if rows else set()
 
 
+def collection_covers_workspace(db, workspace_id, collection_id):
+    """True when a grouping scoped to ``collection_id`` covers every photo in
+    ``workspace_id`` (``collection_id=None`` always does).
+
+    Callers that write ``pipeline_results_ws*.json`` use this to decide
+    whether the workspace's ``last_group_fingerprint`` may be stamped: a
+    subset run replaces the whole cache, so a stamp left in place would make
+    the pipeline page report Group as done for a cache that is partial.
+    """
+    if collection_id is None:
+        return True
+    collection_photo_ids = _resolve_collection_photo_ids(db, collection_id)
+    ws_photo_ids = {
+        r["id"] for r in db.conn.execute(
+            """SELECT p.id
+                 FROM photos p
+                 JOIN workspace_folders wf
+                   ON wf.folder_id = p.folder_id
+                WHERE wf.workspace_id = ?""",
+            (workspace_id,),
+        ).fetchall()
+    }
+    return ws_photo_ids.issubset(collection_photo_ids)
+
+
 def _replace_temp_id_scope(conn, table_name, ids):
     """Replace a connection-local temp ID table without leaking a transaction.
 

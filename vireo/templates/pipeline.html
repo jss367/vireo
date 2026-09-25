@@ -2478,6 +2478,14 @@ var _stageToCard = {
   regroup: 'Group',
 };
 
+// Backend stages that only appear in ``stages`` when they fail. They mark
+// their card failed but are left out of _cardToStages, so a normal run
+// (where the key is absent) doesn't wait on them to finish the card.
+// ``collection`` builds the run's collection right after the scan.
+var _failureOnlyStageToCard = {
+  collection: 'Scan',
+};
+
 // Reverse of _stageToCard: cardSuffix -> [backend stage names]. Used by
 // _updatePipelineStageUI to aggregate the per-card terminal state across
 // multi-substage cards (e.g. Previews = thumbnails + previews) so the pill
@@ -2545,7 +2553,16 @@ function _updatePipelineStageUI(p) {
   var cardAgg = {};  // cardSuffix -> aggregate substage outcomes
   for (var stageName in stages) {
     var cardSuffix = _stageToCard[stageName];
-    if (!cardSuffix) continue;
+    if (!cardSuffix) {
+      var failureCard = _failureOnlyStageToCard[stageName];
+      if (failureCard && stages[stageName].status === 'failed') {
+        (cardAgg[failureCard] || (cardAgg[failureCard] = {
+          running: false, failed: false, warning: false,
+          completed: 0, skipped: 0, present: 0,
+        })).failed = true;
+      }
+      continue;
+    }
     var agg = cardAgg[cardSuffix] || (cardAgg[cardSuffix] = {
       running: false, failed: false, warning: false,
       completed: 0, skipped: 0, present: 0,

@@ -805,11 +805,16 @@ def create_jobs_blueprint(
         pipeline_cfg = effective_cfg.get("pipeline", {})
 
         def work(job):
+            import time
+
             from pipeline import (
+                collection_covers_workspace,
+                compute_group_fingerprint,
                 load_photo_features,
                 run_full_pipeline,
                 save_results,
             )
+            from pipeline_locks import acquire_workspace_regroup
 
             thread_db = ctx.thread_db()
 
@@ -826,43 +831,76 @@ def create_jobs_blueprint(
                 {"phase": "Loading features from database", "current": 0, "total": 3},
             )
 
-            photos = load_photo_features(thread_db, collection_id=collection_id, config=effective_cfg)
-            if not photos:
-                ctx.runner.update_step(job["id"], "load", status="failed",
-                                       error="No photos with pipeline features found")
-                return {"error": "No photos with pipeline features found. Run extract-masks first."}
-            ctx.runner.update_step(job["id"], "load", status="completed",
-                                   summary=f"{len(photos)} photos")
+            # Hold the workspace regroup lock across load/compute/save, like
+            # /api/pipeline/reflow and regroup-live. Without it this save can
+            # land between a pipeline's regroup and miss stages (pairing its
+            # miss flags with a grouping they never saw) or overwrite a
+            # concurrent detach/grouping edit, leaving that edit's undo stale.
+            with acquire_workspace_regroup(ctx.workspace_id):
+                photos = load_photo_features(
+                    thread_db, collection_id=collection_id, config=effective_cfg,
+                )
+                if not photos:
+                    msg = "No photos with pipeline features found. Run extract-masks first."
+                    ctx.runner.update_step(job["id"], "load", status="failed",
+                                           error="No photos with pipeline features found")
+                    for step_id in ("group", "save"):
+                        ctx.runner.update_step(job["id"], step_id, status="completed",
+                                               summary="Skipped")
+                    # ``ok: False`` makes JobRunner record the job as failed;
+                    # a bare ``{"error": ...}`` was recorded as completed.
+                    return {"ok": False, "error": msg, "errors": [msg]}
+                ctx.runner.update_step(job["id"], "load", status="completed",
+                                       summary=f"{len(photos)} photos")
 
-            ctx.runner.update_step(job["id"], "group", status="running")
-            ctx.runner.push_event(
-                job["id"],
-                "progress",
-                {"phase": "Grouping encounters and bursts", "current": 1, "total": 3},
-            )
+                ctx.runner.update_step(job["id"], "group", status="running")
+                ctx.runner.push_event(
+                    job["id"],
+                    "progress",
+                    {"phase": "Grouping encounters and bursts", "current": 1, "total": 3},
+                )
 
-            # emit_trace=True so the pipeline-review sidebar's algorithm-trace
-            # panel can show per-cut-point details for each encounter on the
-            # very first load (not only after the user drags a live-tuning
-            # slider). Cost is negligible (~300B per adjacent pair).
-            if ctx.runner.is_cancelled(job["id"]):
-                return {}
-            results = run_full_pipeline(photos, config=pipeline_cfg, emit_trace=True)
-            summary = results.get("summary", {})
-            ctx.runner.update_step(job["id"], "group", status="completed",
-                                   summary=f"{summary.get('encounters', 0)} encounters")
+                # emit_trace=True so the pipeline-review sidebar's algorithm-trace
+                # panel can show per-cut-point details for each encounter on the
+                # very first load (not only after the user drags a live-tuning
+                # slider). Cost is negligible (~300B per adjacent pair).
+                if ctx.runner.is_cancelled(job["id"]):
+                    return {}
+                results = run_full_pipeline(photos, config=pipeline_cfg, emit_trace=True)
+                summary = results.get("summary", {})
+                ctx.runner.update_step(job["id"], "group", status="completed",
+                                       summary=f"{summary.get('encounters', 0)} encounters")
 
-            ctx.runner.update_step(job["id"], "save", status="running")
-            ctx.runner.push_event(
-                job["id"],
-                "progress",
-                {"phase": "Saving results", "current": 2, "total": 3},
-            )
+                ctx.runner.update_step(job["id"], "save", status="running")
+                ctx.runner.push_event(
+                    job["id"],
+                    "progress",
+                    {"phase": "Saving results", "current": 2, "total": 3},
+                )
 
-            if ctx.runner.is_cancelled(job["id"]):
-                return {}
-            cache_dir = os.path.dirname(db_path)
-            save_results(results, cache_dir, ctx.workspace_id)
+                if ctx.runner.is_cancelled(job["id"]):
+                    return {}
+                cache_dir = os.path.dirname(db_path)
+                save_results(results, cache_dir, ctx.workspace_id)
+                # save_results replaced the whole workspace cache. Stamp the
+                # grouping fingerprint only when this run covered the whole
+                # workspace; a collection-scoped run leaves a partial cache, so
+                # clear the stamp instead (as regroup_stage does) or the
+                # pipeline page would report Group as done-prior.
+                if collection_covers_workspace(
+                    thread_db, ctx.workspace_id, collection_id,
+                ):
+                    thread_db.set_workspace_group_state(
+                        workspace_id=ctx.workspace_id,
+                        fingerprint=compute_group_fingerprint(effective_cfg),
+                        when_ts=int(time.time()),
+                    )
+                else:
+                    thread_db.set_workspace_group_state(
+                        workspace_id=ctx.workspace_id,
+                        fingerprint=None,
+                        when_ts=None,
+                    )
             ctx.runner.update_step(job["id"], "save", status="completed")
 
             return results["summary"]
