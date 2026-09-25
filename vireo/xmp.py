@@ -501,14 +501,21 @@ def _description_subject(desc, parent_map=None):
     other subjects. When a caller passes ``parent_map`` the resolution
     happens here, so ``rdf:about="photo.jpg"'' under
     ``xml:base="file:///photos/"'' fingerprints the same as
-    ``rdf:about="file:///photos/photo.jpg"''; without it the raw text
-    is used, matching the pre-xml:base callers that resolve subjects
-    against one another only when they were spelled identically.
+    ``rdf:about="file:///photos/photo.jpg"''; an *explicitly empty*
+    ``rdf:about=""'' is also a URI reference (RFC 3986 §4.2, the
+    empty reference), so it resolves to the base URI when one is
+    present -- otherwise a Description carrying it would sit in the
+    empty-subject bucket while an equivalent absolute-spelled sibling
+    landed elsewhere. Without ``parent_map`` the raw text is used,
+    matching the pre-xml:base callers that resolve subjects against
+    one another only when they were spelled identically. An *absent*
+    ``rdf:about'' still means "the enclosing resource" and stays in
+    the empty bucket.
     """
     about = desc.get(f"{{{NS_RDF}}}about")
     node = desc.get(f"{{{NS_RDF}}}nodeID")
     rid = desc.get(f"{{{NS_RDF}}}ID")
-    if about and parent_map is not None:
+    if about is not None and parent_map is not None:
         base = _effective_xml_base(desc, parent_map)
         if base:
             about = urllib.parse.urljoin(base, about)

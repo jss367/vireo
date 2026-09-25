@@ -397,6 +397,43 @@ def test_fragment_auxiliary_does_not_hide_photo_subject(tmp_path):
     assert metadata["rating"] == "4"
 
 
+def test_empty_rdf_about_resolves_against_xml_base(tmp_path):
+    """An explicitly-empty ``rdf:about="" `` resolves to the effective ``xml:base'.
+
+    RFC 3986 §4.2 defines the empty reference: an ``rdf:about=""``
+    resolves to the base URI itself. Before this fix the truthiness
+    check short-circuited on the empty string, so
+    ``<rdf:Description rdf:about="">'' under
+    ``xml:base="file:///photos/photo.jpg"'' fingerprinted as the empty
+    subject rather than resolving to the base URI, and an equivalent
+    absolute-spelled sibling ``<rdf:Description
+    rdf:about="file:///photos/photo.jpg">'' landed in a different
+    subject bucket. Reads then dropped one, and writes could leave a
+    conflicting empty-``rdf:about'' Description behind.
+    """
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'"
+        f" xmlns:xml='http://www.w3.org/XML/1998/namespace'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}' xml:base='file:///photos/photo.jpg'>"
+        f"<rdf:Description rdf:about=''"
+        f" xmlns:xmp='{NS_XMP}' xmp:Rating='4'/>"
+        f"<rdf:Description rdf:about='file:///photos/photo.jpg'"
+        f" xmlns:exif='{NS_EXIF}'"
+        f" exif:GPSLatitude='10,0.0N' exif:GPSLongitude='20,0.0E'/>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    metadata = read_sync_preview_metadata(path_str)
+    # Both Descriptions collapse to the same photo subject, so the
+    # rating from the ``rdf:about=""`` Description and the GPS from
+    # the absolute-spelled sibling both surface.
+    assert metadata["rating"] == "4"
+    assert metadata["location"]["latitude"] == pytest.approx(10.0)
+    assert metadata["location"]["longitude"] == pytest.approx(20.0)
+
+
 def test_xml_base_resolution_unifies_equivalent_photo_subjects(tmp_path):
     """``xml:base'' resolves a relative ``rdf:about'' to its absolute form.
 
