@@ -2430,6 +2430,16 @@ def _plan_import(db, params, emit, state):
     )
 
     # Group by destination (template) folder, template order, then chunk.
+    # Chunking is companion-aware: each ``_ImportBatchState`` holds its own
+    # ``companion_siblings`` and ``companion_slots``, so a same-stem RAW/JPEG
+    # pair split across two batches loses both signals and the collision
+    # walk can suffix one half while the other keeps the shared stem —
+    # the scan then pairs the JPEG with an unrelated same-stem RAW at the
+    # destination. Keeping companion groups intact in the same batch is
+    # enough because such a group is 2–3 files (RAW + JPEG + occasional
+    # sidecar); a group large enough to exceed ``IMPORT_BATCH_SIZE`` on
+    # its own gets split as before (unavoidable, and the same-stem
+    # collision walk still adopts the anchor within one batch).
     groups = {}
     for f in files:
         rel = build_destination_path(
@@ -2439,8 +2449,28 @@ def _plan_import(db, params, emit, state):
     batches = []
     for rel in sorted(groups):
         group = groups[rel]
-        for i in range(0, len(group), IMPORT_BATCH_SIZE):
-            batches.append((rel, group[i:i + IMPORT_BATCH_SIZE]))
+        by_companion = {}
+        for f in group:
+            by_companion.setdefault(_companion_key(f), []).append(f)
+        batch = []
+        for companion in by_companion.values():
+            if len(companion) > IMPORT_BATCH_SIZE:
+                # Degenerate: a single companion group is bigger than a
+                # batch on its own. Preserve the historical chunking so
+                # this doesn't blow batch size unbounded; same-stem
+                # anchoring still works within each sub-chunk.
+                if batch:
+                    batches.append((rel, batch))
+                    batch = []
+                for i in range(0, len(companion), IMPORT_BATCH_SIZE):
+                    batches.append((rel, companion[i:i + IMPORT_BATCH_SIZE]))
+                continue
+            if batch and len(batch) + len(companion) > IMPORT_BATCH_SIZE:
+                batches.append((rel, batch))
+                batch = []
+            batch.extend(companion)
+        if batch:
+            batches.append((rel, batch))
 
     return _ImportPlan(
         files=files,

@@ -138,6 +138,57 @@ def test_copy_via_temp_no_hardlink_fallback_promotes_when_slot_is_free(
     assert _no_partials(dst.parent) == []
 
 
+def test_copy_via_temp_no_hardlink_fallback_never_overwrites_replacement(
+    tmp_path, monkeypatch,
+):
+    """A concurrent writer that unlinks the O_EXCL placeholder and
+    creates its own file at ``dst`` between our claim and our promote
+    used to see its bytes silently overwritten: the old fallback closed
+    the claim fd and then ran ``os.replace(tmp, dst)`` over whatever
+    was at the name. The new promote transfers bytes into the still-open
+    claim fd and re-checks the inode's link count, so the racer's file
+    survives untouched and the caller sees FileExistsError.
+    """
+    import errno
+
+    src = _jpeg(tmp_path / "a.jpg", "red")
+    dst_dir = tmp_path / "out"
+    dst_dir.mkdir()
+    dst = dst_dir / "a.jpg"
+
+    def no_hardlinks(*_a, **_kw):
+        raise OSError(errno.EOPNOTSUPP, "hard links not supported")
+
+    monkeypatch.setattr(staged_copy.os, "link", no_hardlinks)
+
+    # After our O_EXCL claim succeeds, simulate a concurrent writer:
+    # unlink our placeholder and drop its own file at the same name.
+    # ``os.fstat`` on our fd afterwards reports nlink=0.
+    racer_bytes = b"racer-content"
+    original_fstat = os.fstat
+    tripped = {"once": False}
+
+    def racing_fstat(fd):
+        result = original_fstat(fd)
+        if not tripped["once"]:
+            tripped["once"] = True
+            try:
+                os.unlink(str(dst))
+            except FileNotFoundError:
+                pass
+            with open(str(dst), "wb") as fh:
+                fh.write(racer_bytes)
+        return result
+
+    monkeypatch.setattr(staged_copy.os, "fstat", racing_fstat)
+
+    with pytest.raises(FileExistsError):
+        staged_copy.copy_via_temp(str(src), str(dst))
+
+    assert dst.read_bytes() == racer_bytes
+    assert _no_partials(dst_dir) == []
+
+
 # -- ingest: a failed copy leaves nothing behind ------------------------------
 
 

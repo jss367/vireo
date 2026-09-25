@@ -12,20 +12,42 @@ import os
 import shutil
 import tempfile
 
+_COPY_CHUNK = 1 << 20  # 1 MiB per read; small enough for slow NAS transfers
+
 
 def copy_via_temp(src, dst):
     """Copy ``src`` to ``dst`` through a hidden sibling temp file.
 
-    Never overwrites: raises ``FileExistsError`` if ``dst`` exists by the
-    time the copy is promoted. The promote is a no-overwrite ``os.link``;
-    on filesystems without hard links (exFAT, some SMB/NFS shares) it
-    falls back to an atomic exclusive-create claim of ``dst`` (an
-    ``open`` with ``O_CREAT | O_EXCL`` — a check-then-``replace`` would
-    silently overwrite a file created by a concurrent writer inside the
-    window between the two calls) followed by ``os.replace`` onto that
-    just-claimed empty placeholder. Any ``OSError`` from the copy
-    propagates, and the temp file is always removed, so on failure the
-    destination is exactly as it was.
+    Never overwrites: raises ``FileExistsError`` if ``dst`` exists at
+    promote time. The promote is a no-overwrite ``os.link``; on
+    filesystems without hard links (exFAT, some SMB/NFS shares) it
+    falls back to a two-step promote that avoids ``os.replace`` on the
+    hot path so a concurrent writer's file at the same name is never
+    overwritten:
+
+    1. Claim ``dst`` with ``open(O_CREAT | O_EXCL | O_WRONLY)``. This is
+       the same kernel-level race gate the loser of a same-name write
+       loses ``FileExistsError`` on before touching any bytes.
+    2. Write the temp file's bytes into that still-open placeholder fd
+       — not to the name — so nothing about the transfer can overwrite a
+       file another writer creates at ``dst`` after our claim. When the
+       write finishes we re-check ``st_nlink`` on the fd; if a
+       concurrent writer unlinked and recreated ``dst`` during the
+       transfer the placeholder inode is orphaned (nlink == 0) and we
+       raise ``FileExistsError`` so we don't report success over bytes
+       that never reached the named destination.
+
+    A ``check-then-``replace`` sequence in this window would silently
+    overwrite that concurrent writer's file (any interposed unlink and
+    same-name recreate would land on top of our ``os.replace``), and if
+    the replace itself failed the cleanup could unlink the writer's
+    replacement instead of our placeholder.
+
+    Any ``OSError`` from the copy propagates, and the temp file is
+    always removed. On failure the destination is exactly as it was:
+    the fallback rolls back its placeholder only when the entry at
+    ``dst`` is still the inode we claimed, so a concurrent writer's
+    replacement (an inode we didn't claim) is left in place.
     """
     dst_dir = os.path.dirname(dst) or "."
     fd, tmp = tempfile.mkstemp(
@@ -41,27 +63,59 @@ def copy_via_temp(src, dst):
         except FileExistsError:
             raise
         except OSError:
-            # Kernel-level race: exactly one caller wins the O_EXCL
-            # claim, and the loser gets FileExistsError before touching
-            # any bytes.
-            try:
-                claim_fd = os.open(
-                    dst, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644,
-                )
-            except FileExistsError:
-                raise
-            os.close(claim_fd)
-            try:
-                os.replace(tmp, dst)
-            except BaseException:
-                # Roll back the empty placeholder so a failed promote
-                # never leaves a zero-byte artifact under ``dst``. This
-                # covers OSError from the replace and cancellations
-                # (KeyboardInterrupt / SystemExit) that would otherwise
-                # skip the cleanup.
-                with contextlib.suppress(FileNotFoundError):
-                    os.unlink(dst)
-                raise
+            _promote_by_placeholder(tmp, dst)
     finally:
         with contextlib.suppress(FileNotFoundError):
             os.unlink(tmp)
+
+
+def _promote_by_placeholder(tmp, dst):
+    """Promote ``tmp`` to ``dst`` through an ``O_CREAT | O_EXCL`` claim.
+
+    See ``copy_via_temp`` for the race the ``st_nlink`` check closes.
+    """
+    # O_EXCL is the atomic no-overwrite gate. A concurrent writer that
+    # already created ``dst`` gets us FileExistsError here, before we
+    # touch any bytes; raise so ``copy_via_temp`` cleans up ``tmp``.
+    claim_fd = os.open(
+        dst, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644,
+    )
+    try:
+        claim_ino = os.fstat(claim_fd).st_ino
+        try:
+            with open(tmp, "rb") as fin:
+                while True:
+                    chunk = fin.read(_COPY_CHUNK)
+                    if not chunk:
+                        break
+                    off = 0
+                    while off < len(chunk):
+                        off += os.write(claim_fd, chunk[off:])
+            # If another writer unlinked our claim mid-write, our bytes
+            # went to an orphan and ``dst`` either does not exist or now
+            # points to that writer's file. Either way this promote did
+            # NOT deliver ``tmp``'s bytes to ``dst``; refuse rather than
+            # report success over the other writer's data.
+            if os.fstat(claim_fd).st_nlink == 0:
+                raise FileExistsError(
+                    f"{dst}: placeholder was replaced during promote"
+                )
+            # Match ``copy2``'s metadata transfer. Do it on the fd so a
+            # concurrent unlink+recreate between the nlink check and
+            # these calls cannot leak our metadata onto the other
+            # writer's file.
+            src_stat = os.stat(tmp)
+            os.utime(claim_fd, ns=(src_stat.st_atime_ns, src_stat.st_mtime_ns))
+            os.fchmod(claim_fd, src_stat.st_mode)
+        except BaseException:
+            # Roll back only when the entry at ``dst`` still points to
+            # the inode we claimed. A concurrent writer's replacement
+            # has a different inode and stays.
+            try:
+                if os.stat(dst).st_ino == claim_ino:
+                    os.unlink(dst)
+            except FileNotFoundError:
+                pass
+            raise
+    finally:
+        os.close(claim_fd)

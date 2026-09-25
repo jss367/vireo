@@ -2113,6 +2113,69 @@ def test_wc_extraction_deferred_to_after_last_batch(tmp_path, monkeypatch):
     )
 
 
+def test_planner_keeps_companion_group_in_one_batch(tmp_path, monkeypatch):
+    """A same-stem RAW/JPEG pair must land in one batch even when the
+    destination folder holds more than ``IMPORT_BATCH_SIZE`` files. Each
+    ``_ImportBatchState`` keeps its own ``companion_siblings`` /
+    ``companion_slots``; a pair split across two batches would look like
+    two singletons, so a collision rename could suffix one half only and
+    the scan would then pair the JPEG with an unrelated same-stem RAW.
+    """
+    import import_job
+    from import_job import _companion_key
+
+    monkeypatch.setattr(import_job, "IMPORT_BATCH_SIZE", 2)
+
+    card = tmp_path / "card"
+    card.mkdir()
+    # All files land in the same destination folder (same date), so they
+    # form one ``rel`` group. ``discover_source_files`` returns the group
+    # sorted by path, so name the pair so it lands at positions 1..2 of a
+    # 4-file group — under naive chunk-of-2 batching this puts one half
+    # at the end of batch 1 and the other at the start of batch 2.
+    ts = datetime(2026, 4, 15, 10, 0, 0).timestamp()
+    jpeg_bytes = None
+    for name in ("A.jpg", "PAIR.JPG", "Z.jpg"):
+        p = card / name
+        Image.new("RGB", (16, 16), "red").save(str(p))
+        os.utime(str(p), (ts, ts))
+        if jpeg_bytes is None:
+            jpeg_bytes = p.read_bytes()
+    # PAIR.NEF: real RAW bytes aren't required — the planner only groups
+    # by name and timestamp, and the ingest path treats it as a foreign
+    # extension. Use synthetic bytes with a distinct trailer so it isn't
+    # de-duplicated against PAIR.JPG.
+    nef = card / "PAIR.NEF"
+    nef.write_bytes(jpeg_bytes + b"NEF-SENSOR")
+    os.utime(str(nef), (ts, ts))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    db.set_active_workspace(ws_id)
+
+    params = import_job.ImportParams(
+        sources=[str(card)], destination=str(tmp_path / "archive"),
+        vireo_dir=str(tmp_path / "vireo"),
+    )
+    plan = import_job._plan_import(
+        db, params, emit=lambda *_a, **_kw: None,
+        state=import_job._ImportRunState(log_label="test"),
+    )
+
+    # The plan must not put the two ``PAIR.*`` files in different batches.
+    pair_batches = []
+    for batch_index, (_rel, batch) in enumerate(plan.batches):
+        for src_file in batch:
+            if _companion_key(src_file)[1] == "pair":
+                pair_batches.append(batch_index)
+    assert len(pair_batches) == 2, pair_batches
+    assert pair_batches[0] == pair_batches[1], (
+        f"PAIR.NEF and PAIR.JPG straddled a batch boundary: {pair_batches}"
+    )
+    db.close()
+
+
 def test_remote_import_wc_identity_captured_before_transfer(
         tmp_path, monkeypatch):
     """Spec decision 7: the working-copy identity tuple ``(size,
