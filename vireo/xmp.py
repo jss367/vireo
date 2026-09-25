@@ -4,6 +4,7 @@ Provides read/write/merge/remove for XMP keyword and rating metadata.
 All XMP namespace constants and helpers live here as the single source of truth.
 """
 
+import copy
 import errno
 import logging
 import math
@@ -832,7 +833,7 @@ class SidecarEditor:
             if extra_bag is not None:
                 for li in extra_bag.findall(f"{{{NS_RDF}}}li"):
                     if li.text and li.text not in existing:
-                        ET.SubElement(bag, f"{{{NS_RDF}}}li").text = li.text
+                        bag.append(copy.deepcopy(li))
                         existing.add(li.text)
             owner.remove(extra)
             self._dirty = True

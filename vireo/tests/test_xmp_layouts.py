@@ -391,6 +391,39 @@ def test_ambiguous_non_empty_subjects_do_not_designate_a_photo(tmp_path):
     assert metadata["location"]["longitude"] == pytest.approx(-70.25)
 
 
+def test_merging_duplicate_bags_preserves_rdf_li_qualifiers(tmp_path):
+    """When collapsing duplicate keyword bags, rdf:li attributes survive."""
+    path = tmp_path / "photo.xmp"
+    xml_ns = "http://www.w3.org/XML/1998/namespace"
+    path.write_text(EXIFTOOL_XMP.replace(
+        "<rdf:Description rdf:about='' xmlns:dc",
+        f"<rdf:Description rdf:about='' xmlns:dc='{NS_DC}'>\n"
+        "  <dc:subject><rdf:Bag>"
+        "<rdf:li xml:lang='x-default' rdf:parseType='Literal'>Egret</rdf:li>"
+        "</rdf:Bag></dc:subject>\n"
+        " </rdf:Description>\n <rdf:Description rdf:about='' xmlns:dc",
+        1,
+    ))
+    path = str(path)
+
+    editor = SidecarEditor(path)
+    editor.add_keywords({"Kiwi"}, set())
+    editor.commit()
+
+    assert _copies(path, SUBJECT) == 1
+    root = ET.parse(path).getroot()
+    bags = list(root.iter(f"{{{NS_RDF}}}Bag"))
+    egret_lis = [
+        li for bag in bags
+        for li in bag.findall(f"{{{NS_RDF}}}li")
+        if (li.text or "") == "Egret"
+    ]
+    assert len(egret_lis) == 1
+    assert egret_lis[0].get(f"{{{xml_ns}}}lang") == "x-default"
+    assert egret_lis[0].get(f"{{{NS_RDF}}}parseType") == "Literal"
+    assert set(read_keywords(path)) == {"Heron", "Egret", "Kiwi"}
+
+
 @pytest.mark.skipif(shutil.which("exiftool") is None, reason="exiftool not installed")
 def test_exiftool_reads_what_vireo_wrote_in_both_layouts(layout_xmp):
     """ExifTool must see Vireo's values, not a stale copy it wrote itself."""
