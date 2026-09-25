@@ -76,6 +76,27 @@ def test_stored_huge_int_does_not_break_config_load(app_and_db):
     assert loaded["photos_per_page"] == huge
 
 
+def test_stored_fractional_int_is_repaired(app_and_db):
+    """A float stored for an int field would crash SQLite's LIMIT ?.
+
+    A fractional value falls back to the schema default; an integer-valued
+    float is normalised to an int so downstream binds succeed.
+    """
+    import config as cfg
+
+    app, _db = app_and_db
+    _write_raw_config({"photos_per_page": 50.5})
+    loaded = cfg.load()
+    assert loaded["photos_per_page"] == cfg.DEFAULTS["photos_per_page"]
+    assert isinstance(loaded["photos_per_page"], int)
+    assert app.test_client().get("/api/browse/init").status_code == 200
+
+    _write_raw_config({"photos_per_page": 50.0})
+    loaded = cfg.load()
+    assert loaded["photos_per_page"] == 50
+    assert isinstance(loaded["photos_per_page"], int)
+
+
 def test_stored_bad_workspace_override_inherits_global(app_and_db):
     import config as cfg
 
@@ -329,3 +350,53 @@ def test_report_issue_config_keeps_only_identifier_strings(app_and_db):
     assert config_in_report["classification_threshold"] == (
         current["classification_threshold"]
     )
+
+
+def test_report_issue_config_redacts_out_of_schema_enum_string(app_and_db):
+    """An enum key holding an unvalidated legacy value must not leak.
+
+    Older builds stored strings without checking them against the schema,
+    so ``keyword_case`` (or any enum key) can hold arbitrary text. The
+    redactor must confirm the value is in the schema's ``enum`` allowlist
+    before letting it through.
+    """
+    import config as cfg
+
+    app, _db = app_and_db
+    current = cfg.load()
+    current["report_url"] = ""
+    cfg.save(current)
+    # ``cfg.save`` validates, so bypass it to model a legacy unvalidated
+    # write path leaving a private string on an enum key.
+    on_disk = json.load(open(cfg.CONFIG_PATH))
+    on_disk["keyword_case"] = "private-note-Do-Not-Share"
+    with open(cfg.CONFIG_PATH, "w") as f:
+        json.dump(on_disk, f)
+
+    resp = app.test_client().post(
+        "/api/report-issue", json={"description": "redaction"},
+    )
+    config_in_report = resp.get_json()["diagnostics"]["config"]
+    assert "private-note-Do-Not-Share" not in json.dumps(config_in_report)
+    assert config_in_report["keyword_case"] == "[REDACTED]"
+
+
+def test_report_issue_config_redacts_out_of_schema_list_string(app_and_db):
+    """A ``list_string`` item outside its ``items_enum`` must not leak."""
+    import config as cfg
+
+    app, _db = app_and_db
+    current = cfg.load()
+    current["report_url"] = ""
+    cfg.save(current)
+    on_disk = json.load(open(cfg.CONFIG_PATH))
+    on_disk["subject_types"] = ["taxonomy", "private-tag-leak"]
+    with open(cfg.CONFIG_PATH, "w") as f:
+        json.dump(on_disk, f)
+
+    resp = app.test_client().post(
+        "/api/report-issue", json={"description": "redaction"},
+    )
+    config_in_report = resp.get_json()["diagnostics"]["config"]
+    assert "private-tag-leak" not in json.dumps(config_in_report)
+    assert "taxonomy" in config_in_report["subject_types"]

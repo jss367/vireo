@@ -962,7 +962,7 @@ def validate_value(key, raw):
 _MISSING = object()
 
 
-def _usable_number(value):
+def _usable_number(value, kind):
     if isinstance(value, bool):
         return False
     if isinstance(value, int):
@@ -972,7 +972,14 @@ def _usable_number(value):
         # every reader of a legacy config that stored such a value.
         return True
     if isinstance(value, float):
-        return math.isfinite(value)
+        if not math.isfinite(value):
+            return False
+        # A float stored where the schema wants an int (e.g. legacy
+        # ``"photos_per_page": 50.5``) would pass to SQLite's ``LIMIT ?``
+        # and raise ``IntegrityError: datatype mismatch``. Route the value
+        # through ``_coerce`` instead: an integer-valued float becomes an
+        # int, and a fractional one falls back to the default.
+        return kind != "int"
     return False
 
 
@@ -1003,10 +1010,10 @@ def repair_types(config, defaults):
             continue
         if kind == "bool" and isinstance(value, bool):
             continue
-        if kind != "bool" and _usable_number(value):
+        if kind != "bool" and _usable_number(value, kind):
             continue
         try:
-            if kind != "bool" and not isinstance(value, str):
+            if kind != "bool" and not isinstance(value, (str, int, float)):
                 raise ValidationError(f"{key} is not a number")
             repaired = _coerce(value, kind)
         except ValidationError:

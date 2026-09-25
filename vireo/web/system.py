@@ -687,15 +687,19 @@ def create_system_blueprint(
         import config_schema
 
         # Config strings are kept only where the value is one of a fixed set
-        # of identifiers. Every other string (NAS hosts and user names in
-        # remote_targets, recent import destinations, output folders, quick
-        # filter labels, and any key added later) is replaced: matching key
-        # names for secrets and paths let those through whenever a new key
-        # was named differently.
-        safe_string_settings = {
-            key for key, spec in config_schema.SCHEMA.items()
-            if spec["type"] == "enum"
-        } | {"browse_card_fields", "subject_types"}
+        # of identifiers *the schema allows for that key*. Every other string
+        # (NAS hosts and user names in remote_targets, recent import
+        # destinations, output folders, quick filter labels, and any key
+        # added later) is replaced: matching key names for secrets and paths
+        # let those through whenever a new key was named differently. An
+        # arbitrary string stored for an enum key by an older unvalidated
+        # write path must NOT slip through on the key name alone.
+        enum_allowlist = {}
+        for key, spec in config_schema.SCHEMA.items():
+            if spec["type"] == "enum":
+                enum_allowlist[key] = frozenset(spec["enum"])
+            elif spec["type"] == "list_string" and "items_enum" in spec:
+                enum_allowlist[key] = frozenset(spec["items_enum"])
 
         def _redact_config(obj, dotted=""):
             if isinstance(obj, dict):
@@ -713,7 +717,10 @@ def create_system_blueprint(
             if isinstance(obj, list):
                 return [_redact_config(item, dotted) for item in obj]
             if isinstance(obj, str) and obj:
-                if dotted in safe_string_settings or dotted.startswith("keyboard_shortcuts."):
+                if dotted.startswith("keyboard_shortcuts."):
+                    return obj
+                allowed = enum_allowlist.get(dotted)
+                if allowed is not None and obj in allowed:
                     return obj
                 return "[REDACTED]"
             return obj
