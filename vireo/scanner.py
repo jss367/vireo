@@ -465,6 +465,37 @@ def _extract_timestamp(exif_group):
         return None
 
 
+# RAW and camera JPEG of one exposure carry the same DateTimeOriginal; a
+# couple of seconds absorbs sub-second/rounding differences between the two
+# files' EXIF blocks without admitting a different frame.
+COMPANION_TIMESTAMP_TOLERANCE_SECS = 2.0
+
+
+def _companions_compatible(raw, jpeg):
+    """True unless the two rows' capture metadata says they are different shots.
+
+    Missing metadata on either side is not evidence against the pair (an
+    unreadable RAW still pairs with its JPEG by name, as before); only a
+    capture-time gap beyond the tolerance or a different camera refuses it.
+    """
+    raw_ts, jpeg_ts = raw.get("timestamp"), jpeg.get("timestamp")
+    if raw_ts and jpeg_ts:
+        try:
+            gap = abs(
+                (datetime.fromisoformat(str(raw_ts))
+                 - datetime.fromisoformat(str(jpeg_ts))).total_seconds()
+            )
+        except (TypeError, ValueError):
+            gap = None
+        if gap is not None and gap > COMPANION_TIMESTAMP_TOLERANCE_SECS:
+            return False
+    for column in ("camera_make", "camera_model"):
+        a, b = raw.get(column), jpeg.get(column)
+        if a and b and str(a).strip().lower() != str(b).strip().lower():
+            return False
+    return True
+
+
 def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
     """Find raw+JPEG pairs in the same folder and merge them.
 
@@ -489,7 +520,8 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
     jpeg_exts = {".jpg", ".jpeg"}
 
     rows = db.conn.execute(
-        "SELECT id, folder_id, filename, extension FROM photos"
+        "SELECT id, folder_id, filename, extension, timestamp,"
+        " camera_make, camera_model FROM photos"
         " WHERE companion_path IS NULL"
         " OR (companion_path IS NOT NULL AND extension IN"
         " ('.nef','.cr2','.cr3','.arw','.raf','.dng','.rw2','.orf'))"
@@ -529,9 +561,29 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
         if not raws or not jpegs:
             continue
 
-        # Use first raw as primary, first JPEG as companion
-        primary = raws[0]
-        companion = jpegs[0]
+        # A shared stem alone does not make a pair: two bodies shooting
+        # the same day with overlapping counters (or an import that
+        # renamed one side of a collision) put unrelated IMG_0001.CR3 and
+        # IMG_0001.JPG side by side. Pair the first RAW/JPEG whose capture
+        # metadata does not contradict it; with no such pair, leave both
+        # as separate photos.
+        pair = next(
+            (
+                (raw, jpeg)
+                for raw in raws
+                for jpeg in jpegs
+                if _companions_compatible(raw, jpeg)
+            ),
+            None,
+        )
+        if pair is None:
+            log.info(
+                "Not pairing same-stem RAW and JPEG with conflicting capture "
+                "metadata: %s",
+                ", ".join(m["filename"] for m in raws + jpegs),
+            )
+            continue
+        primary, companion = pair
 
         # Transfer metadata from companion to primary if primary lacks it.
         # Includes the promoted EXIF summary columns

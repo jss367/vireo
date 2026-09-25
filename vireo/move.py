@@ -17,9 +17,11 @@ from datetime import datetime
 try:
     from .db import _chunks, _join_subtree_path, _subtree_prefix, _subtree_relative
     from .proc import no_window_kwargs
+    from .staged_copy import copy_via_temp
 except ImportError:
     from db import _chunks, _join_subtree_path, _subtree_prefix, _subtree_relative
     from proc import no_window_kwargs
+    from staged_copy import copy_via_temp
 
 log = logging.getLogger(__name__)
 
@@ -50,9 +52,17 @@ RSYNC_STALL_TIMEOUT = 1800  # 30 minutes
 
 
 def _xmp_path(filepath):
-    """Return the XMP sidecar path for a file, or None if it doesn't exist."""
-    xmp = os.path.splitext(filepath)[0] + ".xmp"
-    return xmp if os.path.isfile(xmp) else None
+    """Return the XMP sidecar path for a file, or None if it doesn't exist.
+
+    Matches ``.XMP`` too (as ``offline_cache._xmp_source_for`` does): on a
+    case-sensitive volume an uppercase sidecar would otherwise be left
+    behind at the source when its photo moves.
+    """
+    stem = os.path.splitext(filepath)[0]
+    for xmp in (stem + ".xmp", stem + ".XMP"):
+        if os.path.isfile(xmp):
+            return xmp
+    return None
 
 
 def _companion_files(photo, src_dir):
@@ -69,8 +79,15 @@ def _companion_files(photo, src_dir):
 
 
 def _copy_and_verify(src, dst):
-    """Copy a single file and verify size matches. Returns True on success."""
-    shutil.copy2(src, dst)
+    """Copy a single file and verify size matches. Returns True on success.
+
+    The copy goes through a hidden sibling temp file (``copy_via_temp``),
+    so a failed copy never leaves a truncated file at ``dst`` that would
+    block every retry as "already exists" and be cataloged by a rescan.
+    ``OSError`` from the copy propagates for the caller to record against
+    this one photo.
+    """
+    copy_via_temp(src, dst)
     if os.path.getsize(src) != os.path.getsize(dst):
         os.remove(dst)
         return False
@@ -2274,7 +2291,11 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
 
             # Gather companion files
             companions = _companion_files(photo, src_dir)
-            xmp_companion = os.path.splitext(photo["filename"])[0] + ".xmp"
+            _src_xmp = _xmp_path(src_file)
+            xmp_companion = (
+                os.path.basename(_src_xmp) if _src_xmp
+                else os.path.splitext(photo["filename"])[0] + ".xmp"
+            )
 
             # Check companion collisions
             comp_collision = False
@@ -2294,8 +2315,15 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
             if comp_collision:
                 continue
 
-            # Copy main file
-            if not _copy_and_verify(src_file, dst_file):
+            # Copy main file. A copy error (disk full, share dropped) fails
+            # this photo only; the rest of the batch still moves.
+            try:
+                copied_ok = _copy_and_verify(src_file, dst_file)
+            except OSError as e:
+                log.warning("Move skipped for %s: copy failed: %s", photo["filename"], e)
+                errors.append(f"{photo['filename']}: copy failed: {e}")
+                continue
+            if not copied_ok:
                 log.warning("Move skipped for %s: verification failed after copy", photo["filename"])
                 errors.append(f"{photo['filename']}: verification failed after copy")
                 continue
@@ -2309,8 +2337,14 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
                 if comp == xmp_companion and \
                         (src_dir, comp) in copied_xmp_companions:
                     continue
-                if not _copy_and_verify(comp_src, comp_dst):
-                    errors.append(f"{comp}: companion verification failed")
+                try:
+                    comp_copied = _copy_and_verify(comp_src, comp_dst)
+                    comp_error = "companion verification failed"
+                except OSError as e:
+                    comp_copied = False
+                    comp_error = f"companion copy failed: {e}"
+                if not comp_copied:
+                    errors.append(f"{comp}: {comp_error}")
                     # Clean up what we copied
                     os.remove(dst_file)
                     for cc in copied_companions:

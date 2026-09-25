@@ -1420,6 +1420,21 @@ class Database:
                 PRIMARY KEY (photo_id, workspace_id)
             );
 
+            -- Which rejections the duplicate resolver made. ``photos.flag``
+            -- alone cannot tell them from a rejection the user made by hand,
+            -- and the duplicate scan's auto-reopen may only undo its own.
+            -- Any flag change away from 'rejected' drops the row, so a photo
+            -- the user un-rejects and later rejects again counts as theirs.
+            CREATE TABLE IF NOT EXISTS duplicate_rejections (
+                photo_id  INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE
+            );
+            CREATE TRIGGER IF NOT EXISTS trg_duplicate_rejections_clear
+            AFTER UPDATE OF flag ON photos
+            WHEN NEW.flag IS NOT 'rejected'
+            BEGIN
+                DELETE FROM duplicate_rejections WHERE photo_id = NEW.id;
+            END;
+
             CREATE TABLE IF NOT EXISTS photo_edit_recipes (
                 photo_id    INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
                 recipe_json TEXT NOT NULL,
@@ -5434,11 +5449,13 @@ class Database:
         return {"resolved": resolved, "skipped": skipped}
 
     def reopen_duplicate_group(self, file_hash):
-        """Un-reject all rejected rows sharing this file_hash.
+        """Un-reject the rows sharing this file_hash that duplicate
+        resolution rejected (those recorded in ``duplicate_rejections``).
 
         Used by the duplicate scan when the kept file has gone missing on
         disk but a rejected sibling still exists — clearing the rejection
         lets the next proposal pass run Rule 0 and promote the survivor.
+        A row the user rejected by hand stays rejected.
         Returns the number of rows un-rejected.
         """
         return self._duplicates_repository().reopen(file_hash)

@@ -2,10 +2,10 @@
 
 import contextlib
 import errno
+import itertools
 import logging
 import os
 import posixpath
-import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -25,6 +25,7 @@ from import_dedup import (
     stored_metadata_key,
 )
 from scanner import ScanCancelled, compute_file_hash
+from staged_copy import copy_via_temp
 
 log = logging.getLogger(__name__)
 
@@ -801,6 +802,51 @@ def ingest(
     # post-import scan folder.
     batch_dest_folders: dict[tuple, str] = {}
 
+    # Same-stem card files (IMG_0001.CR3 + IMG_0001.JPG) keep one shared
+    # stem at the destination: a collision rename of one member alone
+    # (IMG_0001_1.CR3 beside IMG_0001.JPG) splits the pair, and the scan
+    # would then pair the JPEG with the unrelated RAW that owns the
+    # original stem. ``companion_siblings`` groups this batch's files by
+    # source folder + stem; ``companion_slots`` records the numeric suffix
+    # (0 = original name) each group's first copied member took, keyed by
+    # destination folder too.
+    companion_siblings: dict[tuple, list[Path]] = {}
+    for source_file in to_copy:
+        companion_siblings.setdefault(
+            (str(source_file.parent), source_file.stem.casefold()), [],
+        ).append(source_file)
+    companion_slots: dict[tuple, int] = {}
+
+    def _sibling_blocks_slot(source_file, dest_folder, slot):
+        """True if a same-stem sibling bound for ``dest_folder`` would meet a
+        different file at ``slot``. Only a provably different file counts
+        (a non-file entry or a size mismatch); a same-size file may be the
+        sibling's own bytes, which its own collision check skips."""
+        stem = source_file.stem
+        for sibling in companion_siblings.get(
+            (str(source_file.parent), stem.casefold()), (),
+        ):
+            if sibling == source_file:
+                continue
+            sibling_folder = Path(destination_dir) / build_destination_path(
+                timestamps.get(sibling), folder_template, sibling,
+            )
+            if sibling_folder != dest_folder:
+                continue
+            name = (sibling.name if slot == 0
+                    else f"{stem}_{slot}{sibling.suffix}")
+            candidate = dest_folder / name
+            if not os.path.lexists(candidate):
+                continue
+            try:
+                if not candidate.is_file():
+                    return True
+                if candidate.stat().st_size != sibling.stat().st_size:
+                    return True
+            except OSError:
+                return True
+        return False
+
     for source_file in to_copy:
         if pause_callback:
             pause_callback()
@@ -829,6 +875,12 @@ def ingest(
             dest_folder.mkdir(parents=True, exist_ok=True)
 
             dest_file = dest_folder / source_file.name
+            slot_key = (
+                str(source_file.parent), source_file.stem.casefold(),
+                str(dest_folder),
+            )
+            anchor = companion_slots.get(slot_key)
+            needs_suffix = False
 
             # Handle filename collision (different file, same name)
             if dest_file.exists():
@@ -870,14 +922,38 @@ def ingest(
                         duplicate_folders.add(str(dest_folder))
                         continue
                 # Different file, same name — add numeric suffix
-                stem = dest_file.stem
-                suffix = dest_file.suffix
-                counter = 1
-                while dest_file.exists():
-                    dest_file = dest_folder / f"{stem}_{counter}{suffix}"
-                    counter += 1
+                needs_suffix = True
+            elif anchor:
+                # A same-stem sibling was already renamed to a suffix.
+                needs_suffix = True
+            elif anchor is None and _sibling_blocks_slot(
+                source_file, dest_folder, 0,
+            ):
+                # This name is free, but a same-stem sibling would meet a
+                # different file at it and be renamed away from us.
+                needs_suffix = True
 
-            shutil.copy2(str(source_file), str(dest_file))
+            slot = 0
+            if needs_suffix:
+                stem = source_file.stem
+                suffix = source_file.suffix
+                # The sibling's suffix first, then the usual 1, 2, ...
+                candidates = itertools.chain(
+                    [anchor] if anchor else [],
+                    (n for n in itertools.count(1) if n != anchor),
+                )
+                for slot in candidates:
+                    dest_file = dest_folder / f"{stem}_{slot}{suffix}"
+                    if os.path.lexists(dest_file):
+                        continue
+                    if anchor is None and _sibling_blocks_slot(
+                        source_file, dest_folder, slot,
+                    ):
+                        continue
+                    break
+
+            copy_via_temp(str(source_file), str(dest_file))
+            companion_slots.setdefault(slot_key, slot)
             if checker is not None:
                 for token in checker.record(source_file):
                     batch_dest_folders[token] = str(dest_folder)

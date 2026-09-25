@@ -720,6 +720,85 @@ class _ImportBatchState:
     # to catch that case at enqueue time — the file that was already
     # queued backs this skip. See PR #1113 review.
     queued_src_hashes: dict = field(default_factory=dict)
+    # Same-stem card files (IMG_0001.CR3 + IMG_0001.JPG) must keep one
+    # shared stem at the destination, or a collision rename splits the
+    # pair (IMG_0001_1.CR3 beside IMG_0001.JPG) and the scan's companion
+    # pairing matches the JPEG to an unrelated RAW that owns the original
+    # stem. ``companion_siblings``: companion key -> this batch's source
+    # files sharing it (only groups of 2+). ``companion_slots``: companion
+    # key -> the numeric suffix (0 = original name) the group's first
+    # landed member took, which later members try first.
+    companion_siblings: dict = field(default_factory=dict)
+    companion_slots: dict = field(default_factory=dict)
+
+
+def _companion_key(source_file):
+    """Group key for card files that must share a destination stem."""
+    return (
+        os.path.dirname(str(source_file)),
+        os.path.splitext(os.path.basename(str(source_file)))[0].casefold(),
+    )
+
+
+def _companion_siblings(batch):
+    """Map companion key -> source files, for keys with 2+ files in ``batch``."""
+    groups = {}
+    for source_file in batch:
+        groups.setdefault(_companion_key(source_file), []).append(source_file)
+    return {key: files for key, files in groups.items() if len(files) > 1}
+
+
+def _slot_for(counter, anchor):
+    """The numeric suffix the collision walk's ``counter``-th probe tries.
+
+    With no anchor (or anchor 0) this is the identity. With an anchor, the
+    first probe tries the anchor's suffix, then the walk continues through
+    0, 1, 2, ... skipping it.
+    """
+    if not anchor:
+        return counter
+    if counter == 0:
+        return anchor
+    n = counter - 1
+    return n if n < anchor else n + 1
+
+
+def _sibling_blocks_slot(batch_st, source_file, stem, slot):
+    """True if a same-stem card sibling could not share this ``slot``.
+
+    Only a destination entry that PROVABLY holds different bytes counts: a
+    non-regular entry, or a regular file whose size differs from the
+    sibling's. A same-size file might be the sibling's own bytes (a crash
+    retry's earlier landing), which its own walk will adopt, so it does not
+    block. A sibling whose source cannot be stat'd is ignored; its own walk
+    fails it.
+    """
+    siblings = batch_st.companion_siblings.get(_companion_key(source_file))
+    if not siblings:
+        return False
+    for sibling in siblings:
+        if sibling == source_file:
+            continue
+        sib_suffix = os.path.splitext(sibling.name)[1]
+        name = sibling.name if slot == 0 else f"{stem}_{slot}{sib_suffix}"
+        path = os.path.join(batch_st.dest_folder, name)
+        try:
+            dest_stat = os.stat(path)
+        except FileNotFoundError:
+            if os.path.lexists(path):
+                return True  # dangling symlink: the sibling must advance
+            continue
+        except OSError:
+            return True
+        if not stat_mod.S_ISREG(dest_stat.st_mode):
+            return True
+        try:
+            sib_size = sibling.stat().st_size
+        except OSError:
+            continue
+        if dest_stat.st_size != sib_size:
+            return True
+    return False
 
 
 def _counts(state, rel):
@@ -3354,6 +3433,8 @@ def _resolve_dest_collision(state, batch_st, ctx, *, source_file, rel,
     Returns ``(_WALK_HANDLED, None)`` or ``(_WALK_PLACED, basename)``.
     """
     stem, suffix = os.path.splitext(source_file.name)
+    group_key = _companion_key(source_file)
+    anchor = batch_st.companion_slots.get(group_key)
     counter = 0
     while True:
         if counter and stop_requested():
@@ -3379,8 +3460,12 @@ def _resolve_dest_collision(state, batch_st, ctx, *, source_file, rel,
             # loop-top check cannot flip an otherwise-clean copy into a
             # cancellation.
             return _WALK_CANCELLED, None
-        candidate = (source_file.name if counter == 0
-                     else f"{stem}_{counter}{suffix}")
+        # ``slot`` is the numeric suffix this probe tries; ``counter``
+        # only counts probes. They differ when a same-stem sibling
+        # already landed at a suffix (see ``_slot_for``).
+        slot = _slot_for(counter, anchor)
+        candidate = (source_file.name if slot == 0
+                     else f"{stem}_{slot}{suffix}")
         cand_path = os.path.join(batch_st.dest_folder, candidate)
         if claims is not None:
             candidate_key = ctx.fold_basename(candidate)
@@ -3568,7 +3653,17 @@ def _resolve_dest_collision(state, batch_st, ctx, *, source_file, rel,
                 verified_hash=verified_hash, record_hash=record_hash,
                 src_size=src_size, src_mtime_ns=src_mtime_ns,
             )
+            batch_st.companion_slots.setdefault(group_key, slot)
             return _WALK_HANDLED, None
+        if anchor is None and _sibling_blocks_slot(
+            batch_st, source_file, stem, slot,
+        ):
+            # This name is free, but a same-stem sibling from the card
+            # would collide with a different file at the same suffix and
+            # be renamed away from us. Move the whole group on together.
+            counter += 1
+            continue
+        batch_st.companion_slots.setdefault(group_key, slot)
         return _WALK_PLACED, candidate
 
 
@@ -4342,7 +4437,10 @@ def run_import_job(job, runner, db_path, workspace_id, params):
 
         # Field rationale lives on ``_ImportBatchState``; the rsync-only
         # trio stays empty on the local transport.
-        batch_st = _ImportBatchState(rel=rel, dest_folder=dest_folder)
+        batch_st = _ImportBatchState(
+            rel=rel, dest_folder=dest_folder,
+            companion_siblings=_companion_siblings(batch),
+        )
 
         for source_file in batch:
             if runner.is_cancelled(job["id"]):

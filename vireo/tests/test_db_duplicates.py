@@ -578,7 +578,9 @@ def test_merge_chunks_loser_reads_and_rejections(db, folder):
         db._apply_winner_loser_merge(w, losers)
 
     assert len(rec.matching("WHERE photo_id IN (")) == 2
-    assert len(rec.matching("UPDATE photos SET flag = 'rejected' WHERE id IN (")) == 2
+    # Distinct texts: the trace callback re-reports the parent statement
+    # each time the per-row duplicate_rejections trigger fires.
+    assert len(set(rec.matching("UPDATE photos SET flag = 'rejected' WHERE id IN ("))) == 2
     rejected = db.conn.execute(
         "SELECT COUNT(*) FROM photos WHERE flag = 'rejected'"
     ).fetchone()[0]
@@ -736,6 +738,13 @@ def test_bulk_resolve_empty_batch(db):
 # -- reopen_duplicate_group -----------------------------------------------------
 
 
+def _mark_duplicate_rejected(db, *ids):
+    db.conn.executemany(
+        "INSERT INTO duplicate_rejections(photo_id) VALUES (?)", [(i,) for i in ids],
+    )
+    db.conn.commit()
+
+
 def test_reopen_unrejects_only_that_hash_and_commits(db, folder):
     fid, _ = folder
     k = _photo(db, fid, "k.jpg", "H")
@@ -743,6 +752,7 @@ def test_reopen_unrejects_only_that_hash_and_commits(db, folder):
     r2 = _photo(db, fid, "r2.jpg", "H", flag="rejected")
     p = _photo(db, fid, "p.jpg", "H", flag="pick")
     other = _photo(db, fid, "o.jpg", "OTHER", flag="rejected")
+    _mark_duplicate_rejected(db, r1, r2, other)
 
     assert db.reopen_duplicate_group("H") == 2
 
@@ -750,6 +760,31 @@ def test_reopen_unrejects_only_that_hash_and_commits(db, folder):
     assert _flags(db, [k, r1, r2, p, other]) == {
         k: "none", r1: "none", r2: "none", p: "pick", other: "rejected",
     }
+
+
+def test_reopen_leaves_hand_rejected_rows_rejected(db, folder):
+    fid, _ = folder
+    _photo(db, fid, "k.jpg", "H")
+    by_resolver = _photo(db, fid, "r1.jpg", "H", flag="rejected")
+    by_hand = _photo(db, fid, "r2.jpg", "H", flag="rejected")
+    _mark_duplicate_rejected(db, by_resolver)
+
+    assert db.reopen_duplicate_group("H") == 1
+
+    assert _flags(db, [by_resolver, by_hand]) == {
+        by_resolver: "none", by_hand: "rejected",
+    }
+
+
+def test_resolution_records_which_rows_it_rejected(db, folder):
+    fid, _ = folder
+    a = _photo(db, fid, "owl.jpg", "H")
+    b = _photo(db, fid, "owl-2.jpg", "H")
+
+    result = db.apply_duplicate_resolution([a, b])
+
+    rows = db.conn.execute("SELECT photo_id FROM duplicate_rejections").fetchall()
+    assert [r["photo_id"] for r in rows] == result["loser_ids"]
 
 
 def test_reopen_returns_zero_when_nothing_is_rejected(db, folder):

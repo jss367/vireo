@@ -83,11 +83,17 @@ class DuplicatesRepository:
         return groups
 
     def reopen(self, file_hash):
-        """Un-reject every rejected row with ``file_hash``; return the count."""
+        """Un-reject the rows with ``file_hash`` that the duplicate resolver
+        rejected; return the count.
+
+        Rows the user rejected by hand (no ``duplicate_rejections`` row)
+        stay rejected.
+        """
         with self.conn:
             cur = self.conn.execute(
                 "UPDATE photos SET flag = 'none' "
-                "WHERE file_hash = ? AND flag = 'rejected'",
+                "WHERE file_hash = ? AND flag = 'rejected' "
+                "AND id IN (SELECT photo_id FROM duplicate_rejections)",
                 (file_hash,),
             )
             return cur.rowcount
@@ -256,6 +262,10 @@ class DuplicatesRepository:
             self.conn.execute(
                 f"UPDATE photos SET flag = 'rejected' WHERE id IN ({loser_placeholders})",
                 list(chunk),
+            )
+            self.conn.executemany(
+                "INSERT OR IGNORE INTO duplicate_rejections(photo_id) VALUES (?)",
+                [(pid,) for pid in chunk],
             )
 
     def _chunks(self, values):

@@ -2058,7 +2058,7 @@ def test_pipeline_ingest_omits_safe_to_eject_counts_on_partial_failure(tmp_path,
     still holds a file that never made it to the destination.
     """
     import config as cfg
-    import ingest as ingest_module
+    import staged_copy
     from db import Database
     from PIL import Image
 
@@ -2078,14 +2078,14 @@ def test_pipeline_ingest_omits_safe_to_eject_counts_on_partial_failure(tmp_path,
     db = Database(db_path)
     ws_id = db._active_workspace_id
 
-    real_copy2 = ingest_module.shutil.copy2
+    real_copy2 = staged_copy.shutil.copy2
 
     def flaky_copy2(source, destination, *args, **kwargs):
         if str(source).endswith("b.jpg"):
             raise OSError("simulated card read error")
         return real_copy2(source, destination, *args, **kwargs)
 
-    monkeypatch.setattr(ingest_module.shutil, "copy2", flaky_copy2)
+    monkeypatch.setattr(staged_copy.shutil, "copy2", flaky_copy2)
 
     params = PipelineParams(
         source=str(src),

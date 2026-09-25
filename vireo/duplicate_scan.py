@@ -7,6 +7,7 @@ import os
 
 from duplicate_buckets import bucket_unresolved_proposals
 from duplicates import DupCandidate, resolve_duplicates
+from volume_reachability import get_shared as _volume_reachability
 
 _EMPTY_FILE_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
@@ -35,15 +36,28 @@ def _fetch_photo_rows(db, photo_ids, columns, where_extra=""):
     return rows
 
 
+def _volume_offline(path):
+    """True when ``path`` sits on a mount-shaped volume that is not reachable.
+
+    An unmounted NAS makes every file on it fail ``os.path.exists`` exactly
+    as a deleted file would. Only this tells the two apart.
+    """
+    root, reachable = _volume_reachability().check(path)
+    return root is not None and not reachable
+
+
 def _row_to_info(row, folder_path):
     """Shape a photos row into the dict the UI consumes for a proposal entry.
 
     ``exists`` is populated by stat-ing the path. The resolver uses it via
     Rule 0 (present beats missing) and the UI surfaces it as a warning so the
     user doesn't trash surviving copies of a row whose "winner" file is gone.
+    ``volume_offline`` marks a missing file whose volume is unreachable: its
+    state is unknown, so it must not count as missing.
     """
     filename = row["filename"] or ""
     full_path = os.path.join(folder_path or "", filename)
+    exists = os.path.exists(full_path)
     return {
         "id": row["id"],
         "filename": filename,
@@ -51,8 +65,19 @@ def _row_to_info(row, folder_path):
         "mtime": row["file_mtime"] or 0.0,
         "rating": row["rating"] if row["rating"] is not None else 0,
         "file_size": row["file_size"] if row["file_size"] is not None else 0,
-        "exists": os.path.exists(full_path),
+        "exists": exists,
+        "volume_offline": not exists and _volume_offline(full_path),
     }
+
+
+def _candidate(row, info):
+    """A resolver candidate. A copy on an offline volume counts as present:
+    Rule 0 (present beats missing) must not make it the loser just because
+    its share is unmounted."""
+    return DupCandidate(
+        id=row["id"], path=info["path"], mtime=row["file_mtime"] or 0.0,
+        exists=info["exists"] or info["volume_offline"],
+    )
 
 
 def _attach_edit_recipes(db, proposals):
@@ -100,12 +125,7 @@ def _build_unresolved_proposal(db, group):
     )
 
     info_by_id = {r["id"]: _row_to_info(r, r["folder_path"]) for r in rows}
-    candidates = [
-        DupCandidate(id=r["id"], path=info_by_id[r["id"]]["path"],
-                     mtime=r["file_mtime"] or 0.0,
-                     exists=info_by_id[r["id"]]["exists"])
-        for r in rows
-    ]
+    candidates = [_candidate(r, info_by_id[r["id"]]) for r in rows]
     if len(candidates) < 2:
         # Race: rows could have been rejected between find_duplicate_groups
         # and this lookup. Skip silently.
@@ -147,7 +167,9 @@ def _build_resolved_proposal(db, group):
     rows = _fetch_photo_rows(
         db, group["photo_ids"],
         columns="p.id, p.filename, p.file_mtime, p.rating, p.file_size, p.flag, "
-                "f.path AS folder_path",
+                "f.path AS folder_path, "
+                "EXISTS (SELECT 1 FROM duplicate_rejections d"
+                " WHERE d.photo_id = p.id) AS duplicate_rejected",
     )
     if len(rows) < 2:
         return None
@@ -165,18 +187,21 @@ def _build_resolved_proposal(db, group):
     # exists on disk, the DB-frozen winner is now a ghost while a survivor
     # is sitting unhandled. Un-reject the group and rebuild as unresolved
     # so Rule 0 (present beats missing) promotes the survivor.
-    if not info_by_id[kept[0]["id"]]["exists"] and any(
-        info_by_id[r["id"]]["exists"] for r in rejected
+    #
+    # Not when the kept file's volume is offline: an unmounted share looks
+    # exactly like a deleted file, and reopening would propose rejecting
+    # the archive original. And only rows the duplicate resolver rejected
+    # can bring the group back; a sibling the user rejected by hand stays
+    # rejected (``reopen_duplicate_group`` skips it too).
+    kept_info = info_by_id[kept[0]["id"]]
+    if not kept_info["exists"] and not kept_info["volume_offline"] and any(
+        r["duplicate_rejected"] and info_by_id[r["id"]]["exists"]
+        for r in rejected
     ):
         db.reopen_duplicate_group(group["file_hash"])
         return _build_unresolved_proposal(db, group)
 
-    candidates = [
-        DupCandidate(id=r["id"], path=info_by_id[r["id"]]["path"],
-                     mtime=r["file_mtime"] or 0.0,
-                     exists=info_by_id[r["id"]]["exists"])
-        for r in rows
-    ]
+    candidates = [_candidate(r, info_by_id[r["id"]]) for r in rows]
     _winner_id, losers_with_reasons = resolve_duplicates(candidates)
     reasons = dict(losers_with_reasons)
 
