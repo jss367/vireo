@@ -489,6 +489,71 @@ def test_sidecar_alias_missing_sidecars_on_case_sensitive_windows(
     assert db._pending_keyword_sidecar_alias(pu, ws, "Robin") is False
 
 
+def test_sidecar_alias_same_dir_case_variant_stems_on_case_insensitive_volume(
+    db, tmp_path, monkeypatch
+):
+    """Same-dir case-fold aliased stems queue inverse on case-insensitive fs.
+
+    Two photos in one directory whose stems differ only by case (``A.raw``
+    vs ``a.jpg``) share one sidecar file on a case-insensitive volume
+    (``A.xmp`` == ``a.xmp``). Sync's ``_sidecar_target_identities`` groups
+    the missing case-fold aliases as one target, so a cancellation must
+    queue its inverse or the sibling's write will resurrect the cancelled
+    keyword on the shared sidecar. Simulates the volume by making the
+    parent directory samefile-alias its own case-swapped spelling.
+    """
+    parent = tmp_path / "photos"
+    parent.mkdir()
+    ws = db._active_workspace_id
+    folder = db.add_folder(str(parent), name="photos")
+    pu = db.add_photo(folder, "A.raw", ".raw", 1, 1.0)
+    pl = db.add_photo(folder, "a.jpg", ".jpg", 1, 1.0)
+    _insert(db, pl, "keyword_add", "Robin", ws)
+
+    parent_str = os.path.normpath(str(parent))
+    swapped_parent = os.path.join(os.path.dirname(parent_str), "PHOTOS")
+    real_samefile = os.path.samefile
+
+    def fake_samefile(a, b):
+        if {a, b} == {parent_str, swapped_parent}:
+            return True
+        return real_samefile(a, b)
+
+    monkeypatch.setattr(
+        "vireo.repositories.sync.os.path.samefile", fake_samefile
+    )
+    monkeypatch.setattr(
+        "vireo.repositories.sync.os.path.normcase", lambda p: p.lower()
+    )
+    assert db._pending_keyword_sidecar_alias(pu, ws, "Robin") is True
+
+
+def test_sidecar_alias_same_dir_case_variant_stems_case_sensitive(
+    db, tmp_path, monkeypatch
+):
+    """Case-sensitive fs: same-dir case-fold stems stay distinct.
+
+    Two photos in one directory whose stems differ only by case name
+    distinct sidecars on a case-sensitive volume. The alias check must
+    stay False so a cancellation does not queue a destructive inverse
+    removal against the unrelated sidecar.
+    """
+    parent = tmp_path / "photos"
+    parent.mkdir()
+    swapped_parent = tmp_path / "PHOTOS"
+    if swapped_parent.exists():
+        pytest.skip("tmp_path is on a case-insensitive filesystem")
+    ws = db._active_workspace_id
+    folder = db.add_folder(str(parent), name="photos")
+    pu = db.add_photo(folder, "A.raw", ".raw", 1, 1.0)
+    pl = db.add_photo(folder, "a.jpg", ".jpg", 1, 1.0)
+    _insert(db, pl, "keyword_add", "Robin", ws)
+    monkeypatch.setattr(
+        "vireo.repositories.sync.os.path.normcase", lambda p: p.lower()
+    )
+    assert db._pending_keyword_sidecar_alias(pu, ws, "Robin") is False
+
+
 # -- remove_pending_changes ------------------------------------------------------------
 
 

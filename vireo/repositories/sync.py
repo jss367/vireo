@@ -43,15 +43,43 @@ def _parents_case_alias(own_raw, raw):
     cancellation does not queue a destructive inverse against an unrelated
     file. When the parents are byte-identical strings the parent-samefile
     cannot distinguish the two cases (it would succeed on any existing
-    directory regardless of case sensitivity); we stay conservative there
-    and return False.
+    directory regardless of case sensitivity), so we probe the parent's
+    filesystem directly for case-folding via ``_dir_folds_case``: a shared
+    directory whose fs folds case (macOS default, Windows without per-dir
+    case sensitivity) still aliases sibling sidecars whose stems differ
+    only by case, and sync would group them as one target.
     """
     own_parent = os.path.dirname(own_raw) or os.curdir
     other_parent = os.path.dirname(raw) or os.curdir
     if own_parent == other_parent:
-        return False
+        return _dir_folds_case(own_parent)
     try:
         return os.path.samefile(own_parent, other_parent)
+    except OSError:
+        return False
+
+
+def _dir_folds_case(dir_path):
+    """Whether ``dir_path``'s filesystem folds case for its own basename.
+
+    Constructs a case-swapped spelling of ``dir_path``'s final component
+    and asks the filesystem, via ``samefile``, whether that spelling
+    resolves to the same inode. A case-insensitive volume (macOS's default
+    HFS+/APFS, a normal Windows drive) folds the two spellings; a
+    case-sensitive one raises ``FileNotFoundError`` or returns False. When
+    the basename has no case-swappable letters we cannot probe and stay
+    conservative (False), so a cancellation does not queue a destructive
+    inverse against an unrelated file.
+    """
+    dir_path = os.path.normpath(dir_path)
+    parent, basename = os.path.split(dir_path)
+    if not basename or not parent:
+        return False
+    swapped = basename.swapcase()
+    if swapped == basename:
+        return False
+    try:
+        return os.path.samefile(dir_path, os.path.join(parent, swapped))
     except OSError:
         return False
 
