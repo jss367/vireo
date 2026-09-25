@@ -5,6 +5,7 @@ Tests cover config persistence, model listing, active model selection,
 registration, removal, and taxonomy info — all without downloading
 real model weights.
 """
+import contextlib
 import json
 import os
 import sys
@@ -414,12 +415,13 @@ def test_remove_model_deletes_weights_file(tmp_path, monkeypatch):
             "id": "test-model",
             "name": "Test",
             "weights_path": str(weights),
+            "managed": True,
         }],
         "active_model": "test-model",
     })
 
     result = models.remove_model("test-model")
-    assert result is True
+    assert result == {"files_deleted": True, "kept_path": None}
     assert not weights.exists()
 
     config = models._load_config()
@@ -433,9 +435,10 @@ def test_remove_model_deletes_weights_directory(tmp_path, monkeypatch):
 
     cfg_path = str(tmp_path / "models.json")
     monkeypatch.setattr(models, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
 
-    weights_dir = tmp_path / "model_cache"
-    weights_dir.mkdir()
+    weights_dir = tmp_path / "models" / "model_cache"
+    weights_dir.mkdir(parents=True)
     (weights_dir / "config.json").write_text("{}")
 
     models._save_config({
@@ -443,17 +446,18 @@ def test_remove_model_deletes_weights_directory(tmp_path, monkeypatch):
             "id": "dir-model",
             "name": "Dir Model",
             "weights_path": str(weights_dir),
+            "managed": True,
         }],
         "active_model": None,
     })
 
     result = models.remove_model("dir-model")
-    assert result is True
+    assert result == {"files_deleted": True, "kept_path": None}
     assert not weights_dir.exists()
 
 
 def test_remove_model_not_found(tmp_path, monkeypatch):
-    """Removing a nonexistent model returns False."""
+    """Removing a nonexistent model returns None."""
     import models
 
     cfg_path = str(tmp_path / "models.json")
@@ -461,7 +465,7 @@ def test_remove_model_not_found(tmp_path, monkeypatch):
     monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
 
     result = models.remove_model("nonexistent")
-    assert result is False
+    assert result is None
 
 
 def test_remove_known_model_by_default_path(tmp_path, monkeypatch):
@@ -478,8 +482,532 @@ def test_remove_known_model_by_default_path(tmp_path, monkeypatch):
     (model_dir / "weights.bin").write_bytes(b"fake")
 
     result = models.remove_model("bioclip-vit-b-16")
-    assert result is True
+    assert result == {"files_deleted": True, "kept_path": None}
     assert not model_dir.exists()
+
+
+def test_remove_custom_model_never_deletes_outside_models_dir(tmp_path, monkeypatch):
+    """A custom model registered with weights in the user's own folder is
+    only unregistered: ``rmtree`` on that path would delete the folder."""
+    import models
+
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
+    (tmp_path / "models").mkdir()
+
+    user_dir = tmp_path / "Documents" / "stuff"
+    user_dir.mkdir(parents=True)
+    (user_dir / "model.onnx").write_bytes(b"w")
+    (user_dir / "thesis.docx").write_bytes(b"precious")
+    user_file = tmp_path / "Documents" / "single.onnx"
+    user_file.write_bytes(b"w")
+    # A sibling whose name shares the models dir as a string prefix.
+    prefix_trap = tmp_path / "models-evil"
+    prefix_trap.mkdir()
+    (prefix_trap / "keep.txt").write_text("x")
+
+    models.register_model("custom-dir", "Dir", "ViT-B-16", str(user_dir))
+    models.register_model("custom-file", "File", "ViT-B-16", str(user_file))
+    models.register_model("custom-trap", "Trap", "ViT-B-16", str(prefix_trap))
+    models.register_model("custom-root", "Root", "ViT-B-16", str(tmp_path / "models"))
+
+    assert models.remove_model("custom-dir") == {
+        "files_deleted": False, "kept_path": str(user_dir),
+    }
+    assert models.remove_model("custom-file")["files_deleted"] is False
+    assert models.remove_model("custom-trap")["files_deleted"] is False
+    assert models.remove_model("custom-root")["files_deleted"] is False
+
+    assert (user_dir / "thesis.docx").exists()
+    assert user_file.exists()
+    assert (prefix_trap / "keep.txt").exists()
+    assert (tmp_path / "models").is_dir()
+    assert models._load_config()["models"] == []
+
+
+def test_remove_custom_model_keeps_weights_nested_under_models_dir(
+    tmp_path, monkeypatch,
+):
+    """The confirmation dialog promises a custom model's weights are kept
+    wherever they live. Location inside ``~/.vireo/models`` alone is not
+    proof that Vireo downloaded them: a user is allowed to park their own
+    weights there. Only the ``managed`` flag decides deletion."""
+    import models
+
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
+    (tmp_path / "models").mkdir()
+
+    nested = tmp_path / "models" / "user-owned"
+    nested.mkdir()
+    (nested / "weights.onnx").write_bytes(b"w")
+    (nested / "notes.txt").write_text("keep me")
+
+    models.register_model(
+        "custom-nested", "Nested", "ViT-B-16", str(nested),
+    )
+    result = models.remove_model("custom-nested")
+    assert result == {"files_deleted": False, "kept_path": str(nested)}
+    assert (nested / "weights.onnx").exists()
+    assert (nested / "notes.txt").exists()
+
+    # A managed download nested at the same kind of path still deletes.
+    downloaded = tmp_path / "models" / "vireo-owned"
+    downloaded.mkdir()
+    (downloaded / "weights.onnx").write_bytes(b"w")
+    models.register_model(
+        "vireo-download", "Vireo", "ViT-B-16", str(downloaded), managed=True,
+    )
+    assert models.remove_model("vireo-download") == {
+        "files_deleted": True, "kept_path": None,
+    }
+    assert not downloaded.exists()
+
+
+def test_remove_legacy_entry_preserves_nonstandard_layout(tmp_path, monkeypatch):
+    """A legacy entry (no ``managed`` field, non-``custom-`` id) with a
+    ``weights_path`` inside ``DEFAULT_MODELS_DIR`` but NOT at the standard
+    download layout (``DEFAULT_MODELS_DIR/<id>``) must be preserved on
+    removal. Location under the download root alone is not proof Vireo
+    downloaded it — a hand-edited entry or a user-parked path can look
+    identical.
+    """
+    import models
+
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
+    (tmp_path / "models").mkdir()
+
+    # Weights live inside DEFAULT_MODELS_DIR but at a path that does not
+    # match the standard layout (DEFAULT_MODELS_DIR/<id>).
+    weights = tmp_path / "models" / "user-owned-directory"
+    weights.mkdir()
+    (weights / "weights.onnx").write_bytes(b"w")
+
+    # Write a legacy-style entry directly (no ``managed`` key, id doesn't
+    # start with ``custom-``).
+    (tmp_path / "models.json").write_text(json.dumps({
+        "models": [{
+            "id": "some-id",
+            "name": "Some",
+            "model_str": "x",
+            "weights_path": str(weights),
+        }],
+        "active_model": None,
+    }))
+
+    result = models.remove_model("some-id")
+    assert result == {"files_deleted": False, "kept_path": str(weights)}
+    assert (weights / "weights.onnx").exists()
+
+
+def test_remove_legacy_entry_at_standard_layout_deletes(tmp_path, monkeypatch):
+    """A legacy entry whose ``weights_path`` matches the standard Vireo
+    download layout (``DEFAULT_MODELS_DIR/<id>``) is still treated as
+    Vireo-owned for backward compatibility with pre-``managed`` registries.
+    """
+    import models
+
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
+    (tmp_path / "models").mkdir()
+
+    weights = tmp_path / "models" / "legacy-model"
+    weights.mkdir()
+    (weights / "weights.onnx").write_bytes(b"w")
+
+    (tmp_path / "models.json").write_text(json.dumps({
+        "models": [{
+            "id": "legacy-model",
+            "name": "Legacy",
+            "model_str": "x",
+            "weights_path": str(weights),
+        }],
+        "active_model": None,
+    }))
+
+    result = models.remove_model("legacy-model")
+    assert result == {"files_deleted": True, "kept_path": None}
+    assert not weights.exists()
+
+
+def test_remove_legacy_hf_download_at_repo_slug_layout_deletes(
+    tmp_path, monkeypatch,
+):
+    """A legacy ``download_hf_model`` entry has id ``hf-<owner>-<repo>`` but
+    weights at ``DEFAULT_MODELS_DIR/<repo>`` (see download_hf_model's
+    independent id/local_dir construction), so the standard-layout check
+    misses it. ``_model_is_managed`` recognizes the legacy layout via the
+    ``hf-hub:<owner>/<repo>`` model_str so removal actually deletes the
+    downloaded weights instead of leaving gigabytes on disk.
+    """
+    import models
+
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
+    (tmp_path / "models").mkdir()
+
+    weights = tmp_path / "models" / "bioclip-2.5-vith14"
+    weights.mkdir()
+    (weights / "image_encoder.onnx").write_bytes(b"w")
+
+    (tmp_path / "models.json").write_text(json.dumps({
+        "models": [{
+            "id": "hf-imageomics-bioclip-2.5-vith14",
+            "name": "BioCLIP 2.5",
+            "model_str": "hf-hub:imageomics/bioclip-2.5-vith14",
+            "weights_path": str(weights),
+        }],
+        "active_model": None,
+    }))
+
+    result = models.remove_model("hf-imageomics-bioclip-2.5-vith14")
+    assert result == {"files_deleted": True, "kept_path": None}
+    assert not weights.exists()
+
+
+def test_remove_legacy_hf_entry_outside_repo_slug_layout_preserves(
+    tmp_path, monkeypatch,
+):
+    """An ``hf-*`` legacy entry whose weights live somewhere other than
+    ``DEFAULT_MODELS_DIR/<repo-slug>`` (a user-relocated download, a
+    hand-edited path) still falls through to the preserve branch."""
+    import models
+
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
+    (tmp_path / "models").mkdir()
+
+    weights = tmp_path / "models" / "somewhere-else"
+    weights.mkdir()
+    (weights / "image_encoder.onnx").write_bytes(b"w")
+
+    (tmp_path / "models.json").write_text(json.dumps({
+        "models": [{
+            "id": "hf-imageomics-bioclip-2.5-vith14",
+            "name": "BioCLIP 2.5",
+            "model_str": "hf-hub:imageomics/bioclip-2.5-vith14",
+            "weights_path": str(weights),
+        }],
+        "active_model": None,
+    }))
+
+    result = models.remove_model("hf-imageomics-bioclip-2.5-vith14")
+    assert result == {"files_deleted": False, "kept_path": str(weights)}
+    assert (weights / "image_encoder.onnx").exists()
+
+
+def test_api_remove_custom_model_keeps_user_folder(app_and_db, tmp_path):
+    app, _db = app_and_db
+    client = app.test_client()
+    user_dir = tmp_path / "Documents" / "stuff"
+    user_dir.mkdir(parents=True)
+    (user_dir / "thesis.docx").write_bytes(b"precious")
+
+    resp = client.post("/api/models/custom", json={
+        "name": "Mine", "weights_path": str(user_dir),
+    })
+    model_id = resp.get_json()["model_id"]
+    resp = client.delete(f"/api/models/{model_id}")
+    assert resp.status_code == 200
+    assert resp.get_json()["kept_path"] == str(user_dir)
+    assert (user_dir / "thesis.docx").exists()
+    assert client.delete(f"/api/models/{model_id}").status_code == 404
+
+
+def test_load_config_tolerates_corrupt_file(tmp_path, monkeypatch):
+    """A truncated models.json reads as empty and is kept as .corrupt."""
+    import models
+
+    cfg_path = tmp_path / "models.json"
+    monkeypatch.setattr(models, "CONFIG_PATH", str(cfg_path))
+    cfg_path.write_text('{"models": [{"id": "m1"')
+
+    assert models._load_config() == {"models": [], "active_model": None}
+    assert (tmp_path / "models.json.corrupt").read_text().startswith('{"models"')
+
+    cfg_path.write_text("[1, 2]")
+    assert models._load_config() == {"models": [], "active_model": None}
+
+
+def test_load_config_backs_up_schema_invalid_models_field(tmp_path, monkeypatch):
+    """A schema-invalid ``models`` field is preserved as ``.corrupt``.
+
+    A hand-edited ``models.json`` might carry a mapping in place of the
+    expected list. Normalizing to ``[]`` in memory without backing up
+    the original file first would let the next ``register_model`` /
+    ``set_active_model`` / ``remove_model`` save the empty default over
+    the only copy of the recoverable data.
+    """
+    import models
+
+    cfg_path = tmp_path / "models.json"
+    monkeypatch.setattr(models, "CONFIG_PATH", str(cfg_path))
+    original = json.dumps({
+        "models": {
+            "m1": {"id": "m1", "name": "One", "weights_path": "/w1"},
+            "m2": {"id": "m2", "name": "Two", "weights_path": "/w2"},
+        },
+        "active_model": "m1",
+    })
+    cfg_path.write_text(original)
+
+    loaded = models._load_config()
+    assert loaded["models"] == []
+    assert loaded["active_model"] == "m1"
+    assert (tmp_path / "models.json.corrupt").read_text() == original
+
+    # A subsequent write does not overwrite the backed-up original.
+    models.register_model("new", "N", "s", "/w", "d")
+    assert (tmp_path / "models.json.corrupt").read_text() == original
+
+
+def test_load_config_propagates_backup_oserror(tmp_path, monkeypatch):
+    """If the ``.corrupt`` backup fails, the read must not silently discard
+    a recoverable schema-invalid registry.
+
+    Suppressing the ``OSError`` from the backup write while still returning
+    the normalized empty default lets the next
+    ``register_model`` / ``set_active_model`` / ``remove_model`` overwrite
+    the original models.json — the only remaining copy of the recoverable
+    data — via ``_save_config``. Let the backup error propagate instead so
+    every subsequent mutation refuses too, keeping the original on disk.
+    """
+    import models
+
+    cfg_path = tmp_path / "models.json"
+    monkeypatch.setattr(models, "CONFIG_PATH", str(cfg_path))
+    original = json.dumps({
+        "models": {
+            "m1": {"id": "m1", "name": "One", "weights_path": "/w1"},
+        },
+        "active_model": "m1",
+    })
+    cfg_path.write_text(original)
+
+    def failing_mkstemp(*args, **kwargs):
+        # The ``.corrupt`` backup is the only mkstemp call reached in this
+        # test — ``_load_config`` raises before ``_save_config`` runs.
+        raise PermissionError(13, "Permission denied", "")
+
+    monkeypatch.setattr(models.tempfile, "mkstemp", failing_mkstemp)
+    with pytest.raises(OSError):
+        models._load_config()
+    with pytest.raises(OSError):
+        models.register_model("new", "N", "s", "/w", "d")
+    with pytest.raises(OSError):
+        models.set_active_model("m1")
+    with pytest.raises(OSError):
+        models.remove_model("m1")
+
+    assert cfg_path.read_text() == original
+    assert not (tmp_path / "models.json.corrupt").exists()
+
+
+def test_load_config_preserves_distinct_corruptions(tmp_path, monkeypatch):
+    """A later corruption with different bytes must not be masked by a
+    stale ``.corrupt`` backup from a prior recovery.
+
+    If the primary backup from an earlier distinct corruption were treated
+    as "already backed up, skip", a following ``register_model`` /
+    ``set_active_model`` / ``remove_model`` could atomically overwrite the
+    current corruption with normalized state while only the unrelated
+    older backup remained — losing any recoverable registrations from the
+    newer file. Content-addressed aux backups preserve each distinct
+    corrupt version; the primary stays stable for humans / external tools.
+    """
+    import hashlib
+
+    import models
+
+    cfg_path = tmp_path / "models.json"
+    monkeypatch.setattr(models, "CONFIG_PATH", str(cfg_path))
+
+    first_corrupt = '{"models": [{"id": "first"'
+    cfg_path.write_text(first_corrupt)
+    assert models._load_config() == {"models": [], "active_model": None}
+    primary = tmp_path / "models.json.corrupt"
+    assert primary.read_text() == first_corrupt
+
+    # A distinct second corruption arrives later.
+    second_corrupt = '{"models": [{"id": "second"'
+    cfg_path.write_text(second_corrupt)
+    assert models._load_config() == {"models": [], "active_model": None}
+
+    # Primary keeps the first observation (stable name for tools) rather
+    # than being silently overwritten by later distinct bytes.
+    assert primary.read_text() == first_corrupt
+
+    # Both distinct corruptions live in content-addressed aux backups.
+    first_digest = hashlib.sha1(first_corrupt.encode()).hexdigest()[:12]
+    second_digest = hashlib.sha1(second_corrupt.encode()).hexdigest()[:12]
+    assert (tmp_path / f"models.json.corrupt.{first_digest}").read_text() == first_corrupt
+    assert (tmp_path / f"models.json.corrupt.{second_digest}").read_text() == second_corrupt
+
+    # A subsequent mutation cannot silently discard the second corruption
+    # from disk — its aux backup is content-addressed and independent of
+    # what CONFIG_PATH holds.
+    models.register_model("new", "N", "s", "/w", "d")
+    assert (tmp_path / f"models.json.corrupt.{first_digest}").read_text() == first_corrupt
+    assert (tmp_path / f"models.json.corrupt.{second_digest}").read_text() == second_corrupt
+
+    # Re-observing the same corrupt bytes is idempotent — the same aux
+    # file already exists, so nothing gets rewritten (mtime unchanged).
+    cfg_path.write_text(first_corrupt)
+    aux_first = tmp_path / f"models.json.corrupt.{first_digest}"
+    mtime_before = aux_first.stat().st_mtime_ns
+    assert models._load_config() == {"models": [], "active_model": None}
+    assert aux_first.stat().st_mtime_ns == mtime_before
+
+
+def test_load_config_backup_uses_bytes_actually_read(tmp_path, monkeypatch):
+    """The ``.corrupt`` backup preserves the bytes ``_load_config`` read,
+    not whatever is at ``CONFIG_PATH`` when the backup is written.
+
+    Reading ``CONFIG_PATH`` again for the backup would race a concurrent
+    mutator holding ``_CONFIG_LOCK`` that itself observed the corrupt
+    bytes, preserved them, and atomically replaced ``CONFIG_PATH`` with a
+    repaired registry. The reader's re-copy would then overwrite
+    ``.corrupt`` with the repaired bytes, destroying the only backup of
+    the malformed data.
+    """
+    import models
+
+    cfg_path = tmp_path / "models.json"
+    monkeypatch.setattr(models, "CONFIG_PATH", str(cfg_path))
+    corrupt_bytes = '{"models": [{"id": "m1"'
+    cfg_path.write_text(corrupt_bytes)
+
+    real_loads = models.json.loads
+
+    def racing_loads(raw, *args, **kwargs):
+        # Simulate a concurrent mutator that saw the same corrupt bytes,
+        # created its own ``.corrupt`` backup, and atomically replaced
+        # ``CONFIG_PATH`` with a repaired registry — all between our read
+        # and our parse attempt.
+        cfg_path.write_text(json.dumps({"models": [], "active_model": None}))
+        return real_loads(raw, *args, **kwargs)
+
+    monkeypatch.setattr(models.json, "loads", racing_loads)
+
+    assert models._load_config() == {"models": [], "active_model": None}
+    # The backup must reflect the bytes we actually read, not what
+    # CONFIG_PATH holds now.
+    assert (tmp_path / "models.json.corrupt").read_text() == corrupt_bytes
+
+
+def test_load_config_propagates_read_oserror(tmp_path, monkeypatch):
+    """A transient read-side OSError must not silently discard the registry.
+
+    The previous behaviour swallowed OSError and returned the empty default.
+    A follow-up ``register_model`` / ``set_active_model`` / ``remove_model``
+    would then successfully save the empty config, wiping every registered
+    model even though the original file was never actually read.
+    """
+    import builtins
+
+    import models
+
+    cfg_path = tmp_path / "models.json"
+    monkeypatch.setattr(models, "CONFIG_PATH", str(cfg_path))
+    cfg_path.write_text(json.dumps(
+        {"models": [{"id": "keep-me", "name": "K",
+                     "model_str": "x", "weights_path": "/w"}],
+         "active_model": "keep-me"}
+    ))
+
+    real_open = builtins.open
+
+    def flaky_open(path, *args, **kwargs):
+        if str(path) == str(cfg_path):
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_open(path, *args, **kwargs)
+
+    with monkeypatch.context() as m:
+        m.setattr(builtins, "open", flaky_open)
+        with pytest.raises(OSError):
+            models._load_config()
+        with pytest.raises(OSError):
+            models.register_model("new", "N", "s", "/w", "d")
+        with pytest.raises(OSError):
+            models.set_active_model("new")
+        with pytest.raises(OSError):
+            models.remove_model("keep-me")
+
+    on_disk = json.loads(cfg_path.read_text())
+    assert on_disk["active_model"] == "keep-me"
+    assert [m["id"] for m in on_disk["models"]] == ["keep-me"]
+    assert not (tmp_path / "models.json.corrupt").exists()
+
+
+def test_save_config_is_atomic_and_leaves_no_temp_files(tmp_path, monkeypatch):
+    """Readers never see a partially written file, and a failed write
+    leaves the previous contents in place."""
+    import json as _json
+
+    import models
+
+    cfg_path = tmp_path / "models.json"
+    monkeypatch.setattr(models, "CONFIG_PATH", str(cfg_path))
+    models._save_config({"models": [], "active_model": "old"})
+
+    class Boom(Exception):
+        pass
+
+    def exploding_dump(*_args, **_kwargs):
+        raise Boom()
+
+    with monkeypatch.context() as m:
+        m.setattr(models.json, "dump", exploding_dump)
+        with contextlib.suppress(Boom):
+            models._save_config({"models": [], "active_model": "new"})
+
+    assert _json.loads(cfg_path.read_text())["active_model"] == "old"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["models.json"]
+
+
+def test_concurrent_config_updates_do_not_lose_writes(tmp_path, monkeypatch):
+    """``register_model`` racing ``set_active_model`` keeps both changes, and
+    concurrent readers never hit a JSON decode error."""
+    import threading
+
+    import models
+
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+    errors = []
+
+    def register(i):
+        try:
+            models.register_model(f"m{i}", f"M{i}", "ViT-B-16", f"/w/{i}")
+        except Exception as exc:  # pragma: no cover - failure path
+            errors.append(exc)
+
+    def activate(i):
+        try:
+            models.set_active_model(f"m{i}")
+        except Exception as exc:  # pragma: no cover - failure path
+            errors.append(exc)
+
+    def read():
+        try:
+            for _ in range(50):
+                models._load_config()
+        except Exception as exc:  # pragma: no cover - failure path
+            errors.append(exc)
+
+    threads = []
+    for i in range(20):
+        threads.append(threading.Thread(target=register, args=(i,)))
+        threads.append(threading.Thread(target=activate, args=(i,)))
+        threads.append(threading.Thread(target=read))
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == []
+    ids = {m["id"] for m in models._load_config()["models"]}
+    assert ids == {f"m{i}" for i in range(20)}
 
 
 # ---------------------------------------------------------------------------

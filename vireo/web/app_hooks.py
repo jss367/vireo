@@ -198,8 +198,12 @@ def register_app_hooks(app, *, get_db, reservation_exempt_endpoints):
                 elif "/reject" in path:
                     detail = " (reject prediction)"
                 elif "batch" in path:
-                    ids = body.get("photo_ids", [])
-                    detail = f" ({len(ids)} photos)"
+                    # The view already ran (and may have committed), so a
+                    # malformed ``photo_ids`` must not turn its response
+                    # into a 500 here.
+                    ids = body.get("photo_ids")
+                    if isinstance(ids, list):
+                        detail = f" ({len(ids)} photos)"
                 elif "/classify" in path:
                     detail = f" collection={body.get('collection_id')}"
                 elif "/scan" in path:

@@ -150,7 +150,7 @@
     <div class="section">
       <div class="action-bar">
         <button class="btn btn-primary" id="btnSidecars" onclick="runSidecarCheck()">Check for Stray Sidecars</button>
-        <button class="btn btn-danger" onclick="deleteAllSidecars()">Delete All Strays</button>
+        <button class="btn btn-danger" onclick="deleteAllSidecars()">Move All Strays to Trash</button>
         <span class="status-msg" id="sidecarStatus"></span>
       </div>
       <div id="sidecarContent"><div class="empty-msg">Click "Check for Stray Sidecars" to find .xmp files whose photo is gone.</div></div>
@@ -537,7 +537,7 @@ function renderSidecars() {
   sidecarData.forEach(function(s, i) {
     var fname = s.path.split('/').pop();
     html += '<tr><td>' + escapeHtml(fname) + '</td><td>' + escapeHtml(s.folder) + '</td>' +
-      '<td><button class="btn btn-danger" data-idx="' + i + '">Delete</button></td></tr>';
+      '<td><button class="btn btn-danger" data-idx="' + i + '">Move to Trash</button></td></tr>';
   });
   html += '</tbody></table>';
   var sidecarContent = document.getElementById('sidecarContent');

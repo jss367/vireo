@@ -4761,11 +4761,14 @@ async function verifyAllModels() {
 }
 
 async function removeModel(modelId) {
-  if (!confirm('Remove this model and delete its weights from disk?')) return;
+  if (!confirm('Remove this model? Weights Vireo downloaded are deleted from disk; weights in your own folders are left in place.')) return;
   try {
-    await safeFetch('/api/models/' + encodeURIComponent(modelId), {
+    var result = await safeFetch('/api/models/' + encodeURIComponent(modelId), {
       method: 'DELETE',
     });
+    if (result && result.kept_path) {
+      showToast('Model removed from Vireo. Its weights were left in place at ' + result.kept_path, 'success');
+    }
   } catch(e) {}
   loadModels();
 }
