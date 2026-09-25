@@ -2179,14 +2179,31 @@ def materialize_artifacts(
         ).fetchone()
         match = None
         if existing is not None:
+            def _recognized(candidate):
+                # Only prefer the existing-runtime match when this install
+                # can actually reproduce it; a stale row (obsolete or
+                # foreign runtime) that pins a candidate here would be
+                # quarantined by the recognition gate below, and the
+                # recognized competitors have already been discarded, so
+                # repeated materialization would never install a usable
+                # result.
+                return _is_recognized_classifier_runtime(
+                    candidate["classifier_model"],
+                    candidate["labels"]["fingerprint"],
+                    candidate["detector_runtime_fingerprint"],
+                    candidate["runtime_fingerprint"],
+                    identity_cache, extra=known_classifier_runtimes,
+                )
             match = next(
                 (c for c in candidates
                  if c["runtime_fingerprint"] == existing["runtime_fingerprint"]
-                 and c["input_fingerprint"] == existing["input_fingerprint"]),
+                 and c["input_fingerprint"] == existing["input_fingerprint"]
+                 and _recognized(c)),
                 None,
             ) or next(
                 (c for c in candidates
-                 if c["runtime_fingerprint"] == existing["runtime_fingerprint"]),
+                 if c["runtime_fingerprint"] == existing["runtime_fingerprint"]
+                 and _recognized(c)),
                 None,
             )
         if match is None:

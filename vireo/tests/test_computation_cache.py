@@ -2119,6 +2119,47 @@ def test_materialize_prefers_installed_classifier_runtime(tmp_path):
         assert species == ["American Robin"]
 
 
+def test_materialize_ignores_unrecognized_existing_classifier_runtime(tmp_path):
+    """When the catalog holds an obsolete (no longer recognized) classifier
+    runtime for a photo but the store also carries an artifact for the
+    currently recognized runtime, materialize must install the recognized
+    one instead of pinning the obsolete artifact only to have the
+    recognition gate quarantine it (which would discard the recognized
+    competitor and leave stale predictions in place)."""
+    from computation_cache import materialize_artifacts
+
+    db, _folder_id, _photo_id = _database_with_photo(tmp_path / "db.db", "p.jpg")
+    db.upsert_labels_fingerprint("3" * 12, "L", [], 1, full_fingerprint="3" * 64)
+    r_old = runtime_fingerprint({"rev": "old-taxonomy"})
+    r_new = runtime_fingerprint({"rev": "new-taxonomy"})
+    a_old = classification_artifact(
+        classifier_runtime=r_old, candidates=[{"species": "Robin", "confidence": 0.9}],
+    )
+    a_new = classification_artifact(
+        classifier_runtime=r_new,
+        candidates=[{"species": "American Robin", "confidence": 0.9}],
+    )
+    # Prime the catalog with the obsolete r_old run while both runtimes
+    # are still trusted (mirrors a catalog restored from an install with
+    # a since-removed classifier runtime).
+    materialize_artifacts(
+        db, [detection_artifact(), a_old],
+        known_runtimes={RUNTIME}, known_classifier_runtimes={r_old, r_new},
+    )
+    assert _materialized_classifier_runtime(db) == [r_old]
+    # Now only r_new is recognized. Re-materializing must swap the
+    # catalog to r_new (or leave it alone through the deferred path),
+    # never pin r_old only to have it quarantined below.
+    result = materialize_artifacts(
+        db, [detection_artifact(), a_old, a_new],
+        known_runtimes={RUNTIME}, known_classifier_runtimes={r_new},
+    )
+    assert _materialized_classifier_runtime(db) == [r_new]
+    species = [r["species"] for r in db.conn.execute("SELECT species FROM predictions")]
+    assert species == ["American Robin"]
+    assert result["unknown_classifier_runtime"] == 0
+
+
 def test_materialize_competing_classifier_runtimes_settle_on_one(tmp_path):
     """With nothing installed, one runtime is chosen and later calls leave it."""
     from computation_cache import materialize_artifacts
