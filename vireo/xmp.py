@@ -552,11 +552,19 @@ def _walk_ancestors(elem, parent_map):
 
 
 def _ancestor_carries_xml_qualifier(elem, parent_map):
-    """True if elem or any ancestor carries an ``xml:*`` attribute."""
+    """True if elem or any ancestor carries an *effective* ``xml:*`` attribute.
+
+    A closer element with an empty value (``xml:lang=""``) cancels an
+    outer inherited value, so the check has to walk the chain looking
+    for the *effective* setting for each attribute name and only
+    return True when that effective value is non-empty.
+    """
+    effective = {}
     for ancestor in _walk_ancestors(elem, parent_map):
-        if any(name.startswith(f"{{{NS_XML}}}") for name in ancestor.attrib):
-            return True
-    return False
+        for name, value in ancestor.attrib.items():
+            if name.startswith(f"{{{NS_XML}}}") and name not in effective:
+                effective[name] = value
+    return any(value for value in effective.values())
 
 
 def _ancestor_xml_attributes(elem, parent_map):
@@ -714,6 +722,44 @@ def _qualified_value_element(child):
     return None
 
 
+def _qualified_value_attribute_owner(child):
+    """Return the element carrying an ``rdf:value`` attribute, or None.
+
+    RDF/XML's attribute abbreviation lets a qualified property put
+    the value in an ``rdf:value`` attribute on the property itself
+    (``<xmp:Rating rdf:parseType='Resource' rdf:value='3'
+    foo:source='camera'/>``) or on a nested ``rdf:Description``
+    (``<xmp:Rating><rdf:Description rdf:value='3' foo:source='camera'
+    /></xmp:Rating>``). Both are semantically identical to the
+    element form.
+    """
+    rdf_value_attr = f"{{{NS_RDF}}}value"
+    if rdf_value_attr in child.attrib:
+        return child
+    nested = child.find(f"{{{NS_RDF}}}Description")
+    if nested is not None and rdf_value_attr in nested.attrib:
+        return nested
+    return None
+
+
+def _qualified_value(child):
+    """Return the value string of a qualified simple property, or None.
+
+    Handles every equivalent serialization: an ``rdf:value``
+    attribute or child on the property, on a nested ``rdf:Description``
+    wrapper, or both. Returns None only when neither spelling carries
+    a value.
+    """
+    rdf_value_tag = f"{{{NS_RDF}}}value"
+    owner = _qualified_value_attribute_owner(child)
+    if owner is not None:
+        return owner.get(rdf_value_tag)
+    element = _qualified_value_element(child)
+    if element is not None:
+        return (element.text or "").strip()
+    return None
+
+
 def _property_occurrence_score(entry):
     """How authoritative an ``(owner, child)`` occurrence is.
 
@@ -744,26 +790,19 @@ def _get_property(root, name):
     desc, child = max(found, key=_property_occurrence_score)
     if child is None:
         return desc.get(name)
-    if len(child):
-        # Qualified property, e.g.
-        #   <xmp:Rating rdf:parseType="Resource">
-        #     <rdf:value>3</rdf:value><...qualifiers.../>
-        #   </xmp:Rating>
-        # or the equivalent long form
-        #   <xmp:Rating>
-        #     <rdf:Description>
-        #       <rdf:value>3</rdf:value><...qualifiers.../>
-        #     </rdf:Description>
-        #   </xmp:Rating>.
-        # The actual value lives in the nested ``rdf:value``; the
-        # container's own ``text`` is whitespace between its children,
-        # so returning it would hide the rating/GPS from every reader
-        # and let ``set_gps_location`` back up an empty string that
-        # later restores empty coordinates instead of the original.
-        rdf_value = _qualified_value_element(child)
-        if rdf_value is not None:
-            return (rdf_value.text or "").strip()
-        return None
+    # Any qualified form -- element or RDF/XML attribute abbreviation,
+    # short or long -- routes through ``_qualified_value``:
+    #   <xmp:Rating rdf:parseType='Resource'>
+    #     <rdf:value>3</rdf:value><...qualifiers.../>
+    #   </xmp:Rating>
+    # or
+    #   <xmp:Rating><rdf:Description rdf:value='3' foo:source='camera'/>
+    #   </xmp:Rating>
+    # etc. The container's own ``text`` is only whitespace between
+    # its children, so returning it would hide the value from every
+    # reader.
+    if f"{{{NS_RDF}}}value" in child.attrib or len(child):
+        return _qualified_value(child)
     return (child.text or "").strip()
 
 
@@ -1119,9 +1158,12 @@ class SidecarEditor:
         """
         parent_map = _build_parent_map(self._root)
         for desc in _top_descriptions(self._root):
-            if not any(
-                name.startswith(f"{{{NS_XML}}}") for name in desc.attrib
-            ) and not _inherited_xml_attributes(desc, parent_map):
+            # ``xml:lang=""`` on the Description itself explicitly
+            # cancels every ancestor's language, so a Description
+            # carrying only empty ``xml:*`` values is still safe to
+            # write new properties under. Use the effective-qualifier
+            # check to accept it.
+            if not _ancestor_carries_xml_qualifier(desc, parent_map):
                 return desc
         # Capture the photo's subject BEFORE inserting the new
         # Description. If every existing photo Description is qualified
@@ -1348,43 +1390,41 @@ class SidecarEditor:
                 if owner.get(name) != value:
                     owner.set(name, value)
                     changed = True
-            elif len(child):
-                # Qualified property. The value may live under the
-                # property in the short form
-                #   <xmp:Rating rdf:parseType="Resource">
-                #     <rdf:value>3</rdf:value><...qualifiers.../>
-                #   </xmp:Rating>
-                # or under a nested ``rdf:Description`` in the
-                # equivalent long form
-                #   <xmp:Rating>
-                #     <rdf:Description>
-                #       <rdf:value>3</rdf:value><...qualifiers.../>
-                #     </rdf:Description>
-                #   </xmp:Rating>.
-                # Update the existing ``rdf:value`` (creating it under
-                # the ``rdf:Description`` when the property uses the
-                # long form) instead of blowing away the children and
-                # writing plain text into the container: that would
-                # strip every qualifier and leave the qualified
-                # structure holding invalid RDF, and appending a
-                # second ``rdf:value`` beside the nested Description
-                # would leave the stale value in place.
-                rdf_value = child.find(f"{{{NS_RDF}}}value")
-                value_owner = child
-                if rdf_value is None:
-                    nested = child.find(f"{{{NS_RDF}}}Description")
-                    if nested is not None:
-                        value_owner = nested
-                        rdf_value = nested.find(f"{{{NS_RDF}}}value")
-                if rdf_value is None:
-                    rdf_value = ET.SubElement(
-                        value_owner, f"{{{NS_RDF}}}value"
-                    )
-                    rdf_value.text = value
-                    changed = True
-                elif (rdf_value.text or "") != value:
-                    rdf_value.text = value
-                    changed = True
+            elif f"{{{NS_RDF}}}value" in child.attrib or len(child):
+                # Qualified property. The value may live as an
+                # ``rdf:value`` element or as an ``rdf:value``
+                # attribute (RDF/XML's attribute abbreviation),
+                # either directly under the property or inside a
+                # nested ``rdf:Description``. Update whichever
+                # spelling already carries the value in place; only
+                # create a fresh ``<rdf:value>`` element when no
+                # spelling exists yet. Anything else -- writing plain
+                # text into the container, or appending a second
+                # ``rdf:value`` beside the existing one -- would
+                # strip qualifiers or leave a stale value alongside
+                # the new one.
+                attr_owner = _qualified_value_attribute_owner(child)
+                if attr_owner is not None:
+                    if attr_owner.get(f"{{{NS_RDF}}}value") != value:
+                        attr_owner.set(f"{{{NS_RDF}}}value", value)
+                        changed = True
+                else:
+                    rdf_value = child.find(f"{{{NS_RDF}}}value")
+                    value_owner = child
+                    if rdf_value is None:
+                        nested = child.find(f"{{{NS_RDF}}}Description")
+                        if nested is not None:
+                            value_owner = nested
+                            rdf_value = nested.find(f"{{{NS_RDF}}}value")
+                    if rdf_value is None:
+                        rdf_value = ET.SubElement(
+                            value_owner, f"{{{NS_RDF}}}value"
+                        )
+                        rdf_value.text = value
+                        changed = True
+                    elif (rdf_value.text or "") != value:
+                        rdf_value.text = value
+                        changed = True
             elif (child.text or "").strip() != value:
                 child.text = value
                 changed = True

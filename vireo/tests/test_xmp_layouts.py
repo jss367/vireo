@@ -1888,6 +1888,105 @@ def test_qualified_simple_property_duplicates_are_preserved(tmp_path):
     assert origins == ["keeper", "preserve-me"]
 
 
+def test_empty_xml_lang_reset_lets_next_write_reuse_the_description(tmp_path):
+    """An explicit ``xml:lang=""`` reset is treated as unqualified.
+
+    The previous fix explicitly reset inherited ``xml:*`` on newly
+    created photo Descriptions. But the qualifier check treated any
+    ``xml:*`` attribute -- including the empty reset -- as a
+    qualifier, so a subsequent keyword or property write refused to
+    reuse that Description and created yet another. Repeated syncs
+    accumulated duplicate ``dc:subject`` bags. The check must
+    recognize that an empty ``xml:lang`` (or ``xml:space`` / etc.)
+    cancels inheritance and treat the element as effectively
+    unqualified.
+    """
+    xml_ns = "http://www.w3.org/XML/1998/namespace"
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'"
+        f" xmlns:xml='http://www.w3.org/XML/1998/namespace'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}' xml:lang='en'>"
+        f"<rdf:Description rdf:about='' xmlns:dc='{NS_DC}'>"
+        f"<dc:subject><rdf:Bag><rdf:li>Heron</rdf:li></rdf:Bag></dc:subject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    # First add creates the empty-lang reset Description.
+    editor = SidecarEditor(path_str)
+    editor.add_keywords({"Kiwi"}, set())
+    editor.commit()
+    # Second add must reuse the reset Description, not create another.
+    editor = SidecarEditor(path_str)
+    editor.add_keywords({"Owl"}, set())
+    editor.commit()
+
+    root = ET.parse(path_str).getroot()
+
+    # Exactly one Description carries the explicit ``xml:lang=""``
+    # reset, and both new keywords live in one ``dc:subject`` bag
+    # under it.
+    reset_descs = [
+        d for d in root.iter(f"{{{NS_RDF}}}Description")
+        if d.get(f"{{{xml_ns}}}lang") == ""
+    ]
+    assert len(reset_descs) == 1
+    reset_subjects = reset_descs[0].findall(SUBJECT)
+    assert len(reset_subjects) == 1
+    reset_bags = reset_subjects[0].findall(f"{{{NS_RDF}}}Bag")
+    assert len(reset_bags) == 1
+    reset_items = sorted(
+        li.text for li in reset_bags[0].findall(f"{{{NS_RDF}}}li")
+    )
+    assert reset_items == ["Kiwi", "Owl"]
+
+
+def test_rdf_value_attribute_abbreviation_is_read_and_updated(tmp_path):
+    """A qualified property whose value lives in ``rdf:value=`` is honored.
+
+    RDF/XML's attribute-abbreviation form lets ``<rdf:Description
+    rdf:value='3' foo:source='camera'/>`` stand in for the element
+    form. Readers must see the value, and writers must update the
+    same attribute in place instead of appending an ``rdf:value``
+    child element that leaves the stale attribute alongside a fresh
+    conflicting value.
+    """
+    foo_ns = "http://example.com/foo/"
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about=''"
+        f" xmlns:xmp='{NS_XMP}' xmlns:foo='{foo_ns}'>"
+        f"<xmp:Rating>"
+        f"<rdf:Description rdf:value='3' foo:source='camera'/>"
+        f"</xmp:Rating>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    assert read_sync_preview_metadata(path_str)["rating"] == "3"
+
+    write_rating(path_str, 5)
+
+    root = ET.parse(path_str).getroot()
+    ratings = list(root.iter(RATING))
+    assert len(ratings) == 1
+    # The nested Description still holds the value as an attribute --
+    # no extra ``rdf:value`` element was appended.
+    nested_descs = ratings[0].findall(f"{{{NS_RDF}}}Description")
+    assert len(nested_descs) == 1
+    assert nested_descs[0].get(f"{{{NS_RDF}}}value") == "5"
+    assert nested_descs[0].find(f"{{{NS_RDF}}}value") is None
+    # And the qualifier survived intact.
+    assert nested_descs[0].get(f"{{{foo_ns}}}source") == "camera"
+
+    assert read_sync_preview_metadata(path_str)["rating"] == "5"
+
+
 @pytest.mark.skipif(shutil.which("exiftool") is None, reason="exiftool not installed")
 def test_exiftool_reads_what_vireo_wrote_in_both_layouts(layout_xmp):
     """ExifTool must see Vireo's values, not a stale copy it wrote itself."""
