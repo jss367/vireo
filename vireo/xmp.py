@@ -731,25 +731,39 @@ def _li_carries_qualifier(li, parent_map):
 def _has_own_value_qualifier(elem):
     """True if ``elem`` carries a non-structural attribute that changes value semantics.
 
-    Same as :func:`_has_non_structural_attribute`, except ``xml:lang=""``
-    is treated as no qualifier. ``xml:lang=""`` is XML's
-    cancel-inheritance form: it doesn't itself attach a language to the
-    element's descendants, it just says "no known language" on the way
-    in. A bag or wrapper carrying only an empty reset is therefore just
-    as reusable as one with no ``xml:*`` at all -- otherwise a keyword
-    add against a sidecar whose only ``dc:subject`` bag carries the
-    reset would mint a duplicate ``dc:subject`` beside it. Callers that
-    also gate on the owning Description's inherited effective language
-    (via :func:`_ancestor_carries_xml_qualifier`) already refuse to
-    merge into a target with a different effective language, so the
-    reset can be dropped safely: the target we pick has the same "no
-    language" effective semantics.
+    Same as :func:`_has_non_structural_attribute`, except three XML
+    directives are treated as not qualifying a literal value:
+
+    * ``xml:lang=""`` is XML's cancel-inheritance form. It doesn't
+      itself attach a language to the element's descendants, it just
+      says "no known language" on the way in. A bag or wrapper
+      carrying only an empty reset is therefore just as reusable as
+      one with no ``xml:*`` at all -- callers that also gate on the
+      owning Description's effective language (via
+      :func:`_ancestor_carries_xml_qualifier`) already refuse to
+      merge into a target with a different effective language, so
+      the reset can be dropped safely.
+    * ``xml:space`` is a whitespace directive. It doesn't change the
+      meaning of a literal keyword or numeric value, so a bag
+      carrying only ``xml:space="preserve"`` is a valid reuse target.
+    * ``xml:base`` affects URI resolution but never changes a literal
+      keyword or numeric value the way ``xml:lang`` does.
+
+    Non-empty ``xml:lang`` and ``xml:id`` (an XML identifier the
+    element defines in its own right) still count as own qualifiers.
+    This mirrors what :func:`_ancestor_carries_xml_qualifier` skips
+    on the inherited side, so a directive is treated the same
+    whether it sits on the element or on an ancestor.
     """
     xml_lang = f"{{{NS_XML}}}lang"
+    xml_space = f"{{{NS_XML}}}space"
+    xml_base = f"{{{NS_XML}}}base"
     for name, value in elem.attrib.items():
         if name in _STRUCTURAL_RDF_ATTRIBUTES:
             continue
         if name == xml_lang and value == "":
+            continue
+        if name in (xml_space, xml_base):
             continue
         return True
     return False
@@ -2022,10 +2036,14 @@ class SidecarEditor:
             [keyword_match_key(s) for s in v.split("|")] == path_keys
             for v in hier_values_before
         )
-        # Ensure the bags exist so the ``add_keywords`` call below has
-        # somewhere to land -- we no longer need the return values.
-        self._bag(desc, NS_DC, "subject")
-        self._bag(desc, NS_LR, "hierarchicalSubject")
+        # ``add_keywords`` below creates its merge bags lazily -- only
+        # when there's a new value to insert -- so no eager ``_bag``
+        # call is needed here. Creating them eagerly would commit an
+        # empty ``dc:subject`` / ``lr:hierarchicalSubject`` beside a
+        # populated qualified sibling whenever the requested leaf or
+        # hierarchy already lives in that qualified bag, and a reader
+        # that resolves to a single occurrence would then report the
+        # photo as having no keywords.
 
         # Canonicalize any *qualified* variant of the leaf in place so
         # its user-authored qualifier metadata survives. Removing a

@@ -3160,6 +3160,105 @@ def test_remove_location_preserves_qualified_exact_duplicate(tmp_path):
     assert remaining[0].findtext(f"{{{foo_ns}}}source") == "user"
 
 
+def test_set_location_keywords_skips_empty_merge_bags_when_present(tmp_path):
+    """A no-op re-write of an existing qualified location doesn't add empty bags.
+
+    ``set_location_keywords`` used to call ``_bag`` eagerly to
+    "ensure the bags exist" for the follow-up ``add_keywords``. Now
+    that ``add_keywords`` creates its merge target lazily, the eager
+    call is not just redundant: when the requested leaf and hierarchy
+    already live only in a qualified sibling bag, it commits an
+    empty unqualified ``dc:subject`` and ``lr:hierarchicalSubject``
+    beside the populated ones -- and consumers resolving to a single
+    occurrence would then report the photo as having no keywords.
+    """
+    xml_ns = "http://www.w3.org/XML/1998/namespace"
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'"
+        f" xmlns:xml='http://www.w3.org/XML/1998/namespace'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}' xml:lang='en'>"
+        f"<rdf:Description rdf:about=''"
+        f" xmlns:dc='{NS_DC}' xmlns:lr='{NS_LR}'>"
+        f"<dc:subject><rdf:Bag>"
+        f"<rdf:li>Paris</rdf:li>"
+        f"</rdf:Bag></dc:subject>"
+        f"<lr:hierarchicalSubject><rdf:Bag>"
+        f"<rdf:li>Places|Paris</rdf:li>"
+        f"</rdf:Bag></lr:hierarchicalSubject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    editor = SidecarEditor(path_str)
+    editor.set_location_keywords(["Places", "Paris"])
+    editor.commit()
+
+    root = ET.parse(path_str).getroot()
+    # Exactly one ``dc:subject`` and one ``lr:hierarchicalSubject`` --
+    # the pre-existing populated ones -- with no empty duplicates.
+    subjects = list(root.iter(SUBJECT))
+    hier_subjects = list(root.iter(HIERARCHICAL_SUBJECT))
+    assert len(subjects) == 1
+    assert len(hier_subjects) == 1
+    flat_items = [
+        li.text
+        for li in subjects[0].iter(f"{{{NS_RDF}}}li")
+        if li.text
+    ]
+    hier_items = [
+        li.text
+        for li in hier_subjects[0].iter(f"{{{NS_RDF}}}li")
+        if li.text
+    ]
+    assert flat_items == ["Paris"]
+    assert hier_items == ["Places|Paris"]
+    _ = xml_ns
+
+
+def test_xml_space_on_bag_does_not_force_a_duplicate_bag(tmp_path):
+    """A local ``xml:space`` directive on a bag doesn't disqualify it for reuse.
+
+    ``xml:space`` is a whitespace directive that never changes the
+    meaning of a literal keyword or numeric value -- and
+    ``_ancestor_carries_xml_qualifier`` already ignores it when it's
+    inherited from an ancestor. A bag carrying only ``xml:space="preserve"``
+    is just as reusable as one with no ``xml:*`` at all; before this
+    fix the local-attribute check saw the directive and refused to
+    reuse the bag, so a keyword add committed a second ``dc:subject``
+    beside the perfectly-usable one. The same holds for ``xml:base``.
+    """
+    xml_ns = "http://www.w3.org/XML/1998/namespace"
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'"
+        f" xmlns:xml='http://www.w3.org/XML/1998/namespace'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about='' xmlns:dc='{NS_DC}'>"
+        f"<dc:subject><rdf:Bag xml:space='preserve'>"
+        f"<rdf:li>Heron</rdf:li>"
+        f"</rdf:Bag></dc:subject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    editor = SidecarEditor(path_str)
+    editor.add_keywords({"Owl"}, set())
+    editor.commit()
+
+    root = ET.parse(path_str).getroot()
+    subjects = list(root.iter(SUBJECT))
+    # One bag, preserving its ``xml:space``, now carries both keywords.
+    assert len(subjects) == 1
+    bags = subjects[0].findall(f"{{{NS_RDF}}}Bag")
+    assert len(bags) == 1
+    assert bags[0].get(f"{{{xml_ns}}}space") == "preserve"
+    items = sorted(li.text for li in bags[0].findall(f"{{{NS_RDF}}}li"))
+    assert items == ["Heron", "Owl"]
+
+
 def test_set_location_keywords_canonicalizes_container_qualified_leaf_in_place(tmp_path):
     """A container-``xml:lang'' leaf is canonicalized in place, not dropped.
 
