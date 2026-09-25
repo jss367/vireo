@@ -2757,6 +2757,52 @@ def test_remove_location_prefers_exact_across_bags_over_per_bag_fallback(tmp_pat
     assert all_flat == ["paris"]
 
 
+def test_remove_location_preserves_qualified_exact_duplicate(tmp_path):
+    """A qualified exact-match duplicate is preserved on removal.
+
+    Vireo only ever writes plain ``<rdf:li>Value</rdf:li>``. If a
+    user or another tool later adds a qualified ``<rdf:li
+    rdf:parseType='Resource'><rdf:value>Paris</rdf:value>
+    <foo:source>user</foo:source></rdf:li>`` next to Vireo's own
+    plain copy, the qualified duplicate carries metadata we mustn't
+    drop. Preserve qualified exact-match duplicates; remove only
+    the plain Vireo-authored occurrence.
+    """
+    foo_ns = "http://example.com/foo/"
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about=''"
+        f" xmlns:dc='{NS_DC}' xmlns:vireo='{NS_VIREO}'"
+        f" xmlns:foo='{foo_ns}'"
+        f" vireo:locationKeywords='Places|Paris'"
+        f" vireo:locationKeywordsOwned='flat,hier'>"
+        f"<dc:subject><rdf:Bag>"
+        f"<rdf:li>Paris</rdf:li>"
+        f"<rdf:li rdf:parseType='Resource'>"
+        f"<rdf:value>Paris</rdf:value>"
+        f"<foo:source>user</foo:source>"
+        f"</rdf:li>"
+        f"</rdf:Bag></dc:subject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    editor = SidecarEditor(path_str)
+    editor.remove_vireo_location_keywords()
+    editor.commit()
+
+    root = ET.parse(path_str).getroot()
+    # The plain Vireo copy is gone; the qualified user copy survives
+    # with its ``foo:source`` intact.
+    remaining = list(root.iter(f"{{{NS_RDF}}}li"))
+    assert len(remaining) == 1
+    assert (remaining[0].find(f"{{{NS_RDF}}}value").text or "") == "Paris"
+    assert remaining[0].findtext(f"{{{foo_ns}}}source") == "user"
+
+
 @pytest.mark.skipif(shutil.which("exiftool") is None, reason="exiftool not installed")
 def test_exiftool_reads_what_vireo_wrote_in_both_layouts(layout_xmp):
     """ExifTool must see Vireo's values, not a stale copy it wrote itself."""

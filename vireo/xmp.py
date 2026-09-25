@@ -2111,73 +2111,97 @@ class SidecarEditor:
         # the variant as the first bag's fallback (no exact there) and
         # the canonical from the second. Fall back to a normalized
         # match only when NO exact match survives anywhere.
+        # Vireo's own writes create plain-text ``<rdf:li>Value</rdf:li>``
+        # entries, never qualified ones. A qualified exact match is
+        # therefore a user- or tool-added duplicate carrying its own
+        # metadata (a ``foo:source``, an ``xml:lang``, etc.), and
+        # removing it would silently discard that data. Prefer plain
+        # exact occurrences; preserve qualified duplicates; only fall
+        # back to a normalized match when no exact match exists
+        # anywhere at all.
         if owns_flat and leaf_key:
             flat_bags = list(_photo_scoped_bags(
                 self._root, f"{{{NS_DC}}}subject",
             ))
-            exact_targets = [
+            plain_exact_targets = [
                 (bag, li)
                 for bag in flat_bags
                 for li in bag.findall(f"{{{NS_RDF}}}li")
                 if _li_value(li) == leaf
+                and not _simple_prop_carries_qualifier(li)
             ]
-            if exact_targets:
-                for bag, li in exact_targets:
+            if plain_exact_targets:
+                for bag, li in plain_exact_targets:
                     removed.append(_li_value(li))
                     bag.remove(li)
             else:
-                fallback = None
-                for bag in flat_bags:
-                    fallback = next(
-                        (
-                            (bag, li) for li in bag.findall(f"{{{NS_RDF}}}li")
-                            if _li_value(li)
-                            and keyword_match_key(_li_value(li)) == leaf_key
-                        ),
-                        None,
-                    )
+                any_exact = any(
+                    _li_value(li) == leaf
+                    for bag in flat_bags
+                    for li in bag.findall(f"{{{NS_RDF}}}li")
+                )
+                if not any_exact:
+                    fallback = None
+                    for bag in flat_bags:
+                        fallback = next(
+                            (
+                                (bag, li) for li in bag.findall(f"{{{NS_RDF}}}li")
+                                if _li_value(li)
+                                and keyword_match_key(_li_value(li)) == leaf_key
+                                and not _simple_prop_carries_qualifier(li)
+                            ),
+                            None,
+                        )
+                        if fallback is not None:
+                            break
                     if fallback is not None:
-                        break
-                if fallback is not None:
-                    bag, li = fallback
-                    removed.append(_li_value(li))
-                    bag.remove(li)
+                        bag, li = fallback
+                        removed.append(_li_value(li))
+                        bag.remove(li)
 
         if owns_hier:
             hier_bags = list(_photo_scoped_bags(
                 self._root, f"{{{NS_LR}}}hierarchicalSubject",
             ))
-            exact_targets = [
+            plain_exact_targets = [
                 (bag, li)
                 for bag in hier_bags
                 for li in bag.findall(f"{{{NS_RDF}}}li")
                 if _li_value(li) == path
+                and not _simple_prop_carries_qualifier(li)
             ]
-            if exact_targets:
-                for bag, li in exact_targets:
+            if plain_exact_targets:
+                for bag, li in plain_exact_targets:
                     removed.append(_li_value(li))
                     bag.remove(li)
             else:
-                fallback = None
-                for bag in hier_bags:
-                    fallback = next(
-                        (
-                            (bag, li) for li in bag.findall(f"{{{NS_RDF}}}li")
-                            if _li_value(li)
-                            and [
-                                keyword_match_key(s)
-                                for s in _li_value(li).split("|")
-                            ]
-                            == path_keys
-                        ),
-                        None,
-                    )
+                any_exact = any(
+                    _li_value(li) == path
+                    for bag in hier_bags
+                    for li in bag.findall(f"{{{NS_RDF}}}li")
+                )
+                if not any_exact:
+                    fallback = None
+                    for bag in hier_bags:
+                        fallback = next(
+                            (
+                                (bag, li) for li in bag.findall(f"{{{NS_RDF}}}li")
+                                if _li_value(li)
+                                and [
+                                    keyword_match_key(s)
+                                    for s in _li_value(li).split("|")
+                                ]
+                                == path_keys
+                                and not _simple_prop_carries_qualifier(li)
+                            ),
+                            None,
+                        )
+                        if fallback is not None:
+                            break
                     if fallback is not None:
-                        break
-                if fallback is not None:
-                    bag, li = fallback
-                    removed.append(_li_value(li))
-                    bag.remove(li)
+                        bag, li = fallback
+                        removed.append(_li_value(li))
+                        bag.remove(li)
 
         if removed:
             self._dirty = True
