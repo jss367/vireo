@@ -1150,11 +1150,11 @@ def test_group_apply_skips_photos_decided_since_the_modal_rendered(app_and_db):
     ws = db._active_workspace_id
     client = app.test_client()
 
-    # A decision lands on photo A after the modal rendered. Reject rather
-    # than accept because accepting a grouped row expands to the whole burst
-    # — every member would then be stale, which is correct but tests nothing
-    # about applying the untouched remainder.
-    assert client.post(f'/api/predictions/{pred_a}/reject').status_code == 200
+    # A decision lands on photo A alone after the modal rendered. Written
+    # directly because both the accept and reject routes expand a grouped row
+    # to the whole burst — every member would then be stale, which is correct
+    # but tests nothing about applying the untouched remainder.
+    db.update_prediction_status(pred_a, 'rejected')
     assert db.get_review_status(pred_a, ws) == 'rejected'
     flag_before = db.get_photo(photo_a)['flag'] or 'none'
 
@@ -1390,3 +1390,179 @@ def test_group_apply_client_sends_the_observed_baseline(app_and_db):
     assert 'observed: observed,' in html, (
         "the burst modal must send its baseline to /api/predictions/group/apply"
     )
+
+
+def test_reject_covers_the_whole_burst_like_accept(app_and_db):
+    """"Not X" on a burst card rejects every undecided member, not just the lead.
+
+    Accept expands across the burst group, so the card reads "Tag N photos as
+    X". Reject used to write only the lead row: the card then showed
+    "Rejected" while the other members stayed pending and hidden behind it,
+    where a later Accept All tagged them X anyway.
+    """
+    app, db = app_and_db
+    _, (pred_a, pred_b) = _burst_pair(db, 'grejectburst', 'Pinyon Jay')
+    ws = db._active_workspace_id
+    client = app.test_client()
+
+    resp = client.post(f'/api/predictions/{pred_a}/reject')
+    assert resp.status_code == 200
+    assert sorted(resp.get_json()['rejected_prediction_ids']) == sorted(
+        [pred_a, pred_b])
+    assert db.get_review_status(pred_a, ws) == 'rejected'
+    assert db.get_review_status(pred_b, ws) == 'rejected'
+
+
+def test_reject_expansion_leaves_decided_burst_members_alone(app_and_db):
+    """Expansion only picks up undecided members, as accept's does."""
+    app, db = app_and_db
+    _, (pred_a, pred_b) = _burst_pair(db, 'grejectdecided', 'Gray Jay')
+    ws = db._active_workspace_id
+    db.update_prediction_status(pred_b, 'reviewed')
+    client = app.test_client()
+
+    resp = client.post(f'/api/predictions/{pred_a}/reject')
+    assert resp.status_code == 200
+    assert resp.get_json()['rejected_prediction_ids'] == [pred_a]
+    assert db.get_review_status(pred_b, ws) == 'reviewed'
+
+
+def test_group_apply_pick_accepts_only_its_member_and_undo_restores_it(
+    app_and_db,
+):
+    """A burst pick accepts the member row, not the runner-up species.
+
+    ``update_predictions_status_by_photo(pid, 'accepted')`` used to mark every
+    prediction on the picked photo accepted, including the ``alternative``
+    rows the modal only listed as runners-up. None of those status writes were
+    in edit history either, so undo removed the species keyword but left the
+    rows accepted, and a later single Accept of the photo answered 409.
+    """
+    app, db = app_and_db
+    photos = db.get_photos()
+    pick, reject = photos[0]['id'], photos[1]['id']
+    det_pick = _make_detection(db, pick)
+    det_reject = _make_detection(db, reject)
+    db.add_prediction(detection_id=det_pick, species='Canada Jay',
+                      confidence=0.9, model='test-model', category='new',
+                      group_id='galt')
+    db.add_prediction(detection_id=det_pick, species='Blue Jay',
+                      confidence=0.1, model='test-model', category='new',
+                      group_id=None)
+    db.add_prediction(detection_id=det_reject, species='Canada Jay',
+                      confidence=0.8, model='test-model', category='new',
+                      group_id='galt')
+
+    def _pred(det, species):
+        return db.conn.execute(
+            "SELECT id FROM predictions WHERE detection_id = ? AND species = ?",
+            (det, species),
+        ).fetchone()['id']
+
+    member = _pred(det_pick, 'Canada Jay')
+    runner_up = _pred(det_pick, 'Blue Jay')
+    reject_member = _pred(det_reject, 'Canada Jay')
+    db.update_prediction_status(runner_up, 'alternative')
+    ws = db._active_workspace_id
+    client = app.test_client()
+
+    resp = client.post('/api/predictions/group/apply', json={
+        'picks': [pick], 'rejects': [reject], 'removed': [],
+        'species': 'Canada Jay',
+        'observed': {str(member): 'pending', str(reject_member): 'pending'},
+    })
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    assert db.get_review_status(member, ws) == 'accepted'
+    assert db.get_review_status(runner_up, ws) == 'rejected'
+    assert 'Canada Jay' in {k['name'] for k in db.get_photo_keywords(pick)}
+
+    # Undo reverses the keyword and the pick's statuses together.
+    assert client.post('/api/undo').status_code == 200
+    assert 'Canada Jay' not in {k['name'] for k in db.get_photo_keywords(pick)}
+    assert db.get_review_status(member, ws) == 'pending'
+    assert db.get_review_status(runner_up, ws) == 'alternative'
+
+    # The photo is reviewable again rather than stuck behind a 409.
+    assert client.post(f'/api/predictions/{member}/accept').status_code == 200
+
+
+def test_group_apply_without_species_is_undoable(app_and_db):
+    """A species-less pick records a no-tag accept that undo can replay."""
+    app, db = app_and_db
+    (pred_a, pick), (_pred_b, reject) = _seed_burst_group(db, 'gnospecies')
+    ws = db._active_workspace_id
+    client = app.test_client()
+
+    resp = client.post('/api/predictions/group/apply', json={
+        'picks': [pick], 'rejects': [reject], 'removed': [], 'species': '',
+    })
+    assert resp.status_code == 200
+    assert db.get_review_status(pred_a, ws) == 'accepted'
+
+    assert client.post('/api/undo').status_code == 200
+    assert db.get_review_status(pred_a, ws) == 'pending'
+    assert client.post('/api/redo').status_code == 200
+    assert db.get_review_status(pred_a, ws) == 'accepted'
+
+
+def test_undo_replay_is_one_transaction(app_and_db, monkeypatch):
+    """Undo holds the caller's transaction for the whole replay.
+
+    ``/api/undo`` runs under the prediction-decision lock (``BEGIN
+    IMMEDIATE``), but the replay's per-row setters each committed, which
+    ended that transaction after the first write and let another decision
+    interleave with the rest. Commits are now held until the replay
+    finishes, and a failure part-way rolls every step back.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    ws = db._active_workspace_id
+    pred_a, _ = _one_prediction(db, species='Brown Jay', photo_index=0)
+    pred_b, _ = _one_prediction(db, species='Brown Jay', photo_index=1)
+    resp = client.post('/api/predictions/batch-accept', json={
+        'prediction_ids': [pred_a, pred_b],
+    })
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    assert db.get_review_status(pred_a, ws) == 'accepted'
+    assert db.get_review_status(pred_b, ws) == 'accepted'
+
+    original = type(db)._undo_prediction_accept_statuses
+    seen_in_transaction = []
+
+    def spying(self, old_meta, old_val):
+        result = original(self, old_meta, old_val)
+        seen_in_transaction.append(self.conn.in_transaction)
+        return result
+
+    monkeypatch.setattr(type(db), '_undo_prediction_accept_statuses', spying)
+    db.conn.execute('BEGIN IMMEDIATE')
+    db.undo_last_edit()
+    assert seen_in_transaction and all(seen_in_transaction), (
+        'a replay step committed and ended the transaction early'
+    )
+    assert not db.conn.in_transaction
+    assert db.get_review_status(pred_a, ws) == 'pending'
+    assert db.get_review_status(pred_b, ws) == 'pending'
+
+    # A failure after the first photo's replay rolls the whole undo back.
+    db.redo_last_undo()
+    assert db.get_review_status(pred_a, ws) == 'accepted'
+    assert db.get_review_status(pred_b, ws) == 'accepted'
+    real_untag = type(db)._untag_for_edit
+    untagged = []
+
+    def failing_untag(self, pid, kid):
+        if untagged:
+            raise RuntimeError('replay failed part-way')
+        untagged.append(pid)
+        return real_untag(self, pid, kid)
+
+    monkeypatch.setattr(type(db), '_untag_for_edit', failing_untag)
+    try:
+        db.undo_last_edit()
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError('the injected failure did not fire')
+    assert db.get_review_status(pred_a, ws) == 'accepted'
+    assert db.get_review_status(pred_b, ws) == 'accepted'

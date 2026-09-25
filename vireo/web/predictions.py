@@ -1238,6 +1238,96 @@ def create_predictions_blueprint(
             observed[pred_id] = value
         return observed, None
 
+    def _group_pick_prediction_ids(db, photo_ids, observed):
+        """The prediction rows a group-apply pick accepts, keyed by photo.
+
+        The modal's ``observed`` baseline names the burst member it showed for
+        each photo, so a pick accepts exactly those rows. A photo with no
+        observed row (an older client sends no baseline) falls back to its
+        burst member rows, or failing those its rows that are not
+        ``alternative`` runners-up. Other predictions on the photo are left
+        alone either way.
+        """
+        by_photo = {pid: [] for pid in photo_ids}
+        if not by_photo:
+            return by_photo
+        if observed:
+            for chunk in chunked(sorted(observed)):
+                placeholders = ",".join("?" for _ in chunk)
+                for row in db.conn.execute(
+                    f"""SELECT pr.id, d.photo_id FROM predictions pr
+                        JOIN detections d ON d.id = pr.detection_id
+                        WHERE pr.id IN ({placeholders})
+                        ORDER BY pr.id""",
+                    chunk,
+                ):
+                    if row["photo_id"] in by_photo:
+                        by_photo[row["photo_id"]].append(row["id"])
+        missing = [pid for pid, ids in by_photo.items() if not ids]
+        if missing:
+            ws = db._ws_id()
+            for chunk in chunked(missing):
+                placeholders = ",".join("?" for _ in chunk)
+                grouped = {}
+                for row in db.conn.execute(
+                    f"""SELECT pr.id, d.photo_id,
+                               pr_rev.group_id IS NOT NULL AS in_group
+                        FROM predictions pr
+                        JOIN detections d ON d.id = pr.detection_id
+                        LEFT JOIN prediction_review pr_rev
+                          ON pr_rev.prediction_id = pr.id
+                         AND pr_rev.workspace_id = ?
+                        WHERE d.photo_id IN ({placeholders})
+                          AND COALESCE(pr_rev.status, 'pending') != 'alternative'
+                        ORDER BY pr.id""",
+                    [ws, *chunk],
+                ):
+                    by_photo[row["photo_id"]].append(row["id"])
+                    if row["in_group"]:
+                        grouped.setdefault(row["photo_id"], []).append(row["id"])
+                # Prefer the burst member rows: a runner-up an earlier reject
+                # turned ``rejected`` is no longer ``alternative``, but it is
+                # still not the member the burst modal showed.
+                by_photo.update(grouped)
+        return by_photo
+
+    def _accept_group_pick_rows(db, pick_pred_ids):
+        """Accept each pick's rows and reject their open siblings, in-transaction.
+
+        Mirrors a single Accept: within each accepted row's (detection,
+        classifier model, label set) scope, ``pending`` and ``alternative``
+        siblings become ``rejected``. Undo of the resulting
+        ``prediction_accept`` entry resets the same scopes.
+        """
+        ws = db._ws_id()
+        accepted_by_scope = {}
+        for ids in pick_pred_ids.values():
+            for pred_id in ids:
+                db.update_prediction_status(pred_id, "accepted", _commit=False)
+                scope = db.conn.execute(
+                    """SELECT detection_id, classifier_model, labels_fingerprint
+                       FROM predictions WHERE id = ?""",
+                    (pred_id,),
+                ).fetchone()
+                accepted_by_scope.setdefault(tuple(scope), set()).add(pred_id)
+        for scope, accepted_ids in accepted_by_scope.items():
+            placeholders = ",".join("?" for _ in accepted_ids)
+            sibling_ids = [row["id"] for row in db.conn.execute(
+                f"""SELECT pr.id FROM predictions pr
+                    LEFT JOIN prediction_review pr_rev
+                      ON pr_rev.prediction_id = pr.id
+                     AND pr_rev.workspace_id = ?
+                    WHERE pr.detection_id = ?
+                      AND pr.classifier_model = ?
+                      AND pr.labels_fingerprint = ?
+                      AND pr.id NOT IN ({placeholders})
+                      AND COALESCE(pr_rev.status, 'pending')
+                          IN ('pending', 'alternative')""",
+                (ws, *scope, *sorted(accepted_ids)),
+            )]
+            for sid in sibling_ids:
+                db.update_prediction_status(sid, "rejected", _commit=False)
+
     def _stale_group_apply_photos(db, observed):
         """Photos whose group member was decided or regenerated since the modal rendered.
 
@@ -1755,6 +1845,7 @@ def create_predictions_blueprint(
                 """SELECT pr.id, pr.species, pr.detection_id,
                           pr.classifier_model AS model,
                           pr.labels_fingerprint, d.photo_id,
+                          pr_rev.group_id,
                           COALESCE(pr_rev.status, 'pending') AS status
                    FROM predictions pr
                    JOIN detections d ON d.id = pr.detection_id
@@ -1778,44 +1869,87 @@ def create_predictions_blueprint(
                     f'prediction already {pred["status"]}; cannot reject',
                     409,
                 )
-            db.update_prediction_status(pred_id, "rejected", _commit=False)
-            # Also reject sibling alternative predictions for the same
-            # (detection, classifier_model, labels_fingerprint) in this
-            # workspace. Fingerprint scoping matters: without it, rejecting a
-            # prediction from a new label set would rewrite review state for
-            # prior fingerprints' alternatives on the same detection.
-            sibling_ids = [row["id"] for row in db.conn.execute(
-                """SELECT pr.id
-                   FROM predictions pr
-                   JOIN prediction_review pr_rev
-                     ON pr_rev.prediction_id = pr.id
-                    AND pr_rev.workspace_id = ?
-                   WHERE pr.detection_id = ?
-                     AND pr.classifier_model = ?
-                     AND pr.labels_fingerprint = ?
-                     AND pr.id != ?
-                     AND pr_rev.status = 'alternative'""",
-                (ws, pred["detection_id"], pred["model"],
-                 pred["labels_fingerprint"], pred_id),
-            ).fetchall()]
-            for sid in sibling_ids:
-                db.update_prediction_status(sid, "rejected", _commit=False)
+            # A burst card's "Not X" answers for the whole burst, the way its
+            # "Tag N photos" accept does (``accept_prediction`` expands across
+            # the group). Rejecting only the lead left the other members
+            # pending and hidden behind a card that read "Rejected", where a
+            # later Accept All would tag them X. Expansion follows the accept
+            # rule: it only discovers members that are still undecided.
+            targets = [(pred["photo_id"], pred_id)]
+            if pred["group_id"]:
+                for gp in db.conn.execute(
+                    """SELECT pr.id, d.photo_id,
+                              COALESCE(pr_rev.status, 'pending') AS status
+                       FROM predictions pr
+                       JOIN prediction_review pr_rev
+                         ON pr_rev.prediction_id = pr.id
+                        AND pr_rev.workspace_id = ?
+                       JOIN detections d ON d.id = pr.detection_id
+                       JOIN photos ph ON ph.id = d.photo_id
+                       JOIN workspace_folders wf
+                         ON wf.folder_id = ph.folder_id AND wf.workspace_id = ?
+                       WHERE pr_rev.group_id = ? AND pr.classifier_model = ?
+                         AND pr.id != ?
+                       ORDER BY pr.id""",
+                    (ws, ws, pred["group_id"], pred["model"], pred_id),
+                ):
+                    if gp["status"] not in _DECIDED_PREDICTION_STATUSES:
+                        targets.append((gp["photo_id"], gp["id"]))
+            rejected_ids = []
+            for _target_photo, target_id in targets:
+                rejected_ids.append(target_id)
+                _reject_prediction_row(db, ws, target_id)
+            target_photos = list(dict.fromkeys(t[0] for t in targets))
+            desc = f'Rejected prediction "{pred["species"]}"'
+            if len(target_photos) > 1:
+                desc += f" on {len(target_photos)} photos"
             db.record_edit(
                 'prediction_reject',
-                f'Rejected prediction "{pred["species"]}"',
+                desc,
                 'rejected',
                 [{
-                    'photo_id': pred['photo_id'],
+                    'photo_id': target_photo,
                     'old_value': 'pending',
                     'new_value': 'rejected',
-                }],
+                } for target_photo in target_photos],
+                is_batch=len(target_photos) > 1,
                 _commit=False,
             )
             db.conn.commit()
-            return jsonify({"ok": True})
+            return jsonify({"ok": True, "rejected_prediction_ids": rejected_ids})
         except Exception:
             db.conn.rollback()
             raise
+
+    def _reject_prediction_row(db, ws, pred_id):
+        """Reject one prediction and its ``alternative`` siblings, in-transaction."""
+        scope = db.conn.execute(
+            """SELECT detection_id, classifier_model, labels_fingerprint
+               FROM predictions WHERE id = ?""",
+            (pred_id,),
+        ).fetchone()
+        db.update_prediction_status(pred_id, "rejected", _commit=False)
+        # Also reject sibling alternative predictions for the same
+        # (detection, classifier_model, labels_fingerprint) in this
+        # workspace. Fingerprint scoping matters: without it, rejecting a
+        # prediction from a new label set would rewrite review state for
+        # prior fingerprints' alternatives on the same detection.
+        sibling_ids = [row["id"] for row in db.conn.execute(
+            """SELECT pr.id
+               FROM predictions pr
+               JOIN prediction_review pr_rev
+                 ON pr_rev.prediction_id = pr.id
+                AND pr_rev.workspace_id = ?
+               WHERE pr.detection_id = ?
+                 AND pr.classifier_model = ?
+                 AND pr.labels_fingerprint = ?
+                 AND pr.id != ?
+                 AND pr_rev.status = 'alternative'""",
+            (ws, scope["detection_id"], scope["classifier_model"],
+             scope["labels_fingerprint"], pred_id),
+        ).fetchall()]
+        for sid in sibling_ids:
+            db.update_prediction_status(sid, "rejected", _commit=False)
 
     @blueprint.route("/api/predictions/group/<group_id>")
     def api_prediction_group(group_id):
@@ -1906,21 +2040,11 @@ def create_predictions_blueprint(
                         )
                         added_picks.append(pid)
 
-                    # Record keyword_add history for picks
-                    kw_items = [
-                        {'photo_id': pid, 'old_value': '', 'new_value': str(kid)}
-                        for pid in added_picks
-                    ]
-                    if kw_items:
-                        db.record_edit(
-                            'keyword_add',
-                            f'Added "{local_species}" to {len(added_picks)} photos (group prediction)',
-                            str(kid), kw_items,
-                            is_batch=len(added_picks) > 1,
-                            _commit=False,
-                        )
                 else:
                     # No species — still flag picks
+                    kid = None
+                    already_has_species = set()
+                    added_picks = []
                     for pid in actionable_picks:
                         db.update_photo_flag(pid, "flagged", _commit=False)
 
@@ -1955,11 +2079,54 @@ def create_predictions_blueprint(
                     is_batch=True, _commit=False,
                 )
 
-            # Mark all predictions in this group as accepted/rejected
+            # A pick accepts its burst member, the way a single Accept does:
+            # the member row becomes ``accepted`` and the open siblings in its
+            # (detection, model, label set) scope become ``rejected``. Writing
+            # ``accepted`` over every prediction on the photo also accepted
+            # the alternative species the modal only listed as runners-up.
+            pick_pred_ids = _group_pick_prediction_ids(
+                db, actionable_picks, observed,
+            )
+            _accept_group_pick_rows(db, pick_pred_ids)
+
+            # One history entry covers the keyword and the statuses, so undo
+            # restores both together. Before this the statuses were never
+            # recorded: undo removed the keyword but left the rows accepted,
+            # and a later single Accept of the same photo answered 409.
+            accept_items = []
             for pid in actionable_picks:
-                db.update_predictions_status_by_photo(
-                    pid, 'accepted', _commit=False,
+                ids = pick_pred_ids.get(pid) or []
+                tagged = pid in added_picks
+                if not ids and not tagged:
+                    continue
+                if ids:
+                    meta = {"prediction_id": ids[0], "prediction_ids": ids}
+                    if not tagged:
+                        meta["no_tag"] = True
+                    old_value = json.dumps(meta)
+                else:
+                    old_value = ''
+                accept_items.append({
+                    'photo_id': pid,
+                    'old_value': old_value,
+                    'new_value': str(kid) if kid is not None else '',
+                })
+            if accept_items:
+                has_rows = any(pick_pred_ids.get(pid) for pid in actionable_picks)
+                n = len(accept_items)
+                if kid is not None:
+                    desc = f'Added "{local_species}" to {n} photos (group prediction)'
+                else:
+                    desc = f'Accepted group prediction on {n} photos'
+                db.record_edit(
+                    'prediction_accept' if has_rows else 'keyword_add',
+                    desc,
+                    str(kid) if kid is not None else '',
+                    accept_items,
+                    is_batch=n > 1,
+                    _commit=False,
                 )
+
             for pid in actionable_rejects:
                 db.update_predictions_status_by_photo(
                     pid, 'rejected', _commit=False,

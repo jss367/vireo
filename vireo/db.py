@@ -568,6 +568,25 @@ NAV_ID_ALIASES = {
 }
 
 
+class _Connection(sqlite3.Connection):
+    """``sqlite3.Connection`` whose ``commit()`` can be held off.
+
+    Undo/redo replays an edit through the ordinary per-photo setters, and
+    each of those commits on its own. Under the prediction-decision lock
+    that first commit would end ``BEGIN IMMEDIATE`` and let another decision
+    interleave with the rest of the replay. ``Database._commits_held()``
+    raises ``_commit_holds`` so those inner commits become no-ops and the
+    replay lands as one transaction.
+    """
+
+    _commit_holds = 0
+
+    def commit(self):
+        if self._commit_holds:
+            return
+        super().commit()
+
+
 def commit_with_retry(conn, max_retries=5, base_delay=0.1):
     """Commit ``conn`` with retry on transient "locked"/"busy" errors.
 
@@ -748,7 +767,9 @@ class Database:
         self._db_path = db_path
         # Pre-set so __del__ can run safely if sqlite3.connect raises.
         self.conn = None
-        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        self.conn = sqlite3.connect(
+            db_path, check_same_thread=False, factory=_Connection,
+        )
         self.conn.row_factory = sqlite3.Row
         self.conn.create_function(
             "vireo_keyword_text_match",
@@ -13469,8 +13490,9 @@ class Database:
                     'History has been refreshed; review the next action before trying again.'
                 ) from None
         else:
-            self._apply_undo(entry, items)
-            history.mark_undone(entry['id'])
+            with self._commits_held():
+                self._apply_undo(entry, items)
+                history.mark_undone(entry['id'])
         return entry
 
     def redo_last_undo(self):
@@ -13521,9 +13543,39 @@ class Database:
                     'History has been refreshed; review the next action before trying again.'
                 ) from None
         else:
-            self._apply_redo(entry, items)
-            history.mark_redone(entry['id'])
+            with self._commits_held():
+                self._apply_redo(entry, items)
+                history.mark_redone(entry['id'])
         return entry
+
+    @contextlib.contextmanager
+    def _commits_held(self):
+        """Run an undo/redo replay as one transaction.
+
+        The replay's setters each commit, which would end the caller's
+        ``BEGIN IMMEDIATE`` (``api_undo`` / ``api_redo`` hold the
+        prediction-decision lock) after the first write and leave the rest of
+        the replay racing other decisions. Holding the connection's commits
+        turns those into no-ops; the whole replay then commits once here, or
+        rolls back if any step raises, so a failure part-way cannot leave half
+        an edit reversed. A connection that cannot hold commits (a test's
+        wrapper) runs the replay unheld, as before.
+        """
+        conn = self.conn
+        if not isinstance(conn, _Connection):
+            yield
+            return
+        conn._commit_holds += 1
+        try:
+            yield
+        except BaseException:
+            conn._commit_holds -= 1
+            if not conn._commit_holds:
+                conn.rollback()
+            raise
+        conn._commit_holds -= 1
+        if not conn._commit_holds:
+            conn.commit()
 
     def _retire_stale_grouping_entry(self, entry_id):
         """Retire stale cache state while retaining any reversible photo edit.
@@ -13684,9 +13736,11 @@ class Database:
         pid, old_val = item['photo_id'], item['old_value']
         action = entry['action_type']
         old_meta = self._edit_old_value_meta(old_val)
-        kid = int((item['new_value'] if action == 'prediction_accept' else None) or entry['new_value'])
-        kw_name = self._keyword_name(kid)
         skip_tag = action == 'prediction_accept' and old_meta.get('no_tag')
+        raw_kid = (item['new_value'] if action == 'prediction_accept' else None) or entry['new_value']
+        # A no-tag accept (a species-less burst pick) records no keyword.
+        kid = int(raw_kid) if raw_kid or not skip_tag else None
+        kw_name = self._keyword_name(kid) if kid is not None else None
         if not skip_tag:
             if action == 'prediction_accept' and (
                 not old_val or old_meta.get('keyword_only') or old_meta.get('symmetric_keyword_queue')
@@ -13723,9 +13777,11 @@ class Database:
         pid, old_val = item['photo_id'], item['old_value']
         action = entry['action_type']
         old_meta = self._edit_old_value_meta(old_val)
-        kid = int((item['new_value'] if action == 'prediction_accept' else None) or entry['new_value'])
-        kw_name = self._keyword_name(kid)
         skip_tag = action == 'prediction_accept' and old_meta.get('no_tag')
+        raw_kid = (item['new_value'] if action == 'prediction_accept' else None) or entry['new_value']
+        # A no-tag accept (a species-less burst pick) records no keyword.
+        kid = int(raw_kid) if raw_kid or not skip_tag else None
+        kw_name = self._keyword_name(kid) if kid is not None else None
         if not skip_tag:
             if action == 'prediction_accept' and (
                 not old_val or old_meta.get('keyword_only') or old_meta.get('symmetric_keyword_queue')
@@ -13767,6 +13823,10 @@ class Database:
         self._edit_history_repository().undo_prediction_accept_statuses(
             pred_ids, self._prediction_scope,
         )
+        # A Highlights confirm of a ``reviewed`` row records that status, so
+        # undo restores the user's earlier decision instead of ``pending``.
+        if old_meta.get("prior_status") == "reviewed" and old_meta.get("prediction_id"):
+            self.update_prediction_status(int(old_meta["prediction_id"]), "reviewed")
 
     def _redo_prediction_accept_statuses(self, old_meta, old_val):
         """Re-accept every recorded prediction and re-reject its siblings.
