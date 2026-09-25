@@ -27,6 +27,7 @@ id lists, ``create_default_collections_for_all_workspaces``) stay on
 """
 
 import json
+import math
 
 from keyword_identity import identity_sql
 
@@ -2684,15 +2685,32 @@ def _photo_id_key(value):
     """The integer photo id a ``photo_ids`` rule value names, or None.
 
     The rules engine matches ints inline and binds anything else, where
-    SQLite's integer affinity on ``p.id`` still matches a numeric string, so
-    both spellings name the same photo.
+    SQLite's integer affinity on ``p.id`` still matches a numeric string, an
+    integral float, or a string spelling of one (e.g. ``"1.0"`` or ``"1e3"``),
+    so every such spelling names the same photo. The rule validator permits
+    those spellings, so a remap that missed them would leave a stale entry for
+    the deleted id and silently rejoin the next photo that reuses it.
     """
     if isinstance(value, bool):
         return None
     if isinstance(value, int):
         return value
-    if isinstance(value, str) and value.strip().lstrip("-").isdigit():
-        return int(value.strip())
+    if isinstance(value, float):
+        if math.isfinite(value) and value.is_integer():
+            return int(value)
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if text.lstrip("-").isdigit():
+            return int(text)
+        try:
+            as_float = float(text)
+        except ValueError:
+            return None
+        if math.isfinite(as_float) and as_float.is_integer():
+            return int(as_float)
     return None
 
 

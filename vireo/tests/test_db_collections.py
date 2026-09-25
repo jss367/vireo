@@ -310,6 +310,60 @@ def test_remap_collection_photo_ids_follows_chains_and_folds_duplicates(db):
     assert remap_collection_photo_ids(db.conn, {}) == 0
 
 
+def test_remap_collection_photo_ids_normalizes_float_and_stringified_ids(db):
+    """Non-int spellings SQLite's integer affinity still matches must remap.
+
+    The rule validator permits any scalar (``_is_scalar`` accepts int, float,
+    str, bool, None), and the ``photo_ids`` engine binds anything that isn't
+    an ``int`` — so ``1.0``, ``"1"`` and ``"1.0"`` all match ``p.id = 1`` at
+    query time. Miss any spelling here and the stale entry silently rejoins
+    the next photo that reuses id 1.
+    """
+    from repositories.collections import remap_collection_photo_ids
+
+    other_ws = db.create_workspace("Other")
+    rules = [
+        {"field": "photo_ids", "value": [1, 1.0, "1", "1.0", "1e0", "2"]},
+    ]
+    cid = db.conn.execute(
+        "INSERT INTO collections (name, rules, workspace_id) VALUES (?, ?, ?)",
+        ("mixed", json.dumps(rules), other_ws),
+    ).lastrowid
+    assert remap_collection_photo_ids(db.conn, {1: 7, 2: None}) == 1
+    stored = json.loads(db.conn.execute(
+        "SELECT rules FROM collections WHERE id = ?", (cid,),
+    ).fetchone()[0])
+    # Every spelling of 1 is remapped to 7 and folded to a single entry; 2 is
+    # dropped outright. Order preserved from the first surviving occurrence.
+    assert stored == [{"field": "photo_ids", "value": [7]}]
+
+
+def test_photo_id_key_normalizes_the_spellings_sqlite_matches():
+    from repositories.collections import _photo_id_key
+
+    assert _photo_id_key(1) == 1
+    assert _photo_id_key(-3) == -3
+    assert _photo_id_key(1.0) == 1
+    assert _photo_id_key(-1.0) == -1
+    assert _photo_id_key("1") == 1
+    assert _photo_id_key(" 1 ") == 1
+    assert _photo_id_key("-1") == -1
+    assert _photo_id_key("1.0") == 1
+    assert _photo_id_key("-1.0") == -1
+    assert _photo_id_key("1e3") == 1000
+    # Non-integral or non-numeric spellings never name an integer id.
+    assert _photo_id_key(1.5) is None
+    assert _photo_id_key("1.5") is None
+    assert _photo_id_key(float("nan")) is None
+    assert _photo_id_key(float("inf")) is None
+    assert _photo_id_key(True) is None
+    assert _photo_id_key(False) is None
+    assert _photo_id_key(None) is None
+    assert _photo_id_key("") is None
+    assert _photo_id_key("   ") is None
+    assert _photo_id_key("abc") is None
+
+
 def test_needs_review_rule(db, folder):
     pending = _photo(db, folder, "a.jpg")
     accepted = _photo(db, folder, "b.jpg")
