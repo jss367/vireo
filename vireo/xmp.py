@@ -637,9 +637,33 @@ def _photo_subject(root):
     if not descriptions:
         return empty
     parent_map = _build_parent_map(root)
-    subjects = {_description_subject(d, parent_map) for d in descriptions}
+    subjects = set()
+    empty_origin = set()
+    rdf_about = f"{{{NS_RDF}}}about"
+    rdf_node = f"{{{NS_RDF}}}nodeID"
+    rdf_id = f"{{{NS_RDF}}}ID"
+    for desc in descriptions:
+        subject = _description_subject(desc, parent_map)
+        subjects.add(subject)
+        # Track Descriptions that ORIGINATED from an empty/absent
+        # ``rdf:about'' (with no blank-node or rdf:ID). Under an
+        # explicit ``xml:base'' they resolve into the base URI, so
+        # ``empty in subjects'' no longer fires -- but the enclosing-
+        # photo convention still applies: prefer their resolved
+        # subject over any non-fragment auxiliary sibling.
+        if (
+            not desc.get(rdf_about)
+            and not desc.get(rdf_node)
+            and not desc.get(rdf_id)
+        ):
+            empty_origin.add(subject)
     if empty in subjects:
         return empty
+    if empty_origin:
+        # All empty-originated Descriptions in a given packet share
+        # the same effective base (they resolve identically), so any
+        # one entry names the photo's subject.
+        return next(iter(empty_origin))
     photo_candidates = {
         (about, node, rid)
         for (about, node, rid) in subjects

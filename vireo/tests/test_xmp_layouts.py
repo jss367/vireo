@@ -397,6 +397,40 @@ def test_fragment_auxiliary_does_not_hide_photo_subject(tmp_path):
     assert metadata["rating"] == "4"
 
 
+def test_empty_rdf_about_priority_survives_explicit_xml_base(tmp_path):
+    """The empty-``rdf:about'' priority still fires under an explicit ``xml:base''.
+
+    With an ``xml:base'' declared, an empty ``rdf:about'' resolves
+    into the base URI rather than staying literally empty. So
+    ``empty in subjects'' no longer catches the enclosing-photo
+    convention, and the photo Description would sit alongside an
+    ``rdf:about="uuid:aux"'' sibling looking like two non-fragment
+    candidates -- ``_photo_subject'' returned empty and no Description
+    matched it. ``_photo_subject'' now tracks Descriptions that
+    ORIGINATED from an empty/absent ``rdf:about'' and returns their
+    resolved subject as the photo, so reads still surface the
+    photo's metadata under an explicit base.
+    """
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'"
+        f" xmlns:xml='http://www.w3.org/XML/1998/namespace'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'"
+        f" xml:base='file:///photos/photo.jpg'>"
+        f"<rdf:Description rdf:about=''"
+        f" xmlns:xmp='{NS_XMP}' xmp:Rating='4'/>"
+        f"<rdf:Description rdf:about='uuid:aux'"
+        f" xmlns:xmp='{NS_XMP}' xmp:Rating='1'/>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+
+    metadata = read_sync_preview_metadata(str(path))
+    # The photo's rating (``4'') surfaces; the auxiliary's ``1'' is
+    # not confused with it even though the empty ``rdf:about''
+    # resolved into ``file:///photos/photo.jpg''.
+    assert metadata["rating"] == "4"
+
+
 def test_empty_rdf_about_still_wins_alongside_absolute_auxiliary(tmp_path):
     """A photo Description with empty ``rdf:about'' wins over an auxiliary URI.
 
