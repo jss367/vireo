@@ -180,12 +180,14 @@ Automated review cycle managed by `.github/workflows/pr-agent.yml`.
 3. When a review is submitted on a `claude-agent` PR (not an approval), Claude pushes fixes to the branch.
 4. When **Codex Connect** submits a review on any PR, Claude addresses the feedback by pushing to the branch and adds the `claude-agent` label so future comments are handled automatically.
 5. When the **Tests workflow fails** on any PR, Claude reads the failure logs and pushes a fix directly to the PR branch. Loop prevention: skips if the failing commit was already a CI fix attempt.
-6. When an **approving review** is submitted or someone comments **👍**, the PR is squash-merged.
-7. Branches are deleted after merge.
+6. When **Full tests fails on `main`**, `main-health.yml` opens (or comments on) a `main-red` issue and closes it on the next green run. It also fires the routine with `Task: fix-main` until one request per incident has been accepted (the issue records it), and the routine opens a `fix-main` PR; to retry after that, close the issue and the next red run opens a new one. The fire is gated on the repository variable `MAIN_HEALTH_ENABLE_FIX_MAIN`, off by default because the stored routine prompt is not synced from the repo; flip it to `true` after pasting `pr-agent-routine-prompt.md` into the routine. Runs on `main` are never cancelled mid-run (a burst of merges queues one run for the newest), so main always gets a complete result.
+7. When an **approving review** is submitted or someone comments **👍**, the PR is squash-merged.
+8. Branches are deleted after merge.
 
 ### Key files
 
 - `.github/workflows/pr-agent.yml` — Event forwarder + pure-bash merge jobs
+- `.github/workflows/main-health.yml` — Tracks red `Full tests` runs on `main` and fires `fix-main`
 - `.github/actions/fire-routine/action.yml` — Composite action that POSTs to the routine `/fire` endpoint
 - `docs/pr-agent-routine.md` — Setup guide for the Claude Code routine that does the LLM work
 - `docs/pr-agent-routine-prompt.md` — The routine's prompt (paste into claude.ai/code/routines)

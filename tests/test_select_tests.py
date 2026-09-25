@@ -756,6 +756,7 @@ def test_e2e_changes_are_ignored_for_unit_selection(repo):
         "pyproject.toml",
         ".github/workflows/test.yml",
         ".github/workflows/test-main.yml",
+        ".github/workflows/main-health.yml",
         ".github/actions/setup-python-tests/action.yml",
         "vireo/data/taxonomy.json",
         "vireo/tests/wait.py",

@@ -105,6 +105,7 @@ FULL_SUITE_PATHS = frozenset(
         "scripts/selected_tests_plugin.py",
         ".github/workflows/test.yml",
         ".github/workflows/test-main.yml",
+        ".github/workflows/main-health.yml",
     }
 )
 FULL_SUITE_PREFIXES = (".github/actions/", "vireo/data/")

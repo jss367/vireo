@@ -64,6 +64,7 @@ jobs:
               path.startsWith(".github/actions/") ||
               path === ".github/workflows/pr-agent.yml" ||
               path === ".github/workflows/test-main.yml" ||
+              path === ".github/workflows/main-health.yml" ||
               path === "docs/pr-agent-routine-prompt.md" ||
               (path.startsWith("scripts/") && path.endsWith(".py")) ||
               ["pyproject.toml", "uv.lock", "conftest.py"].includes(path)
