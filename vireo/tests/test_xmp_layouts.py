@@ -397,6 +397,109 @@ def test_fragment_auxiliary_does_not_hide_photo_subject(tmp_path):
     assert metadata["rating"] == "4"
 
 
+def test_read_keywords_uses_document_uri_resolution(tmp_path):
+    """``read_keywords'' honors the same subject resolution as the sync preview.
+
+    ``read_keywords'', ``read_hierarchical_keywords'', and other
+    top-level readers go through ``_parse_xmp'', which used to skip
+    ``_register_document_uri''. So a sidecar with equivalent
+    ``rdf:about="photo.jpg"'' and ``rdf:about="file:///<tmp>/photo.jpg"''
+    subjects looked ambiguous to those readers (the synthetic
+    fallback base doesn't match the absolute-URI Description) even
+    though the sync preview correctly folded them into one subject.
+    Registering the sidecar URI in ``_parse_xmp'' fixes it.
+    """
+    path = tmp_path / "photo.xmp"
+    absolute_uri = (tmp_path / "photo.jpg").as_uri()
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about='photo.jpg' xmlns:dc='{NS_DC}'>"
+        f"<dc:subject><rdf:Bag>"
+        f"<rdf:li>Heron</rdf:li>"
+        f"</rdf:Bag></dc:subject>"
+        f"</rdf:Description>"
+        f"<rdf:Description rdf:about='{absolute_uri}' xmlns:dc='{NS_DC}'>"
+        f"<dc:subject><rdf:Bag>"
+        f"<rdf:li>Sparrow</rdf:li>"
+        f"</rdf:Bag></dc:subject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+
+    keywords = read_keywords(str(path))
+    # Both spellings collapse to the same subject, so both keywords surface.
+    assert keywords == {"Heron", "Sparrow"}
+
+
+def test_relative_xml_base_resolves_from_document_uri(tmp_path):
+    """A relative ``xml:base'' composes against the sidecar's URI.
+
+    Before this fix ``_effective_xml_base'' seeded its composition
+    with an empty string, so a purely relative ``xml:base="sub/"''
+    stayed relative. ``rdf:about="../photo.jpg"'' then didn't
+    resolve to ``file:///<tmp>/photo.jpg'', and an equivalent
+    absolute-URI sibling was treated as a second photo candidate.
+    Seeding with the registered document URI resolves the base to
+    an absolute path, so both spellings fingerprint together.
+    """
+    path = tmp_path / "photo.xmp"
+    absolute_uri = (tmp_path / "photo.jpg").as_uri()
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'"
+        f" xmlns:xml='http://www.w3.org/XML/1998/namespace'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about='../photo.jpg' xml:base='sub/'"
+        f" xmlns:xmp='{NS_XMP}' xmp:Rating='4'/>"
+        f"<rdf:Description rdf:about='{absolute_uri}'"
+        f" xmlns:exif='{NS_EXIF}'"
+        f" exif:GPSLatitude='10,0.0N' exif:GPSLongitude='20,0.0E'/>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+
+    metadata = read_sync_preview_metadata(str(path))
+    # Both Descriptions fold into the same photo subject.
+    assert metadata["rating"] == "4"
+    assert metadata["location"]["latitude"] == pytest.approx(10.0)
+
+
+def test_write_new_photo_description_uses_context_independent_subject(tmp_path):
+    """A write under an ``xml:base'' context uses the resolved absolute subject.
+
+    When the existing photo Description carries a local
+    ``xml:base'' and a relative ``rdf:about'', copying just the raw
+    ``rdf:about'' onto a new Description that sits under
+    ``rdf:RDF'' would drift -- the new one lacks the local base
+    and its raw spelling resolves against the document URI to a
+    different subject. The write path now uses the resolved
+    absolute URI for the new Description's ``rdf:about'', so it
+    resolves consistently on the next read.
+    """
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'"
+        f" xmlns:xml='http://www.w3.org/XML/1998/namespace'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about='photo.jpg' xml:base='sub/'"
+        f" xmlns:xml='http://www.w3.org/XML/1998/namespace'"
+        f" xml:lang='en' xmlns:xmp='{NS_XMP}' xmp:Rating='4'/>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    # Adding a keyword forces a fresh unqualified Description
+    # (the existing one is language-qualified).
+    editor = SidecarEditor(path_str)
+    editor.add_keywords({"Heron"}, set())
+    editor.commit()
+
+    # After the write, the keyword surfaces on the next read: both
+    # Descriptions resolve to the same photo subject.
+    metadata = read_sync_preview_metadata(path_str)
+    assert "Heron" in metadata["keywords"]
+    assert metadata["rating"] == "4"
+
+
 def test_relative_and_absolute_rdf_about_share_photo_via_document_uri(tmp_path):
     """A relative ``rdf:about'' folds with the equivalent absolute form.
 

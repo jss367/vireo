@@ -446,7 +446,9 @@ def _parse_xmp(xmp_path):
         log.warning("Corrupt XMP file: %s", xmp_path)
         return None
 
-    return tree.getroot(), tree
+    root = tree.getroot()
+    _register_document_uri(root, xmp_path)
+    return root, tree
 
 
 def _all_top_descriptions(root):
@@ -515,12 +517,19 @@ def _document_uri_for(elem, parent_map):
 def _effective_xml_base(elem, parent_map):
     """Return the effective ``xml:base`` URI for ``elem``.
 
-    Per the XML Base recommendation, an element's base URI for resolving
-    a relative URI reference in one of its own attributes is the
-    composition of every ancestor's ``xml:base'', starting from the
-    outermost and resolving each against the previous. Missing bases
-    contribute nothing; a bare ``xml:base'' on ``rdf:RDF'' or higher is
-    honored just as one directly on the Description would be.
+    Per the XML Base recommendation, an element's base URI for
+    resolving a relative URI reference in one of its own attributes
+    is the composition of every ancestor's ``xml:base'', starting
+    from the document's base URI (the sidecar's file URI when it
+    was registered via :func:`_register_document_uri`) and resolving
+    each successive ``xml:base'' against the previous. That
+    seeding lets a relative ``xml:base="sub/"'' compose into an
+    absolute path -- otherwise ``photo.jpg'' under such a base
+    would stay relative and drift out of alignment with a sibling
+    absolute-URI Description that names the same photo. Missing
+    ``xml:base'' declarations contribute nothing; a bare
+    ``xml:base'' on ``rdf:RDF'' or higher is honored just as one
+    directly on the Description would be.
     """
     xml_base = f"{{{NS_XML}}}base"
     chain = []
@@ -529,7 +538,7 @@ def _effective_xml_base(elem, parent_map):
         chain.append(current)
         current = parent_map.get(current)
     chain.reverse()
-    base = ""
+    base = _document_uri_for(elem, parent_map) or ""
     for anc in chain:
         b = anc.get(xml_base)
         if b is not None:
@@ -1573,27 +1582,29 @@ class SidecarEditor:
         return desc
 
     def _photo_write_subject(self):
-        """Return the raw ``rdf:about'' spelling a new photo Description should use.
+        """Return the ``rdf:about'' spelling a new photo Description should use.
 
-        ``_photo_subject'' returns the URI-resolved subject key so it
-        can compare against Descriptions across ``xml:base'' and
-        document-URI resolutions. Writers want the sidecar's own
-        spelling instead -- copying it from the first existing
-        photo-scoped Description keeps the idiomatic empty
-        ``rdf:about'' when that's what the sidecar already uses, and
-        preserves whatever relative or absolute form the existing
-        Descriptions pin. Falls back to the resolved subject when
-        no existing Description matches (which only happens for a
-        blank-node or ``rdf:ID''-only subject key).
+        The new Description will sit under ``rdf:RDF'' with no local
+        ``xml:base'', so any raw ``rdf:about'' copied from an
+        existing Description that carries additional context
+        (a local ``xml:base'' or a namespace defaulting quirk) would
+        drift once placed under the new context. Use the resolved
+        absolute URI ``_photo_subject'' returns, so the new
+        Description is context-independent -- with one exception:
+        when the photo's subject IS the sidecar's document URI
+        (the empty ``rdf:about'' at root resolves there), keep the
+        idiomatic empty spelling so sidecars using the convention
+        stay unchanged. ``rdf:nodeID'' / ``rdf:ID'' subjects don't
+        resolve, so they pass through unchanged.
         """
         resolved = _photo_subject(self._root)
+        about, node, rid = resolved
+        if not about:
+            return resolved
         parent_map = _build_parent_map(self._root)
-        for desc in _all_top_descriptions(self._root):
-            if _description_subject(desc, parent_map) == resolved:
-                raw_about = desc.get(f"{{{NS_RDF}}}about")
-                raw_node = desc.get(f"{{{NS_RDF}}}nodeID")
-                raw_rid = desc.get(f"{{{NS_RDF}}}ID")
-                return (raw_about or "", raw_node or "", raw_rid or "")
+        doc_uri = _document_uri_for(self._root, parent_map)
+        if doc_uri and about == doc_uri:
+            return ("", node, rid)
         return resolved
 
     def _find_description(self):
