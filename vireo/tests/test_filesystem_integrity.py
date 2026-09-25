@@ -164,14 +164,26 @@ def test_copy_via_temp_no_hardlink_fallback_never_overwrites_replacement(
 
     # After our O_EXCL claim succeeds, simulate a concurrent writer:
     # unlink our placeholder and drop its own file at the same name.
-    # ``os.fstat`` on our fd afterwards reports nlink=0.
+    # ``os.fstat`` on our fd afterwards reports nlink=0. Track the claim
+    # fd explicitly (only tripped when fstat runs on THAT fd), because
+    # ``shutil.copy2`` staging the temp file also calls ``os.fstat`` and
+    # would otherwise trip the racer before the claim-fd nlink check even
+    # runs — leaving the check unexercised while the test still passes.
     racer_bytes = b"racer-content"
     original_fstat = os.fstat
+    original_open = os.open
+    claim_fds = set()
     tripped = {"once": False}
+
+    def tracking_open(path, flags, *args, **kwargs):
+        fd = original_open(path, flags, *args, **kwargs)
+        if os.fspath(path) == str(dst) and (flags & os.O_EXCL):
+            claim_fds.add(fd)
+        return fd
 
     def racing_fstat(fd):
         result = original_fstat(fd)
-        if not tripped["once"]:
+        if fd in claim_fds and not tripped["once"]:
             tripped["once"] = True
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(str(dst))
@@ -179,11 +191,13 @@ def test_copy_via_temp_no_hardlink_fallback_never_overwrites_replacement(
                 fh.write(racer_bytes)
         return result
 
+    monkeypatch.setattr(staged_copy.os, "open", tracking_open)
     monkeypatch.setattr(staged_copy.os, "fstat", racing_fstat)
 
     with pytest.raises(FileExistsError):
         staged_copy.copy_via_temp(str(src), str(dst))
 
+    assert tripped["once"], "racer never ran against the O_EXCL claim fd"
     assert dst.read_bytes() == racer_bytes
     assert _no_partials(dst_dir) == []
 

@@ -25,6 +25,12 @@ _COPY_CHUNK = 1 << 20  # 1 MiB per read; small enough for slow NAS transfers
 _UTIME_SUPPORTS_FD = os.utime in getattr(os, "supports_fd", set())
 _HAS_FCHMOD = hasattr(os, "fchmod")
 
+# On Windows a file descriptor opened without O_BINARY defaults to text
+# translation, which turns lone LF bytes in binary photo data into CRLF
+# on write and corrupts the file silently. Add the flag when the platform
+# provides it; POSIX doesn't define it and doesn't need it.
+_O_BINARY = getattr(os, "O_BINARY", 0)
+
 
 def copy_via_temp(src, dst):
     """Copy ``src`` to ``dst`` through a hidden sibling temp file.
@@ -89,7 +95,7 @@ def _promote_by_placeholder(tmp, dst):
     # already created ``dst`` gets us FileExistsError here, before we
     # touch any bytes; raise so ``copy_via_temp`` cleans up ``tmp``.
     claim_fd = os.open(
-        dst, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644,
+        dst, os.O_CREAT | os.O_EXCL | os.O_WRONLY | _O_BINARY, 0o644,
     )
     try:
         claim_ino = os.fstat(claim_fd).st_ino

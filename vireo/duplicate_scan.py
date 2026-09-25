@@ -140,14 +140,21 @@ def _build_unresolved_proposal(db, group):
     # recommend orphan cleanup. Offline volumes are unknown, not missing —
     # counting them here would tell the user their archive is gone whenever a
     # NAS is unplugged. ``all_offline`` lets the UI say "reconnect to check"
-    # instead.
+    # instead; it must require EVERY absent entry to be on an offline volume
+    # so a group mixing one offline copy with one genuinely-missing copy
+    # doesn't get "reconnect to check" when at least one copy is confirmed
+    # gone from a reachable volume.
     all_missing = not any(
         info["exists"] or info["volume_offline"]
         for info in info_by_id.values()
     )
     all_offline = (
         not all_missing
-        and not any(info["exists"] for info in info_by_id.values())
+        and all(
+            info["exists"] or info["volume_offline"]
+            for info in info_by_id.values()
+        )
+        and any(info["volume_offline"] for info in info_by_id.values())
     )
     empty_file_group = _is_empty_file_group(
         group["file_hash"], info_by_id.values(),
@@ -225,14 +232,19 @@ def _build_resolved_proposal(db, group):
         linfo["rejected"] = True
         losers.append(linfo)
     # See ``_build_unresolved_proposal`` for why offline volumes are unknown
-    # rather than missing.
+    # rather than missing, and why ``all_offline`` requires every absent
+    # entry to actually sit on an offline volume.
     all_missing = not any(
         info["exists"] or info["volume_offline"]
         for info in info_by_id.values()
     )
     all_offline = (
         not all_missing
-        and not any(info["exists"] for info in info_by_id.values())
+        and all(
+            info["exists"] or info["volume_offline"]
+            for info in info_by_id.values()
+        )
+        and any(info["volume_offline"] for info in info_by_id.values())
     )
     empty_file_group = _is_empty_file_group(
         group["file_hash"], info_by_id.values(),

@@ -957,6 +957,7 @@ def ingest(
                 needs_suffix = True
 
             slot = 0
+            matched_existing = False
             if needs_suffix:
                 stem = source_file.stem
                 suffix = source_file.suffix
@@ -965,15 +966,49 @@ def ingest(
                     [anchor] if anchor else [],
                     (n for n in itertools.count(1) if n != anchor),
                 )
+                src_size = source_file.stat().st_size
                 for slot in candidates:
                     dest_file = dest_folder / f"{stem}_{slot}{suffix}"
                     if os.path.lexists(dest_file):
+                        # A same-size same-hash regular file at this slot
+                        # is already the bytes we would copy. Adopt it
+                        # (matches the slot-0 branch above) rather than
+                        # copying a second identical file at slot+1: the
+                        # anchor case reaches here when the first sibling
+                        # picked a suffixed slot because ``_sibling_blocks_slot``
+                        # found this exact match, and the non-anchored
+                        # case avoids the same duplicate-copy on retry.
+                        try:
+                            if (dest_file.is_file()
+                                and dest_file.stat().st_size == src_size
+                                and src_size != 0):
+                                src_hash = (
+                                    checker.content_hash(source_file)
+                                    if checker is not None
+                                    else compute_file_hash(str(source_file))
+                                )
+                                dest_hash = compute_file_hash(str(dest_file))
+                                if (src_hash is not None
+                                        and src_hash == dest_hash):
+                                    matched_existing = True
+                                    break
+                        except OSError:
+                            pass
                         continue
                     if anchor is None and _sibling_blocks_slot(
                         source_file, dest_folder, slot,
                     ):
                         continue
                     break
+
+            if matched_existing:
+                skipped_duplicate += 1
+                if checker is not None:
+                    for token in checker.record(source_file):
+                        batch_dest_folders[token] = str(dest_folder)
+                duplicate_folders.add(str(dest_folder))
+                companion_slots.setdefault(slot_key, slot)
+                continue
 
             copy_via_temp(str(source_file), str(dest_file))
             companion_slots.setdefault(slot_key, slot)

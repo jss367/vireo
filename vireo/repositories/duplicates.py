@@ -13,6 +13,25 @@ resolver this repository feeds.
 import os
 
 
+def _volume_offline(path):
+    """True when ``path`` sits on a mount-shaped volume that is not reachable.
+
+    Mirrors ``duplicate_scan._volume_offline`` so the auto-resolver used by
+    ``add_photo`` and ``check_and_resolve_duplicates_for_hash`` treats an
+    unmounted NAS copy as "state unknown" rather than "missing" — otherwise
+    Rule 0 rejects the archive original whenever its share is unplugged, and
+    the ``duplicate_rejections`` provenance written by ``reject`` would keep
+    the group resolved when the share came back. Imported lazily to avoid a
+    circular import at module load.
+    """
+    try:
+        from volume_reachability import get_shared as _volume_reachability
+    except Exception:
+        return False
+    root, reachable = _volume_reachability().check(path)
+    return root is not None and not reachable
+
+
 class DuplicatesRepository:
     def __init__(self, conn, *, chunk_size=800):
         self.conn = conn
@@ -130,16 +149,21 @@ class DuplicatesRepository:
         candidates = []
         for r in rows:
             path = os.path.join(r["folder_path"] or "", r["filename"] or "")
+            # Stat each candidate so the resolver doesn't pick a winner
+            # whose file was moved/deleted on disk. The DB row would
+            # otherwise outvote a surviving twin solely on path-string
+            # heuristics. A copy on an unreachable volume is "state
+            # unknown", not "missing" — treat it as present so Rule 0
+            # doesn't reject the archive original just because the NAS is
+            # unplugged (which would then get frozen into the group by
+            # the ``duplicate_rejections`` row ``reject`` writes).
+            present = os.path.exists(path)
             candidates.append(
                 DupCandidate(
                     id=r["id"],
                     path=path,
                     mtime=r["file_mtime"] or 0.0,
-                    # Stat each candidate so the resolver doesn't pick a
-                    # winner whose file was moved/deleted on disk. The DB
-                    # row would otherwise outvote a surviving twin solely
-                    # on path-string heuristics.
-                    exists=os.path.exists(path),
+                    exists=present or _volume_offline(path),
                 )
             )
         winner_id, losers_with_reasons = resolve_duplicates(candidates)
