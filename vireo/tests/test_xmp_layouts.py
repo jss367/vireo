@@ -1257,6 +1257,193 @@ def test_collapsing_duplicate_simple_property_keeps_qualified_copy(tmp_path):
     assert read_sync_preview_metadata(path_str)["rating"] == "5"
 
 
+def test_rdf_id_subject_is_not_treated_as_the_photo(tmp_path):
+    """A Description identified by ``rdf:ID`` is auxiliary, not the photo.
+
+    ``rdf:ID`` names a distinct RDF resource, just like ``rdf:about``
+    or ``rdf:nodeID`` -- it is never the enclosing photo. If the
+    identity ignored ``rdf:ID``, the auxiliary Description would alias
+    into the empty-subject bucket alongside the real photo, so photo
+    reads would pick up its rating/GPS and photo writes could mutate
+    or collapse it.
+    """
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about=''"
+        f" xmlns:xmp='{NS_XMP}' xmp:Rating='4'/>"
+        f"<rdf:Description rdf:ID='aux'"
+        f" xmlns:xmp='{NS_XMP}' xmlns:exif='{NS_EXIF}' xmlns:dc='{NS_DC}'"
+        f" xmp:Rating='1'"
+        f" exif:GPSLatitude='40,0.0N' exif:GPSLongitude='40,0.0E'>"
+        f"<dc:subject><rdf:Bag><rdf:li>AuxOnly</rdf:li></rdf:Bag></dc:subject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    metadata = read_sync_preview_metadata(path_str)
+    assert metadata["rating"] == "4"
+    assert metadata["location"] is None
+    assert read_keywords(path_str) == set()
+
+    editor = SidecarEditor(path_str)
+    editor.set_rating(5)
+    editor.add_keywords({"Heron"}, set())
+    editor.commit()
+
+    root = ET.parse(path_str).getroot()
+    aux = [
+        d for d in root.iter(f"{{{NS_RDF}}}Description")
+        if d.get(f"{{{NS_RDF}}}ID") == "aux"
+    ]
+    assert len(aux) == 1
+    assert aux[0].get(RATING) == "1"
+    assert aux[0].get(GPS_LATITUDE) == "40,0.0N"
+    aux_items = sorted(
+        li.text for li in aux[0].iter(f"{{{NS_RDF}}}li") if li.text
+    )
+    assert aux_items == ["AuxOnly"]
+
+    metadata = read_sync_preview_metadata(path_str)
+    assert metadata["rating"] == "5"
+    assert read_keywords(path_str) == {"Heron"}
+
+
+def test_qualified_keyword_bag_under_rdf_value_is_read_and_merged(tmp_path):
+    """A ``<dc:subject><rdf:value><rdf:Bag>...`` array is read as the photo's.
+
+    The qualified array form wraps the bag in an ``rdf:value`` resource
+    node, so a direct ``prop.find('rdf:Bag')`` misses it. Readers must
+    follow the one-level indirection, and ``add_keywords`` must merge
+    into that existing bag rather than creating a second unqualified
+    ``dc:subject`` beside the qualified one.
+    """
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about='' xmlns:dc='{NS_DC}'>"
+        f"<dc:subject rdf:parseType='Resource'>"
+        f"<rdf:value>"
+        f"<rdf:Bag><rdf:li>Heron</rdf:li></rdf:Bag>"
+        f"</rdf:value>"
+        f"</dc:subject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    assert read_keywords(path_str) == {"Heron"}
+
+    editor = SidecarEditor(path_str)
+    editor.add_keywords({"Kiwi"}, set())
+    editor.commit()
+
+    root = ET.parse(path_str).getroot()
+    subjects = list(root.iter(SUBJECT))
+    assert len(subjects) == 1
+    bags = list(subjects[0].iter(f"{{{NS_RDF}}}Bag"))
+    assert len(bags) == 1
+    items = sorted(li.text for li in bags[0].findall(f"{{{NS_RDF}}}li"))
+    assert items == ["Heron", "Kiwi"]
+
+    assert read_keywords(path_str) == {"Heron", "Kiwi"}
+
+
+def test_gps_backup_reads_from_qualified_when_both_forms_exist(tmp_path):
+    """``set_gps_location`` backs up the qualified GPS, not the stale attribute.
+
+    An earlier writer left both an unqualified ``exif:GPSLatitude``
+    attribute and a qualified child with a nested ``rdf:value`` giving
+    a different coordinate. ``_set_properties`` keeps the qualified
+    child on the update; the backup snapshot must read from the same
+    occurrence, so ``remove_vireo_gps_location`` later restores the
+    qualified original -- not the stale attribute value the write
+    already removed.
+    """
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about='' xmlns:exif='{NS_EXIF}'"
+        f" exif:GPSLatitude='40,0.0N' exif:GPSLongitude='40,0.0E'>"
+        f"<exif:GPSLatitude rdf:parseType='Resource'>"
+        f"<rdf:value>10,30.0N</rdf:value>"
+        f"</exif:GPSLatitude>"
+        f"<exif:GPSLongitude rdf:parseType='Resource'>"
+        f"<rdf:value>20,15.0E</rdf:value>"
+        f"</exif:GPSLongitude>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    metadata = read_sync_preview_metadata(path_str)
+    # Reader agrees with the writer: the qualified value wins.
+    assert metadata["location"]["latitude"] == pytest.approx(10.5)
+    assert metadata["location"]["longitude"] == pytest.approx(20.25)
+
+    editor = SidecarEditor(path_str)
+    editor.set_gps_location(-33.5, -70.25)
+    editor.commit()
+
+    assert read_sync_preview_metadata(path_str)["location"]["latitude"] == pytest.approx(-33.5)
+
+    remove_vireo_gps_location(path_str)
+
+    restored = read_sync_preview_metadata(path_str)
+    assert restored["location"]["latitude"] == pytest.approx(10.5)
+    assert restored["location"]["longitude"] == pytest.approx(20.25)
+
+
+def test_new_simple_property_lands_on_unqualified_description(tmp_path):
+    """A rating on an all-``xml:lang`` sidecar creates an unqualified Description.
+
+    When every photo Description carries ``xml:lang`` and the rating
+    is absent, adding it directly to that Description would attach the
+    language qualifier to the numeric value -- invalid XMP semantics
+    (and the source of stale readings for tools that respect
+    ``xml:lang``). A fresh unqualified Description is created instead.
+    """
+    xml_ns = "http://www.w3.org/XML/1998/namespace"
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about=''"
+        f" xmlns:dc='{NS_DC}'"
+        f" xmlns:xml='http://www.w3.org/XML/1998/namespace'"
+        f" xml:lang='en'>"
+        f"<dc:subject><rdf:Bag><rdf:li>Heron</rdf:li></rdf:Bag></dc:subject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    write_rating(path_str, 4)
+
+    root = ET.parse(path_str).getroot()
+    qualified = [
+        d for d in root.iter(f"{{{NS_RDF}}}Description")
+        if d.get(f"{{{xml_ns}}}lang") == "en"
+    ]
+    unqualified = [
+        d for d in root.iter(f"{{{NS_RDF}}}Description")
+        if d.get(f"{{{xml_ns}}}lang") is None
+    ]
+    # The rating landed on a Description that carries no language.
+    assert len(qualified) == 1 and qualified[0].get(RATING) is None
+    rated = [d for d in unqualified if d.get(RATING) == "4"]
+    assert len(rated) == 1
+    # And the original keywords are still on the language-qualified Description.
+    keywords = sorted(
+        li.text for li in qualified[0].iter(f"{{{NS_RDF}}}li") if li.text
+    )
+    assert keywords == ["Heron"]
+
+
 @pytest.mark.skipif(shutil.which("exiftool") is None, reason="exiftool not installed")
 def test_exiftool_reads_what_vireo_wrote_in_both_layouts(layout_xmp):
     """ExifTool must see Vireo's values, not a stale copy it wrote itself."""

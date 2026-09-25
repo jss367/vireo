@@ -407,19 +407,22 @@ def _all_top_descriptions(root):
 
 
 def _description_subject(desc):
-    """Return the ``(rdf:about, rdf:nodeID)`` tuple identifying a Description.
+    """Return the ``(rdf:about, rdf:nodeID, rdf:ID)`` tuple identifying a Description.
 
     An empty or missing ``rdf:about`` means "the enclosing resource", which
-    for a sidecar file is the photo it sits next to. The two spellings are
-    equivalent, so treat a missing attribute as ``""``.
+    for a sidecar file is the photo it sits next to. ``rdf:nodeID`` and
+    ``rdf:ID`` both name distinct resources; they are never the enclosing
+    photo and each must fingerprint separately, so a Description carrying
+    one cannot alias into the empty-subject bucket.
     """
     about = desc.get(f"{{{NS_RDF}}}about")
     node = desc.get(f"{{{NS_RDF}}}nodeID")
-    return (about or "", node or "")
+    rid = desc.get(f"{{{NS_RDF}}}ID")
+    return (about or "", node or "", rid or "")
 
 
 def _photo_subject(root):
-    """Return the ``(about, nodeID)`` tuple identifying the photo's Descriptions.
+    """Return the ``(about, nodeID, ID)`` tuple identifying the photo's Descriptions.
 
     ``rdf:about=""`` (or a missing attribute) is the sidecar convention for
     "the enclosing resource" -- the photo. When no top-level Description
@@ -430,22 +433,22 @@ def _photo_subject(root):
     guess from document order: fall back to the empty subject, which
     leaves reads returning nothing rather than an auxiliary resource's
     rating or GPS, and lets writes land on a fresh Description that is
-    unambiguously the photo's. A lone ``rdf:nodeID`` is always an auxiliary
-    blank-node resource -- it never identifies the enclosing photo -- so
-    fall back to the empty subject there too, no matter how many blank-node
-    Descriptions share it.
+    unambiguously the photo's. A lone ``rdf:nodeID`` or ``rdf:ID`` is
+    always an auxiliary side-resource -- neither identifies the
+    enclosing photo -- so fall back to the empty subject there too, no
+    matter how many share the same identifier.
     """
+    empty = ("", "", "")
     descriptions = _all_top_descriptions(root)
     if not descriptions:
-        return ("", "")
-    empty = ("", "")
+        return empty
     subjects = {_description_subject(d) for d in descriptions}
     if empty in subjects or len(subjects) > 1:
         return empty
-    about, node = next(iter(subjects))
-    if not about or node:
+    about, node, rid = next(iter(subjects))
+    if not about or node or rid:
         return empty
-    return (about, node)
+    return (about, node, rid)
 
 
 def _top_descriptions(root):
@@ -493,10 +496,20 @@ def _photo_scoped_bags(root, tag):
     resource such as ``rdf:about="#aux"``). For keyword arrays that would
     import someone else's ``dc:subject`` or ``lr:hierarchicalSubject`` as
     the photo's keywords, and delete or rewrite them during a sync.
+
+    A qualified keyword array wraps the bag in an ``rdf:value`` resource
+    form (``<dc:subject><rdf:value><rdf:Bag>...``), so also follow that
+    one-level indirection; otherwise readers hide the keywords and a
+    keyword addition creates a second unqualified property beside the
+    qualified one instead of merging with it.
     """
     for desc in _top_descriptions(root):
         for prop in desc.findall(tag):
             bag = prop.find(f"{{{NS_RDF}}}Bag")
+            if bag is None:
+                rdf_value = prop.find(f"{{{NS_RDF}}}value")
+                if rdf_value is not None:
+                    bag = rdf_value.find(f"{{{NS_RDF}}}Bag")
             if bag is not None:
                 yield bag
 
@@ -520,33 +533,57 @@ def _qualified_value_element(child):
     return None
 
 
+def _property_occurrence_score(entry):
+    """How authoritative an ``(owner, child)`` occurrence is.
+
+    A qualified child element (one with children of its own -- the
+    ``rdf:parseType='Resource'`` short form or the ``rdf:Description``
+    long form carrying ``rdf:value`` and qualifier siblings) is the
+    most authoritative; an unqualified child element ranks next; a
+    plain attribute is the least authoritative. Readers and writers
+    both use this so they agree on which copy holds the truth, and
+    the write path leaves that copy in place while removing the
+    others -- ``set_gps_location`` would otherwise back up the
+    attribute's stale value and later restore that instead of the
+    qualified coordinate the write kept.
+    """
+    _, child = entry
+    if child is None:
+        return 0
+    if len(child):
+        return 2
+    return 1
+
+
 def _get_property(root, name):
     """Return a simple property's value from whichever form stores it."""
-    for desc, child in _property_occurrences(root, name):
-        if child is None:
-            return desc.get(name)
-        if len(child):
-            # Qualified property, e.g.
-            #   <xmp:Rating rdf:parseType="Resource">
-            #     <rdf:value>3</rdf:value><...qualifiers.../>
-            #   </xmp:Rating>
-            # or the equivalent long form
-            #   <xmp:Rating>
-            #     <rdf:Description>
-            #       <rdf:value>3</rdf:value><...qualifiers.../>
-            #     </rdf:Description>
-            #   </xmp:Rating>.
-            # The actual value lives in the nested ``rdf:value``; the
-            # container's own ``text`` is whitespace between its children,
-            # so returning it would hide the rating/GPS from every reader
-            # and let ``set_gps_location`` back up an empty string that
-            # later restores empty coordinates instead of the original.
-            rdf_value = _qualified_value_element(child)
-            if rdf_value is not None:
-                return (rdf_value.text or "").strip()
-            return None
-        return (child.text or "").strip()
-    return None
+    found = _property_occurrences(root, name)
+    if not found:
+        return None
+    desc, child = max(found, key=_property_occurrence_score)
+    if child is None:
+        return desc.get(name)
+    if len(child):
+        # Qualified property, e.g.
+        #   <xmp:Rating rdf:parseType="Resource">
+        #     <rdf:value>3</rdf:value><...qualifiers.../>
+        #   </xmp:Rating>
+        # or the equivalent long form
+        #   <xmp:Rating>
+        #     <rdf:Description>
+        #       <rdf:value>3</rdf:value><...qualifiers.../>
+        #     </rdf:Description>
+        #   </xmp:Rating>.
+        # The actual value lives in the nested ``rdf:value``; the
+        # container's own ``text`` is whitespace between its children,
+        # so returning it would hide the rating/GPS from every reader
+        # and let ``set_gps_location`` back up an empty string that
+        # later restores empty coordinates instead of the original.
+        rdf_value = _qualified_value_element(child)
+        if rdf_value is not None:
+            return (rdf_value.text or "").strip()
+        return None
+    return (child.text or "").strip()
 
 
 def _format_gps_coordinate(value, positive_ref, negative_ref):
@@ -870,11 +907,13 @@ class SidecarEditor:
         # resource (rdf:about="uuid:...") would land the photo's rating and
         # GPS on a Description that _top_descriptions no longer treats as
         # the photo -- the write would be invisible on the next read.
-        about, node = _photo_subject(self._root)
+        about, node, rid = _photo_subject(self._root)
         if about:
             desc.set(f"{{{NS_RDF}}}about", about)
         if node:
             desc.set(f"{{{NS_RDF}}}nodeID", node)
+        if rid:
+            desc.set(f"{{{NS_RDF}}}ID", rid)
         self._dirty = True
         return desc
 
@@ -907,7 +946,7 @@ class SidecarEditor:
         # distinct subjects (``uuid:photo`` and empty) on its next call
         # and fall back to the empty subject -- unscoping every
         # original photo Description.
-        about, node = _photo_subject(self._root)
+        about, node, rid = _photo_subject(self._root)
         if self._root.tag == f"{{{NS_RDF}}}RDF":
             rdf = self._root
         else:
@@ -920,6 +959,8 @@ class SidecarEditor:
             desc.set(f"{{{NS_RDF}}}about", about)
         if node:
             desc.set(f"{{{NS_RDF}}}nodeID", node)
+        if rid:
+            desc.set(f"{{{NS_RDF}}}ID", rid)
         self._dirty = True
         return desc
 
@@ -939,20 +980,37 @@ class SidecarEditor:
             for child in owner.findall(tag)
         ]
 
-        def _owner_inherits_qualifier(owner):
+        def _has_inherited_qualifier(elem):
             # ``xml:lang``, ``xml:base`` and ``xml:space`` are inherited by
-            # every descendant. When one is set on the owning Description
-            # (rather than on the property or its ``rdf:Bag``) it still
-            # applies to the items inside, so a Description-level
-            # qualifier must count the property as qualified.
-            return any(name.startswith(f"{{{NS_XML}}}") for name in owner.attrib)
+            # every descendant, so any of them on an ancestor of the
+            # ``rdf:li`` items counts. Structural RDF attributes like
+            # ``rdf:parseType`` describe serialization form rather than
+            # value semantics and do not count -- otherwise a keyword
+            # array stored in the qualified resource form
+            # ``<dc:subject rdf:parseType='Resource'><rdf:value><rdf:Bag>...``
+            # would look qualified and force a second bag beside it.
+            return any(
+                name.startswith(f"{{{NS_XML}}}") for name in elem.attrib
+            )
+
+        _owner_inherits_qualifier = _has_inherited_qualifier
+
+        def _property_bag(prop):
+            # The bag is normally a direct child, but the qualified
+            # resource form wraps it inside ``rdf:value``.
+            bag = prop.find(f"{{{NS_RDF}}}Bag")
+            if bag is None:
+                rdf_value = prop.find(f"{{{NS_RDF}}}value")
+                if rdf_value is not None:
+                    bag = rdf_value.find(f"{{{NS_RDF}}}Bag")
+            return bag
 
         def _prop_is_qualified(owner, prop):
-            bag_el = prop.find(f"{{{NS_RDF}}}Bag")
+            bag_el = _property_bag(prop)
             return (
-                _owner_inherits_qualifier(owner)
-                or bool(prop.attrib)
-                or (bag_el is not None and bool(bag_el.attrib))
+                _has_inherited_qualifier(owner)
+                or _has_inherited_qualifier(prop)
+                or (bag_el is not None and _has_inherited_qualifier(bag_el))
             )
 
         if found:
@@ -987,7 +1045,7 @@ class SidecarEditor:
                 target = self._unqualified_photo_description()
             elem = ET.SubElement(target, tag)
             self._dirty = True
-        bag = elem.find(f"{{{NS_RDF}}}Bag")
+        bag = _property_bag(elem)
         if bag is None:
             bag = ET.SubElement(elem, f"{{{NS_RDF}}}Bag")
             self._dirty = True
@@ -995,20 +1053,23 @@ class SidecarEditor:
         for owner, extra in found:
             if extra is elem:
                 continue
-            extra_bag = extra.find(f"{{{NS_RDF}}}Bag")
-            # Container-level qualifiers (an ``xml:lang`` or any other
-            # attribute on the owning Description, the property element,
-            # or its ``rdf:Bag``) apply to every item inside the
-            # container; folding the items into the target bag would
-            # silently drop the qualifier when this duplicate is
-            # removed. Leave a qualified container in place so its
-            # meaning survives. Plain duplicates left by earlier writes
-            # still collapse into one, so ExifTool no longer picks up a
-            # stale copy sitting beside the one Vireo wrote.
+            extra_bag = _property_bag(extra)
+            # Container-level qualifiers (an ``xml:lang`` on the owning
+            # Description, the property element, or its ``rdf:Bag``)
+            # apply to every item inside the container; folding the
+            # items into the target bag would silently drop the
+            # qualifier when this duplicate is removed. Leave a
+            # qualified container in place so its meaning survives.
+            # Plain duplicates left by earlier writes still collapse
+            # into one, so ExifTool no longer picks up a stale copy
+            # sitting beside the one Vireo wrote.
             if (
-                _owner_inherits_qualifier(owner)
-                or extra.attrib
-                or (extra_bag is not None and extra_bag.attrib)
+                _has_inherited_qualifier(owner)
+                or _has_inherited_qualifier(extra)
+                or (
+                    extra_bag is not None
+                    and _has_inherited_qualifier(extra_bag)
+                )
             ):
                 continue
             if extra_bag is not None:
@@ -1035,38 +1096,37 @@ class SidecarEditor:
         """Set simple properties, marking the tree dirty only for real changes.
 
         A property the sidecar already carries is updated in place, as an
-        attribute or as a child element, whichever form it uses; ``desc`` only
-        receives properties that are new. Any further copies of the property
-        are removed so no reader can pick up a stale value.
+        attribute or as a child element, whichever form it uses; a
+        Description free of inherited ``xml:*`` receives properties that
+        are new. Any further copies of the property are removed so no
+        reader can pick up a stale value.
         """
-
-        def _qualified_score(entry):
-            # Prefer a qualified child element (one with children of its
-            # own, like the ``rdf:parseType='Resource'`` structure holding
-            # ``rdf:value`` and its qualifier siblings) as the occurrence
-            # we keep and update: otherwise a same-named unqualified
-            # attribute earlier in ``found`` would win and we'd strip
-            # every qualifier when we removed the qualified sibling as a
-            # duplicate. An unqualified child element is preferred over a
-            # bare attribute for the same reason (its form is closer to
-            # the qualified one), but that order has no observable
-            # effect today.
-            _, child = entry
-            if child is None:
-                return 0
-            if len(child):
-                return 2
-            return 1
-
         changed = False
+        new_desc = None
         for name, value in values.items():
             found = _property_occurrences(self._root, name)
             if not found:
-                desc.set(name, value)
+                # Adding under ``desc`` directly would let an ``xml:lang``
+                # (or another ``xml:*`` attribute) on that Description
+                # attach to a numeric rating, a GPS coordinate, or a
+                # Vireo marker -- language-tagging a value that carries
+                # no natural language is invalid XMP semantics and
+                # ``_photo_scoped_bags`` already avoids the same trap for
+                # keyword arrays. Fall back to a Description with no
+                # ``xml:*`` of its own for the same reason.
+                target = desc
+                if any(
+                    n.startswith(f"{{{NS_XML}}}") for n in desc.attrib
+                ):
+                    if new_desc is None:
+                        new_desc = self._unqualified_photo_description()
+                    target = new_desc
+                target.set(name, value)
                 changed = True
                 continue
             best_idx = max(
-                range(len(found)), key=lambda i: _qualified_score(found[i])
+                range(len(found)),
+                key=lambda i: _property_occurrence_score(found[i]),
             )
             keeper = found[best_idx]
             rest = [
