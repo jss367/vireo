@@ -2318,6 +2318,91 @@ def test_xml_space_is_not_reset_with_empty_value(tmp_path):
             assert d.get(f"{{{xml_ns}}}space") in ("default", "preserve")
 
 
+def test_qualified_attribute_form_duplicate_is_preserved_and_updated(tmp_path):
+    """An attribute-form duplicate on a language-qualified Description survives.
+
+    ``child is None`` used to blindly ``del owner.attrib[name]`` even
+    when the owner Description carried (or inherited) ``xml:lang``.
+    The attribute was a language-tagged RDF statement, so removing
+    it silently dropped that statement. Preserve the attribute
+    instead and update its value in place so both keeper and this
+    qualified duplicate agree.
+    """
+    xml_ns = "http://www.w3.org/XML/1998/namespace"
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}'>"
+        f"<rdf:Description rdf:about='' xmlns:xmp='{NS_XMP}'>"
+        f"<xmp:Rating rdf:parseType='Resource'>"
+        f"<rdf:value>3</rdf:value>"
+        f"</xmp:Rating>"
+        f"</rdf:Description>"
+        f"<rdf:Description rdf:about=''"
+        f" xmlns:xmp='{NS_XMP}'"
+        f" xmlns:xml='http://www.w3.org/XML/1998/namespace'"
+        f" xml:lang='en'"
+        f" xmp:Rating='4'/>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    write_rating(path_str, 5)
+
+    root = ET.parse(path_str).getroot()
+    # The language-qualified Description still carries its ``xmp:Rating``
+    # attribute -- with the updated value.
+    qualified_descs = [
+        d for d in root.iter(f"{{{NS_RDF}}}Description")
+        if d.get(f"{{{xml_ns}}}lang") == "en"
+    ]
+    assert len(qualified_descs) == 1
+    assert qualified_descs[0].get(RATING) == "5"
+
+
+def test_ancestor_xml_space_does_not_block_bag_reuse(tmp_path):
+    """``xml:space`` on ``rdf:RDF`` does not force fresh Descriptions.
+
+    Only ``xml:lang`` / ``xml:base`` change value semantics.
+    ``xml:space`` is a whitespace directive, so a Description that
+    inherits ``xml:space='preserve'`` from an ancestor is still a
+    perfectly good target -- and reusing it prevents an
+    ever-growing pile of duplicate ``dc:subject`` bags across
+    repeated syncs.
+    """
+    xml_ns = "http://www.w3.org/XML/1998/namespace"
+    path = tmp_path / "photo.xmp"
+    path.write_text(
+        f"<x:xmpmeta xmlns:x='adobe:ns:meta/'"
+        f" xmlns:xml='http://www.w3.org/XML/1998/namespace'>"
+        f"<rdf:RDF xmlns:rdf='{NS_RDF}' xml:space='preserve'>"
+        f"<rdf:Description rdf:about='' xmlns:dc='{NS_DC}'>"
+        f"<dc:subject><rdf:Bag><rdf:li>Heron</rdf:li></rdf:Bag></dc:subject>"
+        f"</rdf:Description>"
+        f"</rdf:RDF></x:xmpmeta>"
+    )
+    path_str = str(path)
+
+    # Two consecutive syncs must not accumulate bags.
+    editor = SidecarEditor(path_str)
+    editor.add_keywords({"Kiwi"}, set())
+    editor.commit()
+    editor = SidecarEditor(path_str)
+    editor.add_keywords({"Owl"}, set())
+    editor.commit()
+
+    root = ET.parse(path_str).getroot()
+    subjects = list(root.iter(SUBJECT))
+    assert len(subjects) == 1
+    items = sorted(li.text for li in subjects[0].iter(f"{{{NS_RDF}}}li") if li.text)
+    assert items == ["Heron", "Kiwi", "Owl"]
+
+    # ``xml:space`` inheritance is left intact -- no empty reset was written.
+    for d in root.iter(f"{{{NS_RDF}}}Description"):
+        if f"{{{xml_ns}}}space" in d.attrib:
+            assert d.get(f"{{{xml_ns}}}space") != ""
+
+
 @pytest.mark.skipif(shutil.which("exiftool") is None, reason="exiftool not installed")
 def test_exiftool_reads_what_vireo_wrote_in_both_layouts(layout_xmp):
     """ExifTool must see Vireo's values, not a stale copy it wrote itself."""

@@ -596,17 +596,26 @@ def _walk_ancestors(elem, parent_map):
 
 
 def _ancestor_carries_xml_qualifier(elem, parent_map):
-    """True if elem or any ancestor carries an *effective* ``xml:*`` attribute.
+    """True if elem or any ancestor carries an *effective* value-qualifying ``xml:*``.
 
-    A closer element with an empty value (``xml:lang=""``) cancels an
-    outer inherited value, so the check has to walk the chain looking
-    for the *effective* setting for each attribute name and only
-    return True when that effective value is non-empty.
+    Only attributes that change a value's meaning are checked:
+    ``xml:lang`` (language tag) and ``xml:base`` (base URI). Those
+    are the ones that would silently alter a numeric rating, GPS
+    coordinate or keyword when they get inherited. ``xml:space`` is
+    a serialization/whitespace directive, not a value qualifier, so
+    a Description carrying an inherited ``xml:space`` is still
+    perfectly good to reuse as an unqualified target.
+
+    A closer element with an empty value (``xml:lang=""``) cancels
+    an outer inherited value, so the check computes the *effective*
+    setting for each attribute name and only returns True when at
+    least one effective value is non-empty.
     """
+    tracked = {f"{{{NS_XML}}}lang", f"{{{NS_XML}}}base"}
     effective = {}
     for ancestor in _walk_ancestors(elem, parent_map):
         for name, value in ancestor.attrib.items():
-            if name.startswith(f"{{{NS_XML}}}") and name not in effective:
+            if name in tracked and name not in effective:
                 effective[name] = value
     return any(value for value in effective.values())
 
@@ -1494,8 +1503,20 @@ class SidecarEditor:
                 changed = True
             for owner, child in rest:
                 if child is None:
-                    del owner.attrib[name]
-                    changed = True
+                    if _ancestor_carries_xml_qualifier(owner, parent_map):
+                        # The attribute is a value-qualified RDF
+                        # statement in its own right (the owner or an
+                        # ancestor carries ``xml:lang`` / ``xml:base``),
+                        # so removing it silently drops the qualifier.
+                        # Update the attribute's value in place to
+                        # match the keeper instead of deleting it, so
+                        # every occurrence agrees on the value.
+                        if owner.get(name) != value:
+                            owner.set(name, value)
+                            changed = True
+                    else:
+                        del owner.attrib[name]
+                        changed = True
                 elif (
                     _simple_prop_carries_qualifier(child)
                     or _ancestor_carries_xml_qualifier(owner, parent_map)
