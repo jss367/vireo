@@ -1853,6 +1853,15 @@ def create_imports_blueprint(
             )
         if conflict:
             return json_error(conflict, 409)
+        # A folder-stage request that arrives after the pre-flight check
+        # above releases ``stage_boundary_lock`` and before the runner
+        # registers this import would see no import job and be admitted;
+        # this import would then start against a source the stage is
+        # rebasing, letting both workers race the same tree. Re-check and
+        # register the job atomically under the boundary lock so a stage
+        # racing the registration blocks on the same guard its admission
+        # takes. See ``local_folder._busy_job`` for the reverse direction.
+        _scan_path = [destination if copy else source]
 
         def work(job):
             from scanner import scan as do_scan
@@ -2124,10 +2133,22 @@ def create_imports_blueprint(
 
             return result
 
-        return ctx.start(
-            "import-full", work, pausable=True,
-            config={"source": source, "destination": destination, "copy": copy, "file_types": file_types},
-        )
+        with stage_boundary_lock():
+            pending_sources = stage_pending_source_paths(
+                runner.list_jobs if runner is not None else None,
+                db_for_conflict,
+            )
+            conflict = local_copy_scan_conflict(
+                db_for_conflict, _scan_path,
+                active_workspace_id=ctx.workspace_id,
+                pending_stage_sources=pending_sources,
+            )
+            if conflict:
+                return json_error(conflict, 409)
+            return ctx.start(
+                "import-full", work, pausable=True,
+                config={"source": source, "destination": destination, "copy": copy, "file_types": file_types},
+            )
 
     @blueprint.route("/api/jobs/import", methods=["POST"])
     @background_job
@@ -3007,6 +3028,10 @@ def create_imports_blueprint(
                 )
             if conflict:
                 return json_error(conflict, 409)
+            # Re-checked atomically with ``runner.start`` below so a stage
+            # request that races between the pre-flight release and job
+            # registration still blocks on the same boundary lock.
+            _conflict_paths = list(sources)
 
         recursive = bool(body.get("recursive", True))
         import_tags, location_from_gps, tag_options_err = (
@@ -3092,6 +3117,10 @@ def create_imports_blueprint(
                 )
             if conflict:
                 return json_error(conflict, 409)
+            # Re-checked atomically with ``runner.start`` below. See the
+            # explicit-sources branch above for why the pre-flight check is
+            # not sufficient on its own.
+            _conflict_paths = list(snapshot_paths)
         else:
             snapshot_paths_by_root = None
         # Preflight an explicit after_import before creating a workspace so
@@ -4070,10 +4099,29 @@ def create_imports_blueprint(
         # no effect until the first import resumed. Keep this mode
         # non-pausable while the lock is in play; other in-place imports
         # remain pausable.
-        job_id = runner.start(
-            "import-in-place", work, config=job_config, workspace_id=active_ws,
-            pausable=snapshot_import_lock is None,
-        )
+        #
+        # Re-check ``local_copy_scan_conflict`` and register the runner job
+        # atomically under ``stage_boundary_lock``. A folder-stage request
+        # that arrives after the earlier pre-flight release but before this
+        # registration would otherwise see no import job and be admitted,
+        # letting the stage rebase paths this import is about to walk.
+        with stage_boundary_lock():
+            pending_sources = stage_pending_source_paths(
+                runner.list_jobs if runner is not None else None,
+                db,
+            )
+            conflict = local_copy_scan_conflict(
+                db, _conflict_paths,
+                active_workspace_id=db._active_workspace_id,
+                pending_stage_sources=pending_sources,
+            )
+            if conflict:
+                return json_error(conflict, 409)
+            job_id = runner.start(
+                "import-in-place", work, config=job_config,
+                workspace_id=active_ws,
+                pausable=snapshot_import_lock is None,
+            )
         response = {"job_id": job_id}
         if created_workspace is not None:
             response["workspace"] = created_workspace
@@ -4285,6 +4333,10 @@ def create_imports_blueprint(
             )
         if conflict:
             return json_error(conflict, 409)
+        # Re-checked atomically with ``runner.start`` below so a stage
+        # request that races between the pre-flight release and job
+        # registration still blocks on the same boundary lock.
+        _import_photos_conflict_paths = [destination]
 
         folder_template = body.get("folder_template", "%Y/%Y-%m-%d")
         if folder_template and _is_unsafe_path(folder_template):
@@ -5153,10 +5205,28 @@ def create_imports_blueprint(
                         409,
                     )
 
-        job_id = runner.start(
-            "import", work, config=job_config, workspace_id=active_ws,
-            pausable=True,
-        )
+        # Re-check ``local_copy_scan_conflict`` and register the runner job
+        # atomically under ``stage_boundary_lock``. A folder-stage request
+        # that arrives after the earlier pre-flight release but before this
+        # registration would otherwise see no import job and be admitted,
+        # letting the stage rebase the destination this import is about to
+        # copy into and scan.
+        with stage_boundary_lock():
+            pending_sources = stage_pending_source_paths(
+                runner.list_jobs if runner is not None else None,
+                db,
+            )
+            conflict = local_copy_scan_conflict(
+                db, _import_photos_conflict_paths,
+                active_workspace_id=db._active_workspace_id,
+                pending_stage_sources=pending_sources,
+            )
+            if conflict:
+                return json_error(conflict, 409)
+            job_id = runner.start(
+                "import", work, config=job_config, workspace_id=active_ws,
+                pausable=True,
+            )
         response = {"job_id": job_id}
         if created_workspace is not None:
             response["workspace"] = created_workspace
