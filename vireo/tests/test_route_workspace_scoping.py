@@ -512,6 +512,127 @@ def test_snapshot_import_refuses_paths_inside_staged_source(staged):
     assert "local copy" in resp.get_json()["error"]
 
 
+def _stub_final_check_conflict(monkeypatch, marker):
+    """Make the final atomic ``local_copy_scan_conflict`` fail while the
+    pre-flight passes.
+
+    ``import-in-place`` and ``import-photos`` run a pre-flight check
+    BEFORE ``_prepare_import_workspace`` (which is why a plain-overlap
+    request never reaches the atomic block and the rollback path). The
+    finding is about the RACE: a folder-stage request slips in between
+    the pre-flight release and the atomic re-check. Simulate the race by
+    stubbing ``local_copy_scan_conflict`` so only the final call (the one
+    after workspace creation) reports a conflict.
+    """
+    from web import imports as imports_module
+
+    calls = {"count": 0}
+
+    def flaky_conflict(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] < marker:
+            return None
+        return "simulated race: overlapping stage published between checks"
+
+    monkeypatch.setattr(
+        imports_module, "local_copy_scan_conflict", flaky_conflict,
+    )
+    return calls
+
+
+def test_import_in_place_conflict_rolls_back_new_workspace(
+    staged, monkeypatch, tmp_path,
+):
+    """``import-in-place`` with ``new_workspace_name`` creates the workspace
+    and switches active to it BEFORE the final atomic conflict check inside
+    ``stage_boundary_lock``. If that check rejects the request (a race with
+    a folder-stage published after the pre-flight released the lock), the
+    workspace and the active-workspace change must be undone — otherwise the
+    409 leaves an orphan workspace and silently changes the user's active
+    workspace even though no import was queued.
+    """
+    db = staged["db"]
+    active_before = db._active_workspace_id
+    workspaces_before = {int(ws["id"]) for ws in db.get_workspaces()}
+    # A source outside the staged tree so the pre-flight passes; the
+    # simulated race makes the atomic final check reject it anyway.
+    fresh_source = tmp_path / "unrelated"
+    fresh_source.mkdir()
+    (fresh_source / "b.jpg").write_bytes(b"jpg")
+    # Two calls fire inside the route (explicit-sources branch): the
+    # pre-flight at request entry and the atomic re-check before
+    # ``runner.start``. Trip only the second one.
+    _stub_final_check_conflict(monkeypatch, marker=2)
+
+    call_log = _stub_final_check_conflict(monkeypatch, marker=2)
+
+    resp = staged["client"].post(
+        "/api/jobs/import-in-place",
+        json={
+            "sources": [str(fresh_source)],
+            "new_workspace_name": "Orphan In-Place",
+            "after_import": None,
+        },
+    )
+
+    assert call_log["count"] >= 2, (
+        f"only saw {call_log['count']} conflict calls; "
+        f"status={resp.status_code} body={resp.get_json()}"
+    )
+    assert resp.status_code == 409
+    assert "simulated race" in resp.get_json()["error"]
+    workspaces_after = {int(ws["id"]) for ws in db.get_workspaces()}
+    assert workspaces_after == workspaces_before
+    assert not any(
+        ws["name"] == "Orphan In-Place" for ws in db.get_workspaces()
+    )
+    # A per-request Database is instantiated by the app, so re-check active
+    # workspace through the API rather than the fixture db.
+    active = staged["client"].get("/api/workspaces/active").get_json()
+    assert int(active["id"]) == int(active_before)
+
+
+def test_import_photos_conflict_rolls_back_new_workspace(
+    staged, monkeypatch, tmp_path,
+):
+    """Same guarantee for ``import-photos``. A ``new_workspace_name`` request
+    whose destination is claimed by a folder-stage after the pre-flight
+    releases the boundary lock must not leave an orphan workspace or a
+    silent active-workspace change behind.
+    """
+    db = staged["db"]
+    active_before = db._active_workspace_id
+    workspaces_before = {int(ws["id"]) for ws in db.get_workspaces()}
+    card = tmp_path / "card"
+    card.mkdir()
+    (card / "DSC_0001.jpg").write_bytes(b"jpg")
+    dest = tmp_path / "archive-photos"
+    dest.mkdir()
+    # Two calls fire inside the route: the pre-flight at request entry
+    # and the atomic re-check before ``runner.start``. Trip only the second.
+    _stub_final_check_conflict(monkeypatch, marker=2)
+
+    resp = staged["client"].post(
+        "/api/jobs/import-photos",
+        json={
+            "sources": [str(card)],
+            "destination": str(dest),
+            "after_import": None,
+            "new_workspace_name": "Orphan Photos",
+        },
+    )
+
+    assert resp.status_code == 409
+    assert "simulated race" in resp.get_json()["error"]
+    workspaces_after = {int(ws["id"]) for ws in db.get_workspaces()}
+    assert workspaces_after == workspaces_before
+    assert not any(
+        ws["name"] == "Orphan Photos" for ws in db.get_workspaces()
+    )
+    active = staged["client"].get("/api/workspaces/active").get_json()
+    assert int(active["id"]) == int(active_before)
+
+
 def test_audit_import_untracked_refuses_paths_in_staged_source(staged):
     """``/api/audit/untracked`` reports the originals under a staged source
     because staging rebased the catalog rows to the local copy. Those

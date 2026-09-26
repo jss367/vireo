@@ -2244,12 +2244,19 @@ def create_imports_blueprint(
     def _prepare_import_workspace(db, body):
         """Return the workspace id an import should write to.
 
-        `new_workspace_name` mirrors the normal workspace creation route
+        Returns ``(active_ws, created_workspace, previous_active_ws, err)``:
+        ``previous_active_ws`` is the workspace that was active before this
+        call, so a later admission failure inside the atomic stage-boundary
+        block can undo a freshly-created workspace and restore the user's
+        previous active state through ``_rollback_import_workspace``.
+
+        ``new_workspace_name`` mirrors the normal workspace creation route
         so import-to-new-workspace jobs get default collections and do not
         inherit stale per-workspace caches from a reused SQLite rowid.
         """
+        previous_active_ws = db._active_workspace_id
         if "new_workspace_name" not in body:
-            active_ws = db._active_workspace_id
+            active_ws = previous_active_ws
             if active_ws is None:
                 # Without a target workspace ``run_import_job`` would bind
                 # ``active_ws=None`` and its batch scans would insert
@@ -2257,14 +2264,20 @@ def create_imports_blueprint(
                 # workspace link, leaving catalog rows invisible to every
                 # workspace. Reject at the route boundary so the request
                 # never enqueues instead.
-                return None, None, json_error("no active workspace", 400)
-            return active_ws, None, None
+                return None, None, previous_active_ws, json_error(
+                    "no active workspace", 400,
+                )
+            return active_ws, None, previous_active_ws, None
         raw_name = body.get("new_workspace_name")
         if not isinstance(raw_name, str):
-            return None, None, json_error("new_workspace_name must be a string")
+            return None, None, previous_active_ws, json_error(
+                "new_workspace_name must be a string",
+            )
         name = raw_name.strip()
         if not name:
-            return None, None, json_error("new_workspace_name is required")
+            return None, None, previous_active_ws, json_error(
+                "new_workspace_name is required",
+            )
         try:
             from datetime import datetime
 
@@ -2274,9 +2287,41 @@ def create_imports_blueprint(
             db.set_active_workspace(ws_id)
             db.update_workspace(ws_id, last_opened_at=datetime.now().isoformat())
             ws = db.get_workspace(ws_id)
-            return ws_id, dict(ws) if ws else {"id": ws_id, "name": name}, None
+            return (
+                ws_id,
+                dict(ws) if ws else {"id": ws_id, "name": name},
+                previous_active_ws,
+                None,
+            )
         except Exception as e:
-            return None, None, json_error(str(e))
+            return None, None, previous_active_ws, json_error(str(e))
+
+    def _rollback_import_workspace(db, created_workspace, previous_active_ws):
+        """Undo ``_prepare_import_workspace`` when a later admission check fails.
+
+        A ``new_workspace_name`` import that passes the pre-flight but is
+        later rejected inside the atomic stage-boundary block has already
+        committed a workspace row and switched active-workspace to it.
+        Returning 409 without this rollback would leak that state: an
+        orphan workspace with no import attached, plus a silent change of
+        the user's active workspace even though no job was queued.
+        Restore the previous active workspace and delete the freshly
+        created one so the 409 is state-neutral.
+        """
+        if created_workspace is None:
+            return
+        try:
+            db.set_active_workspace(previous_active_ws)
+        except Exception:
+            log.exception(
+                "Failed to restore active workspace after import conflict",
+            )
+        try:
+            db.delete_workspace(int(created_workspace["id"]))
+        except Exception:
+            log.exception(
+                "Failed to delete created import workspace after conflict",
+            )
 
     def _remote_target_snapshot(remote_archive_config):
         """Freeze the parts of a resolved remote target that decide where
@@ -3134,7 +3179,7 @@ def create_imports_blueprint(
             if err is not None:
                 return err
 
-        active_ws, created_workspace, workspace_err = (
+        active_ws, created_workspace, previous_active_ws, workspace_err = (
             _prepare_import_workspace(db, body)
         )
         if workspace_err is not None:
@@ -4116,6 +4161,12 @@ def create_imports_blueprint(
                 pending_stage_sources=pending_sources,
             )
             if conflict:
+                # A ``new_workspace_name`` request has already committed the
+                # workspace and switched active to it. Roll both back so the
+                # 409 leaves no orphan and no silent active-workspace change.
+                _rollback_import_workspace(
+                    db, created_workspace, previous_active_ws,
+                )
                 return json_error(conflict, 409)
             job_id = runner.start(
                 "import-in-place", work, config=job_config,
@@ -4777,7 +4828,7 @@ def create_imports_blueprint(
             if completed:
                 return json_error("These photos have already been sent to NAS. Start a new import instead of retrying.")
 
-        active_ws, created_workspace, workspace_err = (
+        active_ws, created_workspace, previous_active_ws, workspace_err = (
             _prepare_import_workspace(db, body)
         )
         if workspace_err is not None:
@@ -5222,6 +5273,12 @@ def create_imports_blueprint(
                 pending_stage_sources=pending_sources,
             )
             if conflict:
+                # A ``new_workspace_name`` request has already committed the
+                # workspace and switched active to it. Roll both back so the
+                # 409 leaves no orphan and no silent active-workspace change.
+                _rollback_import_workspace(
+                    db, created_workspace, previous_active_ws,
+                )
                 return json_error(conflict, 409)
             job_id = runner.start(
                 "import", work, config=job_config, workspace_id=active_ws,
