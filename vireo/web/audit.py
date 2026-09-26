@@ -275,7 +275,18 @@ def create_audit_blueprint(
         # original-path rows the local copy was meant to replace. Include
         # queued folder-stage jobs so a stage waiting for its worker can
         # still block an admission that would race it.
+        #
+        # ``import_untracked`` runs synchronously in this request rather than
+        # as a runner job, so ``_busy_job`` cannot observe it. Hold
+        # ``stage_boundary_lock`` across the entire import so a folder-stage
+        # request that arrives after the conflict check but before the scan
+        # finishes still blocks on the same guard the stage admission takes;
+        # otherwise a stage could rebase the same subtree while this handler
+        # is still cataloging its originals.
         runner = get_runner()
+        from audit import import_untracked
+
+        vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
         with stage_boundary_lock():
             pending_sources = stage_pending_source_paths(
                 runner.list_jobs if runner is not None else None, db,
@@ -285,24 +296,21 @@ def create_audit_blueprint(
                 active_workspace_id=db._active_workspace_id,
                 pending_stage_sources=pending_sources,
             )
-        if conflict:
-            return json_error(conflict, 409)
-        from audit import import_untracked
-
-        vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
-        try:
-            imported = import_untracked(
-                db, paths,
-                vireo_dir=vireo_dir,
-                thumb_cache_dir=config["THUMB_CACHE_DIR"],
-            )
-        finally:
+            if conflict:
+                return json_error(conflict, 409)
             try:
-                invalidate_missing_originals()
-            except Exception:
-                log.exception(
-                    "Failed to invalidate missing-originals cache after audit import"
+                imported = import_untracked(
+                    db, paths,
+                    vireo_dir=vireo_dir,
+                    thumb_cache_dir=config["THUMB_CACHE_DIR"],
                 )
+            finally:
+                try:
+                    invalidate_missing_originals()
+                except Exception:
+                    log.exception(
+                        "Failed to invalidate missing-originals cache after audit import"
+                    )
         # Audit import calls scanner.scan just like the standalone scan and
         # import paths. Without ExifTool the newly imported photos still lose
         # capture date, GPS, and camera info; the frontend renders any warning

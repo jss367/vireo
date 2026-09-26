@@ -219,17 +219,22 @@ def create_local_folder_blueprint(
             )
         return sorted(set(result)), None
 
-    # Job types whose ``config`` lists on-disk paths (``roots``/``root``) that a
-    # stage worker must consider when deciding whether to commit a mapping. A
-    # scan or import queued or running against a path this stage is about to
-    # rebase would catalog the originals a second time once the mapping
-    # publishes, even when that scan lives in a workspace whose folder set has
-    # no overlap with the one we are staging. ``_busy_job`` refuses the
+    # Job types whose ``config`` records on-disk paths that a stage worker
+    # must consider when deciding whether to commit a mapping. A scan or
+    # import queued or running against a path this stage is about to rebase
+    # would catalog the originals a second time once the mapping publishes,
+    # even when that scan lives in a workspace whose folder set has no
+    # overlap with the one we are staging. ``_busy_job`` refuses the
     # transition in that case so ``_busy_job_error`` names the racing job.
+    # ``_job_config_paths`` handles the per-type key names (``roots``/``root``
+    # for scan and metadata-repair; ``source``/``destination`` for
+    # ``import-full``; ``sources``/``destination`` for ``import-in-place``
+    # and the ``import`` job the ``/api/jobs/import-photos`` route
+    # registers).
     _PATH_CONFIG_JOB_TYPES = frozenset(
         {
             "scan", "import-full", "import-in-place", "import-photos",
-            "repair-metadata",
+            "import", "metadata-repair",
         }
     )
 
@@ -246,15 +251,29 @@ def create_local_folder_blueprint(
         return paths
 
     def _job_config_paths(config):
+        # Different job types record their on-disk paths under different
+        # keys. Collecting every shape here keeps ``_busy_job`` honest about
+        # what a queued or running import actually walks:
+        # * scan and metadata-repair use ``roots``/``root``.
+        # * ``import-full`` copies ``source`` to ``destination``.
+        # * ``import-in-place`` and the ``import`` job registered by
+        #   ``/api/jobs/import-photos`` list source paths in ``sources`` and
+        #   record the archive destination (when present) in ``destination``.
+        # An overlap on either the source tree or the destination tree lets
+        # the importer catalog originals a second time, so both belong here.
         if not isinstance(config, dict):
             return []
         paths = []
         raw_roots = config.get("roots")
         if isinstance(raw_roots, list):
             paths.extend(p for p in raw_roots if isinstance(p, str) and p)
-        raw_root = config.get("root")
-        if isinstance(raw_root, str) and raw_root:
-            paths.append(raw_root)
+        raw_sources = config.get("sources")
+        if isinstance(raw_sources, list):
+            paths.extend(p for p in raw_sources if isinstance(p, str) and p)
+        for key in ("root", "source", "destination"):
+            raw = config.get(key)
+            if isinstance(raw, str) and raw:
+                paths.append(raw)
         return paths
 
     def _busy_job(db, root_ids, initiating_workspace_id):
