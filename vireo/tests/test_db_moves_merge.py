@@ -1399,6 +1399,7 @@ MOVED = [
     "_transfer_edit_recipe_for_merge", "_link_survivor_for_sibling_edits",
     "get_sync_only_photo_paths", "merge_staged_tree_into_archive",
     "check_filename_collisions", "query_move_rule_matches",
+    "_photo_syncable_in_workspace",
 ]
 
 

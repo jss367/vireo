@@ -2,8 +2,9 @@
 
 Covers saved move rules, the folder-path and photo-folder rewrites a move
 performs, the move-rule match query, the sync-only grants a merge records for
-sibling workspaces, and the staged-tree -> archive reconciliation with the
-per-collision state transfers it runs.
+sibling workspaces (and the grant lookup behind
+``Database._photo_syncable_in_workspace``), and the staged-tree -> archive
+reconciliation with the per-collision state transfers it runs.
 
 ``Database`` keeps the composition. Keyword re-tagging stays on the façade
 (``Database.tag_photo`` / ``untag_photo``) so the keyword-provenance fold and
@@ -599,6 +600,47 @@ class MovesMergeRepository:
             for r in legacy_rows:
                 paths.setdefault(r["photo_id"], r["path"])
         return paths
+
+    def photo_has_sync_only_grant(self, photo_id, workspace_id):
+        """True if ``workspace_id`` holds a sync-only grant on ``photo_id``.
+
+        A ``workspace_sync_only_photos`` row, or a legacy
+        ``workspace_sync_only_folders`` grant on the photo's folder (or the
+        folder it was last moved out of) backed by a pending edit in the
+        workspace. Library membership is the façade's check
+        (``Database._photo_syncable_in_workspace``), made before this one.
+        """
+        row = self.conn.execute(
+            "SELECT 1 FROM workspace_sync_only_photos "
+            "WHERE photo_id = ? AND workspace_id = ?",
+            (photo_id, workspace_id),
+        ).fetchone()
+        if row is not None:
+            return True
+        legacy = self.conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='table' AND name='workspace_sync_only_folders'"
+        ).fetchone()
+        if legacy is None:
+            return False
+        row = self.conn.execute(
+            """SELECT 1
+               FROM workspace_sync_only_folders sof
+               JOIN photos p ON p.id = ?
+               LEFT JOIN folders granted ON granted.id = sof.folder_id
+               WHERE sof.workspace_id = ?
+                 AND EXISTS (
+                     SELECT 1 FROM pending_changes pc
+                     WHERE pc.workspace_id = sof.workspace_id
+                       AND pc.photo_id = p.id
+                 )
+                 AND (sof.folder_id = p.folder_id
+                      OR (granted.path IS NOT NULL
+                          AND granted.path
+                              = p.last_move_source_folder_path))""",
+            (photo_id, workspace_id),
+        ).fetchone()
+        return row is not None
 
     def merge_staged_tree_into_archive(
             self, staged_root_id, archive_path, *, workspace_id_fn,

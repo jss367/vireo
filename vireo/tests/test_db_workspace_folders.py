@@ -1018,6 +1018,7 @@ _MOVED_METHODS = [
     "_active_ws_root_descendant_exists",
     "_prune_ws_nonroot_links_outside_roots",
     "workspace_unlinked_folder_count",
+    "_photo_in_workspace",
 ]
 
 

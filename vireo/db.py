@@ -2831,13 +2831,9 @@ class Database:
 
     def _photo_in_workspace(self, photo_id):
         """Return True if the photo belongs to a folder visible in the active workspace."""
-        row = self.conn.execute(
-            """SELECT 1 FROM photos p
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-               WHERE p.id = ? AND wf.workspace_id = ?""",
-            (photo_id, self._ws_id()),
-        ).fetchone()
-        return row is not None
+        return self._workspace_folder_repository().photo_in_workspace(
+            photo_id, self._ws_id()
+        )
 
     def _verify_photo_in_workspace(self, photo_id):
         """Raise ValueError if the photo is not in the active workspace."""
@@ -2868,38 +2864,9 @@ class Database:
         """
         if self._photo_in_workspace(photo_id):
             return True
-        workspace_id = self._ws_id()
-        row = self.conn.execute(
-            "SELECT 1 FROM workspace_sync_only_photos "
-            "WHERE photo_id = ? AND workspace_id = ?",
-            (photo_id, workspace_id),
-        ).fetchone()
-        if row is not None:
-            return True
-        legacy = self.conn.execute(
-            "SELECT 1 FROM sqlite_master "
-            "WHERE type='table' AND name='workspace_sync_only_folders'"
-        ).fetchone()
-        if legacy is None:
-            return False
-        row = self.conn.execute(
-            """SELECT 1
-               FROM workspace_sync_only_folders sof
-               JOIN photos p ON p.id = ?
-               LEFT JOIN folders granted ON granted.id = sof.folder_id
-               WHERE sof.workspace_id = ?
-                 AND EXISTS (
-                     SELECT 1 FROM pending_changes pc
-                     WHERE pc.workspace_id = sof.workspace_id
-                       AND pc.photo_id = p.id
-                 )
-                 AND (sof.folder_id = p.folder_id
-                      OR (granted.path IS NOT NULL
-                          AND granted.path
-                              = p.last_move_source_folder_path))""",
-            (photo_id, workspace_id),
-        ).fetchone()
-        return row is not None
+        return self._moves_merge_repository().photo_has_sync_only_grant(
+            photo_id, self._ws_id()
+        )
 
     def _verify_photo_syncable_in_workspace(self, photo_id):
         """Raise ValueError if the workspace may not write this sidecar."""
