@@ -7,6 +7,24 @@ from pathlib import Path
 import pytest
 from wait import wait_for_job_via_client
 
+_STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+_STATIC_SCRIPT_RE = re.compile(r'<script src="/static/([\w.-]+\.js)"></script>')
+
+
+def _page_with_scripts(client, path):
+    """The rendered page with its ``/static`` scripts inlined.
+
+    Page JS lives in ``vireo/static/``, so a test that checks what a page
+    does reads the page the way the browser assembles it.
+    """
+    html = client.get(path).get_data(as_text=True)
+    return _STATIC_SCRIPT_RE.sub(
+        lambda m: "<script>\n"
+        + (_STATIC_DIR / m.group(1)).read_text(encoding="utf-8")
+        + "</script>",
+        html,
+    )
+
 
 def _run_missing_originals_check(client, folder_id=None):
     body = {}
@@ -55,7 +73,7 @@ def test_browse_page(app_and_db):
     client = app.test_client()
     resp = client.get('/browse')
     assert resp.status_code == 200
-    html = resp.get_data(as_text=True)
+    html = _page_with_scripts(client, '/browse')
     assert 'id="syncBanner"' in html
     assert 'function refreshPendingSyncBanner()' in html
     assert html.count(
@@ -68,7 +86,7 @@ def test_browse_slim_batch_bar_and_unified_menu(app_and_db):
     context menu is the complete action surface (spec
     docs/superpowers/specs/2026-08-02-browse-batch-bar-unified-menu-design.md)."""
     app, _ = app_and_db
-    html = app.test_client().get('/browse').get_data(as_text=True)
+    html = _page_with_scripts(app.test_client(), "/browse")
     # More button opens the unified menu
     assert 'id="batchMoreBtn"' in html
     assert 'function openBatchMoreMenu(' in html
@@ -91,7 +109,7 @@ def test_browse_slim_batch_bar_and_unified_menu(app_and_db):
 
 def test_browse_export_offers_embedded_metadata_checkboxes(app_and_db):
     app, _ = app_and_db
-    html = app.test_client().get('/browse').get_data(as_text=True)
+    html = _page_with_scripts(app.test_client(), "/browse")
 
     assert "Include metadata in exported files" in html
     for control in (
@@ -110,7 +128,7 @@ def test_browse_export_offers_embedded_metadata_checkboxes(app_and_db):
 
 def test_browse_export_warns_before_numbering_collision_names(app_and_db):
     app, _ = app_and_db
-    html = app.test_client().get('/browse').get_data(as_text=True)
+    html = _page_with_scripts(app.test_client(), "/browse")
 
     assert "Existing files are never overwritten." in html
     assert "Vireo adds a number" in html
@@ -126,7 +144,7 @@ def test_browse_export_warns_before_numbering_collision_names(app_and_db):
 
 def test_browse_export_offers_reveal_after_export(app_and_db):
     app, _ = app_and_db
-    html = app.test_client().get('/browse').get_data(as_text=True)
+    html = _page_with_scripts(app.test_client(), "/browse")
 
     assert 'id="exportRevealAfter"' in html
     assert "Show exported files in the file manager when finished" in html
@@ -141,7 +159,7 @@ def test_shared_context_menu_scrolls_within_viewport(app_and_db):
     unclickable after their batch-bar shortcuts were removed."""
     app, _ = app_and_db
     client = app.test_client()
-    html = client.get('/browse').get_data(as_text=True)
+    html = _page_with_scripts(client, "/browse")
     assert '/static/vireo-navbar.css' in html
     css = client.get('/static/vireo-navbar.css').get_data(as_text=True)
     assert '.vireo-ctx-menu' in css
@@ -153,7 +171,7 @@ def test_browse_discloses_raw_jpeg_pairs_and_offers_source_switch(app_and_db):
     """The paired-file behavior must be discoverable in Browse rather than
     existing only as an internal ``companion_path`` or delete-dialog detail."""
     app, _ = app_and_db
-    html = app.test_client().get("/browse").get_data(as_text=True)
+    html = _page_with_scripts(app.test_client(), "/browse")
 
     assert "JPEG · RAW pair" in html
     assert 'id="lightboxSourceControl"' in html
@@ -17180,7 +17198,7 @@ def test_browse_filter_by_collection_guards_degraded_rows():
     (with a toast) rather than firing the request.
     """
     from pathlib import Path
-    src = Path(__file__).parent.parent / "templates" / "browse.html"
+    src = Path(__file__).parent.parent / "static" / "browse.js"
     text = src.read_text(encoding="utf-8")
     fn_start = text.find("async function filterByCollection")
     assert fn_start != -1, "filterByCollection function not found"
@@ -17188,30 +17206,30 @@ def test_browse_filter_by_collection_guards_degraded_rows():
     # must reference count_error and return before the normal load path runs.
     body = text[fn_start:fn_start + 3000]
     assert "count_error" in body, (
-        "browse.html filterByCollection does not check count_error"
+        "browse.js filterByCollection does not check count_error"
     )
     guard_end = body.find("return;")
     # Collections open into the filter bar now (Phase 5): the load path is
     # VireoFilter.loadExpression rather than a collection-endpoint fetch.
     fetch_start = body.find("loadExpression")
     assert guard_end != -1 and fetch_start != -1 and guard_end < fetch_start, (
-        "browse.html filterByCollection does not early-return before loading"
+        "browse.js filterByCollection does not early-return before loading"
     )
 
 
 def _browse_editor_field_ops():
-    """Parse ``FIELD_OPS`` out of browse.html, resolving the NUMERIC_OPS alias.
+    """Parse ``FIELD_OPS`` out of browse.js, resolving the NUMERIC_OPS alias.
 
     The saved-collection editor keeps its own field maps rather than
     reading the registry, so tests have to read them the way the browser
     does to catch drift.
     """
-    text = (Path(__file__).parent.parent / "templates" / "browse.html").read_text(
+    text = (Path(__file__).parent.parent / "static" / "browse.js").read_text(
         encoding="utf-8")
     numeric_start = text.find("var NUMERIC_OPS = [")
     numeric_ops = re.findall(
         r"'([^']+)'", text[numeric_start:text.find("];", numeric_start)])
-    assert numeric_ops, "NUMERIC_OPS not found in browse.html"
+    assert numeric_ops, "NUMERIC_OPS not found in browse.js"
     ops_start = text.find("var FIELD_OPS = {")
     block = text[ops_start:text.find("};", ops_start)]
     field_ops = {}
@@ -17251,7 +17269,7 @@ def test_browse_collection_editor_round_trips_registry_numeric_rules():
     labels_start = text.find("var FIELD_LABELS = {")
     labels = text[labels_start:text.find("};", labels_start)]
     assert "species_count: 'Species Count'" in labels, (
-        "browse.html FIELD_LABELS omits species_count — the editor's field "
+        "browse.js FIELD_LABELS omits species_count — the editor's field "
         "dropdown would show the wrong field for a saved rule"
     )
 
@@ -17275,7 +17293,7 @@ def test_browse_collection_editor_round_trips_registry_numeric_rules():
             continue  # editor-only field (e.g. crop_complete); no registry ops
         missing = set(spec["ops"]) - set(field_ops.get(field, []))
         assert not missing, (
-            f"browse.html editor can't represent {field} {sorted(missing)} — "
+            f"browse.js editor can't represent {field} {sorted(missing)} — "
             "a collection saved from the filter bar would reopen with a "
             "different operator"
         )
@@ -17290,7 +17308,7 @@ def test_browse_collection_editor_round_trips_registry_numeric_rules():
 def test_browse_undo_confirmation_uses_success_toast():
     """Successful edits must not inherit showToast's red error default."""
     from pathlib import Path
-    src = Path(__file__).parent.parent / "templates" / "browse.html"
+    src = Path(__file__).parent.parent / "static" / "browse.js"
     text = src.read_text(encoding="utf-8")
     fn_start = text.find("async function showUndoToast")
     assert fn_start != -1, "showUndoToast function not found"
@@ -17303,7 +17321,7 @@ def test_browse_undo_confirmation_uses_success_toast():
 def test_browse_export_started_uses_info_toast():
     """Starting an export is informational, not an error."""
     from pathlib import Path
-    src = Path(__file__).parent.parent / "templates" / "browse.html"
+    src = Path(__file__).parent.parent / "static" / "browse.js"
     text = src.read_text(encoding="utf-8")
     fn_start = text.find("async function startExport")
     assert fn_start != -1, "startExport function not found"
@@ -18339,7 +18357,7 @@ def test_process_page_has_no_import_source(app_and_db):
 def test_browse_empty_state_import_link_targets_import_page(app_and_db):
     app, _ = app_and_db
     client = app.test_client()
-    html = client.get("/browse").data.decode()
+    html = _page_with_scripts(client, "/browse")
     assert 'href="/import"' in html
     assert 'href="/pipeline" style="display:inline-block' not in html
 
@@ -19308,7 +19326,7 @@ def test_browse_page_has_prediction_panels(app_and_db):
     """Browse ships both prediction surfaces: single-photo and selection."""
     app, _ = app_and_db
     client = app.test_client()
-    html = client.get("/browse").get_data(as_text=True)
+    html = _page_with_scripts(client, "/browse")
     assert 'id="detailPredictions"' in html
     assert 'id="selectionPredictions"' in html
     # The empty states must stay distinguishable — an empty panel would
@@ -19327,7 +19345,7 @@ def test_browse_names_the_status_only_share_of_an_accept(app_and_db):
     """
     app, _ = app_and_db
     client = app.test_client()
-    html = client.get("/browse").get_data(as_text=True)
+    html = _page_with_scripts(client, "/browse")
     assert "acceptable_keyworded_count" in html, (
         "the backend reports how many of the Accept targets are status-only "
         "but the panel never shows it"
@@ -19344,7 +19362,7 @@ def test_browse_reject_predictions_refreshes_collections(app_and_db):
     """
     app, _ = app_and_db
     client = app.test_client()
-    html = client.get("/browse").get_data(as_text=True)
+    html = _page_with_scripts(client, "/browse")
     reject_fn_idx = html.find("async function rejectDetailPredictions")
     assert reject_fn_idx != -1, "rejectDetailPredictions must exist"
     # Bound the search to the body of the function.
@@ -20260,7 +20278,7 @@ def test_browse_detail_panel_groups_by_consensus_species(app_and_db):
     """
     app, _ = app_and_db
     client = app.test_client()
-    html = client.get("/browse").get_data(as_text=True)
+    html = _page_with_scripts(client, "/browse")
     # The rendered grouping key uses the consensus species when present.
     assert "p.consensus_species || p.species" in html
 
@@ -20287,7 +20305,7 @@ def test_browse_prediction_panels_carry_no_borrowed_suppression(app_and_db):
     """
     app, _ = app_and_db
     client = app.test_client()
-    html = client.get("/browse").get_data(as_text=True)
+    html = _page_with_scripts(client, "/browse")
     assert "suppressedBorrowedRows" not in html
     assert "meta.suppressed_borrowed_count" not in html
     assert "consensus-attributable score above your confidence threshold" not in html
@@ -21898,7 +21916,7 @@ def test_browse_clears_stale_ambiguity_when_keywords_no_longer_conflict(app_and_
 
     # The single-photo panel decides this in JS, so it needs the same
     # precedence: fresh when present, stored only as fallback.
-    html = client.get("/browse").get_data(as_text=True)
+    html = _page_with_scripts(client, "/browse")
     idx = html.find("function predictionIsAmbiguous")
     assert idx != -1
     body = html[idx:html.find("\n}", idx)]
@@ -22024,7 +22042,7 @@ def test_browse_uses_ascii_case_fold_for_prediction_group_key(app_and_db):
     """
     app, _ = app_and_db
     client = app.test_client()
-    html = client.get("/browse").get_data(as_text=True)
+    html = _page_with_scripts(client, "/browse")
     # Helper is present.
     assert "function asciiCaseFoldKey" in html
     # And is what the prediction group key actually uses — no lingering
@@ -22108,7 +22126,7 @@ def test_batch_reject_skips_already_rejected_predictions(app_and_db):
 def _browse_js_function_body(html, signature):
     """The source text of one inline Browse function, for structure asserts."""
     start = html.find(signature)
-    assert start != -1, f"{signature} must exist in browse.html"
+    assert start != -1, f"{signature} must exist in browse.js"
     nxt = html.find("\nfunction ", start + 1)
     nxt_async = html.find("\nasync function ", start + 1)
     ends = [i for i in (nxt, nxt_async) if i != -1]
@@ -22129,7 +22147,7 @@ def test_browse_prediction_panels_refresh_on_keyword_edits(app_and_db):
     """
     app, _ = app_and_db
     client = app.test_client()
-    html = client.get("/browse").get_data(as_text=True)
+    html = _page_with_scripts(client, "/browse")
     assert "function refreshPredictionPanels(" in html
     body = _browse_js_function_body(
         html, "async function _refreshBrowseKeywordState(",
@@ -22159,7 +22177,7 @@ def test_browse_sidebar_panels_refresh_on_undo_and_redo(app_and_db):
     """
     app, _ = app_and_db
     client = app.test_client()
-    html = client.get("/browse").get_data(as_text=True)
+    html = _page_with_scripts(client, "/browse")
     # Scoped to the handler itself rather than a fixed character count: the
     # listener's own comments explain why each refresh is there, and a
     # character budget silently turns into "the comment got longer" failures.
@@ -22205,7 +22223,7 @@ def test_browse_undo_bails_when_selection_moves_during_hydration(app_and_db):
     """
     app, _ = app_and_db
     client = app.test_client()
-    html = client.get("/browse").get_data(as_text=True)
+    html = _page_with_scripts(client, "/browse")
     handler = _browse_js_function_body(
         html, "window.afterHistoryChange = async function("
     )
@@ -22238,7 +22256,7 @@ def test_browse_review_deep_link_clears_persisted_filters(app_and_db):
     """
     app, _ = app_and_db
     client = app.test_client()
-    html = client.get("/browse").get_data(as_text=True)
+    html = _page_with_scripts(client, "/browse")
     body = _browse_js_function_body(html, "function openPredictionInReview(")
     assert "filters=" in body, (
         "the Review deep link must send an explicit empty filter handoff"
@@ -22284,7 +22302,7 @@ var document = {
   },
   createTextNode: function(text) { return { text: String(text) }; },
 };
-// Declared in browse.html above the panel code, outside the slice below.
+// Declared in browse.js above the panel code, outside the slice below.
 var PREDICTION_COLLAPSE_AT = 5;
 var detailPredictionsExpanded = false;
 var _detailPredictionData = null;
@@ -22365,7 +22383,7 @@ def _run_node(source, args):
 
 def test_selection_predictions_accept_on_all_renders_and_submits_full_selection(app_and_db):
     app, _ = app_and_db
-    html = app.test_client().get("/browse").get_data(as_text=True)
+    html = _page_with_scripts(app.test_client(), "/browse")
     source = "\n".join([
         _PANEL_DOM_STUB.replace("id === 'detailPredictions'", "id === 'selectionPredictions'"),
         _browse_escape_helpers(),
@@ -22450,7 +22468,7 @@ def test_selection_prediction_accept_on_all_leads_and_names_its_count(app_and_db
     than asking the user to choose between two spellings of one action.
     """
     app, _ = app_and_db
-    html = app.test_client().get("/browse").get_data(as_text=True)
+    html = _page_with_scripts(app.test_client(), "/browse")
     source = "\n".join([
         _PANEL_DOM_STUB.replace(
             "id === 'detailPredictions'", "id === 'selectionPredictions'",
@@ -22548,7 +22566,7 @@ def test_selection_prediction_show_button_opens_only_that_species_photos(app_and
     write, no change to the 70-photo selection the Accept buttons act on.
     """
     app, _ = app_and_db
-    html = app.test_client().get("/browse").get_data(as_text=True)
+    html = _page_with_scripts(app.test_client(), "/browse")
     source = "\n".join([
         _PANEL_DOM_STUB.replace("id === 'detailPredictions'", "id === 'selectionPredictions'"),
         _browse_escape_helpers(),
@@ -22648,7 +22666,7 @@ def test_selection_prediction_show_button_drops_stale_interleaved_fetch(app_and_
     lightbox ends up showing the wrong species under the wrong count.
     """
     app, _ = app_and_db
-    html = app.test_client().get("/browse").get_data(as_text=True)
+    html = _page_with_scripts(app.test_client(), "/browse")
     source = "\n".join([
         _PANEL_DOM_STUB.replace("id === 'detailPredictions'", "id === 'selectionPredictions'"),
         _browse_escape_helpers(),
@@ -22736,7 +22754,7 @@ def _run_detail_prediction_panel(html, mode, payload):
     start = html.find("function predictionIsAmbiguous(")
     end = html.find("function openPredictionInReview(")
     assert start != -1 and end > start, (
-        "browse.html's detail prediction panel could not be located"
+        "browse.js's detail prediction panel could not be located"
     )
     source = "\n".join([
         _PANEL_DOM_STUB, _browse_escape_helpers(), html[start:end],
@@ -22843,7 +22861,7 @@ def test_clicking_a_stack_card_selects_every_frame_behind_it(app_and_db):
     user can actually see.
     """
     app, _ = app_and_db
-    html = app.test_client().get("/browse").get_data(as_text=True)
+    html = _page_with_scripts(app.test_client(), "/browse")
     result = _run_node(_browse_selection_js(html, """
 seedGrid();
 selectPhoto(CLICK, 10, 0);
@@ -22879,7 +22897,7 @@ def test_stack_cards_toggle_and_range_select_as_whole_stacks(app_and_db):
     way the card the user clicked says it should.
     """
     app, _ = app_and_db
-    html = app.test_client().get("/browse").get_data(as_text=True)
+    html = _page_with_scripts(app.test_client(), "/browse")
     result = _run_node(_browse_selection_js(html, """
 seedGrid();
 selectPhoto(CLICK, 10, 0);
@@ -22918,7 +22936,7 @@ def test_restoring_focus_to_a_stack_card_does_not_select_the_stack(app_and_db):
     turn one photo into a stack-wide batch.
     """
     app, _ = app_and_db
-    html = app.test_client().get("/browse").get_data(as_text=True)
+    html = _page_with_scripts(app.test_client(), "/browse")
     result = _run_node(_browse_selection_js(html, """
 seedGrid();
 selectPhoto(CLICK, 10, 0, {stackAware: false});
@@ -22942,7 +22960,7 @@ def test_shift_click_inside_a_tray_ranges_over_the_trays_own_members(
     was for.
     """
     app, _ = app_and_db
-    html = app.test_client().get("/browse").get_data(as_text=True)
+    html = _page_with_scripts(app.test_client(), "/browse")
     result = _run_node(_browse_selection_js(html, """
 seedGrid();
 browseStackMembers['10'] = [{id: 11}, {id: 10}, {id: 12}];
@@ -22962,7 +22980,7 @@ def test_stack_card_paints_a_partial_mark_for_a_partial_selection(app_and_db):
     rather than a ring that would overstate what the batch bar will act on.
     """
     app, _ = app_and_db
-    html = app.test_client().get("/browse").get_data(as_text=True)
+    html = _page_with_scripts(app.test_client(), "/browse")
     result = _run_node(_browse_selection_js(html, """
 seedGrid();
 var none = browseCardSelectionClass(photos[0]);
@@ -23014,7 +23032,7 @@ def test_stack_dblclick_snapshot_distinguishes_a_preselected_stack(app_and_db):
     through the second click. Codex P2 on PR #1672.
     """
     app, _ = app_and_db
-    html = app.test_client().get("/browse").get_data(as_text=True)
+    html = _page_with_scripts(app.test_client(), "/browse")
     result = _run_node(_browse_selection_js(html, """
 seedGrid();
 var FIRST = Object.assign({detail: 1}, CLICK);
@@ -23078,7 +23096,7 @@ def test_selection_count_names_stacks_only_when_the_grid_accounts_for_all(
     that case says nothing instead.
     """
     app, _ = app_and_db
-    html = app.test_client().get("/browse").get_data(as_text=True)
+    html = _page_with_scripts(app.test_client(), "/browse")
     result = _run_node(_browse_selection_js(html, """
 seedGrid();
 process.stdout.write(JSON.stringify({
@@ -23116,7 +23134,7 @@ def test_clicking_a_stack_card_scrubs_the_previous_detail_owner(app_and_db):
     reasoning as the drop-anchor and closeDetail paths.
     """
     app, _ = app_and_db
-    html = app.test_client().get("/browse").get_data(as_text=True)
+    html = _page_with_scripts(app.test_client(), "/browse")
     result = _run_node(_browse_selection_js(html, """
 var __clearCalls = 0;
 clearExifSuggestion = function() { __clearCalls++; };
@@ -23163,14 +23181,14 @@ def test_right_click_stack_branch_scrubs_the_previous_detail_owner(app_and_db):
     also call, with this test pinning what that helper does.
     """
     app, _ = app_and_db
-    html = app.test_client().get("/browse").get_data(as_text=True)
+    html = _page_with_scripts(app.test_client(), "/browse")
     # Slice the contextmenu handler out of the file: it opens with the
     # document-level addEventListener and runs to the corresponding closing
     # ``});``. That is enough to look for the stack-coercion branch and its
     # cleanup calls without depending on the exact line numbers.
     marker = "document.addEventListener('contextmenu', function(e) {"
     start = html.find(marker)
-    assert start != -1, "contextmenu handler not found in browse.html"
+    assert start != -1, "contextmenu handler not found in browse.js"
     stack_branch_marker = "if (stackIds.length > 1 && !wholeStackSelected) {"
     branch_start = html.find(stack_branch_marker, start)
     assert branch_start != -1, "right-click stack branch not found"
@@ -23220,7 +23238,7 @@ def test_batch_delete_discards_a_companion_count_for_a_stale_selection(
     batch reply must refuse to open on top of any open delete dialog.
     """
     app, _ = app_and_db
-    html = app.test_client().get("/browse").get_data(as_text=True)
+    html = _page_with_scripts(app.test_client(), "/browse")
     body = _browse_js_function_body(html, "async function batchDelete(")
     source = "\n".join([
         # The real selection-key helper, not a stand-in: the staleness check
@@ -23359,7 +23377,7 @@ def test_empty_lightbox_close_drops_a_stacks_dangling_members(app_and_db):
     Codex P2 on PR #1672.
     """
     app, _ = app_and_db
-    html = app.test_client().get("/browse").get_data(as_text=True)
+    html = _page_with_scripts(app.test_client(), "/browse")
     body = _browse_js_function_body(html, "function browseReconcileEmptyLightboxClose(")
     # The extractor's boundary is ``\nfunction ``, so the body carries the
     # `lightbox:closed` addEventListener call that follows. Stub the DOM
@@ -23652,7 +23670,7 @@ def test_photodeleted_prunes_hidden_member_from_cover_metadata(app_and_db):
     Codex P2 on PR #1672.
     """
     app, _ = app_and_db
-    html = app.test_client().get("/browse").get_data(as_text=True)
+    html = _page_with_scripts(app.test_client(), "/browse")
     marker = "document.addEventListener('lightbox:photodeleted', function(event) {"
     start = html.find(marker)
     assert start != -1, "the lightbox:photodeleted handler must exist"
@@ -23930,7 +23948,7 @@ def test_browse_detail_prediction_buttons_survive_apostrophe_species(
     """
     app, _ = app_and_db
     client = app.test_client()
-    html = client.get("/browse").get_data(as_text=True)
+    html = _page_with_scripts(client, "/browse")
     payload = _apostrophe_panel_payload()
 
     rendered = _run_detail_prediction_panel(html, "render", payload)["html"]
@@ -24012,7 +24030,7 @@ def test_browse_detail_panel_scores_consensus_species_from_matching_row(
     """
     app, _ = app_and_db
     client = app.test_client()
-    html = client.get("/browse").get_data(as_text=True)
+    html = _page_with_scripts(client, "/browse")
 
     def _pred(pid, raw, consensus, confidence):
         return {
@@ -24087,7 +24105,7 @@ def test_browse_reject_toast_names_workspace_detach_skips(app_and_db):
     """
     app, _ = app_and_db
     client = app.test_client()
-    html = client.get("/browse").get_data(as_text=True)
+    html = _page_with_scripts(client, "/browse")
     body = _browse_js_function_body(html, "function _reportSkippedRejects(")
     import json as _json
 
@@ -24805,7 +24823,7 @@ def test_browse_panel_treats_reviewed_status_as_decided(app_and_db):
 
     app, _ = app_and_db
     client = app.test_client()
-    html = client.get("/browse").get_data(as_text=True)
+    html = _page_with_scripts(client, "/browse")
 
     # The panel routes its check through one named constant rather than an
     # inline comparison, so assert the constant equals the backend's list
@@ -24847,9 +24865,9 @@ def test_browse_detail_panel_keeps_row_data_out_of_markup(app_and_db):
     """
     app, _ = app_and_db
     client = app.test_client()
-    html = client.get("/browse").get_data(as_text=True)
+    html = _page_with_scripts(client, "/browse")
     body = _browse_js_function_body(html, "function renderDetailPredictions(")
-    assert body, "renderDetailPredictions must exist in browse.html"
+    assert body, "renderDetailPredictions must exist in browse.js"
     assert "onclick" not in body, (
         "the detail prediction panel must wire its buttons through the "
         "delegated listener, not inline handlers built by concatenation"
@@ -24880,9 +24898,9 @@ def test_browse_reject_reporter_names_workspace_detach_skips(app_and_db):
     """
     app, _ = app_and_db
     client = app.test_client()
-    html = client.get("/browse").get_data(as_text=True)
+    html = _page_with_scripts(client, "/browse")
     body = _browse_js_function_body(html, "function _reportSkippedRejects(")
-    assert body, "_reportSkippedRejects must exist in browse.html"
+    assert body, "_reportSkippedRejects must exist in browse.js"
     assert "skipped_out_of_workspace" in body, (
         "the reject reporter must surface skipped_out_of_workspace the same "
         "way _reportSkippedAccepts does — silence would be a black box"
@@ -26654,7 +26672,7 @@ def test_browse_detail_prediction_species_identity_credits_scientific_alias(app_
     data = client.get(f"/api/predictions?photo_ids={photo}").get_json()
     assert len(data["predictions"]) == 2
     assert all(p["species_key"] == p["consensus_species_key"] == "taxon:42" for p in data["predictions"])
-    html = client.get("/browse").get_data(as_text=True)
+    html = _page_with_scripts(client, "/browse")
     rendered = _run_detail_prediction_panel(html, "render", {"photoId": photo, "data": data})["html"]
     assert rendered.count('class="prediction-species"') == 1
     assert "99%" in rendered

@@ -141,7 +141,7 @@ Layering: `vireo/app.py` wires the app; HTTP routes live in blueprints under `vi
 - `vireo/services/missing_originals.py` — `MissingOriginals` owns the per-app scan cache, in-flight table, error/backoff records and invalidation generations (also exposed as `app._missing_originals_{lock,cache,inflight,errors,generation}`), with `payload`, `start_scan`, `invalidate` and `folder_health_loop`. Module-level: `resolve_folder_id`, `cache_key`, `HEAVY_JOB_TYPES`.
 - `vireo/highlights_payload.py`, `vireo/best_batch.py` — Pure payload builders (a `Database` in, JSON-ready dicts out): the Highlights and Life List payloads with their bucket scoring, curation-ordering and filter helpers, and `photo_highlight_entries`; `best_batch_scope` / `build_best_batch_response` for `/api/photos/<id>/best-batch`. Imported by the blueprints that render them.
 - `vireo/templates/_navbar.html` — Shared navbar included by all pages. Contains workspace switcher, bottom panel, lightbox, theme system.
-- `vireo/templates/*.html` — One file per page, inline CSS and JS.
+- `vireo/templates/*.html` — One file per page, inline CSS and JS. Pages are moving their JS out to classic (non-module) scripts in `vireo/static/`, loaded with `<script src>` where the inline block was; `browse.html`'s lives in `vireo/static/browse.js`. Tests that grep a rendered page for JS read it through `_page_with_scripts` in `vireo/tests/test_app.py`, which inlines the page's `/static` scripts.
 
 ## Workspaces
 
