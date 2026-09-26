@@ -7,9 +7,10 @@ sibling workspaces (and the grant lookup behind
 reconciliation with the per-collision state transfers it runs.
 
 ``Database`` keeps the composition. Keyword re-tagging stays on the façade
-(``Database.tag_photo`` / ``untag_photo``) so the keyword-provenance fold and
-its contract test (``test_keyword_provenance_contract``) keep seeing every
-writer in ``repositories/keyword_provenance.py``. The merge and ``move_folder_path`` call other domains'
+(``Database.tag_photo`` / ``untag_photo``), whose writes live in
+``repositories/keyword_provenance.py``, so the keyword-provenance fold applies
+and its contract test (``test_keyword_provenance_contract``) sees every
+re-tag call site. The merge and ``move_folder_path`` call other domains'
 ``Database`` methods mid-transaction; those are passed in as callbacks so the
 bodies here stay verbatim and patched façade methods still take effect.
 
