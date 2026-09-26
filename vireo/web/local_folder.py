@@ -220,21 +220,21 @@ def create_local_folder_blueprint(
         return sorted(set(result)), None
 
     # Job types whose ``config`` records on-disk paths that a stage worker
-    # must consider when deciding whether to commit a mapping. A scan or
-    # import queued or running against a path this stage is about to rebase
-    # would catalog the originals a second time once the mapping publishes,
-    # even when that scan lives in a workspace whose folder set has no
-    # overlap with the one we are staging. ``_busy_job`` refuses the
-    # transition in that case so ``_busy_job_error`` names the racing job.
-    # ``_job_config_paths`` handles the per-type key names (``roots``/``root``
-    # for scan and metadata-repair; ``source``/``destination`` for
-    # ``import-full``; ``sources``/``destination`` for ``import-in-place``
-    # and the ``import`` job the ``/api/jobs/import-photos`` route
-    # registers).
+    # must consider when deciding whether to commit a mapping. A scan,
+    # import, or pipeline queued or running against a path this stage is
+    # about to rebase would catalog the originals a second time once the
+    # mapping publishes, even when that job lives in a workspace whose
+    # folder set has no overlap with the one we are staging. ``_busy_job``
+    # refuses the transition in that case so ``_busy_job_error`` names the
+    # racing job. ``_job_config_paths`` handles the per-type key names
+    # (``roots``/``root`` for scan and metadata-repair; ``source``/
+    # ``destination`` for ``import-full`` and ``pipeline``; ``sources``/
+    # ``destination`` for ``import-in-place``, the ``import`` job the
+    # ``/api/jobs/import-photos`` route registers, and ``pipeline``).
     _PATH_CONFIG_JOB_TYPES = frozenset(
         {
             "scan", "import-full", "import-in-place",
-            "import", "metadata-repair",
+            "import", "metadata-repair", "pipeline",
         }
     )
 
@@ -248,6 +248,26 @@ def create_local_folder_blueprint(
             ).fetchone()
             if row and row["path"]:
                 paths.append(row["path"])
+        return paths
+
+    def _stage_destination_paths(source_paths, destination_bases):
+        """Final absolute local paths a stage will write to.
+
+        ``destination_bases`` is the caller-chosen base directory per
+        root. ``local_path_for_base`` composes the same per-root
+        destination that ``stage_folder`` will create, so the paths
+        here match what the worker actually writes.
+        """
+        paths = []
+        for root_id, base in (destination_bases or {}).items():
+            source_path = source_paths.get(root_id)
+            if not source_path or not base:
+                continue
+            paths.append(
+                os.path.abspath(
+                    str(local_path_for_base(base, root_id, source_path))
+                )
+            )
         return paths
 
     def _job_config_paths(config):
@@ -276,12 +296,21 @@ def create_local_folder_blueprint(
                 paths.append(raw)
         return paths
 
-    def _busy_job(db, root_ids, initiating_workspace_id):
+    def _busy_job(db, root_ids, initiating_workspace_id, *, extra_stage_paths=None):
         workspace_ids = {int(initiating_workspace_id)}
         for root_id in root_ids:
             workspace_ids.update(affected_workspace_ids(db, root_id))
             workspace_ids.update(workspace_ids_for_folder_tree(db, root_id))
-        stage_source_paths = _stage_source_paths(db, root_ids)
+        # Combine the folder's source paths (pre-rebase) with the chosen
+        # local destinations. A scan or import walking either would race
+        # this stage: sources become catalog-unsafe after the mapping
+        # publishes, and destinations receive files the stage worker is
+        # copying in.
+        stage_source_paths = list(_stage_source_paths(db, root_ids))
+        if extra_stage_paths:
+            stage_source_paths.extend(
+                path for path in extra_stage_paths if path
+            )
         stage_source_physicals = [
             (source, _resolve_physical(source)) for source in stage_source_paths
         ]
@@ -692,6 +721,9 @@ def create_local_folder_blueprint(
         )
         if destination_error is not None:
             return destination_error
+        stage_destination_paths = _stage_destination_paths(
+            source_paths, destination_bases
+        )
         runner = get_runner()
 
         def work(job):
@@ -758,7 +790,10 @@ def create_local_folder_blueprint(
         # ``stage_boundary_lock`` across their own check-and-register. Scan
         # admissions never take ``transition_lock``, so no cycle is possible.
         with transition_lock, stage_boundary_lock():
-            busy = _busy_job(db, root_ids, workspace_id)
+            busy = _busy_job(
+                db, root_ids, workspace_id,
+                extra_stage_paths=stage_destination_paths,
+            )
             if busy:
                 return json_error(_busy_job_error(busy), 409)
             # Recheck residency inside the same registration boundary so
@@ -770,7 +805,10 @@ def create_local_folder_blueprint(
                 "work-locally-folder-stage",
                 work,
                 workspace_id=workspace_id,
-                config={"root_folder_ids": root_ids},
+                config={
+                    "root_folder_ids": root_ids,
+                    "destination_paths": stage_destination_paths,
+                },
             )
         return jsonify({"job_id": job_id, "folder_ids": root_ids}), 202
 

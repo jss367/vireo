@@ -512,6 +512,127 @@ def test_snapshot_import_refuses_paths_inside_staged_source(staged):
     assert "local copy" in resp.get_json()["error"]
 
 
+def _stub_final_check_conflict(monkeypatch, marker):
+    """Make the final atomic ``local_copy_scan_conflict`` fail while the
+    pre-flight passes.
+
+    ``import-in-place`` and ``import-photos`` run a pre-flight check
+    BEFORE ``_prepare_import_workspace`` (which is why a plain-overlap
+    request never reaches the atomic block and the rollback path). The
+    finding is about the RACE: a folder-stage request slips in between
+    the pre-flight release and the atomic re-check. Simulate the race by
+    stubbing ``local_copy_scan_conflict`` so only the final call (the one
+    after workspace creation) reports a conflict.
+    """
+    from web import imports as imports_module
+
+    calls = {"count": 0}
+
+    def flaky_conflict(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] < marker:
+            return None
+        return "simulated race: overlapping stage published between checks"
+
+    monkeypatch.setattr(
+        imports_module, "local_copy_scan_conflict", flaky_conflict,
+    )
+    return calls
+
+
+def test_import_in_place_conflict_rolls_back_new_workspace(
+    staged, monkeypatch, tmp_path,
+):
+    """``import-in-place`` with ``new_workspace_name`` creates the workspace
+    and switches active to it BEFORE the final atomic conflict check inside
+    ``stage_boundary_lock``. If that check rejects the request (a race with
+    a folder-stage published after the pre-flight released the lock), the
+    workspace and the active-workspace change must be undone — otherwise the
+    409 leaves an orphan workspace and silently changes the user's active
+    workspace even though no import was queued.
+    """
+    db = staged["db"]
+    active_before = db._active_workspace_id
+    workspaces_before = {int(ws["id"]) for ws in db.get_workspaces()}
+    # A source outside the staged tree so the pre-flight passes; the
+    # simulated race makes the atomic final check reject it anyway.
+    fresh_source = tmp_path / "unrelated"
+    fresh_source.mkdir()
+    (fresh_source / "b.jpg").write_bytes(b"jpg")
+    # Two calls fire inside the route (explicit-sources branch): the
+    # pre-flight at request entry and the atomic re-check before
+    # ``runner.start``. Trip only the second one.
+    _stub_final_check_conflict(monkeypatch, marker=2)
+
+    call_log = _stub_final_check_conflict(monkeypatch, marker=2)
+
+    resp = staged["client"].post(
+        "/api/jobs/import-in-place",
+        json={
+            "sources": [str(fresh_source)],
+            "new_workspace_name": "Orphan In-Place",
+            "after_import": None,
+        },
+    )
+
+    assert call_log["count"] >= 2, (
+        f"only saw {call_log['count']} conflict calls; "
+        f"status={resp.status_code} body={resp.get_json()}"
+    )
+    assert resp.status_code == 409
+    assert "simulated race" in resp.get_json()["error"]
+    workspaces_after = {int(ws["id"]) for ws in db.get_workspaces()}
+    assert workspaces_after == workspaces_before
+    assert not any(
+        ws["name"] == "Orphan In-Place" for ws in db.get_workspaces()
+    )
+    # A per-request Database is instantiated by the app, so re-check active
+    # workspace through the API rather than the fixture db.
+    active = staged["client"].get("/api/workspaces/active").get_json()
+    assert int(active["id"]) == int(active_before)
+
+
+def test_import_photos_conflict_rolls_back_new_workspace(
+    staged, monkeypatch, tmp_path,
+):
+    """Same guarantee for ``import-photos``. A ``new_workspace_name`` request
+    whose destination is claimed by a folder-stage after the pre-flight
+    releases the boundary lock must not leave an orphan workspace or a
+    silent active-workspace change behind.
+    """
+    db = staged["db"]
+    active_before = db._active_workspace_id
+    workspaces_before = {int(ws["id"]) for ws in db.get_workspaces()}
+    card = tmp_path / "card"
+    card.mkdir()
+    (card / "DSC_0001.jpg").write_bytes(b"jpg")
+    dest = tmp_path / "archive-photos"
+    dest.mkdir()
+    # Two calls fire inside the route: the pre-flight at request entry
+    # and the atomic re-check before ``runner.start``. Trip only the second.
+    _stub_final_check_conflict(monkeypatch, marker=2)
+
+    resp = staged["client"].post(
+        "/api/jobs/import-photos",
+        json={
+            "sources": [str(card)],
+            "destination": str(dest),
+            "after_import": None,
+            "new_workspace_name": "Orphan Photos",
+        },
+    )
+
+    assert resp.status_code == 409
+    assert "simulated race" in resp.get_json()["error"]
+    workspaces_after = {int(ws["id"]) for ws in db.get_workspaces()}
+    assert workspaces_after == workspaces_before
+    assert not any(
+        ws["name"] == "Orphan Photos" for ws in db.get_workspaces()
+    )
+    active = staged["client"].get("/api/workspaces/active").get_json()
+    assert int(active["id"]) == int(active_before)
+
+
 def test_audit_import_untracked_refuses_paths_in_staged_source(staged):
     """``/api/audit/untracked`` reports the originals under a staged source
     because staging rebased the catalog rows to the local copy. Those
@@ -758,3 +879,153 @@ def test_stage_admission_refuses_when_scan_registered_first(
     )
     assert resp.status_code == 409
     assert job_type in resp.get_json()["error"].lower()
+
+
+def test_stage_admission_refuses_when_pipeline_registered_first(
+    staged, tmp_path, monkeypatch,
+):
+    """A pipeline job in another workspace whose ``config`` records a
+    ``source``/``sources``/``destination`` overlapping this stage source
+    must be caught by ``_busy_job``. ``scanner_stage`` (broken metadata
+    repair, snapshot / local_processing runs that ever land in the
+    config) walks those paths, so a stage that rebases them mid-run would
+    have its originals re-cataloged. Pipeline is in
+    ``_PATH_CONFIG_JOB_TYPES`` so cross-workspace pipeline configs are
+    consulted the same way import and scan configs already are.
+    """
+    db = staged["db"]
+    pending_source = tmp_path / "to-stage-pipeline"
+    pending_source.mkdir()
+    (pending_source / "b.jpg").write_bytes(b"jpg")
+    stage_fid = db.add_folder(str(pending_source), name="to-stage-pipeline")
+
+    real_runner = staged["app"]._job_runner
+    fake_pipeline_job = {
+        "id": "pipeline-1",
+        "type": "pipeline",
+        "status": "running",
+        "workspace_id": 99,
+        "config": {"sources": [str(pending_source)]},
+        "blocks_local_transitions": True,
+    }
+    monkeypatch.setattr(
+        real_runner, "list_jobs", lambda: [fake_pipeline_job],
+    )
+
+    resp = staged["client"].post(
+        "/api/workspaces/active/local-folders/stage",
+        json={"root_folder_ids": [stage_fid]},
+    )
+    assert resp.status_code == 409
+    assert "pipeline" in resp.get_json()["error"].lower()
+
+
+def test_stage_admission_refuses_when_scan_overlaps_destination(
+    staged, tmp_path, monkeypatch,
+):
+    """The stage-side overlap check must include the caller's chosen
+    local destination, not just the folder's source path. If a scan or
+    import in another workspace is already cataloging the tree the stage
+    is about to copy files into, the stage worker would race that scan
+    and either duplicate rows or fail on an already-created directory.
+    ``_busy_job`` receives the computed final destinations via
+    ``extra_stage_paths`` so cross-workspace conflicts on the
+    destination are caught the same way overlaps on the source are.
+    """
+    from services.local_folder import local_path_for_base
+
+    db = staged["db"]
+    pending_source = tmp_path / "to-stage-destination"
+    pending_source.mkdir()
+    (pending_source / "b.jpg").write_bytes(b"jpg")
+    stage_fid = db.add_folder(str(pending_source), name="to-stage-destination")
+    destination_base = tmp_path / "custom-destination"
+    destination_base.mkdir()
+    final_destination = str(local_path_for_base(
+        str(destination_base), stage_fid, str(pending_source),
+    ))
+
+    real_runner = staged["app"]._job_runner
+    fake_scan_job = {
+        "id": "scan-1",
+        "type": "scan",
+        "status": "running",
+        "workspace_id": 99,
+        # The scan's root is the parent of our destination -- it will
+        # walk into the destination while the stage worker is writing to
+        # it, so admission must refuse the stage.
+        "config": {"roots": [str(destination_base)]},
+        "blocks_local_transitions": True,
+    }
+    monkeypatch.setattr(
+        real_runner, "list_jobs", lambda: [fake_scan_job],
+    )
+
+    resp = staged["client"].post(
+        "/api/workspaces/active/local-folders/stage",
+        json={
+            "root_folder_ids": [stage_fid],
+            "destination_bases": {str(stage_fid): str(destination_base)},
+        },
+    )
+    assert resp.status_code == 409
+    assert "scan" in resp.get_json()["error"].lower()
+    # Sanity: nothing should have been queued or written to the destination.
+    assert not (
+        tmp_path / "custom-destination" / os.path.basename(final_destination)
+    ).exists() or list(
+        (tmp_path / "custom-destination" / os.path.basename(final_destination)).iterdir()
+    ) == []
+
+
+def test_scan_conflict_sees_queued_folder_stage_destination(staged, tmp_path):
+    """A queued folder-stage job records its chosen local destination in
+    ``config.destination_paths`` so another workspace's scan or import
+    admission can reserve it even before the mapping row publishes.
+    ``stage_pending_source_paths`` returns both the source and the
+    destination for the same reason ``local_copy_scan_conflict`` blocks
+    the pending source: either path becomes catalog-unsafe once the
+    stage worker begins writing.
+    """
+    from services.local_folder import (
+        local_copy_scan_conflict,
+        stage_pending_source_paths,
+    )
+
+    db = staged["db"]
+    pending_dest = tmp_path / "queued-dest" / "photos"
+    pending_dest.parent.mkdir()
+
+    def list_jobs():
+        return [
+            {
+                "id": "job-1",
+                "type": "work-locally-folder-stage",
+                "status": "queued",
+                "workspace_id": 99,
+                "config": {
+                    "root_folder_ids": [],
+                    "destination_paths": [str(pending_dest)],
+                },
+            }
+        ]
+
+    pending = stage_pending_source_paths(list_jobs, db)
+    assert str(pending_dest) in pending
+
+    conflict = local_copy_scan_conflict(
+        db, [str(pending_dest)],
+        pending_stage_sources=pending,
+    )
+    assert conflict is not None
+    assert "stage" in conflict.lower()
+
+    # An unrelated path is still allowed.
+    unrelated = tmp_path / "unrelated"
+    unrelated.mkdir()
+    assert (
+        local_copy_scan_conflict(
+            db, [str(unrelated)], pending_stage_sources=pending,
+        )
+        is None
+    )

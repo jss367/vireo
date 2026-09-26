@@ -414,26 +414,34 @@ def local_root_overlapping_path(
 
 
 def stage_pending_source_paths(list_jobs, db) -> list[str]:
-    """Source paths reserved by queued/running folder-stage jobs.
+    """Paths reserved by queued/running folder-stage jobs.
 
-    A stage route registers a job under ``config.root_folder_ids`` and
-    returns 202 before the worker enters :func:`stage_folder`, which is
-    what actually creates the ``local_folder_mappings`` row. In that
-    window a scan or import admission that only reads
-    ``local_folder_mappings`` would let a path the queued stage will
-    rebase slip through. Callers pass these source paths to
-    :func:`local_copy_scan_conflict` alongside the DB check so a scan or
-    import cannot be registered against a path another workspace is
-    about to make catalog-unsafe.
+    A stage route registers a job under
+    ``config.root_folder_ids``/``config.destination_paths`` and returns
+    202 before the worker enters :func:`stage_folder`, which is what
+    actually creates the ``local_folder_mappings`` row. In that window a
+    scan or import admission that only reads ``local_folder_mappings``
+    would let a path the queued stage will rebase (its source) or write
+    into (its chosen local destination) slip through. Callers pass these
+    reserved paths to :func:`local_copy_scan_conflict` alongside the DB
+    check so a scan or import cannot be registered against a path
+    another workspace is about to make catalog-unsafe.
+
+    Sources come from ``folders.path`` for each ``root_folder_ids``
+    entry (equal to the source before staging rebases it).
+    Destinations come from ``config.destination_paths`` as recorded at
+    stage-registration time -- the same absolute paths ``stage_folder``
+    will create on disk. Both are returned in one list because a caller
+    only needs to know "which paths a queued stage will claim".
 
     ``list_jobs`` is the runner's ``list_jobs`` callable, or an already
-    materialized job list. ``db`` reads the pending root's current
-    ``folders.path`` (equal to the source before staging rebases it).
+    materialized job list.
     """
     if list_jobs is None:
         return []
     jobs = list_jobs() if callable(list_jobs) else list_jobs
     pending_root_ids: set[int] = set()
+    destination_paths: list[str] = []
     for job in jobs or []:
         if job.get("type") != "work-locally-folder-stage":
             continue
@@ -447,8 +455,9 @@ def stage_pending_source_paths(list_jobs, db) -> list[str]:
                 pending_root_ids.add(int(raw))
             except (TypeError, ValueError):
                 continue
-    if not pending_root_ids:
-        return []
+        for raw in config.get("destination_paths") or []:
+            if isinstance(raw, str) and raw:
+                destination_paths.append(raw)
     sources: list[str] = []
     for root_id in sorted(pending_root_ids):
         row = db.conn.execute(
@@ -457,7 +466,7 @@ def stage_pending_source_paths(list_jobs, db) -> list[str]:
         ).fetchone()
         if row and row["path"]:
             sources.append(row["path"])
-    return sources
+    return sources + destination_paths
 
 
 def local_copy_scan_conflict(
