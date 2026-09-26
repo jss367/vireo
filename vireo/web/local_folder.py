@@ -233,7 +233,7 @@ def create_local_folder_blueprint(
     # registers).
     _PATH_CONFIG_JOB_TYPES = frozenset(
         {
-            "scan", "import-full", "import-in-place", "import-photos",
+            "scan", "import-full", "import-in-place",
             "import", "metadata-repair",
         }
     )
