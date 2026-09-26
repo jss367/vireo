@@ -1,7 +1,8 @@
 """One-time database schema initialization and ordered migrations.
 
-The legacy canonical-schema code remains in ``Database`` while it is split
-into discrete historical migrations.  This module is the startup boundary:
+The legacy canonical-schema code lives in ``canonical_schema.py`` (run by
+``Database._create_tables``) while it is split into discrete historical
+migrations.  This module is the startup boundary:
 web requests open an initialized database and never perform schema work.
 """
 

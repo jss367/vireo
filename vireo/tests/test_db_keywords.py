@@ -1371,9 +1371,11 @@ _DELEGATING_KEYWORD_METHODS = (
     "mark_species_keywords",
 )
 
-# ``test_keyword_provenance_contract`` keys these writers to db.py, and the
-# methods that call ``_merge_keyword_into`` mid-flight keep that call there.
-_KEYWORD_METHODS_KEPT_ON_DATABASE = (
+# The provenance writers and the methods that call ``_merge_keyword_into``
+# mid-flight live in ``KeywordProvenanceRepository``, not here (see
+# ``test_db_keyword_provenance``); ``test_keyword_provenance_contract`` keys
+# the writers to that module.
+_KEYWORD_METHODS_IN_PROVENANCE_REPOSITORY = (
     "tag_photo",
     "_merge_keyword_into",
     "retire_builtin_wildlife_genre",
@@ -1413,12 +1415,21 @@ def test_keyword_method_delegates_to_repository(name):
     )
 
 
-@pytest.mark.parametrize("name", _KEYWORD_METHODS_KEPT_ON_DATABASE)
-def test_provenance_writers_and_their_merge_callers_stay_on_database(name):
+@pytest.mark.parametrize("name", _KEYWORD_METHODS_IN_PROVENANCE_REPOSITORY)
+def test_provenance_writers_and_their_merge_callers_delegate_to_provenance_repository(
+    name,
+):
     attrs = _self_attrs(getattr(Database, name))
+    assert "conn" not in attrs, (
+        f"Database.{name} touches self.conn; its SQL belongs in "
+        "KeywordProvenanceRepository"
+    )
+    assert "_keyword_provenance_repository" in attrs, (
+        f"Database.{name} no longer delegates to KeywordProvenanceRepository"
+    )
     assert "_keyword_repository" not in attrs, (
-        f"Database.{name} must keep its photo_keywords write (or its "
-        "_merge_keyword_into call) in db.py; see test_keyword_provenance_contract"
+        f"Database.{name} is a photo_keywords writer (or merges mid-flight); "
+        "it must not route through KeywordRepository"
     )
 
 

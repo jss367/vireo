@@ -24,7 +24,14 @@ Three mechanisms enforce it, and this module pins all three:
    ``db.py`` (``keyword_source_max`` / ``keyword_source_max_sql`` /
    ``KEYWORD_SOURCE_CONFLICT_SQL``), and the convergence guard below requires
    every site that writes a ``photo_keywords`` row to be a listed, reviewed
-   site that uses it.
+   site that uses it. The writers behind the ``Database`` façade live in
+   ``repositories/keyword_provenance.py``, which receives the fold from
+   ``db`` and reads it as ``self.<name>``; the guards below scan every
+   production module and accept a fold symbol either as a bare name or as an
+   attribute, so the contract holds wherever a writer lives.
+
+Sites are keyed by ``(module relative to vireo/ in POSIX form, enclosing
+function)``, so a writer that moves between modules has to be re-listed here.
 """
 
 import ast
@@ -65,11 +72,16 @@ PROVENANCE_FOLD_SYMBOLS = {
 # may hit an existing row) or UPDATE of its keyword_id/source (which moves a
 # row onto one that may already exist). Each is a convergence point: two
 # claims about the same (photo, keyword) meet and one survives.
+#
+# ``Database.tag_photo``, ``_merge_keyword_into``, ``link_keyword_to_place``
+# and ``retire_builtin_wildlife_genre`` are one-line wrappers; their writes
+# live in ``KeywordProvenanceRepository`` under the names keyed here.
+_PROVENANCE_MODULE = "repositories/keyword_provenance.py"
 PROVENANCE_CONVERGENCE_POINTS = {
-    ("db.py", "tag_photo"): "re-tag folds against the row already there",
-    ("db.py", "_merge_keyword_into"): "keyword merge repoints rows onto dst",
-    ("db.py", "link_keyword_to_place"): "place link repoints rows onto canonical",
-    ("db.py", "retire_builtin_wildlife_genre"): "latches sidecar verdict to the top",
+    (_PROVENANCE_MODULE, "tag"): "re-tag folds against the row already there",
+    (_PROVENANCE_MODULE, "merge_keyword_into"): "keyword merge repoints rows onto dst",
+    (_PROVENANCE_MODULE, "link_keyword_to_place"): "place link repoints rows onto canonical",
+    (_PROVENANCE_MODULE, "retire_builtin_wildlife_genre"): "latches sidecar verdict to the top",
     ("scanner.py", "_pair_raw_jpeg_companions"): "pairing copies companion keywords",
 }
 
@@ -114,7 +126,7 @@ def _tag_photo_calls():
             if source is None and len(node.args) >= 3:
                 source = node.args[2]
             yield (
-                str(rel),
+                rel.as_posix(),
                 _enclosing_function_name(tree, node),
                 node.lineno,
                 source,
@@ -262,7 +274,7 @@ def _production_functions():
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                yield str(rel), node.name, node
+                yield rel.as_posix(), node.name, node
 
 
 def test_photo_keywords_writers_use_the_shared_provenance_fold():

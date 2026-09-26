@@ -792,10 +792,12 @@ def test_prediction_mutators_keep_their_database_names(name):
     assert callable(getattr(Database, name, None))
 
 
-def test_accept_prediction_stays_on_database():
-    """It tags through the provenance-pinned ``tag_photo`` mid-transaction."""
+def test_accept_prediction_delegates_to_keyword_provenance_repository():
+    """It tags through ``tag_photo`` mid-transaction, so it lives with the
+    provenance writers rather than in ``PredictionRepository``."""
     attrs = _self_attrs(Database.accept_prediction)
-    assert "tag_photo" in attrs
+    assert "conn" not in attrs
+    assert "_keyword_provenance_repository" in attrs
     assert "_prediction_repository" not in attrs
 
 

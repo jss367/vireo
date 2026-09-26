@@ -955,6 +955,46 @@ def test_workspace_unlinked_folder_count_batches(db):
     assert len({s for s in statements if "FROM folders f" in s}) == 2
 
 
+# -- photo visibility ------------------------------------------------------------
+
+
+def test_photo_in_workspace_follows_folder_membership(db):
+    active = db._active_workspace_id
+    other = db.create_workspace("Other")
+    linked = _folder(db, "/linked")
+    unlinked = _folder(db, "/unlinked")
+    db.add_workspace_folder(active, linked)
+    db.add_workspace_folder(other, unlinked)
+    seen = _photo(db, linked, "seen.jpg")
+    hidden = _photo(db, unlinked, "hidden.jpg")
+
+    assert db._photo_in_workspace(seen) is True
+    assert db._photo_in_workspace(hidden) is False
+    assert db._photo_in_workspace(hidden + 999) is False
+    db.set_active_workspace(other)
+    assert db._photo_in_workspace(seen) is False
+    assert db._photo_in_workspace(hidden) is True
+
+
+def test_photo_in_workspace_needs_an_active_workspace(db):
+    fid = _folder(db, "/linked")
+    db.add_workspace_folder(db._active_workspace_id, fid)
+    pid = _photo(db, fid, "a.jpg")
+    db.set_active_workspace(None)
+    with pytest.raises(RuntimeError, match="No active workspace set"):
+        db._photo_in_workspace(pid)
+
+
+def test_verify_photo_in_workspace_goes_through_the_facade(db, monkeypatch):
+    fid = _folder(db, "/linked")
+    db.add_workspace_folder(db._active_workspace_id, fid)
+    pid = _photo(db, fid, "a.jpg")
+    db._verify_photo_in_workspace(pid)
+    monkeypatch.setattr(Database, "_photo_in_workspace", lambda self, photo_id: False)
+    with pytest.raises(ValueError, match=f"Photo {pid} does not belong"):
+        db._verify_photo_in_workspace(pid)
+
+
 # -- structure -------------------------------------------------------------------
 
 _MOVED_METHODS = [
@@ -978,6 +1018,7 @@ _MOVED_METHODS = [
     "_active_ws_root_descendant_exists",
     "_prune_ws_nonroot_links_outside_roots",
     "workspace_unlinked_folder_count",
+    "_photo_in_workspace",
 ]
 
 

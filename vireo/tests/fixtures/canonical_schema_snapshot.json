@@ -1,0 +1,924 @@
+{
+ "sqlite_master": [
+  [
+   "table",
+   "folders",
+   "folders",
+   "CREATE TABLE folders (\n                id          INTEGER PRIMARY KEY,\n                path        TEXT UNIQUE,\n                parent_id   INTEGER REFERENCES folders(id),\n                name        TEXT,\n                photo_count INTEGER DEFAULT 0,\n                status      TEXT NOT NULL DEFAULT 'ok'\n            )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_folders_1",
+   "folders",
+   null
+  ],
+  [
+   "table",
+   "photos",
+   "photos",
+   "CREATE TABLE photos (\n                id                       INTEGER PRIMARY KEY,\n                folder_id                INTEGER REFERENCES folders(id),\n                filename                 TEXT,\n                extension                TEXT,\n                file_size                INTEGER,\n                file_mtime               REAL,\n                xmp_mtime                REAL,\n                timestamp                TEXT,\n                width                    INTEGER,\n                height                   INTEGER,\n                rating                   INTEGER DEFAULT 0,\n                flag                     TEXT DEFAULT 'none',\n                thumb_path               TEXT,\n                sharpness                REAL,\n                detection_box            TEXT,\n                detection_conf           REAL,\n                subject_sharpness        REAL,\n                subject_size             REAL,\n                quality_score            REAL,\n                latitude                 REAL,\n                longitude                REAL,\n                phash                    TEXT,\n                mask_path                TEXT,\n                dino_subject_embedding   BLOB,\n                dino_global_embedding    BLOB,\n                subject_tenengrad        REAL,\n                bg_tenengrad             REAL,\n                crop_complete            REAL,\n                bg_separation            REAL,\n                subject_clip_high        REAL,\n                subject_clip_low         REAL,\n                subject_y_median         REAL,\n                phash_crop               TEXT,\n                noise_estimate           REAL,\n                dino_embedding_variant   TEXT,\n                active_mask_variant      TEXT,\n                focal_length             REAL,\n                burst_id                 TEXT,\n                file_hash                TEXT,\n                companion_path           TEXT,\n                exif_data                TEXT,\n                working_copy_path        TEXT,\n                working_copy_evicted_mtime REAL,\n                working_copy_failed_at   TEXT,\n                working_copy_failed_mtime REAL,\n                working_copy_failed_source TEXT,\n                last_move_source_folder_path TEXT,\n                eye_x                    REAL,\n                eye_y                    REAL,\n                eye_conf                 REAL,\n                eye_tenengrad            REAL,\n                eye_kp_fingerprint       TEXT,\n                miss_no_subject          INTEGER,\n                miss_clipped             INTEGER,\n                miss_oof                 INTEGER,\n                miss_computed_at         TEXT,\n                wildlife_excluded        INTEGER NOT NULL DEFAULT 0,\n                hash_checked_at          TEXT,\n                hash_status              TEXT, quality_input_recipe TEXT, camera_make TEXT, camera_model TEXT, lens TEXT, aperture REAL, shutter_speed REAL, iso INTEGER,\n                UNIQUE(folder_id, filename)\n            )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_photos_1",
+   "photos",
+   null
+  ],
+  [
+   "table",
+   "taxa",
+   "taxa",
+   "CREATE TABLE taxa (\n                id          INTEGER PRIMARY KEY,\n                inat_id     INTEGER UNIQUE,\n                name        TEXT NOT NULL,\n                common_name TEXT,\n                rank        TEXT NOT NULL,\n                parent_id   INTEGER REFERENCES taxa(id),\n                kingdom     TEXT\n            )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_taxa_1",
+   "taxa",
+   null
+  ],
+  [
+   "table",
+   "companion_identities",
+   "companion_identities",
+   "CREATE TABLE companion_identities (\n                photo_id INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,\n                filename TEXT NOT NULL,\n                file_size INTEGER,\n                timestamp TEXT,\n                file_hash TEXT\n            )"
+  ],
+  [
+   "table",
+   "keywords",
+   "keywords",
+   "CREATE TABLE keywords (\n                id          INTEGER PRIMARY KEY,\n                name        TEXT,\n                parent_id   INTEGER REFERENCES keywords(id),\n                is_species  INTEGER DEFAULT 0,\n                type        TEXT NOT NULL DEFAULT 'general',\n                latitude    REAL,\n                longitude   REAL,\n                taxon_id    INTEGER REFERENCES taxa(id), source_taxon_id INTEGER, place_id TEXT,\n                UNIQUE(name, parent_id)\n            )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_keywords_1",
+   "keywords",
+   null
+  ],
+  [
+   "table",
+   "photo_keywords",
+   "photo_keywords",
+   "CREATE TABLE photo_keywords (\n                photo_id    INTEGER REFERENCES photos(id),\n                keyword_id  INTEGER REFERENCES keywords(id),\n                source      TEXT,\n                PRIMARY KEY (photo_id, keyword_id)\n            )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_photo_keywords_1",
+   "photo_keywords",
+   null
+  ],
+  [
+   "table",
+   "db_meta",
+   "db_meta",
+   "CREATE TABLE db_meta (\n                key   TEXT PRIMARY KEY,\n                value TEXT\n            )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_db_meta_1",
+   "db_meta",
+   null
+  ],
+  [
+   "table",
+   "workspaces",
+   "workspaces",
+   "CREATE TABLE workspaces (\n                id              INTEGER PRIMARY KEY,\n                name            TEXT NOT NULL UNIQUE,\n                config_overrides TEXT,\n                ui_state        TEXT,\n                tabs            TEXT,\n                created_at      TEXT DEFAULT (datetime('now')),\n                last_opened_at  TEXT,\n                pinned_at       TEXT,\n                last_grouped_at         INTEGER,\n                last_group_fingerprint  TEXT\n            )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_workspaces_1",
+   "workspaces",
+   null
+  ],
+  [
+   "table",
+   "workspace_folders",
+   "workspace_folders",
+   "CREATE TABLE workspace_folders (\n                workspace_id    INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,\n                folder_id       INTEGER REFERENCES folders(id),\n                is_root         INTEGER NOT NULL DEFAULT 1,\n                PRIMARY KEY (workspace_id, folder_id)\n            )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_workspace_folders_1",
+   "workspace_folders",
+   null
+  ],
+  [
+   "table",
+   "workspace_folder_removals",
+   "workspace_folder_removals",
+   "CREATE TABLE workspace_folder_removals (\n                workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,\n                folder_id INTEGER REFERENCES folders(id) ON DELETE CASCADE,\n                recursive INTEGER NOT NULL DEFAULT 0,\n                PRIMARY KEY (workspace_id, folder_id)\n            )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_workspace_folder_removals_1",
+   "workspace_folder_removals",
+   null
+  ],
+  [
+   "index",
+   "idx_workspace_folder_removals_folder",
+   "workspace_folder_removals",
+   "CREATE INDEX idx_workspace_folder_removals_folder\n                ON workspace_folder_removals(folder_id)"
+  ],
+  [
+   "trigger",
+   "workspace_folder_restore_on_link",
+   "workspace_folders",
+   "CREATE TRIGGER workspace_folder_restore_on_link\n            AFTER INSERT ON workspace_folders\n            BEGIN\n                DELETE FROM workspace_folder_removals\n                WHERE workspace_id = NEW.workspace_id AND folder_id = NEW.folder_id;\n            END"
+  ],
+  [
+   "table",
+   "workspace_sync_only_photos",
+   "workspace_sync_only_photos",
+   "CREATE TABLE workspace_sync_only_photos (\n                workspace_id    INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,\n                photo_id        INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,\n                PRIMARY KEY (workspace_id, photo_id)\n            )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_workspace_sync_only_photos_1",
+   "workspace_sync_only_photos",
+   null
+  ],
+  [
+   "table",
+   "local_workspaces",
+   "local_workspaces",
+   "CREATE TABLE local_workspaces (\n                workspace_id INTEGER PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,\n                state        TEXT NOT NULL,\n                created_at   REAL,\n                activated_at REAL\n            )"
+  ],
+  [
+   "table",
+   "local_workspace_folders",
+   "local_workspace_folders",
+   "CREATE TABLE local_workspace_folders (\n                workspace_id    INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,\n                folder_id       INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,\n                source_path     TEXT NOT NULL,\n                local_path      TEXT NOT NULL,\n                original_status TEXT NOT NULL DEFAULT 'ok',\n                is_root         INTEGER NOT NULL DEFAULT 0,\n                root_index      INTEGER,\n                PRIMARY KEY (workspace_id, folder_id)\n            )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_local_workspace_folders_1",
+   "local_workspace_folders",
+   null
+  ],
+  [
+   "table",
+   "local_folders",
+   "local_folders",
+   "CREATE TABLE local_folders (\n                root_folder_id INTEGER PRIMARY KEY REFERENCES folders(id) ON DELETE CASCADE,\n                state          TEXT NOT NULL,\n                created_at     REAL,\n                activated_at   REAL\n            )"
+  ],
+  [
+   "table",
+   "local_folder_mappings",
+   "local_folder_mappings",
+   "CREATE TABLE local_folder_mappings (\n                root_folder_id INTEGER NOT NULL REFERENCES local_folders(root_folder_id) ON DELETE CASCADE,\n                folder_id      INTEGER NOT NULL UNIQUE REFERENCES folders(id) ON DELETE CASCADE,\n                source_path    TEXT NOT NULL,\n                local_path     TEXT NOT NULL,\n                original_status TEXT NOT NULL DEFAULT 'ok',\n                is_root        INTEGER NOT NULL DEFAULT 0,\n                PRIMARY KEY (root_folder_id, folder_id)\n            )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_local_folder_mappings_1",
+   "local_folder_mappings",
+   null
+  ],
+  [
+   "index",
+   "sqlite_autoindex_local_folder_mappings_2",
+   "local_folder_mappings",
+   null
+  ],
+  [
+   "table",
+   "collections",
+   "collections",
+   "CREATE TABLE collections (\n                id           INTEGER PRIMARY KEY,\n                name         TEXT,\n                rules        TEXT,\n                workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,\n                visual_json  TEXT\n            )"
+  ],
+  [
+   "table",
+   "pending_archives",
+   "pending_archives",
+   "CREATE TABLE pending_archives (\n                id TEXT PRIMARY KEY,\n                workspace_id INTEGER NOT NULL,\n                collection_id INTEGER,\n                destination TEXT NOT NULL,\n                staging_destination TEXT NOT NULL,\n                target_json TEXT NOT NULL,\n                state TEXT NOT NULL DEFAULT 'pending',\n                error TEXT NOT NULL DEFAULT '',\n                created_at TEXT NOT NULL DEFAULT (datetime('now'))\n            )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_pending_archives_1",
+   "pending_archives",
+   null
+  ],
+  [
+   "trigger",
+   "pending_archives_require_workspace",
+   "pending_archives",
+   "CREATE TRIGGER pending_archives_require_workspace\n            BEFORE INSERT ON pending_archives\n            WHEN NOT EXISTS (SELECT 1 FROM workspaces WHERE id = NEW.workspace_id)\n            BEGIN\n                SELECT RAISE(ABORT, 'Pending NAS transfer workspace no longer exists');\n            END"
+  ],
+  [
+   "trigger",
+   "pending_archives_protect_workspace",
+   "workspaces",
+   "CREATE TRIGGER pending_archives_protect_workspace\n            BEFORE DELETE ON workspaces\n            WHEN EXISTS (\n                SELECT 1 FROM pending_archives\n                WHERE workspace_id = OLD.id AND state != 'complete'\n            )\n            BEGIN\n                SELECT RAISE(ABORT, 'Send pending photos to NAS before deleting this workspace');\n            END"
+  ],
+  [
+   "trigger",
+   "pending_archives_cleanup_workspace",
+   "workspaces",
+   "CREATE TRIGGER pending_archives_cleanup_workspace\n            AFTER DELETE ON workspaces\n            BEGIN\n                DELETE FROM pending_archives WHERE workspace_id = OLD.id;\n            END"
+  ],
+  [
+   "trigger",
+   "pending_archives_clear_collection",
+   "collections",
+   "CREATE TRIGGER pending_archives_clear_collection\n            AFTER DELETE ON collections\n            BEGIN\n                UPDATE pending_archives SET collection_id = NULL WHERE collection_id = OLD.id;\n            END"
+  ],
+  [
+   "table",
+   "pending_changes",
+   "pending_changes",
+   "CREATE TABLE pending_changes (\n                id          INTEGER PRIMARY KEY,\n                photo_id    INTEGER REFERENCES photos(id) ON DELETE CASCADE,\n                change_type TEXT,\n                value       TEXT,\n                change_token TEXT,\n                sync_started INTEGER NOT NULL DEFAULT 0,\n                created_at  TEXT DEFAULT (datetime('now')),\n                workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE\n            )"
+  ],
+  [
+   "table",
+   "location_gps_reviews",
+   "location_gps_reviews",
+   "CREATE TABLE location_gps_reviews (\n                photo_id INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,\n                fingerprint TEXT NOT NULL,\n                reviewed_at TEXT NOT NULL DEFAULT (datetime('now'))\n            )"
+  ],
+  [
+   "table",
+   "detections",
+   "detections",
+   "CREATE TABLE detections (\n                id                  INTEGER PRIMARY KEY,\n                photo_id            INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,\n                detector_model      TEXT NOT NULL DEFAULT 'megadetector-v6',\n                runtime_fingerprint TEXT NOT NULL DEFAULT 'legacy',\n                box_x               REAL,\n                box_y               REAL,\n                box_w               REAL,\n                box_h               REAL,\n                detector_confidence REAL,\n                category            TEXT,\n                created_at          TEXT DEFAULT (datetime('now'))\n            )"
+  ],
+  [
+   "table",
+   "photo_masks",
+   "photo_masks",
+   "CREATE TABLE photo_masks (\n                photo_id          INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,\n                variant           TEXT    NOT NULL,\n                path              TEXT    NOT NULL,\n                created_at        INTEGER NOT NULL,\n                detector_model    TEXT    NOT NULL,\n                prompt_x          REAL    NOT NULL,\n                prompt_y          REAL    NOT NULL,\n                prompt_w          REAL    NOT NULL,\n                prompt_h          REAL    NOT NULL,\n                subject_size      REAL,\n                subject_tenengrad REAL,\n                bg_tenengrad      REAL,\n                crop_complete     REAL,\n                quality_input_recipe TEXT,\n                subject_clip_high REAL,\n                subject_clip_low REAL,\n                subject_y_median REAL,\n                bg_separation REAL,\n                phash_crop TEXT,\n                noise_estimate REAL,\n                PRIMARY KEY (photo_id, variant)\n            )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_photo_masks_1",
+   "photo_masks",
+   null
+  ],
+  [
+   "table",
+   "subject_raw_analysis",
+   "subject_raw_analysis",
+   "CREATE TABLE subject_raw_analysis (\n                detection_id INTEGER PRIMARY KEY REFERENCES detections(id) ON DELETE CASCADE,\n                recipe TEXT NOT NULL,\n                report_json TEXT NOT NULL,\n                created_at INTEGER NOT NULL\n            )"
+  ],
+  [
+   "table",
+   "detection_subjects",
+   "detection_subjects",
+   "CREATE TABLE detection_subjects (\n                detection_id INTEGER PRIMARY KEY REFERENCES detections(id) ON DELETE CASCADE,\n                source_key TEXT NOT NULL,\n                crop TEXT NOT NULL,\n                quality_score REAL NOT NULL,\n                exposure_ev REAL NOT NULL,\n                features TEXT NOT NULL\n            )"
+  ],
+  [
+   "table",
+   "photo_subject_choices",
+   "photo_subject_choices",
+   "CREATE TABLE photo_subject_choices (\n                photo_id INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,\n                detection_id INTEGER NOT NULL\n            )"
+  ],
+  [
+   "table",
+   "photo_subject_state",
+   "photo_subject_state",
+   "CREATE TABLE photo_subject_state (\n                photo_id INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,\n                detection_id INTEGER NOT NULL\n            )"
+  ],
+  [
+   "table",
+   "predictions",
+   "predictions",
+   "CREATE TABLE predictions (\n                id                   INTEGER PRIMARY KEY,\n                detection_id         INTEGER NOT NULL REFERENCES detections(id) ON DELETE CASCADE,\n                classifier_model     TEXT NOT NULL,\n                labels_fingerprint   TEXT NOT NULL DEFAULT 'legacy',\n                labels_fingerprint_full TEXT,\n                species              TEXT,\n                confidence           REAL,\n                category             TEXT,\n                scientific_name      TEXT,\n                taxonomy_kingdom     TEXT,\n                taxonomy_phylum     TEXT,\n                taxonomy_class       TEXT,\n                taxonomy_order       TEXT,\n                taxonomy_family      TEXT,\n                taxonomy_genus       TEXT,\n                created_at           TEXT DEFAULT (datetime('now')), source_taxon_id INTEGER, match_score REAL,\n                UNIQUE(detection_id, classifier_model, labels_fingerprint, species)\n            )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_predictions_1",
+   "predictions",
+   null
+  ],
+  [
+   "table",
+   "detector_runs",
+   "detector_runs",
+   "CREATE TABLE detector_runs (\n                photo_id        INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,\n                detector_model  TEXT NOT NULL,\n                runtime_fingerprint TEXT NOT NULL DEFAULT 'legacy',\n                input_fingerprint TEXT,\n                run_at          TEXT DEFAULT (datetime('now')),\n                box_count       INTEGER NOT NULL DEFAULT 0,\n                PRIMARY KEY (photo_id, detector_model)\n            )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_detector_runs_1",
+   "detector_runs",
+   null
+  ],
+  [
+   "table",
+   "classifier_runs",
+   "classifier_runs",
+   "CREATE TABLE classifier_runs (\n                detection_id         INTEGER NOT NULL REFERENCES detections(id) ON DELETE CASCADE,\n                classifier_model     TEXT NOT NULL,\n                labels_fingerprint   TEXT NOT NULL,\n                labels_fingerprint_full TEXT,\n                runtime_fingerprint TEXT NOT NULL DEFAULT 'legacy',\n                input_recipe TEXT,\n                input_fingerprint TEXT,\n                run_at               TEXT DEFAULT (datetime('now')),\n                prediction_count     INTEGER NOT NULL DEFAULT 0,\n                PRIMARY KEY (detection_id, classifier_model, labels_fingerprint)\n            )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_classifier_runs_1",
+   "classifier_runs",
+   null
+  ],
+  [
+   "table",
+   "classifier_match_scores",
+   "classifier_match_scores",
+   "CREATE TABLE classifier_match_scores (\n                detection_id         INTEGER NOT NULL REFERENCES detections(id) ON DELETE CASCADE,\n                classifier_model     TEXT NOT NULL,\n                labels_fingerprint   TEXT NOT NULL,\n                max_match_score      REAL,\n                match_margin         REAL,\n                top_species          TEXT,\n                label_count          INTEGER,\n                score_kind           TEXT,\n                run_at               TEXT DEFAULT (datetime('now')),\n                PRIMARY KEY (detection_id, classifier_model, labels_fingerprint)\n            )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_classifier_match_scores_1",
+   "classifier_match_scores",
+   null
+  ],
+  [
+   "table",
+   "photo_embeddings",
+   "photo_embeddings",
+   "CREATE TABLE photo_embeddings (\n                photo_id    INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,\n                model       TEXT NOT NULL,\n                variant     TEXT NOT NULL DEFAULT '',\n                embedding   BLOB NOT NULL,\n                created_at  TEXT NOT NULL DEFAULT (datetime('now')),\n                PRIMARY KEY (photo_id, model, variant)\n            )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_photo_embeddings_1",
+   "photo_embeddings",
+   null
+  ],
+  [
+   "table",
+   "labels_fingerprints",
+   "labels_fingerprints",
+   "CREATE TABLE labels_fingerprints (\n                fingerprint    TEXT PRIMARY KEY,\n                full_fingerprint TEXT,\n                display_name   TEXT,\n                sources_json   TEXT,\n                label_count    INTEGER,\n                created_at     TEXT DEFAULT (datetime('now'))\n            )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_labels_fingerprints_1",
+   "labels_fingerprints",
+   null
+  ],
+  [
+   "table",
+   "prediction_review",
+   "prediction_review",
+   "CREATE TABLE prediction_review (\n                prediction_id  INTEGER NOT NULL REFERENCES predictions(id) ON DELETE CASCADE,\n                workspace_id   INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,\n                status         TEXT NOT NULL DEFAULT 'pending',\n                reviewed_at    TEXT,\n                individual     TEXT,\n                group_id       TEXT,\n                vote_count     INTEGER,\n                total_votes    INTEGER,\n                PRIMARY KEY (prediction_id, workspace_id)\n            )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_prediction_review_1",
+   "prediction_review",
+   null
+  ],
+  [
+   "table",
+   "inat_submissions",
+   "inat_submissions",
+   "CREATE TABLE inat_submissions (\n                id              INTEGER PRIMARY KEY,\n                photo_id        INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,\n                observation_id  INTEGER NOT NULL,\n                observation_url TEXT NOT NULL,\n                submitted_at    TEXT NOT NULL DEFAULT (datetime('now')),\n                UNIQUE(photo_id, observation_id)\n            )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_inat_submissions_1",
+   "inat_submissions",
+   null
+  ],
+  [
+   "table",
+   "edit_history",
+   "edit_history",
+   "CREATE TABLE edit_history (\n                id           INTEGER PRIMARY KEY,\n                workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,\n                action_type  TEXT NOT NULL,\n                description  TEXT NOT NULL,\n                new_value    TEXT,\n                is_batch     INTEGER DEFAULT 0,\n                undone       INTEGER DEFAULT 0,\n                created_at   TEXT DEFAULT (datetime('now'))\n            )"
+  ],
+  [
+   "table",
+   "edit_history_items",
+   "edit_history_items",
+   "CREATE TABLE edit_history_items (\n                id        INTEGER PRIMARY KEY,\n                edit_id   INTEGER NOT NULL REFERENCES edit_history(id) ON DELETE CASCADE,\n                photo_id  INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,\n                old_value TEXT,\n                new_value TEXT\n            )"
+  ],
+  [
+   "table",
+   "edit_history_payloads",
+   "edit_history_payloads",
+   "CREATE TABLE edit_history_payloads (\n                edit_id  INTEGER PRIMARY KEY REFERENCES edit_history(id) ON DELETE CASCADE,\n                payload  TEXT NOT NULL\n            )"
+  ],
+  [
+   "table",
+   "taxa_common_names",
+   "taxa_common_names",
+   "CREATE TABLE taxa_common_names (\n                taxon_id    INTEGER REFERENCES taxa(id) ON DELETE CASCADE,\n                name        TEXT NOT NULL,\n                locale      TEXT DEFAULT 'en',\n                PRIMARY KEY (taxon_id, name)\n            )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_taxa_common_names_1",
+   "taxa_common_names",
+   null
+  ],
+  [
+   "table",
+   "informal_groups",
+   "informal_groups",
+   "CREATE TABLE informal_groups (\n                id          INTEGER PRIMARY KEY,\n                name        TEXT NOT NULL UNIQUE\n            )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_informal_groups_1",
+   "informal_groups",
+   null
+  ],
+  [
+   "table",
+   "informal_group_taxa",
+   "informal_group_taxa",
+   "CREATE TABLE informal_group_taxa (\n                group_id    INTEGER REFERENCES informal_groups(id) ON DELETE CASCADE,\n                taxon_id    INTEGER REFERENCES taxa(id) ON DELETE CASCADE,\n                PRIMARY KEY (group_id, taxon_id)\n            )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_informal_group_taxa_1",
+   "informal_group_taxa",
+   null
+  ],
+  [
+   "table",
+   "move_rules",
+   "move_rules",
+   "CREATE TABLE move_rules (\n                id          INTEGER PRIMARY KEY,\n                name        TEXT NOT NULL,\n                destination TEXT NOT NULL,\n                criteria    TEXT DEFAULT '{}',\n                created_at  TEXT DEFAULT (datetime('now')),\n                last_run_at TEXT\n            )"
+  ],
+  [
+   "table",
+   "photo_color_labels",
+   "photo_color_labels",
+   "CREATE TABLE photo_color_labels (\n                photo_id      INTEGER REFERENCES photos(id) ON DELETE CASCADE,\n                workspace_id  INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,\n                color         TEXT NOT NULL,\n                PRIMARY KEY (photo_id, workspace_id)\n            )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_photo_color_labels_1",
+   "photo_color_labels",
+   null
+  ],
+  [
+   "table",
+   "duplicate_rejections",
+   "duplicate_rejections",
+   "CREATE TABLE duplicate_rejections (\n                photo_id  INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE\n            )"
+  ],
+  [
+   "trigger",
+   "trg_duplicate_rejections_clear",
+   "photos",
+   "CREATE TRIGGER trg_duplicate_rejections_clear\n            AFTER UPDATE OF flag ON photos\n            WHEN NEW.flag IS NOT 'rejected'\n            BEGIN\n                DELETE FROM duplicate_rejections WHERE photo_id = NEW.id;\n            END"
+  ],
+  [
+   "table",
+   "photo_edit_recipes",
+   "photo_edit_recipes",
+   "CREATE TABLE photo_edit_recipes (\n                photo_id    INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,\n                recipe_json TEXT NOT NULL,\n                updated_at  TEXT NOT NULL DEFAULT (datetime('now'))\n            )"
+  ],
+  [
+   "table",
+   "edit_presets",
+   "edit_presets",
+   "CREATE TABLE edit_presets (\n                id          INTEGER PRIMARY KEY AUTOINCREMENT,\n                name        TEXT NOT NULL UNIQUE,\n                recipe_json TEXT NOT NULL,\n                created_at  TEXT NOT NULL DEFAULT (datetime('now')),\n                updated_at  TEXT NOT NULL DEFAULT (datetime('now'))\n            )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_edit_presets_1",
+   "edit_presets",
+   null
+  ],
+  [
+   "table",
+   "sqlite_sequence",
+   "sqlite_sequence",
+   "CREATE TABLE sqlite_sequence(name,seq)"
+  ],
+  [
+   "table",
+   "photo_preferences",
+   "photo_preferences",
+   "CREATE TABLE photo_preferences (\n                workspace_id  INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,\n                purpose       TEXT NOT NULL,\n                species       TEXT NOT NULL,\n                photo_id      INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,\n                created_at    TEXT DEFAULT (datetime('now')),\n                updated_at    TEXT DEFAULT (datetime('now')),\n                PRIMARY KEY (workspace_id, purpose, species)\n            )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_photo_preferences_1",
+   "photo_preferences",
+   null
+  ],
+  [
+   "table",
+   "species_representatives",
+   "species_representatives",
+   "CREATE TABLE species_representatives (\n                id             INTEGER PRIMARY KEY AUTOINCREMENT,\n                species        TEXT NOT NULL,\n                photo_id       INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,\n                selected_order INTEGER NOT NULL,\n                created_at     TEXT DEFAULT (datetime('now')),\n                updated_at     TEXT DEFAULT (datetime('now')),\n                UNIQUE(species, photo_id)\n            )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_species_representatives_1",
+   "species_representatives",
+   null
+  ],
+  [
+   "table",
+   "species_highlights",
+   "species_highlights",
+   "CREATE TABLE species_highlights (\n                workspace_id  INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,\n                species       TEXT NOT NULL,\n                photo_id      INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,\n                rank          INTEGER NOT NULL,\n                created_at    TEXT DEFAULT (datetime('now')),\n                updated_at    TEXT DEFAULT (datetime('now')),\n                PRIMARY KEY (workspace_id, species, photo_id)\n            )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_species_highlights_1",
+   "species_highlights",
+   null
+  ],
+  [
+   "table",
+   "preview_cache",
+   "preview_cache",
+   "CREATE TABLE preview_cache (\n                photo_id INTEGER NOT NULL,\n                size INTEGER NOT NULL,\n                bytes INTEGER NOT NULL,\n                last_access_at REAL NOT NULL,\n                PRIMARY KEY (photo_id, size),\n                FOREIGN KEY (photo_id) REFERENCES photos(id) ON DELETE CASCADE\n            )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_preview_cache_1",
+   "preview_cache",
+   null
+  ],
+  [
+   "table",
+   "offline_originals",
+   "offline_originals",
+   "CREATE TABLE offline_originals (\n                photo_id INTEGER NOT NULL PRIMARY KEY,\n                original_path TEXT,\n                xmp_path TEXT,\n                companion_path TEXT,\n                bytes INTEGER NOT NULL DEFAULT 0,\n                source_size INTEGER,\n                source_mtime REAL,\n                cached_at REAL NOT NULL,\n                status TEXT NOT NULL,\n                error TEXT,\n                FOREIGN KEY (photo_id) REFERENCES photos(id) ON DELETE CASCADE\n            )"
+  ],
+  [
+   "table",
+   "new_image_snapshots",
+   "new_image_snapshots",
+   "CREATE TABLE new_image_snapshots (\n              id INTEGER PRIMARY KEY AUTOINCREMENT,\n              workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,\n              created_at TEXT NOT NULL,\n              file_count INTEGER NOT NULL\n            )"
+  ],
+  [
+   "table",
+   "new_image_snapshot_files",
+   "new_image_snapshot_files",
+   "CREATE TABLE new_image_snapshot_files (\n              snapshot_id INTEGER NOT NULL REFERENCES new_image_snapshots(id) ON DELETE CASCADE,\n              file_path TEXT NOT NULL,\n              PRIMARY KEY (snapshot_id, file_path)\n            )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_new_image_snapshot_files_1",
+   "new_image_snapshot_files",
+   null
+  ],
+  [
+   "table",
+   "audit_runs",
+   "audit_runs",
+   "CREATE TABLE audit_runs (\n                workspace_id  INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,\n                check_name    TEXT NOT NULL,\n                ran_at        TEXT NOT NULL,\n                problem_count INTEGER NOT NULL DEFAULT 0,\n                PRIMARY KEY (workspace_id, check_name)\n            )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_audit_runs_1",
+   "audit_runs",
+   null
+  ],
+  [
+   "table",
+   "place_reverse_geocode_cache",
+   "place_reverse_geocode_cache",
+   "CREATE TABLE place_reverse_geocode_cache (\n                lat_grid    INTEGER NOT NULL,\n                lng_grid    INTEGER NOT NULL,\n                place_id    TEXT,\n                response    TEXT NOT NULL,\n                fetched_at  INTEGER NOT NULL,\n                PRIMARY KEY (lat_grid, lng_grid)\n            )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_place_reverse_geocode_cache_1",
+   "place_reverse_geocode_cache",
+   null
+  ],
+  [
+   "table",
+   "saved_processes",
+   "saved_processes",
+   "CREATE TABLE saved_processes (\n                id                INTEGER PRIMARY KEY AUTOINCREMENT,\n                name              TEXT NOT NULL UNIQUE,\n                skip_classify     INTEGER NOT NULL DEFAULT 0,\n                skip_extract_masks INTEGER NOT NULL DEFAULT 0,\n                skip_eye_keypoints INTEGER NOT NULL DEFAULT 0,\n                skip_regroup      INTEGER NOT NULL DEFAULT 0,\n                miss_enabled      INTEGER NOT NULL DEFAULT 1,\n                review_mode       TEXT,\n                is_seed           INTEGER NOT NULL DEFAULT 0,\n                sort_order        INTEGER NOT NULL DEFAULT 0\n            )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_saved_processes_1",
+   "saved_processes",
+   null
+  ],
+  [
+   "index",
+   "idx_taxa_parent",
+   "taxa",
+   "CREATE INDEX idx_taxa_parent ON taxa(parent_id)"
+  ],
+  [
+   "index",
+   "idx_taxa_rank",
+   "taxa",
+   "CREATE INDEX idx_taxa_rank ON taxa(rank)"
+  ],
+  [
+   "index",
+   "idx_taxa_name",
+   "taxa",
+   "CREATE INDEX idx_taxa_name ON taxa(name)"
+  ],
+  [
+   "index",
+   "idx_taxa_common",
+   "taxa",
+   "CREATE INDEX idx_taxa_common ON taxa(common_name)"
+  ],
+  [
+   "index",
+   "idx_taxa_common_lower",
+   "taxa",
+   "CREATE INDEX idx_taxa_common_lower ON taxa(lower(common_name))"
+  ],
+  [
+   "index",
+   "idx_photos_timestamp",
+   "photos",
+   "CREATE INDEX idx_photos_timestamp ON photos(timestamp)"
+  ],
+  [
+   "index",
+   "idx_photos_folder",
+   "photos",
+   "CREATE INDEX idx_photos_folder ON photos(folder_id)"
+  ],
+  [
+   "index",
+   "idx_edit_history_ws_undone_created",
+   "edit_history",
+   "CREATE INDEX idx_edit_history_ws_undone_created\n                ON edit_history(workspace_id, undone, created_at, id)"
+  ],
+  [
+   "index",
+   "idx_edit_history_items_edit",
+   "edit_history_items",
+   "CREATE INDEX idx_edit_history_items_edit\n                ON edit_history_items(edit_id)"
+  ],
+  [
+   "index",
+   "idx_photos_rating",
+   "photos",
+   "CREATE INDEX idx_photos_rating ON photos(rating)"
+  ],
+  [
+   "index",
+   "idx_photos_file_hash",
+   "photos",
+   "CREATE INDEX idx_photos_file_hash ON photos(file_hash)"
+  ],
+  [
+   "index",
+   "idx_keywords_name",
+   "keywords",
+   "CREATE INDEX idx_keywords_name ON keywords(name)"
+  ],
+  [
+   "index",
+   "idx_keywords_parent_id",
+   "keywords",
+   "CREATE INDEX idx_keywords_parent_id ON keywords(parent_id)"
+  ],
+  [
+   "index",
+   "idx_keywords_taxon_id",
+   "keywords",
+   "CREATE INDEX idx_keywords_taxon_id ON keywords(taxon_id)"
+  ],
+  [
+   "index",
+   "idx_keywords_type",
+   "keywords",
+   "CREATE INDEX idx_keywords_type ON keywords(type)"
+  ],
+  [
+   "index",
+   "idx_photo_keywords_photo",
+   "photo_keywords",
+   "CREATE INDEX idx_photo_keywords_photo ON photo_keywords(photo_id)"
+  ],
+  [
+   "index",
+   "idx_photo_keywords_keyword",
+   "photo_keywords",
+   "CREATE INDEX idx_photo_keywords_keyword ON photo_keywords(keyword_id)"
+  ],
+  [
+   "index",
+   "idx_photo_color_labels_ws",
+   "photo_color_labels",
+   "CREATE INDEX idx_photo_color_labels_ws\n                ON photo_color_labels(workspace_id)"
+  ],
+  [
+   "index",
+   "idx_photo_preferences_photo",
+   "photo_preferences",
+   "CREATE INDEX idx_photo_preferences_photo\n                ON photo_preferences(photo_id)"
+  ],
+  [
+   "index",
+   "idx_species_representatives_photo",
+   "species_representatives",
+   "CREATE INDEX idx_species_representatives_photo\n                ON species_representatives(photo_id)"
+  ],
+  [
+   "index",
+   "idx_species_representatives_order",
+   "species_representatives",
+   "CREATE INDEX idx_species_representatives_order\n                ON species_representatives(species, selected_order DESC)"
+  ],
+  [
+   "index",
+   "idx_species_highlights_photo",
+   "species_highlights",
+   "CREATE INDEX idx_species_highlights_photo\n                ON species_highlights(photo_id)"
+  ],
+  [
+   "index",
+   "idx_species_highlights_rank",
+   "species_highlights",
+   "CREATE INDEX idx_species_highlights_rank\n                ON species_highlights(workspace_id, species, rank)"
+  ],
+  [
+   "index",
+   "preview_cache_last_access",
+   "preview_cache",
+   "CREATE INDEX preview_cache_last_access\n                ON preview_cache(last_access_at)"
+  ],
+  [
+   "index",
+   "idx_offline_originals_status",
+   "offline_originals",
+   "CREATE INDEX idx_offline_originals_status\n                ON offline_originals(status)"
+  ],
+  [
+   "index",
+   "idx_new_image_snapshots_ws",
+   "new_image_snapshots",
+   "CREATE INDEX idx_new_image_snapshots_ws\n                ON new_image_snapshots(workspace_id)"
+  ],
+  [
+   "index",
+   "idx_detections_photo",
+   "detections",
+   "CREATE INDEX idx_detections_photo\n                ON detections(photo_id)"
+  ],
+  [
+   "index",
+   "idx_detections_photo_model",
+   "detections",
+   "CREATE INDEX idx_detections_photo_model\n                ON detections(photo_id, detector_model)"
+  ],
+  [
+   "index",
+   "idx_detections_conf",
+   "detections",
+   "CREATE INDEX idx_detections_conf\n                ON detections(photo_id, detector_confidence)"
+  ],
+  [
+   "index",
+   "idx_predictions_detection",
+   "predictions",
+   "CREATE INDEX idx_predictions_detection\n                ON predictions(detection_id)"
+  ],
+  [
+   "index",
+   "idx_predictions_identity",
+   "predictions",
+   "CREATE UNIQUE INDEX idx_predictions_identity\n                ON predictions(detection_id, classifier_model,\n                               labels_fingerprint, species)"
+  ],
+  [
+   "index",
+   "idx_classifier_runs_detection",
+   "classifier_runs",
+   "CREATE INDEX idx_classifier_runs_detection\n                ON classifier_runs(detection_id)"
+  ],
+  [
+   "index",
+   "idx_classifier_match_scores_detection",
+   "classifier_match_scores",
+   "CREATE INDEX idx_classifier_match_scores_detection\n                ON classifier_match_scores(detection_id)"
+  ],
+  [
+   "index",
+   "idx_photo_embeddings_model",
+   "photo_embeddings",
+   "CREATE INDEX idx_photo_embeddings_model\n                ON photo_embeddings(model, variant)"
+  ],
+  [
+   "index",
+   "idx_prediction_review_workspace",
+   "prediction_review",
+   "CREATE INDEX idx_prediction_review_workspace\n                ON prediction_review(workspace_id)"
+  ],
+  [
+   "index",
+   "idx_collections_workspace",
+   "collections",
+   "CREATE INDEX idx_collections_workspace\n                ON collections(workspace_id)"
+  ],
+  [
+   "index",
+   "idx_pending_workspace",
+   "pending_changes",
+   "CREATE INDEX idx_pending_workspace\n                ON pending_changes(workspace_id)"
+  ],
+  [
+   "index",
+   "idx_pending_photo",
+   "pending_changes",
+   "CREATE INDEX idx_pending_photo\n                ON pending_changes(photo_id)"
+  ],
+  [
+   "trigger",
+   "trg_folder_health_version_insert",
+   "folders",
+   "CREATE TRIGGER trg_folder_health_version_insert\n            AFTER INSERT ON folders\n            BEGIN\n                UPDATE db_meta\n                SET value = CAST(value AS INTEGER) + 1\n                WHERE key = 'folder_health_version';\n            END"
+  ],
+  [
+   "trigger",
+   "trg_folder_health_version_delete",
+   "folders",
+   "CREATE TRIGGER trg_folder_health_version_delete\n            AFTER DELETE ON folders\n            BEGIN\n                UPDATE db_meta\n                SET value = CAST(value AS INTEGER) + 1\n                WHERE key = 'folder_health_version';\n            END"
+  ],
+  [
+   "trigger",
+   "trg_folder_health_version_status",
+   "folders",
+   "CREATE TRIGGER trg_folder_health_version_status\n            AFTER UPDATE OF status ON folders\n            WHEN OLD.status IS NOT NEW.status\n            BEGIN\n                UPDATE db_meta\n                SET value = CAST(value AS INTEGER) + 1\n                WHERE key = 'folder_health_version';\n            END"
+  ],
+  [
+   "trigger",
+   "trg_folder_health_version_ws_insert",
+   "workspace_folders",
+   "CREATE TRIGGER trg_folder_health_version_ws_insert\n            AFTER INSERT ON workspace_folders\n            BEGIN\n                UPDATE db_meta\n                SET value = CAST(value AS INTEGER) + 1\n                WHERE key = 'folder_health_version';\n            END"
+  ],
+  [
+   "trigger",
+   "trg_folder_health_version_ws_delete",
+   "workspace_folders",
+   "CREATE TRIGGER trg_folder_health_version_ws_delete\n            AFTER DELETE ON workspace_folders\n            BEGIN\n                UPDATE db_meta\n                SET value = CAST(value AS INTEGER) + 1\n                WHERE key = 'folder_health_version';\n            END"
+  ],
+  [
+   "trigger",
+   "trg_pending_changes_version_insert",
+   "pending_changes",
+   "CREATE TRIGGER trg_pending_changes_version_insert\n            AFTER INSERT ON pending_changes\n            BEGIN\n                INSERT OR IGNORE INTO db_meta(key, value)\n                    VALUES ('pending_changes_version:' || NEW.workspace_id, '0');\n                UPDATE db_meta\n                SET value = CAST(value AS INTEGER) + 1\n                WHERE key = 'pending_changes_version:' || NEW.workspace_id;\n            END"
+  ],
+  [
+   "trigger",
+   "trg_pending_changes_version_delete",
+   "pending_changes",
+   "CREATE TRIGGER trg_pending_changes_version_delete\n            AFTER DELETE ON pending_changes\n            BEGIN\n                INSERT OR IGNORE INTO db_meta(key, value)\n                    VALUES ('pending_changes_version:' || OLD.workspace_id, '0');\n                UPDATE db_meta\n                SET value = CAST(value AS INTEGER) + 1\n                WHERE key = 'pending_changes_version:' || OLD.workspace_id;\n            END"
+  ],
+  [
+   "trigger",
+   "trg_pending_changes_version_update",
+   "pending_changes",
+   "CREATE TRIGGER trg_pending_changes_version_update\n            AFTER UPDATE ON pending_changes\n            BEGIN\n                INSERT OR IGNORE INTO db_meta(key, value)\n                    VALUES ('pending_changes_version:' || NEW.workspace_id, '0');\n                UPDATE db_meta\n                SET value = CAST(value AS INTEGER) + 1\n                WHERE key = 'pending_changes_version:' || NEW.workspace_id;\n            END"
+  ],
+  [
+   "trigger",
+   "trg_pending_changes_version_update_source_ws",
+   "pending_changes",
+   "CREATE TRIGGER trg_pending_changes_version_update_source_ws\n            AFTER UPDATE OF workspace_id ON pending_changes\n            WHEN OLD.workspace_id IS NOT NEW.workspace_id\n            BEGIN\n                INSERT OR IGNORE INTO db_meta(key, value)\n                    VALUES ('pending_changes_version:' || OLD.workspace_id, '0');\n                UPDATE db_meta\n                SET value = CAST(value AS INTEGER) + 1\n                WHERE key = 'pending_changes_version:' || OLD.workspace_id;\n            END"
+  ],
+  [
+   "view",
+   "workspace_removed_folders",
+   "workspace_removed_folders",
+   "CREATE VIEW workspace_removed_folders AS\n            WITH paths AS NOT MATERIALIZED (\n                SELECT f.id,\n                       RTRIM(REPLACE(f.path, '\\', '/'), '/') AS path,\n                       RTRIM(REPLACE(COALESCE(m.source_path, f.path), '\\', '/'), '/') AS source_path\n                FROM folders f\n                LEFT JOIN local_folder_mappings m ON m.folder_id = f.id\n            ), scopes AS NOT MATERIALIZED (\n                -- Exact records use primary-key lookups; only recursive\n                -- roots need to search the catalog for descendants.\n                SELECT workspace_id, folder_id AS root_id, folder_id\n                FROM workspace_folder_removals\n                UNION ALL\n                SELECT removed.workspace_id, root.id, candidate.id\n                FROM workspace_folder_removals removed\n                JOIN paths root ON root.id = removed.folder_id\n                JOIN paths candidate\n                  ON substr(candidate.path, 1, length(root.path) + 1) = root.path || '/'\n                  OR substr(candidate.source_path, 1, length(root.source_path) + 1) = root.source_path || '/'\n                WHERE removed.recursive = 1 AND candidate.id != root.id\n            )\n            SELECT removed.workspace_id, candidate.id AS folder_id\n            FROM scopes removed\n            JOIN paths root ON root.id = removed.root_id\n            JOIN paths candidate ON candidate.id = removed.folder_id\n            WHERE NOT EXISTS (\n                SELECT 1 FROM workspace_folders direct\n                WHERE direct.workspace_id = removed.workspace_id\n                  AND direct.folder_id = candidate.id\n            ) AND NOT EXISTS (\n                -- An explicitly restored subfolder root may cover new\n                -- descendants without restoring its removed ancestors.\n                SELECT 1 FROM workspace_folders restored\n                JOIN paths restored_path ON restored_path.id = restored.folder_id\n                WHERE restored.workspace_id = removed.workspace_id\n                  AND restored.is_root = 1\n                  AND (substr(restored_path.path, 1, length(root.path) + 1) = root.path || '/'\n                       OR substr(restored_path.source_path, 1, length(root.source_path) + 1) = root.source_path || '/')\n                  AND (candidate.id = restored.folder_id\n                       OR substr(candidate.path, 1, length(restored_path.path) + 1) = restored_path.path || '/'\n                       OR substr(candidate.source_path, 1, length(restored_path.source_path) + 1) = restored_path.source_path || '/')\n            )"
+  ],
+  [
+   "index",
+   "idx_keywords_source_taxon_id",
+   "keywords",
+   "CREATE INDEX idx_keywords_source_taxon_id ON keywords(source_taxon_id)"
+  ],
+  [
+   "table",
+   "keyword_import_aliases",
+   "keyword_import_aliases",
+   "CREATE TABLE keyword_import_aliases (\n            path_key TEXT PRIMARY KEY,\n            path_json TEXT NOT NULL,\n            keyword_id INTEGER NOT NULL REFERENCES keywords(id) ON DELETE CASCADE\n        )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_keyword_import_aliases_1",
+   "keyword_import_aliases",
+   null
+  ],
+  [
+   "index",
+   "idx_keywords_place_id",
+   "keywords",
+   "CREATE UNIQUE INDEX idx_keywords_place_id ON keywords(place_id) WHERE place_id IS NOT NULL"
+  ],
+  [
+   "table",
+   "species_identity_repairs",
+   "species_identity_repairs",
+   "CREATE TABLE species_identity_repairs (\n        id INTEGER PRIMARY KEY, prediction_id INTEGER NOT NULL,\n        resolution_identity TEXT NOT NULL, before_json TEXT NOT NULL,\n        after_json TEXT NOT NULL, reason TEXT NOT NULL,\n        repaired_at TEXT NOT NULL DEFAULT (datetime('now'))\n    )"
+  ]
+ ],
+ "db_meta": {
+  "curation_species_case_aligned_v2": "1",
+  "default_strategy_to_process_id": "1",
+  "duplicate_rejections_backfill_v1": "1",
+  "exif_summary_backfill_v1": "1",
+  "eye_kp_fingerprint_backfill": "1",
+  "folder_health_version": "0",
+  "keyword_apostrophes_folded_v1": "1",
+  "keyword_names_normalized": "1",
+  "saved_processes_seeded": "1",
+  "species_highlights_from_preferences_backfill": "1",
+  "species_representatives_from_preferences_backfill": "1",
+  "workspace_folder_removal_scope_version": "1"
+ }
+}

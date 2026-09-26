@@ -21,15 +21,18 @@ The method bodies were moved verbatim from ``Database``. The only edits are
 the ``db`` module helpers and constants listed in ``__init__``; the SQL text,
 parameter order, chunk sizes and commit placement are unchanged.
 
+What lives in ``repositories/keyword_provenance.py`` instead:
+``accept_prediction``, whole. It tags the accepted species through
+``tag_photo`` (and ``queue_change``, the curation renames and
+``remove_pending_changes``) in the middle of its own transaction, so it
+sits with the ``photo_keywords`` writers that
+``test_keyword_provenance_contract`` keys to that module.
+``accept_subject_species`` lives in this module, but reaches it through the
+façade (``self.accept_prediction(...)``). A structural test fails if this
+module ever references ``tag_photo``.
+
 What deliberately stays on ``Database``:
 
-- ``accept_prediction``, whole. It tags the accepted species through the
-  provenance-pinned ``tag_photo`` (and ``queue_change``, the curation
-  renames and ``remove_pending_changes``) in the middle of its own
-  transaction, and ``test_keyword_provenance_contract`` keys that writer to
-  db.py. ``accept_subject_species`` moved, but reaches it through the
-  façade (``self.accept_prediction(...)``). A structural test fails if this
-  module ever references ``tag_photo``.
 - The prediction-decision mutators keep their ``Database`` names
   (``update_prediction_status``, ``update_predictions_status_by_photo``,
   ``ungroup_prediction``, ``set_review_status``, ``accept_prediction``,
