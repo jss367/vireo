@@ -866,3 +866,42 @@ def test_stage_admission_refuses_when_scan_registered_first(
     )
     assert resp.status_code == 409
     assert "scan" in resp.get_json()["error"].lower()
+
+
+def test_stage_admission_refuses_when_pipeline_registered_first(
+    staged, tmp_path, monkeypatch,
+):
+    """A pipeline job in another workspace whose ``config`` records a
+    ``source``/``sources``/``destination`` overlapping this stage source
+    must be caught by ``_busy_job``. ``scanner_stage`` (broken metadata
+    repair, snapshot / local_processing runs that ever land in the
+    config) walks those paths, so a stage that rebases them mid-run would
+    have its originals re-cataloged. Pipeline is in
+    ``_PATH_CONFIG_JOB_TYPES`` so cross-workspace pipeline configs are
+    consulted the same way import and scan configs already are.
+    """
+    db = staged["db"]
+    pending_source = tmp_path / "to-stage-pipeline"
+    pending_source.mkdir()
+    (pending_source / "b.jpg").write_bytes(b"jpg")
+    stage_fid = db.add_folder(str(pending_source), name="to-stage-pipeline")
+
+    real_runner = staged["app"]._job_runner
+    fake_pipeline_job = {
+        "id": "pipeline-1",
+        "type": "pipeline",
+        "status": "running",
+        "workspace_id": 99,
+        "config": {"sources": [str(pending_source)]},
+        "blocks_local_transitions": True,
+    }
+    monkeypatch.setattr(
+        real_runner, "list_jobs", lambda: [fake_pipeline_job],
+    )
+
+    resp = staged["client"].post(
+        "/api/workspaces/active/local-folders/stage",
+        json={"root_folder_ids": [stage_fid]},
+    )
+    assert resp.status_code == 409
+    assert "pipeline" in resp.get_json()["error"].lower()

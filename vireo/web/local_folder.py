@@ -220,21 +220,21 @@ def create_local_folder_blueprint(
         return sorted(set(result)), None
 
     # Job types whose ``config`` records on-disk paths that a stage worker
-    # must consider when deciding whether to commit a mapping. A scan or
-    # import queued or running against a path this stage is about to rebase
-    # would catalog the originals a second time once the mapping publishes,
-    # even when that scan lives in a workspace whose folder set has no
-    # overlap with the one we are staging. ``_busy_job`` refuses the
-    # transition in that case so ``_busy_job_error`` names the racing job.
-    # ``_job_config_paths`` handles the per-type key names (``roots``/``root``
-    # for scan and metadata-repair; ``source``/``destination`` for
-    # ``import-full``; ``sources``/``destination`` for ``import-in-place``
-    # and the ``import`` job the ``/api/jobs/import-photos`` route
-    # registers).
+    # must consider when deciding whether to commit a mapping. A scan,
+    # import, or pipeline queued or running against a path this stage is
+    # about to rebase would catalog the originals a second time once the
+    # mapping publishes, even when that job lives in a workspace whose
+    # folder set has no overlap with the one we are staging. ``_busy_job``
+    # refuses the transition in that case so ``_busy_job_error`` names the
+    # racing job. ``_job_config_paths`` handles the per-type key names
+    # (``roots``/``root`` for scan and metadata-repair; ``source``/
+    # ``destination`` for ``import-full`` and ``pipeline``; ``sources``/
+    # ``destination`` for ``import-in-place``, the ``import`` job the
+    # ``/api/jobs/import-photos`` route registers, and ``pipeline``).
     _PATH_CONFIG_JOB_TYPES = frozenset(
         {
             "scan", "import-full", "import-in-place",
-            "import", "metadata-repair",
+            "import", "metadata-repair", "pipeline",
         }
     )
 

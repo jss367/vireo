@@ -34,6 +34,11 @@ from pipeline_results import (
     rebuild_encounter_species_label,
 )
 from runtime_warnings import build_cpu_runtime_warning, runtime_warning_work_units
+from services.local_folder import (
+    local_copy_scan_conflict,
+    stage_pending_source_paths,
+)
+from services.local_workspace import stage_boundary_lock
 from services.pipeline_launch import (
     apply_no_model_auto_skip,
     resolve_remote_archive_target,
@@ -1206,12 +1211,40 @@ def create_pipeline_blueprint(
                 "ssh_destination": remote_archive_config["ssh_final"],
                 "display": remote_archive_config["display"],
             }
-        job_id = runner.enqueue_pipeline(
-            work,
-            config=job_config,
-            workspace_id=active_ws,
-            runtime_warning=runtime_warning,
-        )
+        # Enqueue under ``stage_boundary_lock`` so a folder-stage request
+        # arriving after upstream validation but before enqueue cannot
+        # rebase a source this pipeline's ``scanner_stage`` is about to
+        # walk. Import routes hold the same boundary; matching them here
+        # closes the reverse race for pipeline admission. The paths this
+        # check collects come from the same ``job_config`` keys the stage
+        # blocker consults for a running pipeline via ``_job_config_paths``
+        # (``source``/``sources``/``destination``), so the two ends of the
+        # race stay symmetric.
+        scan_paths = [
+            job_config["source"]
+        ] if isinstance(job_config.get("source"), str) and job_config["source"] else []
+        raw_sources = job_config.get("sources")
+        if isinstance(raw_sources, list):
+            scan_paths.extend(p for p in raw_sources if isinstance(p, str) and p)
+        if isinstance(job_config.get("destination"), str) and job_config["destination"]:
+            scan_paths.append(job_config["destination"])
+        with stage_boundary_lock():
+            if scan_paths:
+                conflict = local_copy_scan_conflict(
+                    db, scan_paths,
+                    active_workspace_id=active_ws,
+                    pending_stage_sources=stage_pending_source_paths(
+                        runner.list_jobs, db,
+                    ),
+                )
+                if conflict:
+                    return json_error(conflict, 409)
+            job_id = runner.enqueue_pipeline(
+                work,
+                config=job_config,
+                workspace_id=active_ws,
+                runtime_warning=runtime_warning,
+            )
         result = {"job_id": job_id}
         if model_warning:
             result["model_warning"] = model_warning
