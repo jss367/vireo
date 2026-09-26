@@ -510,3 +510,58 @@ def test_snapshot_import_refuses_paths_inside_staged_source(staged):
 
     assert resp.status_code == 409
     assert "local copy" in resp.get_json()["error"]
+
+
+def test_audit_import_untracked_refuses_paths_in_staged_source(staged):
+    """``/api/audit/untracked`` reports the originals under a staged source
+    because staging rebased the catalog rows to the local copy. Those
+    originals then pass the workspace-containment check on
+    ``/api/audit/import-untracked``: without a local-copy guard the audit
+    action would scan the staged source's parent and recreate the
+    original-path photo rows.
+    """
+    db = staged["db"]
+    # Register the archive as a workspace root so the source's file passes
+    # the containment check and would otherwise be importable.
+    db.add_folder(staged["archive"], name="archive")
+    original = os.path.join(staged["source"], "a.jpg")
+    photos_before = db.conn.execute("SELECT COUNT(*) FROM photos").fetchone()[0]
+
+    resp = staged["client"].post(
+        "/api/audit/import-untracked", json={"paths": [original]},
+    )
+
+    assert resp.status_code == 409
+    assert "local copy" in resp.get_json()["error"]
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM photos"
+    ).fetchone()[0] == photos_before
+
+
+def test_repair_metadata_refuses_root_containing_staged_source(
+    staged, monkeypatch,
+):
+    """``/api/jobs/repair-metadata`` walks every reachable workspace root the
+    same way ``/api/jobs/scan-workspace`` does. When a root contains another
+    workspace's staged descendant, that walk would recreate the original-path
+    rows the local copy replaced; the route must refuse before starting the
+    job.
+    """
+    import metadata
+
+    monkeypatch.setattr(metadata, "exiftool_status", lambda: {
+        "available": True,
+        "path": "/bundled/exiftool",
+        "version": "13.59",
+        "error": None,
+        "hint": "",
+    })
+    db = staged["db"]
+    # Register the archive as a workspace root so the metadata-repair job
+    # would walk it (and its staged descendant) if not guarded.
+    db.add_folder(staged["archive"], name="archive")
+
+    resp = staged["client"].post("/api/jobs/repair-metadata")
+
+    assert resp.status_code == 409
+    assert "local copy" in resp.get_json()["error"]

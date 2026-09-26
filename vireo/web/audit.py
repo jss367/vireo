@@ -14,6 +14,10 @@ import os
 
 from flask import Blueprint, jsonify, request
 from metadata import scan_metadata_warning
+from services.local_folder import (
+    local_copy_scan_conflict,
+    stage_boundary_lock,
+)
 
 log = logging.getLogger(__name__)
 
@@ -259,6 +263,16 @@ def create_audit_blueprint(
             return json_error(
                 f"paths outside the active workspace's folders: {rejected}"
             )
+        # A workspace root may contain a descendant that another workspace has
+        # staged as a local copy. Staging rebased the descendant's catalog
+        # rows to the local path, so its originals now read as "untracked"
+        # under this workspace's root and pass the containment check above.
+        # Refuse them, or the scan behind ``import_untracked`` recreates the
+        # original-path rows the local copy was meant to replace.
+        with stage_boundary_lock():
+            conflict = local_copy_scan_conflict(db, paths)
+        if conflict:
+            return json_error(conflict, 409)
         from audit import import_untracked
 
         vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])

@@ -596,6 +596,15 @@ def create_job_launchers_blueprint(
         ]
         if not existing:
             return json_error("no metadata-repair folders are currently on disk")
+        # A reachable root can contain another workspace's staged descendant.
+        # Its originals still sit at the source path with ``exif_data IS NULL``,
+        # but staging rebased the catalog rows to the local copy: walking the
+        # root here would let the scanner recreate the original-path rows the
+        # local copy replaced. Match the ``/api/jobs/scan-workspace`` guard.
+        with stage_boundary_lock():
+            conflict = local_copy_scan_conflict(db, existing)
+        if conflict:
+            return json_error(conflict, 409)
         # Count against the actually-reachable roots so the response's
         # ``photo_count`` matches what the job will process. An unscoped
         # count could report photos under an offline sibling root that
