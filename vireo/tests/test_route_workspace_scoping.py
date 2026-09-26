@@ -171,6 +171,50 @@ def test_audit_import_untracked_rejects_symlink_escape(scoped, tmp_path):
     ).fetchone()[0] == folders_before
 
 
+@pytest.mark.parametrize("nested", [False, True])
+def test_audit_import_untracked_accepts_file_symlink(scoped, tmp_path, nested):
+    """An image offered by Audit must import under its in-workspace parent,
+    even when the image itself links to a file outside the workspace.
+    """
+    from PIL import Image
+
+    db, client = scoped["db"], scoped["client"]
+    root_dir = tmp_path / "shoot"
+    root_dir.mkdir()
+    db.add_folder(str(root_dir), name="shoot")
+    parent = root_dir / "day" if nested else root_dir
+    parent.mkdir(exist_ok=True)
+    outside_dir = tmp_path / "elsewhere"
+    outside_dir.mkdir()
+    target = outside_dir / "original.jpg"
+    Image.new("RGB", (16, 16), "red").save(target)
+    path = parent / "linked.jpg"
+    os.symlink(target, path)
+
+    untracked = client.get("/api/audit/untracked")
+    assert untracked.status_code == 200
+    assert str(path) in {item["path"] for item in untracked.get_json()}
+
+    response = client.post(
+        "/api/audit/import-untracked", json={"paths": [str(path)]},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["imported"] == 1
+    row = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id = p.folder_id "
+        "WHERE p.filename = 'linked.jpg'"
+    ).fetchone()
+    assert row["path"] == os.path.realpath(parent)
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM folders WHERE path = ?",
+        (os.path.realpath(outside_dir),),
+    ).fetchone()[0] == 0
+    assert str(path) not in {
+        item["path"] for item in client.get("/api/audit/untracked").get_json()
+    }
+
+
 # -- collections and highlights ----------------------------------------------
 
 

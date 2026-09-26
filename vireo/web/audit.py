@@ -40,12 +40,15 @@ def create_audit_blueprint(
     def _path_within(path, root):
         """True if ``path`` is strictly below ``root`` (separator-aware).
 
-        Compares by the lexical ``normpath`` spelling AND by ``realpath`` so
-        a directory symlink inside the workspace root that points outside
+        Compares by the lexical ``normpath`` spelling AND the parent's
+        ``realpath`` so a directory symlink inside the workspace root
+        that points outside
         cannot smuggle an out-of-tree path past the containment check: the
         scanner later canonicalizes the parent through the link and would
         otherwise catalog files under a directory the workspace does not
-        actually cover.
+        actually cover. Resolve only the parent, matching the scanner's
+        folder identity: a file symlink stays cataloged under its local
+        filename and is also reported by ``check_untracked``.
         """
         try:
             lexical = (
@@ -58,12 +61,9 @@ def create_audit_blueprint(
         if not lexical:
             return False
         try:
-            real_path = os.path.realpath(path)
+            real_parent = os.path.realpath(os.path.dirname(path))
             real_root = os.path.realpath(root)
-            return (
-                real_path != real_root
-                and os.path.commonpath([real_path, real_root]) == real_root
-            )
+            return os.path.commonpath([real_parent, real_root]) == real_root
         except (ValueError, OSError):
             return False
 
