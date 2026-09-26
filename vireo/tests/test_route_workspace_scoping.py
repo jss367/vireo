@@ -905,3 +905,114 @@ def test_stage_admission_refuses_when_pipeline_registered_first(
     )
     assert resp.status_code == 409
     assert "pipeline" in resp.get_json()["error"].lower()
+
+
+def test_stage_admission_refuses_when_scan_overlaps_destination(
+    staged, tmp_path, monkeypatch,
+):
+    """The stage-side overlap check must include the caller's chosen
+    local destination, not just the folder's source path. If a scan or
+    import in another workspace is already cataloging the tree the stage
+    is about to copy files into, the stage worker would race that scan
+    and either duplicate rows or fail on an already-created directory.
+    ``_busy_job`` receives the computed final destinations via
+    ``extra_stage_paths`` so cross-workspace conflicts on the
+    destination are caught the same way overlaps on the source are.
+    """
+    from services.local_folder import local_path_for_base
+
+    db = staged["db"]
+    pending_source = tmp_path / "to-stage-destination"
+    pending_source.mkdir()
+    (pending_source / "b.jpg").write_bytes(b"jpg")
+    stage_fid = db.add_folder(str(pending_source), name="to-stage-destination")
+    destination_base = tmp_path / "custom-destination"
+    destination_base.mkdir()
+    final_destination = str(local_path_for_base(
+        str(destination_base), stage_fid, str(pending_source),
+    ))
+
+    real_runner = staged["app"]._job_runner
+    fake_scan_job = {
+        "id": "scan-1",
+        "type": "scan",
+        "status": "running",
+        "workspace_id": 99,
+        # The scan's root is the parent of our destination -- it will
+        # walk into the destination while the stage worker is writing to
+        # it, so admission must refuse the stage.
+        "config": {"roots": [str(destination_base)]},
+        "blocks_local_transitions": True,
+    }
+    monkeypatch.setattr(
+        real_runner, "list_jobs", lambda: [fake_scan_job],
+    )
+
+    resp = staged["client"].post(
+        "/api/workspaces/active/local-folders/stage",
+        json={
+            "root_folder_ids": [stage_fid],
+            "destination_bases": {str(stage_fid): str(destination_base)},
+        },
+    )
+    assert resp.status_code == 409
+    assert "scan" in resp.get_json()["error"].lower()
+    # Sanity: nothing should have been queued or written to the destination.
+    assert not (
+        tmp_path / "custom-destination" / os.path.basename(final_destination)
+    ).exists() or list(
+        (tmp_path / "custom-destination" / os.path.basename(final_destination)).iterdir()
+    ) == []
+
+
+def test_scan_conflict_sees_queued_folder_stage_destination(staged, tmp_path):
+    """A queued folder-stage job records its chosen local destination in
+    ``config.destination_paths`` so another workspace's scan or import
+    admission can reserve it even before the mapping row publishes.
+    ``stage_pending_source_paths`` returns both the source and the
+    destination for the same reason ``local_copy_scan_conflict`` blocks
+    the pending source: either path becomes catalog-unsafe once the
+    stage worker begins writing.
+    """
+    from services.local_folder import (
+        local_copy_scan_conflict,
+        stage_pending_source_paths,
+    )
+
+    db = staged["db"]
+    pending_dest = tmp_path / "queued-dest" / "photos"
+    pending_dest.parent.mkdir()
+
+    def list_jobs():
+        return [
+            {
+                "id": "job-1",
+                "type": "work-locally-folder-stage",
+                "status": "queued",
+                "workspace_id": 99,
+                "config": {
+                    "root_folder_ids": [],
+                    "destination_paths": [str(pending_dest)],
+                },
+            }
+        ]
+
+    pending = stage_pending_source_paths(list_jobs, db)
+    assert str(pending_dest) in pending
+
+    conflict = local_copy_scan_conflict(
+        db, [str(pending_dest)],
+        pending_stage_sources=pending,
+    )
+    assert conflict is not None
+    assert "stage" in conflict.lower()
+
+    # An unrelated path is still allowed.
+    unrelated = tmp_path / "unrelated"
+    unrelated.mkdir()
+    assert (
+        local_copy_scan_conflict(
+            db, [str(unrelated)], pending_stage_sources=pending,
+        )
+        is None
+    )
