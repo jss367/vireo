@@ -195,11 +195,12 @@ def test_accept_on_all_keeps_selection_for_removing_another_keyword(live_server,
         assert len(selected) == 2
     before = page.evaluate("gridContainer.scrollTop")
     row = page.locator("#selectionPredictions .prediction-row").filter(has_text="Red-tailed Hawk")
-    expect(row.get_by_role("button", name="Accept on all", exact=True)).to_be_visible()
+    accept_all = row.get_by_role("button", name=f"Accept on all {len(selected)}", exact=True)
+    expect(accept_all).to_be_visible()
     _watch_grid_frames(page)
 
     with page.expect_response("**/api/predictions/batch-accept") as accepted:
-        row.get_by_role("button", name="Accept on all", exact=True).click()
+        accept_all.click()
     assert accepted.value.ok
     page.wait_for_function(
         "ids => ids.every(id => { const p = findBrowsePhoto(id);"
