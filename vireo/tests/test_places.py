@@ -228,13 +228,12 @@ def test_reverse_geocode_parses_response(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "template_name",
-    ["browse.html", "keywords.html", "location_review.html"],
+    "page_source",
+    ["static/browse.js", "templates/keywords.html", "templates/location_review.html"],
 )
-def test_google_maps_javascript_loaders_honor_english_preference(template_name):
+def test_google_maps_javascript_loaders_honor_english_preference(page_source):
     """All browser Places flows should conditionally request English."""
-    template = Path(__file__).parent.parent / "templates" / template_name
-    source = template.read_text(encoding="utf-8")
+    source = (Path(__file__).parent.parent / page_source).read_text(encoding="utf-8")
 
     assert "google_maps_prefer_english" in source
     assert "&language=en" in source
