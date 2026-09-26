@@ -12068,6 +12068,8 @@ def test_api_audit_import_untracked_invalidates_missing_cache(
     img_path = tmp_path / "shoot" / "IMG_0001.JPG"
     img_path.parent.mkdir()
     img_path.write_bytes(b"stub")
+    # import-untracked only accepts files under the workspace's roots.
+    db.add_folder(str(img_path.parent), name="shoot")
 
     key = (db._db_path, db._active_workspace_id, None)
     with app._missing_originals_lock:
@@ -17806,12 +17808,14 @@ def test_api_audit_import_untracked_warns_when_exiftool_missing(
     """/api/audit/import-untracked surfaces the degraded-scan warning when
     ExifTool is unavailable. Without it the UI silently refreshes after a
     scan that lost capture date / GPS / camera info."""
-    app, _db = app_and_db
+    app, db = app_and_db
     import metadata
     monkeypatch.setattr(metadata, "exiftool_available", lambda: False)
 
     img_path = tmp_path / "shoot" / "IMG_0001.JPG"
     _touch_jpeg(str(img_path))
+    # import-untracked only accepts files under the workspace's roots.
+    db.add_folder(str(img_path.parent), name="shoot")
 
     client = app.test_client()
     resp = client.post(
@@ -17832,12 +17836,14 @@ def test_api_audit_import_untracked_silent_when_exiftool_present(
     """When ExifTool runs cleanly the endpoint must NOT inject a warning
     field — a stray warning would render as a false-positive toast on every
     audit import."""
-    app, _db = app_and_db
+    app, db = app_and_db
     import metadata
     monkeypatch.setattr(metadata, "exiftool_available", lambda: True)
 
     img_path = tmp_path / "shoot" / "IMG_0001.JPG"
     _touch_jpeg(str(img_path))
+    # import-untracked only accepts files under the workspace's roots.
+    db.add_folder(str(img_path.parent), name="shoot")
 
     client = app.test_client()
     resp = client.post(

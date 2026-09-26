@@ -38,6 +38,11 @@ from flask import Blueprint, Response, abort, jsonify, make_response, request
 from keyword_normalization import keyword_match_key, normalize_keyword_display
 from metadata import scan_metadata_warning
 from new_images import invalidate_new_images_after_scan
+from services.local_folder import (
+    local_copy_scan_conflict,
+    stage_pending_source_paths,
+)
+from services.local_workspace import stage_boundary_lock
 from services.pipeline_launch import resolve_remote_archive_target
 from services.startup_tasks import metadata_repair_count
 from web.background_jobs import make_background_job
@@ -1819,6 +1824,44 @@ def create_imports_blueprint(
             from ingest import _is_unsafe_path
             if folder_template and _is_unsafe_path(folder_template):
                 return json_error("folder_template must be a relative path without '..' or backslashes")
+        # The scan below walks the destination (or, in place, the source); a
+        # folder-level local copy of any part of that tree would be
+        # catalogued a second time at its original path.
+        #
+        # ``include_descendants=True`` is deliberate even for a copy import.
+        # A copy renders each file's destination folder from ``folder_template``
+        # and the file's capture time, so an archive that merely *contains* a
+        # staged day folder is not automatically safe: a template flat enough
+        # to match the staged folder's own path (``%Y-%m-%d`` when
+        # ``/archive/2024-05-01`` is staged, plus a photo taken that day) would
+        # copy into the original source and then scan it, creating original-path
+        # catalog rows alongside the rebased local-copy rows. Refuse the whole
+        # import in that case and let the user sync or discard the local copy
+        # first, rather than trying to enumerate every ``folder_template``
+        # rendering at request time.
+        db_for_conflict = get_db()
+        runner = get_runner()
+        with stage_boundary_lock():
+            pending_sources = stage_pending_source_paths(
+                runner.list_jobs if runner is not None else None,
+                db_for_conflict,
+            )
+            conflict = local_copy_scan_conflict(
+                db_for_conflict, [destination if copy else source],
+                active_workspace_id=ctx.workspace_id,
+                pending_stage_sources=pending_sources,
+            )
+        if conflict:
+            return json_error(conflict, 409)
+        # A folder-stage request that arrives after the pre-flight check
+        # above releases ``stage_boundary_lock`` and before the runner
+        # registers this import would see no import job and be admitted;
+        # this import would then start against a source the stage is
+        # rebasing, letting both workers race the same tree. Re-check and
+        # register the job atomically under the boundary lock so a stage
+        # racing the registration blocks on the same guard its admission
+        # takes. See ``local_folder._busy_job`` for the reverse direction.
+        _scan_path = [destination if copy else source]
 
         def work(job):
             from scanner import scan as do_scan
@@ -2090,10 +2133,22 @@ def create_imports_blueprint(
 
             return result
 
-        return ctx.start(
-            "import-full", work, pausable=True,
-            config={"source": source, "destination": destination, "copy": copy, "file_types": file_types},
-        )
+        with stage_boundary_lock():
+            pending_sources = stage_pending_source_paths(
+                runner.list_jobs if runner is not None else None,
+                db_for_conflict,
+            )
+            conflict = local_copy_scan_conflict(
+                db_for_conflict, _scan_path,
+                active_workspace_id=ctx.workspace_id,
+                pending_stage_sources=pending_sources,
+            )
+            if conflict:
+                return json_error(conflict, 409)
+            return ctx.start(
+                "import-full", work, pausable=True,
+                config={"source": source, "destination": destination, "copy": copy, "file_types": file_types},
+            )
 
     @blueprint.route("/api/jobs/import", methods=["POST"])
     @background_job
@@ -2189,12 +2244,19 @@ def create_imports_blueprint(
     def _prepare_import_workspace(db, body):
         """Return the workspace id an import should write to.
 
-        `new_workspace_name` mirrors the normal workspace creation route
+        Returns ``(active_ws, created_workspace, previous_active_ws, err)``:
+        ``previous_active_ws`` is the workspace that was active before this
+        call, so a later admission failure inside the atomic stage-boundary
+        block can undo a freshly-created workspace and restore the user's
+        previous active state through ``_rollback_import_workspace``.
+
+        ``new_workspace_name`` mirrors the normal workspace creation route
         so import-to-new-workspace jobs get default collections and do not
         inherit stale per-workspace caches from a reused SQLite rowid.
         """
+        previous_active_ws = db._active_workspace_id
         if "new_workspace_name" not in body:
-            active_ws = db._active_workspace_id
+            active_ws = previous_active_ws
             if active_ws is None:
                 # Without a target workspace ``run_import_job`` would bind
                 # ``active_ws=None`` and its batch scans would insert
@@ -2202,14 +2264,20 @@ def create_imports_blueprint(
                 # workspace link, leaving catalog rows invisible to every
                 # workspace. Reject at the route boundary so the request
                 # never enqueues instead.
-                return None, None, json_error("no active workspace", 400)
-            return active_ws, None, None
+                return None, None, previous_active_ws, json_error(
+                    "no active workspace", 400,
+                )
+            return active_ws, None, previous_active_ws, None
         raw_name = body.get("new_workspace_name")
         if not isinstance(raw_name, str):
-            return None, None, json_error("new_workspace_name must be a string")
+            return None, None, previous_active_ws, json_error(
+                "new_workspace_name must be a string",
+            )
         name = raw_name.strip()
         if not name:
-            return None, None, json_error("new_workspace_name is required")
+            return None, None, previous_active_ws, json_error(
+                "new_workspace_name is required",
+            )
         try:
             from datetime import datetime
 
@@ -2219,9 +2287,41 @@ def create_imports_blueprint(
             db.set_active_workspace(ws_id)
             db.update_workspace(ws_id, last_opened_at=datetime.now().isoformat())
             ws = db.get_workspace(ws_id)
-            return ws_id, dict(ws) if ws else {"id": ws_id, "name": name}, None
+            return (
+                ws_id,
+                dict(ws) if ws else {"id": ws_id, "name": name},
+                previous_active_ws,
+                None,
+            )
         except Exception as e:
-            return None, None, json_error(str(e))
+            return None, None, previous_active_ws, json_error(str(e))
+
+    def _rollback_import_workspace(db, created_workspace, previous_active_ws):
+        """Undo ``_prepare_import_workspace`` when a later admission check fails.
+
+        A ``new_workspace_name`` import that passes the pre-flight but is
+        later rejected inside the atomic stage-boundary block has already
+        committed a workspace row and switched active-workspace to it.
+        Returning 409 without this rollback would leak that state: an
+        orphan workspace with no import attached, plus a silent change of
+        the user's active workspace even though no job was queued.
+        Restore the previous active workspace and delete the freshly
+        created one so the 409 is state-neutral.
+        """
+        if created_workspace is None:
+            return
+        try:
+            db.set_active_workspace(previous_active_ws)
+        except Exception:
+            log.exception(
+                "Failed to restore active workspace after import conflict",
+            )
+        try:
+            db.delete_workspace(int(created_workspace["id"]))
+        except Exception:
+            log.exception(
+                "Failed to delete created import workspace after conflict",
+            )
 
     def _remote_target_snapshot(remote_archive_config):
         """Freeze the parts of a resolved remote target that decide where
@@ -2958,6 +3058,25 @@ def create_imports_blueprint(
                     )
                 if not os.path.isdir(s):
                     return json_error(f"source directory not found: {s}")
+            db_for_conflict = get_db()
+            runner_for_conflict = get_runner()
+            with stage_boundary_lock():
+                pending_sources = stage_pending_source_paths(
+                    runner_for_conflict.list_jobs
+                    if runner_for_conflict is not None else None,
+                    db_for_conflict,
+                )
+                conflict = local_copy_scan_conflict(
+                    db_for_conflict, sources,
+                    active_workspace_id=db_for_conflict._active_workspace_id,
+                    pending_stage_sources=pending_sources,
+                )
+            if conflict:
+                return json_error(conflict, 409)
+            # Re-checked atomically with ``runner.start`` below so a stage
+            # request that races between the pre-flight release and job
+            # registration still blocks on the same boundary lock.
+            _conflict_paths = list(sources)
 
         recursive = bool(body.get("recursive", True))
         import_tags, location_from_gps, tag_options_err = (
@@ -3021,6 +3140,32 @@ def create_imports_blueprint(
                     )
                 snapshot_paths_by_root.setdefault(root, []).append(path)
             sources = sorted(snapshot_paths_by_root)
+            # A snapshot can have been captured before a descendant of one of
+            # its roots was staged as a local copy by another workspace. The
+            # worker restricts the scan to snapshot_paths but the scanner
+            # canonicalizes folder paths via realpath, so a frozen file inside
+            # a staged source would still be catalogued a second time at its
+            # original path. Refuse the whole import if any snapshot path
+            # falls within (or is aliased to) a staged source; the user syncs
+            # or discards the local copy first.
+            snapshot_runner = get_runner()
+            with stage_boundary_lock():
+                pending_sources = stage_pending_source_paths(
+                    snapshot_runner.list_jobs
+                    if snapshot_runner is not None else None,
+                    db,
+                )
+                conflict = local_copy_scan_conflict(
+                    db, snapshot_paths,
+                    active_workspace_id=db._active_workspace_id,
+                    pending_stage_sources=pending_sources,
+                )
+            if conflict:
+                return json_error(conflict, 409)
+            # Re-checked atomically with ``runner.start`` below. See the
+            # explicit-sources branch above for why the pre-flight check is
+            # not sufficient on its own.
+            _conflict_paths = list(snapshot_paths)
         else:
             snapshot_paths_by_root = None
         # Preflight an explicit after_import before creating a workspace so
@@ -3034,7 +3179,7 @@ def create_imports_blueprint(
             if err is not None:
                 return err
 
-        active_ws, created_workspace, workspace_err = (
+        active_ws, created_workspace, previous_active_ws, workspace_err = (
             _prepare_import_workspace(db, body)
         )
         if workspace_err is not None:
@@ -3999,10 +4144,35 @@ def create_imports_blueprint(
         # no effect until the first import resumed. Keep this mode
         # non-pausable while the lock is in play; other in-place imports
         # remain pausable.
-        job_id = runner.start(
-            "import-in-place", work, config=job_config, workspace_id=active_ws,
-            pausable=snapshot_import_lock is None,
-        )
+        #
+        # Re-check ``local_copy_scan_conflict`` and register the runner job
+        # atomically under ``stage_boundary_lock``. A folder-stage request
+        # that arrives after the earlier pre-flight release but before this
+        # registration would otherwise see no import job and be admitted,
+        # letting the stage rebase paths this import is about to walk.
+        with stage_boundary_lock():
+            pending_sources = stage_pending_source_paths(
+                runner.list_jobs if runner is not None else None,
+                db,
+            )
+            conflict = local_copy_scan_conflict(
+                db, _conflict_paths,
+                active_workspace_id=db._active_workspace_id,
+                pending_stage_sources=pending_sources,
+            )
+            if conflict:
+                # A ``new_workspace_name`` request has already committed the
+                # workspace and switched active to it. Roll both back so the
+                # 409 leaves no orphan and no silent active-workspace change.
+                _rollback_import_workspace(
+                    db, created_workspace, previous_active_ws,
+                )
+                return json_error(conflict, 409)
+            job_id = runner.start(
+                "import-in-place", work, config=job_config,
+                workspace_id=active_ws,
+                pausable=snapshot_import_lock is None,
+            )
         response = {"job_id": job_id}
         if created_workspace is not None:
             response["workspace"] = created_workspace
@@ -4188,6 +4358,36 @@ def create_imports_blueprint(
                     f"(destination={destination!r}, source={s!r}); "
                     f"formatting the card would erase the archive copy"
                 )
+        # The copied files are catalogued under the destination; if a local
+        # copy covers it, they would land beside rows the catalog only knows
+        # by their local path.
+        #
+        # ``include_descendants`` defaults to True. A staged folder beneath
+        # the destination is not automatically safe just because the import
+        # only walks the dated folders it writes: ``folder_template`` can
+        # render a dated folder that coincides with the staged source
+        # (``%Y-%m-%d`` when ``/archive/2024-05-01`` is staged and a card
+        # holds a photo from that day), and then the import copies into the
+        # original source and scans it. Refuse and let the user sync or
+        # discard the local copy first.
+        db_for_conflict = get_db()
+        card_runner = get_runner()
+        with stage_boundary_lock():
+            pending_sources = stage_pending_source_paths(
+                card_runner.list_jobs if card_runner is not None else None,
+                db_for_conflict,
+            )
+            conflict = local_copy_scan_conflict(
+                db_for_conflict, [destination],
+                active_workspace_id=db_for_conflict._active_workspace_id,
+                pending_stage_sources=pending_sources,
+            )
+        if conflict:
+            return json_error(conflict, 409)
+        # Re-checked atomically with ``runner.start`` below so a stage
+        # request that races between the pre-flight release and job
+        # registration still blocks on the same boundary lock.
+        _import_photos_conflict_paths = [destination]
 
         folder_template = body.get("folder_template", "%Y/%Y-%m-%d")
         if folder_template and _is_unsafe_path(folder_template):
@@ -4628,7 +4828,7 @@ def create_imports_blueprint(
             if completed:
                 return json_error("These photos have already been sent to NAS. Start a new import instead of retrying.")
 
-        active_ws, created_workspace, workspace_err = (
+        active_ws, created_workspace, previous_active_ws, workspace_err = (
             _prepare_import_workspace(db, body)
         )
         if workspace_err is not None:
@@ -5056,10 +5256,34 @@ def create_imports_blueprint(
                         409,
                     )
 
-        job_id = runner.start(
-            "import", work, config=job_config, workspace_id=active_ws,
-            pausable=True,
-        )
+        # Re-check ``local_copy_scan_conflict`` and register the runner job
+        # atomically under ``stage_boundary_lock``. A folder-stage request
+        # that arrives after the earlier pre-flight release but before this
+        # registration would otherwise see no import job and be admitted,
+        # letting the stage rebase the destination this import is about to
+        # copy into and scan.
+        with stage_boundary_lock():
+            pending_sources = stage_pending_source_paths(
+                runner.list_jobs if runner is not None else None,
+                db,
+            )
+            conflict = local_copy_scan_conflict(
+                db, _import_photos_conflict_paths,
+                active_workspace_id=db._active_workspace_id,
+                pending_stage_sources=pending_sources,
+            )
+            if conflict:
+                # A ``new_workspace_name`` request has already committed the
+                # workspace and switched active to it. Roll both back so the
+                # 409 leaves no orphan and no silent active-workspace change.
+                _rollback_import_workspace(
+                    db, created_workspace, previous_active_ws,
+                )
+                return json_error(conflict, 409)
+            job_id = runner.start(
+                "import", work, config=job_config, workspace_id=active_ws,
+                pausable=True,
+            )
         response = {"job_id": job_id}
         if created_workspace is not None:
             response["workspace"] = created_workspace

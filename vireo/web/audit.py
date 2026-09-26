@@ -14,6 +14,11 @@ import os
 
 from flask import Blueprint, jsonify, request
 from metadata import scan_metadata_warning
+from services.local_folder import (
+    local_copy_scan_conflict,
+    stage_boundary_lock,
+    stage_pending_source_paths,
+)
 
 log = logging.getLogger(__name__)
 
@@ -25,6 +30,7 @@ def create_audit_blueprint(
     *,
     cleanup_cached_files_for_deleted_photos,
     invalidate_missing_originals,
+    get_runner,
     trash_paths,
 ):
     """Build the audit blueprint.
@@ -34,11 +40,43 @@ def create_audit_blueprint(
     ``cleanup_cached_files_for_deleted_photos`` (the app's ``PhotoDeletion``)
     unlinks the thumbnails, previews and working copies of deleted photos, and
     ``invalidate_missing_originals`` (the app's ``MissingOriginals``) drops
-    the missing-originals cache after the catalog changes. ``trash_paths``
-    (``app._trash_paths``, late-bound) moves deleted stray sidecars to the
-    Trash.
+    the missing-originals cache after the catalog changes. ``get_runner``
+    returns the current :class:`jobs.JobRunner` so ``import-untracked`` can
+    see queued folder-stage jobs whose mapping rows do not yet exist.
+    ``trash_paths`` (``app._trash_paths``, late-bound) moves deleted stray
+    sidecars to the Trash.
     """
     blueprint = Blueprint("audit", __name__)
+
+    def _path_within(path, root):
+        """True if ``path`` is strictly below ``root`` (separator-aware).
+
+        Compares by the lexical ``normpath`` spelling AND the parent's
+        ``realpath`` so a directory symlink inside the workspace root
+        that points outside
+        cannot smuggle an out-of-tree path past the containment check: the
+        scanner later canonicalizes the parent through the link and would
+        otherwise catalog files under a directory the workspace does not
+        actually cover. Resolve only the parent, matching the scanner's
+        folder identity: a file symlink stays cataloged under its local
+        filename and is also reported by ``check_untracked``.
+        """
+        try:
+            lexical = (
+                path != root
+                and os.path.commonpath([path, root]) == root
+            )
+        except ValueError:
+            # Different drives on Windows, or mixed absolute/relative.
+            lexical = False
+        if not lexical:
+            return False
+        try:
+            real_parent = os.path.realpath(os.path.dirname(path))
+            real_root = os.path.realpath(root)
+            return os.path.commonpath([real_parent, real_root]) == real_root
+        except (ValueError, OSError):
+            return False
 
     @blueprint.route("/api/audit/drift")
     def api_audit_drift():
@@ -148,6 +186,11 @@ def create_audit_blueprint(
             return json_error("direction must be 'use_db' or 'use_xmp'")
         if isinstance(photo_id, bool) or not isinstance(photo_id, int):
             return json_error("photo_id must be an integer")
+        # Photos are global; resolving queues sidecar writes (or rewrites
+        # keywords from the XMP) under the active workspace, so it may only
+        # touch a photo that workspace can see -- the same set drift lists.
+        if photo_id not in db.filter_photo_ids_in_workspace([photo_id]):
+            return json_error("photo not found", 404)
         from audit import resolve_drift
 
         resolve_drift(db, photo_id, direction)
@@ -204,23 +247,77 @@ def create_audit_blueprint(
     def api_audit_import_untracked():
         db = get_db()
         body = request.get_json(silent=True) or {}
+        if not isinstance(body, dict):
+            return json_error("request body must be a JSON object")
         paths = body.get("paths", [])
+        if not isinstance(paths, list) or any(
+            not isinstance(p, str) or not p for p in paths
+        ):
+            return json_error("paths must be a list of file paths")
+        # The scan behind this creates a folder row for each file's parent
+        # and links it into the active workspace, so a path outside the
+        # workspace's roots would graft an arbitrary directory onto it.
+        # Accept only what /api/audit/untracked can report: files under a
+        # workspace root, outside app-managed libraries.
+        from image_loader import is_excluded_scan_path
+
+        roots = [os.path.normpath(r) for r in _audit_workspace_roots(db)]
+        rejected = []
+        for path in paths:
+            if not os.path.isabs(path) or is_excluded_scan_path(path):
+                rejected.append(path)
+                continue
+            norm = os.path.normpath(path)
+            if not any(_path_within(norm, root) for root in roots):
+                rejected.append(path)
+        if rejected:
+            return json_error(
+                f"paths outside the active workspace's folders: {rejected}"
+            )
+        # A workspace root may contain a descendant that another workspace has
+        # staged as a local copy. Staging rebased the descendant's catalog
+        # rows to the local path, so its originals now read as "untracked"
+        # under this workspace's root and pass the containment check above.
+        # Refuse them, or the scan behind ``import_untracked`` recreates the
+        # original-path rows the local copy was meant to replace. Include
+        # queued folder-stage jobs so a stage waiting for its worker can
+        # still block an admission that would race it.
+        #
+        # ``import_untracked`` runs synchronously in this request rather than
+        # as a runner job, so ``_busy_job`` cannot observe it. Hold
+        # ``stage_boundary_lock`` across the entire import so a folder-stage
+        # request that arrives after the conflict check but before the scan
+        # finishes still blocks on the same guard the stage admission takes;
+        # otherwise a stage could rebase the same subtree while this handler
+        # is still cataloging its originals.
+        runner = get_runner()
         from audit import import_untracked
 
         vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
-        try:
-            imported = import_untracked(
-                db, paths,
-                vireo_dir=vireo_dir,
-                thumb_cache_dir=config["THUMB_CACHE_DIR"],
+        with stage_boundary_lock():
+            pending_sources = stage_pending_source_paths(
+                runner.list_jobs if runner is not None else None, db,
             )
-        finally:
+            conflict = local_copy_scan_conflict(
+                db, paths,
+                active_workspace_id=db._active_workspace_id,
+                pending_stage_sources=pending_sources,
+            )
+            if conflict:
+                return json_error(conflict, 409)
             try:
-                invalidate_missing_originals()
-            except Exception:
-                log.exception(
-                    "Failed to invalidate missing-originals cache after audit import"
+                imported = import_untracked(
+                    db, paths,
+                    vireo_dir=vireo_dir,
+                    thumb_cache_dir=config["THUMB_CACHE_DIR"],
                 )
+            finally:
+                try:
+                    invalidate_missing_originals()
+                except Exception:
+                    log.exception(
+                        "Failed to invalidate missing-originals cache after audit import"
+                    )
         # Audit import calls scanner.scan just like the standalone scan and
         # import paths. Without ExifTool the newly imported photos still lose
         # capture date, GPS, and camera info; the frontend renders any warning

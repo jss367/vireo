@@ -31,6 +31,10 @@ from runtime_warnings import (
     build_cpu_runtime_warning,
     runtime_warning_work_units,
 )
+from services.local_folder import (
+    local_copy_scan_conflict,
+    stage_pending_source_paths,
+)
 from services.local_workspace import (
     has_local_workspace,
     stage_boundary_lock,
@@ -38,7 +42,11 @@ from services.local_workspace import (
 from services.startup_tasks import metadata_repair_count
 from sql_chunks import chunked
 from web.background_jobs import make_background_job
-from web.request_args import coerce_collection_id, reject_visual_collection
+from web.request_args import (
+    coerce_collection_id,
+    parse_selection_photo_ids,
+    reject_visual_collection,
+)
 
 log = logging.getLogger(__name__)
 
@@ -503,19 +511,38 @@ def create_job_launchers_blueprint(
                         "manifest doesn't cover.",
                         409,
                     )
-
+        # A folder-level local copy (shared across workspaces) rebases its
+        # catalog rows onto the managed copy, so walking its original source
+        # tree would catalog every one of those photos a second time. Include
+        # queued folder-stage jobs so a stage another workspace has waiting
+        # for its worker cannot slip a scan registration through the window
+        # before its mapping row exists, and hold ``stage_boundary_lock``
+        # across the check and ``ctx.start`` so a stage registering after us
+        # sees this scan in ``_busy_job`` -- otherwise the reverse race
+        # remains open between our conflict check and job registration.
+        db_for_conflict = get_db()
         work = build_scan_work(roots_list, incremental, ctx.workspace_id)
-
         job_config = {"roots": roots_list, "incremental": incremental}
         # Back-compat: keep ``root`` in config when exactly one was given,
         # so existing consumers (history viewers, etc.) still find it.
         if len(roots_list) == 1:
             job_config["root"] = roots_list[0]
-
-        return ctx.start(
-            "scan", work, config=job_config,
-            pausable=True,
-        )
+        with stage_boundary_lock():
+            pending_sources = stage_pending_source_paths(
+                ctx.runner.list_jobs if ctx.runner is not None else None,
+                db_for_conflict,
+            )
+            conflict = local_copy_scan_conflict(
+                db_for_conflict, roots_list,
+                active_workspace_id=ctx.workspace_id,
+                pending_stage_sources=pending_sources,
+            )
+            if conflict:
+                return json_error(conflict, 409)
+            return ctx.start(
+                "scan", work, config=job_config,
+                pausable=True,
+            )
 
     @blueprint.route("/api/jobs/scan-workspace", methods=["POST"])
     @background_job
@@ -540,16 +567,33 @@ def create_job_launchers_blueprint(
             if roots:
                 return json_error("no workspace folders are currently on disk")
             return json_error("this workspace has no folders to rescan")
-
+        # A staged root is scanned at its local path, which is safe; a root
+        # that contains another workspace's staged folder would walk that
+        # folder's original source and duplicate its catalog rows. Also
+        # include queued folder-stage jobs so a stage waiting for its
+        # worker cannot slip through the mapping-row window. Hold
+        # ``stage_boundary_lock`` across ``ctx.start`` so a stage
+        # registering after us cannot miss the scan in ``_busy_job``.
         work = build_scan_work(existing, incremental, ctx.workspace_id)
         job_config = {"roots": existing, "incremental": incremental}
         if len(existing) == 1:
             job_config["root"] = existing[0]
-        return ctx.start(
-            "scan", work, config=job_config,
-            pausable=True,
-            extra={"roots": existing, "skipped": skipped},
-        )
+        with stage_boundary_lock():
+            pending_sources = stage_pending_source_paths(
+                ctx.runner.list_jobs if ctx.runner is not None else None, db,
+            )
+            conflict = local_copy_scan_conflict(
+                db, existing,
+                active_workspace_id=ctx.workspace_id,
+                pending_stage_sources=pending_sources,
+            )
+            if conflict:
+                return json_error(conflict, 409)
+            return ctx.start(
+                "scan", work, config=job_config,
+                pausable=True,
+                extra={"roots": existing, "skipped": skipped},
+            )
 
     @blueprint.route("/api/jobs/repair-metadata", methods=["POST"])
     @background_job
@@ -576,6 +620,26 @@ def create_job_launchers_blueprint(
         ]
         if not existing:
             return json_error("no metadata-repair folders are currently on disk")
+        # A reachable root can contain another workspace's staged descendant.
+        # Its originals still sit at the source path with ``exif_data IS NULL``,
+        # but staging rebased the catalog rows to the local copy: walking the
+        # root here would let the scanner recreate the original-path rows the
+        # local copy replaced. Match the ``/api/jobs/scan-workspace`` guard,
+        # including queued folder-stage jobs whose mapping row does not exist
+        # yet. The conflict check must precede the "no photos need metadata
+        # repair" fast-path so a repair against a staged root is reported as
+        # a local-copy conflict rather than as a no-op.
+        with stage_boundary_lock():
+            pending_sources = stage_pending_source_paths(
+                ctx.runner.list_jobs if ctx.runner is not None else None, db,
+            )
+            conflict = local_copy_scan_conflict(
+                db, existing,
+                active_workspace_id=ctx.workspace_id,
+                pending_stage_sources=pending_sources,
+            )
+        if conflict:
+            return json_error(conflict, 409)
         # Count against the actually-reachable roots so the response's
         # ``photo_count`` matches what the job will process. An unscoped
         # count could report photos under an offline sibling root that
@@ -595,10 +659,24 @@ def create_job_launchers_blueprint(
         }
         if len(existing) == 1:
             job_config["root"] = existing[0]
-        return ctx.start(
-            "metadata-repair", work, config=job_config, pausable=True,
-            extra={"photo_count": repair_count, "roots": existing},
-        )
+        # Re-check under ``stage_boundary_lock`` and register atomically so a
+        # stage that lands between the checks and our ``ctx.start`` is seen
+        # by ``_busy_job`` on the next stage admission.
+        with stage_boundary_lock():
+            pending_sources = stage_pending_source_paths(
+                ctx.runner.list_jobs if ctx.runner is not None else None, db,
+            )
+            conflict = local_copy_scan_conflict(
+                db, existing,
+                active_workspace_id=ctx.workspace_id,
+                pending_stage_sources=pending_sources,
+            )
+            if conflict:
+                return json_error(conflict, 409)
+            return ctx.start(
+                "metadata-repair", work, config=job_config, pausable=True,
+                extra={"photo_count": repair_count, "roots": existing},
+            )
 
     @blueprint.route("/api/jobs/previews", methods=["POST"])
     @background_job
@@ -857,12 +935,20 @@ def create_job_launchers_blueprint(
     def api_job_move_photos(ctx):
         """Move selected photos to a destination directory."""
         body = request.get_json(silent=True) or {}
-        photo_ids = body.get("photo_ids", [])
+        if not isinstance(body, dict):
+            return json_error("request body must be a JSON object")
         destination = body.get("destination", "")
         rule_id = body.get("rule_id")
 
-        if not photo_ids:
-            return json_error("photo_ids required")
+        # Photos are global but visibility is per workspace: a move rewrites
+        # the photo's folder and links the destination only to the active
+        # workspace, so an id from another workspace must be refused here,
+        # not silently moved out from under that workspace.
+        photo_ids, err = parse_selection_photo_ids(
+            get_db(), body, json_error=json_error, limit=None,
+        )
+        if err is not None:
+            return err
         if not destination:
             return json_error("destination required")
         if not os.path.isabs(destination):

@@ -103,6 +103,15 @@ def create_encounters_blueprint(get_db, json_error, db_path):
         missing = [pid for pid in photo_ids if pid not in found_ids]
         if missing:
             return json_error(f"Unknown photo_ids: {missing}")
+        # Photos are global; a confirmation tags keywords and queues sidecar
+        # writes under the active workspace, so it may only touch photos
+        # that workspace can see.
+        visible_ids = set(db.filter_photo_ids_in_workspace(photo_ids))
+        foreign = [pid for pid in photo_ids if pid not in visible_ids]
+        if foreign:
+            return json_error(
+                f"photo_ids not in the active workspace: {foreign}", 403
+            )
 
         # Surface photos whose only detections are below the workspace's
         # detector_confidence threshold, but do not drop them. This endpoint

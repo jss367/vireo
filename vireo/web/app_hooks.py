@@ -110,6 +110,7 @@ def register_app_hooks(app, *, get_db, reservation_exempt_endpoints):
             path.startswith("/api/")
             or path.startswith("/photos/")
             or path.startswith("/thumbnails/")
+            or path.startswith("/masks/")
         )
         if not protected:
             return None
