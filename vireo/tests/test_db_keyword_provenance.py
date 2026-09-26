@@ -1114,3 +1114,40 @@ def test_keyword_provenance_facade_signatures_unchanged():
     params = inspect.signature(KeywordProvenanceRepository.tag).parameters
     assert params["source"].default is inspect.Parameter.empty
     assert params["source"].kind is inspect.Parameter.KEYWORD_ONLY
+
+
+def _reaches_provenance_repository(node):
+    if isinstance(node, ast.ImportFrom):
+        return (node.module or "").endswith("keyword_provenance")
+    if isinstance(node, ast.Import):
+        return any(a.name.endswith("keyword_provenance") for a in node.names)
+    return isinstance(node, ast.Attribute) and node.attr in {
+        "_keyword_provenance_repository", "KeywordProvenanceRepository",
+    }
+
+
+def test_only_the_database_facade_builds_the_provenance_repository():
+    """Callers go through ``Database.tag_photo`` and friends, never the repo.
+
+    ``test_keyword_provenance_contract`` finds provenance-neutral tagging by
+    scanning for ``.tag_photo(...)`` calls. A caller that built this
+    repository and called ``.tag(...)`` itself would skip that scan and the
+    façade's fail-safe ``source`` default, so only ``db.py`` may build it.
+    """
+    from pathlib import Path
+
+    vireo_dir = Path(__file__).resolve().parent.parent
+    offenders = []
+    for path in sorted(vireo_dir.rglob("*.py")):
+        rel = path.relative_to(vireo_dir)
+        if rel.parts[0] in {"tests", "testing"} or rel.as_posix() in {
+            "db.py", "repositories/keyword_provenance.py",
+        }:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        offenders.extend(
+            f"{rel.as_posix()}:{node.lineno}"
+            for node in ast.walk(tree)
+            if _reaches_provenance_repository(node)
+        )
+    assert not offenders, offenders
