@@ -1869,6 +1869,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 photo_deletion.cleanup_cached_files_for_deleted_photos
             ),
             invalidate_missing_originals=missing_originals.invalidate,
+            get_runner=lambda: app._job_runner,
         )
     )
     app.register_blueprint(

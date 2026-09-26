@@ -38,7 +38,10 @@ from flask import Blueprint, Response, abort, jsonify, make_response, request
 from keyword_normalization import keyword_match_key, normalize_keyword_display
 from metadata import scan_metadata_warning
 from new_images import invalidate_new_images_after_scan
-from services.local_folder import local_copy_scan_conflict
+from services.local_folder import (
+    local_copy_scan_conflict,
+    stage_pending_source_paths,
+)
 from services.local_workspace import stage_boundary_lock
 from services.pipeline_launch import resolve_remote_archive_target
 from services.startup_tasks import metadata_repair_count
@@ -1836,9 +1839,17 @@ def create_imports_blueprint(
         # import in that case and let the user sync or discard the local copy
         # first, rather than trying to enumerate every ``folder_template``
         # rendering at request time.
+        db_for_conflict = get_db()
+        runner = get_runner()
         with stage_boundary_lock():
+            pending_sources = stage_pending_source_paths(
+                runner.list_jobs if runner is not None else None,
+                db_for_conflict,
+            )
             conflict = local_copy_scan_conflict(
-                get_db(), [destination if copy else source],
+                db_for_conflict, [destination if copy else source],
+                active_workspace_id=ctx.workspace_id,
+                pending_stage_sources=pending_sources,
             )
         if conflict:
             return json_error(conflict, 409)
@@ -2981,8 +2992,19 @@ def create_imports_blueprint(
                     )
                 if not os.path.isdir(s):
                     return json_error(f"source directory not found: {s}")
+            db_for_conflict = get_db()
+            runner_for_conflict = get_runner()
             with stage_boundary_lock():
-                conflict = local_copy_scan_conflict(get_db(), sources)
+                pending_sources = stage_pending_source_paths(
+                    runner_for_conflict.list_jobs
+                    if runner_for_conflict is not None else None,
+                    db_for_conflict,
+                )
+                conflict = local_copy_scan_conflict(
+                    db_for_conflict, sources,
+                    active_workspace_id=db_for_conflict._active_workspace_id,
+                    pending_stage_sources=pending_sources,
+                )
             if conflict:
                 return json_error(conflict, 409)
 
@@ -3056,9 +3078,17 @@ def create_imports_blueprint(
             # original path. Refuse the whole import if any snapshot path
             # falls within (or is aliased to) a staged source; the user syncs
             # or discards the local copy first.
+            snapshot_runner = get_runner()
             with stage_boundary_lock():
+                pending_sources = stage_pending_source_paths(
+                    snapshot_runner.list_jobs
+                    if snapshot_runner is not None else None,
+                    db,
+                )
                 conflict = local_copy_scan_conflict(
-                    get_db(), snapshot_paths,
+                    db, snapshot_paths,
+                    active_workspace_id=db._active_workspace_id,
+                    pending_stage_sources=pending_sources,
                 )
             if conflict:
                 return json_error(conflict, 409)
@@ -4241,8 +4271,18 @@ def create_imports_blueprint(
         # holds a photo from that day), and then the import copies into the
         # original source and scans it. Refuse and let the user sync or
         # discard the local copy first.
+        db_for_conflict = get_db()
+        card_runner = get_runner()
         with stage_boundary_lock():
-            conflict = local_copy_scan_conflict(get_db(), [destination])
+            pending_sources = stage_pending_source_paths(
+                card_runner.list_jobs if card_runner is not None else None,
+                db_for_conflict,
+            )
+            conflict = local_copy_scan_conflict(
+                db_for_conflict, [destination],
+                active_workspace_id=db_for_conflict._active_workspace_id,
+                pending_stage_sources=pending_sources,
+            )
         if conflict:
             return json_error(conflict, 409)
 

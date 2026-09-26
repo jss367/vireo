@@ -12,6 +12,8 @@ from services.local_folder import (
     LOCAL_FOLDER_JOB_TYPES,
     LocalWorkspaceCancelled,
     LocalWorkspaceError,
+    _path_overlaps_source,
+    _resolve_physical,
     affected_workspace_ids,
     discard_folder,
     folder_status,
@@ -25,7 +27,7 @@ from services.local_folder import (
     workspace_local_root_ids,
     workspace_status,
 )
-from services.local_workspace import destination_case_insensitive
+from services.local_workspace import destination_case_insensitive, stage_boundary_lock
 from services.local_workspace import local_state as legacy_local_state
 
 
@@ -217,11 +219,53 @@ def create_local_folder_blueprint(
             )
         return sorted(set(result)), None
 
+    # Job types whose ``config`` lists on-disk paths (``roots``/``root``) that a
+    # stage worker must consider when deciding whether to commit a mapping. A
+    # scan or import queued or running against a path this stage is about to
+    # rebase would catalog the originals a second time once the mapping
+    # publishes, even when that scan lives in a workspace whose folder set has
+    # no overlap with the one we are staging. ``_busy_job`` refuses the
+    # transition in that case so ``_busy_job_error`` names the racing job.
+    _PATH_CONFIG_JOB_TYPES = frozenset(
+        {
+            "scan", "import-full", "import-in-place", "import-photos",
+            "repair-metadata",
+        }
+    )
+
+    def _stage_source_paths(db, root_ids):
+        """Pre-stage source paths for ``root_ids`` (before rebase)."""
+        paths = []
+        for root_id in root_ids:
+            row = db.conn.execute(
+                "SELECT path FROM folders WHERE id=?",
+                (int(root_id),),
+            ).fetchone()
+            if row and row["path"]:
+                paths.append(row["path"])
+        return paths
+
+    def _job_config_paths(config):
+        if not isinstance(config, dict):
+            return []
+        paths = []
+        raw_roots = config.get("roots")
+        if isinstance(raw_roots, list):
+            paths.extend(p for p in raw_roots if isinstance(p, str) and p)
+        raw_root = config.get("root")
+        if isinstance(raw_root, str) and raw_root:
+            paths.append(raw_root)
+        return paths
+
     def _busy_job(db, root_ids, initiating_workspace_id):
         workspace_ids = {int(initiating_workspace_id)}
         for root_id in root_ids:
             workspace_ids.update(affected_workspace_ids(db, root_id))
             workspace_ids.update(workspace_ids_for_folder_tree(db, root_id))
+        stage_source_paths = _stage_source_paths(db, root_ids)
+        stage_source_physicals = [
+            (source, _resolve_physical(source)) for source in stage_source_paths
+        ]
         for job in get_runner().list_jobs():
             # Jobs that carry no pre-rebase photo/folder paths opt out —
             # model/label downloads and embedding precomputes, which touch
@@ -243,6 +287,27 @@ def create_local_folder_blueprint(
             job_roots = set(config.get("root_folder_ids") or []) if isinstance(config, dict) else set()
             if job.get("workspace_id") in workspace_ids or job_roots.intersection(root_ids):
                 return job
+            # A scan or import in another workspace whose ``config`` names a
+            # path that overlaps our stage source would race us: the mapping
+            # this stage creates rebases the catalog under the local copy, but
+            # that job walks the original tree and can re-catalog it. Local
+            # folder mappings are keyed on source path, not workspace, so the
+            # cross-workspace check is what actually protects the shared
+            # catalog. ``_busy_job_error`` reports the job type, not any
+            # workspace path we did not read from the caller.
+            if (
+                stage_source_paths
+                and job.get("type") in _PATH_CONFIG_JOB_TYPES
+            ):
+                for job_path in _job_config_paths(config):
+                    job_physical = _resolve_physical(job_path)
+                    for source, source_physical in stage_source_physicals:
+                        if _path_overlaps_source(
+                            job_path, job_physical,
+                            source, source_physical,
+                            include_descendants=True,
+                        ):
+                            return job
         return None
 
     def _busy_job_error(job):
@@ -668,12 +733,18 @@ def create_local_folder_blueprint(
             finally:
                 thread_db.close()
 
-        with transition_lock:
+        # Nested lock order is deliberate: ``transition_lock`` first (matches
+        # every other stage/sync/discard entry point) and ``stage_boundary_lock``
+        # second so ``_busy_job`` can observe scan/import jobs that hold
+        # ``stage_boundary_lock`` across their own check-and-register. Scan
+        # admissions never take ``transition_lock``, so no cycle is possible.
+        with transition_lock, stage_boundary_lock():
             busy = _busy_job(db, root_ids, workspace_id)
             if busy:
                 return json_error(_busy_job_error(busy), 409)
-            # Recheck residency inside the same registration boundary so two
-            # simultaneous requests cannot both report 202 for one folder.
+            # Recheck residency inside the same registration boundary so
+            # two simultaneous requests cannot both report 202 for one
+            # folder.
             if any(local_root_for_folder(db, root_id) is not None for root_id in root_ids):
                 return json_error("A selected folder is already local", 409)
             job_id = runner.start(

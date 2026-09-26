@@ -565,3 +565,183 @@ def test_repair_metadata_refuses_root_containing_staged_source(
 
     assert resp.status_code == 409
     assert "local copy" in resp.get_json()["error"]
+
+
+def test_scan_conflict_loads_mappings_once_per_call(staged, monkeypatch):
+    """``local_copy_scan_conflict`` scans ``local_folder_mappings`` once per
+    call and reuses the loaded rows for every path. A snapshot import can
+    pass thousands of frozen file paths; the pre-optimization loop repeated
+    both the DB query and the ``realpath`` resolution for each path, so the
+    O(N*M) cost dominated even when nothing overlapped.
+    """
+    from services import local_folder as sf
+
+    db = staged["db"]
+    calls = {"count": 0}
+    real_load = sf._load_staged_source_index
+
+    def counting_load(target_db):
+        calls["count"] += 1
+        return real_load(target_db)
+
+    monkeypatch.setattr(sf, "_load_staged_source_index", counting_load)
+    paths = [os.path.join(staged["archive"], f"day-{i:04d}") for i in range(50)]
+    sf.local_copy_scan_conflict(db, paths)
+    assert calls["count"] == 1
+
+
+def test_scan_conflict_names_source_when_visible_to_workspace(staged):
+    """When the mapping IS visible to the caller's workspace, the 409
+    message names ``source_path`` so the user knows which local copy to
+    sync or discard. The ``staged`` fixture's mapping is linked to the
+    Default workspace (which is the active workspace here), so the
+    caller can already see the source path.
+    """
+    from services.local_folder import local_copy_scan_conflict
+
+    db = staged["db"]
+    conflict = local_copy_scan_conflict(
+        db, [staged["source"]],
+        active_workspace_id=db._active_workspace_id,
+    )
+    assert conflict is not None
+    assert staged["source"] in conflict
+
+
+def test_scan_conflict_hides_source_path_from_foreign_workspace(staged):
+    """The 409 message must not disclose the source path of a local copy
+    the caller's workspace cannot otherwise see. Local mappings are keyed
+    on source path, so a caller who never registered the archive could
+    otherwise learn its absolute spelling by scanning any path near it.
+    """
+    from services.local_folder import local_copy_scan_conflict
+
+    db = staged["db"]
+    # Unlink the mapping's folder from every workspace so the caller's
+    # active workspace cannot see it. In practice this reproduces the case
+    # of a mapping that lives entirely in another workspace: the caller's
+    # scan path happens to overlap its source, but that source path was
+    # never surfaced to them.
+    fid = db.conn.execute(
+        "SELECT root_folder_id FROM local_folder_mappings WHERE is_root=1"
+    ).fetchone()[0]
+    db.conn.execute(
+        "DELETE FROM workspace_folders WHERE folder_id=?",
+        (fid,),
+    )
+    db.conn.commit()
+
+    # Use ``archive`` (an ancestor of ``source``) as the caller's scan path
+    # so we can distinguish the caller's own path (which the message may
+    # echo) from the mapping's ``source_path`` (which it may not).
+    conflict = local_copy_scan_conflict(
+        db, [staged["archive"]],
+        active_workspace_id=db._active_workspace_id,
+    )
+    assert conflict is not None
+    assert staged["source"] not in conflict
+    assert "another workspace" in conflict
+
+
+def test_scan_conflict_sees_queued_folder_stage_job(staged, tmp_path):
+    """A folder-stage job that has been queued but whose worker has not yet
+    entered ``stage_folder`` has no ``local_folder_mappings`` row. Scan and
+    import admissions that only read the mapping table would accept a path
+    the queued stage is about to rebase, and the scan would then walk the
+    staged originals once the mapping publishes.
+    """
+    from services.local_folder import (
+        local_copy_scan_conflict,
+        stage_pending_source_paths,
+    )
+
+    db = staged["db"]
+    # Register a fresh folder that is NOT yet staged: no mapping row exists.
+    pending_source = tmp_path / "queued-source"
+    pending_source.mkdir()
+    fid = db.add_folder(str(pending_source), name="queued")
+
+    def list_jobs():
+        return [
+            {
+                "id": "job-1",
+                "type": "work-locally-folder-stage",
+                "status": "queued",
+                "workspace_id": 99,
+                "config": {"root_folder_ids": [fid]},
+            }
+        ]
+
+    pending = stage_pending_source_paths(list_jobs, db)
+    assert str(pending_source) in pending
+
+    conflict = local_copy_scan_conflict(
+        db, [str(pending_source)],
+        pending_stage_sources=pending,
+    )
+    assert conflict is not None
+    assert "stage" in conflict.lower()
+
+
+def test_scan_conflict_ignores_stage_job_in_terminal_state(staged, tmp_path):
+    """A stage job that has completed, failed, or been cancelled no longer
+    holds a claim on its source. ``stage_pending_source_paths`` filters by
+    the queued/running/pausing/paused statuses so a stale entry in job
+    history does not block every future scan.
+    """
+    from services.local_folder import stage_pending_source_paths
+
+    db = staged["db"]
+    pending_source = tmp_path / "done-source"
+    pending_source.mkdir()
+    fid = db.add_folder(str(pending_source), name="done")
+
+    def list_jobs():
+        return [
+            {
+                "id": "job-1",
+                "type": "work-locally-folder-stage",
+                "status": "completed",
+                "workspace_id": 99,
+                "config": {"root_folder_ids": [fid]},
+            }
+        ]
+
+    assert stage_pending_source_paths(list_jobs, db) == []
+
+
+def test_stage_admission_refuses_when_scan_registered_first(
+    staged, tmp_path, monkeypatch,
+):
+    """``_busy_job`` includes queued/running scan and import jobs whose
+    ``config`` paths overlap the stage source, even when those jobs live
+    in a workspace that shares no folder with the mapping. Local mappings
+    are keyed on source path, so cross-workspace overlap is what actually
+    determines whether a scan will race a stage's catalog rebase.
+    """
+    db = staged["db"]
+    # A fresh folder to stage: no mapping yet.
+    pending_source = tmp_path / "to-stage"
+    pending_source.mkdir()
+    (pending_source / "b.jpg").write_bytes(b"jpg")
+    stage_fid = db.add_folder(str(pending_source), name="to-stage")
+
+    real_runner = staged["app"]._job_runner
+    fake_scan_job = {
+        "id": "scan-1",
+        "type": "scan",
+        "status": "running",
+        "workspace_id": 99,
+        "config": {"roots": [str(pending_source)]},
+        "blocks_local_transitions": True,
+    }
+    monkeypatch.setattr(
+        real_runner, "list_jobs", lambda: [fake_scan_job],
+    )
+
+    resp = staged["client"].post(
+        "/api/workspaces/active/local-folders/stage",
+        json={"root_folder_ids": [stage_fid]},
+    )
+    assert resp.status_code == 409
+    assert "scan" in resp.get_json()["error"].lower()

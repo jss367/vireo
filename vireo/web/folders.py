@@ -18,6 +18,7 @@ from services.local_folder import (
     local_copy_scan_conflict,
     local_root_for_folder,
     local_root_under_folder,
+    stage_pending_source_paths,
 )
 from services.local_workspace import folder_has_local_workspace, stage_boundary_lock
 from web.background_jobs import make_background_job
@@ -367,22 +368,30 @@ def create_folders_blueprint(
             )
         if not os.path.isdir(root):
             return json_error(f"folder path no longer exists: {root}")
-        with stage_boundary_lock():
-            conflict = local_copy_scan_conflict(db, [root])
-        if conflict:
-            return json_error(conflict, 409)
-
         work = build_scan_work(root, incremental, ctx.workspace_id)
-
-        return ctx.start(
-            "scan", work,
-            config={
-                "root": root,
-                "incremental": incremental,
-                "folder_id": folder_id,
-            },
-            pausable=True,
-        )
+        # Hold ``stage_boundary_lock`` across the conflict check and
+        # ``ctx.start`` so a stage registering after us cannot miss this
+        # rescan in ``_busy_job`` -- see the ``/api/jobs/scan`` guard.
+        with stage_boundary_lock():
+            pending_sources = stage_pending_source_paths(
+                ctx.runner.list_jobs if ctx.runner is not None else None, db,
+            )
+            conflict = local_copy_scan_conflict(
+                db, [root],
+                active_workspace_id=ctx.workspace_id,
+                pending_stage_sources=pending_sources,
+            )
+            if conflict:
+                return json_error(conflict, 409)
+            return ctx.start(
+                "scan", work,
+                config={
+                    "root": root,
+                    "incremental": incremental,
+                    "folder_id": folder_id,
+                },
+                pausable=True,
+            )
 
     @blueprint.route("/api/folders/reveal", methods=["POST"])
     def api_folders_reveal():

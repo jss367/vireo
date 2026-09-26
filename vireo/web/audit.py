@@ -17,6 +17,7 @@ from metadata import scan_metadata_warning
 from services.local_folder import (
     local_copy_scan_conflict,
     stage_boundary_lock,
+    stage_pending_source_paths,
 )
 
 log = logging.getLogger(__name__)
@@ -29,6 +30,7 @@ def create_audit_blueprint(
     *,
     cleanup_cached_files_for_deleted_photos,
     invalidate_missing_originals,
+    get_runner,
 ):
     """Build the audit blueprint.
 
@@ -37,7 +39,9 @@ def create_audit_blueprint(
     ``cleanup_cached_files_for_deleted_photos`` (the app's ``PhotoDeletion``)
     unlinks the thumbnails, previews and working copies of deleted photos, and
     ``invalidate_missing_originals`` (the app's ``MissingOriginals``) drops
-    the missing-originals cache after the catalog changes.
+    the missing-originals cache after the catalog changes. ``get_runner``
+    returns the current :class:`jobs.JobRunner` so ``import-untracked`` can
+    see queued folder-stage jobs whose mapping rows do not yet exist.
     """
     blueprint = Blueprint("audit", __name__)
 
@@ -268,9 +272,19 @@ def create_audit_blueprint(
         # rows to the local path, so its originals now read as "untracked"
         # under this workspace's root and pass the containment check above.
         # Refuse them, or the scan behind ``import_untracked`` recreates the
-        # original-path rows the local copy was meant to replace.
+        # original-path rows the local copy was meant to replace. Include
+        # queued folder-stage jobs so a stage waiting for its worker can
+        # still block an admission that would race it.
+        runner = get_runner()
         with stage_boundary_lock():
-            conflict = local_copy_scan_conflict(db, paths)
+            pending_sources = stage_pending_source_paths(
+                runner.list_jobs if runner is not None else None, db,
+            )
+            conflict = local_copy_scan_conflict(
+                db, paths,
+                active_workspace_id=db._active_workspace_id,
+                pending_stage_sources=pending_sources,
+            )
         if conflict:
             return json_error(conflict, 409)
         from audit import import_untracked

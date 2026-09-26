@@ -302,6 +302,80 @@ def local_root_under_folder(db, folder_id: int) -> int | None:
     return roots[0] if roots else None
 
 
+def _resolve_physical(path: str) -> str | None:
+    """Return ``os.path.normcase(realpath(path))`` or ``None`` on failure."""
+    try:
+        return os.path.normcase(os.path.realpath(path))
+    except (ValueError, OSError):
+        return None
+
+
+def _load_staged_source_index(db) -> list[tuple[int, str, str | None]]:
+    """Snapshot of ``(root_folder_id, source_path, physical_source_path)``.
+
+    Cached per call so a snapshot import that passes every frozen file path
+    can compare each one against a resolved copy of every mapping without
+    repeating the DB query or the ``realpath`` walk.
+    """
+    entries: list[tuple[int, str, str | None]] = []
+    for row in db.conn.execute(
+        "SELECT root_folder_id, source_path FROM local_folder_mappings "
+        "WHERE is_root=1 ORDER BY root_folder_id"
+    ).fetchall():
+        source = row["source_path"]
+        if not source:
+            continue
+        entries.append((int(row["root_folder_id"]), source, _resolve_physical(source)))
+    return entries
+
+
+def _path_overlaps_source(
+    path: str,
+    path_physical: str | None,
+    source: str,
+    source_physical: str | None,
+    *,
+    include_descendants: bool,
+) -> bool:
+    """Whether ``path`` overlaps ``source`` lexically or physically."""
+    if _is_within(path, source):
+        return True
+    if path_physical and source_physical:
+        try:
+            if os.path.commonpath([path_physical, source_physical]) == source_physical:
+                return True
+        except ValueError:
+            pass
+    if not include_descendants:
+        return False
+    if _is_within(source, path):
+        return True
+    if path_physical and source_physical:
+        try:
+            if os.path.commonpath([source_physical, path_physical]) == path_physical:
+                return True
+        except ValueError:
+            pass
+    return False
+
+
+def _staged_root_visible_to_workspace(
+    db, root_folder_id: int, workspace_id: int | None,
+) -> bool:
+    """Whether a staged root's mappings sit under a folder the workspace sees."""
+    if workspace_id is None:
+        return False
+    row = db.conn.execute(
+        """SELECT 1
+           FROM workspace_folders wf
+           JOIN local_folder_mappings lfm ON lfm.folder_id = wf.folder_id
+           WHERE wf.workspace_id=? AND lfm.root_folder_id=?
+           LIMIT 1""",
+        (int(workspace_id), int(root_folder_id)),
+    ).fetchone()
+    return row is not None
+
+
 def local_root_overlapping_path(
     db, path: str, *, include_descendants: bool = True,
 ) -> int | None:
@@ -329,46 +403,127 @@ def local_root_overlapping_path(
     """
     if not path:
         return None
-    for entry in db.conn.execute(
-        "SELECT root_folder_id, source_path FROM local_folder_mappings "
-        "WHERE is_root=1 ORDER BY root_folder_id"
-    ).fetchall():
-        source = entry["source_path"]
-        if not source:
-            continue
-        if (
-            _is_within(path, source)
-            or _physical_is_within(path, source)
-            or (
-                include_descendants
-                and (_is_within(source, path) or _physical_is_within(source, path))
-            )
+    path_physical = _resolve_physical(path)
+    for root_id, source, source_physical in _load_staged_source_index(db):
+        if _path_overlaps_source(
+            path, path_physical, source, source_physical,
+            include_descendants=include_descendants,
         ):
-            return int(entry["root_folder_id"])
+            return root_id
     return None
 
 
-def local_copy_scan_conflict(
-    db, paths, *, include_descendants: bool = True,
-) -> str | None:
-    """User-facing refusal when scanning ``paths`` would re-add staged photos."""
-    for path in paths:
-        root_id = local_root_overlapping_path(
-            db, path, include_descendants=include_descendants,
-        )
-        if root_id is None:
+def stage_pending_source_paths(list_jobs, db) -> list[str]:
+    """Source paths reserved by queued/running folder-stage jobs.
+
+    A stage route registers a job under ``config.root_folder_ids`` and
+    returns 202 before the worker enters :func:`stage_folder`, which is
+    what actually creates the ``local_folder_mappings`` row. In that
+    window a scan or import admission that only reads
+    ``local_folder_mappings`` would let a path the queued stage will
+    rebase slip through. Callers pass these source paths to
+    :func:`local_copy_scan_conflict` alongside the DB check so a scan or
+    import cannot be registered against a path another workspace is
+    about to make catalog-unsafe.
+
+    ``list_jobs`` is the runner's ``list_jobs`` callable, or an already
+    materialized job list. ``db`` reads the pending root's current
+    ``folders.path`` (equal to the source before staging rebases it).
+    """
+    if list_jobs is None:
+        return []
+    jobs = list_jobs() if callable(list_jobs) else list_jobs
+    pending_root_ids: set[int] = set()
+    for job in jobs or []:
+        if job.get("type") != "work-locally-folder-stage":
             continue
+        if job.get("status") not in {"queued", "running", "pausing", "paused"}:
+            continue
+        config = job.get("config") or {}
+        if not isinstance(config, dict):
+            continue
+        for raw in config.get("root_folder_ids") or []:
+            try:
+                pending_root_ids.add(int(raw))
+            except (TypeError, ValueError):
+                continue
+    if not pending_root_ids:
+        return []
+    sources: list[str] = []
+    for root_id in sorted(pending_root_ids):
         row = db.conn.execute(
-            "SELECT source_path FROM local_folder_mappings "
-            "WHERE root_folder_id=? AND is_root=1",
-            (root_id,),
+            "SELECT path FROM folders WHERE id=?",
+            (int(root_id),),
         ).fetchone()
-        source = row["source_path"] if row else path
-        return (
-            f"Cannot scan {path} while {source} has a local copy: the scan "
-            "would catalog its originals a second time. Sync or discard the "
-            "local copy first."
-        )
+        if row and row["path"]:
+            sources.append(row["path"])
+    return sources
+
+
+def local_copy_scan_conflict(
+    db,
+    paths,
+    *,
+    include_descendants: bool = True,
+    active_workspace_id: int | None = None,
+    pending_stage_sources: list[str] | None = None,
+) -> str | None:
+    """User-facing refusal when scanning ``paths`` would re-add staged photos.
+
+    Loads the staged-source index once and reuses each source's resolved
+    physical spelling across every candidate ``path``, so a snapshot
+    import passing thousands of frozen file paths does one DB query and
+    one ``realpath`` per staged source instead of one per path.
+
+    When the matching mapping is not visible from ``active_workspace_id``
+    (another workspace staged it and this workspace shares no folder
+    with that mapping), the refusal names only the caller's path -- not
+    the mapping's ``source_path``, which the caller could not otherwise
+    see. Same for a queued folder-stage that overlaps: the caller is
+    told a stage job overlaps their path, not which source it names.
+
+    ``pending_stage_sources`` covers folder-stage jobs another workspace
+    has queued but whose worker has not yet created the mapping row --
+    otherwise the DB check alone would accept the path in that window.
+    """
+    staged = _load_staged_source_index(db)
+    pending: list[str] = []
+    for source in pending_stage_sources or []:
+        if source:
+            pending.append(source)
+    pending_physical = [(source, _resolve_physical(source)) for source in pending]
+    for path in paths:
+        if not path:
+            continue
+        path_physical = _resolve_physical(path)
+        for root_id, source, source_physical in staged:
+            if _path_overlaps_source(
+                path, path_physical, source, source_physical,
+                include_descendants=include_descendants,
+            ):
+                if _staged_root_visible_to_workspace(
+                    db, root_id, active_workspace_id
+                ):
+                    return (
+                        f"Cannot scan {path} while {source} has a local copy: "
+                        "the scan would catalog its originals a second time. "
+                        "Sync or discard the local copy first."
+                    )
+                return (
+                    f"Cannot scan {path}: it overlaps a local copy staged "
+                    "from another workspace. Sync or discard that local "
+                    "copy first."
+                )
+        for source, source_physical in pending_physical:
+            if _path_overlaps_source(
+                path, path_physical, source, source_physical,
+                include_descendants=include_descendants,
+            ):
+                return (
+                    f"Cannot scan {path}: another workspace has a "
+                    "folder-stage job queued that overlaps it. Wait for "
+                    "that stage job to finish before scanning."
+                )
     return None
 
 
