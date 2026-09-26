@@ -26,19 +26,23 @@ handed the ``Database`` itself to a helper (``resolve_import_alias(self,
 now pass ``self.db``, the façade, since ``self`` is the repository here. The
 SQL text, parameter order, chunk sizes and commit placement are unchanged.
 
+What lives in ``repositories/keyword_provenance.py`` instead: the
+``photo_keywords`` writers that create or converge an association
+(``tag_photo``, ``_merge_keyword_into``, ``retire_builtin_wildlife_genre``,
+``link_keyword_to_place``), which ``test_keyword_provenance_contract`` keys
+to that module, and the keyword methods that call ``_merge_keyword_into``
+in the middle of their own work (``_upsert_one_keyword``,
+``_normalize_keyword_data_once``). This module writes no ``photo_keywords``
+association itself; a structural test fails if it ever references one of
+those writers.
+
 What deliberately stays on ``Database``:
 
-- The provenance-pinned ``photo_keywords`` writers that
-  ``test_keyword_provenance_contract`` keys to ``db.py``: ``tag_photo``,
-  ``_merge_keyword_into`` and ``retire_builtin_wildlife_genre``, whole.
-- The methods that call ``_merge_keyword_into`` in the middle of their own
-  work, so that call stays a visible ``self._merge_keyword_into(...)`` in
-  db.py: ``_upsert_one_keyword`` and ``_normalize_keyword_data_once`` stay
-  whole; ``_merge_duplicate_keywords_pass`` and ``update_keyword`` keep
-  their control flow and delegate only their statements here
+- The control flow of ``_merge_duplicate_keywords_pass`` and
+  ``update_keyword``, with their ``self._merge_keyword_into(...)`` call on
+  the façade; they delegate only their statements here
   (``duplicate_scope_rows`` / ``live_ids``, ``get_update_target`` /
-  ``same_type_peer`` / ``cross_type_peer`` / ``apply_update``). A structural
-  test fails if this module ever references one of those writers.
+  ``same_type_peer`` / ``cross_type_peer`` / ``apply_update``).
 - The active-workspace state. ``workspace_id`` is resolved lazily through
   ``Database._ws_id`` at exactly the points the original code called it.
 - Composition. Every façade method a moved body calls is bound from the
@@ -2953,8 +2957,9 @@ class KeywordRepository:
     #
     # ``Database._merge_duplicate_keywords_pass`` and
     # ``Database.update_keyword`` keep their control flow (and the
-    # provenance-pinned ``self._merge_keyword_into(...)`` call) in db.py; the
-    # statements they issue live here, unchanged.
+    # ``self._merge_keyword_into(...)`` call, which runs the merge in
+    # ``repositories/keyword_provenance.py``) in db.py; the statements they
+    # issue live here, unchanged.
 
     def duplicate_scope_rows(self, ws):
         """Keywords tagged on a photo in workspace ``ws``, plus their ancestors.

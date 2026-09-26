@@ -9,7 +9,7 @@ reconciliation with the per-collision state transfers it runs.
 ``Database`` keeps the composition. Keyword re-tagging stays on the façade
 (``Database.tag_photo`` / ``untag_photo``) so the keyword-provenance fold and
 its contract test (``test_keyword_provenance_contract``) keep seeing every
-writer in ``db.py``. The merge and ``move_folder_path`` call other domains'
+writer in ``repositories/keyword_provenance.py``. The merge and ``move_folder_path`` call other domains'
 ``Database`` methods mid-transaction; those are passed in as callbacks so the
 bodies here stay verbatim and patched façade methods still take effect.
 

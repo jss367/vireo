@@ -14,12 +14,16 @@ convergence point, that the calls these methods make to each other and to
 the rest of the façade (``_merge_keyword_into`` recursion, ``tag_photo``,
 ``queue_change``, the curation renames, ...) still route through
 ``Database`` so monkeypatches take effect, and that every helper that is
-handed "the database" receives the ``Database`` itself.
+handed "the database" receives the ``Database`` itself. The structural
+tests at the end pin the delegation to ``KeywordProvenanceRepository``.
 """
 
+import ast
 import contextlib
+import inspect
 import json
 import sqlite3
+import textwrap
 
 import pytest
 from db import (
@@ -953,3 +957,160 @@ def test_accept_prediction_grouped_skips_decided_siblings(db, lib):
         db, "SELECT prediction_id, status FROM prediction_review WHERE workspace_id = ?",
         (ws,),
     )) == sorted([(preds[0], "accepted"), (preds[1], "accepted"), (preds[2], "rejected")])
+
+
+# -- structure ----------------------------------------------------------------------------
+
+
+_DELEGATING_PROVENANCE_METHODS = (
+    "tag_photo",
+    "_merge_keyword_into",
+    "link_keyword_to_place",
+    "retire_builtin_wildlife_genre",
+    "_upsert_one_keyword",
+    "_normalize_keyword_data_once",
+    "accept_prediction",
+)
+
+
+def _self_attrs(fn):
+    source = textwrap.dedent(inspect.getsource(fn))
+    node = ast.parse(source).body[0]
+    return {
+        n.attr
+        for n in ast.walk(node)
+        if isinstance(n, ast.Attribute)
+        and isinstance(n.value, ast.Name)
+        and n.value.id == "self"
+    }
+
+
+def _module_tree():
+    import repositories.keyword_provenance as module
+
+    return module, ast.parse(inspect.getsource(module))
+
+
+def _repository_methods(tree):
+    cls = next(
+        n for n in tree.body
+        if isinstance(n, ast.ClassDef) and n.name == "KeywordProvenanceRepository"
+    )
+    return {n.name: n for n in cls.body if isinstance(n, ast.FunctionDef)}
+
+
+@pytest.mark.parametrize("name", _DELEGATING_PROVENANCE_METHODS)
+def test_provenance_method_delegates_to_repository(name):
+    attrs = _self_attrs(getattr(Database, name))
+    assert "conn" not in attrs, (
+        f"Database.{name} touches self.conn; move the SQL to "
+        "KeywordProvenanceRepository"
+    )
+    assert "_keyword_provenance_repository" in attrs, (
+        f"Database.{name} no longer delegates to KeywordProvenanceRepository"
+    )
+
+
+def test_keyword_provenance_repository_routes_facade_calls_through_database(db):
+    from repositories.keyword_provenance import FACADE_METHODS
+
+    repo = db._keyword_provenance_repository()
+    for name in FACADE_METHODS:
+        assert getattr(repo, name) == getattr(db, name), name
+    assert repo.db is db
+
+
+def test_keyword_provenance_facade_names_never_shadow_repository_methods():
+    module, tree = _module_tree()
+    assert not set(_repository_methods(tree)) & set(module.FACADE_METHODS)
+
+
+def test_moved_writers_reach_each_other_only_through_the_facade():
+    """Calls between the writers go through their ``Database`` names, so a
+    monkeypatch of ``Database._merge_keyword_into`` / ``tag_photo`` still
+    intercepts the recursion, the mid-flight merges and the accept's tag."""
+    _module, tree = _module_tree()
+    methods = _repository_methods(tree)
+
+    def self_attrs(node):
+        return {
+            n.attr for n in ast.walk(node)
+            if isinstance(n, ast.Attribute)
+            and isinstance(n.value, ast.Name) and n.value.id == "self"
+        }
+
+    own = set(methods) - {"__init__", "workspace_id", "_active_workspace_id"}
+    for name, node in methods.items():
+        assert not self_attrs(node) & own, (name, self_attrs(node) & own)
+    expected = {
+        "merge_keyword_into": "_merge_keyword_into",
+        "upsert_one_keyword": "_merge_keyword_into",
+        "normalize_keyword_data_once": "_merge_keyword_into",
+        "accept_prediction": "tag_photo",
+    }
+    for name, facade_name in expected.items():
+        assert facade_name in self_attrs(methods[name]), (name, facade_name)
+
+
+def test_keyword_provenance_repository_does_not_import_db():
+    """The fold stays defined once in ``db`` and is injected, not re-imported."""
+    _module, tree = _module_tree()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            assert all(a.name != "db" for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            assert node.module != "db"
+
+
+def test_keyword_provenance_repository_injects_the_db_fold(db):
+    import db as db_module
+
+    repo = db._keyword_provenance_repository()
+    assert repo.keyword_source_max_sql is db_module.keyword_source_max_sql
+    assert repo.KEYWORD_SOURCE_CONFLICT_SQL is db_module.KEYWORD_SOURCE_CONFLICT_SQL
+    assert repo.KEYWORD_SOURCE_MANUAL == db_module.KEYWORD_SOURCE_MANUAL
+    assert repo._chunks is db_module._chunks
+    assert repo.log is db_module.log
+
+
+def test_keyword_provenance_repository_never_hands_itself_out_as_the_database():
+    """Moved bodies that passed ``self`` (the Database) to a helper must pass
+    ``self.db`` now; a bare ``self`` argument would hand over the repository."""
+    _module, tree = _module_tree()
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    bare = [
+        node.lineno for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and node.id == "self"
+        and not (isinstance(parents.get(node), ast.Attribute)
+                 and parents[node].value is node)
+        and not isinstance(parents.get(node), ast.arguments)
+    ]
+    # The only one is ``__init__`` storing the façade (``setattr(self, ...)``).
+    assert len(bare) == 1
+
+
+def test_keyword_provenance_facade_signatures_unchanged():
+    sig = {n: str(inspect.signature(getattr(Database, n)))
+           for n in _DELEGATING_PROVENANCE_METHODS}
+    assert sig == {
+        "tag_photo": "(self, photo_id, keyword_id, source='manual', _commit=True)",
+        "_merge_keyword_into": "(self, src_id, dst_id, *, pending_source_only=False)",
+        "link_keyword_to_place": "(self, keyword_id, details)",
+        "retire_builtin_wildlife_genre": "(self, force=False)",
+        "_upsert_one_keyword": (
+            "(self, name, parent_id, place_id=None, latitude=None, longitude=None, "
+            "reuse_location_component=False)"
+        ),
+        "_normalize_keyword_data_once": "(self)",
+        "accept_prediction": (
+            "(self, prediction_id, replace_species=False, photo_ids=None, "
+            "prediction_ids=None, _commit=True)"
+        ),
+    }
+    # The repository's ``tag`` has no default to fall back on: the façade's
+    # fail-safe ``'manual'`` is the only one.
+    from repositories.keyword_provenance import KeywordProvenanceRepository
+
+    params = inspect.signature(KeywordProvenanceRepository.tag).parameters
+    assert params["source"].default is inspect.Parameter.empty
+    assert params["source"].kind is inspect.Parameter.KEYWORD_ONLY

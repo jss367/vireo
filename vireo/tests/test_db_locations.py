@@ -867,7 +867,8 @@ def test_reverse_geocode_cache_put_upserts_negative_result(db):
 # Database methods whose SQL moved to repositories/locations.py. Each stays on
 # Database as a thin wrapper so existing call sites keep working; none may
 # reach the connection directly again. ``link_keyword_to_place`` is not here:
-# test_keyword_provenance_contract pins it to db.py as a photo_keywords writer.
+# it is a photo_keywords writer, so it delegates to KeywordProvenanceRepository
+# (test_keyword_provenance_contract keys it to repositories/keyword_provenance.py).
 _DELEGATING_LOCATION_METHODS = (
     "get_photo_location_statuses",
     "get_geolocated_photos",
