@@ -1155,8 +1155,9 @@ def test_browse_lightbox_zoom_hud_controls_logarithmic_zoom(live_server, page):
     expect(badge).to_have_attribute("aria-expanded", "false")
 
 
+@pytest.mark.parametrize("subjects_open", [False, True], ids=["subjects_collapsed", "subjects_expanded"])
 def test_browse_lightbox_zoom_hud_keeps_near_fit_native_stop_separate(
-    live_server, page
+    live_server, page, subjects_open
 ):
     """A near-fit native zoom keeps separate exact Fit and 1:1 actions."""
     svg = (
@@ -1180,6 +1181,12 @@ def test_browse_lightbox_zoom_hud_keeps_near_fit_native_stop_separate(
                 !window._lbVisualTransitionPending;
         }"""
     )
+
+    # Subject data arrives asynchronously. Keep its panel present so it cannot
+    # hide a pointer-interception regression by arriving after the zoom clicks.
+    expect(page.locator("#lightboxSubjects")).to_be_visible()
+    if subjects_open:
+        page.locator("#lightboxSubjectSummary").click()
 
     # Put native zoom just above fit but below the track position where its 1:1
     # label would avoid overlapping Fit. The label is visually offset to 8%,

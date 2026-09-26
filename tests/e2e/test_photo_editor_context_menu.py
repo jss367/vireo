@@ -71,7 +71,7 @@ def test_photo_editor_context_disables_save_while_request_is_pending(
             }
             return originalSafeFetch(url, options, config);
           };
-          saveRecipe();
+          window.__pendingEditorSave = saveRecipe();
         }"""
     )
 
@@ -124,7 +124,17 @@ def test_photo_editor_context_disables_save_while_request_is_pending(
     ) is True
 
     page.evaluate("() => window.__resolveEditorSave({recipe: {rotation: 90}})")
-    page.wait_for_function("() => !isEditorDirty()")
+    # The reset above is a newer edit. Completing the PUT updates the saved
+    # baseline without replacing that working recipe or marking it clean.
+    assert page.evaluate("window.__pendingEditorSave") is False
+    assert page.evaluate("editorState.savedRecipe.rotation") == 90
+    assert page.evaluate("editorState.recipe.rotation || 0") == 0
+    assert page.evaluate("isEditorDirty()") is True
+    expect(page.locator("#saveBtn")).to_be_enabled()
+    assert page.evaluate(
+        """() => buildPhotoEditorContextMenu()
+          .find(item => item.label === 'Save Changes').disabled"""
+    ) is False
 
 
 def test_photo_editor_save_uses_authoritative_staleness_from_response(
