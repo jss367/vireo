@@ -957,3 +957,69 @@ def validate_value(key, raw):
                 )
 
     return value
+
+
+_MISSING = object()
+
+
+def _usable_number(value, kind):
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        # Python ints are arbitrary precision, so they cannot be NaN or
+        # infinity. Calling ``math.isfinite`` on one raises OverflowError
+        # once its magnitude exceeds the float range, which would break
+        # every reader of a legacy config that stored such a value.
+        return True
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return False
+        # A float stored where the schema wants an int (e.g. legacy
+        # ``"photos_per_page": 50.5``) would pass to SQLite's ``LIMIT ?``
+        # and raise ``IntegrityError: datatype mismatch``. Route the value
+        # through ``_coerce`` instead: an integer-valued float becomes an
+        # int, and a fractional one falls back to the default.
+        return kind != "int"
+    return False
+
+
+def repair_types(config, defaults):
+    """Replace numeric and boolean leaves that cannot be read as their type.
+
+    Older write paths stored settings without validating them, so a
+    ``config.json`` or a workspace's overrides can hold ``null``, ``"abc"``
+    or an object where a number belongs, and every reader doing ``float()``
+    or a comparison on it then fails. Each such leaf falls back to its
+    value in ``defaults``, or is dropped when ``defaults`` has none (for a
+    workspace, dropping it inherits the global value). A numeric string
+    such as ``"0.5"`` is converted rather than discarded.
+
+    Only the type is repaired. A number outside the schema's range is left
+    alone: that may be a deliberate hand edit, and the write paths already
+    refuse new out-of-range values. ``config`` is modified in place and
+    returned.
+    """
+    for key, spec in SCHEMA.items():
+        kind = spec["type"]
+        if kind not in ("int", "float", "bool"):
+            continue
+        value = get_dotted(config, key, default=_MISSING)
+        if value is _MISSING:
+            continue
+        if value is None and spec.get("nullable"):
+            continue
+        if kind == "bool" and isinstance(value, bool):
+            continue
+        if kind != "bool" and _usable_number(value, kind):
+            continue
+        try:
+            if kind != "bool" and not isinstance(value, (str, int, float)):
+                raise ValidationError(f"{key} is not a number")
+            repaired = _coerce(value, kind)
+        except ValidationError:
+            repaired = get_dotted(defaults, key, default=_MISSING)
+        if repaired is _MISSING:
+            delete_dotted(config, key)
+        else:
+            set_dotted(config, key, repaired)
+    return config

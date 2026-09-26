@@ -396,6 +396,36 @@ def test_first_run_never_consults_the_pin(db, monkeypatch):
     assert len(db.write_detection_batch(pid, MODEL, [_d()])) == 1
 
 
+def test_force_replace_with_no_run_record_retires_stray_rows(db):
+    pid = _photo(db)
+    # A stray row with a different runtime and no ``detector_runs`` entry:
+    # a torn state ``save_detections`` (which never touches ``detector_runs``)
+    # or a legacy write can leave behind. Same-model, different box: the new
+    # write's same-runtime sweep would not touch it.
+    stray = _raw_det(db, pid, runtime_fingerprint="old-rt", x=0.9)
+    other_model = _raw_det(db, pid, model="other-det",
+                           runtime_fingerprint="old-rt")
+    ids = db.write_detection_batch(pid, MODEL, [_d(x=0.1)],
+                                   runtime_fingerprint="rt-new",
+                                   force_runtime_replace=True)
+    remaining = {r["id"] for r in _det_rows(db, pid)}
+    assert remaining == {ids[0], other_model}
+    assert stray not in remaining
+    # ``detector_runs`` now records the new authoritative run.
+    assert _run_row(db, pid)["runtime_fingerprint"] == "rt-new"
+
+
+def test_no_force_replace_with_no_run_record_keeps_stray_rows(db):
+    pid = _photo(db)
+    stray = _raw_det(db, pid, runtime_fingerprint="old-rt", x=0.9)
+    ids = db.write_detection_batch(pid, MODEL, [_d(x=0.1)],
+                                   runtime_fingerprint="rt-new")
+    # Non-forced writes keep unrelated-runtime rows: the pre-existing
+    # non-reclassify behavior for save_detections stays intact.
+    remaining = {r["id"] for r in _det_rows(db, pid)}
+    assert remaining == {ids[0], stray}
+
+
 def test_write_detection_batch_rolls_back_on_failure(db):
     pid = _photo(db)
     first = db.write_detection_batch(pid, MODEL, [_d(x=0.1)],
@@ -876,7 +906,11 @@ def test_bulk_reject_updates_in_chunks_of_500(db):
     statements = _trace(db)
     affected = db.bulk_reject_miss_category("no_subject")
     db.conn.set_trace_callback(None)
-    updates = [s for s in statements if s.startswith("UPDATE photos SET flag")]
+    # Distinct texts, in order: the trace callback re-reports the parent
+    # statement each time the per-row duplicate_rejections trigger fires.
+    updates = list(dict.fromkeys(
+        s for s in statements if s.startswith("UPDATE photos SET flag")
+    ))
     assert [s.count(",") + 1 for s in updates] == [500, 1]
     assert {a["photo_id"] for a in affected} == set(pids)
 

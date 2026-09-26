@@ -4,7 +4,9 @@ The tables here are ``workspace_folders`` (which folders a workspace sees,
 and which of them are user-facing roots) and ``workspace_folder_removals``
 (read through the ``workspace_removed_folders`` view), plus the
 workspace-scoped rows that follow a folder when it moves to another
-workspace. Every method takes the workspace id explicitly, so the
+workspace, and the photo-visibility read behind
+``Database._photo_in_workspace``. Every method takes the workspace id
+explicitly, so the
 repository is not bound to the active workspace.
 
 ``Database`` keeps the composition: subtree discovery
@@ -25,6 +27,18 @@ class WorkspaceFolderRepository:
 
     def commit(self):
         self.conn.commit()
+
+    # -- photo visibility ----------------------------------------------------
+
+    def photo_in_workspace(self, photo_id, workspace_id):
+        """True if the photo's folder is linked to ``workspace_id``."""
+        row = self.conn.execute(
+            """SELECT 1 FROM photos p
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               WHERE p.id = ? AND wf.workspace_id = ?""",
+            (photo_id, workspace_id),
+        ).fetchone()
+        return row is not None
 
     # -- linking -------------------------------------------------------------
 
@@ -406,6 +420,32 @@ class WorkspaceFolderRepository:
                                 )
                           )""",
                     [source_ws_id, source_ws_id] + chunk,
+                )
+
+            # Move color labels, which are per (photo, workspace) like the
+            # review rows above. A label the target already holds for the
+            # photo wins; the source row is dropped either way, since the
+            # source can no longer see the photo.
+            for chunk in self._chunks(moved_folder_ids):
+                placeholders = ",".join("?" for _ in chunk)
+                self.conn.execute(
+                    f"""INSERT OR IGNORE INTO photo_color_labels
+                          (photo_id, workspace_id, color)
+                        SELECT photo_id, ?, color
+                        FROM photo_color_labels
+                        WHERE workspace_id = ?
+                          AND photo_id IN (
+                              SELECT id FROM photos WHERE folder_id IN ({placeholders})
+                          )""",
+                    [target_ws_id, source_ws_id] + chunk,
+                )
+                self.conn.execute(
+                    f"""DELETE FROM photo_color_labels
+                        WHERE workspace_id = ?
+                          AND photo_id IN (
+                              SELECT id FROM photos WHERE folder_id IN ({placeholders})
+                          )""",
+                    [source_ws_id] + chunk,
                 )
 
             # Move manually selected Life List / Highlights representative

@@ -1315,6 +1315,78 @@ def test_merge_phantom_sibling_edits_link_staged_survivor(db, tmp_path):
         t["staged"]: str(tmp_path / "arch" / "day")}
 
 
+# -- _photo_syncable_in_workspace ---------------------------------------------
+
+
+def test_photo_syncable_in_workspace(db):
+    sibling = db.create_workspace("Sibling")
+    lib = _folder(db, "/lib", root=True)
+    other = _folder(db, "/other", link=False)
+    member = _photo(db, lib, "member.jpg")
+    granted = _photo(db, other, "granted.jpg")
+    stranger = _photo(db, other, "stranger.jpg")
+    db.conn.execute(
+        "INSERT INTO workspace_sync_only_photos (workspace_id, photo_id) "
+        "VALUES (?, ?)", (db._active_workspace_id, granted))
+    db.conn.commit()
+
+    assert db._photo_syncable_in_workspace(member) is True
+    assert db._photo_syncable_in_workspace(granted) is True
+    assert db._photo_syncable_in_workspace(stranger) is False
+    assert db._photo_syncable_in_workspace(stranger + 999) is False
+    db._verify_photo_syncable_in_workspace(granted)
+    with pytest.raises(ValueError):
+        db._verify_photo_syncable_in_workspace(stranger)
+    db.set_active_workspace(sibling)
+    assert db._photo_syncable_in_workspace(member) is False
+    assert db._photo_syncable_in_workspace(granted) is False
+    db.set_active_workspace(None)
+    with pytest.raises(RuntimeError, match="No active workspace set"):
+        db._photo_syncable_in_workspace(member)
+
+
+def test_photo_syncable_in_workspace_legacy_folder_grants(db):
+    sibling = db.create_workspace("Sibling")
+    granted = _folder(db, "/granted", root=True)
+    moved_to = _folder(db, "/moved", root=True)
+    direct = _photo(db, granted, "direct.jpg")
+    moved = _photo(db, moved_to, "moved.jpg")
+    stray = _photo(db, moved_to, "stray.jpg")  # no pending edge: not authorized
+    unrelated = _photo(db, moved_to, "unrelated.jpg")  # edge but no folder match
+    db.conn.execute(
+        "UPDATE photos SET last_move_source_folder_path = '/granted' "
+        "WHERE id IN (?, ?)", (moved, stray))
+    db.conn.execute(
+        "CREATE TABLE workspace_sync_only_folders "
+        "(workspace_id INTEGER, folder_id INTEGER)")
+    db.conn.execute(
+        "INSERT INTO workspace_sync_only_folders VALUES (?, ?)",
+        (sibling, granted))
+    db.conn.commit()
+    for pid in (direct, moved, unrelated):
+        _queue(db, pid, "rating", "3", "2026-01-01 00:00:00", ws=sibling)
+
+    db.set_active_workspace(sibling)
+    assert db._photo_syncable_in_workspace(direct) is True
+    assert db._photo_syncable_in_workspace(moved) is True
+    assert db._photo_syncable_in_workspace(stray) is False
+    assert db._photo_syncable_in_workspace(unrelated) is False
+
+
+def test_photo_syncable_in_workspace_checks_membership_through_the_facade(
+        db, monkeypatch):
+    other = _folder(db, "/other", link=False)
+    pid = _photo(db, other, "a.jpg")
+    assert db._photo_syncable_in_workspace(pid) is False
+    monkeypatch.setattr(Database, "_photo_in_workspace", lambda self, photo_id: True)
+    statements = _trace(db)
+    try:
+        assert db._photo_syncable_in_workspace(pid) is True
+    finally:
+        _stop_trace(db)
+    assert statements == []
+
+
 # -- structure ---------------------------------------------------------------
 
 MOVED = [
@@ -1327,6 +1399,7 @@ MOVED = [
     "_transfer_edit_recipe_for_merge", "_link_survivor_for_sibling_edits",
     "get_sync_only_photo_paths", "merge_staged_tree_into_archive",
     "check_filename_collisions", "query_move_rule_matches",
+    "_photo_syncable_in_workspace",
 ]
 
 

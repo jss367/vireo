@@ -110,6 +110,81 @@ def test_add_keyword_without_commit_leaves_transaction_open(db, lib):
     assert _visible(db, "SELECT COUNT(*) FROM keywords WHERE id = ?", (kid,)) == [(1,)]
 
 
+def _race_add(db, monkeypatch, insert):
+    """Run ``insert(other)`` on a second connection right after ``db``'s lookup."""
+    from repositories.keywords import KeywordRepository
+
+    other = Database(db._db_path)
+    other.set_active_workspace(db._active_workspace_id)
+    real = KeywordRepository._find_add_candidate
+    state = {"fired": False, "winner": None}
+
+    def racing(self, *args, **kwargs):
+        found = real(self, *args, **kwargs)
+        if not state["fired"]:
+            state["fired"] = True
+            state["winner"] = insert(other)
+        return found
+
+    monkeypatch.setattr(KeywordRepository, "_find_add_candidate", racing)
+    return other, state
+
+
+def test_add_keyword_race_reuses_concurrent_top_level_row(db, lib, monkeypatch):
+    # UNIQUE(name, parent_id) never fires for NULL parents, so without the
+    # write-locked re-check both callers would insert a root "Sunrise".
+    other, state = _race_add(db, monkeypatch, lambda o: o.add_keyword("Sunrise"))
+    try:
+        kid = db.add_keyword("sunrise")
+    finally:
+        other.close()
+    assert kid == state["winner"]
+    assert not db.conn.in_transaction
+    assert _visible(
+        db, "SELECT COUNT(*) FROM keywords WHERE name = 'sunrise' COLLATE NOCASE",
+    ) == [(1,)]
+
+
+def test_add_keyword_race_reuses_concurrent_child_row(db, lib, monkeypatch):
+    # With a parent the UNIQUE index does fire; the loser must reuse the
+    # winner's row instead of raising IntegrityError.
+    birds = db.add_keyword("Birds")
+    other, state = _race_add(
+        db, monkeypatch, lambda o: o.add_keyword("Heron", parent_id=birds),
+    )
+    try:
+        kid = db.add_keyword("Heron", parent_id=birds)
+    finally:
+        other.close()
+    assert kid == state["winner"]
+    assert _visible(
+        db, "SELECT COUNT(*) FROM keywords WHERE name = 'Heron' AND parent_id = ?",
+        (birds,),
+    ) == [(1,)]
+
+
+def test_add_keyword_race_reuses_concurrent_top_level_row_commit_false(db, lib, monkeypatch):
+    # ``_commit=False`` is the first mutation on caller-managed connections
+    # (sync.py, web/encounters.py, web/highlights.py, the import job at
+    # web/imports.py). Without the write-locked re-check both callers would
+    # commit a root "Sunrise" — SQLite treats NULL parents as distinct in
+    # UNIQUE(name, parent_id), so IntegrityError never fires.
+    other, state = _race_add(db, monkeypatch, lambda o: o.add_keyword("Sunrise"))
+    try:
+        kid = db.add_keyword("sunrise", _commit=False)
+        # The recursion at the ``existing`` fast path must leave the caller's
+        # transaction open — the caller (encounters, highlights, import, sync)
+        # commits later with its own follow-up writes.
+        assert db.conn.in_transaction
+        db.conn.commit()
+    finally:
+        other.close()
+    assert kid == state["winner"]
+    assert _visible(
+        db, "SELECT COUNT(*) FROM keywords WHERE name = 'sunrise' COLLATE NOCASE",
+    ) == [(1,)]
+
+
 @pytest.mark.parametrize("kwargs", [
     {"is_species": True},
     {"kw_type": "genre"},
@@ -590,9 +665,9 @@ def test_update_keyword_merges_into_same_slot_peer(db, lib, monkeypatch):
     merges = []
     real = db._merge_keyword_into
 
-    def recording(src, dst):
+    def recording(src, dst, **kwargs):
         merges.append((src, dst))
-        return real(src, dst)
+        return real(src, dst, **kwargs)
 
     monkeypatch.setattr(db, "_merge_keyword_into", recording)
     assert db.update_keyword(dup, name="heron") == keep
@@ -604,6 +679,56 @@ def test_update_keyword_merges_into_same_slot_peer(db, lib, monkeypatch):
     b = db.add_keyword("B", parent_id=birds)
     assert db.update_keyword(b, name="a") == a
     assert merges[-1] == (b, a)
+
+
+def test_update_keyword_merge_keeps_unrelated_pending_removal(db, lib):
+    # P carries Egret and Heron, then drops Egret (queued for the sidecar).
+    # Renaming Egret onto Heron must not turn that queued removal into
+    # "remove Heron": P is still tagged Heron.
+    p0, p1 = lib["p"][:2]
+    ws = lib["ws"]
+    heron = db.add_keyword("Heron")
+    egret = db.add_keyword("Egret")
+    db.tag_photo(p0, heron)
+    db.tag_photo(p0, egret)
+    db.tag_photo(p1, egret)
+    db.untag_photo(p0, egret)
+    db.queue_change(p0, "keyword_remove", "Egret", workspace_id=ws)
+    db.queue_change(p1, "keyword_add", "Egret", workspace_id=ws)
+
+    assert db.update_keyword(egret, name="Heron") == heron
+
+    rows = sorted(
+        tuple(r) for r in db.conn.execute(
+            "SELECT photo_id, change_type, value FROM pending_changes"
+        ).fetchall()
+    )
+    # p1 carried the merged-away spelling, so its add follows the survivor.
+    assert rows == sorted([
+        (p0, "keyword_remove", "Egret"),
+        (p1, "keyword_add", "Heron"),
+    ])
+    assert _visible(
+        db, "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?", (p0,),
+    ) == [(heron,)]
+
+
+def test_merge_duplicate_keywords_keeps_unrelated_pending_removal(db, lib):
+    p0, p1 = lib["p"][:2]
+    ws = lib["ws"]
+    keep = _raw_kw(db, "Heron")
+    dup = _raw_kw(db, "heron")
+    db.conn.commit()
+    db.tag_photo(p0, keep)
+    db.tag_photo(p1, dup)
+    db.queue_change(p0, "keyword_remove", "heron", workspace_id=ws)
+
+    assert db.merge_duplicate_keywords() >= 1
+
+    assert _kw(db, dup) is None
+    assert _visible(
+        db, "SELECT change_type, value FROM pending_changes WHERE photo_id = ?", (p0,),
+    ) == [("keyword_remove", "heron")]
 
 
 def test_update_keyword_cross_type_child_conflict(db, lib):
@@ -637,7 +762,7 @@ def test_merge_duplicate_keywords_merges_and_commits(db, lib, monkeypatch):
     merges = []
     real = db._merge_keyword_into
     monkeypatch.setattr(db, "_merge_keyword_into",
-                        lambda s, d: merges.append((s, d)) or real(s, d))
+                        lambda s, d, **kw: merges.append((s, d)) or real(s, d, **kw))
     total = db.merge_duplicate_keywords()
     assert total >= 1
     assert all(dst == a for _src, dst in merges)
@@ -653,7 +778,7 @@ def test_merge_duplicate_keywords_rolls_back_on_failure(db, lib, monkeypatch):
     db.tag_photo(p0, a)
     db.tag_photo(p1, b)
 
-    def boom(src, dst):
+    def boom(src, dst, **kwargs):
         db.conn.execute("UPDATE keywords SET name = 'changed' WHERE id = ?", (dst,))
         raise RuntimeError("merge failed")
 
@@ -676,7 +801,7 @@ def test_merge_duplicate_pass_skips_blank_keys_and_stale_groups(db, lib, monkeyp
     calls = []
     monkeypatch.setattr(db, "_normalize_keyword_row_name", lambda kid: calls.append(kid))
 
-    def fake_merge(src, dst):
+    def fake_merge(src, dst, **kwargs):
         db.conn.execute("UPDATE photo_keywords SET keyword_id = ? WHERE keyword_id = ?",
                         (dst, src))
         db.conn.execute("DELETE FROM keywords WHERE id = ?", (src,))
@@ -699,7 +824,7 @@ def test_merge_duplicate_pass_skips_group_whose_survivor_vanished(db, lib, monke
         db.tag_photo(pid, kid)
     order = []
 
-    def fake_merge(src, dst):
+    def fake_merge(src, dst, **kwargs):
         order.append((src, dst))
         # Deleting the parent-group loser also removes every child row,
         # so the child group's survivor is gone on this pass.
@@ -1246,9 +1371,11 @@ _DELEGATING_KEYWORD_METHODS = (
     "mark_species_keywords",
 )
 
-# ``test_keyword_provenance_contract`` keys these writers to db.py, and the
-# methods that call ``_merge_keyword_into`` mid-flight keep that call there.
-_KEYWORD_METHODS_KEPT_ON_DATABASE = (
+# The provenance writers and the methods that call ``_merge_keyword_into``
+# mid-flight live in ``KeywordProvenanceRepository``, not here (see
+# ``test_db_keyword_provenance``); ``test_keyword_provenance_contract`` keys
+# the writers to that module.
+_KEYWORD_METHODS_IN_PROVENANCE_REPOSITORY = (
     "tag_photo",
     "_merge_keyword_into",
     "retire_builtin_wildlife_genre",
@@ -1288,12 +1415,21 @@ def test_keyword_method_delegates_to_repository(name):
     )
 
 
-@pytest.mark.parametrize("name", _KEYWORD_METHODS_KEPT_ON_DATABASE)
-def test_provenance_writers_and_their_merge_callers_stay_on_database(name):
+@pytest.mark.parametrize("name", _KEYWORD_METHODS_IN_PROVENANCE_REPOSITORY)
+def test_provenance_writers_and_their_merge_callers_delegate_to_provenance_repository(
+    name,
+):
     attrs = _self_attrs(getattr(Database, name))
+    assert "conn" not in attrs, (
+        f"Database.{name} touches self.conn; its SQL belongs in "
+        "KeywordProvenanceRepository"
+    )
+    assert "_keyword_provenance_repository" in attrs, (
+        f"Database.{name} no longer delegates to KeywordProvenanceRepository"
+    )
     assert "_keyword_repository" not in attrs, (
-        f"Database.{name} must keep its photo_keywords write (or its "
-        "_merge_keyword_into call) in db.py; see test_keyword_provenance_contract"
+        f"Database.{name} is a photo_keywords writer (or merges mid-flight); "
+        "it must not route through KeywordRepository"
     )
 
 

@@ -5,11 +5,13 @@ HuggingFace repository into ~/.vireo/models/{model-id}/.
 """
 
 import contextlib
+import hashlib
 import json
 import logging
 import os
 import shutil
 import tempfile
+import threading
 
 import model_verify
 
@@ -199,18 +201,246 @@ KNOWN_MODELS = [
 ]
 
 
-def _load_config():
-    """Load the model config, creating defaults if missing."""
-    if os.path.exists(CONFIG_PATH):
-        with open(CONFIG_PATH) as f:
-            return json.load(f)
+# Serializes every read-modify-write of models.json in this process, so a
+# download's ``register_model`` and a concurrent ``set_active_model`` cannot
+# each load the old file and save over the other's change.
+_CONFIG_LOCK = threading.RLock()
+
+
+def _default_config():
     return {"models": [], "active_model": None}
 
 
+def _atomic_write_bytes(dest, raw_bytes):
+    """Write ``raw_bytes`` to ``dest`` atomically via a tempfile + os.replace.
+
+    The tempfile lives in ``dest``'s directory so ``os.replace`` stays
+    on the same filesystem (rename-atomic). A failed write leaves the
+    tempfile behind briefly; the ``finally``-style cleanup removes it,
+    and the exception propagates so callers can refuse to proceed.
+    """
+    dest_dir = os.path.dirname(dest) or "."
+    os.makedirs(dest_dir, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(
+        dir=dest_dir, prefix=".models.corrupt.", suffix=".tmp",
+    )
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(raw_bytes)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, dest)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_path)
+        raise
+
+
+def _file_bytes_equal(path, raw_bytes):
+    """True if ``path`` exists and holds exactly ``raw_bytes``."""
+    try:
+        with open(path, "rb") as f:
+            return f.read() == raw_bytes
+    except (FileNotFoundError, OSError):
+        return False
+
+
+def _write_corrupt_backup(raw_bytes):
+    """Preserve ``raw_bytes`` (what ``_load_config`` actually read from
+    ``CONFIG_PATH``) so a subsequent mutation cannot atomically replace
+    the malformed original without leaving a copy behind.
+
+    Reading from ``CONFIG_PATH`` again for the backup would race a
+    concurrent mutator that has since taken ``_CONFIG_LOCK``, preserved
+    the corrupt bytes itself, and atomically replaced ``CONFIG_PATH``
+    with a repaired registry: the reader's re-copy would then overwrite
+    ``.corrupt`` with the repaired bytes, destroying the only backup of
+    the malformed data.
+
+    Every distinct corrupt version is preserved. Each specific corrupt-
+    bytes value is always written to a content-addressed
+    ``models.json.corrupt.<sha1[:12]>`` file — idempotent, so re-observing
+    the same bytes is a no-op, and byte-distinct observations never
+    overwrite one another. In addition, a stable ``models.json.corrupt``
+    primary is populated on first observation; a stale primary from a
+    prior recovery is *not* overwritten (its aux copy still exists
+    somewhere by design), but it can no longer mask a fresh distinct
+    corruption because that fresh corruption has its own aux backup.
+
+    Backup failures propagate rather than being suppressed: a following
+    ``register_model`` / ``set_active_model`` / ``remove_model`` would
+    otherwise atomically overwrite the (only remaining, possibly
+    corrupt) original with normalized state.
+    """
+    primary = CONFIG_PATH + ".corrupt"
+    digest = hashlib.sha1(raw_bytes).hexdigest()[:12]
+    aux = f"{primary}.{digest}"
+
+    # Content-addressed aux: idempotent for the same corrupt bytes,
+    # distinct for byte-distinct corruptions. Nothing can overwrite it
+    # with different bytes because its name is derived from those bytes.
+    if not _file_bytes_equal(aux, raw_bytes):
+        _atomic_write_bytes(aux, raw_bytes)
+
+    # Stable primary name for humans / external tools. Do not overwrite
+    # an existing primary — it either matches raw_bytes (idempotent) or
+    # is an older distinct corruption we must not lose. Either way its
+    # bytes are safe in an aux backup.
+    if not _file_bytes_equal(primary, raw_bytes) and not os.path.exists(primary):
+        _atomic_write_bytes(primary, raw_bytes)
+
+
+def _load_config():
+    """Load the model config, creating defaults if missing.
+
+    A parse- or schema-corrupt file is kept as ``models.json.corrupt``
+    and treated as empty, rather than failing every models, readiness
+    and pipeline request until the file is fixed by hand. A read-side
+    ``OSError`` (permission denied, transient I/O) propagates instead:
+    otherwise the next ``register_model`` / ``set_active_model`` /
+    ``remove_model`` would save the empty default over an existing
+    registry it never actually managed to read.
+
+    A dict whose ``models`` value is not a list — for example, a hand-
+    edited ``models.json`` where ``models`` is a mapping of id → entry —
+    is normalized to an empty list in memory, but the original file is
+    preserved as ``models.json.corrupt`` first so a subsequent write does
+    not overwrite the only copy of the recoverable data. If that backup
+    copy itself fails (unwritable directory, disk full), the ``OSError``
+    propagates rather than being suppressed: otherwise the same follow-up
+    write would still overwrite the recoverable original with an empty
+    registry.
+
+    The backup is written from the bytes we actually read, not by re-
+    opening ``CONFIG_PATH`` — a concurrent mutator holding ``_CONFIG_LOCK``
+    can atomically replace the file between our failed parse and any
+    later ``copy2`` from ``CONFIG_PATH``, and re-copying the (now-
+    repaired) pathname would destroy the true corrupt-bytes backup.
+    """
+    try:
+        with open(CONFIG_PATH, "rb") as f:
+            raw = f.read()
+    except FileNotFoundError:
+        return _default_config()
+    try:
+        config = json.loads(raw)
+    except ValueError:
+        log.warning("Could not parse %s; treating it as empty", CONFIG_PATH,
+                    exc_info=True)
+        _write_corrupt_backup(raw)
+        return _default_config()
+    if not isinstance(config, dict):
+        log.warning("%s is not a JSON object; treating it as empty", CONFIG_PATH)
+        _write_corrupt_backup(raw)
+        return _default_config()
+    if not isinstance(config.get("models"), list):
+        log.warning(
+            "%s has a %s 'models' field; backing up as .corrupt and "
+            "normalizing to an empty list",
+            CONFIG_PATH, type(config.get("models")).__name__,
+        )
+        _write_corrupt_backup(raw)
+        config["models"] = []
+    return config
+
+
 def _save_config(config):
-    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-    with open(CONFIG_PATH, "w") as f:
-        json.dump(config, f, indent=2)
+    """Write models.json atomically (temp file in the same dir + replace)."""
+    config_dir = os.path.dirname(CONFIG_PATH)
+    os.makedirs(config_dir, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(
+        dir=config_dir, prefix=".models.", suffix=".json.tmp",
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(config, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, CONFIG_PATH)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_path)
+        raise
+
+
+def _inside_models_dir(path):
+    """True if ``path`` resolves strictly inside ``DEFAULT_MODELS_DIR``."""
+    root = os.path.realpath(DEFAULT_MODELS_DIR)
+    target = os.path.realpath(path)
+    if target == root:
+        return False
+    try:
+        return os.path.commonpath([root, target]) == root
+    except ValueError:  # different drives on Windows
+        return False
+
+
+def _model_is_managed(entry):
+    """True if Vireo downloaded these weights and owns their lifecycle.
+
+    ``remove_model`` deletes files only for managed entries: a custom
+    model the user registered with weights in their own folder is
+    unregistered, its files preserved, regardless of where the folder
+    lives. The confirmation dialog promises this even when the user
+    happens to keep their own weights beneath ``~/.vireo/models``.
+
+    Backward compatibility: entries written before the ``managed`` field
+    existed have neither key. Ids issued by ``/api/models/custom`` start
+    with ``custom-`` (see ``api_add_custom_model``) so they are treated
+    as unmanaged. Anything else is treated as a Vireo download when its
+    ``weights_path`` resolves to a layout an internal downloader would
+    have produced:
+
+    - Standard layout: ``DEFAULT_MODELS_DIR/<entry_id>`` — every
+      ``download_model`` call and current ``download_hf_model`` call
+      (whose id was set to match its download directory) produces this.
+    - Legacy Hugging Face layout: ``DEFAULT_MODELS_DIR/<repo-slug>``
+      paired with an id of ``hf-<owner>-<repo>`` and a ``model_str`` of
+      ``hf-hub:<owner>/<repo>``. ``download_hf_model`` built the id and
+      the download directory independently, so the standard-layout check
+      alone would leave gigabytes of Vireo-downloaded weights on disk
+      when the user removes such a legacy entry.
+
+    A legacy entry that matches neither layout (e.g. a user-registered
+    ``~/.vireo/models/my-model`` whose id is not ``my-model``, or a
+    hand-edited path that just happens to live inside the download root)
+    is preserved rather than deleted.
+    """
+    if not isinstance(entry, dict):
+        return False
+    managed = entry.get("managed")
+    if isinstance(managed, bool):
+        return managed
+    entry_id = str(entry.get("id", ""))
+    if entry_id.startswith("custom-") or not entry_id:
+        return False
+    weights_path = entry.get("weights_path") or ""
+    if not weights_path:
+        return False
+    try:
+        actual = os.path.realpath(weights_path)
+    except OSError:
+        return False
+    try:
+        expected = os.path.realpath(os.path.join(DEFAULT_MODELS_DIR, entry_id))
+    except OSError:
+        expected = None
+    if expected is not None and actual == expected:
+        return True
+    if entry_id.startswith("hf-"):
+        model_str = str(entry.get("model_str") or "")
+        if model_str.startswith("hf-hub:"):
+            slug = model_str.removeprefix("hf-hub:").rsplit("/", 1)[-1]
+            if slug:
+                try:
+                    legacy_expected = os.path.realpath(
+                        os.path.join(DEFAULT_MODELS_DIR, slug)
+                    )
+                except OSError:
+                    return False
+                if actual == legacy_expected:
+                    return True
+    return False
 
 
 def _check_onnx_downloaded(model_dir, files):
@@ -441,87 +671,120 @@ def get_active_model():
 
 def set_active_model(model_id):
     """Set the active model."""
-    config = _load_config()
-    config["active_model"] = model_id
-    _save_config(config)
+    with _CONFIG_LOCK:
+        config = _load_config()
+        config["active_model"] = model_id
+        _save_config(config)
 
 
 def remove_model(model_id):
     """Remove a model's weights from disk and unregister it.
 
-    Deletes local ONNX model files and removes it from models.json.
-    Returns True if found.
+    Files are deleted only for entries Vireo downloaded and manages
+    (see ``_model_is_managed``). A custom model — registered through
+    ``/api/models/custom`` or without the ``managed`` flag — is only
+    unregistered, and its files are left in place and reported back as
+    ``kept_path``, even when the user parked those weights inside
+    ``~/.vireo/models``.
+
+    Returns ``None`` if the model is unknown, otherwise a dict with
+    ``files_deleted`` (bool) and ``kept_path`` (str or ``None``).
     """
-    config = _load_config()
-    models = config.get("models", [])
+    with _CONFIG_LOCK:
+        config = _load_config()
+        models = config.get("models", [])
 
-    found = None
-    for m in models:
-        if m["id"] == model_id:
-            found = m
-            break
+        found = None
+        for m in models:
+            if m["id"] == model_id:
+                found = m
+                break
 
-    if not found:
-        # Check if it's a known model with a default path
-        known = {km["id"]: km for km in KNOWN_MODELS}
-        if model_id in known:
-            path = os.path.join(DEFAULT_MODELS_DIR, model_id)
-            if os.path.isdir(path):
-                shutil.rmtree(path)
-                return True
-        return False
+        if not found:
+            # Check if it's a known model with a default path
+            known = {km["id"]: km for km in KNOWN_MODELS}
+            if model_id in known:
+                path = os.path.join(DEFAULT_MODELS_DIR, model_id)
+                if os.path.isdir(path) and _inside_models_dir(path):
+                    shutil.rmtree(path)
+                    return {"files_deleted": True, "kept_path": None}
+            return None
 
-    # Delete local model directory
-    weights_path = found.get("weights_path", "")
-    if weights_path and os.path.exists(weights_path):
-        if os.path.isdir(weights_path):
-            shutil.rmtree(weights_path)
-        else:
-            os.unlink(weights_path)
-            parent = os.path.dirname(weights_path)
-            if parent.startswith(DEFAULT_MODELS_DIR) and os.path.isdir(parent):
-                remaining = os.listdir(parent)
-                if not remaining:
+        files_deleted = False
+        kept_path = None
+        weights_path = found.get("weights_path") or ""
+        managed = _model_is_managed(found)
+        if weights_path and os.path.lexists(weights_path):
+            if not managed or not _inside_models_dir(weights_path):
+                log.info(
+                    "Unregistering model %s without deleting %s "
+                    "(managed=%s, inside_models_dir=%s)",
+                    model_id, weights_path, managed,
+                    _inside_models_dir(weights_path),
+                )
+                kept_path = weights_path
+            elif os.path.isdir(weights_path) and not os.path.islink(weights_path):
+                shutil.rmtree(weights_path)
+                files_deleted = True
+            else:
+                os.unlink(weights_path)
+                files_deleted = True
+                parent = os.path.dirname(weights_path)
+                if (
+                    _inside_models_dir(parent) and os.path.isdir(parent)
+                    and not os.listdir(parent)
+                ):
                     os.rmdir(parent)
 
-    # Remove from config
-    config["models"] = [m for m in models if m["id"] != model_id]
-    if config.get("active_model") == model_id:
-        config["active_model"] = None
-    _save_config(config)
+        config["models"] = [m for m in models if m["id"] != model_id]
+        if config.get("active_model") == model_id:
+            config["active_model"] = None
+        _save_config(config)
 
-    log.info("Removed model %s (weights: %s)", model_id, weights_path)
-    return True
+    log.info("Removed model %s (weights: %s, deleted: %s)",
+             model_id, weights_path, files_deleted)
+    return {"files_deleted": files_deleted, "kept_path": kept_path}
 
 
-def register_model(model_id, name, model_str, weights_path, description=""):
-    """Register a model (custom or after download)."""
-    config = _load_config()
-    models = config.get("models", [])
+def register_model(model_id, name, model_str, weights_path, description="",
+                   managed=False):
+    """Register a model (custom or after download).
 
-    # Update if exists, add if not
-    found = False
-    for m in models:
-        if m["id"] == model_id:
-            m["name"] = name
-            m["model_str"] = model_str
-            m["weights_path"] = weights_path
-            m["description"] = description
-            found = True
-            break
-    if not found:
-        models.append(
-            {
-                "id": model_id,
-                "name": name,
-                "model_str": model_str,
-                "weights_path": weights_path,
-                "description": description,
-            }
-        )
+    ``managed=True`` marks the entry as owned by Vireo — used by the
+    internal download helpers so ``remove_model`` may delete the files.
+    A custom registration (via ``/api/models/custom``) leaves it at the
+    default ``False`` so ``remove_model`` unregisters without touching
+    the user's files, regardless of where they live.
+    """
+    with _CONFIG_LOCK:
+        config = _load_config()
+        models = config.get("models", [])
 
-    config["models"] = models
-    _save_config(config)
+        # Update if exists, add if not
+        found = False
+        for m in models:
+            if m["id"] == model_id:
+                m["name"] = name
+                m["model_str"] = model_str
+                m["weights_path"] = weights_path
+                m["description"] = description
+                m["managed"] = bool(managed)
+                found = True
+                break
+        if not found:
+            models.append(
+                {
+                    "id": model_id,
+                    "name": name,
+                    "model_str": model_str,
+                    "weights_path": weights_path,
+                    "description": description,
+                    "managed": bool(managed),
+                }
+            )
+
+        config["models"] = models
+        _save_config(config)
 
 
 def _needs_atomic_publish(filename):
@@ -994,7 +1257,7 @@ def download_model(model_id, progress_callback=None):
     log.info("Model downloaded to: %s", model_dir)
     register_model(
         model_id, km["name"], km.get("model_str", model_id),
-        model_dir, km["description"],
+        model_dir, km["description"], managed=True,
     )
     # The on-disk bytes just changed, so drop any cached "verified" marker
     # for this model_id — the next pipeline run will re-verify.
@@ -1612,7 +1875,7 @@ def download_hf_model(repo_id, progress_callback=None):
     name = slug.replace("-", " ").title()
     register_model(
         model_id, name, model_str, local_dir,
-        f"Downloaded from HuggingFace: {repo_id}",
+        f"Downloaded from HuggingFace: {repo_id}", managed=True,
     )
 
     log.info("Model registered: %s (%s)", name, local_dir)

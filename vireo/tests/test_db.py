@@ -28786,7 +28786,7 @@ def test_registry_ops_all_compile(tmp_path):
 
 def test_browse_editor_numeric_ops_all_compile(tmp_path):
     """The saved-collection editor advertises its own op list per field
-    (browse.html ``FIELD_OPS``), independent of the registry. Every numeric
+    (browse.js ``FIELD_OPS``), independent of the registry. Every numeric
     op it offers must build SQL — the editor offering an op the engine
     rejects turns a saved collection into a 400/500 instead of a filter.
 
@@ -28795,12 +28795,12 @@ def test_browse_editor_numeric_ops_all_compile(tmp_path):
     """
     import re
     from pathlib import Path
-    text = (Path(__file__).parent.parent / "templates" / "browse.html").read_text(
+    text = (Path(__file__).parent.parent / "static" / "browse.js").read_text(
         encoding="utf-8")
 
     def _js_list(marker):
         start = text.find(marker)
-        assert start != -1, f"{marker} not found in browse.html"
+        assert start != -1, f"{marker} not found in browse.js"
         return re.findall(r"'([^']+)'", text[start:text.find("];", start)])
 
     numeric_fields = _js_list("var NUMERIC_RULE_FIELDS = [")

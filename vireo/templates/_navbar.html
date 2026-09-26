@@ -7347,32 +7347,28 @@ async function handleDeleteJobComplete(evt, savedCallback, mode, includeCompanio
 
   hideDeleteModal();
 
-  if (data.trash_failed && data.trash_failed.length > 0) {
+  var failedIds = (data.failed_photo_ids || []).filter(function(id, idx, all) {
+    return all.indexOf(id) === idx;
+  });
+  if (data.trash_failed && data.trash_failed.length > 0 && failedIds.length) {
     var paths = data.trash_failed.map(function(f) { return f.path; });
-    var failedIds = (data.failed_photo_ids || []).filter(function(id, idx, all) {
-      return all.indexOf(id) === idx;
-    });
     if (confirm('Trash not available for ' + paths.length + ' file(s):\n' +
         paths.slice(0, 5).join('\n') +
         (paths.length > 5 ? '\n... and ' + (paths.length - 5) + ' more' : '') +
         '\n\nPermanently delete instead?')) {
       try {
-        // Newer servers retain catalog rows whose Trash operation failed, so
-        // retry by photo id and let the server remove each row only after its
-        // permanent file deletion succeeds. ``paths`` remains the compatibility
-        // path for an in-flight job started by an older build that already
-        // removed its rows.
-        var retryBody = failedIds.length
-          ? {
-              photo_ids: failedIds,
-              mode: 'disk_permanent',
-              include_companions: !!includeCompanions,
-            }
-          : {paths: paths, mode: 'disk_permanent'};
+        // The server retains catalog rows whose Trash operation failed, so
+        // retry by photo id and let it remove each row only after its
+        // permanent file deletion succeeds. There is no retry by raw path:
+        // the catalog row is what vouches for a file.
         var retry = await safeFetch('/api/batch/delete', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify(retryBody),
+          body: JSON.stringify({
+            photo_ids: failedIds,
+            mode: 'disk_permanent',
+            include_companions: !!includeCompanions,
+          }),
         });
         data.deleted += Number(retry.deleted || 0);
         data.trashed += Number(retry.trashed || 0);
@@ -8217,6 +8213,10 @@ document.addEventListener('keydown', function(e) {
   // so the lightbox keeps keyboard precedence; the burst modal's own keydown
   // handler bails while the lightbox is open.
   if (document.querySelector('.pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .inspect-overlay.open, .shortcuts-overlay.open, .help-overlay.active, .report-overlay.active')) return;
+  // The command palette (Cmd+K) opens over the lightbox and toggles `hidden`
+  // rather than a class; while it is open it owns the keyboard.
+  var cmdPalette = document.getElementById('commandPalette');
+  if (cmdPalette && !cmdPalette.hidden) return;
   var editable0 = _lbKeyTargetEditable(e.target);
   // Editable check must come before arrow handling so arrows inside form
   // fields (e.g. the mask-variant <select>) change the value, not the photo.
@@ -8278,7 +8278,7 @@ document.addEventListener('keydown', function(e) {
     }
   }
   var zoomKey = (window._vireoShortcuts && window._vireoShortcuts.browse) ? window._vireoShortcuts.browse.zoom : 'z';
-  if (matchesShortcut(e, zoomKey)) {
+  if (matchesShortcut(e, zoomKey) && !_lbKeyTargetEditable(e.target)) {
     // Zoom toggle — simulate a click in the center
     var wrap = document.getElementById('lightboxWrap');
     var rect = wrap.getBoundingClientRect();
@@ -10191,13 +10191,38 @@ async function nativeMenuCancelCurrentJob() {
   // the queued path atomically), so the native menu's "cancel current
   // job" should be able to reach them — otherwise a waiting pipeline
   // is stuck if the user closes the pipeline page.
-  var running = list.find(isAttentionJob);
-  if (!running) {
-    nativeMenuInfo('No active job to cancel');
+  //
+  // /api/jobs lists every workspace's jobs, oldest first. "Current" means the
+  // active workspace's (workspace-agnostic jobs count, as in the bottom
+  // panel), and the job actually doing work beats one that is paused or
+  // waiting; ties go to the most recently started.
+  var wsId = (jobs && !Array.isArray(jobs)) ? jobs.active_workspace_id : null;
+  var attention = list.filter(isAttentionJob);
+  var inWorkspace = attention.filter(function(j) {
+    return wsId == null || j.workspace_id == null || j.workspace_id === wsId;
+  });
+  if (!inWorkspace.length) {
+    var elsewhere = attention.length;
+    nativeMenuInfo(elsewhere
+      ? 'No active job in this workspace (' + elsewhere + ' in other workspaces; cancel from the Jobs panel)'
+      : 'No active job to cancel');
     return;
   }
-  await safeFetch('/api/jobs/' + running.id + '/cancel', {method: 'POST'});
-  nativeMenuInfo('Cancel requested');
+  function rank(j) {
+    if (j.status === 'running' || j.status === 'pausing') return 0;
+    if (j.status === 'paused') return 1;
+    return 2;
+  }
+  inWorkspace.sort(function(a, b) {
+    var r = rank(a) - rank(b);
+    if (r) return r;
+    var sa = a.started_at || '', sb = b.started_at || '';
+    return sa < sb ? 1 : sa > sb ? -1 : 0;
+  });
+  var target = inWorkspace[0];
+  var name = window.formatJobType ? window.formatJobType(target.type) : (target.type || 'job');
+  await safeFetch('/api/jobs/' + target.id + '/cancel', {method: 'POST'});
+  nativeMenuInfo('Cancel requested: ' + name);
 }
 
 async function nativeMenuCopyDiagnostics() {
@@ -13207,6 +13232,9 @@ async function loadMissingPhotos() {
     _updateMissingPhotosBulkBtn();
     return 'ready';
   } catch (e) {
+    // Same staleness rule as the success path: a failure from a superseded
+    // load must not replace the newer load's list with an error.
+    if (myId !== _missingPhotosModalFetchId) return;
     container.innerHTML = '<p style="color:var(--text-secondary);">Failed to check photos.</p>';
     _finalizeMissingPhotosRemovalRefresh('failed');
     return 'failed';

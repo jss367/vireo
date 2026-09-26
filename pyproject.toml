@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vireo"
-version = "0.57.1"
+version = "0.58.0"
 description = "AI-powered wildlife photo organizer"
 license = "MIT AND GPL-3.0-or-later"
 license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md", "vireo/data/denoise/LICENSE.txt", "vireo/data/denoise/NOTICE.txt"]

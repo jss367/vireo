@@ -46,13 +46,17 @@ that information for interactive use.
   `vireo/web/background_jobs.py`. The view receives a `JobLaunch` (runner,
   active workspace id, worker-thread database factory) and returns
   `ctx.start(job_type, work, ...)`; do not re-implement that prologue inline.
-- Repositories own SQL for one domain. `Database` remains a compatibility
-  façade while photo, workspace, metadata, and job access is extracted.
-  Each moved method stays on `Database` as a one-line wrapper around its
-  repository, and a structural test keeps the moved methods off `self.conn`.
+- Repositories (`vireo/repositories/`) own SQL for one domain; `Database`
+  is the façade over them. It keeps each method as a one-line wrapper around
+  its repository, plus cross-domain composition and the active-workspace
+  state, and runs no SQL itself: `test_db_facade_structure.py` fails if a
+  `Database` method other than the connection-lifecycle ones uses
+  `self.conn` for anything but handing it to a repository.
 - Schema changes are ordered migrations in `vireo/schema.py`. They execute once
   at startup, use a transaction, advance `PRAGMA user_version`, and validate
-  before committing. Request connections must use the initialized schema.
+  before committing. Request connections must use the initialized schema. The
+  legacy canonical schema they build on (`CREATE TABLE IF NOT EXISTS` plus the
+  older inline upgrades) lives in `vireo/canonical_schema.py`.
 - Shared browser code is exposed through the `Vireo` namespace. Network calls
   use `Vireo.api`; shared DOM state uses `Vireo.dom`. New inline event handlers
   and page-global variables are not permitted.

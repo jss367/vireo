@@ -389,6 +389,138 @@ def test_delete_stray_sidecars_refuses_paths_outside_roots(tmp_path):
     assert os.path.exists(outside), "path outside roots was not refused"
 
 
+def test_stray_sidecars_ignore_sidecars_of_unsupported_formats(tmp_path):
+    """A sidecar beside any file with its name is not a stray, even when
+    Vireo can't import that format (PEF, CRW, HEIC, MP4...). Deleting it
+    would destroy the user's Lightroom/darktable edits."""
+    from audit import check_stray_sidecars, delete_stray_sidecars
+    from xmp import write_sidecar
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    owners = ["IMGP0001.PEF", "IMG_1234.HEIC", "CRW_0042.CRW", "clip.MP4"]
+    sidecars = ["IMGP0001.xmp", "IMG_1234.HEIC.xmp", "CRW_0042.xmp", "clip.xmp"]
+    for name in owners:
+        with open(os.path.join(root, name), "wb") as f:
+            f.write(b"x")
+    paths = [os.path.join(root, name) for name in sidecars]
+    for p in paths:
+        write_sidecar(p, flat_keywords={"Edit"}, hierarchical_keywords=set())
+    ghost = os.path.join(root, "ghost.xmp")
+    write_sidecar(ghost, flat_keywords={"Gone"}, hierarchical_keywords=set())
+
+    strays = check_stray_sidecars([root])
+    assert [s["path"] for s in strays] == [ghost]
+
+    trashed = []
+
+    def fake_trash(targets):
+        trashed.extend(targets)
+        for t in targets:
+            os.remove(t)
+        return len(targets), set(targets), []
+
+    deleted = delete_stray_sidecars(paths + [ghost], [root], trash_paths=fake_trash)
+    assert deleted == 1
+    assert trashed == [ghost]
+    for p in paths:
+        assert os.path.exists(p), f"{p} belongs to a real file"
+
+
+def test_delete_stray_sidecars_ignores_directory_with_matching_stem(tmp_path):
+    """A stray sidecar ``ghost.xmp`` next to a directory named ``ghost``
+    (no image extension, so ``check_stray_sidecars`` reports it via the
+    ``os.path.isfile`` filter) must still be deletable: the recheck must
+    apply the same filter, or the entry becomes permanently undeletable."""
+    from audit import check_stray_sidecars, delete_stray_sidecars
+    from xmp import write_sidecar
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    stray = os.path.join(root, "ghost.xmp")
+    write_sidecar(stray, flat_keywords={"X"}, hierarchical_keywords=set())
+    # A sibling directory whose bare name matches the sidecar stem.
+    os.makedirs(os.path.join(root, "ghost"))
+
+    strays = check_stray_sidecars([root])
+    assert [s["path"] for s in strays] == [stray]
+
+    trashed = []
+
+    def fake_trash(targets):
+        trashed.extend(targets)
+        for t in targets:
+            os.remove(t)
+        return len(targets), set(targets), []
+
+    deleted = delete_stray_sidecars([stray], [root], trash_paths=fake_trash)
+    assert deleted == 1
+    assert trashed == [stray]
+    assert os.path.isdir(os.path.join(root, "ghost")), \
+        "the sibling directory must not be touched"
+
+
+def test_delete_stray_sidecars_preserves_hidden_owner(tmp_path):
+    """A hidden sidecar beside its hidden owner is not stray. The scan
+    hides these entries, but the delete route accepts client-supplied
+    paths — the recheck must still see the hidden owner and keep the
+    sidecar, or ``.bird.jpg.xmp`` beside ``.bird.jpg`` slips into Trash."""
+    from audit import delete_stray_sidecars
+    from xmp import write_sidecar
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    hidden_owner = os.path.join(root, ".bird.jpg")
+    hidden_sidecar = os.path.join(root, ".bird.jpg.xmp")
+    Image.new("RGB", (50, 50)).save(hidden_owner)
+    write_sidecar(hidden_sidecar, flat_keywords={"Hidden"},
+                  hierarchical_keywords=set())
+
+    trashed = []
+
+    def fake_trash(targets):
+        trashed.extend(targets)
+        for t in targets:
+            os.remove(t)
+        return len(targets), set(targets), []
+
+    deleted = delete_stray_sidecars([hidden_sidecar], [root],
+                                    trash_paths=fake_trash)
+
+    assert deleted == 0, "recheck must preserve a sidecar with a hidden owner"
+    assert trashed == []
+    assert os.path.exists(hidden_sidecar)
+    assert os.path.exists(hidden_owner)
+
+
+def test_audit_delete_sidecars_route_uses_trash(app_and_db, tmp_path, monkeypatch):
+    """The route moves strays to the Trash instead of unlinking them."""
+    import app as app_module
+    from xmp import write_sidecar
+
+    app, db = app_and_db
+    root = tmp_path / "lib"
+    root.mkdir()
+    db.add_folder(str(root), name="lib")
+    stray = str(root / "ghost.xmp")
+    write_sidecar(stray, flat_keywords={"G"}, hierarchical_keywords=set())
+
+    calls = []
+
+    def fake_trash(targets, **_kwargs):
+        calls.append(list(targets))
+        return len(targets), set(targets), []
+
+    monkeypatch.setattr(app_module, "_trash_paths", fake_trash)
+    client = app.test_client()
+    resp = client.post("/api/audit/delete-sidecars", json={"paths": [stray]})
+    assert resp.status_code == 200
+    assert resp.get_json()["deleted"] == 1
+    assert calls == [[stray]]
+    # The fake Trash leaves the file alone; an unlink would have removed it.
+    assert os.path.exists(stray)
+
+
 def test_verify_hashes_ok_and_baseline(tmp_path):
     """Untouched files verify as ok; photos without a stored hash get
     baselined; the integrity run is recorded for the summary."""

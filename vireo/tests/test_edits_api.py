@@ -193,12 +193,13 @@ def test_color_label_description_validation(app_and_db):
     assert client.put(
         "/api/color-label-descriptions/red", json={}
     ).status_code == 400
+    # A non-object body is refused app-wide before it reaches the route.
     for body in (42, "description", ["description"]):
         response = client.put(
             "/api/color-label-descriptions/red", json=body
         )
         assert response.status_code == 400
-        assert response.get_json()["error"] == "description required"
+        assert response.get_json()["code"] == "json_body_not_object"
     assert client.put(
         "/api/color-label-descriptions/red", json={"description": None}
     ).status_code == 400

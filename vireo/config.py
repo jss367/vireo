@@ -322,7 +322,19 @@ def load():
         except Exception:
             log.warning("Failed to read config, using defaults")
             _preserve_corrupt_config()
-    return config
+    return _repair_types(config)
+
+
+def _repair_types(config):
+    """Fall back to the default for any stored number or bool of the wrong type.
+
+    See ``config_schema.repair_types``: a ``null`` or ``"abc"`` stored by an
+    older, unvalidated write path would otherwise fail every reader that
+    does arithmetic on it, until the file was edited by hand.
+    """
+    import config_schema
+
+    return config_schema.repair_types(config, DEFAULTS)
 
 
 def load_strict():
@@ -346,7 +358,7 @@ def load_strict():
     except Exception:
         _preserve_corrupt_config()
         raise
-    return _deep_merge(config, data)
+    return _repair_types(_deep_merge(config, data))
 
 
 def _replace_with_windows_retry(src, dst):

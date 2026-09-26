@@ -1870,6 +1870,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             ),
             invalidate_missing_originals=missing_originals.invalidate,
             get_runner=lambda: app._job_runner,
+            # Late-bound so a patched ``app._trash_paths`` reaches the
+            # stray-sidecar delete, as it does the duplicates routes.
+            trash_paths=lambda *args, **kwargs: _trash_paths(*args, **kwargs),
         )
     )
     app.register_blueprint(

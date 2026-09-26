@@ -31,6 +31,7 @@ def create_audit_blueprint(
     cleanup_cached_files_for_deleted_photos,
     invalidate_missing_originals,
     get_runner,
+    trash_paths,
 ):
     """Build the audit blueprint.
 
@@ -42,6 +43,8 @@ def create_audit_blueprint(
     the missing-originals cache after the catalog changes. ``get_runner``
     returns the current :class:`jobs.JobRunner` so ``import-untracked`` can
     see queued folder-stage jobs whose mapping rows do not yet exist.
+    ``trash_paths`` (``app._trash_paths``, late-bound) moves deleted stray
+    sidecars to the Trash.
     """
     blueprint = Blueprint("audit", __name__)
 
@@ -134,7 +137,11 @@ def create_audit_blueprint(
         # Client-supplied paths are untrusted; anything outside the
         # workspace roots (the same roots the sidecars check scans)
         # is refused.
-        deleted = delete_stray_sidecars(paths, _audit_workspace_roots(db))
+        if not isinstance(paths, list):
+            return json_error("paths must be a list")
+        deleted = delete_stray_sidecars(
+            paths, _audit_workspace_roots(db), trash_paths=trash_paths,
+        )
         return jsonify({"ok": True, "deleted": deleted})
 
     @blueprint.route("/api/audit/integrity")

@@ -13,6 +13,41 @@ resolver this repository feeds.
 import os
 
 
+class _DeferredPlan:
+    """Singleton sentinel returned by ``resolution_plan`` when at least one
+    candidate is on an offline volume, so the resolver can't safely pick a
+    winner yet. Distinct from ``None`` (which still means "fewer than 2
+    non-rejected candidates, nothing to do") so callers can tell the two
+    apart and communicate deferral back to the user.
+    """
+    __slots__ = ()
+
+    def __repr__(self):
+        return "DEFERRED_PLAN"
+
+
+DEFERRED_PLAN = _DeferredPlan()
+
+
+def _volume_offline(path):
+    """True when ``path`` sits on a mount-shaped volume that is not reachable.
+
+    Mirrors ``duplicate_scan._volume_offline`` so the auto-resolver used by
+    ``add_photo`` and ``check_and_resolve_duplicates_for_hash`` treats an
+    unmounted NAS copy as "state unknown" rather than "missing" — otherwise
+    Rule 0 rejects the archive original whenever its share is unplugged, and
+    the ``duplicate_rejections`` provenance written by ``reject`` would keep
+    the group resolved when the share came back. Imported lazily to avoid a
+    circular import at module load.
+    """
+    try:
+        from volume_reachability import get_shared as _volume_reachability
+    except Exception:
+        return False
+    root, reachable = _volume_reachability().check(path)
+    return root is not None and not reachable
+
+
 class DuplicatesRepository:
     def __init__(self, conn, *, chunk_size=800):
         self.conn = conn
@@ -83,11 +118,17 @@ class DuplicatesRepository:
         return groups
 
     def reopen(self, file_hash):
-        """Un-reject every rejected row with ``file_hash``; return the count."""
+        """Un-reject the rows with ``file_hash`` that the duplicate resolver
+        rejected; return the count.
+
+        Rows the user rejected by hand (no ``duplicate_rejections`` row)
+        stay rejected.
+        """
         with self.conn:
             cur = self.conn.execute(
                 "UPDATE photos SET flag = 'none' "
-                "WHERE file_hash = ? AND flag = 'rejected'",
+                "WHERE file_hash = ? AND flag = 'rejected' "
+                "AND id IN (SELECT photo_id FROM duplicate_rejections)",
                 (file_hash,),
             )
             return cur.rowcount
@@ -97,8 +138,11 @@ class DuplicatesRepository:
     def resolution_plan(self, photo_ids):
         """Pick a winner among the non-rejected ``photo_ids``.
 
-        Returns ``(winner_id, loser_ids)``, or None when fewer than 2
-        non-rejected candidates remain. Writes nothing.
+        Returns ``(winner_id, loser_ids)``, or ``None`` when fewer than 2
+        non-rejected candidates remain, or the ``DEFERRED_PLAN`` sentinel
+        when at least one candidate lives on an offline volume (state
+        unknown; the resolver can't safely pick a winner until the volume
+        returns). Writes nothing.
         """
         from duplicates import DupCandidate, resolve_duplicates
 
@@ -122,20 +166,52 @@ class DuplicatesRepository:
             return None
 
         candidates = []
+        any_offline = False
         for r in rows:
             path = os.path.join(r["folder_path"] or "", r["filename"] or "")
+            # Stat each candidate so the resolver doesn't pick a winner
+            # whose file was moved/deleted on disk. The DB row would
+            # otherwise outvote a surviving twin solely on path-string
+            # heuristics.
+            #
+            # Probe volume reachability BEFORE ``os.path.exists``. This
+            # auto-resolver runs from ``add_photo`` and
+            # ``check_and_resolve_duplicates_for_hash`` on every import
+            # and scan; on a stale SMB/NFS mount an unqualified stat can
+            # block for minutes while the kernel waits for the transport,
+            # wedging the import/scan worker before the bounded volume
+            # gate ever runs. ``duplicate_scan._row_to_info`` uses the
+            # same ordering.
+            offline = _volume_offline(path)
+            present = False if offline else os.path.exists(path)
+            if offline:
+                any_offline = True
             candidates.append(
                 DupCandidate(
                     id=r["id"],
                     path=path,
                     mtime=r["file_mtime"] or 0.0,
-                    # Stat each candidate so the resolver doesn't pick a
-                    # winner whose file was moved/deleted on disk. The DB
-                    # row would otherwise outvote a surviving twin solely
-                    # on path-string heuristics.
-                    exists=os.path.exists(path),
+                    # Placeholder; overridden by the offline-defer below when
+                    # we return None. When every candidate is reachable, this
+                    # is the real on-disk state and Rule 0 applies as usual.
+                    exists=present,
                 )
             )
+        # An offline candidate's on-disk state is unknown. Auto-resolution
+        # can't safely pick a winner without confirming: if the offline
+        # row wins by path/mtime and its file was actually deleted while
+        # the volume was down, ``apply_duplicate_resolution`` would reject
+        # the only reachable copy and stamp a ``duplicate_rejections`` row
+        # that ``reopen_duplicate_group`` would then un-reject only after
+        # the volume returns and the scan re-runs. Defer instead and let
+        # the interactive duplicate scan surface the group; that scan
+        # treats offline as "state unknown" for the user to resolve.
+        # ``DEFERRED_PLAN`` is distinct from ``None`` so callers (and the
+        # ``/api/duplicates/apply`` route) can tell "state unknown, keep
+        # the group visible" apart from "fewer than 2 candidates, nothing
+        # to do" and communicate the deferral back to the user.
+        if any_offline:
+            return DEFERRED_PLAN
         winner_id, losers_with_reasons = resolve_duplicates(candidates)
         loser_ids = [lid for lid, _reason in losers_with_reasons]
         return winner_id, loser_ids
@@ -256,6 +332,10 @@ class DuplicatesRepository:
             self.conn.execute(
                 f"UPDATE photos SET flag = 'rejected' WHERE id IN ({loser_placeholders})",
                 list(chunk),
+            )
+            self.conn.executemany(
+                "INSERT OR IGNORE INTO duplicate_rejections(photo_id) VALUES (?)",
+                [(pid,) for pid in chunk],
             )
 
     def _chunks(self, values):

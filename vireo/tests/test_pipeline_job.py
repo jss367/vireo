@@ -2058,7 +2058,7 @@ def test_pipeline_ingest_omits_safe_to_eject_counts_on_partial_failure(tmp_path,
     still holds a file that never made it to the destination.
     """
     import config as cfg
-    import ingest as ingest_module
+    import staged_copy
     from db import Database
     from PIL import Image
 
@@ -2078,14 +2078,14 @@ def test_pipeline_ingest_omits_safe_to_eject_counts_on_partial_failure(tmp_path,
     db = Database(db_path)
     ws_id = db._active_workspace_id
 
-    real_copy2 = ingest_module.shutil.copy2
+    real_copy2 = staged_copy.shutil.copy2
 
     def flaky_copy2(source, destination, *args, **kwargs):
         if str(source).endswith("b.jpg"):
             raise OSError("simulated card read error")
         return real_copy2(source, destination, *args, **kwargs)
 
-    monkeypatch.setattr(ingest_module.shutil, "copy2", flaky_copy2)
+    monkeypatch.setattr(staged_copy.shutil, "copy2", flaky_copy2)
 
     params = PipelineParams(
         source=str(src),
@@ -7832,6 +7832,195 @@ def test_pipeline_loader_failure_marks_classify_rows_failed_not_skipped(
             f"pipeline, got status={kwargs['status']!r}, "
             f"summary={kwargs.get('summary')!r}"
         )
+
+
+def _last_stages_snapshot(runner):
+    """The ``stages`` dict from the last progress event the pipeline pushed."""
+    return [
+        data["stages"] for (_, kind, data) in runner.events
+        if kind == "progress" and "stages" in data
+    ][-1]
+
+
+def test_pipeline_loader_failure_does_not_cancel_scan(tmp_path, monkeypatch):
+    """A model that fails to load must not stop the concurrent scan.
+
+    The loader's failure used to set ``abort``, which is also the scanner's
+    cancel signal: the scan stopped with 0 photos cataloged and its step read
+    "Cancelled" although nobody cancelled. Scan and thumbnails don't need the
+    model, so they now finish; the loader still fails the job and every
+    model-dependent stage still skips.
+    """
+    import time
+
+    import classifier as classifier_mod
+    import config as cfg
+    import scanner
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    for i in range(3):
+        _drop_jpeg(str(photo_dir), f"p{i}.jpg")
+
+    _setup_fake_downloaded_model(tmp_path, monkeypatch)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated model load failure")
+
+    monkeypatch.setattr(classifier_mod, "Classifier", boom)
+
+    runner = FakeRunner()
+
+    # Hold the scan until the loader has recorded its failure, so the test
+    # deterministically covers "loader fails while the scan is running".
+    real_scan = scanner.scan
+
+    def scan_after_loader_failure(*args, **kwargs):
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if any(
+                step == "model_loader" and kw.get("status") == "failed"
+                for (_, step, kw) in list(runner.step_updates)
+            ):
+                break
+            time.sleep(0.01)
+        return real_scan(*args, **kwargs)
+
+    monkeypatch.setattr(scanner, "scan", scan_after_loader_failure)
+
+    params = PipelineParams(
+        source=str(photo_dir),
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+    job = _make_job()
+
+    with pytest.raises(RuntimeError, match=r"\[model_loader\] Fatal"):
+        run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    verify_db = Database(db_path)
+    n_photos = verify_db.conn.execute("SELECT COUNT(*) FROM photos").fetchone()[0]
+    assert n_photos == 3
+
+    scan_final = [
+        kw for (_, step, kw) in runner.step_updates
+        if step == "scan" and kw.get("status") in ("completed", "failed")
+    ][-1]
+    assert scan_final["status"] == "completed"
+    assert scan_final.get("summary") != "Cancelled"
+    stages = _last_stages_snapshot(runner)
+    assert stages["model_loader"]["status"] == "failed"
+    assert stages["thumbnails"]["status"] == "completed"
+    assert stages["detect"]["status"] == "skipped"
+
+
+def test_pipeline_collection_failure_fails_job(tmp_path, monkeypatch):
+    """A collection-stage error must fail the job.
+
+    It used to append "[collection] Fatal" and set abort without marking any
+    stage failed, so every downstream stage read "Skipped" and the run was
+    recorded as completed with nothing processed.
+    """
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    _drop_jpeg(str(photo_dir), "a.jpg")
+
+    def locked(self, *args, **kwargs):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(Database, "add_collection", locked)
+
+    params = PipelineParams(
+        source=str(photo_dir),
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+    job = _make_job()
+    runner = FakeRunner()
+
+    with pytest.raises(RuntimeError, match=r"\[collection\] Fatal: database is locked"):
+        run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    assert _last_stages_snapshot(runner)["collection"]["status"] == "failed"
+
+
+def test_pipeline_snapshot_resolution_failure_does_not_hang(tmp_path, monkeypatch):
+    """An error while resolving a snapshot's paths must still release
+    detect_stage.
+
+    The resolver ran outside the try/finally that sets ``collection_ready``,
+    so an exception there (e.g. a locked DB) left detect_stage waiting
+    forever and the job holding a pipeline slot.
+    """
+    import sqlite3
+    import traceback
+
+    import config as cfg
+    import pipeline_job
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    folder = tmp_path / "folder"
+    folder.mkdir()
+    db.add_folder(str(folder))
+    path = _drop_jpeg(str(folder), "IMG_001.JPG")
+    snap_id = db.create_new_images_snapshot([path])
+
+    real_database = pipeline_job.Database
+
+    class LockedInCollectionStage(real_database):
+        def __init__(self, *args, **kwargs):
+            names = {f.name for f in traceback.extract_stack()}
+            if "_collection_stage_body" in names or "collection_stage" in names:
+                raise sqlite3.OperationalError("database is locked")
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline_job, "Database", LockedInCollectionStage)
+
+    params = PipelineParams(
+        source_snapshot_id=snap_id,
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+    job = _make_job()
+    outcome = {}
+
+    def run():
+        try:
+            outcome["result"] = run_pipeline_job(
+                job, FakeRunner(), db_path, ws_id, params,
+            )
+        except Exception as e:  # noqa: BLE001 - recorded for the assert
+            outcome["error"] = e
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(60)
+    assert not t.is_alive(), "pipeline hung waiting on collection_ready"
+    assert "[collection] Fatal" in str(outcome.get("error"))
 
 
 # ---------------------------------------------------------------------------

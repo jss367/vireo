@@ -3558,6 +3558,9 @@ async function saveRecipe(description) {
   var btn = document.getElementById('saveBtn');
   btn.disabled = true;
   setStatus('Saving...');
+  // The sliders stay live during the PUT, so remember what we sent: an edit
+  // made while the request is in flight must survive its response.
+  var sentKey = recipeKey(editorState.recipe);
   try {
     var data = await safeFetch('/api/photos/' + savedPhotoId + '/edit-recipe', {
       method: 'PUT',
@@ -3581,6 +3584,17 @@ async function saveRecipe(description) {
     if (editorState.photoId !== savedPhotoId) return false;
     editorState.savedRecipe = cloneRecipe(data.recipe || {});
     editorState.savedRecipeSeq++;
+    if (recipeKey(editorState.recipe) !== sentKey) {
+      // The user kept editing while the PUT was in flight. What we sent is
+      // now the saved baseline, but the newer edits are still in the editor:
+      // keep them and their undo history, and show them as unsaved. Report
+      // false so save-then-export doesn't render a recipe older than the
+      // canvas.
+      editorState.savedLocalStale = !!data.local_mask_stale;
+      updateDirtyState();
+      loadHistory();
+      return false;
+    }
     editorState.recipe = cloneRecipe(data.recipe || {});
     editorState.savedLocalStale = !!data.local_mask_stale;
     editorState.localStale = editorState.savedLocalStale;

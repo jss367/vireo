@@ -1136,16 +1136,16 @@ def test_pipeline_local_processing_fails_ingest_when_files_fail_to_copy(
 
     # Simulate a partial-card copy failure: ingest() catches the OSError
     # and bumps `failed` by 1, but returns normally so the run continues.
-    import ingest as ingest_mod
+    import staged_copy
 
-    real_copy2 = ingest_mod.shutil.copy2
+    real_copy2 = staged_copy.shutil.copy2
 
     def flaky_copy2(src_path, dest_path, *args, **kwargs):
         if os.path.basename(str(src_path)) == "bad.jpg":
             raise OSError("synthetic copy failure")
         return real_copy2(src_path, dest_path, *args, **kwargs)
 
-    monkeypatch.setattr(ingest_mod.shutil, "copy2", flaky_copy2)
+    monkeypatch.setattr(staged_copy.shutil, "copy2", flaky_copy2)
 
     with app.test_client() as c:
         resp = c.post("/api/jobs/pipeline", json={
@@ -1206,16 +1206,16 @@ def test_pipeline_local_processing_ingest_failure_short_circuits_pipeline(
 
     # ingest() catches per-file copy errors and continues — bad.jpg will
     # bump ``failed`` while good.jpg still lands in staging.
-    import ingest as ingest_mod
+    import staged_copy
 
-    real_copy2 = ingest_mod.shutil.copy2
+    real_copy2 = staged_copy.shutil.copy2
 
     def flaky_copy2(src_path, dest_path, *args, **kwargs):
         if os.path.basename(str(src_path)) == "bad.jpg":
             raise OSError("synthetic copy failure")
         return real_copy2(src_path, dest_path, *args, **kwargs)
 
-    monkeypatch.setattr(ingest_mod.shutil, "copy2", flaky_copy2)
+    monkeypatch.setattr(staged_copy.shutil, "copy2", flaky_copy2)
 
     # Track whether scanner.scan ever ran. If the abort propagation in
     # the ingest-failure branch is wired correctly the scan stage is

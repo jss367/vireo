@@ -6,11 +6,12 @@ used to define inline:
 * ``before_request``, in this order: request timing and id
   (``_start_timer``), the browser-surface guard
   (``_protect_browser_surface``), the ``/api/v1`` token check
-  (``_enforce_api_v1_token``), and the workspace mutation reservation
-  (``_reserve_workspace_mutation``). Flask runs them in registration order
-  and stops at the first that returns a response, so the order is part of
-  the security contract: a cross-site request is refused before it can take
-  a reservation.
+  (``_enforce_api_v1_token``), the non-object JSON body check
+  (``_reject_non_object_json_body``), and the workspace mutation
+  reservation (``_reserve_workspace_mutation``). Flask runs them in
+  registration order and stops at the first that returns a response, so the
+  order is part of the security contract: a cross-site or malformed request
+  is refused before it can take a reservation.
 * ``after_request``: action/slow/API logging plus the security headers and
   browser session cookie (``_log_requests``).
 * ``errorhandler(Exception)``: ``_handle_error``.
@@ -198,8 +199,12 @@ def register_app_hooks(app, *, get_db, reservation_exempt_endpoints):
                 elif "/reject" in path:
                     detail = " (reject prediction)"
                 elif "batch" in path:
-                    ids = body.get("photo_ids", [])
-                    detail = f" ({len(ids)} photos)"
+                    # The view already ran (and may have committed), so a
+                    # malformed ``photo_ids`` must not turn its response
+                    # into a 500 here.
+                    ids = body.get("photo_ids")
+                    if isinstance(ids, list):
+                        detail = f" ({len(ids)} photos)"
                 elif "/classify" in path:
                     detail = f" collection={body.get('collection_id')}"
                 elif "/scan" in path:
@@ -293,6 +298,31 @@ def register_app_hooks(app, *, get_db, reservation_exempt_endpoints):
         if not secrets.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8")):
             return json_error("Invalid or missing X-Vireo-Token", 401)
         return None
+
+    @app.before_request
+    def _reject_non_object_json_body():
+        """Refuse a JSON body that parses to anything but an object.
+
+        Every API route reads its body as an object, usually through
+        ``request.get_json(silent=True) or {}``. That guards only against a
+        missing or unparsable body: a valid non-object document such as
+        ``"x"``, ``[1]`` or ``5`` comes through as-is and the route's first
+        ``body.get(...)`` raises, so the client gets a 500 instead of a 400.
+        Answering here covers every route at once, before the request takes
+        a workspace reservation. Unparsable JSON is left to the route, which
+        already decides how to report it.
+        """
+        if request.method not in {"POST", "PUT", "PATCH", "DELETE"}:
+            return None
+        if not request.path.startswith("/api/") or not request.is_json:
+            return None
+        body = request.get_json(silent=True)
+        if body is None or isinstance(body, dict):
+            return None
+        return json_error(
+            "request body must be a JSON object", 400,
+            code="json_body_not_object",
+        )
 
     @app.before_request
     def _reserve_workspace_mutation():

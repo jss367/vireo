@@ -3092,6 +3092,68 @@ def test_download_taxonomy_writes_atomically(tmp_path, monkeypatch):
     assert not list(tmp_path.glob("*.tmp"))
 
 
+def _fake_homonym_dwca_download(url, path, progress_callback=None):
+    """A DWCA where a bird genus and a plant genus are both named Prunella."""
+    import zipfile as _zf
+    with _zf.ZipFile(path, "w") as zf:
+        zf.writestr(
+            "taxa.csv",
+            "id,parentNameUsageID,scientificName,taxonRank\n"
+            "1,,Animalia,kingdom\n"
+            "47126,,Plantae,kingdom\n"
+            "10,https://www.inaturalist.org/taxa/1,Prunellidae,family\n"
+            "11,https://www.inaturalist.org/taxa/10,Prunella,genus\n"
+            "12,https://www.inaturalist.org/taxa/11,Prunella modularis,species\n"
+            "20,https://www.inaturalist.org/taxa/47126,Lamiaceae,family\n"
+            "21,https://www.inaturalist.org/taxa/20,Prunella,genus\n"
+            "22,https://www.inaturalist.org/taxa/21,Prunella vulgaris,species\n",
+        )
+        zf.writestr(
+            "VernacularNames-english.csv",
+            "id,vernacularName,language\n"
+            "12,Dunnock,en\n"
+            "22,Common Self-heal,en\n",
+        )
+
+
+def test_download_taxonomy_keeps_cross_kingdom_homonyms(tmp_path, monkeypatch):
+    """Two genera sharing a scientific name both survive the download.
+
+    ``taxa_by_scientific`` used to be keyed on the name alone, so the
+    later CSV row overwrote the earlier: the bird genus Prunella vanished,
+    ``lookup("Prunella")`` answered with the plant's lineage, and the DB
+    populate never created the bird genus to parent its species.
+    """
+    import taxonomy as tax_mod
+    from taxonomy import populate_taxa_db_from_json
+
+    monkeypatch.setattr(tax_mod, "_download_with_resume", _fake_homonym_dwca_download)
+    output_path = tmp_path / "taxonomy.json"
+    tax_mod.download_taxonomy(str(output_path))
+
+    tax = tax_mod.Taxonomy(str(output_path))
+    # The bare name can't say which kingdom is meant, so it answers nothing
+    # instead of an arbitrary one's lineage.
+    assert tax.lookup("Prunella") is None
+    assert tax.get_hierarchy("Prunella") == {}
+    # Each genus stays reachable by its id, with its own lineage.
+    assert tax.lookup_id(11)["lineage_names"] == ["Animalia", "Prunellidae", "Prunella"]
+    assert tax.lookup_id(21)["lineage_names"] == ["Plantae", "Lamiaceae", "Prunella"]
+    # Unambiguous binomials are unaffected.
+    assert tax.get_hierarchy("Prunella modularis")["kingdom"] == "Animalia"
+    assert tax.get_hierarchy("Dunnock")["family"] == "Prunellidae"
+    assert tax.get_hierarchy("Prunella vulgaris")["kingdom"] == "Plantae"
+
+    db = Database(str(tmp_path / "x.db"))
+    populate_taxa_db_from_json(db, str(output_path))
+    rows = db.conn.execute(
+        "SELECT child.inat_id AS child, parent.inat_id AS parent "
+        "FROM taxa child JOIN taxa parent ON parent.id = child.parent_id "
+        "WHERE child.inat_id IN (11, 12, 21, 22)"
+    ).fetchall()
+    assert {r["child"]: r["parent"] for r in rows} == {11: 10, 12: 11, 21: 20, 22: 21}
+
+
 def test_atomic_write_creates_a_new_target_without_a_mode_to_copy(tmp_path):
     """A first-time write has no existing file to copy permissions from.
 

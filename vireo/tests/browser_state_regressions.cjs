@@ -8,7 +8,7 @@ function fn(file, name) {
   assert(found, name);
   return found[0];
 }
-const browse = 'vireo/templates/browse.html';
+const browse = 'vireo/static/browse.js';
 const review = 'vireo/templates/pipeline_review.html';
 async function main() {
   let complete;

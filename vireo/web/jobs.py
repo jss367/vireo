@@ -805,11 +805,16 @@ def create_jobs_blueprint(
         pipeline_cfg = effective_cfg.get("pipeline", {})
 
         def work(job):
+            import time
+
             from pipeline import (
+                collection_covers_workspace,
+                compute_group_fingerprint,
                 load_photo_features,
                 run_full_pipeline,
                 save_results,
             )
+            from pipeline_locks import acquire_workspace_regroup
 
             thread_db = ctx.thread_db()
 
@@ -826,43 +831,117 @@ def create_jobs_blueprint(
                 {"phase": "Loading features from database", "current": 0, "total": 3},
             )
 
-            photos = load_photo_features(thread_db, collection_id=collection_id, config=effective_cfg)
-            if not photos:
-                ctx.runner.update_step(job["id"], "load", status="failed",
-                                       error="No photos with pipeline features found")
-                return {"error": "No photos with pipeline features found. Run extract-masks first."}
-            ctx.runner.update_step(job["id"], "load", status="completed",
-                                   summary=f"{len(photos)} photos")
-
-            ctx.runner.update_step(job["id"], "group", status="running")
-            ctx.runner.push_event(
-                job["id"],
-                "progress",
-                {"phase": "Grouping encounters and bursts", "current": 1, "total": 3},
-            )
-
-            # emit_trace=True so the pipeline-review sidebar's algorithm-trace
-            # panel can show per-cut-point details for each encounter on the
-            # very first load (not only after the user drags a live-tuning
-            # slider). Cost is negligible (~300B per adjacent pair).
+            # Hold the workspace regroup lock across load/compute/save, like
+            # /api/pipeline/reflow and regroup-live. Without it this save can
+            # land between a pipeline's regroup and miss stages (pairing its
+            # miss flags with a grouping they never saw) or overwrite a
+            # concurrent detach/grouping edit, leaving that edit's undo stale.
+            #
+            # Poll acquisition instead of ``with acquire_workspace_regroup(...):``:
+            # the lock is a bare ``threading.Lock`` so a blocking ``with``
+            # would keep this job stuck behind another same-workspace
+            # pipeline's regroup + misses stages even after the user
+            # cancelled it. Short-timeout polling lets ``JobRunner.cancel``
+            # reach this job promptly, and ``is_cancelled`` honours the
+            # cooperative pause between attempts — only while the lock is
+            # NOT held.
+            #
+            # Inside the lock, cancellation is probed with the non-waiting
+            # ``cancellation_requested``: ``is_cancelled`` sleeps through a
+            # Pause, and pausing here would keep every same-workspace
+            # pipeline and grouping edit out of its regroup critical
+            # section until the user resumed. The locked section is seconds
+            # of in-memory math, so a Pause that arrives there is honoured
+            # by ``JobRunner`` after the worker returns, with the lock
+            # already released.
             if ctx.runner.is_cancelled(job["id"]):
                 return {}
-            results = run_full_pipeline(photos, config=pipeline_cfg, emit_trace=True)
-            summary = results.get("summary", {})
-            ctx.runner.update_step(job["id"], "group", status="completed",
-                                   summary=f"{summary.get('encounters', 0)} encounters")
+            workspace_regroup_lock = acquire_workspace_regroup(ctx.workspace_id)
+            while not workspace_regroup_lock.acquire(timeout=0.2):
+                if ctx.runner.is_cancelled(job["id"]):
+                    return {}
+            try:
+                # A Cancel that landed just before an uncontended acquire (or
+                # while the previous holder was releasing) never reached the
+                # polling loop's check; recheck before the feature load.
+                if ctx.runner.cancellation_requested(job["id"]):
+                    return {}
+                photos = load_photo_features(
+                    thread_db, collection_id=collection_id, config=effective_cfg,
+                )
+                if not photos:
+                    msg = "No photos with pipeline features found. Run extract-masks first."
+                    ctx.runner.update_step(job["id"], "load", status="failed",
+                                           error="No photos with pipeline features found")
+                    for step_id in ("group", "save"):
+                        ctx.runner.update_step(job["id"], step_id, status="completed",
+                                               summary="Skipped")
+                    # ``ok: False`` makes JobRunner record the job as failed;
+                    # a bare ``{"error": ...}`` was recorded as completed.
+                    return {"ok": False, "error": msg, "errors": [msg]}
+                ctx.runner.update_step(job["id"], "load", status="completed",
+                                       summary=f"{len(photos)} photos")
 
-            ctx.runner.update_step(job["id"], "save", status="running")
-            ctx.runner.push_event(
-                job["id"],
-                "progress",
-                {"phase": "Saving results", "current": 2, "total": 3},
-            )
+                ctx.runner.update_step(job["id"], "group", status="running")
+                ctx.runner.push_event(
+                    job["id"],
+                    "progress",
+                    {"phase": "Grouping encounters and bursts", "current": 1, "total": 3},
+                )
 
-            if ctx.runner.is_cancelled(job["id"]):
-                return {}
-            cache_dir = os.path.dirname(db_path)
-            save_results(results, cache_dir, ctx.workspace_id)
+                # emit_trace=True so the pipeline-review sidebar's algorithm-trace
+                # panel can show per-cut-point details for each encounter on the
+                # very first load (not only after the user drags a live-tuning
+                # slider). Cost is negligible (~300B per adjacent pair).
+                if ctx.runner.cancellation_requested(job["id"]):
+                    return {}
+                results = run_full_pipeline(photos, config=pipeline_cfg, emit_trace=True)
+                summary = results.get("summary", {})
+                ctx.runner.update_step(job["id"], "group", status="completed",
+                                       summary=f"{summary.get('encounters', 0)} encounters")
+
+                ctx.runner.update_step(job["id"], "save", status="running")
+                ctx.runner.push_event(
+                    job["id"],
+                    "progress",
+                    {"phase": "Saving results", "current": 2, "total": 3},
+                )
+
+                if ctx.runner.cancellation_requested(job["id"]):
+                    return {}
+                cache_dir = os.path.dirname(db_path)
+                save_results(results, cache_dir, ctx.workspace_id)
+                # save_results replaced the whole workspace cache. Stamp the
+                # grouping fingerprint only when this run covered the whole
+                # workspace; a collection-scoped run leaves a partial cache, so
+                # clear the stamp instead (as regroup_stage does) or the
+                # pipeline page would report Group as done-prior.
+                #
+                # Coverage is measured against the loaded photo snapshot, not
+                # the current collection membership: if a smart collection
+                # expanded (a rating just crossed the threshold, matching an
+                # extra photo) or a new workspace photo was added between
+                # ``load_photo_features`` and here, a re-resolve would falsely
+                # claim full-workspace coverage and stamp the fingerprint for
+                # a cache that in fact excluded the newly-eligible photo.
+                snapshot_photo_ids = {p["id"] for p in photos}
+                if collection_covers_workspace(
+                    thread_db, ctx.workspace_id, collection_id,
+                    snapshot_photo_ids=snapshot_photo_ids,
+                ):
+                    thread_db.set_workspace_group_state(
+                        workspace_id=ctx.workspace_id,
+                        fingerprint=compute_group_fingerprint(effective_cfg),
+                        when_ts=int(time.time()),
+                    )
+                else:
+                    thread_db.set_workspace_group_state(
+                        workspace_id=ctx.workspace_id,
+                        fingerprint=None,
+                        when_ts=None,
+                    )
+            finally:
+                workspace_regroup_lock.release()
             ctx.runner.update_step(job["id"], "save", status="completed")
 
             return results["summary"]

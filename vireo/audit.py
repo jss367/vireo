@@ -178,13 +178,18 @@ def check_untracked(db, root_paths):
 
 
 def check_stray_sidecars(root_paths):
-    """Find .xmp sidecar files with no corresponding image file on disk.
+    """Find .xmp sidecar files with no corresponding file on disk.
 
     Matches both sidecar naming styles: ``bird.xmp`` next to ``bird.jpg``
     (Vireo/Lightroom) and ``bird.jpg.xmp`` (darktable). A sidecar whose
     image exists but isn't in the DB is the untracked check's problem,
     not a stray — import would re-attach it. Comparison is
     case-insensitive so ``BIRD.JPG`` matches ``bird.xmp``.
+
+    Any non-sidecar file counts as the sidecar's owner, not just the
+    formats Vireo can import: ``IMGP0001.PEF``, ``IMG_1234.HEIC`` and
+    ``clip.MP4`` carry Lightroom/darktable sidecars too, and a sidecar
+    beside them holds the user's edits.
 
     Returns:
         list of {path, folder}
@@ -218,7 +223,7 @@ def check_stray_sidecars(root_paths):
                 stem, ext = os.path.splitext(name)
                 if ext.lower() == ".xmp":
                     xmps.append(name)
-                elif ext.lower() in SUPPORTED_EXTENSIONS:
+                else:
                     # Both forms so "bird.xmp" and "bird.jpg.xmp" match
                     image_names.add(name.lower())
                     image_names.add(stem.lower())
@@ -234,19 +239,40 @@ def check_stray_sidecars(root_paths):
 
 
 def _sidecar_has_image(xmp_path):
-    """True if any image file next to ``xmp_path`` matches its base name."""
+    """True if any non-sidecar file next to ``xmp_path`` matches its base name.
+
+    Mirrors ``check_stray_sidecars``: any extension counts, so a sidecar
+    beside a format Vireo does not import is never treated as a stray. A
+    directory that cannot be listed counts as matched, so an unreadable
+    folder never makes a sidecar look deletable. Directory entries whose
+    name matches the sidecar's stem do *not* count: ``check_stray_sidecars``
+    excludes them via ``os.path.isfile`` (a sibling directory named
+    ``ghost`` beside ``ghost.xmp`` reports the sidecar as stray), so the
+    delete-time recheck must apply the same rule or that stray becomes
+    permanently undeletable.
+
+    Hidden names (leading ``.``) are *not* skipped here even though
+    ``check_stray_sidecars`` ignores them: the delete route accepts
+    client-supplied paths, so ``.bird.jpg.xmp`` beside its hidden owner
+    ``.bird.jpg`` would otherwise slip past the recheck and land in Trash.
+    The recheck's job is a conservative safety gate, so a hidden owner
+    still counts.
+    """
     dirpath = os.path.dirname(xmp_path)
     base = os.path.splitext(os.path.basename(xmp_path))[0].lower()
     try:
         names = os.listdir(dirpath)
     except OSError:
-        return False
+        return True
     for name in names:
         stem, ext = os.path.splitext(name)
-        if ext.lower() in SUPPORTED_EXTENSIONS and (
-            name.lower() == base or stem.lower() == base
-        ):
-            return True
+        if ext.lower() == ".xmp":
+            continue
+        if name.lower() != base and stem.lower() != base:
+            continue
+        if not os.path.isfile(os.path.join(dirpath, name)):
+            continue
+        return True
     return False
 
 
@@ -262,11 +288,11 @@ def _is_under_roots(path, real_roots):
     )
 
 
-def delete_stray_sidecars(paths, allowed_roots):
-    """Delete sidecar files, re-verifying each is still a stray.
+def delete_stray_sidecars(paths, allowed_roots, trash_paths=None):
+    """Move sidecar files to the Trash, re-verifying each is still a stray.
 
-    Each path must end in .xmp and must still have no matching image
-    file beside it at deletion time — the list the client holds may be
+    Each path must end in .xmp and must still have no matching file
+    beside it at deletion time — the list the client holds may be
     stale (the user could have restored the photo since the check ran),
     and a sidecar with a living image is data, not litter.
 
@@ -276,12 +302,17 @@ def delete_stray_sidecars(paths, allowed_roots):
     root folders the sidecars check scans) is refused. Both sides are
     realpath'd so symlinks can't smuggle a path outside the library.
 
-    Returns the number of files actually deleted.
+    ``trash_paths`` is the app's Trash helper (``app._trash_paths``,
+    returning ``(moved, successful, failures)``). Without one, files are
+    unlinked; the route always passes it so a mistaken delete stays
+    recoverable.
+
+    Returns the number of files actually removed.
     """
     real_roots = [os.path.realpath(r) for r in allowed_roots]
-    deleted = 0
+    targets = []
     for p in paths:
-        if os.path.splitext(p)[1].lower() != ".xmp":
+        if not isinstance(p, str) or os.path.splitext(p)[1].lower() != ".xmp":
             continue
         if not _is_under_roots(p, real_roots):
             log.warning(
@@ -292,6 +323,21 @@ def delete_stray_sidecars(paths, allowed_roots):
             continue
         if _sidecar_has_image(p):
             continue
+        targets.append(p)
+    targets = list(dict.fromkeys(targets))
+    if trash_paths is not None:
+        if not targets:
+            deleted = 0
+        else:
+            deleted, _successful, failures = trash_paths(targets)
+            for failure in failures:
+                log.warning(
+                    "Failed to move stray sidecar to Trash: %s", failure,
+                )
+        log.info("Moved %d stray sidecars to Trash", deleted)
+        return deleted
+    deleted = 0
+    for p in targets:
         try:
             os.unlink(p)
             deleted += 1
@@ -597,6 +643,7 @@ def remove_orphans(db, photo_ids):
         db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (pid,))
         db.conn.execute("DELETE FROM pending_changes WHERE photo_id = ?", (pid,))
         db.conn.execute("DELETE FROM photos WHERE id = ?", (pid,))
+    db.remap_collection_photo_ids(dict.fromkeys(photo_ids))
     db.conn.commit()
     db.update_folder_counts()
     log.info("Removed %d orphan entries", len(photo_ids))

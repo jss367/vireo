@@ -2,7 +2,7 @@
   "name": "vireo",
   "private": true,
   "license": "MIT",
-  "version": "0.57.1",
+  "version": "0.58.0",
   "scripts": {
     "tauri": "tauri"
   },

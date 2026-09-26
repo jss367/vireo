@@ -660,6 +660,7 @@ def test_detect_subjects_returns_detection_map(tmp_path):
     }
 
     mock_db = MagicMock()
+    mock_db.get_effective_config.return_value = {"detector_confidence": 0.2}
     mock_db.get_existing_detection_photo_ids.return_value = set()
     mock_db.write_detection_batch.return_value = [101]
 
@@ -699,6 +700,7 @@ def test_detect_subjects_skips_existing_detections(tmp_path):
     folders = {10: str(tmp_path)}
 
     mock_db = MagicMock()
+    mock_db.get_effective_config.return_value = {"detector_confidence": 0.2}
     # Photo 1 already has detections in the database
     mock_db.get_detector_run_photo_ids.return_value = {1}
     mock_db.get_detections.return_value = [
@@ -739,6 +741,7 @@ def test_detect_subjects_skips_weight_download_when_all_cached(tmp_path):
     folders = {10: str(tmp_path)}
 
     mock_db = MagicMock()
+    mock_db.get_effective_config.return_value = {"detector_confidence": 0.2}
     mock_db.get_detector_run_photo_ids.return_value = {1}
     mock_db.get_detections.return_value = [
         {"id": 101, "box_x": 0.1, "box_y": 0.1, "box_w": 0.5, "box_h": 0.5,
@@ -5568,22 +5571,16 @@ def test_detect_subjects_reclassify_preserves_unprocessed_photos_on_cancel(tmp_p
     )
 
 
-def test_detect_subjects_reclassify_tracks_clear_when_detect_returns_none(tmp_path, monkeypatch):
-    """For reclassify runs, ``_detect_subjects`` must record a photo for
-    rebuild as soon as its prior detections have been cleared — not only
-    when ``_detect_batch`` reports it processed.
+def test_detect_subjects_reclassify_keeps_state_when_detect_returns_none(tmp_path, monkeypatch):
+    """A reclassify whose detector returns ``None`` for a photo (decode
+    failure / ONNX hiccup) must leave that photo's detections and
+    predictions untouched and not queue it for a post-cancel rebuild.
 
-    Regression for Codex P2: if ``detect_animals`` returns ``None`` (image
-    decode failure / ONNX hiccup), ``_detect_batch`` deliberately omits
-    the id from ``processed_ids`` so a future non-reclassify pass retries
-    it. But in reclassify mode the per-photo ``clear_detections`` has
-    already cascaded away the old detections + predictions; if the user
-    then cancels before the next iteration, the run_classify_job cancel
-    path sees an empty processed set and skips classification, leaving
-    the photo with no detections and no predictions.
-
-    The fix marks the photo for rebuild immediately after the clear, so
-    the full-image fallback in ``_classify_photos`` rebuilds it.
+    ``_detect_subjects`` used to run the global ``clear_detections`` before
+    each photo's re-detection, so a ``None`` result stranded the photo and
+    had to be patched over by always queueing it for rebuild. Detections
+    are now replaced only when the new result lands, so there is nothing
+    to rebuild.
     """
     from unittest.mock import patch
 
@@ -5603,17 +5600,19 @@ def test_detect_subjects_reclassify_tracks_clear_when_detect_returns_none(tmp_pa
         folder_id, "a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    db.save_detections(pid, [
+    det = db.save_detections(pid, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1},
          "confidence": 0.9, "category": "animal"},
-    ], detector_model="megadetector-v6")
+    ], detector_model="megadetector-v6")[0]
+    db.add_prediction(det, species="Robin", confidence=0.9,
+                      model="BioCLIP", labels_fingerprint="legacy")
 
     runner = FakeRunner()
     job = _make_job()
     photos = [{"id": pid, "filename": "a.jpg", "folder_id": folder_id}]
 
     # detect_animals returns None → _detect_batch hits its early-continue
-    # and the id never lands in batch_processed. The clear above still ran.
+    # and the id never lands in batch_processed.
     with patch("classify_job.detect_animals", return_value=None), \
          patch("classify_job.get_primary_detection", return_value=None), \
          patch("classify_job.compute_sharpness", return_value=0.0):
@@ -5626,14 +5625,11 @@ def test_detect_subjects_reclassify_tracks_clear_when_detect_returns_none(tmp_pa
             db=db,
         )
 
-    processed = job.get("_detect_processed_ids")
-    assert processed and pid in processed, (
-        "Reclassify with detect_animals returning None must still mark "
-        "the photo for rebuild — its prior detections were cleared and "
-        "the classify path needs to know to replace them. Without this, "
-        "a post-detect cancel strands the photo with no detections and "
-        "no predictions."
-    )
+    assert pid not in job.get("_detect_processed_ids", set())
+    assert [d["id"] for d in db.get_detections(pid, min_conf=0)] == [det]
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM predictions WHERE detection_id = ?", (det,),
+    ).fetchone()[0] == 1
 
 
 def test_classify_photos_stops_when_cancelled(tmp_path):
@@ -6383,13 +6379,14 @@ def test_classify_photos_no_reclassify_drops_pending_batch_on_cancel(tmp_path):
 def test_classify_photos_finish_cleared_only_ignores_cancel(tmp_path):
     """When ``finish_cleared_only=True`` (set by ``run_classify_job`` after a
     post-detect cancel landed on a reclassify run), the classify loop must
-    process every photo despite the cancel signal. The photos in this
-    subset already had their old detections + cascaded predictions wiped
-    during detection; bailing now would strand them empty.
+    process every photo despite the cancel signal. Detection already
+    rewrote this subset's boxes, and any box it dropped took its
+    predictions with it; bailing now would strand them empty.
 
-    Also asserts the per-photo ``clear_predictions`` is NOT re-run — the
-    cascade in ``_detect_subjects`` already did that, and re-issuing the
-    DELETE would just waste a transaction.
+    Also asserts the per-photo ``clear_predictions`` runs scoped to this
+    model and label set: detection no longer cascades predictions away,
+    so the rows under ``fp`` on retained boxes are what this pass replaces,
+    and other label sets' rows must survive.
     """
     from unittest.mock import MagicMock, patch
 
@@ -6439,9 +6436,9 @@ def test_classify_photos_finish_cleared_only_ignores_cancel(tmp_path):
     # Classification happened despite cancel = True.
     assert len(raw_results) == 1
     assert raw_results[0]["prediction"] == "Sparrow"
-    # Per-photo clear must not have re-fired — the detection-loop cascade
-    # already handled it.
-    mock_db.clear_predictions.assert_not_called()
+    mock_db.clear_predictions.assert_called_once_with(
+        model="BioCLIP", collection_photo_ids=[1], labels_fingerprint="fp-x",
+    )
 
 
 def test_run_classify_job_reclassify_cancel_after_detect_classifies_processed(tmp_path):

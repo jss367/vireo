@@ -27,6 +27,8 @@ id lists, ``create_default_collections_for_all_workspaces``) stay on
 """
 
 import json
+import math
+import re
 
 from keyword_identity import identity_sql
 
@@ -869,7 +871,13 @@ class CollectionRepository:
                     exists, params = _prediction_exists(f"{col} = ?", [value])
                     return "NOT " + exists, params
                 if op == "contains":
-                    return _prediction_exists(f"{col} LIKE ?", [f"%{value}%"])
+                    # ``value or ''`` would turn a falsey scalar like ``0`` or
+                    # ``False`` into an empty string, producing ``LIKE '%%'``
+                    # and matching every non-NULL taxonomy value — the exact
+                    # ``value="%"`` unbounded match this escape is meant to
+                    # block. Preserve the scalar's string form instead.
+                    like = f"%{self._escape_like(str(value if value is not None else ''))}%"
+                    return _prediction_exists(f"{col} LIKE ? ESCAPE '\\'", [like])
             if field == "prediction_confidence":
                 cond, cond_params = _numeric_condition("pred.confidence", op, value)
                 return _prediction_exists(cond, cond_params)
@@ -1020,7 +1028,13 @@ class CollectionRepository:
                 if op == "is not":
                     return "(p.active_mask_variant IS NULL OR p.active_mask_variant != ?)", [value]
                 if op == "contains":
-                    return "p.active_mask_variant LIKE ?", [f"%{value}%"]
+                    # ``value or ''`` would turn a falsey scalar like ``0`` or
+                    # ``False`` into an empty string, producing ``LIKE '%%'``
+                    # and matching every photo with a variant set — the exact
+                    # ``value="%"`` unbounded match this escape is meant to
+                    # block. Preserve the scalar's string form instead.
+                    like = f"%{self._escape_like(str(value if value is not None else ''))}%"
+                    return "p.active_mask_variant LIKE ? ESCAPE '\\'", [like]
             if field == "has_gps":
                 has = "p.latitude IS NOT NULL AND p.longitude IS NOT NULL"
                 return _boolean_predicate(has, op, value)
@@ -2676,3 +2690,160 @@ class CollectionRepository:
         if updated:
             self.conn.commit()
         return updated
+
+
+_SQLITE_NUMERIC_TEXT_RE = re.compile(
+    r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$",
+    re.ASCII,
+)
+_SQLITE_INTEGER_TEXT_RE = re.compile(r"^[+-]?\d+$", re.ASCII)
+# The exact byte set sqlite3Isspace() skips before numeric conversion.
+_SQLITE_NUMERIC_WHITESPACE = " \t\n\v\f\r"
+
+
+def _photo_id_key(value):
+    """The integer photo id a ``photo_ids`` rule value names, or None.
+
+    The rules engine matches ints inline and binds anything else, where
+    SQLite's integer affinity on ``p.id`` still matches a numeric string, an
+    integral float, a string spelling of one (e.g. ``"1.0"`` or ``"1e3"``),
+    or a Python bool (SQLite treats ``True``/``False`` as 1/0), so every such
+    spelling names the same photo. The rule validator permits those spellings
+    (``_is_scalar`` accepts bool alongside int/float/str), so a remap that
+    missed them would leave a stale entry for the deleted id and silently
+    rejoin the next photo that reuses it.
+
+    Python's numeric grammar is broader than SQLite's — ``str.isdigit`` and
+    ``int`` accept Unicode digits (``int("٢") == 2``), and ``float`` accepts
+    PEP 515 underscores (``float("1_0") == 10.0``). Neither reaches SQLite's
+    numeric affinity, so binding ``"٢"`` or ``"1_0"`` stays TEXT and never
+    matches an integer id. Only accept strings SQLite would convert with
+    numeric affinity so we do not rewrite an unrelated id.
+
+    Digit-only spellings must parse through ``int``: Python's ``float`` rounds
+    integers above 2^53 to the nearest representable double, so a rule value
+    of ``"9007199254740993"`` would become ``9007199254740992`` and rewrite
+    the wrong photo. SQLite parses that same TEXT as a 64-bit INTEGER exactly,
+    so we mirror that by parsing pure-integer spellings with ``int`` and only
+    falling back to ``float`` for decimal or exponent forms (where SQLite's
+    own REAL conversion loses the same precision).
+
+    Trim only the whitespace SQLite's numeric affinity itself skips (space,
+    tab, newline, vertical tab, form feed, carriage return). ``str.strip()``
+    without arguments also removes Unicode whitespace like ``\\xa0`` (NBSP)
+    and ``\\u2000``-``\\u3000``, but SQLite leaves those bytes in place and
+    the TEXT then stays TEXT, never matching an integer id.
+    """
+    if isinstance(value, bool):
+        return 1 if value else 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if math.isfinite(value) and value.is_integer():
+            return int(value)
+        return None
+    if isinstance(value, str):
+        text = value.strip(_SQLITE_NUMERIC_WHITESPACE)
+        if not text or not _SQLITE_NUMERIC_TEXT_RE.match(text):
+            return None
+        if _SQLITE_INTEGER_TEXT_RE.match(text):
+            try:
+                return int(text)
+            except ValueError:
+                return None
+        try:
+            as_float = float(text)
+        except ValueError:
+            return None
+        if math.isfinite(as_float) and as_float.is_integer():
+            return int(as_float)
+    return None
+
+
+def remap_collection_photo_ids(conn, mapping):
+    """Rewrite ``photo_ids`` rules in every workspace's collections.
+
+    ``mapping`` maps a photo id that is leaving the catalog to the id that
+    absorbed it, or to None when the photo is simply gone. Photos are global,
+    so a static collection in any workspace can name the id, and SQLite reuses
+    a freed ``photos.id``: a stale entry would make the next imported photo
+    join that collection. A remapped id that the rule already lists is not
+    repeated. Runs inside the caller's transaction and never commits. Returns
+    the number of collections rewritten.
+    """
+    targets = {}
+    for old, new in mapping.items():
+        key = _photo_id_key(old)
+        if key is not None:
+            targets[key] = new
+    if not targets:
+        return 0
+    # Follow chains (A absorbed into B, then B into C) to the final survivor,
+    # so a caller can collect one mapping across a multi-step merge.
+    for key in list(targets):
+        seen_chain = {key}
+        new = targets[key]
+        while _photo_id_key(new) in targets and _photo_id_key(new) not in seen_chain:
+            seen_chain.add(_photo_id_key(new))
+            new = targets[_photo_id_key(new)]
+        targets[key] = new
+    # Only an id a remap introduces can create a duplicate this pass should
+    # fold; duplicates a rule already held are left as the user saved them.
+    survivors = {
+        k for k in (_photo_id_key(v) for v in targets.values()) if k is not None
+    }
+
+    def rewrite(node):
+        if isinstance(node, list):
+            changed_any = False
+            for child in node:
+                changed_any = rewrite(child) or changed_any
+            return changed_any
+        if not isinstance(node, dict):
+            return False
+        changed_any = rewrite(node.get("rules"))
+        if node.get("field") != "photo_ids":
+            return changed_any
+        values = node.get("value")
+        if not isinstance(values, list):
+            return changed_any
+        out = []
+        seen = set()
+        changed = False
+        for v in values:
+            key = _photo_id_key(v)
+            if key in targets:
+                changed = True
+                v = targets[key]
+                if v is None:
+                    continue
+                key = _photo_id_key(v)
+            if key in survivors:
+                if key in seen:
+                    changed = True
+                    continue
+                seen.add(key)
+            out.append(v)
+        if changed:
+            node["value"] = out
+        return changed_any or changed
+
+    rewritten = 0
+    # Scan every collection: ``add_collection`` stores callers' JSON verbatim,
+    # so a valid rule can spell the field with unicode escapes like
+    # ``"photo\\u005fids"`` (which the rules engine parses as ``photo_ids``).
+    # A raw-text ``LIKE '%photo_ids%'`` filter would miss it and leave the
+    # stale id behind for the next photo that reuses it.
+    rows = conn.execute("SELECT id, rules FROM collections").fetchall()
+    for row in rows:
+        try:
+            rules = json.loads(row["rules"])
+        except (TypeError, ValueError):
+            continue
+        if rewrite(rules):
+            conn.execute(
+                "UPDATE collections SET rules = ? WHERE id = ?",
+                (json.dumps(rules), row["id"]),
+            )
+            rewritten += 1
+    return rewritten

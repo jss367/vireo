@@ -750,12 +750,12 @@ def test_delete_photos_cleans_collection_photo_id_rules(db, lib):
     other = db.add_collection(
         "other", json.dumps([{"field": "photo_ids", "value": [lib["c"]]}]),
     )
-    # A collection in another workspace is left alone.
-    db.conn.execute(
+    # Photos are global, so a collection in another workspace is cleaned too.
+    foreign = db.conn.execute(
         "INSERT INTO collections (name, rules, workspace_id) VALUES (?, ?, ?)",
-        ("foreign", json.dumps([{"field": "photo_ids", "value": [lib["a"]]}]),
+        ("foreign", json.dumps([{"field": "photo_ids", "value": [lib["a"], lib["f"]]}]),
          lib["other_ws"]),
-    )
+    ).lastrowid
     db.conn.commit()
 
     statements = _trace(db)
@@ -770,13 +770,34 @@ def test_delete_photos_cleans_collection_photo_id_rules(db, lib):
     assert rules["odd"] == odd
     assert json.loads(rules["other"]) == [{"field": "photo_ids", "value": [lib["c"]]}]
     assert json.loads(rules["foreign"]) == [
-        {"field": "photo_ids", "value": [lib["a"]]},
+        {"field": "photo_ids", "value": [lib["f"]]},
     ]
     updates = _sql(statements, "UPDATE collections SET rules")
     assert [s.rsplit("WHERE id = ", 1)[1] for s in updates] == [
-        str(flat), str(nested),
+        str(flat), str(nested), str(foreign),
     ]
     assert untouched not in (flat, nested) and other not in (flat, nested)
+
+
+def test_deleted_photo_id_reused_by_sqlite_does_not_join_foreign_collection(db, lib):
+    # ``photos.id`` has no AUTOINCREMENT, so SQLite hands the highest freed
+    # id to the next insert. A static collection in another workspace that
+    # still named the deleted id would silently gain the new photo.
+    doomed = _photo(db, lib["root"], "doomed.jpg")
+    db.add_workspace_folder(lib["other_ws"], lib["root"])
+    foreign = db.conn.execute(
+        "INSERT INTO collections (name, rules, workspace_id) VALUES (?, ?, ?)",
+        ("foreign", json.dumps([{"field": "photo_ids", "value": [doomed]}]),
+         lib["other_ws"]),
+    ).lastrowid
+    db.conn.commit()
+
+    db.delete_photos([doomed])
+    reused = _photo(db, lib["root"], "unrelated.jpg")
+
+    assert reused == doomed
+    db.set_active_workspace(lib["other_ws"])
+    assert db.get_collection_photo_ids(foreign) == []
 
 
 def test_delete_photos_expires_drained_move_provenance(db, lib, tmp_path):
@@ -895,7 +916,6 @@ def test_delete_photos_sql_order(db, lib, monkeypatch, tmp_path):
     statements = _trace(db)
     db.delete_photos([lib["a"]])
     db.conn.set_trace_callback(None)
-    ws = db._active_workspace_id
     a = lib["a"]
     root = lib["root"]
     # FK cascade sub-programs re-report their statement; dedupe keeps order.
@@ -905,7 +925,7 @@ def test_delete_photos_sql_order(db, lib, monkeypatch, tmp_path):
         f"DELETE FROM photo_keywords WHERE photo_id IN ({a})",
         f"DELETE FROM pending_changes WHERE photo_id IN ({a})",
         f"DELETE FROM detections WHERE photo_id IN ({a})",
-        f"SELECT id, rules FROM collections WHERE workspace_id = {ws}",
+        "SELECT id, rules FROM collections",
         f"DELETE FROM photos WHERE id IN ({a})",
         f"SELECT filename FROM photos WHERE folder_id = {root}",
         "SELECT id, filename, last_move_source_folder_path FROM photos "

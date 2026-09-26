@@ -3196,6 +3196,7 @@ async function loadConfig() {
     document.getElementById('cfgInatToken').value = cfg.inat_token || '';
     if (cfg.inat_token) validateInatToken();
     document.getElementById('cfgGoogleMapsApiKey').value = cfg.google_maps_api_key || '';
+    _rememberSavedSecrets(_readSecretFields());
     document.getElementById('cfgGoogleMapsPreferEnglish').checked = cfg.google_maps_prefer_english !== false;
     document.getElementById('cfgKeywordCase').value = cfg.keyword_case || 'auto';
     document.getElementById('cfgMaxEditHistory').value = cfg.max_edit_history != null ? cfg.max_edit_history : 1000;
@@ -3427,6 +3428,40 @@ function _saveConfigNow(gen) {
     return _serializedSave('config', function() { return _postConfigSnapshot(gen); });
 }
 
+// The secret fields and the value each one held when the page loaded it or
+// last saved it. Every autosave posts the whole form, so sending these
+// unconditionally let any save (a photos-per-page change in another tab)
+// write back the token the page loaded with, over one saved since, and
+// cancel an in-flight iNat token validation. Only a field the user changed
+// here is sent; the server keeps the stored value for an absent key.
+var _SECRET_FIELDS = {
+  hf_token: 'cfgHfToken',
+  inat_token: 'cfgInatToken',
+  google_maps_api_key: 'cfgGoogleMapsApiKey',
+};
+var _savedSecrets = {};
+
+function _readSecretFields() {
+  var values = {};
+  Object.keys(_SECRET_FIELDS).forEach(function(key) {
+    values[key] = document.getElementById(_SECRET_FIELDS[key]).value.trim();
+  });
+  return values;
+}
+
+function _editedSecrets() {
+  var current = _readSecretFields();
+  var edited = {};
+  Object.keys(current).forEach(function(key) {
+    if (current[key] !== _savedSecrets[key]) edited[key] = current[key];
+  });
+  return edited;
+}
+
+function _rememberSavedSecrets(values) {
+  Object.keys(values).forEach(function(key) { _savedSecrets[key] = values[key]; });
+}
+
 async function _postConfigSnapshot(gen) {
     // Runs only once any earlier config POST has settled; reads the form
     // now so the snapshot reflects every edit made while waiting.
@@ -3434,7 +3469,7 @@ async function _postConfigSnapshot(gen) {
     var grouping = parseInt(document.getElementById('cfgGroupingWindow').value, 10);
     if (isNaN(grouping)) grouping = 10;
     var similarity = parseInt(document.getElementById('cfgSimilarity').value, 10) / 100;
-    var hfToken = document.getElementById('cfgHfToken').value.trim();
+    var secrets = _editedSecrets();
     var keywordCase = document.getElementById('cfgKeywordCase').value;
     var maxEditHistory = parseInt(document.getElementById('cfgMaxEditHistory').value, 10);
     if (isNaN(maxEditHistory)) maxEditHistory = 1000;
@@ -3443,15 +3478,12 @@ async function _postConfigSnapshot(gen) {
       await safeFetch('/api/config', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
+        body: JSON.stringify(Object.assign({}, secrets, {
           classification_threshold: threshold,
           grouping_window_seconds: grouping,
           similarity_threshold: similarity,
           keyword_case: keywordCase,
           max_edit_history: maxEditHistory,
-          hf_token: hfToken,
-          inat_token: document.getElementById('cfgInatToken').value.trim(),
-          google_maps_api_key: document.getElementById('cfgGoogleMapsApiKey').value.trim(),
           google_maps_prefer_english: document.getElementById('cfgGoogleMapsPreferEnglish').checked,
           external_editors: collectExternalEditors(),
           remote_targets: collectRemoteTargets(),
@@ -3541,12 +3573,13 @@ async function _postConfigSnapshot(gen) {
             merge_score: parseInt(document.getElementById('cfgMergeScore').value, 10) / 100,
             merge_max_gap: parseInt(document.getElementById('cfgMergeMaxGap').value, 10) || 60,
           },
-        }),
+        })),
       });
     } catch (e) {
       _saveStatusMark('config', 'error', gen);
       throw e;
     }
+    _rememberSavedSecrets(secrets);
     _saveStatusMark('config', 'ok', gen);
     if (typeof loadPreviewCacheStatus === 'function') loadPreviewCacheStatus();
     // Drop the cached editor list so the next "Open in Editor" action
@@ -4728,11 +4761,14 @@ async function verifyAllModels() {
 }
 
 async function removeModel(modelId) {
-  if (!confirm('Remove this model and delete its weights from disk?')) return;
+  if (!confirm('Remove this model? Weights Vireo downloaded are deleted from disk; weights in your own folders are left in place.')) return;
   try {
-    await safeFetch('/api/models/' + encodeURIComponent(modelId), {
+    var result = await safeFetch('/api/models/' + encodeURIComponent(modelId), {
       method: 'DELETE',
     });
+    if (result && result.kept_path) {
+      showToast('Model removed from Vireo. Its weights were left in place at ' + result.kept_path, 'success');
+    }
   } catch(e) {}
   loadModels();
 }
@@ -5406,13 +5442,43 @@ function renderAllSettings(container) {
   container.innerHTML = parts.join('');
 }
 
+function _settingControlSelector(el) {
+  if (!el || !el.getAttribute) return null;
+  var inputKey = el.getAttribute('data-input-key');
+  if (inputKey) return '[data-input-key="' + cssEscape(inputKey) + '"]';
+  var listKey = el.getAttribute('data-list-key');
+  var listItem = el.getAttribute('data-list-item');
+  if (listKey && listItem != null) {
+    return '[data-list-key="' + cssEscape(listKey) + '"][data-list-item="' + cssEscape(listItem) + '"]';
+  }
+  return null;
+}
+
 function rerenderSettingRow(key) {
   var row = document.querySelector('#allSettingsCategories .setting-row-card[data-key="' + cssEscape(key) + '"]');
   if (!row) return;
+  // A save lands asynchronously, and the user may be back in this row's
+  // field. Replacing the row would swallow the keystrokes typed since, so
+  // leave a row that is being edited alone; its own change event saves it
+  // and re-renders then. Otherwise keep focus where it was.
+  var active = document.activeElement;
+  var focusSelector = (active && row.contains(active)) ? _settingControlSelector(active) : null;
+  if (focusSelector && active.dataset && active.dataset.dirty) return;
   var tmp = document.createElement('div');
   tmp.innerHTML = renderSettingRow(key);
   var fresh = tmp.firstElementChild;
-  if (fresh) row.replaceWith(fresh);
+  if (!fresh) return;
+  row.replaceWith(fresh);
+  if (focusSelector) {
+    var target = fresh.querySelector(focusSelector);
+    if (target) {
+      target.focus();
+      try {
+        var end = String(target.value || '').length;
+        target.setSelectionRange(end, end);
+      } catch (e) {}  // number / checkbox inputs have no selection range
+    }
+  }
 }
 
 function cssEscape(s) {
@@ -5536,6 +5602,11 @@ function renderSettingWidget(key, spec, effective) {
          +    'style="' + inputStyle + 'min-width:120px;">'
          +   opts + '</select>';
   }
+  // Typed fields (number, secret, text) save on `change` (blur or Enter), not
+  // per keystroke: a debounced save while typing wrote partial values such as
+  // half a path to config, and for the working-copy limit raised the
+  // "remove ~X GB" confirm after the first digit. `dirty` marks a field with
+  // unsaved typing so rerenderSettingRow won't replace it mid-edit.
   if (spec.type === 'int' || spec.type === 'float') {
     var step = spec.step != null ? spec.step : (spec.type === 'int' ? 1 : 0.01);
     var min = spec.min != null ? ' min="' + spec.min + '"' : '';
@@ -5543,16 +5614,18 @@ function renderSettingWidget(key, spec, effective) {
     var val = (effective != null) ? effective : '';
     return '<input type="number" ' + keyAttr + ' value="' + escapeAttr(String(val)) + '" '
          +     'step="' + step + '"' + min + max + ' '
-         +     'oninput="this.dataset.dirty = \'1\'; onSchemaInputChange(this, false)" '
-     +     'onblur="if (this.dataset.dirty) { delete this.dataset.dirty; onSchemaInputChange(this, true); }" '
+         +     'oninput="this.dataset.dirty = \'1\'" '
+         +     'onchange="delete this.dataset.dirty; onSchemaInputChange(this, true)" '
+     +     'onblur="delete this.dataset.dirty" '
          +     'style="' + inputStyle + 'width:100px;text-align:right;">';
   }
   if (spec.type === 'secret') {
     var sval = (effective != null) ? String(effective) : '';
     return '<input type="password" ' + keyAttr + ' value="' + escapeAttr(sval) + '" '
          +     'placeholder="(unset)" autocomplete="off" '
-         +     'oninput="this.dataset.dirty = \'1\'; onSchemaInputChange(this, false)" '
-     +     'onblur="if (this.dataset.dirty) { delete this.dataset.dirty; onSchemaInputChange(this, true); }" '
+         +     'oninput="this.dataset.dirty = \'1\'" '
+         +     'onchange="delete this.dataset.dirty; onSchemaInputChange(this, true)" '
+     +     'onblur="delete this.dataset.dirty" '
          +     'style="' + inputStyle + 'width:200px;font-family:monospace;">';
   }
   if (spec.type === 'list_string') {
@@ -5579,8 +5652,9 @@ function renderSettingWidget(key, spec, effective) {
   var tval = (effective != null) ? String(effective) : '';
   return '<input type="text" ' + keyAttr + ' value="' + escapeAttr(tval) + '" '
        +     'placeholder="(empty)" '
-       +     'oninput="this.dataset.dirty = \'1\'; onSchemaInputChange(this, false)" '
-     +     'onblur="if (this.dataset.dirty) { delete this.dataset.dirty; onSchemaInputChange(this, true); }" '
+       +     'oninput="this.dataset.dirty = \'1\'" '
+         +     'onchange="delete this.dataset.dirty; onSchemaInputChange(this, true)" '
+     +     'onblur="delete this.dataset.dirty" '
        +     'style="' + inputStyle + 'width:240px;font-family:monospace;">';
 }
 

@@ -190,6 +190,7 @@ def test_app_hooks_run_in_security_order(app_and_db):
         "_start_timer",
         "_protect_browser_surface",
         "_enforce_api_v1_token",
+        "_reject_non_object_json_body",
         "_reserve_workspace_mutation",
     ]
     assert names(app.after_request_funcs[None]) == ["_log_requests"]

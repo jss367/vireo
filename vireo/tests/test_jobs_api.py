@@ -4184,6 +4184,269 @@ def test_jobs_regroup_rejects_visual_collection(app_and_db):
         assert "visual-search clause" in resp.get_json()["error"]
 
 
+def _stub_regroup_pipeline(monkeypatch, photos, saved):
+    """Replace the regroup job's feature load, grouping and cache save."""
+    import pipeline
+
+    monkeypatch.setattr(pipeline, "load_photo_features", lambda *a, **k: photos)
+    monkeypatch.setattr(
+        pipeline, "run_full_pipeline",
+        lambda photos, **k: {"summary": {"encounters": 1}, "photos": photos},
+    )
+    monkeypatch.setattr(
+        pipeline, "save_results",
+        lambda results, cache_dir, ws_id, **k: saved.append(ws_id),
+    )
+
+
+def _group_fingerprint(db):
+    return db.conn.execute(
+        "SELECT last_group_fingerprint FROM workspaces WHERE id = ?",
+        (db._active_workspace_id,),
+    ).fetchone()[0]
+
+
+def test_jobs_regroup_no_photos_records_failure(app_and_db, monkeypatch):
+    """With no pipeline features the regroup job must be recorded as failed;
+    it used to return a bare ``{"error": ...}``, which JobRunner recorded as
+    completed while its "load" step showed failed."""
+    app, _ = app_and_db
+    saved = []
+    _stub_regroup_pipeline(monkeypatch, [], saved)
+    with app.test_client() as client:
+        job_id = client.post("/api/jobs/regroup", json={}).get_json()["job_id"]
+        job = wait_for_job_via_client(client, job_id)
+    assert job["status"] == "failed"
+    assert saved == []
+
+
+def test_jobs_regroup_collection_scope_clears_group_fingerprint(app_and_db, monkeypatch):
+    """A collection-scoped regroup replaces the whole workspace cache with
+    subset output, so it must clear ``last_group_fingerprint``; otherwise the
+    pipeline page keeps reporting Group as done-prior for a partial cache."""
+    app, db = app_and_db
+    ws_id = db._active_workspace_id
+    db.set_workspace_group_state(workspace_id=ws_id, fingerprint="stale", when_ts=1)
+    first = db.conn.execute("SELECT MIN(id) FROM photos").fetchone()[0]
+    col_id = db.add_collection(
+        "Subset", json.dumps([{"field": "photo_ids", "value": [first]}]),
+    )
+    saved = []
+    _stub_regroup_pipeline(monkeypatch, [{"id": first}], saved)
+    with app.test_client() as client:
+        job_id = client.post(
+            "/api/jobs/regroup", json={"collection_id": col_id},
+        ).get_json()["job_id"]
+        job = wait_for_job_via_client(client, job_id)
+    assert job["status"] == "completed"
+    assert saved == [ws_id]
+    assert _group_fingerprint(db) is None
+
+
+def test_jobs_regroup_full_workspace_stamps_group_fingerprint(app_and_db, monkeypatch):
+    """A whole-workspace regroup stamps the current grouping fingerprint.
+
+    The snapshot must include every workspace photo — coverage is measured
+    against the loaded IDs, not the ``collection_id=None`` shape, so a
+    workspace that gained a photo between load and save legitimately
+    doesn't stamp fresh."""
+    import config as cfg
+    from pipeline import compute_group_fingerprint
+
+    app, db = app_and_db
+    ws_ids = [
+        row["id"] for row in db.conn.execute(
+            "SELECT id FROM photos ORDER BY id"
+        ).fetchall()
+    ]
+    saved = []
+    _stub_regroup_pipeline(
+        monkeypatch, [{"id": pid} for pid in ws_ids], saved,
+    )
+    with app.test_client() as client:
+        job_id = client.post("/api/jobs/regroup", json={}).get_json()["job_id"]
+        job = wait_for_job_via_client(client, job_id)
+    assert job["status"] == "completed"
+    assert _group_fingerprint(db) == compute_group_fingerprint(
+        db.get_effective_config(cfg.load()),
+    )
+
+
+def test_jobs_regroup_waits_for_workspace_regroup_lock(app_and_db, monkeypatch):
+    """The regroup job must hold the workspace regroup lock across its save,
+    like reflow and regroup-live, so it can't land between a pipeline's
+    regroup and miss stages or overwrite a concurrent grouping edit."""
+    from pipeline_locks import acquire_workspace_regroup
+
+    app, db = app_and_db
+    saved = []
+    _stub_regroup_pipeline(monkeypatch, [{"id": 1}], saved)
+    lock = acquire_workspace_regroup(db._active_workspace_id)
+    with app.test_client() as client:
+        with lock:
+            job_id = client.post("/api/jobs/regroup", json={}).get_json()["job_id"]
+            time.sleep(0.5)
+            assert saved == [], "regroup saved results without the regroup lock"
+        job = wait_for_job_via_client(client, job_id)
+    assert job["status"] == "completed"
+    assert saved == [db._active_workspace_id]
+
+
+def test_jobs_regroup_cancel_breaks_workspace_regroup_lock_wait(
+    app_and_db, monkeypatch,
+):
+    """Cancelling a regroup job that is waiting on the workspace regroup lock
+    must exit promptly. A blocking ``with acquire_workspace_regroup(...):``
+    used ``threading.Lock.acquire()``, so a cancelled job stayed stuck behind
+    another pipeline's regroup + misses stages; the wait must poll and check
+    cancellation between attempts."""
+    from pipeline_locks import acquire_workspace_regroup
+
+    app, db = app_and_db
+    saved = []
+    _stub_regroup_pipeline(monkeypatch, [{"id": 1}], saved)
+    runner = app._job_runner
+    lock = acquire_workspace_regroup(db._active_workspace_id)
+    with app.test_client() as client:
+        with lock:
+            job_id = client.post(
+                "/api/jobs/regroup", json={},
+            ).get_json()["job_id"]
+            # Give the worker time to start and block on the lock.
+            time.sleep(0.5)
+            assert runner.cancel_job(job_id) is True
+            # The worker must observe cancellation while still waiting for
+            # the lock — without releasing it — and exit within a short
+            # window. Before this fix, the worker was stuck in
+            # ``threading.Lock.acquire()`` and could not see the cancel.
+            job = wait_for_job_via_runner(runner, job_id)
+    assert job["status"] == "cancelled"
+    assert saved == [], "regroup should not have run its save after cancel"
+
+
+def test_jobs_regroup_rechecks_cancel_after_acquiring_regroup_lock(
+    app_and_db, monkeypatch,
+):
+    """A Cancel that lands while ``acquire()`` succeeds (uncontended, or as
+    the previous holder releases) never reaches the polling loop's check, so
+    the job must recheck right after acquiring — before the feature load."""
+    import pipeline
+    import pipeline_locks
+
+    app, db = app_and_db
+    runner = app._job_runner
+    saved = []
+    _stub_regroup_pipeline(monkeypatch, [{"id": 1}], saved)
+    loaded = []
+    monkeypatch.setattr(
+        pipeline, "load_photo_features",
+        lambda *a, **k: loaded.append(1) or [{"id": 1}],
+    )
+    job_ids = []
+
+    class _CancelOnAcquire:
+        def acquire(self, timeout=-1):
+            while not job_ids:
+                time.sleep(0.01)
+            runner.cancel_job(job_ids[0])
+            return True
+
+        def release(self):
+            pass
+
+    monkeypatch.setattr(
+        pipeline_locks, "acquire_workspace_regroup",
+        lambda ws_id: _CancelOnAcquire(),
+    )
+    with app.test_client() as client:
+        job_id = client.post("/api/jobs/regroup", json={}).get_json()["job_id"]
+        job_ids.append(job_id)
+        job = wait_for_job_via_runner(runner, job_id)
+    assert job["status"] == "cancelled"
+    assert loaded == [], "feature load ran after a cancel observed at acquire"
+    assert saved == []
+
+
+def test_jobs_regroup_pause_does_not_hold_workspace_regroup_lock(
+    app_and_db, monkeypatch,
+):
+    """A Pause requested while the job holds the workspace regroup lock must
+    not park the worker inside the lock: ``is_cancelled`` sleeps through a
+    pause, which kept every same-workspace pipeline and grouping edit out of
+    its regroup critical section until the user resumed."""
+    import threading
+
+    import pipeline
+    from pipeline_locks import acquire_workspace_regroup
+
+    app, db = app_and_db
+    runner = app._job_runner
+    saved = []
+    _stub_regroup_pipeline(monkeypatch, [{"id": 1}], saved)
+    entered = threading.Event()
+    proceed = threading.Event()
+
+    def _blocking_load(*a, **k):
+        entered.set()
+        assert proceed.wait(10)
+        return [{"id": 1}]
+
+    monkeypatch.setattr(pipeline, "load_photo_features", _blocking_load)
+    lock = acquire_workspace_regroup(db._active_workspace_id)
+    with app.test_client() as client:
+        job_id = client.post("/api/jobs/regroup", json={}).get_json()["job_id"]
+        assert entered.wait(10), "regroup never reached the feature load"
+        assert runner.pause_job(job_id) is True
+        proceed.set()
+        # The job must finish its locked section and release the lock
+        # despite the pending pause.
+        assert lock.acquire(timeout=10), "paused regroup kept the regroup lock"
+        lock.release()
+        assert saved == [db._active_workspace_id]
+        assert runner.resume_job(job_id) is True
+        job = wait_for_job_via_runner(runner, job_id)
+    assert job["status"] == "completed"
+
+
+def test_jobs_regroup_coverage_uses_photo_snapshot(app_and_db, monkeypatch):
+    """The regroup job stamps the workspace fingerprint from the loaded
+    photo snapshot, not by re-resolving collection membership. If a smart
+    collection expands (a rating just crossed the threshold, matching an
+    extra photo) or a new workspace photo lands between load and save, a
+    re-resolve would falsely report full-workspace coverage and stamp the
+    fingerprint for a cache that in fact excluded the newly-eligible photo."""
+    app, db = app_and_db
+    ws_id = db._active_workspace_id
+    db.set_workspace_group_state(workspace_id=ws_id, fingerprint="stale", when_ts=1)
+    all_ids = [
+        row["id"] for row in db.conn.execute(
+            "SELECT id FROM photos ORDER BY id"
+        ).fetchall()
+    ]
+    assert len(all_ids) >= 3, "fixture must have three photos for this test"
+    # Collection currently matches every workspace photo. If coverage is
+    # measured by re-resolving the collection here, it reports full coverage
+    # and stamps. The loaded snapshot below excludes one photo, so the
+    # snapshot-based check correctly reports partial coverage and clears.
+    col_id = db.add_collection(
+        "MatchesAll",
+        json.dumps([{"field": "photo_ids", "value": all_ids}]),
+    )
+    loaded = all_ids[:-1]
+    saved = []
+    _stub_regroup_pipeline(
+        monkeypatch, [{"id": pid} for pid in loaded], saved,
+    )
+    with app.test_client() as client:
+        job_id = client.post(
+            "/api/jobs/regroup", json={"collection_id": col_id},
+        ).get_json()["job_id"]
+        job = wait_for_job_via_client(client, job_id)
+    assert job["status"] == "completed"
+    assert saved == [ws_id]
+    assert _group_fingerprint(db) is None
+
+
 def test_jobs_extract_masks_rejects_visual_collection(app_and_db):
     """``/api/jobs/extract-masks`` (SAM2 mask extraction) reads
     ``get_collection_photos``; reject visual collections at the boundary."""

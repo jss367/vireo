@@ -501,15 +501,25 @@ def create_highlights_blueprint(get_db, json_error):
                 # entries where the photo already carried the target via
                 # an equivalent hierarchical/root row so undo/redo do not
                 # untag a keyword the user deliberately kept.
+                #
+                # Highlights shows ``reviewed`` predictions with a Confirm
+                # button, so confirming one is a deliberate re-decision. Record
+                # that prior status so undo puts the row back to ``reviewed``
+                # rather than ``pending``, a status it no longer had.
                 items = []
                 for a in result["affected"]:
-                    if a.get("changed_tag", True):
-                        old_value = str(a["prediction_id"])
+                    meta = {}
+                    if not a.get("changed_tag", True):
+                        meta["no_tag"] = True
+                    if (a["prediction_id"] == pred["id"]
+                            and pred["status"] == "reviewed"):
+                        meta["prior_status"] = "reviewed"
+                    if meta:
+                        old_value = json.dumps(
+                            {"prediction_id": a["prediction_id"], **meta},
+                        )
                     else:
-                        old_value = json.dumps({
-                            "prediction_id": a["prediction_id"],
-                            "no_tag": True,
-                        })
+                        old_value = str(a["prediction_id"])
                     items.append({
                         "photo_id": a["photo_id"],
                         "old_value": old_value,

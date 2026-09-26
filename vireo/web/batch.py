@@ -676,14 +676,9 @@ def create_batch_blueprint(
         photo_ids = body.get("photo_ids", [])
         mode = body.get("mode", "vireo")
         include_companions = body.get("include_companions", False)
-        # For disk_permanent retry: accept paths directly since DB rows
-        # were already deleted in the initial disk-mode call.
-        paths = body.get("paths", [])
 
         try:
-            result = run_batch_delete(
-                db, photo_ids, mode, include_companions, paths=paths,
-            )
+            result = run_batch_delete(db, photo_ids, mode, include_companions)
         except ValueError as exc:
             return json_error(str(exc))
         if result.get("deleted"):

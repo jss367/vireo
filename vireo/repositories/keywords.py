@@ -26,19 +26,23 @@ handed the ``Database`` itself to a helper (``resolve_import_alias(self,
 now pass ``self.db``, the façade, since ``self`` is the repository here. The
 SQL text, parameter order, chunk sizes and commit placement are unchanged.
 
+What lives in ``repositories/keyword_provenance.py`` instead: the
+``photo_keywords`` writers that create or converge an association
+(``tag_photo``, ``_merge_keyword_into``, ``retire_builtin_wildlife_genre``,
+``link_keyword_to_place``), which ``test_keyword_provenance_contract`` keys
+to that module, and the keyword methods that call ``_merge_keyword_into``
+in the middle of their own work (``_upsert_one_keyword``,
+``_normalize_keyword_data_once``). This module writes no ``photo_keywords``
+association itself; a structural test fails if it ever references one of
+those writers.
+
 What deliberately stays on ``Database``:
 
-- The provenance-pinned ``photo_keywords`` writers that
-  ``test_keyword_provenance_contract`` keys to ``db.py``: ``tag_photo``,
-  ``_merge_keyword_into`` and ``retire_builtin_wildlife_genre``, whole.
-- The methods that call ``_merge_keyword_into`` in the middle of their own
-  work, so that call stays a visible ``self._merge_keyword_into(...)`` in
-  db.py: ``_upsert_one_keyword`` and ``_normalize_keyword_data_once`` stay
-  whole; ``_merge_duplicate_keywords_pass`` and ``update_keyword`` keep
-  their control flow and delegate only their statements here
+- The control flow of ``_merge_duplicate_keywords_pass`` and
+  ``update_keyword``, with their ``self._merge_keyword_into(...)`` call on
+  the façade; they delegate only their statements here
   (``duplicate_scope_rows`` / ``live_ids``, ``get_update_target`` /
-  ``same_type_peer`` / ``cross_type_peer`` / ``apply_update``). A structural
-  test fails if this module ever references one of those writers.
+  ``same_type_peer`` / ``cross_type_peer`` / ``apply_update``).
 - The active-workspace state. ``workspace_id`` is resolved lazily through
   ``Database._ws_id`` at exactly the points the original code called it.
 - Composition. Every façade method a moved body calls is bound from the
@@ -765,45 +769,10 @@ class KeywordRepository:
         # (e.g. typing into a generic keyword input) doesn't silently
         # bind to a hand-tagged 'general' duplicate when a canonical
         # typed row exists. Tie-break by id for determinism.
-        # NB: SQL literals here are constants, not parameter bindings.
-        type_priority_case = (
-            "CASE type "
-            "WHEN 'taxonomy' THEN 0 "
-            "WHEN 'genre' THEN 1 "
-            "WHEN 'individual' THEN 2 "
-            "WHEN 'location' THEN 3 "
-            "ELSE 4 END"
-        )
-        if parent_id is None:
-            if kw_type is None:
-                existing = self.conn.execute(
-                    f"SELECT id, type FROM keywords WHERE name = ? COLLATE NOCASE "
-                    f"AND parent_id IS NULL "
-                    f"ORDER BY {type_priority_case}, id ASC LIMIT 1",
-                    (name,),
-                ).fetchone()
-            else:
-                existing = self.conn.execute(
-                    "SELECT id, type FROM keywords WHERE name = ? COLLATE NOCASE "
-                    "AND parent_id IS NULL AND type IN (?, 'general') "
-                    "ORDER BY (type = ?) DESC, id ASC LIMIT 1",
-                    (name, kw_type, kw_type),
-                ).fetchone()
-        else:
-            if kw_type is None:
-                existing = self.conn.execute(
-                    f"SELECT id, type FROM keywords WHERE name = ? COLLATE NOCASE "
-                    f"AND parent_id = ? "
-                    f"ORDER BY {type_priority_case}, id ASC LIMIT 1",
-                    (name, parent_id),
-                ).fetchone()
-            else:
-                existing = self.conn.execute(
-                    "SELECT id, type FROM keywords WHERE name = ? COLLATE NOCASE "
-                    "AND parent_id = ? AND type IN (?, 'general') "
-                    "ORDER BY (type = ?) DESC, id ASC LIMIT 1",
-                    (name, parent_id, kw_type, kw_type),
-                ).fetchone()
+        existing = self._find_add_candidate(name, parent_id, kw_type)
+        # The lookup key, before the insert path below rewrites ``name``
+        # (case convention) and ``kw_type`` (auto-detection).
+        lookup_name, lookup_kw_type, lookup_is_species = name, kw_type, is_species
         if existing:
             # Older confirmed-species rows can be correctly typed yet have a
             # NULL taxon_id because the historic is_species=True insert path
@@ -947,13 +916,102 @@ class KeywordRepository:
                 if taxon_id:
                     kw_type = 'taxonomy'
 
-        cur = self.conn.execute(
-            "INSERT INTO keywords (name, parent_id, is_species, type, taxon_id) VALUES (?, ?, ?, ?, ?)",
-            (name, parent_id, 1 if is_species else (1 if taxon_id else 0), kw_type, taxon_id),
-        )
+        # The lookup above ran without a write lock, so a second connection
+        # can pass the same check before either inserts. UNIQUE(name,
+        # parent_id) cannot catch that for a top-level keyword (SQLite treats
+        # NULL parents as distinct) and is case-sensitive besides. Whenever
+        # the connection is not already in a transaction, take the write
+        # lock and look again, so the loser of the race reuses the winner's
+        # row. This must include ``_commit=False`` callers (``sync.py``,
+        # ``web/encounters.py``, ``web/highlights.py``, the import job at
+        # ``web/imports.py``): each passes ``_commit=False`` as the first
+        # mutation on a fresh worker connection, so without the write lock
+        # the same race lets both sides insert a duplicate root keyword.
+        # When we start the transaction under ``_commit=False``, the caller
+        # inherits our open ``BEGIN IMMEDIATE`` and finalises it with the
+        # rest of their work.
+        started_transaction = not self.conn.in_transaction
+        if started_transaction:
+            self.conn.execute("BEGIN IMMEDIATE")
+            if self._find_add_candidate(lookup_name, parent_id, lookup_kw_type) is not None:
+                # No writes happened under our new transaction. When we own
+                # the commit, finalise it before recursing so the reused row
+                # is visible; when the caller owns it, leave the transaction
+                # open so the recursion runs under it and the caller commits.
+                if _commit:
+                    self.conn.commit()
+                # Rerun so the reused row gets the same promotions as any
+                # other hit on the lookup.
+                return self.add(
+                    lookup_name, parent_id, is_species=lookup_is_species,
+                    kw_type=lookup_kw_type, _commit=_commit,
+                )
+        try:
+            cur = self.conn.execute(
+                "INSERT INTO keywords (name, parent_id, is_species, type, taxon_id) VALUES (?, ?, ?, ?, ?)",
+                (name, parent_id, 1 if is_species else (1 if taxon_id else 0), kw_type, taxon_id),
+            )
+        except sqlite3.IntegrityError:
+            # A same-spelling row under this parent committed after the
+            # lookup. Reuse it when it is one ``add`` would have returned.
+            if started_transaction:
+                self.conn.rollback()
+            if self._find_add_candidate(lookup_name, parent_id, lookup_kw_type) is None:
+                raise
+            return self.add(
+                lookup_name, parent_id, is_species=lookup_is_species,
+                kw_type=lookup_kw_type, _commit=_commit,
+            )
+        except BaseException:
+            if started_transaction:
+                self.conn.rollback()
+            raise
         if _commit:
             self.conn.commit()
         return cur.lastrowid
+
+    def _find_add_candidate(self, name, parent_id, kw_type):
+        """The row ``add`` reuses for ``name`` under ``parent_id``, or None."""
+        # NB: SQL literals here are constants, not parameter bindings.
+        type_priority_case = (
+            "CASE type "
+            "WHEN 'taxonomy' THEN 0 "
+            "WHEN 'genre' THEN 1 "
+            "WHEN 'individual' THEN 2 "
+            "WHEN 'location' THEN 3 "
+            "ELSE 4 END"
+        )
+        if parent_id is None:
+            if kw_type is None:
+                existing = self.conn.execute(
+                    f"SELECT id, type FROM keywords WHERE name = ? COLLATE NOCASE "
+                    f"AND parent_id IS NULL "
+                    f"ORDER BY {type_priority_case}, id ASC LIMIT 1",
+                    (name,),
+                ).fetchone()
+            else:
+                existing = self.conn.execute(
+                    "SELECT id, type FROM keywords WHERE name = ? COLLATE NOCASE "
+                    "AND parent_id IS NULL AND type IN (?, 'general') "
+                    "ORDER BY (type = ?) DESC, id ASC LIMIT 1",
+                    (name, kw_type, kw_type),
+                ).fetchone()
+        else:
+            if kw_type is None:
+                existing = self.conn.execute(
+                    f"SELECT id, type FROM keywords WHERE name = ? COLLATE NOCASE "
+                    f"AND parent_id = ? "
+                    f"ORDER BY {type_priority_case}, id ASC LIMIT 1",
+                    (name, parent_id),
+                ).fetchone()
+            else:
+                existing = self.conn.execute(
+                    "SELECT id, type FROM keywords WHERE name = ? COLLATE NOCASE "
+                    "AND parent_id = ? AND type IN (?, 'general') "
+                    "ORDER BY (type = ?) DESC, id ASC LIMIT 1",
+                    (name, parent_id, kw_type, kw_type),
+                ).fetchone()
+        return existing
 
     def merge_duplicates(self):
         """Find and merge normalized duplicate keywords in active workspace.
@@ -2899,8 +2957,9 @@ class KeywordRepository:
     #
     # ``Database._merge_duplicate_keywords_pass`` and
     # ``Database.update_keyword`` keep their control flow (and the
-    # provenance-pinned ``self._merge_keyword_into(...)`` call) in db.py; the
-    # statements they issue live here, unchanged.
+    # ``self._merge_keyword_into(...)`` call, which runs the merge in
+    # ``repositories/keyword_provenance.py``) in db.py; the statements they
+    # issue live here, unchanged.
 
     def duplicate_scope_rows(self, ws):
         """Keywords tagged on a photo in workspace ``ws``, plus their ancestors.

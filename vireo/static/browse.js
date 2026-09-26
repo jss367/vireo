@@ -1,0 +1,13581 @@
+/* Google Maps API key — populated from /api/config below (window._cfgPromise).
+   Empty string when no key is configured; the Location section then
+   degrades to free-text-only (no autocomplete, no script injection). */
+window.GOOGLE_MAPS_API_KEY = '';
+window.GOOGLE_MAPS_PREFER_ENGLISH = true;
+
+/* ---------- State ---------- */
+var photos = [];
+var totalPhotos = 0;
+var totalUnderlyingPhotos = 0;
+var totalBrowseStacks = 0;
+var currentPage = 1;
+var perPage = 50;
+var loading = false;
+var allLoaded = false;
+var earliestPage = 1;
+// True only after an authoritative response has initialized the grid, even
+// when that response contains zero photos. Health events can arrive while
+// bootstrap or a deep link is still pending; an "unaffected scope" is only
+// safe to preserve once there is an initialized dataset to preserve.
+var browseDatasetReady = false;
+var selectedPhotoId = null;
+var selectedIndex = -1;
+// The card the user clicked most recently. Usually selectedPhotoId, but a
+// cmd-click can fold the focused photo into selectedPhotos and null the focus
+// id, and that card is still the one the user is looking at.
+var lastClickedPhotoId = null;
+var anchorRestoreEpoch = 0;
+var anchorScanDepth = 0;
+// Focused reloads (sort changes) capture the selection, then clear it and
+// tear down the cards before their async page fetch settles. If the user
+// changes sort a second time while the first request is in flight, the DOM
+// capture the second call needs is already gone — it would clear
+// ``selectedPhotoId`` and reload from page 1, losing the selection the
+// feature exists to preserve. Hold the in-flight target here so a newer
+// focused reload can pick up the older one's anchor (Codex review
+// r4021334323). Cleared once every in-flight focused reload has settled.
+var pendingFocusAnchor = null;
+// Which photo the last focused load was actually placed by (see loadPhotos).
+var browseResolvedFocusPhotoId = null;
+// How many photos one focused lookup may be asked about, matching
+// ``MAX_FOCUS_PHOTO_IDS`` on the server. Requests are kept inside it rather
+// than allowed to fail: see buildBrowsePageRequest.
+var BROWSE_MAX_FOCUS_CANDIDATES = 200;
+// The scope the pending anchor belongs to. Sidebar folder/keyword/collection
+// clicks bump ``browseScopeGen``; the photo then belongs to the view the user
+// left, so the anchor must not survive into the new one.
+var pendingFocusAnchorScopeGen = -1;
+var focusReloadInFlight = 0;
+var selectedPhotos = new Set(); // multi-select
+var expandedBrowseStacks = new Set();
+var browseStackMembers = {};
+var browseStackErrors = {};
+var browseStackHydrationSeq = 0;
+// In-flight cover hydrations, keyed by cover id: {seq, memberIds, stale}.
+// Same invalidation contract as browseStackExpansionRequests below (a mutation
+// marks any request whose members it just changed), but a different ownership
+// rule: only one hydration may own a cover key at a time, so `seq` lets a newer
+// reconciliation supersede an older one's response instead of both caching.
+var browseStackHydrationRequests = {};
+// Cover ids whose reconciliation could not finish (the members never loaded).
+// The grid is still showing the pre-edit cover for these stacks, so the badge
+// says so and expanding one re-runs the reconciliation from the loaded members.
+var browseStackCoverRecheck = new Set();
+// In-flight stack expansions, keyed by cover id: {memberIds, stale}.
+// A tray's header offers "Select all" the moment it opens, so a stack-wide
+// edit can be applied while its members are still loading. Those members are
+// not in `photos` and not yet in `browseStackMembers`, so findBrowsePhoto()
+// cannot patch them — the edit has nowhere to land. Installing the response
+// that was already in flight would then repaint pre-edit values in the tray
+// and its badges, silently contradicting the edit the user just confirmed.
+// markBrowseStackExpansionsStale() flags such a request so toggleBrowseStack
+// discards it and refetches instead of guessing at the post-edit state.
+//
+// Each cacheKey stores a list, not a single request: collapsing does not
+// cancel an in-flight expansion, and a subsequent re-expand starts a new
+// attempt. Tracking every pending request means a mid-flight edit reaches
+// all of them, so an untracked earlier response cannot cache pre-edit
+// members while only the newest request was marked stale. Codex P2 on
+// PR #1561.
+var browseStackExpansionRequests = {};
+
+function _pushBrowseStackExpansionRequest(cacheKey, request) {
+  var list = browseStackExpansionRequests[cacheKey];
+  if (!list) {
+    list = [];
+    browseStackExpansionRequests[cacheKey] = list;
+  }
+  list.push(request);
+}
+
+function _removeBrowseStackExpansionRequest(cacheKey, request) {
+  var list = browseStackExpansionRequests[cacheKey];
+  if (!list) return;
+  var idx = list.indexOf(request);
+  if (idx >= 0) list.splice(idx, 1);
+  if (!list.length) delete browseStackExpansionRequests[cacheKey];
+}
+
+function setBrowseTotals(data) {
+  totalPhotos = Number(data && data.total) || 0;
+  totalBrowseStacks = Number(data && data.stack_count) || 0;
+  totalUnderlyingPhotos = data && data.underlying_total != null
+    ? Number(data.underlying_total) || 0
+    : totalPhotos;
+}
+var selectionKeywordRequestSeq = 0;
+var selectionKeywordKey = '';
+var selectionKeywordMissingById = {};
+var selectionKeywordPresentById = {};
+var selectionKeywordNameById = {};
+// Prediction panels. Each panel owns one sequence counter and one cache key,
+// mirroring the keyword panel above — a fast selection change must be able to
+// drop a stale response rather than paint the previous selection's rows.
+var detailPredictionSeq = 0;
+var selectionPredictionSeq = 0;
+// "Show N photos" fires an out-of-band fetch that outlives the panel repaint
+// counter (which only bumps when the selection changes). Without a dedicated
+// generation, two Show clicks back-to-back on different rows both pass the
+// selection-seq guard, and a slower earlier fetch can paint its lightbox
+// over the later click's.
+var selectionPredictionShowSeq = 0;
+// A photo can carry dozens of low-confidence guesses, and most users never set
+// a confidence floor. Show the strongest few and collapse the tail behind a
+// counted "show all" rather than either flooding the panel or inventing a
+// threshold the user's settings don't specify.
+var PREDICTION_COLLAPSE_AT = 5;
+var detailPredictionsExpanded = false;
+var selectionPredictionsExpanded = false;
+var _detailPredictionData = null;
+var _selectionPredictionData = null;
+var selectionPredictionKey = '';
+var selectionPredictionAcceptableById = {};
+// Parallel to selectionPredictionAcceptableById, so the accept call can pass
+// the species the button named — the server refuses a row whose current
+// consensus has drifted from what the panel rendered (see
+// _species_drifted_prediction_ids in app.py).
+var selectionPredictionSpeciesByIdx = {};
+// Also parallel: the photos the row's "Predicted on N of M" counts, so the
+// Show button can open exactly that set in the lightbox. Kept in the side
+// table rather than re-derived from the accept ids because those exclude the
+// ambiguous photos — and the ambiguous ones are precisely the photos a user
+// clicks Show to look at.
+var selectionPredictionPhotoIdsByIdx = {};
+// The single-photo panel's rendered rows, in render order, so its buttons can
+// carry a bare index instead of the row's data. The selection panel has kept
+// its ids and species in a side table since it shipped
+// (selectionPredictionAcceptableById above); the detail panel now matches it,
+// for a reason worth stating: it used to interpolate the species straight
+// into an inline handler attribute —
+// `onclick='acceptDetailPredictions([12],44,"Say\'s Phoebe")'` — and the
+// apostrophe closed the attribute. Accept was broken outright for Say's
+// Phoebe, Cooper's Hawk, Steller's Jay, Bewick's Wren, Swainson's Hawk,
+// Wilson's Warbler: possessive common names are ordinary in North American
+// birds, which is most of what this app is pointed at. Escaping that one
+// interpolation would have fixed that one line; keeping row data out of the
+// markup is what stops the next button added here from reintroducing it.
+var detailPredictionGroups = [];
+var detailPredictionGroupsPhotoId = null;
+var showDetectionBoxes = false;
+var cardFields = ["filename", "location_status", "rating", "flag", "sharpness"]; // default, overridden by config
+var inatSubmitted = {};  // {photo_id: true}
+var colorLabels = {};    // {photo_id: color_string}
+// Which photo ids we've confirmed color-label state for. `colorLabels[id]`
+// missing is ambiguous — either the photo has no color set OR we haven't
+// fetched its color labels yet — so the batch inspector needs this to avoid
+// rendering "everything is uncoloured" for a still-loading selection.
+var colorLabelsFetched = new Set();
+var colorLabelGen = 0;   // bumped on local edits; guards against stale fetch responses
+// Per-id record of the generation each id was last locally edited at, so a
+// slow fetch that started before an edit still cannot overwrite that edit for
+// the specific ids it touched. `colorLabelGen === gen` alone catches only the
+// nothing-changed case; a concurrent edit to one id would otherwise let the
+// stale response's values for every other id overwrite them anyway, and the
+// stale value for the edited id survive.
+var colorLabelEditGen = Object.create(null);
+// Stamp ids at a NEW generation. Called twice per write — once before the POST
+// and once after it lands. The trailing stamp is what covers a fetch that
+// starts while the write is still in flight: it captured the same generation
+// the pre-write stamp wrote, so `>` alone would let its response (read from the
+// server before the write committed) overwrite the fresh local value once it
+// resolves. Re-stamping on completion puts every such fetch strictly behind
+// the write (Codex P2 on PR #1668).
+function _noteColorLabelEdits(ids) {
+  colorLabelGen++;
+  ids.forEach(function(id) { colorLabelEditGen[id] = colorLabelGen; });
+}
+
+// Re-ask the server when a write fails. Without this the failed write leaves
+// the worst of both: its stamp makes any fetch that started before it skip
+// these ids, while that fetch still adds them to colorLabelsFetched — so a
+// labelled photo the user edited before initial hydration finished reads as a
+// definite "no color" until reload (Codex P2 on PR #1668).
+//
+// The refetch alone is the whole repair; the stamp must NOT be cleared. Stamps
+// only ever advance through _noteColorLabelEdits, so a stamp is never greater
+// than the generation this refetch captures and can never block its own
+// response. Clearing it would instead un-guard a *concurrent* write: with
+// overlapping writes on one photo, an earlier request failing after a later one
+// succeeded would drop the successful write's completion stamp, letting a GET
+// issued before either of them overwrite the label the user actually chose
+// (Codex P2, second pass). Dropping the fetched marker is kept — until the
+// refetch lands we genuinely do not know this photo's color, and the batch
+// inspector should say so rather than assert "no color".
+function _recoverColorLabelsAfterFailedWrite(ids) {
+  ids.forEach(function(id) { colorLabelsFetched.delete(id); });
+  return fetchColorLabels(ids).then(function() {
+    refreshGridCards(ids);
+    refreshExpandedBrowseStackMembers(ids);
+    // fetchColorLabels already re-rendered a batch inspector; only the
+    // single-photo panel is left to catch up.
+    var detail = document.getElementById('detailContent');
+    if (selectedPhotoId != null && ids.indexOf(selectedPhotoId) !== -1
+        && !(detail && detail.classList.contains('batch-mode'))) {
+      updateDetailColors();
+    }
+  });
+}
+// Generation counter for the grid window (photos/currentPage/earliestPage/
+// allLoaded). Never compare it directly — go through claimBrowseWindow() /
+// observeBrowseWindow() so every async path guards the same way.
+var loadEpoch = 0;
+var selectAllRequestSeq = 0; // bumped to ignore stale async select-all responses
+// rating/flag/color/date/keyword filter state now lives in VireoFilter
+// (the universal filter bar); Browse keeps only page-scope state.
+var activeFolderId = null;
+var activeKeyword = null;
+var activeCollectionId = null;
+// A Dashboard deep link can combine a collection with date/keyword filters.
+// Normal collection clicks keep the historical collection-only behavior.
+var dashboardCollectionScope = false;
+// Which saved collection (if any) is currently loaded into the filter bar
+// as editable chips. Phase 5's ``filterByCollection`` clears
+// ``activeCollectionId`` when it hands off to the filter bar (because the
+// expression IS the filter and the historical "collection endpoint" mode
+// is gone), so we need a separate handle to reload the expression after
+// membership edits — refreshActiveCollectionAfterMembershipChange used to
+// only reload the sidebar counts, leaving a stale photo_ids list in the
+// bar until the user reopened the collection (CodeRabbit review
+// r3620473562). Cleared by the filter bar's onChange when the user edits
+// the expression (so a user-edited chip set isn't silently reverted to
+// the saved collection on the next membership refresh).
+var openedCollectionId = null;
+// A saved collection's logical membership includes photos whose storage is
+// offline. They stay hidden by default and, when revealed, render as read-only
+// cards; selection endpoints remain accessible-only.
+var showOfflineCollectionPhotos = false;
+var collectionInventoryTotal = 0;
+var collectionAvailableTotal = 0;
+var collectionOfflineTotal = 0;
+// Sidebar collections render before the universal filter registry necessarily
+// finishes loading. Keep the init promise so an early collection click can
+// wait for the filter bar instead of being silently discarded.
+var browseFilterInitPromise = null;
+// Monotonic counter bumped by every sidebar scope switch
+// (filterByFolder/filterByKeyword/filterByCollection). A queued collection
+// open captures the gen at entry and aborts on resume if a later scope
+// change has advanced it — otherwise the queued click would clobber the
+// user's newer selection (Codex review r3624395785).
+var browseScopeGen = 0;
+
+var timelineMode = false;
+var calendarYear = new Date().getFullYear();
+var selectedDay = null;
+var calendarData = null;
+// CLIP search is now the filter bar's visual clause (VireoFilter.getVisual).
+
+var bestBatchData = null;
+var keywordAutocompleteCache = null;
+var keywordAutocompletePromise = null;
+var keywordAutocompleteStates = {};
+var collectionCountRefreshTimer = null;
+var collectionCountLoadGen = 0;
+// Same superseded-response guard as loadCollectionCounts, extended to the
+// summary and calendar loaders so a slow /api/browse/summary or
+// /api/photos/calendar response cannot overwrite the panel or heatmap
+// after a newer scope selection triggered a fresh load
+// (CodeRabbit review r3684913398).
+var summaryLoadGen = 0;
+var summaryLoadStates = {};
+var summaryRenderDecisionGen = 0;
+var calendarDataLoadGen = 0;
+var calendarDataLoadStates = {};
+var calendarRenderDecisionGen = 0;
+// Internal generation counters shared across every caller of the sidebar
+// loaders. Without these, ``refreshBrowseSidebarCounts()`` and the various
+// mutation-triggered ``loadKeywords()``/``loadCollections()`` calls fire
+// without any freshness guard, so a slow pre-transition response can arrive
+// after a guarded ``refreshBrowseAfterFolderHealthChange`` render and
+// repaint the sidebar with data that no longer reflects the current health
+// state — reintroducing the offline-folder-in-tree symptom the health
+// refresh was meant to fix (Codex review r3686842772). Every loader checks
+// its captured generation after ``await`` and skips ``render*`` when a
+// newer call has since started, so last-started always wins regardless of
+// which call site issued it.
+var folderLoadGen = 0;
+var folderLoadStates = {};
+var folderRenderDecisionGen = 0;
+var keywordLoadGen = 0;
+var keywordLoadStates = {};
+var keywordRenderDecisionGen = 0;
+var collectionLoadGen = 0;
+var collectionLoadStates = {};
+var collectionRenderDecisionGen = 0;
+var browseFolderRows = [];
+// The workspace ID whose folder tree is currently reflected in the DOM.
+// Captured atomically with the tree from /api/browse/init and refreshed
+// from the same server snapshot on every /api/folders?with_workspace=1
+// response, so ``removeWorkspaceRootFromBrowse`` can bind its DELETE to
+// the workspace the user actually saw. Trusting ``/api/workspaces/active``
+// at click time would let a cross-tab workspace switch redirect the
+// destructive call to the wrong workspace (Codex review r3798912101).
+var browseWorkspaceId = null;
+var collectionsById = {};
+var browseCompareIds = [];
+var browseCompareOffset = 0;
+var browseCompareSeq = 0;
+var browseCompareEscToken = null;
+var browseCompareViews = {
+  A: { zoom: 1, panX: 0, panY: 0 },
+  B: { zoom: 1, panX: 0, panY: 0 }
+};
+var browseComparePointer = null;
+
+/* ---------- Resizable sidebar ---------- */
+var BROWSE_SIDEBAR_DEFAULT_WIDTH = 260;
+var BROWSE_SIDEBAR_MIN_WIDTH = 200;
+var BROWSE_SIDEBAR_MAX_WIDTH = 600;
+var BROWSE_SIDEBAR_STORAGE_KEY = 'vireo.browse.sidebarWidth';
+var BROWSE_DETAIL_PANEL_DEFAULT_WIDTH = 340;
+var BROWSE_DETAIL_PANEL_MIN_WIDTH = 280;
+var BROWSE_DETAIL_PANEL_MAX_WIDTH = 600;
+var BROWSE_DETAIL_PANEL_STORAGE_KEY = 'vireo.browse.detailPanelWidth';
+// Room the resize cap must leave for the rest of the Browse layout: the
+// other adjustable sidebar, both resize handles, and a minimum photo/content
+// column so the grid stays usable.
+var BROWSE_SIDEBAR_HANDLE_WIDTH = 7;
+var BROWSE_MIN_CONTENT_WIDTH = 360;
+
+function currentBrowseSidebarWidth() {
+  var sidebar = document.getElementById('browseSidebar');
+  return sidebar ? sidebar.getBoundingClientRect().width : BROWSE_SIDEBAR_DEFAULT_WIDTH;
+}
+
+function currentBrowseDetailPanelWidth() {
+  var detailPanel = document.getElementById('detailPanel');
+  return detailPanel ? detailPanel.getBoundingClientRect().width : BROWSE_DETAIL_PANEL_DEFAULT_WIDTH;
+}
+
+function browseSidebarMaxWidth() {
+  return Math.max(
+    BROWSE_SIDEBAR_MIN_WIDTH,
+    Math.min(
+      BROWSE_SIDEBAR_MAX_WIDTH,
+      window.innerWidth
+        - currentBrowseDetailPanelWidth()
+        - (2 * BROWSE_SIDEBAR_HANDLE_WIDTH)
+        - BROWSE_MIN_CONTENT_WIDTH
+    )
+  );
+}
+
+function browseDetailPanelMaxWidth() {
+  return Math.max(
+    BROWSE_DETAIL_PANEL_MIN_WIDTH,
+    Math.min(
+      BROWSE_DETAIL_PANEL_MAX_WIDTH,
+      window.innerWidth
+        - currentBrowseSidebarWidth()
+        - (2 * BROWSE_SIDEBAR_HANDLE_WIDTH)
+        - BROWSE_MIN_CONTENT_WIDTH
+    )
+  );
+}
+
+function updateBrowsePanelResizeLimits() {
+  var sidebarResizer = document.getElementById('browseSidebarResizer');
+  var detailResizer = document.getElementById('detailPanelResizer');
+  if (sidebarResizer) sidebarResizer.setAttribute('aria-valuemax', String(browseSidebarMaxWidth()));
+  if (detailResizer) detailResizer.setAttribute('aria-valuemax', String(browseDetailPanelMaxWidth()));
+}
+
+function setBrowseSidebarWidth(width, persist) {
+  var sidebar = document.getElementById('browseSidebar');
+  var resizer = document.getElementById('browseSidebarResizer');
+  if (!sidebar || !resizer) return;
+  var nextWidth = Math.round(Math.max(
+    BROWSE_SIDEBAR_MIN_WIDTH,
+    Math.min(browseSidebarMaxWidth(), Number(width) || BROWSE_SIDEBAR_DEFAULT_WIDTH)
+  ));
+  sidebar.style.width = nextWidth + 'px';
+  sidebar.style.flexBasis = nextWidth + 'px';
+  resizer.setAttribute('aria-valuenow', String(nextWidth));
+  updateBrowsePanelResizeLimits();
+  if (persist) {
+    try { localStorage.setItem(BROWSE_SIDEBAR_STORAGE_KEY, String(nextWidth)); } catch (e) {}
+  }
+  requestAnimationFrame(updateGridTail);
+}
+
+function initBrowseSidebarResize() {
+  var sidebar = document.getElementById('browseSidebar');
+  var resizer = document.getElementById('browseSidebarResizer');
+  if (!sidebar || !resizer) return;
+
+  var storedWidth = BROWSE_SIDEBAR_DEFAULT_WIDTH;
+  try { storedWidth = Number(localStorage.getItem(BROWSE_SIDEBAR_STORAGE_KEY)) || storedWidth; } catch (e) {}
+  setBrowseSidebarWidth(storedWidth, false);
+
+  resizer.addEventListener('pointerdown', function(e) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    var startX = e.clientX;
+    var startWidth = sidebar.getBoundingClientRect().width;
+    resizer.setPointerCapture(e.pointerId);
+    resizer.classList.add('dragging');
+    document.body.classList.add('sidebar-resizing');
+
+    function onPointerMove(moveEvent) {
+      setBrowseSidebarWidth(startWidth + moveEvent.clientX - startX, false);
+    }
+    function stopDragging(upEvent) {
+      setBrowseSidebarWidth(sidebar.getBoundingClientRect().width, true);
+      resizer.classList.remove('dragging');
+      document.body.classList.remove('sidebar-resizing');
+      resizer.removeEventListener('pointermove', onPointerMove);
+      resizer.removeEventListener('pointerup', stopDragging);
+      resizer.removeEventListener('pointercancel', stopDragging);
+      if (resizer.hasPointerCapture(upEvent.pointerId)) {
+        resizer.releasePointerCapture(upEvent.pointerId);
+      }
+    }
+    resizer.addEventListener('pointermove', onPointerMove);
+    resizer.addEventListener('pointerup', stopDragging);
+    resizer.addEventListener('pointercancel', stopDragging);
+  });
+
+  resizer.addEventListener('keydown', function(e) {
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      e.preventDefault();
+      e.stopPropagation();
+      var direction = e.key === 'ArrowRight' ? 1 : -1;
+      var step = e.shiftKey ? 50 : 10;
+      setBrowseSidebarWidth(sidebar.getBoundingClientRect().width + direction * step, true);
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      e.stopPropagation();
+      setBrowseSidebarWidth(BROWSE_SIDEBAR_MIN_WIDTH, true);
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      e.stopPropagation();
+      setBrowseSidebarWidth(browseSidebarMaxWidth(), true);
+    }
+  });
+
+  resizer.addEventListener('dblclick', function() {
+    setBrowseSidebarWidth(BROWSE_SIDEBAR_DEFAULT_WIDTH, true);
+  });
+}
+
+function setBrowseDetailPanelWidth(width, persist) {
+  var detailPanel = document.getElementById('detailPanel');
+  var resizer = document.getElementById('detailPanelResizer');
+  if (!detailPanel || !resizer) return;
+  var nextWidth = Math.round(Math.max(
+    BROWSE_DETAIL_PANEL_MIN_WIDTH,
+    Math.min(browseDetailPanelMaxWidth(), Number(width) || BROWSE_DETAIL_PANEL_DEFAULT_WIDTH)
+  ));
+  detailPanel.style.width = nextWidth + 'px';
+  detailPanel.style.flexBasis = nextWidth + 'px';
+  resizer.setAttribute('aria-valuenow', String(nextWidth));
+  updateBrowsePanelResizeLimits();
+  if (persist) {
+    try { localStorage.setItem(BROWSE_DETAIL_PANEL_STORAGE_KEY, String(nextWidth)); } catch (e) {}
+  }
+  requestAnimationFrame(updateGridTail);
+}
+
+function initBrowseDetailPanelResize() {
+  var detailPanel = document.getElementById('detailPanel');
+  var resizer = document.getElementById('detailPanelResizer');
+  if (!detailPanel || !resizer) return;
+
+  var storedWidth = BROWSE_DETAIL_PANEL_DEFAULT_WIDTH;
+  try { storedWidth = Number(localStorage.getItem(BROWSE_DETAIL_PANEL_STORAGE_KEY)) || storedWidth; } catch (e) {}
+  setBrowseDetailPanelWidth(storedWidth, false);
+
+  resizer.addEventListener('pointerdown', function(e) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    var startX = e.clientX;
+    var startWidth = detailPanel.getBoundingClientRect().width;
+    resizer.setPointerCapture(e.pointerId);
+    resizer.classList.add('dragging');
+    document.body.classList.add('sidebar-resizing');
+
+    function onPointerMove(moveEvent) {
+      setBrowseDetailPanelWidth(startWidth + startX - moveEvent.clientX, false);
+    }
+    function stopDragging(upEvent) {
+      setBrowseDetailPanelWidth(detailPanel.getBoundingClientRect().width, true);
+      resizer.classList.remove('dragging');
+      document.body.classList.remove('sidebar-resizing');
+      resizer.removeEventListener('pointermove', onPointerMove);
+      resizer.removeEventListener('pointerup', stopDragging);
+      resizer.removeEventListener('pointercancel', stopDragging);
+      if (resizer.hasPointerCapture(upEvent.pointerId)) {
+        resizer.releasePointerCapture(upEvent.pointerId);
+      }
+    }
+    resizer.addEventListener('pointermove', onPointerMove);
+    resizer.addEventListener('pointerup', stopDragging);
+    resizer.addEventListener('pointercancel', stopDragging);
+  });
+
+  resizer.addEventListener('keydown', function(e) {
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      e.preventDefault();
+      e.stopPropagation();
+      var direction = e.key === 'ArrowLeft' ? 1 : -1;
+      var step = e.shiftKey ? 50 : 10;
+      setBrowseDetailPanelWidth(detailPanel.getBoundingClientRect().width + direction * step, true);
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      e.stopPropagation();
+      setBrowseDetailPanelWidth(BROWSE_DETAIL_PANEL_MIN_WIDTH, true);
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      e.stopPropagation();
+      setBrowseDetailPanelWidth(browseDetailPanelMaxWidth(), true);
+    }
+  });
+
+  resizer.addEventListener('dblclick', function() {
+    setBrowseDetailPanelWidth(BROWSE_DETAIL_PANEL_DEFAULT_WIDTH, true);
+  });
+}
+
+initBrowseSidebarResize();
+initBrowseDetailPanelResize();
+
+function refreshPendingSyncBanner() {
+  if (typeof checkPendingSync === 'function') {
+    checkPendingSync();
+  }
+}
+
+function invalidateKeywordAutocompleteCache() {
+  keywordAutocompleteCache = null;
+  keywordAutocompletePromise = null;
+}
+
+async function loadKeywordAutocompleteOptions(force) {
+  if (!force && keywordAutocompleteCache !== null) return keywordAutocompleteCache;
+  if (!force && keywordAutocompletePromise) return keywordAutocompletePromise;
+  keywordAutocompletePromise = safeFetch('/api/keywords/all', {}, { toast: false })
+    .then(function(rows) {
+      keywordAutocompleteCache = (rows || [])
+        .filter(function(k) { return k && k.name; })
+        .map(function(k) {
+          return {
+            id: k.id,
+            name: k.name,
+            type: k.type || 'general',
+            place_id: k.place_id || null,
+            photo_count: k.photo_count || 0,
+            search: String(k.name || '').toLowerCase(),
+          };
+        })
+        .sort(function(a, b) {
+          return a.search.localeCompare(b.search) || a.id - b.id;
+        });
+      return keywordAutocompleteCache;
+    })
+    .catch(function() {
+      return [];
+    })
+    .finally(function() {
+      keywordAutocompletePromise = null;
+    });
+  return keywordAutocompletePromise;
+}
+
+function getKeywordAutocompleteState(inputId) {
+  if (!keywordAutocompleteStates[inputId]) {
+    keywordAutocompleteStates[inputId] = {
+      matches: [],
+      activeIndex: -1,
+      selectedKeyword: null,
+      dropdownId: '',
+      submitFn: null,
+    };
+  }
+  return keywordAutocompleteStates[inputId];
+}
+
+function keywordMatchScore(search, query) {
+  if (search === query) return 0;
+  if (search.indexOf(query) === 0) return 1;
+  if (search.split(/[\s\-_/]+/).some(function(part) { return part.indexOf(query) === 0; })) return 2;
+  var idx = search.indexOf(query);
+  return idx === -1 ? 99 : 3 + idx / 1000;
+}
+
+function hideKeywordSuggestions(inputId) {
+  var state = getKeywordAutocompleteState(inputId);
+  var dropdown = document.getElementById(state.dropdownId);
+  if (dropdown) {
+    dropdown.classList.remove('open');
+    dropdown.innerHTML = '';
+  }
+  state.matches = [];
+  state.activeIndex = -1;
+}
+
+function renderKeywordSuggestions(inputId) {
+  var input = document.getElementById(inputId);
+  var state = getKeywordAutocompleteState(inputId);
+  var dropdown = document.getElementById(state.dropdownId);
+  if (!input || !dropdown) return;
+  var query = input.value.trim().toLowerCase();
+  state.selectedKeyword = null;
+  if (!query || !keywordAutocompleteCache || !keywordAutocompleteCache.length) {
+    hideKeywordSuggestions(inputId);
+    return;
+  }
+
+  state.matches = keywordAutocompleteCache
+    .map(function(k) {
+      return { keyword: k, score: keywordMatchScore(k.search, query) };
+    })
+    .filter(function(item) { return item.score < 99; })
+    .sort(function(a, b) {
+      return a.score - b.score || a.keyword.search.localeCompare(b.keyword.search) || a.keyword.id - b.keyword.id;
+    })
+    .slice(0, 8)
+    .map(function(item) { return item.keyword; });
+
+  if (!state.matches.length) {
+    hideKeywordSuggestions(inputId);
+    return;
+  }
+  if (state.activeIndex < 0 || state.activeIndex >= state.matches.length) state.activeIndex = 0;
+
+  dropdown.innerHTML = state.matches.map(function(k, idx) {
+    var active = idx === state.activeIndex ? ' active' : '';
+    var count = k.photo_count === 1 ? '1 photo' : k.photo_count + ' photos';
+    return '<div class="keyword-suggestion-option' + active + '" role="option" data-index="' + idx + '">' +
+      '<span class="keyword-suggestion-name">' + escapeHtml(k.name) + '</span>' +
+      '<span class="keyword-suggestion-meta">' + escapeHtml(count) + '</span>' +
+      '</div>';
+  }).join('');
+  dropdown.classList.add('open');
+}
+
+function chooseKeywordSuggestion(inputId, index) {
+  var input = document.getElementById(inputId);
+  var state = getKeywordAutocompleteState(inputId);
+  var keyword = state.matches[index];
+  if (!input || !keyword) return;
+  input.value = keyword.name;
+  state.selectedKeyword = keyword;
+  hideKeywordSuggestions(inputId);
+  if (typeof state.submitFn === 'function') {
+    state.submitFn(keyword);
+  }
+}
+
+function bindKeywordAutocomplete(inputId, dropdownId, submitFn) {
+  var input = document.getElementById(inputId);
+  var dropdown = document.getElementById(dropdownId);
+  if (!input || !dropdown) return;
+  var state = getKeywordAutocompleteState(inputId);
+  state.dropdownId = dropdownId;
+  state.submitFn = submitFn;
+
+  input.addEventListener('focus', function() {
+    loadKeywordAutocompleteOptions().then(function() { renderKeywordSuggestions(inputId); });
+  });
+  input.addEventListener('input', function() {
+    var s = getKeywordAutocompleteState(inputId);
+    s.activeIndex = 0;
+    s.selectedKeyword = null;
+    loadKeywordAutocompleteOptions().then(function() { renderKeywordSuggestions(inputId); });
+  });
+  input.addEventListener('keydown', function(e) {
+    var s = getKeywordAutocompleteState(inputId);
+    var isOpen = dropdown.classList.contains('open') && s.matches.length > 0;
+    if (isOpen && e.key === 'ArrowDown') {
+      e.preventDefault();
+      s.activeIndex = (s.activeIndex + 1) % s.matches.length;
+      renderKeywordSuggestions(inputId);
+      return;
+    }
+    if (isOpen && e.key === 'ArrowUp') {
+      e.preventDefault();
+      s.activeIndex = (s.activeIndex - 1 + s.matches.length) % s.matches.length;
+      renderKeywordSuggestions(inputId);
+      return;
+    }
+    if (e.key === 'Escape') {
+      hideKeywordSuggestions(inputId);
+      return;
+    }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (isOpen && s.activeIndex >= 0) chooseKeywordSuggestion(inputId, s.activeIndex);
+      else if (typeof submitFn === 'function') submitFn(null);
+    }
+  });
+  input.addEventListener('blur', function() {
+    setTimeout(function() { hideKeywordSuggestions(inputId); }, 120);
+  });
+  dropdown.addEventListener('mousedown', function(e) {
+    var option = e.target.closest('.keyword-suggestion-option');
+    if (!option) return;
+    e.preventDefault();
+    chooseKeywordSuggestion(inputId, parseInt(option.dataset.index, 10));
+  });
+}
+
+function hasActiveBrowseFilter() {
+  return !!(
+    activeFolderId ||
+    activeKeyword ||
+    activeCollectionId ||
+    openedCollectionId ||
+    (window.VireoFilter && VireoFilter.hasFilters())
+  );
+}
+
+var _shortcuts = null;
+var _BROWSE_SC_DEFAULTS = {rate_0:'0',rate_1:'1',rate_2:'2',rate_3:'3',rate_4:'4',rate_5:'5',
+  flag:'p',reject:'x',unflag:'u',undo:'ctrl+z',redo:'ctrl+shift+z',select_all:'ctrl+a',zoom:'z',
+  compare:'c',color_red:'6',color_yellow:'7',color_green:'8',color_blue:'9'};
+var _cfgPromise = (async function() {
+  try {
+    var cfg = await safeFetch('/api/config', {}, { toast: false });
+    var saved = (cfg.keyboard_shortcuts || {}).browse || {};
+    _shortcuts = Object.assign({}, _BROWSE_SC_DEFAULTS, saved);
+    window._vireoShortcuts = cfg.keyboard_shortcuts || {};
+    window.GOOGLE_MAPS_API_KEY = cfg.google_maps_api_key || '';
+    window.GOOGLE_MAPS_PREFER_ENGLISH = cfg.google_maps_prefer_english !== false;
+    return cfg;
+  } catch(e) {
+    _shortcuts = Object.assign({}, _BROWSE_SC_DEFAULTS);
+    return null;
+  }
+})();
+
+function applyBrowseConfig(cfg) {
+  if (!cfg) return;
+  if (cfg.photos_per_page) perPage = cfg.photos_per_page;
+  if (cfg.browse_thumb_default && VireoViewPreferences.read('vireo.browse.thumbSize') === null) {
+    var slider = document.getElementById('thumbSizeSlider');
+    if (slider) {
+      slider.value = cfg.browse_thumb_default;
+      slider.dispatchEvent(new Event('input'));
+    }
+  }
+  if (Array.isArray(cfg.browse_card_fields)) cardFields = cfg.browse_card_fields;
+}
+
+function formatFileSize(bytes) {
+  if (bytes == null) return '';
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+  if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + ' MB';
+  return (bytes / 1073741824).toFixed(1) + ' GB';
+}
+
+function renderSpeciesBadges(species, inline) {
+  if (!Array.isArray(species) || species.length === 0) return '';
+  var maxShow = 3;
+  var style = inline ? ' style="position:static;padding:0;"' : '';
+  var html = '<div class="species-badges"' + style + '>';
+  species.slice(0, maxShow).forEach(function(name) {
+    html += '<span class="species-badge">' + escapeHtml(name) + '</span>';
+  });
+  if (species.length > maxShow) {
+    html += '<span class="species-badge-overflow">+' + (species.length - maxShow) + ' more</span>';
+  }
+  return html + '</div>';
+}
+
+function renderCardField(field, p) {
+  switch (field) {
+    case 'filename':
+      return '<div class="grid-card-name" title="' + escapeAttr(p.filename) + '">' + escapeHtml(p.filename) + '</div>';
+    case 'location_status':
+      var locationStatus = p.location_status || 'none';
+      var locationLabels = {
+        exif: ['📍', 'EXIF GPS', 'Embedded GPS coordinates from the photo'],
+        assigned: ['●', 'Assigned map location', 'Map coordinates from an assigned Vireo location'],
+        none: ['⊘', 'No coordinates', 'No EXIF GPS or assigned map coordinates']
+      };
+      var locationLabel = locationLabels[locationStatus] || locationLabels.none;
+      return '<span class="grid-location-status ' + locationStatus + '" title="' + escapeAttr(locationLabel[2]) + '">' +
+        locationLabel[0] + ' ' + locationLabel[1] + '</span>';
+    case 'rating':
+      if (p.rating > 0) {
+        var stars = '';
+        for (var i = 0; i < p.rating; i++) stars += '&#9733;';
+        return '<span class="grid-card-rating">' + stars + '</span>';
+      }
+      return '';
+    case 'flag':
+      if (p.flag === 'flagged') return '<span class="grid-card-flag flag-flagged">P</span>';
+      if (p.flag === 'rejected') return '<span class="grid-card-flag flag-rejected">X</span>';
+      return '';
+    case 'sharpness':
+      if (p.sharpness != null) return '<span style="font-size:10px;color:var(--text-ghost);" title="Sharpness score">' + Math.round(p.sharpness) + '</span>';
+      return '';
+    case 'species':
+      return renderSpeciesBadges(p.species, true);
+    case 'dimensions':
+      if (p.width && p.height) return '<span style="font-size:10px;color:var(--text-ghost);">' + p.width + ' \u00d7 ' + p.height + '</span>';
+      return '';
+    case 'file_size':
+      if (p.file_size) return '<span style="font-size:10px;color:var(--text-ghost);">' + formatFileSize(p.file_size) + '</span>';
+      return '';
+    case 'capture_date':
+      if (p.timestamp) {
+        var d = p.timestamp.replace('T', ' ').substring(0, 16);
+        return '<span style="font-size:10px;color:var(--text-ghost);" title="' + escapeAttr(p.timestamp) + '">' + d + '</span>';
+      }
+      return '';
+    case 'extension':
+      if (p.extension) return '<span style="font-size:10px;color:var(--text-ghost);">' + escapeHtml(p.extension.toUpperCase()) + '</span>';
+      return '';
+    case 'quality_score':
+      if (p.quality_score != null) return '<span style="font-size:10px;color:var(--text-ghost);" title="Quality score">' + p.quality_score.toFixed(2) + '</span>';
+      return '';
+    // The value the "AI confidence" sorts rank on, so a card can
+    // explain its own position in the grid. Absent (rather than 0) when the
+    // photo has no current, unrejected species prediction — the badge stays
+    // off instead of claiming a confidence of zero.
+    case 'prediction_confidence':
+      if (p.prediction_confidence != null) {
+        // Under a confidence sort a stack is placed by its leading member,
+        // not by the quality-ranked cover shown on the card, and the server
+        // sends that leading score so the badge names the number that put
+        // the item where it is. Say whose score it is rather than letting
+        // the card imply it belongs to the frame in the thumbnail.
+        //
+        // The server flags this per card; do NOT re-derive it from the sort
+        // dropdown. A healthy visual clause keeps the grid similarity-ranked
+        // while the dropdown still reads "AI confidence", and that
+        // path sends the cover's own score — so a select-derived label would
+        // claim the relevance order came from a number that did not produce
+        // it (Codex P2 on PR #1670).
+        var confIsStackLead = p.prediction_confidence_is_stack_lead === true;
+        var confTitle = confIsStackLead
+          ? 'Confidence of the strongest current species prediction on the frame that leads this stack — the score this stack is sorted by'
+          : 'Confidence of the strongest current species prediction';
+        return '<span style="font-size:10px;color:var(--text-ghost);" title="'
+          + escapeAttr(confTitle) + '">'
+          + Math.round(p.prediction_confidence * 100) + '%</span>';
+      }
+      return '';
+    case 'color_label':
+      var cl = colorLabels[p.id];
+      if (cl) {
+        if (!window.VireoColorLabels || !window.VireoColorLabels.isValid(cl)) return '';
+        var colorTitle = window.VireoColorLabels
+          ? window.VireoColorLabels.title(cl, cl.charAt(0).toUpperCase() + cl.slice(1))
+          : cl;
+        return '<span class="grid-card-color" data-color="' + escapeAttr(cl)
+          + '" data-color-label-control data-color-label-base-title="'
+          + escapeAttr(cl.charAt(0).toUpperCase() + cl.slice(1))
+          + '" data-color-label-base-aria="'
+          + escapeAttr(cl.charAt(0).toUpperCase() + cl.slice(1) + ' label')
+          + '" role="img" aria-label="'
+          + escapeAttr(cl.charAt(0).toUpperCase() + cl.slice(1) + ' label')
+          + '" title="' + escapeAttr(colorTitle) + '"></span>';
+      }
+      return '';
+    default:
+      return '';
+  }
+}
+
+// Color labels live in the async `colorLabels` map rather than on the photo
+// row, so the card tint is stamped as an attribute at render time and
+// re-stamped by refreshCardBadgesAndInfo once /api/photos/color_labels
+// resolves or the user edits a label.
+function cardColorLabel(photoId) {
+  var cl = colorLabels[photoId];
+  if (!cl) return null;
+  if (window.VireoColorLabels && !window.VireoColorLabels.isValid(cl)) return null;
+  return cl;
+}
+
+function cardColorLabelAttr(photoId) {
+  var cl = cardColorLabel(photoId);
+  return cl ? ' data-color-label="' + escapeAttr(cl) + '"' : '';
+}
+
+function applyCardColorLabel(card, photoId) {
+  var cl = cardColorLabel(photoId);
+  if (cl) card.setAttribute('data-color-label', cl);
+  else card.removeAttribute('data-color-label');
+}
+
+// Hydrate color labels for the photos an init response just rendered.
+// /api/browse/init carries no labels, so any path that paints a grid straight
+// from it — bootstrapBrowse() and the ?photo_id=... deep link, which skips
+// bootstrap entirely — has to ask for them, or its cards stay untinted and the
+// detail panel reports "no color" until some later action happens to refetch
+// those ids. loadPhotos()'s paging path does its own fetch and does not use
+// this. `isCurrent` is the caller's own staleness guard: a sort change or
+// folder click during the fetch means these ids are no longer on screen.
+function hydrateColorLabelsForRenderedPage(isCurrent) {
+  if (!photos.length) return;
+  var ids = photos.map(function(p) { return p.id; });
+  return fetchColorLabels(ids).then(function() {
+    if (!isCurrent()) return;
+    refreshGridCards(ids);
+    // fetchColorLabels already re-rendered a batch inspector; only the
+    // single-photo panel is left to catch up.
+    var detail = document.getElementById('detailContent');
+    if (selectedPhotoId != null
+        && !(detail && detail.classList.contains('batch-mode'))) {
+      updateDetailColors();
+    }
+  });
+}
+
+function renderCardInfo(p) {
+  var infoHtml = '';
+  cardFields.forEach(function(field) {
+    infoHtml += renderCardField(field, p);
+  });
+  return infoHtml;
+}
+
+function browseStacksEnabled() {
+  var toggle = document.getElementById('browseStacksToggle');
+  return !!(toggle && toggle.checked);
+}
+
+function browseStackLabel(kind) {
+  return kind === 'duplicate' ? 'Exact duplicates' : 'Burst';
+}
+
+// A collapsed stack card stands for its whole stack, not for the one frame
+// whose thumbnail it borrows: the badge counts the frames behind it, and a
+// species, rating, flag or color the user applies while looking at that card
+// is meant for all of them. So clicking it selects every member — the count
+// in the batch bar and the selection panel then states exactly what the next
+// action will touch, instead of silently acting on 1 of 11 (CORE_PHILOSOPHY,
+// "no black boxes"). Working frame by frame is what expanding the stack is
+// for: the tray selects members individually.
+//
+// Members are the filter-scoped ones the badge counted, and the projection
+// never puts an offline frame in a stack (see ``_browse_stack_query_parts``),
+// so every id returned here is actionable. The cover leads the list for the
+// same reason Select-all flattens cover-first: Best Batch, burst review and
+// the export preview all start from the card the user can see.
+function browseStackMemberIdsFor(photo) {
+  var stack = photo && photo.browse_stack;
+  if (!stack || stack.count < 2) return null;
+  var members = (stack.photo_ids || []).filter(function(id) {
+    return id !== photo.id;
+  });
+  if (!members.length) return null;
+  return [photo.id].concat(members);
+}
+
+// By id, for the callers that only have one. Stack cards are top-level grid
+// cards, so an id that is not in ``photos`` — a tray member — is a single
+// photo by construction.
+function browseStackMemberIds(photoId) {
+  return browseStackMemberIdsFor(photos.find(function(p) {
+    return p.id === photoId;
+  }));
+}
+
+// The ids one click acts on: the whole stack for a collapsed stack card, the
+// single photo for anything else. ``stackAware: false`` is for the callers
+// that are restoring a focus rather than making a selection — a tray member
+// click, a collapsing tray, a closing lightbox — where expanding to the
+// stack would escalate a view action into a 15-photo batch.
+function browseSelectionIdsForClick(photoId, opts) {
+  if (opts && opts.stackAware === false) return [photoId];
+  return browseStackMemberIds(photoId) || [photoId];
+}
+
+// Shift-clicking from one tray member to another: both ends report the
+// cover's grid slot, so the top-level range loop cannot tell them apart and
+// would take the whole stack. Range over the tray's own member order
+// instead, which is the order the user is looking at.
+function browseStackMemberRange(anchorId, targetId) {
+  if (anchorId == null) return null;
+  var coverId = browseStackCoverIdForPhoto(targetId);
+  if (coverId == null || browseStackCoverIdForPhoto(anchorId) !== coverId) return null;
+  var members = browseStackMembers[String(coverId)] || [];
+  var anchorAt = -1, targetAt = -1;
+  members.forEach(function(member, at) {
+    if (member.id === anchorId) anchorAt = at;
+    if (member.id === targetId) targetAt = at;
+  });
+  if (anchorAt < 0 || targetAt < 0) return null;
+  return members
+    .slice(Math.min(anchorAt, targetAt), Math.max(anchorAt, targetAt) + 1)
+    .map(function(member) { return member.id; });
+}
+
+// Whether a batch action would touch this photo — the same set-over-focus
+// precedence getActiveSelection() applies, and it has to be the same or a
+// card paints a claim the action will not honour. Cmd-clicking a stack's
+// cover out of the tray and then collapsing leaves the focus on that cover
+// while the set holds only the other frames, and reading the two as an "or"
+// painted the whole stack as selected while a rating would have skipped the
+// frame on top. Codex P2 on PR #1672.
+function browseSelectionIncludes(id) {
+  return selectedPhotos.size > 0
+    ? selectedPhotos.has(id)
+    : id === selectedPhotoId;
+}
+
+// Which of this card's photos are in the active selection. A stack card
+// paints the full selected ring only when the whole stack is in.
+function browseCardSelectionClass(photo) {
+  var members = browseStackMemberIdsFor(photo);
+  if (!members) {
+    return photo && browseSelectionIncludes(photo.id) ? ' selected' : '';
+  }
+  var chosen = members.filter(browseSelectionIncludes).length;
+  if (chosen === members.length) return ' selected';
+  return chosen ? ' stack-partial' : '';
+}
+
+// "12 photos selected · 2 stacks" — the sentence a stack click has to be able
+// to answer, since one click now moves the count by more than one. It is only
+// printable when the stacks and singles currently in the grid account for
+// every selected photo: counting the stacks that happen to be loaded out of a
+// selection that reaches past the window would be a proxy, not an answer, so
+// that case says nothing rather than something cheaper.
+function browseSelectionStackNote(ids) {
+  if (!ids.length) return '';
+  var remaining = new Set(ids);
+  var stacks = 0;
+  photos.forEach(function(photo) {
+    var stack = photo.browse_stack;
+    var members = (stack && stack.count >= 2 && stack.photo_ids) || [];
+    if (!members.length) return;
+    if (!members.every(function(id) { return remaining.has(id); })) return;
+    stacks++;
+    members.forEach(function(id) { remaining.delete(id); });
+  });
+  if (!stacks) return '';
+  photos.forEach(function(photo) { remaining.delete(photo.id); });
+  if (remaining.size) return '';
+  return ' · ' + stacks + (stacks === 1 ? ' stack' : ' stacks');
+}
+
+function renderBrowseStackBadge(p) {
+  var stack = p && p.browse_stack;
+  if (!stack || stack.count < 2) return '';
+  var label = browseStackLabel(stack.kind, stack.count);
+  var expanded = expandedBrowseStacks.has(p.id);
+  // A cover reconciliation that could not load this stack's members leaves the
+  // pre-edit cover on screen. Say that on the badge itself: the toast that
+  // reported it is long gone by the time the user looks back at the grid.
+  var needsRecheck = browseStackCoverRecheck.has(p.id);
+  var title = label + ' · ' + stack.count + ' photos · clicking the card selects all '
+    + stack.count + ', this badge expands the stack to pick single frames';
+  if (needsRecheck) {
+    title += ' · cover may be out of date after a recent edit — expand to refresh';
+  }
+  return '<button type="button" class="browse-stack-badge'
+    + (needsRecheck ? ' needs-recheck' : '') + '" '
+    + 'aria-expanded="' + (expanded ? 'true' : 'false') + '" '
+    + 'title="' + escapeAttr(title) + '" '
+    + 'onclick="toggleBrowseStack(event,' + p.id + ')">'
+    + '<span aria-hidden="true">&#9638;</span>' + stack.count
+    + (needsRecheck ? '<span class="browse-stack-recheck" aria-hidden="true">!</span>' : '')
+    + '</button>';
+}
+
+// Repaints just the stack badge for one cover. refreshGridCards() rewrites card
+// info and overlay badges but not the stack badge, and renderGrid() is far too
+// heavy to run for a marker change on a single card.
+function refreshBrowseStackBadge(coverId) {
+  var card = document.querySelector('.grid-card[data-id="' + coverId + '"]');
+  if (!card) return;
+  var badge = card.querySelector('.browse-stack-badge');
+  var photo = photos.find(function(item) { return item.id === coverId; });
+  if (!badge || !photo) return;
+  badge.outerHTML = renderBrowseStackBadge(photo);
+}
+
+function renderDetectionBoxes(p) {
+  // Shared by renderPhotoCard and renderBrowseStackMember so overlays and their
+  // orientation/RAW-pair hiding stay identical between covers and expanded stack
+  // members; toggleDetectionBoxes() rerenders through both paths.
+  if (!showDetectionBoxes || !Array.isArray(p.detections)) return '';
+  var isRawJpegPair = typeof window.vireoPhotoIsRawJpegPair === 'function'
+    ? window.vireoPhotoIsRawJpegPair(p)
+    : false;
+  var pairSource = _vireoPairSource(p.id) || 'jpeg';
+  var hideDetectionOverlays = (
+    (isRawJpegPair && pairSource === 'jpeg') ||
+    (
+      typeof window.vireoPhotoHasOrientationEdit === 'function' &&
+      window.vireoPhotoHasOrientationEdit(p.id)
+    )
+  );
+  var html = '';
+  p.detections.forEach(function(d) {
+    if (d == null || d.x == null) return;
+    var conf = (d.confidence != null) ? Math.round(d.confidence * 100) + '%' : '';
+    var cat = (d.category && d.category !== 'animal') ? escapeHtml(d.category) + ' ' : '';
+    html += '<div class="det-box" data-photo-id="' + p.id + '" style="' + (hideDetectionOverlays ? 'display:none;' : '') + 'left:' + (d.x * 100) + '%;top:' + (d.y * 100) + '%;width:' + (d.w * 100) + '%;height:' + (d.h * 100) + '%;">' +
+      ((cat || conf) ? '<span class="det-box-label">' + cat + conf + '</span>' : '') +
+    '</div>';
+  });
+  return html;
+}
+
+function renderPhotoCard(p, idx) {
+  var selectedClass = browseCardSelectionClass(p);
+  // Offline members render first and unconditionally: they are read-only
+  // placeholders with no thumbnail, and the server never lets one join a
+  // stack, so there is no stack chrome to preserve here.
+  var isOffline = p.folder_status &&
+    p.folder_status !== 'ok' && p.folder_status !== 'partial';
+  if (isOffline) {
+    return '<div class="grid-card offline" data-id="' + p.id +
+      '" data-idx="' + idx + '" data-filename="' + escapeAttr(p.filename) +
+      '"' + cardColorLabelAttr(p.id) +
+      ' aria-disabled="true" title="This photo\'s folder is offline. Reconnect or relocate the folder to edit it.">' +
+      '<div class="grid-card-img-wrap">' +
+        '<div class="offline-photo-placeholder">' +
+          '<span class="offline-icon">\u26d3</span>' +
+          '<span>Folder offline</span>' +
+        '</div>' +
+      '</div>' +
+      '<div class="grid-card-info">' + renderCardInfo(p) + '</div>' +
+    '</div>';
+  }
+  var stackClass = p.browse_stack ? ' has-browse-stack' : '';
+  var isRawJpegPair = typeof window.vireoPhotoIsRawJpegPair === 'function'
+    ? window.vireoPhotoIsRawJpegPair(p)
+    : false;
+  if (typeof window.vireoRememberPhotoPair === 'function') {
+    window.vireoRememberPhotoPair(p);
+  }
+  var pairSource = _vireoPairSource(p.id) || 'jpeg';
+  if (
+    typeof window.vireoRememberPhotoEditRecipe === 'function' &&
+    Object.prototype.hasOwnProperty.call(p, 'edit_recipe')
+  ) {
+    window.vireoRememberPhotoEditRecipe(p.id, p.edit_recipe, {
+      skipIfLocallyWritten: true,
+    });
+  }
+
+  var boxHtml = renderDetectionBoxes(p);
+
+  var clipBadge = '';
+  if (p._similarity !== undefined) {
+    clipBadge = '<span class="clip-score-badge">' + Math.round(p._similarity * 100) + '%</span>';
+  }
+  var inatBadge = inatSubmitted[String(p.id)] ? '<span class="inat-badge">iNat</span>' : '';
+  var wildlifeBadge = p.wildlife_excluded ? '<span class="no-wildlife-badge">No Wildlife</span>' : '';
+  var representativeBadge = p.is_species_representative ? '<span class="representative-badge">Representative</span>' : '';
+  var pairBadge = isRawJpegPair
+    ? '<span class="pair-source-badge" data-pair-source-id="' + p.id + '">'
+      + (pairSource === 'raw' ? 'RAW · JPEG pair' : 'JPEG · RAW pair')
+      + '</span>'
+    : '';
+
+  // Species badges on image overlay (only when NOT in cardFields — if in cardFields, rendered below)
+  var speciesBadgeHtml = '';
+  if (cardFields.indexOf('species') === -1) {
+    speciesBadgeHtml = renderSpeciesBadges(p.species, false);
+  }
+
+  var thumbUrl = window.vireoThumbnailUrl ? window.vireoThumbnailUrl(p) : '/thumbnails/' + p.id + '.jpg';
+  return '<div class="grid-card' + stackClass + selectedClass + '" data-id="' + p.id + '" data-idx="' + idx + '" data-filename="' + escapeAttr(p.filename) + '"' + cardColorLabelAttr(p.id) + ' onclick="selectPhoto(event,' + p.id + ',' + idx + ')">' +
+    '<div class="grid-card-img-wrap">' +
+      '<img data-thumbnail-src="' + escapeAttr(thumbUrl) + '" decoding="async" alt="' + escapeAttr(p.filename) + '">' +
+      renderBrowseStackBadge(p) +
+      clipBadge +
+      boxHtml +
+      inatBadge +
+      wildlifeBadge +
+      representativeBadge +
+      pairBadge +
+      speciesBadgeHtml +
+    '</div>' +
+    '<div class="grid-card-info">' +
+      renderCardInfo(p) +
+    '</div>' +
+  '</div>';
+}
+
+function renderBrowseStackMember(p, coverId) {
+  var selectedClass = browseSelectionIncludes(p.id) ? ' selected' : '';
+  if (typeof window.vireoRememberPhotoPair === 'function') {
+    window.vireoRememberPhotoPair(p);
+  }
+  if (
+    typeof window.vireoRememberPhotoEditRecipe === 'function' &&
+    Object.prototype.hasOwnProperty.call(p, 'edit_recipe')
+  ) {
+    window.vireoRememberPhotoEditRecipe(p.id, p.edit_recipe, {
+      skipIfLocallyWritten: true,
+    });
+  }
+  var thumbUrl = window.vireoThumbnailUrl
+    ? window.vireoThumbnailUrl(p)
+    : '/thumbnails/' + p.id + '.jpg';
+  return '<div class="browse-stack-member' + selectedClass + '" '
+    + 'data-id="' + p.id + '" data-filename="' + escapeAttr(p.filename) + '"'
+    + cardColorLabelAttr(p.id) + ' '
+    + 'onclick="selectBrowseStackMember(event,' + p.id + ',' + coverId + ')" '
+    + 'ondblclick="openBrowseStackMember(event,' + p.id + ',' + coverId + ')">'
+    + '<div class="grid-card-img-wrap">'
+    + '<img data-thumbnail-src="' + escapeAttr(thumbUrl) + '" decoding="async" alt="' + escapeAttr(p.filename) + '">'
+    + renderDetectionBoxes(p)
+    + (inatSubmitted[String(p.id)] ? '<span class="inat-badge">iNat</span>' : '')
+    + (p.wildlife_excluded ? '<span class="no-wildlife-badge">No Wildlife</span>' : '')
+    + (p.is_species_representative ? '<span class="representative-badge">Representative</span>' : '')
+    + (cardFields.indexOf('species') === -1 ? renderSpeciesBadges(p.species, false) : '')
+    + '</div><div class="grid-card-info">' + renderCardInfo(p) + '</div></div>';
+}
+
+function renderBrowseStackTray(cover) {
+  var stack = cover.browse_stack;
+  var members = browseStackMembers[String(cover.id)];
+  var error = browseStackErrors[String(cover.id)];
+  var label = browseStackLabel(stack.kind, stack.count);
+  var body = '<div class="browse-stack-loading">Loading stack…</div>';
+  if (error) {
+    body = '<div class="browse-stack-error">' + escapeHtml(error) + '</div>';
+  } else if (Array.isArray(members)) {
+    body = '<div class="browse-stack-members">' + members.map(function(member) {
+      return renderBrowseStackMember(member, cover.id);
+    }).join('') + '</div>';
+  }
+  var reviewLabel = stack.kind === 'burst' ? 'Review burst' : 'Compare';
+  return '<div class="browse-stack-tray" data-stack-cover-id="' + cover.id + '">'
+    + '<div class="browse-stack-tray-header"><div>'
+    + '<span class="browse-stack-tray-title">' + escapeHtml(label) + '</span>'
+    + '<span class="browse-stack-tray-subtitle">' + stack.count + ' photos</span>'
+    + '</div><div class="browse-stack-tray-actions">'
+    + '<button type="button" onclick="selectBrowseStackAll(event,' + cover.id + ')">Select all</button>'
+    + '<button type="button" onclick="reviewBrowseStack(event,' + cover.id + ')">' + reviewLabel + '</button>'
+    + '<button type="button" aria-label="Collapse stack" title="Collapse" onclick="toggleBrowseStack(event,' + cover.id + ')">&#10005;</button>'
+    + '</div></div>' + body + '</div>';
+}
+
+function insertBrowseStackTray(coverId) {
+  var oldTray = document.querySelector('.browse-stack-tray[data-stack-cover-id="' + coverId + '"]');
+  if (oldTray) oldTray.remove();
+  if (!expandedBrowseStacks.has(coverId)) return;
+  var cover = photos.find(function(photo) { return photo.id === coverId; });
+  var card = document.querySelector('.grid-card[data-id="' + coverId + '"]');
+  if (!cover || !cover.browse_stack || !card) return;
+  card.insertAdjacentHTML('afterend', renderBrowseStackTray(cover));
+  var tray = document.querySelector('.browse-stack-tray[data-stack-cover-id="' + coverId + '"]');
+  refreshColorLabelControlsIn(tray);
+  refreshCardSelectionVisuals();
+}
+
+function restoreExpandedBrowseStacks() {
+  Array.from(expandedBrowseStacks).forEach(insertBrowseStackTray);
+}
+
+// Every mutation path reports the photo ids whose local state it just changed
+// (see refreshExpandedBrowseStackMembers / reconcileBrowseStackCovers callers).
+// Any stack expansion still in flight fetched those photos before the edit
+// committed, so its payload is pre-edit for exactly the members the mutation
+// could not reach. Mark it rather than trying to replay the mutation onto the
+// response: the set of fields an edit can touch keeps growing, and a refetch
+// is correct for all of them without per-field bookkeeping.
+function markBrowseStackExpansionsStale(photoIds) {
+  var wanted = (photoIds || []).map(Number);
+  if (!wanted.length) return;
+  Object.keys(browseStackExpansionRequests).forEach(function(cacheKey) {
+    var requests = browseStackExpansionRequests[cacheKey] || [];
+    requests.forEach(function(request) {
+      if (!request || request.stale) return;
+      request.stale = wanted.some(function(id) { return request.memberIds.has(id); });
+    });
+  });
+}
+
+// A cover-hydration response captured its members before this mutation ran, so
+// on any overlap its payload is pre-edit and must never reach browseStackMembers.
+// Mark rather than delete: the hydration exists to recompute a cover after an
+// edit that already committed, so dropping it silently would leave the demoted
+// cover on screen. The flag makes reconcileBrowseStackCovers discard the
+// in-flight response and refetch the post-edit members instead.
+// reconcileBrowseStackCovers only supersedes hydrations it starts itself, so
+// mutation paths that don't call it (wildlife, keyword, metadata edits) rely on
+// this to invalidate a matching in-flight request.
+function markBrowseStackHydrationsStale(photoIds) {
+  var wanted = (photoIds || []).map(Number);
+  if (!wanted.length) return;
+  Object.keys(browseStackHydrationRequests).forEach(function(cacheKey) {
+    var record = browseStackHydrationRequests[cacheKey];
+    if (!record || !record.memberIds || record.stale) return;
+    record.stale = wanted.some(function(id) { return record.memberIds.has(id); });
+  });
+}
+
+function refreshExpandedBrowseStackMembers(photoIds) {
+  var wanted = new Set((photoIds || []).map(Number));
+  markBrowseStackExpansionsStale(photoIds);
+  markBrowseStackHydrationsStale(photoIds);
+  Object.keys(browseStackMembers).forEach(function(coverId) {
+    var members = browseStackMembers[coverId] || [];
+    if (members.some(function(member) { return wanted.has(member.id); })) {
+      insertBrowseStackTray(Number(coverId));
+    }
+  });
+}
+
+function browseStackFlagRank(flag) {
+  if (flag === 'flagged') return 2;
+  if (flag == null || flag === 'none') return 1;
+  return 0;
+}
+
+function browseStackCoverCompare(a, b) {
+  var descending = [
+    [browseStackFlagRank(a.flag), browseStackFlagRank(b.flag)],
+    [a.quality_score, b.quality_score],
+    [a.subject_sharpness, b.subject_sharpness],
+    [a.sharpness, b.sharpness],
+    [a.rating == null ? 0 : 1, b.rating == null ? 0 : 1],
+    [a.rating == null ? 0 : a.rating, b.rating == null ? 0 : b.rating],
+    [(a.width || 0) * (a.height || 0), (b.width || 0) * (b.height || 0)],
+    [a.file_size || 0, b.file_size || 0],
+  ];
+  for (var i = 0; i < descending.length; i++) {
+    var av = descending[i][0];
+    var bv = descending[i][1];
+    if (av == null) av = -Infinity;
+    if (bv == null) bv = -Infinity;
+    if (av !== bv) return bv - av;
+  }
+  return a.id - b.id;
+}
+
+// Bounded only as a safety net, mirroring toggleBrowseStack: a stale retry has
+// to be provoked by an edit that already finished its own server round trip, so
+// this cannot spin on its own, and a failure retry needs a fresh transport
+// error each time. The cap stops either from becoming an unbounded refetch loop.
+var MAX_BROWSE_STACK_HYDRATION_ATTEMPTS = 3;
+
+// Loads a collapsed stack's members so reconcileBrowseStackCovers can recompute
+// its cover. Returns:
+//   'hydrated'   — members are in browseStackMembers, cover can be recomputed
+//   'superseded' — a newer request owns this key; it will do the work
+//   'window'     — the dataset was replaced; abandon reconciliation entirely
+//   'unresolved' — retries exhausted; the grid still shows the pre-edit cover
+// 'unresolved' is never silent: the caller flags the stack for recheck and tells
+// the user, because the mutation that asked for this reconciliation succeeded.
+async function hydrateBrowseStackCoverMembers(cover, windowIsCurrent) {
+  var cacheKey = String(cover.id);
+  var memberIds = (cover.browse_stack && cover.browse_stack.photo_ids) || [];
+  for (var attempt = 1; attempt <= MAX_BROWSE_STACK_HYDRATION_ATTEMPTS; attempt++) {
+    var hydrationSeq = ++browseStackHydrationSeq;
+    browseStackHydrationRequests[cacheKey] = {
+      seq: hydrationSeq,
+      stale: false,
+      memberIds: new Set(memberIds.map(Number)),
+    };
+    var hydratedMembers = [];
+    try {
+      for (var offset = 0; offset < memberIds.length; offset += 500) {
+        var data = await safeFetch('/api/photos/by-ids', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({photo_ids: memberIds.slice(offset, offset + 500)}),
+        }, {toast: false});
+        if (!windowIsCurrent()) return 'window';
+        hydratedMembers = hydratedMembers.concat(data.photos || []);
+      }
+    } catch (e) {
+      var errorRecord = browseStackHydrationRequests[cacheKey];
+      if (errorRecord && errorRecord.seq === hydrationSeq) {
+        delete browseStackHydrationRequests[cacheKey];
+      }
+      if (!windowIsCurrent()) return 'window';
+      // The edit itself already committed on the server. Retry the read rather
+      // than abandoning the cover recomputation it asked for. Back off between
+      // attempts so a server that is briefly unreachable gets time to recover
+      // instead of being hit three times inside a few milliseconds.
+      if (attempt < MAX_BROWSE_STACK_HYDRATION_ATTEMPTS) {
+        await new Promise(function(resolve) {
+          setTimeout(resolve, 200 * Math.pow(2, attempt - 1));
+        });
+        if (!windowIsCurrent()) return 'window';
+        continue;
+      }
+      return 'unresolved';
+    }
+    // Overlapping edits may hydrate the same collapsed stack. Request order
+    // tracks mutation freshness, so only the newest request may cache even when
+    // an older response happens to arrive first.
+    var currentRecord = browseStackHydrationRequests[cacheKey];
+    if (!currentRecord || currentRecord.seq !== hydrationSeq) return 'superseded';
+    if (currentRecord.stale) {
+      // A generic member edit (wildlife, keyword, metadata) landed while this
+      // response was in flight, so it holds pre-edit rows for members that had
+      // no cache entry to patch. Never cache that; refetch the post-edit truth.
+      delete browseStackHydrationRequests[cacheKey];
+      if (attempt < MAX_BROWSE_STACK_HYDRATION_ATTEMPTS) continue;
+      return 'unresolved';
+    }
+    delete browseStackHydrationRequests[cacheKey];
+    // Expansion can also hydrate this key while reconciliation is in flight;
+    // and another response may already have promoted a replacement.
+    if (browseStackMembers[cacheKey] || !cover.browse_stack
+        || !photos.some(function(photo) {
+          return photo === cover && photo.id === cover.id;
+        })) {
+      return 'superseded';
+    }
+    var stack = cover.browse_stack;
+    var similarity = cover.similarity;
+    var clientSimilarity = cover._similarity;
+    browseStackMembers[cacheKey] = hydratedMembers.map(function(member) {
+      if (member.id !== cover.id) return member;
+      Object.assign(cover, member);
+      cover.browse_stack = stack;
+      if (similarity !== undefined) cover.similarity = similarity;
+      if (clientSimilarity !== undefined) cover._similarity = clientSimilarity;
+      return cover;
+    });
+    return 'hydrated';
+  }
+  return 'unresolved';
+}
+
+async function reconcileBrowseStackCovers(photoIds) {
+  var wanted = new Set((photoIds || []).map(Number));
+  // Callers run this straight after applying the edit locally, before the
+  // trailing refreshExpandedBrowseStackMembers(). Marking here too closes the
+  // window in which this function's own awaits would let a stale expansion
+  // response land unflagged.
+  markBrowseStackExpansionsStale(photoIds);
+  var windowIsCurrent = observeBrowseWindow();
+  var focusedReplacementId = null;
+  var refreshFocusedDetail = false;
+  var uncachedCovers = photos.filter(function(photo) {
+    if (!photo.browse_stack || browseStackMembers[String(photo.id)]) return false;
+    return wanted.has(photo.id) || (photo.browse_stack.photo_ids || []).some(function(id) {
+      return wanted.has(id);
+    });
+  });
+  var unresolvedCovers = [];
+  for (var h = 0; h < uncachedCovers.length; h++) {
+    var status = await hydrateBrowseStackCoverMembers(uncachedCovers[h], windowIsCurrent);
+    // The dataset under us was replaced; whoever owns the new window will
+    // paint authoritative covers, so there is nothing stale to report.
+    if (status === 'window') return false;
+    if (status === 'unresolved') unresolvedCovers.push(uncachedCovers[h].id);
+    // Members are loaded, so the cover below is recomputed from the full stack:
+    // any earlier recheck marker on this cover is now satisfied.
+    if (status === 'hydrated') browseStackCoverRecheck.delete(uncachedCovers[h].id);
+  }
+  unresolvedCovers.forEach(function(coverId) { browseStackCoverRecheck.add(coverId); });
+
+  var changed = false;
+  Object.keys(browseStackMembers).forEach(function(oldKey) {
+    var members = browseStackMembers[oldKey] || [];
+    if (!members.some(function(member) { return wanted.has(member.id); })) return;
+    var oldCoverId = Number(oldKey);
+    var oldIndex = photos.findIndex(function(photo) { return photo.id === oldCoverId; });
+    if (oldIndex < 0 || !members.length) return;
+    var newCover = members.slice().sort(browseStackCoverCompare)[0];
+    if (!newCover || newCover.id === oldCoverId) return;
+
+    var oldCover = photos[oldIndex];
+    var stack = oldCover.browse_stack;
+    oldCover.browse_stack = null;
+    newCover.browse_stack = stack;
+    if (oldCover.similarity !== undefined) newCover.similarity = oldCover.similarity;
+    if (oldCover._similarity !== undefined) newCover._similarity = oldCover._similarity;
+    photos[oldIndex] = newCover;
+
+    var newKey = String(newCover.id);
+    browseStackMembers[newKey] = members;
+    delete browseStackMembers[oldKey];
+    if (Object.prototype.hasOwnProperty.call(browseStackErrors, oldKey)) {
+      browseStackErrors[newKey] = browseStackErrors[oldKey];
+      delete browseStackErrors[oldKey];
+    }
+    // The cover was just recomputed from the whole member list, so a recheck
+    // marker left over from an earlier failed hydration no longer applies.
+    browseStackCoverRecheck.delete(oldCoverId);
+    if (expandedBrowseStacks.delete(oldCoverId)) {
+      expandedBrowseStacks.add(newCover.id);
+    }
+    if (selectedPhotoId != null && members.some(function(member) {
+      return member.id === selectedPhotoId;
+    })) {
+      selectedIndex = oldIndex;
+      // The demoted cover is gone from the top-level photos array. Grid
+      // selection and preview navigation both look it up there and would
+      // otherwise land on an unselected card with an index of -1 in the
+      // navigation list. Hand focus to the newly promoted cover, which now
+      // occupies that grid slot.
+      if (selectedPhotoId === oldCoverId && selectedPhotos.size === 0) {
+        selectedPhotoId = newCover.id;
+        focusedReplacementId = newCover.id;
+        refreshFocusedDetail = document.getElementById('detailContent').classList.contains('visible');
+      }
+    }
+    changed = true;
+  });
+  if (changed) renderGrid();
+  if (unresolvedCovers.length) {
+    // The edit committed on the server but its cover recomputation did not, so
+    // the grid is knowingly showing a photo the stack may no longer lead with.
+    // Say so instead of leaving a silently wrong representative on screen, and
+    // mark the stacks so the notice survives the toast.
+    unresolvedCovers.forEach(refreshBrowseStackBadge);
+    var one = unresolvedCovers.length === 1;
+    showToast(
+      'Could not reload ' + (one ? 'a stack' : unresolvedCovers.length + ' stacks')
+      + ' after that edit — ' + (one ? 'its cover' : 'their covers')
+      + ' may still show the previous top photo. Expand '
+      + (one ? 'the stack' : 'a stack') + ' marked “!” to refresh it.',
+      'warning'
+    );
+  }
+  // Keep the inspector bound to the same visible grid focus. Call this after
+  // renderGrid() so the promoted cover and its tray are already in place when
+  // the async detail response paints.
+  if (focusedReplacementId != null && refreshFocusedDetail) {
+    loadDetail(focusedReplacementId);
+  }
+  return changed;
+}
+
+function browsePhotoNavigationList(photoId) {
+  // Prefer an expanded stack's member list even for its cover, which also
+  // exists in the top-level grid. Opening that cover from the tray should
+  // navigate to its neighboring frames, not to the next stack cover.
+  var stackIds = Object.keys(browseStackMembers);
+  for (var i = 0; i < stackIds.length; i++) {
+    if (!expandedBrowseStacks.has(Number(stackIds[i]))) continue;
+    var members = browseStackMembers[stackIds[i]] || [];
+    if (members.some(function(photo) { return photo.id === photoId; })) {
+      return members;
+    }
+  }
+  // No stack owns this photo, so navigation falls back to the top-level
+  // grid list. Offline placeholders are not viewable, so the lightbox gets
+  // the available-only projection of it (see ``availableBrowsePhotos``).
+  return availableBrowsePhotos();
+}
+
+// True for either shape ``browsePhotoNavigationList`` returns as its
+// top-level fallback: ``photos`` itself, or the available-only list used
+// while offline collection members are shown.
+function browseNavigationListIsTopLevel(list) {
+  return list === photos || list === browseAvailableLightboxPhotos;
+}
+
+function browseStackCoverIdForPhoto(photoId) {
+  var stackIds = Object.keys(browseStackMembers);
+  for (var i = 0; i < stackIds.length; i++) {
+    if ((browseStackMembers[stackIds[i]] || []).some(function(photo) {
+      return photo.id === photoId;
+    })) {
+      return Number(stackIds[i]);
+    }
+  }
+  return null;
+}
+
+function loadedBrowsePhotoIds() {
+  var ids = new Set(photos.map(function(photo) { return photo.id; }));
+  Object.keys(browseStackMembers).forEach(function(coverId) {
+    (browseStackMembers[coverId] || []).forEach(function(photo) {
+      ids.add(photo.id);
+    });
+  });
+  return Array.from(ids);
+}
+
+async function toggleBrowseStack(event, coverId) {
+  if (event) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+  var cover = photos.find(function(photo) { return photo.id === coverId; });
+  if (!cover || !cover.browse_stack) return;
+  var badge = document.querySelector('.grid-card[data-id="' + coverId + '"] .browse-stack-badge');
+  if (expandedBrowseStacks.has(coverId)) {
+    var members = browseStackMembers[String(coverId)] || [];
+    var selectedHiddenMember = selectedPhotoId !== coverId && members.some(function(member) {
+      return member.id === selectedPhotoId;
+    });
+    // A stack-wide Select all clears selectedPhotoId but leaves every member
+    // ID in selectedPhotos. Once the tray collapses, hidden members are gone
+    // from the navigation list, so a preview shortcut would fall through to
+    // the first hidden member and yield a 0/N lightbox. Detect that case so
+    // we can re-pin focus to the visible cover after removing the tray.
+    var batchHasHiddenMembers = selectedPhotoId == null && selectedPhotos.size > 0
+      && members.some(function(member) {
+        return member.id !== coverId && selectedPhotos.has(member.id);
+      });
+    expandedBrowseStacks.delete(coverId);
+    var tray = document.querySelector('.browse-stack-tray[data-stack-cover-id="' + coverId + '"]');
+    if (tray) tray.remove();
+    if (badge) badge.setAttribute('aria-expanded', 'false');
+    // A collapsed tray cannot keep a single-photo focus on one of its hidden
+    // members: grid/lightbox navigation now uses the top-level cover list.
+    // Hand that focus back to the visible cover while retaining the warm
+    // member cache for a cheap re-expand and for batch state reconciliation.
+    if (selectedHiddenMember) {
+      var coverIndex = photos.findIndex(function(photo) { return photo.id === coverId; });
+      if (selectedPhotos.size > 0) {
+        // Keep the exact multi-selection intact. The focused hidden member is
+        // still an active batch target, and getBrowseShortcutPhoto maps that
+        // focus to the collapsed cover solely for preview/navigation.
+        selectedIndex = coverIndex;
+        refreshCardSelectionVisuals();
+      } else {
+        // stackAware: false — collapsing a tray is a view action. It hands
+        // the focus back to the visible cover; it does not turn one frame
+        // the user was looking at into a stack-wide selection. The cover
+        // card paints the partial mark for exactly this state.
+        selectPhoto({shiftKey: false, metaKey: false, ctrlKey: false},
+                    coverId, coverIndex, { stackAware: false });
+      }
+    } else if (batchHasHiddenMembers) {
+      // Preserve the batch (Select all) selection but pin single-photo focus
+      // to the visible cover so preview shortcuts, keyboard navigation, and
+      // the grid caret all resolve inside the top-level cover list.
+      selectedPhotoId = coverId;
+      selectedIndex = photos.findIndex(function(photo) { return photo.id === coverId; });
+      refreshCardSelectionVisuals();
+    }
+    return;
+  }
+
+  expandedBrowseStacks.add(coverId);
+  if (badge) badge.setAttribute('aria-expanded', 'true');
+  insertBrowseStackTray(coverId);
+  var cacheKey = String(coverId);
+  if (browseStackMembers[cacheKey]) return;
+  // Errors are presentation state, not a durable cache result. Re-expanding
+  // after collapse retries a transient failure instead of pinning the stack
+  // to its first failed request until the whole Browse dataset reloads.
+  delete browseStackErrors[cacheKey];
+  insertBrowseStackTray(coverId);
+  var memberIds = cover.browse_stack.photo_ids || [];
+  var windowIsCurrent = observeBrowseWindow();
+  function coverStillOwnsSlot() {
+    // A cover-changing edit can hydrate and promote this stack while the
+    // expansion request is in flight. The dataset epoch stays current in
+    // that case, so also verify the captured cover still owns this grid slot
+    // before writing its old cache key.
+    return windowIsCurrent() && !!cover.browse_stack && photos.some(function(photo) {
+      return photo === cover && photo.id === coverId;
+    });
+  }
+  // Bounded only as a safety net: every retry has to be provoked by an edit
+  // that already completed its own server round trip, so this cannot spin on
+  // its own. The cap stops a future marking bug from becoming a refetch loop.
+  var MAX_EXPANSION_ATTEMPTS = 4;
+  for (var attempt = 1; attempt <= MAX_EXPANSION_ATTEMPTS; attempt++) {
+    var request = {memberIds: new Set(memberIds.map(Number)), stale: false};
+    _pushBrowseStackExpansionRequest(cacheKey, request);
+    var hydrated = [];
+    var abortedForRace = false;
+    try {
+      // /api/photos/by-ids caps each POST at 500 ids. Cover reconciliation
+      // already chunks in 500-id slices for the same reason; do the same
+      // here so an exact-duplicate or burst stack with more than 500 members
+      // is still expandable instead of surfacing a permanent "too large"
+      // error on its badge.
+      for (var offset = 0; offset < memberIds.length; offset += 500) {
+        var data = await safeFetch('/api/photos/by-ids', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({photo_ids: memberIds.slice(offset, offset + 500)}),
+        });
+        if (!coverStillOwnsSlot()) {
+          // The captured cover no longer owns this grid slot (a promotion
+          // landed between chunks). Drop the request bookkeeping and let
+          // whoever hydrates the new cover own the tray from here.
+          _removeBrowseStackExpansionRequest(cacheKey, request);
+          abortedForRace = true;
+          break;
+        }
+        if (request.stale || browseStackMembers[cacheKey]) {
+          // An edit or a fresher hydration landed mid-chunk. Stop fetching
+          // the rest of the stack and let the outer loop's stale / cache
+          // branches decide what to do; the partial payload is worthless
+          // for painting either way.
+          break;
+        }
+        hydrated = hydrated.concat(data.photos || []);
+      }
+    } catch (error) {
+      _removeBrowseStackExpansionRequest(cacheKey, request);
+      if (!coverStillOwnsSlot()) return;
+      browseStackErrors[cacheKey] = 'Could not load this stack.';
+      insertBrowseStackTray(coverId);
+      return;
+    }
+    if (abortedForRace) return;
+    _removeBrowseStackExpansionRequest(cacheKey, request);
+    if (!coverStillOwnsSlot()) return;
+    if (browseStackMembers[cacheKey]) {
+      // Cover reconciliation hydrated this key while we were in flight. It
+      // issued its fetch after the edit that triggered it, so its cache is
+      // strictly fresher than this response — keep it and just finish the
+      // metadata passes below.
+      break;
+    }
+    if (request.stale) {
+      // An edit landed while this response was in flight, and its hidden
+      // members had no cache entry to be patched in — so this payload holds
+      // pre-edit values for them. Never paint that: the tray keeps saying
+      // "Loading stack…" while we go fetch the post-edit truth.
+      if (attempt < MAX_EXPANSION_ATTEMPTS) continue;
+      browseStackErrors[cacheKey] =
+        'This stack kept changing while it loaded. Collapse and expand it to see current state.';
+      insertBrowseStackTray(coverId);
+      return;
+    }
+    // Reuse the top-level cover object inside the member cache. The cover is
+    // rendered in both places; sharing one object keeps rating/flag/keyword/
+    // wildlife/location mutations from updating the grid copy while leaving
+    // a stale duplicate in the expanded tray.
+    browseStackMembers[cacheKey] = hydrated.map(function(photo) {
+      return photo.id === coverId ? cover : photo;
+    });
+    break;
+  }
+  insertBrowseStackTray(coverId);
+  var loadedIds = (browseStackMembers[cacheKey] || []).map(function(photo) {
+    return photo.id;
+  });
+  if (!loadedIds.length) return;
+  if (browseStackCoverRecheck.delete(coverId)) {
+    // An earlier edit's cover reconciliation could not load these members, so
+    // the grid has been showing a possibly-demoted cover ever since. The
+    // members are cached now, so recompute the cover from them — expanding is
+    // the recovery the badge marker promised. Members are cached, so this
+    // reconciliation issues no requests and cannot fail.
+    await reconcileBrowseStackCovers(loadedIds);
+    // Promotion moves the cache under a new key and re-renders the grid.
+    var recheckedCoverId = browseStackCoverIdForPhoto(coverId);
+    if (recheckedCoverId != null) insertBrowseStackTray(recheckedCoverId);
+  }
+  function refreshCurrentStackTray() {
+    if (!windowIsCurrent()) return;
+    // Patch the members where they stand. A rating/flag edit can promote
+    // another member while either metadata request is in flight, moving these
+    // photos into a different cover's tray; addressing them by photo id finds
+    // them wherever they ended up, and finds nothing once the tray collapses.
+    refreshStackMemberCards(loadedIds);
+  }
+  loadInatStatus(loadedIds).then(refreshCurrentStackTray);
+  fetchColorLabels(loadedIds).then(refreshCurrentStackTray);
+}
+
+function selectBrowseStackMember(event, photoId, coverId) {
+  if (event) event.stopPropagation();
+  var coverIndex = photos.findIndex(function(photo) { return photo.id === coverId; });
+  // Pass shiftKey through so a top-level anchor + Shift-click on a hidden
+  // member range-selects instead of dropping the modifier (symmetric with
+  // the reverse direction: member anchor + Shift-click on a top-level
+  // card). selectPhoto's shift branch folds the click target into the
+  // resulting range so the hidden member always ends up in the selection.
+  // Codex P2 on PR #1561.
+  // stackAware: false — a tray click is the way to pick one frame out of a
+  // stack, including the cover frame, so it must never expand back to the
+  // whole stack the way clicking the collapsed card does.
+  selectPhoto({
+    shiftKey: !!(event && event.shiftKey),
+    metaKey: !!(event && event.metaKey),
+    ctrlKey: !!(event && event.ctrlKey),
+  }, photoId, coverIndex, { stackAware: false });
+}
+
+function selectBrowseStackAll(event, coverId) {
+  if (event) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+  var cover = photos.find(function(photo) { return photo.id === coverId; });
+  if (!cover || !cover.browse_stack) return;
+  anchorRestoreEpoch++;
+  selectedPhotoId = null;
+  selectedIndex = photos.findIndex(function(photo) { return photo.id === coverId; });
+  // Same list, in the same cover-first order, that clicking the collapsed
+  // card produces — the tray button and the card must not disagree.
+  selectedPhotos = new Set(
+    browseStackMemberIds(coverId) || cover.browse_stack.photo_ids || []
+  );
+  abandonDetailFocusForBatch();
+  refreshCardSelectionVisuals();
+  updateBatchBar();
+}
+
+function reviewBrowseStack(event, coverId) {
+  selectBrowseStackAll(event, coverId);
+  var cover = photos.find(function(photo) { return photo.id === coverId; });
+  if (cover && cover.browse_stack && cover.browse_stack.kind === 'duplicate') {
+    openBrowseCompare();
+  } else {
+    openSelectedInBurstReview();
+  }
+}
+
+function openBrowseStackMember(event, photoId, coverId) {
+  if (event) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+  var members = browseStackMembers[String(coverId)] || [];
+  var photo = members.find(function(member) { return member.id === photoId; });
+  openLightbox(photoId, photo ? photo.filename : '', members);
+}
+
+document.addEventListener('lightbox:renderchanged', function(e) {
+  var ids = e && e.detail && Array.isArray(e.detail.photoIds) ? e.detail.photoIds : [];
+  ids.forEach(function(id) {
+    var hideDetectionOverlays = (
+      (
+        _vireoPairKnownByPhoto[String(id)] &&
+        _vireoPairSource(id) === 'jpeg'
+      ) ||
+      (
+        typeof window.vireoPhotoHasOrientationEdit === 'function' &&
+        window.vireoPhotoHasOrientationEdit(id)
+      )
+    );
+    document.querySelectorAll(
+      '.grid-card[data-id="' + id + '"] .det-box, ' +
+      '.browse-stack-member[data-id="' + id + '"] .det-box'
+    ).forEach(function(box) {
+      box.style.display = hideDetectionOverlays ? 'none' : '';
+    });
+  });
+});
+
+// Fold any already-loaded workspace descriptions into freshly rendered
+// color-label badges so lazily inserted cards get the same title and
+// accessible name as cards rendered after descriptions finished loading.
+function refreshColorLabelControlsIn(scope) {
+  if (!scope) return;
+  if (window.VireoColorLabels && typeof window.VireoColorLabels.refreshControls === 'function') {
+    window.VireoColorLabels.refreshControls(scope);
+  }
+}
+
+function appendGridPhotos(newPhotos, startIdx) {
+  if (!newPhotos.length) return;
+  var grid = document.getElementById('grid');
+  var html = '';
+  newPhotos.forEach(function(p, offset) {
+    html += renderPhotoCard(p, startIdx + offset);
+  });
+  var tail = document.getElementById('gridTail');
+  if (tail) tail.insertAdjacentHTML('beforebegin', html);
+  else grid.insertAdjacentHTML('beforeend', html);
+  updateGridTail();
+  refreshColorLabelControlsIn(grid);
+}
+
+function prependGridPhotos(newPhotos) {
+  if (!newPhotos.length) return;
+  var grid = document.getElementById('grid');
+  var html = '';
+  newPhotos.forEach(function(p, idx) {
+    html += renderPhotoCard(p, idx);
+  });
+
+  // Existing cards keep their DOM nodes (and therefore their already-decoded
+  // thumbnails), but their array indices move when a preceding page arrives.
+  // Keep the inline selection handlers in lockstep with the new indices.
+  Array.from(grid.getElementsByClassName('grid-card')).forEach(function(card) {
+    var idx = parseInt(card.dataset.idx, 10) + newPhotos.length;
+    var id = parseInt(card.dataset.id, 10);
+    card.dataset.idx = idx;
+    if (!card.classList.contains('offline')) {
+      card.setAttribute('onclick', 'selectPhoto(event,' + id + ',' + idx + ')');
+    }
+  });
+  grid.insertAdjacentHTML('afterbegin', html);
+  if (selectedIndex >= 0) selectedIndex += newPhotos.length;
+  updateGridTail();
+  refreshColorLabelControlsIn(grid);
+}
+
+/* The grid tail reserves a bounded amount of scroll space for the next photos
+   that haven't loaded yet. It must not reserve the entire dataset: Browse
+   loads a contiguous prefix, so an absolute-bottom jump in a large library
+   would otherwise force every preceding page to load before the viewport
+   could show a real card. Rebuilt after every page append. Lives in a
+   display:contents wrapper so its children participate in the grid layout
+   but real cards can be inserted before it as a unit. */
+var SKEL_POOL = 300;
+
+function updateGridTail() {
+  var grid = document.getElementById('grid');
+  var tail = document.getElementById('gridTail');
+  // Photos before the loaded window are reached with "Browse from beginning",
+  // not by scrolling down — they must not inflate the downward runway.
+  var remaining = allLoaded ? 0 : totalPhotos - loadedWindowOffset() - photos.length;
+  var cards = grid.getElementsByClassName('grid-card');
+  var lastCard = cards.length ? cards[cards.length - 1] : null;
+  if (remaining <= 0 || !lastCard) {
+    if (tail) tail.remove();
+    return;
+  }
+
+  // Size skeleton cells to match real cards: the thumb tracks column width
+  // via aspect-ratio, the info block copies its measured height.
+  var infoEl = lastCard.querySelector('.grid-card-info');
+  if (infoEl && infoEl.offsetHeight) {
+    grid.style.setProperty('--skel-info-h', infoEl.offsetHeight + 'px');
+  }
+
+  var skel = '<div class="skel-card"><div class="skel-thumb"></div><div class="skel-info"><div class="skel-line"></div></div></div>';
+  var html = '';
+  var visible = Math.min(remaining, SKEL_POOL);
+  for (var i = 0; i < visible; i++) html += skel;
+
+  if (!tail) {
+    tail = document.createElement('div');
+    tail.id = 'gridTail';
+    tail.style.display = 'contents';
+    grid.appendChild(tail);
+  }
+  tail.innerHTML = html;
+}
+
+// Patches one already-rendered card to match `p`. Grid cards and expanded
+// stack members share the same `.grid-card-img-wrap` + `.grid-card-info`
+// shape, so both are repainted here rather than re-rendered: the card keeps
+// its <img>, and therefore the thumbnail it has already decoded.
+function refreshCardBadgesAndInfo(card, p) {
+  applyCardColorLabel(card, p.id);
+  var info = card.querySelector('.grid-card-info');
+  if (info) {
+    info.innerHTML = renderCardInfo(p);
+    refreshColorLabelControlsIn(info);
+  }
+  // iNat badge lives in img-wrap (not grid-card-info), so sync it explicitly
+  // when async metadata arrives after the card was appended.
+  var wrap = card.querySelector('.grid-card-img-wrap');
+  if (!wrap) return;
+  var speciesBadges = wrap.querySelector('.species-badges');
+  var speciesBadgeHtml = cardFields.indexOf('species') === -1
+    ? renderSpeciesBadges(p.species, false)
+    : '';
+  if (speciesBadges && speciesBadgeHtml) {
+    speciesBadges.outerHTML = speciesBadgeHtml;
+  } else if (speciesBadges) {
+    speciesBadges.remove();
+  } else if (speciesBadgeHtml) {
+    wrap.insertAdjacentHTML('beforeend', speciesBadgeHtml);
+  }
+  var existing = wrap.querySelector('.inat-badge');
+  var shouldShow = !!inatSubmitted[String(p.id)];
+  if (shouldShow && !existing) {
+    wrap.insertAdjacentHTML('beforeend', '<span class="inat-badge">iNat</span>');
+  } else if (!shouldShow && existing) {
+    existing.remove();
+  }
+  var rep = wrap.querySelector('.representative-badge');
+  if (p.is_species_representative && !rep) {
+    wrap.insertAdjacentHTML('beforeend', '<span class="representative-badge">Representative</span>');
+  } else if (!p.is_species_representative && rep) {
+    rep.remove();
+  }
+}
+
+function refreshGridCards(photoIds) {
+  photoIds.forEach(function(id) {
+    var p = photos.find(function(x) { return x.id === id; });
+    if (!p) return;
+    var card = document.querySelector('.grid-card[data-id="' + id + '"]');
+    if (!card) return;
+    refreshCardBadgesAndInfo(card, p);
+  });
+}
+
+// The same repaint for the members of an expanded stack tray. Used where
+// metadata arrives for members already on screen and only their badges and
+// info line can have changed — not which members the tray holds, nor their
+// order. Rebuilding the tray for that would give every member a fresh <img>
+// (blanking thumbnails that were already decoded) and swap the DOM out from
+// under a click the user has started.
+function refreshStackMemberCards(photoIds) {
+  photoIds.forEach(function(id) {
+    var p = findBrowsePhoto(id);
+    if (!p) return;
+    document.querySelectorAll(
+      '.browse-stack-member[data-id="' + id + '"]'
+    ).forEach(function(member) {
+      refreshCardBadgesAndInfo(member, p);
+    });
+  });
+}
+
+document.addEventListener('lifelist:changed', function(e) {
+  var detail = e && e.detail ? e.detail : {};
+  var species = detail.species;
+  var photoId = detail.photoId;
+  if (!species || !photoId) return;
+  var changed = [];
+  loadedBrowsePhotoIds().forEach(function(id) {
+    var p = findBrowsePhoto(id);
+    if (!p) return;
+    var entries = Array.isArray(p.life_list) ? p.life_list : [];
+    var touched = false;
+    entries.forEach(function(entry) {
+      if (!entry || entry.species !== species) return;
+      var isCurrent = p.id === photoId;
+      if (entry.is_current_photo !== isCurrent || entry.is_species_representative !== isCurrent) {
+        entry.is_current_photo = isCurrent;
+        entry.is_species_representative = isCurrent;
+        touched = true;
+      }
+    });
+    if (p.id === photoId && !entries.some(function(entry) { return entry && entry.species === species; })) {
+      entries.push({species: species, is_current_photo: true, is_species_representative: true});
+      p.life_list = entries;
+      touched = true;
+    }
+    var isRep = entries.some(function(entry) {
+      return entry && entry.is_species_representative;
+    });
+    if (p.is_species_representative !== isRep) {
+      p.is_species_representative = isRep;
+      touched = true;
+    }
+    if (touched) changed.push(p.id);
+  });
+  if (changed.length) {
+    refreshGridCards(changed);
+    refreshExpandedBrowseStackMembers(changed);
+  }
+});
+
+function getGridCard(photoId) {
+  return document.querySelector('.grid-card[data-id="' + photoId + '"]');
+}
+
+function getBrowsePhotoElement(photoId) {
+  return getGridCard(photoId) ||
+    document.querySelector('.browse-stack-member[data-id="' + photoId + '"]');
+}
+
+function loadedBrowseStackCoverForPhoto(photoId) {
+  var wantedId = Number(photoId);
+  return photos.find(function(photo) {
+    return photo.browse_stack && (photo.browse_stack.photo_ids || []).some(function(id) {
+      return Number(id) === wantedId;
+    });
+  }) || null;
+}
+
+/* The cover of the stack the current selection *is*, or null.
+
+   Clicking a collapsed stack card selects every frame it stands for
+   (selectPhoto's ``clickIds.length > 1`` branch) and leaves no focused
+   photo, so by the letter of the guard below a selected stack was
+   indistinguishable from a fifteen-photo batch — and a re-sort dropped the
+   user at the top of the grid instead of keeping them with the stack they
+   had picked. It is not a batch: it is one card, in one position, and it is
+   the card the user is looking at. Resolve it back to that card so it can
+   anchor a reload like any other selected card. */
+function browseSelectedStackCoverId() {
+  if (selectedPhotos.size < 2) return null;
+  var isTheSelection = function(photo) {
+    if (!photo || !photo.browse_stack) return false;
+    // A focused photo alongside the set usually means a batch the user built
+    // by hand around one card. One case is still a whole stack: collapsing a
+    // tray that "Select all" filled pins the focus to the visible cover
+    // (``batchHasHiddenMembers`` in toggleBrowseStack) because a collapsed
+    // tray cannot hold a focus on a hidden frame. Accept a focus that *is*
+    // this cover, reject any other (Codex P2 on PR #1695).
+    if (selectedPhotoId != null && photo.id !== selectedPhotoId) return false;
+    var ids = browseStackMemberIdsFor(photo);
+    return !!ids && ids.length === selectedPhotos.size
+      && ids.every(function(id) { return selectedPhotos.has(id); });
+  };
+  // Both ways of selecting a whole stack — clicking the collapsed card and
+  // the tray's "Select all" — leave ``selectedIndex`` on the cover's grid
+  // slot, so this hits on the first try in practice. The scan is the
+  // fallback for a selection that outlived its index.
+  if (selectedIndex >= 0 && isTheSelection(photos[selectedIndex])) {
+    return photos[selectedIndex].id;
+  }
+  var cover = photos.find(isTheSelection);
+  return cover ? cover.id : null;
+}
+
+function captureSelectedPhotoAnchor() {
+  var stackCoverId = browseSelectedStackCoverId();
+  if (stackCoverId == null && (selectedPhotoId == null || selectedPhotos.size > 0)) {
+    return null;
+  }
+  var anchorId = stackCoverId == null ? selectedPhotoId : stackCoverId;
+  var card = getBrowsePhotoElement(anchorId);
+  if (!card) return null;
+  var container = document.getElementById('gridContainer');
+  var containerRect = container.getBoundingClientRect();
+  var cardRect = card.getBoundingClientRect();
+  // Position in ``photos`` at capture time. Bounds the paged rescan below
+  // when a ``preserveScroll`` reload runs after an edit that may have
+  // removed this photo from the filter (Codex review r4013123608): a
+  // 60k-photo library would otherwise walk to ``allLoaded`` — ~1,200
+  // page requests — before giving up.
+  //
+  // An expanded stack member is not itself in ``photos`` — only its cover
+  // is — so ``findIndex`` returns -1 and the scan budget collapses to a
+  // single page even though the cover may sit tens of thousands of rows
+  // in. Anchor the position via the cover so the budget matches where the
+  // member actually lives; ``loadUntilPhotoRendered`` with
+  // ``resolveStackMember: true`` will re-expand the tray on the far side
+  // (Codex review r4013378153).
+  var index = photos.findIndex(function(p) { return p.id === anchorId; });
+  if (index < 0) {
+    var memberCover = loadedBrowseStackCoverForPhoto(anchorId);
+    if (memberCover) {
+      index = photos.findIndex(function(p) { return p.id === memberCover.id; });
+    }
+  }
+  return {
+    photoId: anchorId,
+    topOffset: cardRect.top - containerRect.top,
+    // A stack selection has no focused frame, so the panel is the batch
+    // inspector rather than one photo's detail — there is nothing to reopen.
+    detailVisible: stackCoverId == null
+      && document.getElementById('detailContent').classList.contains('visible'),
+    index: index,
+    stackSelection: stackCoverId != null,
+    // The frames the user actually picked. The restore intersects these with
+    // the reloaded group rather than adopting its membership wholesale.
+    stackIds: stackCoverId == null ? null : Array.from(selectedPhotos),
+  };
+}
+
+function restorePhotoAnchor(anchor) {
+  if (!anchor) return false;
+  var card = getBrowsePhotoElement(anchor.photoId);
+  if (!card) return false;
+  var container = document.getElementById('gridContainer');
+  var containerRect = container.getBoundingClientRect();
+  var cardRect = card.getBoundingClientRect();
+  container.scrollTop += (cardRect.top - containerRect.top) - anchor.topOffset;
+  return true;
+}
+
+/* A membership-change reload (tag, untag, location save, prediction accept)
+   re-runs the current query because the edit can move photos in or out of it.
+   The dataset it comes back with is the one the user was already looking at,
+   minus or plus a few rows — so restarting at page 1 with ``scrollTop = 0``
+   threw away their place in the grid and made them scroll down again after
+   every single tag. Anchor on the topmost photo on screen instead.
+
+   Separate from ``captureSelectedPhotoAnchor``: that one restores a *single*
+   selection and its detail panel, and deliberately declines when a batch
+   selection is active — which is exactly when a user is tagging. */
+function captureBrowseViewportAnchor() {
+  var container = document.getElementById('gridContainer');
+  if (!container) return null;
+  var containerTop = container.getBoundingClientRect().top;
+  // Include ``.browse-stack-member``: an expanded stack tray can be taller
+  // than the viewport, and if the user is scrolled inside it every card on
+  // screen is a member. Skipping those would let the loop drop through to
+  // the first top-level card *below* the tray — off-screen — and after the
+  // reset collapses the tray, restoring that off-screen card at its old
+  // large offset snaps the grid upward (Codex review r4012897730).
+  var cards = document.querySelectorAll(
+    '#grid .grid-card, #grid .browse-stack-member'
+  );
+  for (var i = 0; i < cards.length; i++) {
+    var rect = cards[i].getBoundingClientRect();
+    // First card still on screen: its bottom edge has not passed the top of
+    // the scroll container.
+    if (rect.bottom > containerTop + 1) {
+      var id = parseInt(cards[i].dataset.id, 10);
+      if (!id) return null;
+      // Anchor on the stack cover, not the member: the reset collapses the
+      // tray, so members no longer exist afterwards and ``photos`` never
+      // held them anyway. The cover sits directly above where the tray
+      // was, so its top after collapse is close to the member's top before.
+      var anchorId = id;
+      if (cards[i].classList.contains('browse-stack-member')) {
+        var tray = cards[i].closest('.browse-stack-tray');
+        var coverId = tray && tray.dataset.stackCoverId
+          ? parseInt(tray.dataset.stackCoverId, 10)
+          : NaN;
+        if (coverId) anchorId = coverId;
+      }
+      return {
+        photoId: anchorId,
+        index: photos.findIndex(function(p) { return p.id === anchorId; }),
+        topOffset: rect.top - containerTop,
+      };
+    }
+  }
+  return null;
+}
+
+async function restoreBrowseViewportAnchor(anchor, shouldContinue) {
+  if (!anchor) return;
+  // Page forward only as far as the anchor plausibly sits. Scanning to
+  // ``allLoaded`` the way ``loadUntilPhotoRendered`` does would walk a
+  // 60k-photo library end to end whenever the anchored photo is the one the
+  // edit removed from the filtered set.
+  var budget = Math.max(anchor.index, 0) + perPage;
+  while (!allLoaded && photos.length <= budget && !getGridCard(anchor.photoId)) {
+    if (shouldContinue && !shouldContinue()) return;
+    var beforeLen = photos.length;
+    if (await loadPhotos() !== true) return;
+    if (shouldContinue && !shouldContinue()) return;
+    if (photos.length === beforeLen) break;
+  }
+  var target = anchor;
+  if (!getGridCard(anchor.photoId)) {
+    // The anchored photo is gone — the user untagged the keyword the filter
+    // is built on, say. Its neighbours are still there, so hold the same
+    // position in the result set rather than snapping back to the top.
+    var fallback = photos[Math.min(Math.max(anchor.index, 0), photos.length - 1)];
+    if (!fallback || !getGridCard(fallback.id)) return;
+    target = { photoId: fallback.id, topOffset: anchor.topOffset };
+  }
+  requestAnimationFrame(function() {
+    if (shouldContinue && !shouldContinue()) return;
+    restorePhotoAnchor(target);
+    updateScrollPosition();
+  });
+}
+
+function anchorRestoreIsPending(anchor, restoreEpoch) {
+  return !!anchor && anchorRestoreEpoch === restoreEpoch && selectedPhotoId == null && selectedPhotos.size === 0;
+}
+
+function anchorSelectionIsCurrent(anchor, restoreEpoch) {
+  if (restoreEpoch != null && anchorRestoreEpoch !== restoreEpoch) return false;
+  if (!anchor) return false;
+  // A restored stack selection lives in ``selectedPhotos`` with no focused
+  // photo — the shape clicking the collapsed card produces, not the
+  // single-focus shape the line below describes.
+  if (anchor.stackSelection) {
+    return selectedPhotoId == null && selectedPhotos.size > 0;
+  }
+  return selectedPhotoId === anchor.photoId && selectedPhotos.size === 0;
+}
+
+async function loadUntilPhotoRendered(photoId, shouldContinue, options) {
+  var resolveStackMember = !!(options && options.resolveStackMember);
+  // Optional cap on how many photos may be paged in while searching.
+  // Callers that know the edit which triggered this scan can have removed
+  // the target (a ``preserveScroll`` membership refresh) pass their own
+  // budget so the scan does not walk the whole catalog looking for a photo
+  // the filter no longer matches.
+  var budget = options && options.budget != null ? options.budget : null;
+  var card = getGridCard(photoId);
+  var stackCover = resolveStackMember ? loadedBrowseStackCoverForPhoto(photoId) : null;
+  while (!card && !stackCover && !allLoaded) {
+    if (budget != null && photos.length > budget) break;
+    if (shouldContinue && !shouldContinue()) return null;
+    var beforePage = currentPage;
+    var beforeLen = photos.length;
+    await loadPhotos();
+    if (shouldContinue && !shouldContinue()) return null;
+    if (currentPage === beforePage && photos.length === beforeLen) break;
+    card = getGridCard(photoId);
+    if (resolveStackMember) stackCover = loadedBrowseStackCoverForPhoto(photoId);
+  }
+  if (!card && stackCover) {
+    await toggleBrowseStack(null, stackCover.id);
+    if (shouldContinue && !shouldContinue()) return null;
+    card = getBrowsePhotoElement(photoId);
+  }
+  return card;
+}
+
+function clearActiveSelectionAndDetail() {
+  anchorRestoreEpoch++;
+  selectedPhotos.clear();
+  selectedPhotoId = null;
+  selectedIndex = -1;
+  closeDetail();
+}
+
+/* ---------- Bootstrap ---------- */
+// ``folderHealthRefreshSeq`` must be *initialized* before ``bootstrapBrowse()``
+// is invoked, not merely declared. ``var`` hoists the declaration to the top
+// of the script but leaves the value ``undefined`` until this line executes;
+// the paired assignment lives further down at the health-refresh helpers.
+// Bootstrap synchronously reads ``folderHealthRefreshSeq`` into
+// ``bootstrapHealthSeq`` before its first await, so with the initialization
+// happening later, the snapshot was ``undefined``, the outer script then
+// ran the ``= 0`` assignment while bootstrap was awaiting ``/api/browse/init``,
+// and the post-await comparison ``0 !== undefined`` was always true. That
+// made ``healthChangedDuringInit`` fire on every normal load, skipping the
+// render block and leaving Browse empty until VireoFilter.init happened to
+// re-fetch. Initialize here so the pre-await snapshot reads the same ``0``
+// the rest of the script sees (Codex review r3686317674).
+var folderHealthRefreshSeq = 0;
+VireoViewPreferences.restoreAll(document.querySelector('.browse-view-controls'));
+updateThumbSize(document.getElementById('thumbSizeSlider').value);
+bootstrapBrowse();
+
+async function bootstrapBrowse() {
+  // If deep-linking to a specific photo, skip normal bootstrap — the deep-link handler takes over
+  if (new URLSearchParams(window.location.search).get('photo_id')) return;
+  // Prevent the IntersectionObserver from triggering loadPhotos() while bootstrap is in flight
+  loading = true;
+  var bootstrapSucceeded = false;
+  // Declared out here so the finally-region guard below can read it even
+  // if /api/browse/init throws before the assignment inside the try.
+  var healthChangedDuringInit = false;
+  // Snapshot the health-refresh generation before any await so we can
+  // detect a concurrent refresh from BOTH the try's success path and
+  // its catch. If a vireo:folder-health-changed event fires while
+  // /api/browse/init is in flight, refreshBrowseAfterFolderHealthChange()
+  // will have already reloaded folders/keywords/collections and the grid
+  // from the fresh post-flip state. Populating ``photos`` / rendering the
+  // sidebars from this pre-flip response afterwards would silently
+  // overwrite that fresher refresh with stale data — leaving the grid
+  // empty until another event or a manual reload (Codex review
+  // r3685515800). Snapshotting here (outside the try) also lets the
+  // catch below recompute the flag when the init request rejects: the
+  // in-try assignment used to be skipped by the throw, leaving the
+  // finally-region guard to release the load lock the concurrent health
+  // refresh's ``loadPhotos`` still owned (Codex review r3686191138).
+  var bootstrapHealthSeq = folderHealthRefreshSeq;
+  // The sort <select> is in the DOM before init resolves, so the user can
+  // change it (or edit a restored filter) while /api/browse/init is pending.
+  // applyFilters() → resetAndLoad() then claims the window and starts its own
+  // loadPhotos(); this bootstrap must not paint its now-abandoned dataset over
+  // that, nor release the ``loading`` mutex the newer load holds — the same
+  // stale-window hazard the deep-link loader guards against (Codex review
+  // r3792769108).
+  var bootstrapWindowIsCurrent = claimBrowseWindow();
+  // Parse URL scope params BEFORE the first await. A folder-health event that
+  // fires while ``_cfgPromise`` is still pending runs
+  // refreshBrowseAfterFolderHealthChange(), which calls resetAndLoad() from
+  // the current ``activeFolderId`` / ``activeCollectionId``. If those were
+  // still null the refresh loads the unscoped workspace grid, and then this
+  // bootstrap's folder-scoped init response is thrown away by the
+  // healthChangedDuringInit guard below — for a plain collection deep link
+  // the browseFilterInitPromise.then replay reopens it, but a folder-only
+  // deep link has no such replay, so Browse would render unscoped despite
+  // ``?folder_id=N`` in the URL (Codex review r3686605296). Assigning here
+  // means any concurrent refresh sees the right scope.
+  var pageParams = new URLSearchParams(window.location.search);
+  var initialFolderId = parseInt(pageParams.get('folder_id'), 10);
+  if (!isNaN(initialFolderId)) activeFolderId = initialFolderId;
+  var initialCollectionId = parseInt(pageParams.get('collection_id'), 10);
+  if (!isNaN(initialCollectionId)) {
+    activeCollectionId = initialCollectionId;
+    dashboardCollectionScope = pageParams.get('dashboard_scope') === '1';
+  }
+  try {
+    applyBrowseConfig(await _cfgPromise);
+    // Legacy filter deep-link params (rating_min/flag/keyword/dates/…) are
+    // compiled into an initial rule tree by VireoFilter.init below, which
+    // reloads through /api/photos/query — the bootstrap endpoint is
+    // scope-only (Phase 5 removed its legacy filter params).
+    var initParams = new URLSearchParams();
+    initParams.set('sort', document.getElementById('sortSelect').value);
+    if (browseStacksEnabled()) initParams.set('stacks', '1');
+    if (activeFolderId) initParams.set('folder_id', activeFolderId);
+    // Collection-only deep links keep their historical endpoint behavior,
+    // while Dashboard links opt into composable filters via dashboard_scope.
+    // The combined init endpoint still needs the collection id for first paint
+    // in either case.
+    if (activeCollectionId) initParams.set('collection_id', activeCollectionId);
+    initParams.set('per_page', perPage);
+    var missingSnapshotVersionAtInitStart =
+      typeof _missingFoldersSnapshotVersion !== 'undefined'
+        ? _missingFoldersSnapshotVersion
+        : null;
+    var data = await safeFetch('/api/browse/init?' + initParams.toString());
+    healthChangedDuringInit = folderHealthRefreshSeq !== bootstrapHealthSeq;
+
+    // Seed the navbar's missing-folder snapshot from init's workspace-scoped
+    // view so the first /api/folders/missing observation has a baseline to
+    // compare against. Without this, a background _folder_health_loop flip
+    // that runs between /api/browse/init and the first navbar poll leaves
+    // the poll's null-baseline branch returning false — later polls then
+    // see the same IDs and never dispatch, so Browse stays showing the
+    // pre-flip state until another transition or a reload (Codex review
+    // r3686191141). The navbar helper compares its baseline version at init
+    // request start and completion: a poll/POST already applied before the
+    // request is older than init, while one applied during the request remains
+    // authoritative.
+    //
+    // When a differing poll snapshot lands while init is in flight, init may
+    // contain pre-flip photos/folders. Dispatch the init→now transition so
+    // refreshBrowseAfterFolderHealthChange takes over, and mark the
+    // health-changed flag so the guarded render path skips init's stale data
+    // (Codex review r3686452019). Conversely, a poll applied before this
+    // request is known older and the helper adopts init directly
+    // (Codex review r3687277899).
+    if (Array.isArray(data.missing_folder_ids) &&
+        typeof _reconcileMissingFoldersInitSnapshot === 'function') {
+      var initWasStale = _reconcileMissingFoldersInitSnapshot(
+        data.missing_folder_ids,
+        missingSnapshotVersionAtInitStart,
+        'bootstrap-reconcile',
+        data.folder_health_version);
+      if (initWasStale) healthChangedDuringInit = true;
+    }
+
+    if (!healthChangedDuringInit) {
+      // The sidebar trees are scope-independent, so render them even if a
+      // newer load owns the grid — otherwise a sort change during init would
+      // leave Browse with no folder/keyword/collection lists at all.
+      if (data.active_workspace_id != null) {
+        browseWorkspaceId = Number(data.active_workspace_id);
+      }
+      renderFolderTree(data.folders || []);
+      renderKeywordTree(data.keywords || []);
+      renderCollectionList(data.collections || []);
+      if (bootstrapWindowIsCurrent()) {
+        // Populate everything from a single response
+        photos = data.photos || [];
+        setBrowseTotals(data);
+        currentPage = 2; // next page to load
+        earliestPage = 1; // bootstrap always starts at the top of the dataset
+        if (photos.length >= totalPhotos) allLoaded = true;
+
+        renderGrid();
+        updatePreviousPhotosButton();
+        browseDatasetReady = true;
+        updateFilterSummary();
+        hydrateColorLabelsForRenderedPage(bootstrapWindowIsCurrent);
+      }
+      loadSummary();
+    }
+    refreshPendingSyncBanner();
+
+    document.getElementById('loadingState').style.display = 'none';
+    // Lazy-load collection photo counts to avoid N+1 on init. Skip this
+    // when the health refresh already ran — it issued its own
+    // loadCollectionCounts() and repeating the call here would just fire
+    // another round-trip for the same data.
+    if (!healthChangedDuringInit) loadCollectionCounts();
+    bootstrapSucceeded = true;
+
+    // Universal filter bar: registry + persisted/deep-linked state load
+    // async; when it comes up with active filters the unfiltered first
+    // paint above is stale, so reload through the rules path.
+    browseFilterInitPromise = VireoFilter.init({
+      page: 'browse',
+      root: document.getElementById('vireoFilterBar'),
+      scopeLabel: 'Workspace \u00b7 All available photos',
+      onChange: function(info) {
+        if (timelineMode) loadCalendarData();
+        if (activeCollectionId && !dashboardCollectionScope) activeCollectionId = null;
+        // Any user-driven change to the filter chips means the bar no
+        // longer represents the saved collection verbatim — drop the
+        // handle so a later membership refresh doesn't silently revert
+        // the user's edits back to the collection's saved expression.
+        // Our own filterByCollection() → loadExpression() fires onChange
+        // with reason 'expressionLoaded' (opening) or 'expressionRefreshed'
+        // (membership-change refresh); both paths set openedCollectionId
+        // above, so leave it alone.
+        if (openedCollectionId && info &&
+            info.reason !== 'expressionLoaded' &&
+            info.reason !== 'expressionRefreshed') {
+          openedCollectionId = null;
+          clearOfflineCollectionState();
+        }
+        resetAndLoad(browseFilterReloadOptions(info));
+        // Summary panel (photo count, classified, top species) is a separate
+        // endpoint from the grid; without this the filter changes the grid
+        // but leaves the summary showing pre-filter numbers.
+        loadSummary();
+      },
+      // Typeahead counts otherwise ignore the folder/collection restriction
+      // the grid uses via /api/photos/query, so picking a suggestion inside
+      // a folder or dashboard-scoped collection can yield fewer visible
+      // grid results than the advertised count. Dashboard-scoped collection
+      // Browse composes collection + rules; the legacy collection view
+      // clears activeCollectionId on filter apply, so this is a no-op there.
+      getScope: function() {
+        return {
+          folder_id: activeFolderId,
+          collection_id: (activeCollectionId && dashboardCollectionScope)
+            ? activeCollectionId : null,
+        };
+      },
+      onCollectionSaved: function() { loadCollections(); },
+    });
+    // Snapshot the scope generation BEFORE we register the .then so we can
+    // tell whether a user sidebar click advanced it while init was pending.
+    // The bootstrap deep-link/persisted replay below unconditionally called
+    // filterByCollection/resetAndLoad, which bumps browseScopeGen and made
+    // any queued sidebar click (e.g. collection B awaiting init) resume as
+    // stale \u2014 reopening the URL's collection A over the user's later
+    // selection (Codex review r3624637674).
+    var bootstrapScopeGen = browseScopeGen;
+    browseFilterInitPromise.then(function() {
+      // A user sidebar click (folder/keyword/collection) may have changed
+      // scope while init was pending. Their newer selection is authoritative
+      // for the collection deep-link replay below — reopening the URL's
+      // collection over the user's later selection is the bug in Codex
+      // review r3624637674. But we must still apply any restored/URL filter
+      // chips: returning early here left them rendered in the bar without
+      // ever running through resetAndLoad, so the grid didn't match the
+      // visible chips until the user edited them (Codex review r3624766665).
+      var scopeChanged = browseScopeGen !== bootstrapScopeGen;
+      VireoFilter.setResultTotal(totalUnderlyingPhotos);
+      // Collection deep links must open showing exactly that collection \u2014
+      // whether plain (?collection_id=..., historical endpoint behavior) or
+      // dashboard-scoped (?dashboard_scope=1&collection_id=..., composable).
+      // A restored persisted Browse filter overrides both: for plain links
+      // the resetAndLoad below clears activeCollectionId (see line ~3901
+      // \u2014 non-dashboard scopes); for dashboard links it silently
+      // intersects the drill-down collection with unrelated saved
+      // rules. If the URL itself didn't supply any legacy filter params,
+      // treat the collection link as URL-scoped and drop the persisted
+      // state so the link is honored.
+      var urlParams = new URLSearchParams(window.location.search);
+      var LEGACY_FILTER_PARAMS = ['rating_min', 'flag', 'color_label',
+        'date_from', 'date_to', 'location_status', 'missing_gps', 'keyword'];
+      var hasExplicitFilterParams = LEGACY_FILTER_PARAMS.some(function(p) {
+        return urlParams.has(p);
+      });
+      var collectionLink = !!urlParams.get('collection_id');
+      if (collectionLink && !hasExplicitFilterParams && VireoFilter.hasFilters()) {
+        VireoFilter.clearAll(true);
+      }
+      // A ?collection_id=...&rating_min=4 (or &date_from=..., etc.) link
+      // compiles the URL filter params into rules above; if we then called
+      // filterByCollection() its loadExpression() would REPLACE state.root
+      // with the saved collection rules and silently drop the URL filters
+      // (Codex review r3620935211). Treat the collection as a composable
+      // dashboard-style scope for this case: keep the URL filter chips
+      // and scope /api/photos/query by the collection alongside them.
+      //
+      // Exception — visual collections: /api/photos/query's collection
+      // restriction evaluates ``rules`` only, not ``visual_json``. Composing
+      // URL filters this way would silently drop the visual clause and
+      // widen to every metadata match with the URL filter (Codex review
+      // r3621403147). Fall through to filterByCollection() instead so the
+      // saved rules + visual expression loads correctly; the URL filter
+      // chips are cleared because loadExpression() replaces state.root, so
+      // surface a toast so the drop isn't silent.
+      var deepLinkedCollection = collectionLink ? collectionsById[activeCollectionId] : null;
+      var deepLinkedIsVisual = !!(deepLinkedCollection && deepLinkedCollection.visual_json);
+      if (collectionLink && hasExplicitFilterParams && !dashboardCollectionScope) {
+        if (deepLinkedIsVisual) {
+          if (typeof showToast === 'function') {
+            showToast(
+              'Opened the visual collection — URL filters (rating/date/etc.) were dropped so the visual clause applies. Edit the filter bar to add them back.',
+              'info'
+            );
+          }
+        } else {
+          dashboardCollectionScope = true;
+        }
+      }
+      // Dashboard-scoped visual collection links (?dashboard_scope=1&collection_id=<visual>
+      // [&rating_min=...]): /api/browse/init and /api/photos/query both restrict
+      // by the collection's ``rules`` and ignore ``visual_json`` in the dashboard
+      // scope path, so keeping dashboardCollectionScope=true would silently widen
+      // to every metadata match (Codex review r3621519730). Drop the scope so we
+      // fall through to filterByCollection() and the saved rules + visual
+      // expression loads correctly; any URL filter chips are cleared by
+      // loadExpression() replacing state.root, so surface a toast if we dropped
+      // filters the user asked for.
+      if (collectionLink && dashboardCollectionScope && deepLinkedIsVisual) {
+        dashboardCollectionScope = false;
+        if (typeof showToast === 'function') {
+          showToast(
+            hasExplicitFilterParams
+              ? 'Opened the visual collection — dashboard scope and URL filters were dropped so the visual clause applies. Edit the filter bar to add them back.'
+              : 'Opened the visual collection — dashboard scope was dropped so the visual clause applies.',
+            'info'
+          );
+        }
+      }
+      if (activeCollectionId && !dashboardCollectionScope && !scopeChanged) {
+        // Plain collection deep link: open it into the filter bar as
+        // editable chips (rules + visual round-trip), replacing the
+        // historical collection-endpoint mode. Skipped when a user sidebar
+        // click already claimed a different scope — their queued
+        // filterByCollection/filterByFolder/filterByKeyword owns the view.
+        filterByCollection(activeCollectionId);
+        return;
+      }
+      // A dashboard-scoped collection deep link (?dashboard_scope=1&collection_id=...)
+      // paints from /api/browse/init and then falls through both branches above
+      // when no explicit filter chips came from the URL. /api/browse/init does
+      // not return availability totals, so ``updateOfflineCollectionState`` never
+      // runs and the offline-photos notice stays hidden — users cannot reveal
+      // the offline members until another action reloads the grid. Force a
+      // scoped /api/photos/query here so ``loadPhotos`` populates the
+      // availability state from the response (Codex review r3839992513).
+      if (VireoFilter.hasFilters() ||
+          (activeCollectionId && dashboardCollectionScope && !scopeChanged)) {
+        resetAndLoad();
+        loadSummary();
+      }
+    }).catch(function() {});
+  } catch(e) {
+    // /api/browse/init rejected — recompute healthChangedDuringInit so the
+    // finally-region guard below correctly defers to a concurrent health
+    // refresh that owns the load lock. The assignment inside the try was
+    // skipped by the throw, and without recomputing here we would clear
+    // ``loading`` even though the health refresh's ``loadPhotos`` still
+    // holds the mutex, letting the intersection observer fire a duplicate
+    // page-1 request against the same ``loadEpoch``
+    // (Codex review r3686191138).
+    healthChangedDuringInit = folderHealthRefreshSeq !== bootstrapHealthSeq;
+    document.getElementById('loadingState').textContent = 'Error loading.';
+  }
+  // If a folder-health event fired while /api/browse/init was in flight,
+  // refreshBrowseAfterFolderHealthChange() has already taken over the load
+  // state: its resetAndLoad() → loadPhotos() chain owns ``loading`` and
+  // rearms the intersection observer itself when it settles. Clearing
+  // ``loading`` here would release the mutex that concurrent loadPhotos
+  // still holds, letting the newly-rearmed observer fire a second page-1
+  // request against the same ``loadEpoch``; both responses append and the
+  // grid ends up with duplicated cards and off-by-one pagination
+  // (Codex review r3685627307). The same reasoning applies when a filter or
+  // sort change claimed the window mid-init: its loadPhotos owns ``loading``
+  // and releases it in its own finally.
+  if (!healthChangedDuringInit && bootstrapWindowIsCurrent()) {
+    loading = false;
+    if (bootstrapSucceeded) {
+      rearmInfiniteScrollObserver();
+      // Make sure a tall viewport still gets its second page even when the
+      // sentinel callback does not fire after the initial layout.
+      requestAnimationFrame(ensureViewportHydrated);
+    }
+  }
+}
+
+function collectionCountMarkup(collection) {
+  if (collection.photo_count == null) return '';
+  var total = Number(collection.photo_count);
+  var offline = Number(collection.offline_photo_count || 0);
+  var html = total.toLocaleString();
+  if (offline > 0) {
+    html += ' <span class="collection-offline-count" title="' +
+      offline.toLocaleString() + ' photo' + (offline === 1 ? '' : 's') +
+      ' currently offline">\u00b7 ' + offline.toLocaleString() + ' offline</span>';
+  }
+  return html;
+}
+
+function renderCollectionList(collections) {
+  collectionsById = {};
+  var html = '';
+  collections.forEach(function(c) {
+    collectionsById[c.id] = c;
+    var canAddPhotos = collectionAcceptsManualPhotos(c);
+    var kind = canAddPhotos ? 'manual' : 'smart';
+    var kindLabel = canAddPhotos ? 'Manual' : 'Smart';
+    // count_error: /api/collections couldn't resolve this collection's rules,
+    // so filtering to it would 400 the /photos endpoint. Show it as
+    // unavailable (with edit still reachable via right-click) instead of
+    // rendering a clickable filter that silently fails.
+    var unavailable = !!c.count_error;
+    // Suppress location review on unavailable collections because the review
+    // page resolves the same collection rules when it builds its queue.
+    var resolveBtn = (c.name === 'GPS Without Location Keyword' && !unavailable)
+      ? '<button class="collection-resolve-btn" type="button" title="Review photo locations on a map" onclick="event.stopPropagation(); reviewLocationsForCollection(' + c.id + ')">Review on Map</button>'
+      : '';
+    var itemClass = 'tree-item' + (unavailable ? ' unavailable' : '');
+    var titleAttr = unavailable
+      ? ' title="This collection\'s rules could not be resolved. Right-click → Edit Rules to fix it."'
+      : '';
+    var trailing = unavailable
+      ? '<span class="collection-unavailable-badge">unavailable</span>'
+      : '<span class="count">' + collectionCountMarkup(c) + '</span>';
+    var visualMark = c.visual_json
+      ? '<span class="collection-visual-mark" title="Includes a visual search clause">\u2726</span>'
+      : '';
+    html += '<div class="' + itemClass + '" data-collection-id="' + c.id + '" data-collection-kind="' + kind + '"' + titleAttr + ' onclick="filterByCollection(' + c.id + ')">' +
+      '<span class="collection-name">' + escapeHtml(c.name) + '</span>' + visualMark +
+      '<span class="collection-kind-badge ' + kind + '">' + kindLabel + '</span>' +
+      resolveBtn +
+      trailing + '</div>';
+  });
+  document.getElementById('collectionList').innerHTML = html || '<div style="font-size:12px;color:var(--text-ghost);padding:4px 8px;">No collections</div>';
+}
+
+/* ---------- Folder Tree ---------- */
+function reconcileFolderLoadRenders() {
+  // Do not render an older successful response while any newer request is
+  // still pending. Once every newer request has failed, fall back to the
+  // newest success instead of leaving the pre-transition tree in the DOM.
+  // This handles both completion orders: success-before-failure and
+  // failure-before-success.
+  var gen = folderLoadGen;
+  while (gen > folderRenderDecisionGen) {
+    var state = folderLoadStates[gen];
+    if (!state || state.status === 'pending') return;
+    if (state.status === 'success') {
+      var shouldRender = !state.shouldRender || state.shouldRender();
+      folderRenderDecisionGen = gen;
+      if (shouldRender) {
+        // Update browseWorkspaceId in lockstep with the rendered rows so
+        // the destructive Remove action always targets the workspace the
+        // user actually sees.
+        if (state.workspaceId != null) browseWorkspaceId = state.workspaceId;
+        renderFolderTree(state.data);
+      }
+      Object.keys(folderLoadStates).forEach(function(key) {
+        if (Number(key) <= folderLoadGen) delete folderLoadStates[key];
+      });
+      return;
+    }
+    gen--;
+  }
+}
+
+async function loadFolders(opts) {
+  var myGen = ++folderLoadGen;
+  folderLoadStates[myGen] = {
+    status: 'pending',
+    shouldRender: opts && opts.shouldRender
+  };
+  try {
+    // One request returns both the tree and the workspace it was scoped
+    // to, so ``browseWorkspaceId`` moves in lockstep with
+    // ``browseFolderRows`` no matter what another tab does in between.
+    // A parallel ``/api/workspaces/active`` call would leave a window
+    // where /api/folders and /api/workspaces/active can disagree (Codex
+    // review r3799038685); it would also drag the expensive per-root
+    // workspace_photo_count query into every sidebar refresh (Codex
+    // review r3799038688).
+    var payload = await safeFetch(
+      '/api/folders?with_workspace=1', {}, { toast: false }
+    );
+    var data = (payload && payload.folders) || [];
+    var state = folderLoadStates[myGen];
+    if (!state) return data;
+    state.status = 'success';
+    state.data = data;
+    state.workspaceId = (payload && payload.active_workspace_id != null)
+      ? Number(payload.active_workspace_id) : null;
+    reconcileFolderLoadRenders();
+    return data;
+  } catch(e) {
+    var failedState = folderLoadStates[myGen];
+    if (failedState) {
+      failedState.status = 'failure';
+      reconcileFolderLoadRenders();
+    }
+    // Signal failure to callers that gate destructive decisions (e.g. the
+    // health refresh clearing ``activeFolderId``) on a successful fetch.
+    // A DOM/cache-based check after a swallowed failure sees the stale
+    // tree and preserves a folder that just went missing, then reloads
+    // its now-unavailable scope into an empty grid — the advanced navbar
+    // snapshot means later polls see no transition to repair it
+    // (Codex review r3687062925).
+    return null;
+  }
+}
+
+function renderFolderTree(folders) {
+  var rows = folders.slice();
+  var byParent = {};
+  rows.forEach(function(f) {
+    var pid = f.parent_id || 'root';
+    if (!byParent[pid]) byParent[pid] = [];
+    byParent[pid].push(f);
+  });
+
+  // Ask folderLocalStatuses for any phantom top-level rows it had to
+  // synthesize because a missing local root has no visible ancestor. These
+  // rows carry the LOCAL ISSUE / SYNCING badge for a folder /api/folders no
+  // longer returns; without injecting them the badge has nowhere to
+  // render.
+  var statusResult = folderLocalStatuses(rows, byParent, {wantsSynthetic: true});
+  (statusResult.synthetic || []).forEach(function(row) {
+    if (rows.some(function(f) { return Number(f.id) === Number(row.id); })) return;
+    rows.push(row);
+    if (!byParent['root']) byParent['root'] = [];
+    byParent['root'].push(row);
+  });
+  browseFolderRows = rows;
+
+  // Single post-order pass: each subtree's rollup is computed once and cached.
+  // (Per-node recomputation during render would be O(n^2) on deep trees.)
+  var rolledUp = {};
+  function computeRollup(f) {
+    var total = f.photo_count || 0;
+    (byParent[f.id] || []).forEach(function(c) { total += computeRollup(c); });
+    rolledUp[f.id] = total;
+    return total;
+  }
+  (byParent['root'] || []).forEach(computeRollup);
+  var localStatuses = statusResult.statuses;
+  var archiveStatuses = pendingArchiveFolderStatuses();
+
+  function buildTree(parentId, depth) {
+    var children = byParent[parentId] || [];
+    var html = '';
+    children.forEach(function(f) {
+      var hasChildren = byParent[f.id] && byParent[f.id].length > 0;
+      var indent = '';
+      for (var i = 0; i < depth; i++) indent += '<span class="tree-indent"></span>';
+      var toggle = hasChildren ? '<span class="tree-toggle" onclick="toggleTree(event,this)">&#9654;</span>' : '<span class="tree-indent"></span>';
+      var activeClass = activeFolderId === f.id ? ' active' : '';
+      var partialBadge = f.status === 'partial'
+        ? '<span class="folder-status-partial" title="Scan did not complete — re-scan to finish">partial</span>'
+        : '';
+      html += '<div class="tree-item' + activeClass + '" onclick="filterByFolder(' + f.id + ')" data-folder-id="' + f.id + '" data-workspace-root="' + (f.is_workspace_root ? '1' : '0') + '">' +
+        indent + toggle +
+        // A folder row shows only its leaf name, which can be as opaque as
+        // "12" for a date-templated import. The full path on hover is the
+        // cheapest way to say which directory the row actually is.
+        '<span class="folder-name"' + (f.path ? ' title="' + escapeAttr(f.path) + '"' : '') + '>' +
+          escapeHtml(f.name) + '</span>' +
+        '<span class="folder-local-status-slot">' + folderLocalStatusMarkup(localStatuses[f.id]) + '</span>' +
+        '<span class="folder-archive-status-slot">' + folderLocalStatusMarkup(archiveStatuses[f.id]) + '</span>' +
+        partialBadge +
+        '<span class="count">' + rolledUp[f.id] + '</span>' +
+      '</div>';
+      if (hasChildren) {
+        html += '<div class="tree-children">' + buildTree(f.id, depth + 1) + '</div>';
+      }
+    });
+    return html;
+  }
+
+  document.getElementById('folderTree').innerHTML = buildTree('root', 0);
+}
+
+function folderLocalStatuses(folders, byParent, options) {
+  var wantsSynthetic = !!(options && options.wantsSynthetic);
+  var localData = window.vireoLocalFolderData;
+  if (!localData || localData.legacy_workspace_session) {
+    return wantsSynthetic ? {statuses: {}, synthetic: []} : {};
+  }
+
+  var rowsById = {};
+  folders.forEach(function(folder) { rowsById[Number(folder.id)] = folder; });
+  var direct = {};
+  // Job payloads report their target as the local root_folder_id, but a
+  // visible workspace folder may be covered by a shared ancestor whose
+  // root_folder_id isn't itself in this workspace's tree. Map each covering
+  // root back to the visible requested_folder_id(s) so sync/discard badges
+  // update instead of freezing on LOCAL. Each entry carries ``fallback``
+  // so job status can inherit whether the visible id is the covering root
+  // itself (direct — spread through the subtree) or a fallback anchor
+  // standing in for a hidden session (do not spread).
+  var visibleIdsByRoot = {};
+  var syntheticRoots = [];
+  var syntheticIds = {};
+
+  function recordMapping(rootId, visibleId, isFallback) {
+    if (!rootId) return;
+    if (!visibleIdsByRoot[rootId]) visibleIdsByRoot[rootId] = [];
+    for (var i = 0; i < visibleIdsByRoot[rootId].length; i++) {
+      if (visibleIdsByRoot[rootId][i].visibleId === visibleId) {
+        // A direct match on this visible id trumps a fallback mapping: a
+        // job on the covering root then propagates to the folder's own
+        // subtree instead of stopping at the fallback anchor.
+        if (!isFallback) visibleIdsByRoot[rootId][i].fallback = false;
+        return;
+      }
+    }
+    visibleIdsByRoot[rootId].push({visibleId: visibleId, fallback: isFallback});
+  }
+
+  (localData.folders || []).forEach(function(item) {
+    if (!item) return;
+    var requestedId = Number(item.requested_folder_id || item.root_folder_id);
+    var visibleId = requestedId;
+    var isFallback = false;
+    if (!rowsById[visibleId]) {
+      // The requested folder isn't in the tree — commonly because
+      // check_folder_health flipped its rebased folders.path to 'missing'
+      // when the managed local directory was unmounted or deleted, so
+      // /api/folders now excludes it. Dropping the item here loses the
+      // LOCAL ISSUE / SYNCING badge exactly when the local copy needs
+      // attention. Fall back to the nearest visible ancestor so the
+      // status surfaces on the enclosing folder instead.
+      var ancestorId = Number(item.visible_ancestor_folder_id || 0);
+      if (ancestorId && rowsById[ancestorId]) {
+        visibleId = ancestorId;
+        isFallback = true;
+      } else if (item.state === 'remote') {
+        // A purely remote workspace root that /api/folders doesn't
+        // return (unmounted, never staged) has nothing local to badge.
+        // Synthesizing a phantom here would restore every such root as
+        // a clickable zero-count folder with no local-status badge,
+        // effectively resurrecting missing remote folders in Browse
+        // (Codex review r3792082330). Skip it entirely.
+        return;
+      } else {
+        // A top-level workspace root that has gone missing has no
+        // visible ancestor to attach the badge to. Without a synthesized
+        // entry the recovery state disappears entirely — the user loses
+        // the only signal that their local copy needs attention. Emit a
+        // phantom top-level row so renderFolderTree can inject a
+        // ``.tree-item`` that carries the LOCAL ISSUE / SYNCING badge
+        // (Codex review r3792031813).
+        if (!syntheticIds[requestedId]) {
+          syntheticIds[requestedId] = true;
+          var syntheticName = String(item.folder_name || '').trim() ||
+            'Missing local folder';
+          // Seed the synthesized row with the root's real workspace photo
+          // count from workspace_status(). Hard-coding 0 made the only
+          // visible entry for a top-level missing local root read as an
+          // empty folder even when the recovery session covers hundreds of
+          // photos, which mis-cues users toward discarding it (Codex review
+          // r3792132683).
+          var syntheticCount = Number(item.workspace_photo_count || 0);
+          var syntheticRow = {
+            id: requestedId,
+            parent_id: null,
+            name: syntheticName,
+            photo_count: syntheticCount,
+            status: 'missing',
+            __synthetic_missing_local: true
+          };
+          syntheticRoots.push(syntheticRow);
+          rowsById[requestedId] = syntheticRow;
+        }
+        visibleId = requestedId;
+      }
+    }
+    var rootId = Number(item.root_folder_id || requestedId);
+    recordMapping(rootId, visibleId, isFallback);
+    if (item.state === 'remote') return;
+    var changes = item.changes || {};
+    var changeCount = Number(changes.created || 0) +
+      Number(changes.modified || 0) + Number(changes.deleted || 0);
+    if (item.state === 'recovery' || item.changes_error) {
+      direct[visibleId] = {
+        kind: 'recovery',
+        label: 'LOCAL ISSUE',
+        description: item.recovery_kind === 'sync'
+          ? 'Local sync needs attention'
+          : 'Local copy needs attention',
+        fallback: isFallback
+      };
+      return;
+    }
+    direct[visibleId] = {
+      kind: item.state === 'staging' ? 'updating' : 'local',
+      label: item.state === 'staging' ? 'COPYING' : 'LOCAL',
+      description: changeCount
+        ? 'Working locally · ' + changeCount + ' unsynced change' + (changeCount === 1 ? '' : 's')
+        : 'Working locally',
+      fallback: isFallback
+    };
+  });
+
+  (localData.jobs || []).forEach(function(job) {
+    var jobStatus = {
+      'work-locally-folder-stage': ['COPYING', 'Copying locally'],
+      'work-locally-folder-sync': ['SYNCING', 'Syncing local changes to source storage'],
+      'work-locally-folder-discard': ['REMOVING', 'Removing the local copy']
+    }[job.type];
+    if (!jobStatus) return;
+    (job.folder_ids || []).forEach(function(rawId) {
+      var id = Number(rawId);
+      var targets = [];
+      if (rowsById[id]) targets.push({visibleId: id, fallback: false});
+      (visibleIdsByRoot[id] || []).forEach(function(mapping) {
+        for (var ti = 0; ti < targets.length; ti++) {
+          if (targets[ti].visibleId === mapping.visibleId) {
+            if (!mapping.fallback) targets[ti].fallback = false;
+            return;
+          }
+        }
+        targets.push({visibleId: mapping.visibleId, fallback: mapping.fallback});
+      });
+      targets.forEach(function(target) {
+        direct[target.visibleId] = {
+          kind: 'updating',
+          label: jobStatus[0],
+          description: jobStatus[1],
+          fallback: target.fallback
+        };
+      });
+    });
+  });
+
+  var result = {};
+  function markDescendants(folderId, status) {
+    result[folderId] = status;
+    // Fallback anchors represent a hidden subtree that could not be
+    // shown. Propagating the anchor's status through unrelated visible
+    // siblings would mislabel healthy remote folders as LOCAL ISSUE /
+    // SYNCING / REMOVING (Codex review r3792031821).
+    if (status && status.fallback) return;
+    (byParent[folderId] || []).forEach(function(child) {
+      markDescendants(Number(child.id), status);
+    });
+  }
+  Object.keys(direct).forEach(function(rawId) {
+    markDescendants(Number(rawId), direct[rawId]);
+  });
+
+  Object.keys(direct).forEach(function(rawId) {
+    var current = rowsById[Number(rawId)];
+    var parentId = current ? current.parent_id : null;
+    var seen = {};
+    while (parentId != null && !seen[parentId]) {
+      seen[parentId] = true;
+      if (!direct[parentId]) {
+        result[parentId] = {
+          kind: 'mixed',
+          label: 'SOME LOCAL',
+          description: 'Contains folders that are working locally'
+        };
+      }
+      current = rowsById[Number(parentId)];
+      parentId = current ? current.parent_id : null;
+    }
+  });
+  if (wantsSynthetic) {
+    return {statuses: result, synthetic: syntheticRoots};
+  }
+  return result;
+}
+
+function pendingArchiveFolderStatuses() {
+  // "Kept locally" photos are an import that was processed in Vireo's
+  // staging directory and has not been copied to its destination yet. The
+  // staging tree is in the catalog like any other folder, so without this
+  // badge the sidebar row is indistinguishable from a folder that already
+  // lives on the destination storage.
+  var items = window.vireoPendingArchives;
+  if (!Array.isArray(items)) return {};
+  var statuses = {};
+  items.forEach(function(item) {
+    if (!item || !Array.isArray(item.folder_ids)) return;
+    var sending = item.state === 'sending';
+    var destination = item.destination
+      ? ' to ' + item.destination
+      : ' to its destination';
+    var description = sending
+      ? 'Kept locally — being copied' + destination + ' now'
+      : 'Kept locally — still in Vireo’s staging folder, not copied' +
+        destination + ' yet. Use "Photos kept locally" at the top of this page to send them.';
+    item.folder_ids.forEach(function(rawId) {
+      statuses[Number(rawId)] = {
+        kind: sending ? 'pending-archive updating' : 'pending-archive',
+        label: sending ? 'SENDING' : 'KEPT LOCALLY',
+        description: description
+      };
+    });
+  });
+  return statuses;
+}
+
+function refreshPendingArchiveStatusIndicators() {
+  var statuses = pendingArchiveFolderStatuses();
+  document.querySelectorAll('#folderTree .tree-item[data-folder-id]').forEach(function(row) {
+    var slot = row.querySelector('.folder-archive-status-slot');
+    if (slot) slot.innerHTML = folderLocalStatusMarkup(statuses[Number(row.dataset.folderId)]);
+  });
+}
+
+window.addEventListener('vireo:pending-archives-changed', function() {
+  refreshPendingArchiveStatusIndicators();
+});
+
+function folderLocalStatusMarkup(status) {
+  if (!status) return '';
+  return '<span class="folder-local-status ' + status.kind + '" role="img"' +
+    ' aria-label="' + escapeAttr(status.description) + '"' +
+    ' title="' + escapeAttr(status.description) + '">' +
+    escapeHtml(status.label) + '</span>';
+}
+
+function refreshFolderLocalStatusIndicators() {
+  // Compute statuses from real rows only. If the previously injected
+  // phantoms remain in the input, folderLocalStatuses treats them as
+  // existing rows and never re-emits them in ``synthetic``, so a still-
+  // needed phantom would look identical to a stale one left behind after
+  // a recovery discard. Rebuild the input so ``synthetic`` reliably
+  // enumerates exactly the phantoms the current local-folder state
+  // requires (Codex review r3792082333).
+  var realFolders = browseFolderRows.filter(function(f) {
+    return !f.__synthetic_missing_local;
+  });
+  var byParent = {};
+  realFolders.forEach(function(folder) {
+    var parentId = folder.parent_id || 'root';
+    if (!byParent[parentId]) byParent[parentId] = [];
+    byParent[parentId].push(folder);
+  });
+  var statusResult = folderLocalStatuses(
+    realFolders, byParent, {wantsSynthetic: true}
+  );
+  var neededPhantomIds = {};
+  (statusResult.synthetic || []).forEach(function(row) {
+    neededPhantomIds[Number(row.id)] = true;
+  });
+  var existingPhantomIds = {};
+  browseFolderRows.forEach(function(f) {
+    if (f.__synthetic_missing_local) existingPhantomIds[Number(f.id)] = true;
+  });
+  var newPhantomNeeded = Object.keys(neededPhantomIds).some(function(id) {
+    return !existingPhantomIds[id];
+  });
+  var stalePhantomPresent = Object.keys(existingPhantomIds).some(function(id) {
+    return !neededPhantomIds[id];
+  });
+  // A stale phantom's underlying folder is no longer flagged as a
+  // missing local session — a discard-recovery, for example, ends the
+  // session and the real folder returns to ``/api/folders``. Re-fetch
+  // so the restored row and photo count replace the zero-count
+  // ``status: 'missing'`` shell instead of leaving Browse with an
+  // orphaned clickable phantom (Codex review r3792082333).
+  if (stalePhantomPresent && typeof loadFolders === 'function') {
+    loadFolders();
+    return;
+  }
+  // A newly needed phantom means the DOM has no ``.tree-item`` slot to
+  // update — a slot-only refresh would silently drop the LOCAL ISSUE
+  // badge. Rebuild from real rows and let renderFolderTree re-inject
+  // the phantom.
+  if (newPhantomNeeded) {
+    renderFolderTree(realFolders);
+    return;
+  }
+  var statuses = statusResult.statuses;
+  document.querySelectorAll('#folderTree .tree-item[data-folder-id]').forEach(function(row) {
+    var slot = row.querySelector('.folder-local-status-slot');
+    if (slot) slot.innerHTML = folderLocalStatusMarkup(statuses[Number(row.dataset.folderId)]);
+  });
+}
+
+window.addEventListener('vireo:local-folder-status-changed', function() {
+  refreshFolderLocalStatusIndicators();
+});
+
+function toggleTree(e, el) {
+  e.stopPropagation();
+  var next = el.closest('.tree-item').nextElementSibling;
+  if (next && next.classList.contains('tree-children')) {
+    next.classList.toggle('open');
+    el.innerHTML = next.classList.contains('open') ? '&#9660;' : '&#9654;';
+  }
+}
+
+function filterByFolder(folderId) {
+  browseScopeGen++;
+  if (activeFolderId === folderId) {
+    activeFolderId = null;
+  } else {
+    activeFolderId = folderId;
+  }
+  // If the current keyword highlight came from a sidebar click,
+  // filterByKeyword also installed a VireoFilter 'keyword' rule — that
+  // rule is now the sidebar's stored state, not activeKeyword. Clearing
+  // just activeKeyword drops the highlight but leaves the rule in place,
+  // so the folder reload silently applies folder ∩ keyword. Drop the
+  // rule before the reload; VireoFilter.removeField fires onChange,
+  // which runs the reload path (including timelineMode + summary), so
+  // skip the plain reloadBrowseResults() branch only when removeField
+  // actually removed something. If the user already dropped the rule
+  // via the filter chip, activeKeyword lingers but there's no keyword
+  // rule left to remove — removeField returns false and we still need
+  // to run our own reload for the folder change.
+  var hadSidebarKeyword = activeKeyword !== null;
+  activeKeyword = null;
+  activeCollectionId = null;
+  // Sidebar scope changes leave the "reopened collection" association
+  // stale: without this, tagging a keyword next fires
+  // refreshActiveCollectionAfterMembershipChange, which sees
+  // openedCollectionId still set and calls filterByCollection() —
+  // filterByCollection clears activeFolderId, unexpectedly replacing
+  // the user's folder-scoped view with the original collection
+  // (Codex review r3622204141). filterByKeyword goes through
+  // VireoFilter.addRule → onChange → the openedCollectionId clear at
+  // browse init, but filterByFolder's reloadBrowseResults() path
+  // bypasses VireoFilter, so clear it explicitly here.
+  openedCollectionId = null;
+  clearOfflineCollectionState();
+  document.querySelectorAll('#folderTree .tree-item').forEach(function(el) {
+    el.classList.toggle('active', parseInt(el.dataset.folderId) === activeFolderId);
+  });
+  if (hadSidebarKeyword && window.VireoFilter && VireoFilter.isReady()) {
+    if (VireoFilter.removeField('keyword', { reason: 'scopeChanged' })) return;
+  }
+  if (timelineMode) loadCalendarData();
+  reloadBrowseResults();
+}
+
+/* ---------- Keyword Tree ---------- */
+function reconcileKeywordLoadRenders() {
+  // Do not discard the newest usable keyword response merely because a
+  // later request started. Pending newer generations still block it, while
+  // failed newer generations fall back to the newest success just like the
+  // folder and collection loaders.
+  var gen = keywordLoadGen;
+  while (gen > keywordRenderDecisionGen) {
+    var state = keywordLoadStates[gen];
+    if (!state || state.status === 'pending') return;
+    if (state.status === 'success') {
+      var shouldRender = !state.shouldRender || state.shouldRender();
+      keywordRenderDecisionGen = gen;
+      if (shouldRender) renderKeywordTree(state.data);
+      Object.keys(keywordLoadStates).forEach(function(key) {
+        if (Number(key) <= keywordLoadGen) delete keywordLoadStates[key];
+      });
+      return;
+    }
+    gen--;
+  }
+}
+
+async function loadKeywords(opts) {
+  var myGen = ++keywordLoadGen;
+  keywordLoadStates[myGen] = {
+    status: 'pending',
+    shouldRender: opts && opts.shouldRender
+  };
+  try {
+    var data = await safeFetch('/api/keywords', {}, { toast: false });
+    var state = keywordLoadStates[myGen];
+    if (!state) return data;
+    state.status = 'success';
+    state.data = data;
+    reconcileKeywordLoadRenders();
+    return data;
+  } catch(e) {
+    var failedState = keywordLoadStates[myGen];
+    if (failedState) {
+      failedState.status = 'failure';
+      reconcileKeywordLoadRenders();
+    }
+    return null;
+  }
+}
+
+function renderKeywordTree(keywords) {
+  _rememberKeywordNames(keywords);
+  var byParent = {};
+  keywords.forEach(function(k) {
+    var pid = k.parent_id || 'root';
+    if (!byParent[pid]) byParent[pid] = [];
+    byParent[pid].push(k);
+  });
+
+  var treeTypeIcons = {general:'',taxonomy:'🌿',individual:'👤',location:'📍',genre:'🎭'};
+  function buildTree(parentId, depth) {
+    var children = byParent[parentId] || [];
+    var html = '';
+    children.forEach(function(k) {
+      var hasChildren = byParent[k.id] && byParent[k.id].length > 0;
+      var indent = '';
+      for (var i = 0; i < depth; i++) indent += '<span class="tree-indent"></span>';
+      var toggle = hasChildren ? '<span class="tree-toggle" onclick="toggleTree(event,this)">&#9654;</span>' : '<span class="tree-indent"></span>';
+      var activeClass = activeKeyword === k.name ? ' active' : '';
+      var tIcon = treeTypeIcons[k.type] || '';
+      html += '<div class="tree-item' + activeClass + '" data-keyword="' + escapeAttr(k.name) + '">' +
+        indent + toggle +
+        (tIcon ? '<span style="font-size:10px;margin-right:3px;opacity:0.7">' + tIcon + '</span>' : '') +
+        '<span>' + escapeHtml(k.name) + '</span>' +
+      '</div>';
+      if (hasChildren) {
+        html += '<div class="tree-children">' + buildTree(k.id, depth + 1) + '</div>';
+      }
+    });
+    return html;
+  }
+
+  var tree = document.getElementById('keywordTree');
+  tree.innerHTML = buildTree('root', 0) || '<div style="font-size:12px;color:var(--text-ghost);padding:4px 8px;">No keywords</div>';
+  // Delegate keyword clicks (XSS-safe: avoids inline onclick with user data)
+  tree.onclick = function(e) {
+    var item = e.target.closest('.tree-item[data-keyword]');
+    if (item) filterByKeyword(item.dataset.keyword);
+  };
+}
+
+async function filterByKeyword(name) {
+  // Bump the scope generation BEFORE the readiness guard so an in-flight
+  // queued filterByCollection (awaiting browseFilterInitPromise) sees the
+  // newer intent and bails out on resume. Without this, the collection
+  // could resume after fields load and clobber the user's later click
+  // (Codex review r3624549744).
+  var myScopeGen = ++browseScopeGen;
+  // The sidebar tree is rendered from the /photos init payload, so a
+  // slow /api/filters/fields (or workspace) round-trip leaves clickable
+  // keywords in the DOM before VireoFilter.init resolves. Without this
+  // guard, addRule -> makeRule dereferences state.fields (still null)
+  // and throws. Dropping the click outright would leave the bootstrap
+  // grid (e.g. a ``?collection_id=A`` deep link's collection scope) in
+  // place while the user's later keyword selection is silently lost
+  // (Codex review r3624927534) — queue behind init and apply once ready,
+  // matching filterByCollection's pattern.
+  if (window.VireoFilter && !VireoFilter.isReady()) {
+    if (!browseFilterInitPromise) return;
+    try {
+      await browseFilterInitPromise;
+    } catch (e) {
+      return;
+    }
+    if (!VireoFilter.isReady()) return;
+    // A later sidebar click (folder/keyword/collection) advanced the scope
+    // while we were waiting for filter-bar init. Applying this stale
+    // keyword now would clobber the user's newer selection.
+    if (browseScopeGen !== myScopeGen) return;
+  }
+  if (activeKeyword === name) {
+    activeKeyword = null;
+  } else {
+    activeKeyword = name;
+  }
+  activeFolderId = null;
+  activeCollectionId = null;
+  clearOfflineCollectionState();
+  // The rule toggles: adding an identical keyword rule removes it. The
+  // filter bar's onChange handles the reload.
+  VireoFilter.addRule('keyword', 'is', name);
+  document.querySelectorAll('#keywordTree .tree-item').forEach(function(el) {
+    el.classList.toggle('active', el.dataset.keyword === activeKeyword);
+  });
+}
+
+/* ---------- Collections ---------- */
+function reconcileCollectionLoadRenders() {
+  // Mirror reconcileFolderLoadRenders: don't render an older successful
+  // response while a newer request is still pending, but if every newer
+  // request failed, fall back to the newest available success rather than
+  // leaving the collection list stale. Otherwise a health-owned request
+  // that observed a just-created collection could be silently dropped by
+  // a subsequent mutation-triggered reload that transiently fails, so the
+  // collection stays absent until the next explicit list refresh
+  // (Codex review r3687331931).
+  var gen = collectionLoadGen;
+  while (gen > collectionRenderDecisionGen) {
+    var state = collectionLoadStates[gen];
+    if (!state || state.status === 'pending') return;
+    if (state.status === 'success') {
+      var shouldRender = !state.shouldRender || state.shouldRender();
+      collectionRenderDecisionGen = gen;
+      if (shouldRender) renderCollectionList(state.data);
+      Object.keys(collectionLoadStates).forEach(function(key) {
+        if (Number(key) <= collectionLoadGen) delete collectionLoadStates[key];
+      });
+      return;
+    }
+    gen--;
+  }
+}
+
+async function loadCollections(opts) {
+  var myGen = ++collectionLoadGen;
+  collectionLoadStates[myGen] = {
+    status: 'pending',
+    shouldRender: opts && opts.shouldRender
+  };
+  try {
+    var data = await safeFetch('/api/collections', {}, { toast: false });
+    var state = collectionLoadStates[myGen];
+    if (!state) return data;
+    state.status = 'success';
+    state.data = data;
+    reconcileCollectionLoadRenders();
+    return data;
+  } catch(e) {
+    var failedState = collectionLoadStates[myGen];
+    if (failedState) {
+      failedState.status = 'failure';
+      reconcileCollectionLoadRenders();
+    }
+    return null;
+  }
+}
+
+async function loadCollectionCounts() {
+  var gen = ++collectionCountLoadGen;
+  try {
+    var data = await safeFetch('/api/collections', {}, { toast: false });
+    if (gen !== collectionCountLoadGen) return;
+    if (!data) return;
+    var items = document.querySelectorAll('#collectionList .tree-item');
+    var metaById = {};
+    data.forEach(function(c) { metaById[c.id] = c; });
+    items.forEach(function(el) {
+      var id = parseInt(el.dataset.collectionId, 10);
+      if (isNaN(id)) {
+        // Fallback for any stragglers without data-collection-id.
+        var onclick = el.getAttribute('onclick') || '';
+        var m = onclick.match(/filterByCollection\((\d+)\)/);
+        if (m) id = parseInt(m[1], 10);
+      }
+      var meta = !isNaN(id) ? metaById[id] : null;
+      if (!meta) return;
+      // Keep our in-memory copy in sync so filterByCollection's guard fires
+      // for collections that transitioned to (or out of) unavailable.
+      collectionsById[id] = meta;
+      var wasUnavailable = el.classList.contains('unavailable');
+      var isUnavailable = !!meta.count_error;
+      if (wasUnavailable !== isUnavailable) {
+        el.classList.toggle('unavailable', isUnavailable);
+        var trailing = el.querySelector('.count, .collection-unavailable-badge');
+        if (trailing) {
+          if (isUnavailable) {
+            trailing.className = 'collection-unavailable-badge';
+            trailing.textContent = 'unavailable';
+          } else {
+            trailing.className = 'count';
+            trailing.innerHTML = collectionCountMarkup(meta);
+          }
+        }
+        if (isUnavailable) {
+          el.setAttribute(
+            'title',
+            "This collection's rules could not be resolved. Right-click → Edit Rules to fix it."
+          );
+        } else {
+          el.removeAttribute('title');
+        }
+      } else if (!isUnavailable) {
+        var span = el.querySelector('.count');
+        if (span && meta.photo_count != null) {
+          span.innerHTML = collectionCountMarkup(meta);
+        }
+      }
+    });
+  } catch(e) {}
+}
+
+function scheduleCollectionCountsRefresh() {
+  if (collectionCountRefreshTimer) clearTimeout(collectionCountRefreshTimer);
+  collectionCountRefreshTimer = setTimeout(function() {
+    collectionCountRefreshTimer = null;
+    loadCollectionCounts();
+  }, 150);
+}
+
+function hasCollectionAvailabilityScope() {
+  return openedCollectionId != null || activeCollectionId != null;
+}
+
+function renderOfflineCollectionNotice() {
+  var notice = document.getElementById('offlineCollectionNotice');
+  if (!notice) return;
+  if (!hasCollectionAvailabilityScope() || collectionOfflineTotal <= 0) {
+    notice.style.display = 'none';
+    return;
+  }
+  var text = document.getElementById('offlineCollectionText');
+  var toggle = document.getElementById('offlineCollectionToggle');
+  var available = collectionAvailableTotal.toLocaleString();
+  var inventory = collectionInventoryTotal.toLocaleString();
+  var offline = collectionOfflineTotal.toLocaleString();
+  text.textContent = available + ' of ' + inventory + ' photos available \u00b7 ' +
+    offline + ' offline' +
+    (showOfflineCollectionPhotos
+      ? ' (shown read-only)'
+      : ' (hidden)');
+  toggle.textContent = showOfflineCollectionPhotos
+    ? 'Hide offline photos'
+    : 'Show offline photos';
+  notice.style.display = 'flex';
+}
+
+function clearOfflineCollectionState() {
+  showOfflineCollectionPhotos = false;
+  collectionInventoryTotal = 0;
+  collectionAvailableTotal = 0;
+  collectionOfflineTotal = 0;
+  renderOfflineCollectionNotice();
+}
+
+function updateOfflineCollectionState(data) {
+  if (!hasCollectionAvailabilityScope()) {
+    clearOfflineCollectionState();
+    return;
+  }
+  // These are photo counts. ``data.total`` is the logical item count, which
+  // Stacks collapses, so fall back through ``underlying_total`` first —
+  // otherwise a stacked view would report "N of M photos" in stacks.
+  var photoTotal = data.underlying_total != null
+    ? Number(data.underlying_total) || 0
+    : Number(data.total) || 0;
+  collectionInventoryTotal = data.inventory_total != null
+    ? Number(data.inventory_total) || 0
+    : photoTotal;
+  collectionAvailableTotal = data.available_total != null
+    ? Number(data.available_total) || 0
+    : photoTotal;
+  collectionOfflineTotal = Number(data.offline_total || 0);
+  // Visual collections intentionally skip sidebar counts until their prompt
+  // is resolved. Once opened, promote the resolved membership into the same
+  // total/offline presentation as metadata collections.
+  var collectionId = openedCollectionId != null
+    ? openedCollectionId
+    : activeCollectionId;
+  var meta = collectionsById[collectionId];
+  if (meta && data.inventory_total != null) {
+    meta.photo_count = collectionInventoryTotal;
+    meta.available_photo_count = collectionAvailableTotal;
+    meta.offline_photo_count = collectionOfflineTotal;
+    var row = document.querySelector(
+      '#collectionList .tree-item[data-collection-id="' + collectionId + '"] .count'
+    );
+    if (row) row.innerHTML = collectionCountMarkup(meta);
+  }
+  if (collectionOfflineTotal <= 0) showOfflineCollectionPhotos = false;
+  renderOfflineCollectionNotice();
+}
+
+function toggleOfflineCollectionPhotos() {
+  if (!hasCollectionAvailabilityScope() || collectionOfflineTotal <= 0) return;
+  showOfflineCollectionPhotos = !showOfflineCollectionPhotos;
+  renderOfflineCollectionNotice();
+  resetAndLoad({ preserveCollection: true });
+}
+
+/* Mutation kinds, as declared per filter field in vireo/filter_fields.py
+   (``changed_by``). A membership-change refresh names what it just changed so
+   the filter bar can answer whether the active expression can even notice —
+   adding a keyword cannot change which photos a "Rating >= 3" filter matches,
+   and reloading for it costs the user their place in the grid and their
+   selection for nothing. */
+var MUTATION_KEYWORD = 'keyword';
+var MUTATION_PREDICTION = 'prediction';
+var MUTATION_WILDLIFE = 'wildlife_excluded';
+
+/* Sorts whose key is the photo's top prediction confidence — mirrors
+   _PREDICTION_CONFIDENCE_SORTS in vireo/db.py. */
+var PREDICTION_CONFIDENCE_SORTS = ['prediction_confidence',
+  'prediction_confidence_asc'];
+
+/* Whether the sort DROPDOWN is set to a confidence sort. Deliberately not
+   "the grid is ordered by confidence": a healthy visual clause keeps results
+   similarity-ranked while this still reads prediction_confidence. Only the
+   reload heuristic below may use it — a card that wants to describe its own
+   badge reads the server's per-card
+   ``prediction_confidence_is_stack_lead`` flag instead. */
+function sortSelectRanksOnPredictionConfidence() {
+  var el = document.getElementById('sortSelect');
+  return !!el && PREDICTION_CONFIDENCE_SORTS.indexOf(el.value) !== -1;
+}
+
+function refreshActiveCollectionAfterMembershipChange(mutations) {
+  if (activeCollectionId) {
+    filterByCollection(activeCollectionId, { preserveAnchor: false });
+    return;
+  }
+  // A collection opened into the filter bar carries a static rules snapshot
+  // (the saved photo_ids list plus any user-picked chips). loadCollections()
+  // refreshes the sidebar counts but the bar keeps the STALE photo_ids
+  // rule until the user manually reopens the collection, so an add/remove
+  // just made from Browse doesn't show up in the current grid (CodeRabbit
+  // review r3620473562). Refetch the collection metadata and reopen so
+  // the bar's photo_ids expression matches the fresh membership.
+  if (openedCollectionId) {
+    var reopenId = openedCollectionId;
+    // Ensure filterByCollection sees the freshest rules/visual_json, not
+    // whatever the last renderCollectionList cached; loadCollections
+    // (called by callers of this function) refreshes collectionsById via
+    // loadCollectionCounts, but that's async — sequence with a fetch.
+    safeFetch('/api/collections', {}, { toast: false }).then(function(list) {
+      if (Array.isArray(list)) {
+        list.forEach(function(c) { collectionsById[c.id] = c; });
+      }
+      // The user can switch scope (folder click, keyword click, filter
+      // change) while this fetch is in flight; those paths clear
+      // ``openedCollectionId``. Reopening unconditionally would reinstate
+      // the old collection and wipe the user's new scope (Codex review
+      // r3622743705). Only reopen if the same collection is still open.
+      if (openedCollectionId === reopenId) {
+        filterByCollection(reopenId, { preserveAnchor: false });
+      }
+    }).catch(function() {
+      // Even without the refresh, opening the cached copy is closer to
+      // right than leaving the stale expression in place — but still
+      // only if the user hasn't already moved on.
+      if (openedCollectionId === reopenId) {
+        filterByCollection(reopenId, { preserveAnchor: false });
+      }
+    });
+    return;
+  }
+  // A prediction edit moves a photo under the prediction-confidence sorts
+  // even with no filter active, so the filter-only checks below would skip
+  // the reload the grid needs. Rejecting the top pick promotes the next
+  // guess (or leaves the photo unscored); accepting a runner-up rejects the
+  // old top pick. Either way the photo's sort key AND the number its badge
+  // shows have changed, and without reloading the grid keeps the old order
+  // and the old score until a manual re-sort (Codex P2 on PR #1670). Same
+  // options as onSortChanged(), which is the same situation: the order moved
+  // under the photo the user is looking at, so hold onto it.
+  //
+  // Reading the dropdown rather than what the server actually ranked by is
+  // deliberate here: with a healthy visual clause the order will not move,
+  // but every affected card's badge number still did, so the reload is
+  // wanted either way.
+  var predictionEdit = !mutations ||
+    mutations.indexOf(MUTATION_PREDICTION) !== -1;
+  if (predictionEdit && sortSelectRanksOnPredictionConfidence()) {
+    // A batch spanning several cards has no single-photo anchor. Keep its
+    // grid window and surviving selection so accepting a species can be
+    // followed by another edit on those same photos.
+    reloadBrowseResults(selectedPhotos.size > 0
+      ? { preserveScroll: true }
+      : { preserveAnchor: true, focusAnchor: true });
+    return;
+  }
+  // Collections open into the filter bar now (Phase 5): when a membership
+  // change (tag/untag, add/remove) happens while an expression is active,
+  // re-evaluate it so photos that no longer match leave the grid — but only
+  // when the expression reads something this edit can actually move. A
+  // caller that doesn't say what it changed is treated as "anything".
+  if (!window.VireoFilter || !VireoFilter.hasFilters()) return;
+  if (mutations && VireoFilter.dependsOnMutation &&
+      !VireoFilter.dependsOnMutation(mutations)) {
+    return;
+  }
+  resetAndLoad({ preserveAnchor: false, preserveScroll: true });
+}
+
+function refreshBrowseSidebarCounts() {
+  loadFolders();
+  loadKeywords();
+  loadCollectionCounts();
+}
+
+// ``folderHealthRefreshSeq`` is initialized above the bootstrapBrowse()
+// invocation so the pre-await snapshot inside bootstrap reads ``0`` instead
+// of ``undefined`` (Codex review r3686317674).
+function folderRowsContainScope(rows, folderId, scopeId) {
+  var byId = {};
+  (rows || []).forEach(function(row) { byId[row.id] = row; });
+  var currentId = folderId;
+  var seen = {};
+  while (currentId != null && !seen[currentId]) {
+    if (currentId === scopeId) return true;
+    seen[currentId] = true;
+    var row = byId[currentId];
+    currentId = row ? row.parent_id : null;
+  }
+  return false;
+}
+
+function folderHealthTouchesActiveScope(detail, beforeRows, afterRows) {
+  if (!activeFolderId) return true;
+  var restored = detail && Array.isArray(detail.restored) ? detail.restored : [];
+  var wentMissing = detail && Array.isArray(detail.wentMissing) ? detail.wentMissing : [];
+  var changedIds = restored.concat(wentMissing);
+  // The null-baseline fallback intentionally carries no ids. Conservatively
+  // reload because the server only knows that this workspace changed.
+  if (!changedIds.length) return true;
+  return changedIds.some(function(folderId) {
+    return folderRowsContainScope(beforeRows, folderId, activeFolderId) ||
+      folderRowsContainScope(afterRows, folderId, activeFolderId);
+  });
+}
+
+async function refreshBrowseAfterFolderHealthChange(detail) {
+  var seq = ++folderHealthRefreshSeq;
+  // A health-driven dataset refresh is not a user scope change: bumping
+  // browseScopeGen here would make any in-flight sidebar click
+  // (filterByFolder/filterByKeyword/filterByCollection) or the initial
+  // collection deep-link replay look stale, and its own guard would then
+  // silently discard the requested scope — leaving Browse on the workspace
+  // grid instead of the user's newer selection (Codex review r3684907518).
+  // folderHealthRefreshSeq below is the only counter this refresh needs.
+
+  // Apply the effective ``perPage`` (and other cfg values) before any
+  // loadPhotos call. Without this, a health event that fires while
+  // ``_cfgPromise`` is still pending calls resetAndLoad → loadPhotos with
+  // the hard-coded default (50), and bootstrap later applies the configured
+  // size — its own init response is discarded by the health-generation
+  // guard, but the perPage variable it wrote is not, so subsequent
+  // pagination computes offsets against the new size while the health
+  // refresh loaded page 1 with the old size: photos are silently skipped
+  // or duplicated across the boundary (Codex review r3686912883).
+  // applyBrowseConfig is idempotent — safe to call again after bootstrap.
+  try { applyBrowseConfig(await _cfgPromise); } catch (e) {}
+  if (seq !== folderHealthRefreshSeq) return;
+
+  // Refresh the scope controls first. If the selected folder just went
+  // offline it disappears from /api/folders; clear that stale scope before
+  // reloading the grid so Browse falls back to the available workspace.
+  //
+  // Pass ``shouldRender`` into each loader: without it, two overlapping
+  // health events (a folder flapping, or the modal check racing the
+  // ten-minute poll) can complete out of order — the older fetch's
+  // render*Tree call would clobber the newer render, and the post-await
+  // seq check would fire too late to undo the DOM mutation. Guarding
+  // *before* render means only the winning generation's data ever reaches
+  // the tree (Codex review r3685193225).
+  var isCurrent = function() { return seq === folderHealthRefreshSeq; };
+  var beforeFolderRows = browseFolderRows.slice();
+  var loaded = await Promise.all([
+    loadFolders({ shouldRender: isCurrent }),
+    loadKeywords({ shouldRender: isCurrent }),
+    loadCollections({ shouldRender: isCurrent }),
+  ]);
+  if (!isCurrent()) return;
+  // If ``/api/folders`` failed transiently during this health transition,
+  // the folder tree DOM (and the cached ``browseFolderRows``) are still
+  // the pre-transition state — a membership check against either would
+  // preserve a folder that just went missing, and ``resetAndLoad`` would
+  // then reload an empty folder-scoped grid. Because the navbar has
+  // already advanced ``_missingFoldersLastIds`` before dispatching this
+  // event, later polls see no transition and never repair the view, so
+  // schedule a retry via the same event listener rather than committing
+  // to a decision from stale data (Codex review r3687062925).
+  if (loaded[0] === null) {
+    var retryAttempt = detail && Number(detail.refreshRetryAttempt) || 0;
+    // Bound the short-term recovery loop. A prolonged/permanent endpoint
+    // outage must fall back to the normal ten-minute health poll instead of
+    // issuing folder/keyword/collection requests forever.
+    if (retryAttempt >= 3) {
+      // The navbar advanced ``_missingFoldersLastIds`` before dispatching
+      // this event, so its 10-minute poll will see unchanged IDs once
+      // ``/api/folders`` recovers and by default emits nothing — the page
+      // would then remain on pre-transition data indefinitely. Flag the
+      // navbar so the next successful poll fires a synthetic reconciliation
+      // event regardless of the ID diff, letting this handler re-attempt
+      // the refresh with a healthy endpoint (Codex review r3687331927).
+      if (typeof window.markMissingFoldersReconciliationPending === 'function') {
+        window.markMissingFoldersReconciliationPending();
+      }
+      return;
+    }
+    var retryDetail = Object.assign({}, detail || {}, {
+      source: 'refresh-retry',
+      refreshRetryAttempt: retryAttempt + 1
+    });
+    setTimeout(function() {
+      document.dispatchEvent(new CustomEvent('vireo:folder-health-changed', {
+        // Preserve restored/wentMissing ids so the successful retry can still
+        // distinguish an unrelated sibling transition from one that affects
+        // the active folder scope. Dropping them makes the conservative
+        // no-id fallback reset an unaffected grid and selection.
+        detail: retryDetail
+      }));
+    }, 2000 * Math.pow(2, retryAttempt));
+    return;
+  }
+  // Folder health can change which visible ancestor represents a hidden
+  // local session. Refresh the authoritative local-folder payload after the
+  // fresh tree has rendered so recovery badges move to the correct ancestor
+  // (or synthesize a top-level row) immediately. Encoding folder health in
+  // the 15-second blocker fingerprint either misses non-mapped ancestors or
+  // makes that lightweight polling payload grow with catalog size.
+  if (window.vireoLocalFolders &&
+      typeof window.vireoLocalFolders.load === 'function') {
+    window.vireoLocalFolders.load();
+  }
+  // Use the health-owned response rather than the DOM. A later unrelated
+  // loadFolders() call may supersede this render while still being in flight;
+  // in that window the DOM is intentionally old even though this response
+  // already proves whether the selected folder is available.
+  var currentFolderRows = loaded[0];
+  var activeScopeWasAffected = folderHealthTouchesActiveScope(
+    detail, beforeFolderRows, currentFolderRows);
+  if (activeFolderId &&
+      !currentFolderRows.some(function(folder) { return folder.id === activeFolderId; })) {
+    activeFolderId = null;
+    activeScopeWasAffected = true;
+  }
+
+  // A transition in an unrelated folder cannot change a leaf-folder result
+  // set. Keep its selection, detail panel, and scroll position intact while
+  // still refreshing workspace-wide sidebar and summary counts.
+  if (!activeScopeWasAffected && browseDatasetReady) {
+    loadCollectionCounts();
+    loadSummary();
+    if (timelineMode) loadCalendarData();
+    return;
+  }
+
+  // Preserve the active collection: resetAndLoad's default is to clear
+  // ``activeCollectionId`` for non-dashboard scopes, which would kick a user
+  // viewing a normal collection back to the unscoped workspace grid whenever
+  // folder health changes (CodeRabbit review r3684913393).
+  var gridReloadStatus = await resetAndLoad({
+    preserveCollection: true,
+    preserveAnchor: true,
+    // Health can move photos in and out of the result set, so let the
+    // server place the anchor rather than paging towards where it used to
+    // be (Codex P1 on PR #1695).
+    focusAnchor: true
+  });
+  if (!isCurrent()) return;
+  if (gridReloadStatus === false) {
+    // resetAndLoad has already cleared the pre-transition grid. Keep the
+    // navbar reconciliation marker set so an unchanged normal poll retries
+    // after a transient first-page query/collection failure instead of
+    // leaving Browse empty indefinitely.
+    if (typeof window.markMissingFoldersReconciliationPending === 'function') {
+      window.markMissingFoldersReconciliationPending();
+    }
+    return;
+  }
+  loadCollectionCounts();
+  loadSummary();
+  if (timelineMode) loadCalendarData();
+}
+
+// Track the currently-running refresh so awaiters (the photo deep-link
+// loader in particular) can wait for it to settle before re-snapshotting
+// their generation counter and retrying. Without this, a health event
+// that fires while ``?photo_id=…`` is awaiting ``_cfgPromise`` /
+// ``/api/photos/<id>`` / ``/api/browse/init`` used to cancel the deep
+// link permanently — the refresh has no idea what folder the target
+// photo lives in, so Browse fell back to the unscoped workspace grid
+// without scrolling to the requested photo (and VireoFilter was left
+// uninitialized) (Codex review r3686778061).
+var _activeFolderHealthRefresh = Promise.resolve();
+document.addEventListener('vireo:folder-health-changed', function(event) {
+  _activeFolderHealthRefresh = refreshBrowseAfterFolderHealthChange(
+    event && event.detail);
+});
+
+async function waitForFolderHealthRefreshesToSettle() {
+  // A second event can replace the active promise while an awaiter is still
+  // waiting on the first. Keep observing until the promise that just settled
+  // is still the active one, so photo deep-link retries cannot resume in the
+  // gap between overlapping refreshes.
+  while (true) {
+    var observed = _activeFolderHealthRefresh;
+    try { await observed; } catch (e) { /* keep draining newer refreshes */ }
+    if (observed === _activeFolderHealthRefresh) return;
+  }
+}
+
+async function filterByCollection(id, options) {
+  // The sidebar collection list is rendered from the initial /photos payload,
+  // so a slow /api/filters/fields (or workspace) round-trip leaves clickable
+  // collections in the DOM before VireoFilter.init resolves. Without this
+  // guard, the saved expression is pushed into the filter bar while
+  // state.fields is still null and the in-flight init's restorePersisted/
+  // finish then overwrites the just-loaded rules/visual clause. Do not drop
+  // the click, though: wait for the in-flight init and apply the collection
+  // as soon as the filter bar is ready. The bootstrap deep-link caller fires
+  // from inside browseFilterInitPromise.then(...), so it proceeds immediately.
+  var myScopeGen = ++browseScopeGen;
+  if (window.VireoFilter && !VireoFilter.isReady()) {
+    if (!browseFilterInitPromise) return;
+    try {
+      await browseFilterInitPromise;
+    } catch (e) {
+      return;
+    }
+    if (!VireoFilter.isReady()) return;
+    // A later sidebar click (folder/keyword/collection) advanced the scope
+    // generation while we were waiting for filter-bar init. Applying this
+    // stale collection now would clobber the user's newer selection
+    // (Codex review r3624395785).
+    if (browseScopeGen !== myScopeGen) return;
+  }
+  // Guard: degraded (count_error) collections can't resolve their rules.
+  var collectionMeta = collectionsById[id];
+  if (!collectionMeta) {
+    // Programmatic callers (deep links, tests, refresh paths) can race the
+    // sidebar render — fetch the list before giving up.
+    await loadCollections();
+    collectionMeta = collectionsById[id];
+  }
+  if (collectionMeta && collectionMeta.count_error) {
+    if (typeof showToast === 'function') {
+      showToast(
+        (collectionMeta.name || 'This collection') +
+          " is unavailable \u2014 its rules could not be resolved. Right-click \u2192 Edit Rules to fix it.",
+        'error'
+      );
+    }
+    return;
+  }
+  if (!collectionMeta) return;
+  // Opening a collection loads its saved expression into the filter bar as
+  // editable chips (rules + visual clause round-trip). The expression IS
+  // the filter; loadExpression's onChange reload refreshes the grid with
+  // anchor preservation handled by the shared path.
+  activeFolderId = null;
+  activeKeyword = null;
+  activeCollectionId = null;
+  dashboardCollectionScope = false;
+  clearOfflineCollectionState();
+  // Track which collection is currently loaded so post-membership refresh
+  // can pull fresh rules/photo_ids without waiting for a user reopen.
+  openedCollectionId = id;
+  var rules = [];
+  var visual = null;
+  try { rules = JSON.parse(collectionMeta.rules || '[]'); } catch (e) { rules = []; }
+  try {
+    visual = collectionMeta.visual_json ? JSON.parse(collectionMeta.visual_json) : null;
+  } catch (e) { visual = null; }
+  // Membership-refresh callers pass {preserveAnchor: false} to avoid paging
+  // through the whole refreshed collection looking for a photo that may
+  // have just left it; propagate via a distinct reason so the shared
+  // onChange handler skips anchor preservation for that path (Codex review
+  // r3622521603).
+  var preserveAnchor = !(options && options.preserveAnchor === false);
+  VireoFilter.loadExpression(rules, visual, {
+    reason: preserveAnchor ? 'expressionLoaded' : 'expressionRefreshed',
+  });
+}
+
+/* ---------- Collection Modal ---------- */
+var collectionEditorRoot = {mode: 'all', rules: []};
+var collectionEditingId = null;
+// Cached dropdown sources for the rule editor. Filled on first modal open
+// and reused across rule rows so toggling field=Extension or field=Folder
+// doesn't refetch on every render. Re-fetched each time the modal opens
+// so newly-imported folders/extensions show up without a page reload.
+var collectionExtensions = [];
+var collectionFolders = [];
+
+/* Fields whose rule value is a number: they get a number input, default to
+   0, and are parsed with parseFloat on save. One list rather than three
+   copies — the copies had already drifted, and a field missing from any of
+   them silently degrades to a text input or a NaN value on save. */
+var NUMERIC_RULE_FIELDS = ['rating', 'quality_score', 'sharpness',
+  'subject_sharpness', 'noise_estimate', 'crop_complete',
+  'prediction_confidence', 'species_count'];
+
+/* Ops every numeric field accepts. Must be a superset of what the
+   registry (vireo/filter_fields.py) advertises for number/rating fields,
+   or a rule saved from the filter bar reopens here showing a different
+   operator than the one it runs with — and `between`, whose value is a
+   [low, high] pair, used to be flattened to a single scalar on save. */
+var NUMERIC_OPS = ['is', 'is not', '>=', '<=', '>', '<', 'between'];
+
+/* Valid ops per field — must mirror vireo/db.py::_build_collection_query.
+   The UI only shows ops the backend handles; non-matching combos used to
+   silently produce zero matches. */
+var FIELD_OPS = {
+  all:         ['equals'],
+  metadata:    ['contains', 'not_contains'],
+  keyword:     ['is', 'is not', 'contains', 'not_contains'],
+  species_count: NUMERIC_OPS,
+  rating:      NUMERIC_OPS,
+  flag:        ['is', 'is not'],
+  color_label: ['is', 'is not'],
+  extension:   ['is', 'is not'],
+  folder:      ['under', 'not_under'],
+  timestamp:   ['between', 'recent_days'],
+  quality_score: NUMERIC_OPS,
+  sharpness: NUMERIC_OPS,
+  subject_sharpness: NUMERIC_OPS,
+  noise_estimate: NUMERIC_OPS,
+  crop_complete: NUMERIC_OPS,
+  has_mask: ['equals'],
+  has_jpeg_companion: ['equals'],
+  active_mask_variant: ['is', 'is not', 'contains'],
+  has_gps: ['equals'],
+  has_location_keyword: ['equals'],
+  wildlife_excluded: ['equals'],
+  location_keyword_missing: ['equals'],
+  inat_submitted: ['equals'],
+  is_duplicate: ['equals'],
+  prediction_confidence: NUMERIC_OPS,
+  classifier_model: ['is', 'is not', 'contains'],
+  prediction_status: ['is', 'is not'],
+  needs_review: ['equals'],
+};
+var FIELD_LABELS = {
+  all: 'All Photos',
+  metadata: 'All metadata',
+  keyword: 'Keyword',
+  species_count: 'Species Count',
+  rating: 'Rating',
+  flag: 'Flag',
+  color_label: 'Color Label',
+  extension: 'Extension',
+  folder: 'Folder',
+  timestamp: 'Date',
+  quality_score: 'Quality Score',
+  sharpness: 'Sharpness',
+  subject_sharpness: 'Subject Sharpness',
+  noise_estimate: 'Noise',
+  crop_complete: 'Crop Complete',
+  has_mask: 'Has Mask',
+  has_jpeg_companion: 'Has JPEG Companion',
+  active_mask_variant: 'Mask Variant',
+  has_gps: 'Has GPS',
+  has_location_keyword: 'Has Location Keyword',
+  wildlife_excluded: 'Not Wildlife',
+  location_keyword_missing: 'GPS Without Location Keyword',
+  inat_submitted: 'iNaturalist Submitted',
+  is_duplicate: 'Duplicate',
+  prediction_confidence: 'Prediction Confidence',
+  classifier_model: 'Classifier Model',
+  prediction_status: 'Prediction Status',
+  needs_review: 'Needs Review',
+};
+var OP_LABELS = {
+  'equals':       'is',
+  'is':           'is',
+  'is not':       'is not',
+  'contains':     'contains',
+  'not_contains': 'does not contain',
+  '>=':           '>=',
+  '<=':           '<=',
+  '>':            '>',
+  '<':            '<',
+  'under':        'under',
+  'not_under':    'not under',
+  'between':      'between',
+  'recent_days':  'in the last',
+};
+
+function defaultValueForRule(field, op) {
+  if (field === 'all') return 1;
+  if (field === 'color_label') return 'red';
+  if (field === 'flag') return 'flagged';
+  if (field === 'rating') return op === 'between' ? [0, 0] : 0;
+  if (NUMERIC_RULE_FIELDS.indexOf(field) !== -1) {
+    return op === 'between' ? [0, 0] : 0;
+  }
+  if (field === 'extension') return collectionExtensions[0] || '';
+  if (field === 'folder') return (collectionFolders[0] && collectionFolders[0].path) || '';
+  if (field === 'timestamp') {
+    if (op === 'between') return ['', ''];
+    if (op === 'recent_days') return 7;
+  }
+  if (field === 'active_mask_variant') return 'sam2-large';
+  if (field === 'prediction_status') return 'pending';
+  if (field === 'wildlife_excluded') return 0;
+  if (['has_mask', 'has_jpeg_companion', 'has_gps', 'has_location_keyword', 'location_keyword_missing',
+       'inat_submitted', 'is_duplicate', 'needs_review'].indexOf(field) !== -1) return 1;
+  return '';
+}
+
+function normalizeCollectionRules(rawRules) {
+  var parsed = rawRules;
+  if (typeof parsed === 'string') {
+    try { parsed = JSON.parse(parsed); } catch (e) { parsed = []; }
+  }
+  if (Array.isArray(parsed)) return {mode: 'all', rules: parsed};
+  if (parsed && typeof parsed === 'object' && Array.isArray(parsed.rules)) {
+    return {
+      mode: (['all', 'any', 'none'].indexOf(parsed.mode) !== -1) ? parsed.mode : 'all',
+      rules: parsed.rules,
+    };
+  }
+  return {mode: 'all', rules: []};
+}
+
+function walkRuleTree(node, fn) {
+  if (!node) return;
+  if (Array.isArray(node)) {
+    node.forEach(function(child) { walkRuleTree(child, fn); });
+    return;
+  }
+  if (node.rules && !node.field) {
+    node.rules.forEach(function(child) { walkRuleTree(child, fn); });
+  } else {
+    fn(node);
+  }
+}
+
+async function loadCollectionEditorSources() {
+  try {
+    var [exts, folders] = await Promise.all([
+      safeFetch('/api/photos/extensions'),
+      safeFetch('/api/folders'),
+    ]);
+    collectionExtensions = Array.isArray(exts) ? exts : [];
+    collectionFolders = Array.isArray(folders) ? folders : [];
+  } catch (e) {
+    collectionExtensions = [];
+    collectionFolders = [];
+  }
+}
+
+async function showCollectionModal(collection) {
+  // Cancel any pending/in-flight preview from a previous session before
+  // resetting state — otherwise a stale response can land on the DOM and
+  // briefly show the previous rule set's count in the freshly opened modal.
+  resetPreviewState();
+  collectionEditingId = collection && collection.id ? collection.id : null;
+  collectionEditorRoot = normalizeCollectionRules(collection ? collection.rules : []);
+  document.getElementById('collectionModalTitle').textContent =
+    collectionEditingId ? 'Edit Smart Collection' : 'New Smart Collection';
+  document.getElementById('collectionSaveBtn').textContent =
+    collectionEditingId ? 'Update' : 'Save';
+  document.getElementById('rulePreview').textContent = '';
+  document.getElementById('collectionName').value = collection ? (collection.name || '') : '';
+  // Clear the rule-row DOM before awaiting the dropdown fetches. Without
+  // this, a slow/failed fetch leaves the previous session's <select>s
+  // visible and interactive while editor state is already reset, so
+  // changing one fires updateRule(idx, ...) against an undefined row and
+  // throws.
+  renderRules();
+  document.getElementById('collectionModal').classList.add('open');
+  await loadCollectionEditorSources();
+  // Backfill any extension/folder rules added during the await: they got
+  // value '' from defaultValueForRule because the source lists were empty.
+  // After fetch, the <select> visually picks the first option but state
+  // still holds '', so save/preview would run with an empty filter.
+  walkRuleTree(collectionEditorRoot, function(r) {
+    if (r.field === 'extension' && !r.value) {
+      r.value = collectionExtensions[0] || '';
+    } else if (r.field === 'folder' && !r.value) {
+      r.value = (collectionFolders[0] && collectionFolders[0].path) || '';
+    }
+  });
+  // Only seed the initial row if the user hasn't already added one (or
+  // dismissed the modal) during the await. Without this guard, a user who
+  // clicks "+ Add Rule" while the fetch is in flight gets a phantom
+  // keyword/contains/"" row tacked on when fetches resolve, silently
+  // changing the saved collection's semantics.
+  if (collectionEditorRoot.rules.length === 0 &&
+      document.getElementById('collectionModal').classList.contains('open')) {
+    addRuleRow();
+  } else {
+    // Re-render so any rows added during the await (which were drawn with
+    // empty extension/folder dropdowns) pick up the freshly-fetched data.
+    renderRules();
+  }
+}
+
+function hideCollectionModal() {
+  resetPreviewState();
+  collectionEditingId = null;
+  document.getElementById('collectionModal').classList.remove('open');
+}
+
+function getRuleContainer(path) {
+  if (!path) return collectionEditorRoot;
+  var parts = path.split('.').filter(Boolean).map(function(p) { return parseInt(p, 10); });
+  var node = collectionEditorRoot;
+  parts.forEach(function(idx) { node = node.rules[idx]; });
+  return node;
+}
+
+function getRuleParent(path) {
+  var parts = path.split('.').filter(Boolean);
+  var idx = parseInt(parts.pop(), 10);
+  var parent = parts.length ? getRuleContainer(parts.join('.')) : collectionEditorRoot;
+  return {parent: parent, index: idx};
+}
+
+function addRuleRow(groupPath) {
+  var group = getRuleContainer(groupPath || '');
+  if (!group.rules) group.rules = [];
+  group.rules.push({field: 'keyword', op: 'contains', value: ''});
+  renderRules();
+}
+
+function addRuleGroup(groupPath) {
+  var group = getRuleContainer(groupPath || '');
+  if (!group.rules) group.rules = [];
+  group.rules.push({mode: 'all', rules: [
+    {field: 'keyword', op: 'contains', value: ''}
+  ]});
+  renderRules();
+}
+
+function removeRule(path) {
+  var ref = getRuleParent(path);
+  ref.parent.rules.splice(ref.index, 1);
+  renderRules();
+}
+
+function updateRule(path, key, val) {
+  var r = getRuleContainer(path);
+  if (!r) return;
+  if (key === 'mode') {
+    r.mode = val;
+    renderRules();
+    return;
+  }
+  if (key === 'field') {
+    r.field = val;
+    delete r.rules;
+    delete r.mode;
+    var ops = FIELD_OPS[val] || [];
+    // If current op isn't valid for the new field, default to the field's
+    // first listed op. Otherwise keep the user's selection.
+    if (ops.indexOf(r.op) === -1) {
+      r.op = ops[0] || '';
+    }
+    r.value = defaultValueForRule(val, r.op);
+    renderRules();
+    return;
+  }
+  if (key === 'op') {
+    var wasPair = r.op === 'between';
+    r.op = val;
+    // The value shape depends on the op: timestamp switches between a date
+    // pair and a day count, and every numeric field switches between a
+    // [low, high] pair and a scalar. Reset when the shape changes, or the
+    // stale shape reaches the backend (a scalar under `between` hit
+    // value[0] in _numeric_condition and 500'd).
+    if (r.field === 'timestamp' || wasPair !== (val === 'between')) {
+      r.value = defaultValueForRule(r.field, val);
+    }
+    renderRules();
+    return;
+  }
+  if (key === 'value_from' && r.op === 'between') {
+    // `|| ''` would rewrite a legitimate 0 bound to blank on a numeric
+    // pair, so keep the other end verbatim unless it's actually missing.
+    if (!Array.isArray(r.value)) r.value = ['', ''];
+    r.value = [val, r.value[1] == null ? '' : r.value[1]];
+    schedulePreviewUpdate();
+    return;
+  }
+  if (key === 'value_to' && r.op === 'between') {
+    if (!Array.isArray(r.value)) r.value = ['', ''];
+    r.value = [r.value[0] == null ? '' : r.value[0], val];
+    schedulePreviewUpdate();
+    return;
+  }
+  r[key] = val;
+  schedulePreviewUpdate();
+}
+
+/* ---------- Live match-count preview ---------- */
+var _previewTimer = null;
+var _previewSeq = 0;
+
+function schedulePreviewUpdate() {
+  if (_previewTimer) clearTimeout(_previewTimer);
+  _previewTimer = setTimeout(updatePreviewNow, 250);
+}
+
+function resetPreviewState() {
+  // Bump the sequence so any in-flight fetch's response is discarded as
+  // stale, and cancel any pending debounced call. Used when the modal
+  // opens or closes so a previous session can't write into a new one.
+  if (_previewTimer) {
+    clearTimeout(_previewTimer);
+    _previewTimer = null;
+  }
+  _previewSeq++;
+}
+
+async function updatePreviewNow() {
+  _previewTimer = null;
+  var el = document.getElementById('rulePreview');
+  if (!el) return;
+  var rules = serializeCollectionRules();
+  var seq = ++_previewSeq;
+  try {
+    var data = await safeFetch('/api/collections/preview', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({rules: rules}),
+    }, {toast: false});
+    if (seq !== _previewSeq) return;  // stale response
+    if (data && typeof data.count === 'number') {
+      el.textContent = 'Matches: ' + data.count + ' photo' + (data.count === 1 ? '' : 's');
+    } else {
+      el.textContent = '';
+    }
+  } catch (e) {
+    if (seq === _previewSeq) el.textContent = '';
+  }
+}
+
+function commitRuleOnEnter(e) {
+  if (e.key !== 'Enter' || e.isComposing || e.keyCode === 229) return;
+  var t = e.currentTarget || e.target;
+  if (t && t.type === 'date') {
+    // Native date pickers use Enter to commit the highlighted date;
+    // cancelling it would close the picker without applying the selection.
+    // Defer the blur so the picker's own Enter handler runs first.
+    setTimeout(function() { t.blur(); }, 0);
+    return;
+  }
+  e.preventDefault();
+  t.blur();
+}
+
+function renderRuleValueInput(r, i) {
+  var p = escapeAttr(i);
+  if (r.field === 'all') {
+    return '<span style="flex:1;color:var(--text-ghost);font-size:12px;">Matches every photo in this workspace</span>';
+  }
+  if (['has_mask', 'has_jpeg_companion', 'has_gps', 'has_location_keyword', 'wildlife_excluded',
+       'location_keyword_missing', 'inat_submitted', 'is_duplicate',
+       'needs_review'].indexOf(r.field) !== -1) {
+    var boolVal = (r.value === true || r.value === 1 || r.value === '1' || r.value === 'true') ? '1' : '0';
+    return '<select onchange="updateRule(\'' + p + '\',\'value\',this.value)" style="flex:1;">' +
+        '<option value="1"' + (boolVal==='1'?' selected':'') + '>Yes</option>' +
+        '<option value="0"' + (boolVal==='0'?' selected':'') + '>No</option>' +
+      '</select>';
+  }
+  if (r.field === 'color_label') {
+    return '<select onchange="updateRule(\'' + p + '\',\'value\',this.value)" style="flex:1;">' +
+        '<option value="red"' + (r.value==='red'?' selected':'') + '>Red</option>' +
+        '<option value="yellow"' + (r.value==='yellow'?' selected':'') + '>Yellow</option>' +
+        '<option value="green"' + (r.value==='green'?' selected':'') + '>Green</option>' +
+        '<option value="blue"' + (r.value==='blue'?' selected':'') + '>Blue</option>' +
+        '<option value="purple"' + (r.value==='purple'?' selected':'') + '>Purple</option>' +
+      '</select>';
+  }
+  if (r.field === 'flag') {
+    return '<select onchange="updateRule(\'' + p + '\',\'value\',this.value)" style="flex:1;">' +
+        '<option value="flagged"' + (r.value==='flagged'?' selected':'') + '>Pick</option>' +
+        '<option value="rejected"' + (r.value==='rejected'?' selected':'') + '>Reject</option>' +
+        '<option value="none"' + (r.value==='none'?' selected':'') + '>No flag</option>' +
+      '</select>';
+  }
+  if (r.field === 'prediction_status') {
+    return '<select onchange="updateRule(\'' + p + '\',\'value\',this.value)" style="flex:1;">' +
+        '<option value="pending"' + (r.value==='pending'?' selected':'') + '>Pending</option>' +
+        '<option value="accepted"' + (r.value==='accepted'?' selected':'') + '>Accepted</option>' +
+        '<option value="rejected"' + (r.value==='rejected'?' selected':'') + '>Rejected</option>' +
+      '</select>';
+  }
+  if (r.field === 'extension') {
+    // Extension dropdown is sourced from /api/photos/extensions for the
+    // active workspace. If the current rule value isn't in that list
+    // (legacy rule, freshly switched field), include it as a sticky
+    // option so the user can see+keep it instead of having it silently
+    // snap to the first known extension on next render.
+    return '<select onchange="updateRule(\'' + p + '\',\'value\',this.value)" style="flex:1;">' +
+        (collectionExtensions.length === 0
+          ? '<option value="">(no extensions yet — scan a folder)</option>'
+          : '') +
+        (r.value && collectionExtensions.indexOf(r.value) === -1
+          ? '<option value="' + escapeAttr(String(r.value)) + '" selected>' + escapeHtml(String(r.value)) + '</option>'
+          : '') +
+        collectionExtensions.map(function(ext) {
+          return '<option value="' + escapeAttr(ext) + '"' + (r.value===ext?' selected':'') + '>' + escapeHtml(ext) + '</option>';
+        }).join('') +
+      '</select>';
+  }
+  if (r.field === 'folder') {
+    // Folder dropdown shows the path (full path is the value the
+    // backend matches with f.path LIKE ?). Display is the path too —
+    // basenames collide across folders and a smart-collection author
+    // can't disambiguate "January" between /2023/January and /2024.
+    var paths = collectionFolders.map(function(f){ return f.path; });
+    var stickyFolder = (r.value && paths.indexOf(r.value) === -1)
+      ? '<option value="' + escapeAttr(String(r.value)) + '" selected>' + escapeHtml(String(r.value)) + '</option>'
+      : '';
+    return '<select onchange="updateRule(\'' + p + '\',\'value\',this.value)" style="flex:1;">' +
+        (collectionFolders.length === 0
+          ? '<option value="">(no folders in this workspace)</option>'
+          : '') +
+        stickyFolder +
+        collectionFolders.map(function(f) {
+          return '<option value="' + escapeAttr(f.path) + '"' + (r.value===f.path?' selected':'') + '>' + escapeHtml(f.path) + '</option>';
+        }).join('') +
+      '</select>';
+  }
+  if (r.field === 'timestamp') {
+    if (r.op === 'between') {
+      var from = Array.isArray(r.value) ? (r.value[0] || '') : '';
+      var to   = Array.isArray(r.value) ? (r.value[1] || '') : '';
+      return '<div style="flex:1;display:flex;gap:6px;align-items:center;">' +
+          '<input type="date" value="' + escapeAttr(from) + '" onchange="updateRule(\'' + p + '\',\'value_from\',this.value)" onkeydown="commitRuleOnEnter(event)" style="flex:1;">' +
+          '<span style="color:var(--text-ghost);font-size:11px;">and</span>' +
+          '<input type="date" value="' + escapeAttr(to) + '" onchange="updateRule(\'' + p + '\',\'value_to\',this.value)" onkeydown="commitRuleOnEnter(event)" style="flex:1;">' +
+        '</div>';
+    }
+    if (r.op === 'recent_days') {
+      var n = (typeof r.value === 'number' || (typeof r.value === 'string' && r.value !== '')) ? r.value : 7;
+      return '<div style="flex:1;display:flex;gap:6px;align-items:center;">' +
+          '<input type="number" min="1" value="' + escapeAttr(String(n)) + '" onchange="updateRule(\'' + p + '\',\'value\',this.value)" onkeydown="commitRuleOnEnter(event)" style="width:80px;">' +
+          '<span style="color:var(--text-ghost);font-size:11px;">days</span>' +
+        '</div>';
+    }
+  }
+  var numeric = NUMERIC_RULE_FIELDS.indexOf(r.field) !== -1;
+  if (numeric && r.op === 'between') {
+    // Two inputs, matching the [low, high] pair the backend expects. A
+    // single input here dropped the upper bound on save.
+    var lo = Array.isArray(r.value) ? (r.value[0] == null ? '' : r.value[0]) : '';
+    var hi = Array.isArray(r.value) ? (r.value[1] == null ? '' : r.value[1]) : '';
+    return '<div style="flex:1;display:flex;gap:6px;align-items:center;">' +
+        '<input type="number" step="any" value="' + escapeAttr(String(lo)) + '" onchange="updateRule(\'' + p + '\',\'value_from\',this.value)" onkeydown="commitRuleOnEnter(event)" style="flex:1;">' +
+        '<span style="color:var(--text-ghost);font-size:11px;">and</span>' +
+        '<input type="number" step="any" value="' + escapeAttr(String(hi)) + '" onchange="updateRule(\'' + p + '\',\'value_to\',this.value)" onkeydown="commitRuleOnEnter(event)" style="flex:1;">' +
+      '</div>';
+  }
+  return '<input type="' + (numeric ? 'number' : 'text') + '" value="' +
+    escapeAttr(String(r.value == null ? '' : r.value)) +
+    '" onchange="updateRule(\'' + p + '\',\'value\',this.value)"' +
+    ' onkeydown="commitRuleOnEnter(event)"' +
+    ' placeholder="value" style="flex:1;">';
+}
+
+function renderFieldOptions(selected) {
+  return Object.keys(FIELD_LABELS).map(function(field) {
+    return '<option value="' + escapeAttr(field) + '"' + (selected === field ? ' selected' : '') + '>' +
+      escapeHtml(FIELD_LABELS[field]) + '</option>';
+  }).join('');
+}
+
+function renderRuleNode(node, path, depth) {
+  var p = escapeAttr(path);
+  var indent = Math.min(depth, 4) * 12;
+  if (node.rules && !node.field) {
+    var groupHtml = '<div style="margin-left:' + indent + 'px;margin-bottom:8px;padding:8px;border:1px solid var(--border-subtle);border-radius:4px;">' +
+      '<div class="rule-row" style="margin-bottom:6px;">' +
+      '<span style="font-size:12px;color:var(--text-dim);">Match</span>' +
+      '<select onchange="updateRule(\'' + p + '\',\'mode\',this.value)">' +
+        '<option value="all"' + (node.mode==='all'?' selected':'') + '>all</option>' +
+        '<option value="any"' + (node.mode==='any'?' selected':'') + '>any</option>' +
+        '<option value="none"' + (node.mode==='none'?' selected':'') + '>none</option>' +
+      '</select>' +
+      '<span style="font-size:12px;color:var(--text-dim);flex:1;">of these rules</span>';
+    if (path) {
+      groupHtml += '<span class="remove-rule" onclick="removeRule(\'' + p + '\')">&times;</span>';
+    }
+    groupHtml += '</div>';
+    (node.rules || []).forEach(function(child, idx) {
+      groupHtml += renderRuleNode(child, path ? path + '.' + idx : String(idx), depth + 1);
+    });
+    groupHtml += '<button onclick="addRuleRow(\'' + p + '\')" style="background:var(--bg-tertiary);color:var(--info);border:none;border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer;margin-right:4px;">+ Rule</button>' +
+      '<button onclick="addRuleGroup(\'' + p + '\')" style="background:var(--bg-tertiary);color:var(--info);border:none;border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer;">+ Group</button>' +
+      '</div>';
+    return groupHtml;
+  }
+  var ops = FIELD_OPS[node.field] || [];
+  var opOptions = ops.map(function(op) {
+    var label = OP_LABELS[op] || op;
+    return '<option value="' + escapeAttr(op) + '"' + (node.op===op?' selected':'') + '>' + escapeHtml(label) + '</option>';
+  }).join('');
+  return '<div class="rule-row" style="margin-left:' + indent + 'px;">' +
+    '<select onchange="updateRule(\'' + p + '\',\'field\',this.value)">' +
+      renderFieldOptions(node.field) +
+    '</select>' +
+    '<select onchange="updateRule(\'' + p + '\',\'op\',this.value)">' +
+      opOptions +
+    '</select>' +
+    renderRuleValueInput(node, path) +
+    '<span class="remove-rule" onclick="removeRule(\'' + p + '\')">&times;</span>' +
+  '</div>';
+}
+
+function renderRules() {
+  document.getElementById('ruleRows').innerHTML = renderRuleNode(collectionEditorRoot, '', 0);
+  schedulePreviewUpdate();
+}
+
+function coerceRuleForSave(node) {
+  function num(v) {
+    var n = parseFloat(v);
+    return isNaN(n) ? 0 : n;
+  }
+  if (node.rules && !node.field) {
+    return {
+      mode: (['all', 'any', 'none'].indexOf(node.mode) !== -1) ? node.mode : 'all',
+      rules: (node.rules || []).map(coerceRuleForSave),
+    };
+  }
+  var val = node.value;
+  if (NUMERIC_RULE_FIELDS.indexOf(node.field) !== -1) {
+    if (node.op === 'between') {
+      var pair = Array.isArray(val) ? val : [val, val];
+      val = [num(pair[0]), num(pair[1])];
+    } else {
+      val = num(val);
+    }
+  } else if (['has_mask', 'has_jpeg_companion', 'has_gps', 'has_location_keyword',
+              'location_keyword_missing', 'inat_submitted', 'is_duplicate',
+              'needs_review', 'all'].indexOf(node.field) !== -1) {
+    val = (val === true || val === 1 || val === '1' || val === 'true') ? 1 : 0;
+  } else if (node.field === 'timestamp' && node.op === 'recent_days') {
+    val = parseInt(val, 10) || 0;
+  } else if (node.field === 'timestamp' && node.op === 'between') {
+      var from = Array.isArray(val) ? (val[0] || '') : '';
+      var to   = Array.isArray(val) ? (val[1] || '') : '';
+      val = [from, to];
+  }
+  return {field: node.field, op: node.op, value: val};
+}
+
+function serializeCollectionRules() {
+  return coerceRuleForSave(collectionEditorRoot);
+}
+
+async function editCollection(cid) {
+  var collection = collectionsById[cid];
+  if (!collection) {
+    var list = await safeFetch('/api/collections', {}, {toast: false});
+    renderCollectionList(list || []);
+    collection = collectionsById[cid];
+  }
+  if (collection) showCollectionModal(collection);
+}
+
+async function saveCollection() {
+  var name = document.getElementById('collectionName').value.trim();
+  if (!name) return;
+  var rules = serializeCollectionRules();
+
+  try {
+    var url = collectionEditingId ? '/api/collections/' + collectionEditingId : '/api/collections';
+    // This modal only edits rules — the preview and controls never surface
+    // the stored visual clause. When editing an existing visual collection,
+    // leaving visual_json in place would silently apply a hidden visual
+    // prompt on reopen that the user just previewed without (Codex review
+    // r3623087112). Clear it so the saved collection matches the preview.
+    var body = {name: name, rules: rules};
+    if (collectionEditingId) body.visual = null;
+    await safeFetch(url, {
+      method: collectionEditingId ? 'PUT' : 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    hideCollectionModal();
+    loadCollections();
+    loadCollectionCounts();
+  } catch(e) {}
+}
+
+/* ---------- Photo Loading ---------- */
+
+/* Browse's grid window is four variables that only make sense together:
+   ``photos``, ``currentPage``, ``earliestPage`` and ``allLoaded`` describe one
+   contiguous slice of one dataset. Any async path that writes them has to
+   prove, after every await, that no newer load has taken the window over in
+   the meantime — otherwise a response from an abandoned dataset paints into a
+   window that has since changed (unscoped workspace rows appended to a
+   folder-scoped grid, an ``earliestPage`` banner counting photos from a
+   dataset that is no longer on screen). ``loadEpoch`` is that generation
+   counter; these two helpers are the only supported way to use it, so every
+   guard is written the same way instead of re-deriving the comparison at each
+   call site (Codex reviews r3792693920 and r3792769108).
+
+     claimBrowseWindow()   — take ownership. Advances loadEpoch, which
+                             invalidates every load already in flight. Use
+                             when about to replace the dataset: reset, folder
+                             switch, deep link, bootstrap.
+     observeBrowseWindow() — follow the current owner without displacing it.
+                             Use when extending a window somebody else already
+                             claimed (loadPhotos appending the next page).
+
+   Both return a zero-arg predicate; call it after each await, before touching
+   window state, releasing ``loading``, or rendering. */
+function claimBrowseWindow() {
+  return observeBrowseWindow(++loadEpoch);
+}
+function observeBrowseWindow(epoch) {
+  var claimedEpoch = (epoch === undefined) ? loadEpoch : epoch;
+  return function() { return loadEpoch === claimedEpoch; };
+}
+
+async function refreshBrowseWindowInPlace() {
+  var windowIsCurrent = claimBrowseWindow();
+  selectAllRequestSeq++;
+  loading = true;
+  var firstPage = earliestPage;
+  var nextPhotos = [];
+  var data;
+  var page = firstPage;
+  var succeeded = false;
+  var scrollContainer = null;
+  var previousOverflowAnchor;
+
+  function neededEndPage() {
+    var viewport = document.getElementById('gridContainer').getBoundingClientRect();
+    var anchor = captureBrowseViewportAnchor();
+    // No real card on screen means the user reached the placeholder tail;
+    // retain the loaded prefix beneath that position rather than truncating it.
+    var lastIndex = anchor ? Math.max(0, anchor.index) : Math.max(0, photos.length - 1);
+    var cards = document.querySelectorAll('#grid > .grid-card');
+    for (var i = lastIndex; i < cards.length; i++) {
+      if (cards[i].getBoundingClientRect().top >= viewport.bottom) break;
+      lastIndex = i;
+    }
+    // Keep selected photos too, including selected members of a stack. The
+    // rest of the historical tail can return through ordinary lazy loading.
+    photos.forEach(function(photo, index) {
+      if (photo.id === selectedPhotoId || selectedPhotos.has(photo.id)
+          || (photo.browse_stack && photo.browse_stack.photo_ids.some(function(id) {
+            return id === selectedPhotoId || selectedPhotos.has(id);
+          }))) lastIndex = Math.max(lastIndex, index);
+    });
+    // One extra page provides room for rows to fill the gaps after removals.
+    return Math.max(firstPage, Math.min(currentPage - 1,
+      firstPage + Math.floor(lastIndex / perPage) + 1));
+  }
+
+  async function stageNeededPages() {
+    // Re-evaluate the live viewport after every await. A user can scroll
+    // farther while either pages or expanded stack members are being fetched.
+    while (windowIsCurrent() && page <= neededEndPage()
+        && (!data || (page - 1) * perPage < data.total)) {
+      var chunk = Math.max(1, Math.min(Math.floor(500 / perPage), neededEndPage() - page + 1));
+      while ((page - 1) % chunk !== 0) chunk--;
+      var request = buildBrowsePageRequest((page - 1) / chunk + 1, perPage * chunk);
+      data = await safeFetch(request.url, request.options);
+      if (!windowIsCurrent()) return false;
+      if (data.total === 0) {
+        firstPage = 1;
+        page = 1;
+        nextPhotos = [];
+        break;
+      }
+      // A batch removal may have eliminated the entire focused window.
+      // Fetch the new last page instead of leaving a nonempty library blank.
+      if (page === firstPage && page > 1 && !data.photos.length && data.total > 0) {
+        firstPage = Math.max(1, Math.ceil(data.total / perPage));
+        page = firstPage;
+        continue;
+      }
+      nextPhotos = nextPhotos.concat(data.photos);
+      page += chunk;
+      if ((page - 1) * perPage >= data.total || !data.photos.length) break;
+    }
+    return windowIsCurrent();
+  }
+
+  try {
+    // Keep expanded stacks open when their surviving members still form a
+    // stack, even if its cover changed. Hydrate them before the atomic paint
+    // so a loading tray cannot temporarily shrink the grid under the user.
+    function expandedMemberIds() {
+      var ids = new Set();
+      photos.forEach(function(photo) {
+        if (expandedBrowseStacks.has(photo.id) && photo.browse_stack) {
+          photo.browse_stack.photo_ids.forEach(function(id) { ids.add(id); });
+        }
+      });
+      return ids;
+    }
+    var nextMembers = {};
+    var matchingIds = null;
+    while (true) {
+      if (await stageNeededPages() !== true || !windowIsCurrent()) return null;
+      // Recheck after each request so opening another stack while waiting
+      // doesn't cause that newly opened tray to collapse on commit.
+      var expandedIds = expandedMemberIds();
+      var photo = nextPhotos.find(function(candidate) {
+        return candidate.browse_stack && !nextMembers[candidate.id]
+          && candidate.browse_stack.photo_ids.some(function(id) { return expandedIds.has(id); });
+      });
+      if (!photo) {
+        // Selected IDs outside this page may still match: Select all includes
+        // unloaded photos, and a confidence change can move a selected photo
+        // to another page. Check membership without loading the whole grid.
+        var stagedIds = new Set();
+        nextPhotos.forEach(function(candidate) {
+          if (!browsePhotoIsAvailable(candidate)) return;
+          stagedIds.add(candidate.id);
+          if (candidate.browse_stack) candidate.browse_stack.photo_ids.forEach(function(id) {
+            stagedIds.add(id);
+          });
+        });
+        if (matchingIds === null && data.total > 0 && Array.from(selectedPhotos).some(function(id) {
+          return !stagedIds.has(id);
+        })) {
+          var idsRequest = buildBrowseIdsRequest();
+          var idsData = await safeFetch(idsRequest.url, idsRequest.options);
+          if (!windowIsCurrent()) return null;
+          matchingIds = new Set(idsData.photo_ids || idsData.ids || []);
+          // Scrolling, selection, or stack expansion may have changed while
+          // waiting. Stage any newly needed pages before the atomic paint.
+          continue;
+        }
+        break;
+      }
+      var memberIds = photo.browse_stack.photo_ids;
+      var members = [];
+      for (var offset = 0; offset < memberIds.length; offset += 500) {
+        var memberData = await safeFetch('/api/photos/by-ids', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({photo_ids: memberIds.slice(offset, offset + 500)}),
+        });
+        if (!windowIsCurrent()) return null;
+        members = members.concat(memberData.photos || []);
+      }
+      nextMembers[photo.id] = members.map(function(member) {
+        return member.id === photo.id ? photo : member;
+      });
+    }
+
+    // Capture position and selection at commit time: scrolling or clicking
+    // during the request must not be undone by its eventual response.
+    var container = document.getElementById('gridContainer');
+    var scrollTop = container.scrollTop;
+    // Only the synchronous replacement owns scroll position. Other updates,
+    // such as a stack finishing loading above the viewport, still need the
+    // browser's normal scroll anchoring.
+    scrollContainer = container;
+    previousOverflowAnchor = container.style.overflowAnchor;
+    container.style.overflowAnchor = 'none';
+    var stillExpandedIds = expandedMemberIds();
+    expandedBrowseStacks.clear();
+    nextPhotos.forEach(function(photo) {
+      if (photo.similarity != null) photo._similarity = photo.similarity;
+      if (nextMembers[photo.id] && photo.browse_stack.photo_ids.some(function(id) {
+        return stillExpandedIds.has(id);
+      })) expandedBrowseStacks.add(photo.id);
+    });
+    browseStackMembers = nextMembers;
+    browseStackErrors = {};
+    browseStackHydrationRequests = {};
+    browseStackExpansionRequests = {};
+    browseStackCoverRecheck.clear();
+    // The lightbox shares this array; retain its identity across the refresh.
+    photos.length = 0;
+    nextPhotos.forEach(function(photo) { photos.push(photo); });
+    earliestPage = firstPage;
+    currentPage = page;
+    setBrowseTotals(data);
+    allLoaded = loadedWindowOffset() + photos.length >= totalPhotos;
+    syncBrowseAvailableLightboxPhotos();
+
+    var availableIds = matchingIds || new Set();
+    if (matchingIds === null) photos.forEach(function(photo) {
+      if (!browsePhotoIsAvailable(photo)) return;
+      availableIds.add(photo.id);
+      if (photo.browse_stack) photo.browse_stack.photo_ids.forEach(function(id) {
+        availableIds.add(id);
+      });
+    });
+    selectedPhotos.forEach(function(id) {
+      if (!availableIds.has(id)) selectedPhotos.delete(id);
+    });
+    if (selectedPhotoId != null && !availableIds.has(selectedPhotoId)) closeDetail();
+    var selectedCover = loadedBrowseStackCoverForPhoto(selectedPhotoId);
+    selectedIndex = photos.findIndex(function(photo) {
+      return photo.id === selectedPhotoId || (selectedCover && photo.id === selectedCover.id);
+    });
+    if (selectedPhotoId == null && selectedPhotos.size === 0) hideDetailPanel();
+
+    renderGrid({ preserveThumbnails: true });
+    updateGridTail();
+    updatePreviousPhotosButton();
+    updateOfflineCollectionState(data);
+    if (window.VireoFilter && VireoFilter.setResultTotal) VireoFilter.setResultTotal(totalUnderlyingPhotos);
+    if (window.VireoFilter && VireoFilter.setVisualInfo) VireoFilter.setVisualInfo(data.visual || null);
+    updateFilterSummary();
+    updateBatchBar();
+    _refreshBatchInspectorIfActive();
+    refreshBrowseLightboxCounter();
+    // Setting this synchronously prevents an intermediate frame at the top.
+    // The browser only clamps it when the remaining results are too short.
+    container.scrollTop = scrollTop;
+    updateScrollPosition();
+    var refreshIds = photos.map(function(photo) { return photo.id; });
+    loadInatStatus(refreshIds).then(function() {
+      if (windowIsCurrent()) refreshGridCards(refreshIds);
+    });
+    fetchColorLabels(refreshIds).then(function() {
+      if (windowIsCurrent()) refreshGridCards(refreshIds);
+    });
+    succeeded = true;
+    return true;
+  } catch (e) {
+    // safeFetch reports the error. Leave the existing grid and selection
+    // usable rather than replacing them with a partial response.
+    return windowIsCurrent() ? false : null;
+  } finally {
+    if (scrollContainer) scrollContainer.style.overflowAnchor = previousOverflowAnchor;
+    if (windowIsCurrent()) {
+      loading = false;
+      if (succeeded) {
+        rearmInfiniteScrollObserver();
+        requestAnimationFrame(ensureViewportHydrated);
+      }
+    }
+  }
+}
+
+// Both normal Browse and photo deep links initialize the shared filter bar.
+// Keep their reload behavior identical for every way of removing filters.
+function browseFilterReloadOptions(info) {
+  var reason = info && info.reason;
+  // Removing a filter should keep the photo in view. A removal in an
+  // OR/NOT expression can also exclude it, so ask the server for its new
+  // position instead of scanning the catalog to find it.
+  if (['quickSearchCleared', 'filtersCleared', 'filterRemoved', 'filtersPaused'].includes(reason)) {
+    return { preserveAnchor: true, focusAnchor: true, preserveViewport: true };
+  }
+  // Loading a saved expression replaces the result set wholesale, so the
+  // anchor's old position says nothing about where it landed — or whether
+  // the expression contains it at all. Ask the server, the same way a
+  // re-sort does; paging towards it would walk the replacement result set
+  // (Codex P1 on PR #1695).
+  if (reason === 'expressionLoaded') {
+    return { preserveAnchor: true, focusAnchor: true };
+  }
+  // A membership-change refresh re-runs the expression already on screen.
+  if (reason === 'expressionRefreshed') return { preserveScroll: true };
+}
+
+/* The photos a focused reload may be placed by, in lookup-sized chunks.
+
+   The card the user is holding comes first; for a stack the other frames
+   they picked follow, because any of them places the same card. Chunked to
+   what one lookup accepts, and never emptied by that bound — the frames
+   past the first chunk are asked about in a further lookup, not discarded
+   (Codex P2 on PR #1695). Empty when the reload has no anchor to place or
+   is not a focused one. */
+function browseFocusCandidateChunks(anchor, focusAnchor) {
+  if (!anchor || !focusAnchor) return [];
+  var candidates = [anchor.photoId];
+  if (anchor.stackSelection && anchor.stackIds) {
+    anchor.stackIds.forEach(function(id) {
+      if (id != null && id !== anchor.photoId) candidates.push(id);
+    });
+  }
+  var chunks = [];
+  for (var at = 0; at < candidates.length; at += BROWSE_MAX_FOCUS_CANDIDATES) {
+    chunks.push(candidates.slice(at, at + BROWSE_MAX_FOCUS_CANDIDATES));
+  }
+  return chunks;
+}
+
+/* Drop the loaded window — the pages, their stack caches, and the paging
+   cursors — so the next load starts a fresh contiguous window. Selection,
+   collection scope and anchors are the caller's business. */
+function clearBrowseLoadedWindow() {
+  browseDatasetReady = false;
+  expandedBrowseStacks.clear();
+  browseStackMembers = {};
+  browseStackErrors = {};
+  browseStackHydrationRequests = {};
+  browseStackExpansionRequests = {};
+  browseStackCoverRecheck.clear();
+  photos = [];
+  currentPage = 1;
+  allLoaded = false;
+  earliestPage = 1;
+  updatePreviousPhotosButton();
+}
+
+async function resetAndLoad(options) {
+  // Membership edits keep the current window on screen until its replacement
+  // is complete. A reset followed by anchor restoration still paints page 1
+  // while the remaining pages load, even if the final position is correct.
+  if (options && options.preserveScroll && photos.length && browseDatasetReady) {
+    return refreshBrowseWindowInPlace();
+  }
+  var preserveAnchor = !!(options && options.preserveAnchor);
+  // Callers that need the current collection scope to survive a reset
+  // (folder-health refresh) pass ``preserveCollection: true``. Without it
+  // the default clear below would drop a normal (non-dashboard) collection
+  // and send the user back to the unscoped workspace grid.
+  var preserveCollection = !!(options && options.preserveCollection);
+  var preserveScroll = !!(options && options.preserveScroll);
+  // ``focusAnchor``: resolve the anchor's new position server-side instead of
+  // paging forward until it shows up. Re-sorts and filter removals can move
+  // the photo far from its old index, or remove it from the results entirely.
+  var focusAnchor = !!(options && options.focusAnchor);
+  // Try the single-photo anchor whenever a caller has asked us to keep the
+  // user's place — ``preserveAnchor`` (explicit) or ``preserveScroll`` (the
+  // membership-change fallback that has no photo of its own to focus on).
+  // ``captureSelectedPhotoAnchor`` declines when a multi-selection is
+  // active, so the batch-tagging case still falls through to the viewport
+  // anchor below; when a single photo is selected and the edit did not
+  // remove it, restoring the selection and detail panel matches the
+  // documented fallback behavior (Codex review r4012897727).
+  var anchor = (preserveAnchor || preserveScroll)
+    ? captureSelectedPhotoAnchor()
+    : null;
+  // A reload arriving while a focused one is still in flight has nothing to
+  // capture from the DOM — the older reload cleared the selection and tore
+  // down the cards synchronously before its await. The target it was aiming
+  // at is still the target, so forward it rather than dropping back to page 1
+  // (Codex review r4021334323).
+  //
+  // What decides whether the anchor may be forwarded is the *scope*, not who
+  // is asking. A sidebar folder/keyword/collection click bumps
+  // ``browseScopeGen``, and the photo then belongs to the view the user left
+  // — keeping it there would resurrect a selection the scope change
+  // deliberately cleared. Everything else is the same dataset: a second sort
+  // change, and equally a folder-health refresh or a cleared quick search,
+  // both of which ask to keep the user's place via ``preserveAnchor`` and
+  // would otherwise invalidate the in-flight sort and lose its selection for
+  // good (Codex reviews on PR #1658).
+  if (pendingFocusAnchor && pendingFocusAnchorScopeGen !== browseScopeGen) {
+    pendingFocusAnchor = null;
+  }
+  // A reset that isn't focused and asks for no preservation is an intentional
+  // selection clear — applying or narrowing a filter, for example. That path
+  // does not bump ``browseScopeGen`` (the folder/collection are unchanged),
+  // so the scope-generation guard above cannot see it; without dropping the
+  // holder here, a following focused sort would adopt the stale anchor and
+  // resurrect a selection the intervening reset just cleared, whenever the
+  // photo still matched the new filter (Codex review r4021838076).
+  if (!focusAnchor && !preserveAnchor && !preserveScroll) {
+    pendingFocusAnchor = null;
+  }
+  if (!anchor && (focusAnchor || preserveAnchor) && pendingFocusAnchor) {
+    anchor = pendingFocusAnchor;
+  }
+  // A person browsing without a single selection still has a place in the
+  // grid. Focus the first visible card without turning it into a selection.
+  if (!anchor && options && options.preserveViewport) {
+    anchor = captureBrowseViewportAnchor();
+    if (anchor) anchor.viewportOnly = true;
+  }
+  if (focusAnchor) {
+    pendingFocusAnchor = anchor;
+    pendingFocusAnchorScopeGen = browseScopeGen;
+    focusReloadInFlight++;
+  }
+  var restoreEpoch = anchor ? ++anchorRestoreEpoch : null;
+  // Membership-change reloads (``preserveScroll``) can arrive after an edit
+  // that removed the selected photo from the filter — untagging its only
+  // matching keyword, say. Capture the viewport anchor alongside the
+  // selected-photo one so that when the paged scan below runs out of
+  // budget without finding the id, we can still hold position instead of
+  // resetting to ``scrollTop = 0`` (Codex review r4013123608).
+  var scrollAnchor = preserveScroll
+    ? captureBrowseViewportAnchor()
+    : null;
+  clearBrowseLoadedWindow();
+  var resetWindowIsCurrent = claimBrowseWindow();
+  selectAllRequestSeq++;
+  loading = false;
+  // Dataset is about to change; any prior selection (multi-select Set or
+  // single-focus id) points at photos that may not exist in the new view.
+  // Leaving them set would let updateBatchBar() keep showing "N selected"
+  // and arm batch actions (delete/export/develop) against stale ids.
+  selectedPhotos.clear();
+  selectedPhotoId = null;
+  selectedIndex = -1;
+  // Leaving collection mode when applying non-collection filters (sort, rating,
+  // date, keyword, folder) so the summary stays in sync with the visible grid.
+  // Dashboard-scoped collections are the exception: there the collection is an
+  // explicit composable restriction that filters combine WITH, so it must
+  // survive filter-driven reloads (dashboard drill-down deep links).
+  if (!dashboardCollectionScope && !preserveCollection) activeCollectionId = null;
+  var preservedCollectionId = preserveCollection ? activeCollectionId : null;
+  if (anchor) hideDetailPanel();
+  else closeDetail();
+  document.getElementById('grid').innerHTML = '';
+  document.getElementById('gridContainer').scrollTop = 0;
+
+  function resetRequestIsCurrent() {
+    if (!resetWindowIsCurrent()) return false;
+    if (activeCollectionId == null) return true;
+    if (dashboardCollectionScope) return true;
+    // Explicitly preserved collection: the reset is still current as long as
+    // the caller-chosen scope hasn't been replaced by a newer sidebar click.
+    if (preserveCollection && activeCollectionId === preservedCollectionId) return true;
+    return false;
+  }
+  function anchorScanShouldContinue() {
+    return resetRequestIsCurrent() && anchorRestoreEpoch === restoreEpoch;
+  }
+
+  if (anchor || scrollAnchor) anchorScanDepth++;
+  try {
+    // A stack anchor offers every frame the user picked, so the reload can
+    // be placed by one it kept even when the frame we aimed at is gone
+    // (Codex P2 on PR #1695). One lookup takes a bounded number of
+    // candidates — they become bound parameters in one ``IN`` clause — and
+    // nothing bounds how many frames a burst holds, so the frames past that
+    // are asked about in a further lookup rather than dropped: a saved
+    // expression can keep exactly the tail of a long burst (the few frames
+    // the user rated, say) and that is still the selection it should
+    // restore. Only a chunk that places nothing costs another request, so
+    // every stack short enough to ask about at once — which is all of them,
+    // in practice — is one request, as before.
+    var focusChunks = browseFocusCandidateChunks(anchor, focusAnchor);
+    var initialLoadStatus;
+    for (var chunkAt = 0; chunkAt < Math.max(1, focusChunks.length); chunkAt++) {
+      var chunk = focusChunks[chunkAt];
+      if (chunkAt > 0) {
+        // Start the replacement window clean, exactly as this reset did.
+        clearBrowseLoadedWindow();
+        document.getElementById('grid').innerHTML = '';
+      }
+      initialLoadStatus = await loadPhotos(
+        chunk ? { focusPhotoId: chunk[0], focusPhotoIds: chunk.slice(1) } : undefined
+      );
+      if (initialLoadStatus !== true) return initialLoadStatus;
+      if (!resetRequestIsCurrent()) return null;
+      if (!chunk || browseResolvedFocusPhotoId != null) break;
+    }
+    // The frame the server placed the page by becomes the anchor: it is the
+    // card the restore selects around and the one the scroll holds onto.
+    // Resolved to the top-level card it is part of, because the anchor is a
+    // lookup target as well as a selection: handed a hidden frame,
+    // ``loadUntilPhotoRendered`` would expand that stack's tray to reach it,
+    // so a plain re-sort would leave the collapsed stack the user selected
+    // standing open (Codex P2 on PR #1695).
+    if (anchor && focusAnchor && browseResolvedFocusPhotoId != null) {
+      var resolvedCover = anchor.stackSelection
+        ? loadedBrowseStackCoverForPhoto(browseResolvedFocusPhotoId)
+        : null;
+      anchor.photoId = resolvedCover
+        ? resolvedCover.id
+        : browseResolvedFocusPhotoId;
+    }
+    if (!anchor) {
+      if (scrollAnchor) {
+        await restoreBrowseViewportAnchor(scrollAnchor, resetRequestIsCurrent);
+      }
+      return true;
+    }
+
+    // A focused load has already been served the anchor's page: the server
+    // resolved its position under the same grouping the page fetch uses, so
+    // there is nothing left to search for. Budget 0 confines the lookup to
+    // the pages in hand — still enough to expand a stack tray around a
+    // hidden member — instead of paging towards a photo that is either
+    // already here or not in this result set at all.
+    //
+    // ``preserveScroll`` membership refreshes are the one anchored reload
+    // that still pages: they re-run the query already on screen after an
+    // edit that may have moved the anchor out of it, so the anchor's old
+    // position plus a page is a sound bound — and a bound there must be, or
+    // a 60k-photo result set that no longer contains the photo costs ~1,200
+    // sequential requests to find that out.
+    var anchorScanBudget = focusAnchor
+      ? 0
+      : Math.max(anchor.index || 0, 0) + perPage;
+    var card = await loadUntilPhotoRendered(
+      anchor.photoId,
+      anchorScanShouldContinue,
+      { resolveStackMember: true, budget: anchorScanBudget }
+    );
+    if (!resetRequestIsCurrent()) return null;
+
+    if (!anchorRestoreIsPending(anchor, restoreEpoch)) return true;
+    if (!card) {
+      clearActiveSelectionAndDetail();
+      if (scrollAnchor) {
+        await restoreBrowseViewportAnchor(scrollAnchor, resetRequestIsCurrent);
+      }
+      return true;
+    }
+
+    // Offline placeholders can hold the viewport without becoming a
+    // selection or enabling any photo actions.
+    if (anchor.viewportOnly) {
+      requestAnimationFrame(function() {
+        if (!resetRequestIsCurrent() || !anchorRestoreIsPending(anchor, restoreEpoch)) return;
+        restorePhotoAnchor(anchor);
+        updateScrollPosition();
+      });
+      return true;
+    }
+
+    // The anchor may have been rendered as an offline placeholder — e.g. a
+    // folder-health refresh with ``showOfflineCollectionPhotos`` on keeps the
+    // just-went-missing photo in the reloaded dataset with ``folder_status``
+    // set to a non-``ok``/``partial`` value. Restoring the selection there
+    // would let updateBatchBar() expose Develop/Export/Delete against a
+    // supposedly read-only photo (Codex review r3839992514).
+    var anchorPhoto = findBrowsePhoto(anchor.photoId);
+    var anchorCoverId = browseStackCoverIdForPhoto(anchor.photoId);
+    var anchorGridId = anchorCoverId == null ? anchor.photoId : anchorCoverId;
+    var anchorIndex = photos.findIndex(function(p) { return p.id === anchorGridId; });
+    if (anchorIndex < 0 || !anchorPhoto || !browsePhotoIsAvailable(anchorPhoto)) {
+      clearActiveSelectionAndDetail();
+      if (scrollAnchor) {
+        await restoreBrowseViewportAnchor(scrollAnchor, resetRequestIsCurrent);
+      }
+      return true;
+    }
+
+    // A selected stack comes back as a selected stack — as the frames the
+    // user actually picked, intersected with the group the reload came back
+    // with. Adopting the reloaded group's membership wholesale would widen
+    // the selection whenever an edit merged a neighbouring frame into the
+    // burst: undo/redo re-runs the query and ``afterHistoryChange`` folds the
+    // pre-action ids back in on top, so a later batch export or delete would
+    // act on a frame the user never selected (Codex P2 on PR #1695). The
+    // intersection is also why the ids cannot simply be replayed: a frame
+    // this reload dropped from the group is no longer part of the card the
+    // user is looking at, and a stack with only some of its frames selected
+    // paints the partial mark that says exactly that.
+    var currentStackIds = anchor.stackSelection
+      ? browseStackMemberIds(anchorGridId)
+      : null;
+    var restoredStackIds = currentStackIds
+      ? currentStackIds.filter(function(id) {
+          return anchor.stackIds.indexOf(id) !== -1;
+        })
+      : null;
+    if (restoredStackIds && !restoredStackIds.length) restoredStackIds = null;
+    if (anchor.stackSelection && !restoredStackIds) {
+      // The group did not survive the reload — Stacks switched off
+      // mid-flight, or the frames no longer group. Hold the position
+      // without inventing a single-photo selection the user never made:
+      // Delete/Export/Develop act on whatever is selected.
+      requestAnimationFrame(function() {
+        if (!resetRequestIsCurrent()) return;
+        if (!anchorRestoreIsPending(anchor, restoreEpoch)) return;
+        restorePhotoAnchor(anchor);
+        updateScrollPosition();
+      });
+      return true;
+    }
+
+    if (restoredStackIds) {
+      selectedPhotos = new Set(restoredStackIds);
+      selectedPhotoId = null;
+      selectedIndex = anchorIndex;
+      abandonDetailFocusForBatch();
+    } else {
+      selectedPhotoId = anchor.photoId;
+      selectedIndex = anchorIndex;
+    }
+    refreshCardSelectionVisuals();
+    updateBatchBar();
+    if (anchor.detailVisible) loadDetail(anchor.photoId);
+    requestAnimationFrame(function() {
+      if (!resetRequestIsCurrent()) return;
+      if (!anchorSelectionIsCurrent(anchor, restoreEpoch)) return;
+      restorePhotoAnchor(anchor);
+      updateScrollPosition();
+    });
+    return true;
+  } finally {
+    if (focusAnchor) {
+      focusReloadInFlight = Math.max(0, focusReloadInFlight - 1);
+      // Only clear the shared anchor once no focused reload is still in
+      // flight — otherwise the first reload's ``finally`` (it exits early
+      // when a newer reload has invalidated its window) would drop the
+      // anchor the newer reload is still relying on.
+      if (focusReloadInFlight === 0) pendingFocusAnchor = null;
+    }
+    if (anchor || scrollAnchor) {
+      anchorScanDepth = Math.max(0, anchorScanDepth - 1);
+      if (anchorScanDepth === 0) {
+        rearmInfiniteScrollObserver();
+        requestAnimationFrame(ensureViewportHydrated);
+      }
+    }
+  }
+}
+
+function getBrowseRules() {
+  if (!window.VireoFilter || !VireoFilter.getRules) return null;
+  var rules = VireoFilter.getRules();
+  var count = Array.isArray(rules) ? rules.length : (rules.rules || []).length;
+  return count ? rules : null;
+}
+
+function buildCurrentBrowseParams() {
+  var params = new URLSearchParams();
+  params.set('sort', document.getElementById('sortSelect').value);
+  if (activeFolderId) params.set('folder_id', activeFolderId);
+  if (activeCollectionId && dashboardCollectionScope) {
+    params.set('collection_id', activeCollectionId);
+  }
+  var rules = getBrowseRules();
+  if (rules) params.set('rules', JSON.stringify(rules));
+  return params;
+}
+
+/* How many photos of the current dataset sit before ``photos[0]``. Normally 0
+   — Browse loads a contiguous prefix — but a ?photo_id=... deep link starts at
+   the target's page, so everything that reasons about how much of the dataset
+   is on screen (tail runway, allLoaded gate, position readout) has to add it
+   back. */
+function loadedWindowOffset() {
+  return Math.max(0, (earliestPage - 1) * perPage);
+}
+
+function updatePreviousPhotosButton() {
+  var banner = document.getElementById('loadPreviousPhotosBanner');
+  if (!banner) return;
+  var offset = loadedWindowOffset();
+  if (earliestPage <= 1 || offset <= 0) {
+    banner.style.display = 'none';
+    return;
+  }
+  var textEl = document.getElementById('loadPreviousPhotosText');
+  if (textEl) {
+    // With Stacks on the grid pages logical items, not photos, so this
+    // offset counts cards — and a single card can stand for a whole burst.
+    // Calling them photos would undercount, badly: fifty earlier stacks can
+    // be hundreds of frames. Say what the number actually counts (Codex
+    // review on PR #1658; CORE_PHILOSOPHY, "no black boxes").
+    var noun = browseStacksEnabled()
+      ? (offset === 1 ? 'card' : 'cards')
+      : (offset === 1 ? 'photo' : 'photos');
+    var verb = offset === 1 ? 'isn’t' : 'aren’t';
+    textEl.textContent =
+      offset.toLocaleString() + ' earlier ' + noun + ' ' + verb +
+      ' loaded — this grid starts at #' + (offset + 1).toLocaleString() + '.';
+  }
+  banner.style.display = 'block';
+}
+
+async function loadPreviousPhotos() {
+  if (loading || earliestPage <= 1) return false;
+  // Do not prepend an offset page read from a newer database snapshot to the
+  // focused page. Ingestion/deletion between those requests can overlap or
+  // skip the boundary. Restarting at page 1 hands control back to the normal
+  // contiguous lazy loader while keeping this user-requested transition
+  // bounded to one configured-size page.
+  earliestPage = 1;
+  updatePreviousPhotosButton();
+  return resetAndLoad();
+}
+
+/* ``requestOptions.focusPhotoId`` asks the server for the page that photo sits
+   on rather than the requested one (see ``loadPhotos``). Only the rules
+   endpoint can express it, so the returned request reports back which id it
+   actually carries — a saved-collection page has to fall back to loading from
+   the top rather than silently believing page 1 holds the photo. */
+function buildBrowsePageRequest(page, requestPerPage, requestOptions) {
+  var focusPhotoId = (requestOptions && requestOptions.focusPhotoId != null)
+    ? requestOptions.focusPhotoId
+    : null;
+  // The other frames of a focused stack card. Any of them places the same
+  // card, so a reload that dropped the frame we asked about first can still
+  // be placed by one it kept — in the same request, rather than one retry
+  // per frame (Codex P2 on PR #1695).
+  //
+  // Trimmed to what one lookup accepts. Every candidate becomes a bound
+  // parameter in one ``IN`` clause, so an over-long list would come back a
+  // 400 — and this request runs after the window has been cleared, which
+  // would leave the grid empty and the selection gone (Codex P2 on
+  // PR #1695). Callers that have more frames than this send the rest in a
+  // further lookup (``browseFocusCandidateChunks``); the trim here is what
+  // makes *this request* valid, not where the extra frames go.
+  var focusPhotoIds = (requestOptions && requestOptions.focusPhotoIds
+      ? requestOptions.focusPhotoIds
+          .filter(function(id) { return id != null && id !== focusPhotoId; })
+          .slice(0, BROWSE_MAX_FOCUS_CANDIDATES - (focusPhotoId == null ? 0 : 1))
+      : []);
+  if (activeCollectionId && !dashboardCollectionScope) {
+    var cparams = new URLSearchParams();
+    cparams.set('page', page);
+    cparams.set('per_page', requestPerPage);
+    cparams.set('sort', document.getElementById('sortSelect').value);
+    if (browseStacksEnabled()) cparams.set('stacks', '1');
+    if (focusPhotoId != null) cparams.set('focus_photo_id', focusPhotoId);
+    if (focusPhotoIds.length) {
+      cparams.set('focus_photo_ids', focusPhotoIds.join(','));
+    }
+    return {
+      url: '/api/collections/' + activeCollectionId + '/photos?' + cparams.toString(),
+      options: {},
+      focusPhotoId: focusPhotoId,
+    };
+  }
+
+  var body = {
+    rules: getBrowseRules() || [],
+    sort: document.getElementById('sortSelect').value,
+    page: page,
+    per_page: requestPerPage,
+    stacks: browseStacksEnabled(),
+  };
+  if (hasCollectionAvailabilityScope()) {
+    body.include_availability = true;
+    if (showOfflineCollectionPhotos) body.include_offline = true;
+  }
+  var visual = window.VireoFilter && VireoFilter.getVisual ? VireoFilter.getVisual() : null;
+  if (visual) body.visual = visual;
+  if (activeFolderId) body.folder_id = activeFolderId;
+  if (activeCollectionId && dashboardCollectionScope) body.collection_id = activeCollectionId;
+  if (focusPhotoId != null) body.focus_photo_id = focusPhotoId;
+  if (focusPhotoIds.length) body.focus_photo_ids = focusPhotoIds;
+  return {
+    url: '/api/photos/query',
+    options: {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    },
+    focusPhotoId: focusPhotoId,
+  };
+}
+
+/* Extend a focused deep-link window upward by one page. Unlike the explicit
+   "Browse from beginning" action, this preserves the user's viewport: the
+   first previously-loaded card remains at the same screen position while the
+   new cards are inserted above it. */
+async function prependPreviousPhotos(options) {
+  if (loading || earliestPage <= 1) return false;
+  loading = true;
+  var windowIsCurrent = observeBrowseWindow();
+  var loadSucceeded = false;
+  var requestedPage = earliestPage - 1;
+  var request = buildBrowsePageRequest(requestedPage, perPage);
+
+  try {
+    var data = await safeFetch(request.url, request.options, {
+      toast: !(options && options.silent),
+    });
+    if (!windowIsCurrent()) return null;
+
+    setBrowseTotals(data);
+    if (window.VireoFilter && VireoFilter.setResultTotal) VireoFilter.setResultTotal(totalUnderlyingPhotos);
+    if (window.VireoFilter && VireoFilter.setVisualInfo) {
+      VireoFilter.setVisualInfo(data.visual || null);
+    }
+    (data.photos || []).forEach(function(p) {
+      if (p.similarity != null) p._similarity = p.similarity;
+    });
+
+    // Offset paging can overlap by a row if an ingestion/deletion lands
+    // between the focused init snapshot and this request. Never duplicate a
+    // card in the live window; the next dataset reset will reconcile ordering.
+    var loadedIds = new Set(photos.map(function(p) { return String(p.id); }));
+    var preceding = (data.photos || []).filter(function(p) {
+      var key = String(p.id);
+      if (loadedIds.has(key)) return false;
+      loadedIds.add(key);
+      return true;
+    });
+
+    // Capture at response time, not request time: the user can continue
+    // scrolling while the network request is in flight, and the prepend must
+    // preserve the position they reached rather than undoing that movement.
+    var oldFirstPhoto = photos.length ? photos[0] : null;
+    var oldFirstCard = oldFirstPhoto ? getGridCard(oldFirstPhoto.id) : null;
+    var oldFirstTop = oldFirstCard ? oldFirstCard.getBoundingClientRect().top : null;
+
+    // Keep the array identity stable. The shared lightbox holds this same
+    // object while it is open, so mutating it lets Previous navigation see
+    // the newly prepended page without closing and reopening the viewer.
+    Array.prototype.unshift.apply(photos, preceding);
+    syncBrowseAvailableLightboxPhotos();
+    earliestPage = requestedPage;
+    prependGridPhotos(preceding);
+    updatePreviousPhotosButton();
+    allLoaded = loadedWindowOffset() + photos.length >= totalPhotos;
+    updateGridTail();
+    updateFilterSummary();
+    refreshBrowseLightboxCounter();
+
+    // Adding rows changes scrollHeight. Compensate by the anchor's exact
+    // layout delta so there is no visual jump, even with a responsive number
+    // of grid columns.
+    if (oldFirstPhoto && oldFirstTop != null) {
+      var movedFirstCard = getGridCard(oldFirstPhoto.id);
+      if (movedFirstCard) {
+        document.getElementById('gridContainer').scrollTop +=
+          movedFirstCard.getBoundingClientRect().top - oldFirstTop;
+      }
+    }
+
+    if (preceding.length > 0) {
+      var refreshIds = preceding.map(function(p) { return p.id; });
+      loadInatStatus(refreshIds).then(function() {
+        if (windowIsCurrent()) refreshGridCards(refreshIds);
+      });
+      fetchColorLabels(refreshIds).then(function() {
+        if (windowIsCurrent()) refreshGridCards(refreshIds);
+      });
+    }
+    loadSucceeded = true;
+  } catch(e) {
+    if (!windowIsCurrent()) return null;
+  } finally {
+    if (windowIsCurrent()) {
+      loading = false;
+      if (loadSucceeded && anchorScanDepth === 0) {
+        rearmInfiniteScrollObserver();
+        requestAnimationFrame(ensureViewportHydrated);
+      }
+    }
+  }
+  return loadSucceeded;
+}
+
+async function loadPhotos(options) {
+  if (loading) return null;
+  if (allLoaded) return true;
+  loading = true;
+  // Extends the window its caller (resetAndLoad / bootstrap / deep link /
+  // the intersection observer) already owns — observe, never claim.
+  var windowIsCurrent = observeBrowseWindow();
+  var loadSucceeded = false;
+  var showLoading = !(options && options.silent) && photos.length === 0;
+  var loadingState = document.getElementById('loadingState');
+  if (showLoading && loadingState) {
+    loadingState.textContent = 'Loading...';
+    loadingState.style.display = 'block';
+  }
+
+  // ``options.focusPhotoId`` turns this into a focused load: the server
+  // reports which page of the current query that photo lands on and returns
+  // that page instead of the requested one. Multi-page chunking would make
+  // the returned ``focus_page`` ambiguous (it counts perPage-sized pages),
+  // so a focused load always asks for exactly one page.
+  //
+  // ``options.focusPhotoIds`` names the other photos that would do just as
+  // well — the frames of a selected stack, which all share their card's
+  // position. The server places the first of them the result set still
+  // contains and names it in ``focus_photo_id``; the caller reads which
+  // one answered from ``browseResolvedFocusPhotoId``.
+  var focusPhotoId = (options && options.focusPhotoId != null)
+    ? options.focusPhotoId
+    : null;
+  var focusPhotoIds = (options && options.focusPhotoIds) || null;
+  if (focusPhotoId != null) browseResolvedFocusPhotoId = null;
+  // When placeholder cells are already visible, the user is actively
+  // waiting on this load — fetch several pages in one request. Chunks must
+  // stay aligned to perPage-sized pages so page/per_page arithmetic holds
+  // (server caps per_page at 500).
+  var chunk = 1;
+  var tailEl = document.getElementById('gridTail');
+  if (focusPhotoId == null && tailEl && tailEl.firstElementChild) {
+    var contRect = document.getElementById('gridContainer').getBoundingClientRect();
+    if (tailEl.firstElementChild.getBoundingClientRect().top < contRect.bottom) {
+      var pagesLoaded = currentPage - 1;
+      if (perPage * 4 <= 500 && pagesLoaded % 4 === 0) chunk = 4;
+      else if (perPage * 2 <= 500 && pagesLoaded % 2 === 0) chunk = 2;
+    }
+  }
+  var reqPage = (currentPage - 1) / chunk + 1;
+  var reqPerPage = perPage * chunk;
+
+  var request = buildBrowsePageRequest(
+    reqPage, reqPerPage,
+    focusPhotoId == null
+      ? null
+      : { focusPhotoId: focusPhotoId, focusPhotoIds: focusPhotoIds }
+  );
+
+  try {
+    var data = await safeFetch(request.url, request.options);
+    if (!windowIsCurrent()) return null;  // grid was reset mid-flight; drop stale response
+    setBrowseTotals(data);
+    // Availability totals are photo counts, so they are read from the same
+    // response that feeds ``totalUnderlyingPhotos`` — never from the
+    // stack-collapsed ``data.total``.
+    updateOfflineCollectionState(data);
+    if (window.VireoFilter && VireoFilter.setResultTotal) VireoFilter.setResultTotal(totalUnderlyingPhotos);
+    if (window.VireoFilter && VireoFilter.setVisualInfo) {
+      VireoFilter.setVisualInfo(data.visual || null);
+    }
+    (data.photos || []).forEach(function(p) {
+      if (p.similarity != null) p._similarity = p.similarity;
+    });
+    // A focused load can come back from the middle of the dataset. Anchor
+    // the loaded window on that page — the same shape a ?photo_id deep link
+    // produces — so ``loadedWindowOffset`` keeps reporting how much of the
+    // result set sits above the grid and the "N earlier photos aren't
+    // loaded" banner says so out loud. Without a resolved position the
+    // server served the page we asked for, so leave the window alone.
+    var focusedPage = null;
+    if (request.focusPhotoId != null && (data.photos || []).length > 0
+        && Number.isInteger(data.focus_index) && data.focus_index >= 0
+        && Number.isInteger(data.focus_page) && data.focus_page >= 1) {
+      focusedPage = data.focus_page;
+      earliestPage = focusedPage;
+      currentPage = focusedPage;
+      // Which candidate the server placed the page by. Usually the one we
+      // asked about first; a stack whose leading frames this result set
+      // dropped answers with a frame it kept.
+      browseResolvedFocusPhotoId = Number.isInteger(data.focus_photo_id)
+        ? data.focus_photo_id
+        : request.focusPhotoId;
+    }
+    var firstNewIdx = photos.length;
+
+    if (data.photos.length === 0) {
+      allLoaded = true;
+    } else {
+      // Keep the array identity stable. The shared lightbox navigates the
+      // same object and can therefore continue into this newly loaded page.
+      Array.prototype.push.apply(photos, data.photos);
+      syncBrowseAvailableLightboxPhotos();
+      currentPage += chunk;
+      // A deep-link window starts partway in, so it is exhausted when it
+      // reaches the end of the dataset — not when it holds ``totalPhotos``
+      // rows, which it never would.
+      if (loadedWindowOffset() + photos.length >= totalPhotos) allLoaded = true;
+    }
+    if (focusedPage !== null) updatePreviousPhotosButton();
+
+    if (firstNewIdx === 0) renderGrid();
+    else appendGridPhotos(data.photos, firstNewIdx);
+    browseDatasetReady = true;
+    updateGridTail();
+    updateFilterSummary();
+    refreshBrowseLightboxCounter();
+
+    // Refresh appended cards once async metadata resolves — appendGridPhotos
+    // only renders each page once, so badges/labels would otherwise stay
+    // missing until an unrelated full grid render.
+    if (data.photos.length > 0) {
+      var refreshIds = data.photos.map(function(p) { return p.id; });
+      loadInatStatus(refreshIds).then(function() {
+        if (windowIsCurrent()) refreshGridCards(refreshIds);
+      });
+      fetchColorLabels(refreshIds).then(function() {
+        if (windowIsCurrent()) refreshGridCards(refreshIds);
+      });
+    }
+    loadSucceeded = true;
+  } catch(e) {
+    if (!windowIsCurrent()) return null;
+    if (showLoading && loadingState) {
+      loadingState.textContent = 'Error loading photos.';
+    }
+  } finally {
+    if (windowIsCurrent()) {
+      loading = false;
+      if (showLoading && loadingState) loadingState.style.display = 'none';
+      // Re-check the scan depth live (not a load-start snapshot): a stale
+      // scan can drain during our fetch, and its own hydration rAF then
+      // bails on loading=true. In that overlap this load is the current
+      // view's only chance to re-arm.
+      if (loadSucceeded && anchorScanDepth === 0) {
+        rearmInfiniteScrollObserver();
+        // Chain: keep loading while the viewport is at or past the loading
+        // boundary (rAF so the freshly appended cards have a layout first).
+        requestAnimationFrame(ensureViewportHydrated);
+      }
+    }
+  }
+  return loadSucceeded;
+}
+
+/* ---------- Calendar Heatmap ---------- */
+function toggleTimelineMode() {
+  timelineMode = !timelineMode;
+  var btn = document.getElementById('calToggle');
+  btn.style.color = timelineMode ? 'var(--accent)' : 'var(--text-muted)';
+  btn.style.borderColor = timelineMode ? 'var(--accent)' : 'var(--border-secondary)';
+
+  var container = document.getElementById('calendarContainer');
+  if (timelineMode) {
+    container.classList.add('active');
+    loadCalendarData();
+  } else {
+    container.classList.remove('active');
+    clearCalendarSelection();
+  }
+}
+
+function buildCalendarParams() {
+  var params = new URLSearchParams();
+  params.set('year', calendarYear);
+  if (activeFolderId) params.set('folder_id', activeFolderId);
+  // Dashboard-scoped Browse composes the collection with active filters —
+  // without this the calendar shows counts from the whole workspace/folder
+  // and a day-click applies a date chip based on photos not in the collection.
+  if (activeCollectionId && dashboardCollectionScope) {
+    params.set('collection_id', activeCollectionId);
+  }
+  // Strip any root-level `timestamp` rule from the calendar's own request.
+  // selectCalendarDay adds/replaces exactly such a rule, and the filter
+  // bar's onChange calls loadCalendarData() synchronously — feeding the
+  // just-selected day back into the heatmap zeros out every other day and
+  // makes it impossible to click through to another one. The heatmap is a
+  // date picker: it should always show all days matching the non-date
+  // filters (the visible grid still applies the date rule).
+  var rules = getBrowseRulesWithoutTimestamp();
+  if (rules) params.set('rules', JSON.stringify(rules));
+  appendVisualScopeParams(params);
+  return params;
+}
+
+function reconcileCalendarLoadRenders() {
+  var gen = calendarDataLoadGen;
+  while (gen > calendarRenderDecisionGen) {
+    var state = calendarDataLoadStates[gen];
+    if (!state || state.status === 'pending') return;
+    if (state.status === 'success') {
+      var currentKey = buildCalendarParams().toString();
+      calendarRenderDecisionGen = gen;
+      if (state.key === currentKey) {
+        calendarData = state.data;
+        renderCalendar();
+      }
+      Object.keys(calendarDataLoadStates).forEach(function(key) {
+        if (Number(key) <= calendarDataLoadGen) delete calendarDataLoadStates[key];
+      });
+      return;
+    }
+    gen--;
+  }
+}
+
+async function loadCalendarData() {
+  var gen = ++calendarDataLoadGen;
+  var params = buildCalendarParams();
+  calendarDataLoadStates[gen] = {
+    status: 'pending',
+    key: params.toString()
+  };
+
+  try {
+    var data = await safeFetch('/api/photos/calendar?' + params.toString());
+    var state = calendarDataLoadStates[gen];
+    if (!state) return data;
+    state.status = 'success';
+    state.data = data;
+    reconcileCalendarLoadRenders();
+    return data;
+  } catch(e) {
+    var failedState = calendarDataLoadStates[gen];
+    if (failedState) {
+      failedState.status = 'failure';
+      reconcileCalendarLoadRenders();
+    }
+    return null;
+  }
+}
+
+function getBrowseRulesWithoutTimestamp() {
+  var rules = getBrowseRules();
+  if (!rules || !rules.rules) return rules;
+  var kept = rules.rules.filter(function(r) {
+    return !(r && !Array.isArray(r.rules) && r.field === 'timestamp');
+  });
+  if (!kept.length) return null;
+  return { mode: rules.mode || 'all', rules: kept };
+}
+
+function renderCalendar() {
+  if (!calendarData) return;
+
+  document.getElementById('calYearLabel').textContent = calendarData.year;
+  document.getElementById('calYearPrev').disabled = calendarData.year <= calendarData.min_year;
+  document.getElementById('calYearNext').disabled = calendarData.year >= calendarData.max_year;
+
+  // Compute intensity thresholds from data
+  var counts = Object.values(calendarData.days);
+  var maxCount = counts.length ? Math.max(...counts) : 0;
+  var t1 = Math.max(1, Math.ceil(maxCount * 0.15));
+  var t2 = Math.max(2, Math.ceil(maxCount * 0.40));
+  var t3 = Math.max(3, Math.ceil(maxCount * 0.70));
+
+  function getLevel(count) {
+    if (!count) return 0;
+    if (count <= t1) return 1;
+    if (count <= t2) return 2;
+    if (count <= t3) return 3;
+    return 4;
+  }
+
+  // Build month labels
+  var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  var monthLabels = document.getElementById('calMonthLabels');
+  monthLabels.innerHTML = months.map(function(m) { return '<span>' + m + '</span>'; }).join('');
+
+  // Build grid: 53 weeks x 7 days
+  var grid = document.getElementById('calGrid');
+  grid.innerHTML = '';
+
+  var dayNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  for (var d = 0; d < 7; d++) {
+    var label = document.createElement('div');
+    label.className = 'day-label';
+    label.textContent = (d % 2 === 1) ? dayNames[d].charAt(0) : '';
+    label.style.gridRow = (d + 1);
+    label.style.gridColumn = 1;
+    grid.appendChild(label);
+  }
+
+  var jan1 = new Date(calendarData.year, 0, 1);
+  var startDow = jan1.getDay();
+  var isLeap = (calendarData.year % 4 === 0 && (calendarData.year % 100 !== 0 || calendarData.year % 400 === 0));
+  var daysInYear = isLeap ? 366 : 365;
+
+  for (var i = 0; i < daysInYear; i++) {
+    var dt = new Date(calendarData.year, 0, 1 + i);
+    var dow = dt.getDay();
+    var weekNum = Math.floor((i + startDow) / 7);
+    var dateStr = dt.getFullYear() + '-' +
+        String(dt.getMonth() + 1).padStart(2, '0') + '-' +
+        String(dt.getDate()).padStart(2, '0');
+    var count = calendarData.days[dateStr] || 0;
+    var level = getLevel(count);
+
+    var cell = document.createElement('div');
+    cell.className = 'day-cell' + (level ? ' level-' + level : ' empty') +
+        (selectedDay === dateStr ? ' selected' : '');
+    cell.style.gridRow = (dow + 1);
+    cell.style.gridColumn = (weekNum + 2);
+    cell.dataset.date = dateStr;
+    cell.dataset.count = count;
+
+    cell.addEventListener('click', function() {
+      var d = this.dataset.date;
+      if (selectedDay === d) {
+        clearCalendarSelection();
+      } else {
+        selectCalendarDay(d, parseInt(this.dataset.count));
+      }
+    });
+
+    cell.addEventListener('mouseenter', function(e) {
+      var tip = document.getElementById('dayTooltip');
+      var dateObj = new Date(this.dataset.date + 'T12:00:00');
+      var formatted = dateObj.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+      var c = parseInt(this.dataset.count);
+      tip.textContent = formatted + ' \u2014 ' + c + ' photo' + (c !== 1 ? 's' : '');
+      tip.style.display = 'block';
+      tip.style.left = (e.clientX + 10) + 'px';
+      tip.style.top = (e.clientY - 30) + 'px';
+    });
+
+    cell.addEventListener('mousemove', function(e) {
+      var tip = document.getElementById('dayTooltip');
+      tip.style.left = (e.clientX + 10) + 'px';
+      tip.style.top = (e.clientY - 30) + 'px';
+    });
+
+    cell.addEventListener('mouseleave', function() {
+      document.getElementById('dayTooltip').style.display = 'none';
+    });
+
+    grid.appendChild(cell);
+  }
+}
+
+function selectCalendarDay(dateStr, count) {
+  // /api/photos/calendar can resolve before VireoFilter.init() has
+  // loaded /api/filters/fields, so a click that lands in that window
+  // would reach addRule -> makeRule with state.fields still null and
+  // throw \u2014 silently swallowing the day pick and leaving the calendar
+  // in a half-selected state (chip up, no filter applied). Bail out
+  // until the filter registry is ready; the click will succeed on the
+  // next attempt once the field payload lands.
+  if (!window.VireoFilter || !VireoFilter.isReady()) return;
+  selectedDay = dateStr;
+  var dateObj = new Date(dateStr + 'T12:00:00');
+  var formatted = dateObj.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+  document.getElementById('calSelectionText').textContent = formatted + ' \u00b7 ' + count + ' photo' + (count !== 1 ? 's' : '');
+  document.getElementById('calSelection').classList.add('active');
+
+  // Day selection is a capture-date rule in the filter bar (single-day
+  // between; the backend pads the upper bound to end-of-day).
+  // Clear the collection scope BEFORE addRule() — its onChange fires the
+  // reload synchronously, so mutating scope after would only take effect
+  // for later requests (infinite scroll, select-all, summary, calendar).
+  // Dashboard-scoped collection Browse composes collection + rules and
+  // must keep activeCollectionId.
+  if (!dashboardCollectionScope) activeCollectionId = null;
+  VireoFilter.addRule('timestamp', 'between', [dateStr, dateStr]);
+  renderCalendar(); // update selected state
+}
+
+function clearCalendarSelection() {
+  // Only drop collection scope when a day was actually selected — that
+  // scope is what selectCalendarDay cleared, and its removal here pairs
+  // with the removeField('timestamp') reload. Toggling the calendar off
+  // (or clearing selection twice) with no day picked hits this path with
+  // nothing to remove: removeField would return early without firing
+  // onChange, so a silent activeCollectionId=null would leave the grid
+  // showing the collection while infinite-scroll/summary/select-all
+  // silently widened to the whole workspace.
+  //
+  // The removeField('timestamp') is also gated on hadSelection: a user
+  // with a manual capture-date rule from a deep link or the filter
+  // popover (never entered via the calendar) toggling the calendar on
+  // and back off would otherwise silently clear their date filter.
+  var hadSelection = selectedDay !== null;
+  selectedDay = null;
+  document.getElementById('calSelection').classList.remove('active');
+  if (hadSelection && !dashboardCollectionScope) activeCollectionId = null;
+  if (hadSelection && window.VireoFilter) VireoFilter.removeField('timestamp');
+  if (calendarData) renderCalendar();
+}
+
+function calendarChangeYear(delta) {
+  if (delta < 0 && calendarData && calendarYear <= calendarData.min_year) return;
+  if (delta > 0 && calendarData && calendarYear >= calendarData.max_year) return;
+  calendarYear += delta;
+  // Same guards as clearCalendarSelection: only touch collection scope
+  // and only removeField('timestamp') when a day was actually picked
+  // (that day-pick is what dropped scope and set the timestamp rule).
+  // Without them, switching year in a collection view before ever
+  // selecting a day silently widens later requests to the workspace,
+  // and stepping through years with a manual timestamp rule active
+  // would silently clear the user's date filter.
+  var hadSelection = selectedDay !== null;
+  selectedDay = null;
+  document.getElementById('calSelection').classList.remove('active');
+  if (hadSelection && !dashboardCollectionScope) activeCollectionId = null;
+  if (hadSelection && window.VireoFilter) VireoFilter.removeField('timestamp');
+  loadCalendarData();
+}
+
+function applyFilters() {
+  if (timelineMode) loadCalendarData();
+  if (!dashboardCollectionScope) activeCollectionId = null;
+  reloadBrowseResults();
+}
+
+/* Re-sorting is a re-ordering, not a membership change: the photo the user
+   selected is still in the result set, just somewhere else in it. Dropping
+   them at the top of the grid with nothing selected made "let me see these
+   same photos by rating instead" cost them their place every time. Keep the
+   selection and ask the server which page the photo landed on
+   (``focusAnchor``), which is the only thing that scales — the old position
+   is no guide to the new one, so there is nothing sensible to page towards.
+
+   Everything else ``applyFilters`` does still applies: the calendar heatmap
+   and collection scope follow the same rules for a sort as for any other
+   non-collection filter change. */
+function onSortChanged() {
+  if (timelineMode) loadCalendarData();
+  if (!dashboardCollectionScope) activeCollectionId = null;
+  // A batch selection that is not a single stack has no one card to keep the
+  // user with, but they still have a place in the grid: hold it without
+  // turning it into a selection. With nothing selected at all there is
+  // nothing to hold onto and a re-sort deliberately starts at the top —
+  // position N in the old order says nothing about the new one.
+  reloadBrowseResults({
+    preserveAnchor: true,
+    focusAnchor: true,
+    preserveViewport: selectedPhotos.size > 0,
+  });
+}
+
+function toggleBrowseStacks() {
+  resetAndLoad({preserveCollection: true});
+}
+
+function updateFilterSummary() {
+  updateScrollPosition();
+}
+
+function updateThumbSize(val) {
+  document.getElementById('grid').style.setProperty('--thumb-size', val + 'px');
+  updateGridTail();
+}
+
+function toggleDetectionBoxes() {
+  showDetectionBoxes = !showDetectionBoxes;
+  var btn = document.getElementById('detBoxToggle');
+  btn.style.color = showDetectionBoxes ? 'var(--accent)' : 'var(--text-muted)';
+  btn.style.borderColor = showDetectionBoxes ? 'var(--accent)' : 'var(--border-secondary)';
+  renderGrid();
+}
+
+function appendVisualScopeParams(params) {
+  // Summary/calendar/typeahead counts must describe the same photos the
+  // visually-filtered grid shows; the backend narrows to the matched set
+  // when the clause is healthy and leaves rules untouched otherwise.
+  var visual = window.VireoFilter && VireoFilter.getVisual ? VireoFilter.getVisual() : null;
+  if (visual) params.set('visual', JSON.stringify(visual));
+}
+
+function reloadBrowseResults(options) {
+  resetAndLoad(options);
+}
+
+function updateScrollPosition() {
+  var el = document.getElementById('filterSummary');
+  var positionOffset = loadedWindowOffset();
+  var stackedTotals = totalPhotos.toLocaleString() + ' items · '
+    + totalBrowseStacks.toLocaleString() + (totalBrowseStacks === 1 ? ' stack · ' : ' stacks · ')
+    + totalUnderlyingPhotos.toLocaleString() + ' photos';
+  var resultLabel = function(position) {
+    if (browseStacksEnabled()) {
+      return position + ' of ' + stackedTotals;
+    }
+    return position + ' of ' + totalPhotos.toLocaleString();
+  };
+  if (photos.length === 0) {
+    el.textContent = browseStacksEnabled()
+      ? stackedTotals
+      : totalPhotos.toLocaleString() + ' photos';
+    return;
+  }
+  // Find which cards are visible in the viewport
+  var cards = document.querySelectorAll('.grid-card');
+  if (cards.length === 0) {
+    el.textContent = browseStacksEnabled()
+      ? stackedTotals
+      : totalPhotos.toLocaleString() + ' photos';
+    return;
+  }
+  var container = document.getElementById('gridContainer');
+  var scrollTop = container.scrollTop;
+  var viewHeight = container.clientHeight;
+
+  // Viewport entirely below every loaded card (placeholder territory):
+  // reporting the loaded range would be a lie, so estimate within the
+  // bounded runway represented by the rendered skeleton cells.
+  var lastCard = cards[cards.length - 1];
+  if (lastCard.offsetTop + lastCard.offsetHeight < scrollTop) {
+    var frac = Math.min(1, (scrollTop + viewHeight / 2) / Math.max(1, container.scrollHeight));
+    var skeletonCount = document.querySelectorAll('#gridTail .skel-card').length;
+    var representedPhotos = Math.min(
+      totalPhotos - positionOffset,
+      photos.length + skeletonCount
+    );
+    var approx = positionOffset + Math.max(
+      1,
+      Math.min(representedPhotos, Math.round(frac * representedPhotos))
+    );
+    el.textContent = resultLabel('≈' + approx.toLocaleString());
+    return;
+  }
+
+  var first = 1;
+  var last = cards.length;
+  for (var i = 0; i < cards.length; i++) {
+    if (cards[i].offsetTop + cards[i].offsetHeight > scrollTop) {
+      first = i + 1;
+      break;
+    }
+  }
+  for (var i = cards.length - 1; i >= 0; i--) {
+    if (cards[i].offsetTop < scrollTop + viewHeight) {
+      last = i + 1;
+      break;
+    }
+  }
+  el.textContent = resultLabel(
+    (positionOffset + first) + '–' + (positionOffset + last)
+  );
+}
+
+/* ---------- iNaturalist ---------- */
+async function loadInatStatus(photoIds) {
+  if (photoIds.length === 0) return;
+  try {
+    // Chunk the GET URL so oversized stacks (or any large id set) don't
+    // exceed the browser/proxy/server request-target limit and drop the
+    // whole page's iNaturalist badges when a stack expansion hydrates a
+    // large member list (Codex P2 on PR #1561). Matches the 500-id cap
+    // the /api/photos/by-ids stack-expansion path already uses.
+    for (var offset = 0; offset < photoIds.length; offset += 500) {
+      var chunk = photoIds.slice(offset, offset + 500);
+      var data = await safeFetch(
+        '/api/inat/submissions?photo_ids=' + chunk.join(','),
+        {}, { toast: false },
+      );
+      if (data && !data.error) {
+        for (var k in data) inatSubmitted[k] = true;
+      }
+    }
+  } catch(e) {}
+}
+
+function batchSubmitInat() {
+  var ids = getActiveSelection();
+  if (ids.length === 0) {
+    if (typeof showToast === 'function') showToast('Select one or more photos to send to iNaturalist.', 'error');
+    else alert('Select one or more photos to send to iNaturalist.');
+    return;
+  }
+  submitToInatBatch(ids);
+}
+
+/* ---------- Grid Rendering ---------- */
+function renderGrid(options) {
+  var grid = document.getElementById('grid');
+  var empty = document.getElementById('emptyState');
+  var welcome = document.getElementById('welcomeState');
+  var thumbnails = new Map();
+  var trayScroll = new Map();
+  function thumbnailKey(img) {
+    var card = img.closest('.grid-card, .browse-stack-member');
+    return card && (card.classList.contains('grid-card') ? 'cover:' : 'member:') + card.dataset.id;
+  }
+  if (options && options.preserveThumbnails) {
+    grid.querySelectorAll('img[data-thumbnail-src]').forEach(function(img) {
+      thumbnails.set(thumbnailKey(img), img);
+    });
+    grid.querySelectorAll('.browse-stack-tray').forEach(function(tray) {
+      var members = tray.querySelector('.browse-stack-members');
+      if (members) trayScroll.set(tray.dataset.stackCoverId, members.scrollLeft);
+    });
+  }
+
+  if (photos.length === 0) {
+    grid.innerHTML = '';
+    // Show welcome if DB is completely empty, otherwise show filter-empty message
+    if (totalPhotos === 0 && !hasActiveBrowseFilter()) {
+      welcome.style.display = 'block';
+      empty.style.display = 'none';
+    } else {
+      welcome.style.display = 'none';
+      empty.style.display = 'block';
+    }
+    return;
+  }
+  welcome.style.display = 'none';
+  empty.style.display = 'none';
+
+  var html = '';
+  photos.forEach(function(p, idx) {
+    html += renderPhotoCard(p, idx);
+  });
+  grid.innerHTML = html;
+  updateGridTail();
+  refreshColorLabelControlsIn(grid);
+  restoreExpandedBrowseStacks();
+  if (thumbnails.size) {
+    grid.querySelectorAll('img[data-thumbnail-src]').forEach(function(img) {
+      var previous = thumbnails.get(thumbnailKey(img));
+      if (previous && previous.dataset.thumbnailSrc === img.dataset.thumbnailSrc) {
+        img.replaceWith(previous);
+      }
+    });
+    grid.querySelectorAll('.browse-stack-tray').forEach(function(tray) {
+      var members = tray.querySelector('.browse-stack-members');
+      if (members && trayScroll.has(tray.dataset.stackCoverId)) {
+        members.scrollLeft = trayScroll.get(tray.dataset.stackCoverId);
+      }
+    });
+  }
+}
+
+/* ---------- Grid dblclick delegation (XSS-safe) ---------- */
+document.getElementById('grid').addEventListener('dblclick', function(e) {
+  var card = e.target.closest('.grid-card');
+  if (!card || card.classList.contains('offline')) return;
+  var id = parseInt(card.dataset.id, 10);
+  var filename = card.dataset.filename || '';
+  // Provenance for the close handler. A double-click on a stack card runs its
+  // own two clicks through selectPhoto first, so the stack is selected by the
+  // time the lightbox opens — a selection this viewing gesture made, not a
+  // batch the user assembled, and the only one the close handler may replace.
+  // Recording the opener is the only way to tell those apart: the selected ids
+  // are identical either way.
+  //
+  // Except on the stack badge, whose two clicks expand and collapse the stack
+  // and stop propagating, so they never reach selectPhoto and never make a
+  // selection. The dblclick still bubbles here, and an identical id set would
+  // otherwise let a deliberate batch be claimed by a gesture that did not
+  // create it.
+  //
+  // And a card dblclick over a batch the user already assembled (tray Select
+  // all + collapse) still runs through selectPhoto, so the resulting ids also
+  // read the same as the gesture case even though the two clicks reaffirmed
+  // the batch rather than creating it. Consult the pre-first-click snapshot:
+  // only mark the gesture when the clicks actually moved the selection onto
+  // this stack. Codex P2 on PR #1672.
+  var gestureIds = e.target.closest('.browse-stack-badge')
+    ? null : browseStackMemberIds(id);
+  var preState = browseSelectionBeforeStackDblClickStart;
+  browseSelectionBeforeStackDblClickStart = null;
+  var preStateWasThisStack = !!(
+    preState && gestureIds
+    && preState.size === gestureIds.length
+    && gestureIds.every(function(memberId) { return preState.has(memberId); })
+  );
+  browseLightboxStackGestureSpent = null;
+  browseLightboxStackGesture = (
+    !preStateWasThisStack
+    && gestureIds
+    && gestureIds.length === selectedPhotos.size
+    && gestureIds.every(function(memberId) { return selectedPhotos.has(memberId); })
+  ) ? { ids: gestureIds.slice(), epoch: anchorRestoreEpoch } : null;
+  // Top-level grid cards navigate the grid, matching pre-stacks behaviour;
+  // an expanded stack's members live in ``.browse-stack-member`` cards and
+  // open against their own member list instead.
+  openLightbox(id, filename, availableBrowsePhotos());
+});
+
+var browseAvailableLightboxPhotos = [];
+
+function browsePhotoIsAvailable(photo) {
+  return !photo.folder_status ||
+    photo.folder_status === 'ok' || photo.folder_status === 'partial';
+}
+
+function replaceBrowseAvailableLightboxPhotos(available) {
+  browseAvailableLightboxPhotos.length = 0;
+  available.forEach(function(photo) {
+    browseAvailableLightboxPhotos.push(photo);
+  });
+}
+
+function syncBrowseAvailableLightboxPhotos() {
+  if (window._lightboxPhotoList !== browseAvailableLightboxPhotos) return;
+  replaceBrowseAvailableLightboxPhotos(photos.filter(browsePhotoIsAvailable));
+}
+
+function availableBrowsePhotos() {
+  // Default Browse results already exclude offline folders. Preserve the
+  // shared array identity so lightbox boundary prefetch sees later pages as
+  // loadPhotos mutates ``photos``. The opt-in offline view needs a filtered
+  // list; keep that list stable and synchronize it after every append/prepend.
+  if (!showOfflineCollectionPhotos) return photos;
+  replaceBrowseAvailableLightboxPhotos(photos.filter(browsePhotoIsAvailable));
+  return browseAvailableLightboxPhotos;
+}
+
+function getBrowseShortcutPhoto() {
+  if (selectedPhotoId != null) {
+    var selected = findBrowsePhoto(selectedPhotoId);
+    if (selected) {
+      var selectedNavigation = browsePhotoNavigationList(selectedPhotoId);
+      if (browseNavigationListIsTopLevel(selectedNavigation) && !photos.some(function(photo) {
+        return photo.id === selectedPhotoId;
+      })) {
+        var selectedCoverId = browseStackCoverIdForPhoto(selectedPhotoId);
+        var selectedCover = photos.find(function(photo) { return photo.id === selectedCoverId; });
+        if (selectedCover) selected = selectedCover;
+      }
+      return {
+        photo: selected,
+        index: selectedIndex,
+        navigationPhotos: selectedNavigation,
+      };
+    }
+  }
+  if (selectedPhotos.size > 0) {
+    var selectedIds = Array.from(selectedPhotos);
+    for (var selectedOffset = 0; selectedOffset < selectedIds.length; selectedOffset++) {
+      var selectedMember = findBrowsePhoto(selectedIds[selectedOffset]);
+      if (selectedMember) {
+        var memberNavigation = browsePhotoNavigationList(selectedMember.id);
+        if (browseNavigationListIsTopLevel(memberNavigation) && !photos.some(function(photo) {
+          return photo.id === selectedMember.id;
+        })) {
+          var memberCoverId = browseStackCoverIdForPhoto(selectedMember.id);
+          var memberCover = photos.find(function(photo) { return photo.id === memberCoverId; });
+          if (memberCover) selectedMember = memberCover;
+        }
+        return {
+          photo: selectedMember,
+          index: selectedIndex,
+          navigationPhotos: memberNavigation,
+        };
+      }
+    }
+  }
+  var idx = -1;
+  if (idx < 0 && selectedIndex >= 0 && photos[selectedIndex]) {
+    idx = selectedIndex;
+  }
+  if (idx < 0 && photos.length > 0) {
+    idx = photos.findIndex(function(photo) {
+      return !photo.folder_status ||
+        photo.folder_status === 'ok' || photo.folder_status === 'partial';
+    });
+  }
+  if (idx < 0 || !photos[idx]) return null;
+  return {
+    photo: photos[idx],
+    index: idx,
+    navigationPhotos: availableBrowsePhotos(),
+  };
+}
+
+function openBrowseShortcutPhoto(fullscreen) {
+  var item = getBrowseShortcutPhoto();
+  if (!item) return false;
+  openLightbox(item.photo.id, item.photo.filename || '', item.navigationPhotos);
+  if (fullscreen && typeof requestLightboxFullscreen === 'function') {
+    requestLightboxFullscreen();
+  }
+  return true;
+}
+
+function browseKeyMatchesConfiguredShortcut(e) {
+  if (!_shortcuts) return false;
+  for (var action in _shortcuts) {
+    if (Object.prototype.hasOwnProperty.call(_shortcuts, action) && matchesShortcut(e, _shortcuts[action])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/* Keep Browse's lightbox navigation moving across lazy-loaded page edges.
+   The normal grid and lightbox share ``photos``; the opt-in offline grid uses
+   a stable available-only list. ``loadPhotos``/``prependPreviousPhotos`` keep
+   the active list synchronized, so prefetched pages reach the lightbox without
+   reopening it. If the user reaches an edge before the request finishes, retry
+   at the same boundary and advance as soon as the page is available. */
+var browseLightboxBoundaryRetry = null;
+var browseLightboxSession = 0;
+// Set by the grid double-click handler when the gesture's own clicks selected
+// the stack it opened: {ids, epoch}. It is spent by the close of the lightbox
+// it opened, so a later viewing shortcut over the same selection is a viewing
+// shortcut over a batch. ``epoch`` is the selection generation the gesture was
+// made in, so any selection action in between — a click, a Select all, a
+// Clear — also retires it, without every one of those paths having to know
+// this marker exists.
+var browseLightboxStackGesture = null;
+// The gesture a delete-button close just retired, held only until the delete
+// that caused it either completes (and hands it back) or is cancelled (and
+// never claims it). See the ``lightbox:photodeleted`` listener.
+var browseLightboxStackGestureSpent = null;
+
+// What each photo viewed in this lightbox session stands for, for the covers
+// among them: {photoId: memberIds}. Recorded while the photo is on screen,
+// because once it is deleted its stack is gone from ``photos`` and nothing
+// can say what it stood for. Keyed by photo rather than held in a single
+// slot so the reopen that follows a delete cannot overwrite the entry the
+// delete still needs. Read by the ``lightbox:photodeleted`` listener, and
+// dropped when the lightbox is really closed. Codex P2 on PR #1672.
+var browseLightboxRepresentedByPhoto = {};
+
+// The selection as it stood before the first click of the most recent click
+// sequence. Captured in ``selectPhoto`` and consulted by the grid double-click
+// handler so it can tell "these clicks made the selection" from "these clicks
+// reaffirmed a selection the user already had": a deliberate tray Select all
+// + collapse leaves the stack members in ``selectedPhotos``, and a plain
+// click on the collapsed cover then sets the same set again, so the
+// resulting ``selectedPhotos`` is byte-for-byte identical either way. Without
+// this snapshot the dblclick handler would mark that pre-existing batch as
+// gesture-generated and the close handler would then replace it with the
+// finished-on photo. Codex P2 on PR #1672.
+var browseSelectionBeforeStackDblClickStart = null;
+
+function browseLightboxOwnsLoadedWindow() {
+  return (
+    typeof window._lightboxPhotoList !== 'undefined' &&
+    browseNavigationListIsTopLevel(window._lightboxPhotoList) &&
+    typeof window._lightboxCurrentId !== 'undefined' &&
+    window._lightboxCurrentId != null
+  );
+}
+
+function refreshBrowseLightboxCounter() {
+  if (!browseLightboxOwnsLoadedWindow()) return;
+  var visibleId = window._lightboxCommittedId != null
+    ? window._lightboxCommittedId
+    : window._lightboxCurrentId;
+  var lightboxPhotos = window._lightboxPhotoList;
+  var index = lightboxPhotos.findIndex(function(photo) {
+    return photo.id === visibleId;
+  });
+  var counter = document.getElementById('lightboxCounter');
+  if (index < 0 || !counter || lightboxPhotos.length < 2) return;
+  var filename = lightboxPhotos[index].filename || '';
+  counter.textContent = (index + 1) + ' / ' + lightboxPhotos.length
+    + (filename ? ' \u00b7 ' + filename : '');
+  counter.title = filename;
+  counter.style.display = '';
+}
+
+function continueBrowseLightboxAcrossBoundary(delta, currentId, session) {
+  if (session !== browseLightboxSession) return;
+  if (!browseLightboxOwnsLoadedWindow() || window._lightboxCurrentId !== currentId) return;
+  var lightboxPhotos = window._lightboxPhotoList;
+  var index = lightboxPhotos.findIndex(function(photo) {
+    return photo.id === currentId;
+  });
+  if (index < 0) return;
+
+  var nextIndex = index + delta;
+  if (nextIndex >= 0 && nextIndex < lightboxPhotos.length) {
+    lightboxNav(delta);
+    return;
+  }
+
+  var canLoad = delta > 0 ? !allLoaded : earliestPage > 1;
+  if (!canLoad) return;
+  if (loading) {
+    clearTimeout(browseLightboxBoundaryRetry);
+    browseLightboxBoundaryRetry = setTimeout(function() {
+      continueBrowseLightboxAcrossBoundary(delta, currentId, session);
+    }, 50);
+    return;
+  }
+
+  var request = delta > 0
+    ? loadPhotos({ silent: true })
+    : prependPreviousPhotos({ silent: true });
+  Promise.resolve(request).then(function(loaded) {
+    if (loaded !== true) return;
+    if (session !== browseLightboxSession) return;
+    if (!browseLightboxOwnsLoadedWindow() || window._lightboxCurrentId !== currentId) return;
+    lightboxNav(delta);
+  });
+}
+
+document.addEventListener('lightbox:photochanged', function(event) {
+  // Before the window check below: this has to happen for every photo the
+  // user actually sees, whoever owns the loaded window.
+  var shownId = event && event.detail && event.detail.photoId;
+  if (shownId != null) {
+    var shownStack = browseStackMemberIds(shownId);
+    if (shownStack) browseLightboxRepresentedByPhoto[String(shownId)] = shownStack;
+  }
+  if (!browseLightboxOwnsLoadedWindow() || loading) return;
+  var photoId = event && event.detail && event.detail.photoId;
+  var lightboxPhotos = window._lightboxPhotoList;
+  var index = lightboxPhotos.findIndex(function(photo) {
+    return photo.id === photoId;
+  });
+  if (index < 0) return;
+  if (!allLoaded && index >= lightboxPhotos.length - 3) loadPhotos({ silent: true });
+  if (earliestPage > 1 && index <= 2) prependPreviousPhotos({ silent: true });
+});
+
+document.addEventListener('lightbox:navigationboundary', function(event) {
+  var detail = event && event.detail || {};
+  if (detail.delta !== 1 && detail.delta !== -1) return;
+  if (!browseLightboxOwnsLoadedWindow()) return;
+  continueBrowseLightboxAcrossBoundary(
+    detail.delta, detail.photoId, browseLightboxSession
+  );
+});
+
+document.addEventListener('lightbox:closed', function() {
+  browseLightboxSession++;
+  clearTimeout(browseLightboxBoundaryRetry);
+  browseLightboxBoundaryRetry = null;
+});
+
+/* ---------- Infinite Scroll ---------- */
+var gridContainer = document.getElementById('gridContainer');
+var infiniteScrollObserverDisconnected = false;
+var infiniteScrollObserverIsNative = (
+  typeof window.IntersectionObserver === 'function' &&
+  String(window.IntersectionObserver).indexOf('[native code]') !== -1
+);
+var observer = new IntersectionObserver(function(entries) {
+  if (entries[0].isIntersecting) loadPhotos({ silent: photos.length > 0 });
+}, { root: gridContainer, rootMargin: '3200px 0px' });
+
+var _observerObserve = observer.observe.bind(observer);
+var _observerDisconnect = observer.disconnect.bind(observer);
+observer.observe = function(target) {
+  infiniteScrollObserverDisconnected = false;
+  return _observerObserve(target);
+};
+observer.disconnect = function() {
+  infiniteScrollObserverDisconnected = true;
+  return _observerDisconnect();
+};
+observer.observe(document.getElementById('scrollSentinel'));
+
+function rearmInfiniteScrollObserver() {
+  // With the 3200px root margin, the sentinel can remain intersecting after
+  // bootstrap or page loads. Re-observing asks IntersectionObserver to deliver
+  // a fresh callback for the current layout instead of waiting for a scroll
+  // transition that may never occur.
+  if (infiniteScrollObserverDisconnected) return;
+  if (allLoaded || typeof observer === 'undefined') return;
+  var sentinel = document.getElementById('scrollSentinel');
+  if (!sentinel) return;
+  observer.unobserve(sentinel);
+  observer.observe(sentinel);
+}
+
+/* Scroll-driven page loading. The primary trigger is proximity to the loading
+   boundary (the first skeleton cell). Fires on scroll and chains after each
+   successful page load until the viewport is covered by real cards. */
+function ensureViewportHydrated() {
+  if (infiniteScrollObserverDisconnected || !infiniteScrollObserverIsNative) return;
+  if (loading || allLoaded || anchorScanDepth > 0) return;
+  if (photos.length === 0) return;
+  var tail = document.getElementById('gridTail');
+  if (!tail || !tail.firstElementChild) return;
+  var contRect = document.getElementById('gridContainer').getBoundingClientRect();
+  var skelRect = tail.firstElementChild.getBoundingClientRect();
+  if (skelRect.top - contRect.bottom <= 3200) loadPhotos({ silent: true });
+}
+
+/* A photo deep link begins with the page containing the target. When the user
+   travels back toward the top edge of that window, fetch its preceding page
+   just as the lower edge fetches the following page. The grid's top is used
+   instead of the sticky explanation banner, whose sticky geometry remains in
+   the viewport even when the actual loading boundary is far above it. */
+function ensurePreviousViewportHydrated() {
+  if (loading || earliestPage <= 1 || anchorScanDepth > 0) return;
+  if (photos.length === 0) return;
+  var grid = document.getElementById('grid');
+  var contRect = gridContainer.getBoundingClientRect();
+  var gridRect = grid.getBoundingClientRect();
+  if (gridRect.top >= contRect.top - 800) {
+    prependPreviousPhotos({ silent: true });
+  }
+}
+
+window.addEventListener('resize', function() {
+  var sidebar = document.getElementById('browseSidebar');
+  if (sidebar) setBrowseSidebarWidth(sidebar.getBoundingClientRect().width, false);
+  var detailPanel = document.getElementById('detailPanel');
+  if (detailPanel) setBrowseDetailPanelWidth(detailPanel.getBoundingClientRect().width, false);
+  // Column count and card heights change with width — re-estimate the tail
+  requestAnimationFrame(updateGridTail);
+});
+
+/* ---------- Keep the clicked photo visible across layout changes ---------- */
+// The grid is `auto-fill`, so any width change reflows every card into a
+// different column: after a window resize (or a sidebar/detail-panel drag) the
+// photo the user clicked can end up far outside the viewport. A shorter
+// viewport pushes it past the bottom edge the same way. Put it back in view —
+// but only when it was on screen to begin with, so a resize never hauls the
+// grid back to a selection the user has deliberately scrolled away from.
+function focusedBrowsePhotoId() {
+  // The most recent click wins. A cmd/shift-click extends the selection while
+  // leaving selectedPhotoId on the older detail focus, and the card the user
+  // just clicked is the one they are looking at. It only wins while it has a
+  // card on screen, though: collapsing a stack after a stack-wide Select all
+  // leaves the last-clicked member selected but unrendered, with
+  // selectedPhotoId deliberately pinned to the visible cover.
+  if (lastClickedPhotoId != null &&
+      (lastClickedPhotoId === selectedPhotoId || selectedPhotos.has(lastClickedPhotoId)) &&
+      renderedCardForFocus(lastClickedPhotoId)) {
+    return lastClickedPhotoId;
+  }
+  return selectedPhotoId;
+}
+
+// The card standing in for a focused photo. A focused photo that is not itself
+// rendered can still have a visible home: a collapsed stack draws its cover in
+// place of every member, and collapsing while two members are selected leaves
+// the focus on a hidden one by design (the member stays an active batch
+// target). Grid and lightbox navigation already resolve that focus to the
+// cover — getBrowseShortcutPhoto — so the resize correction does too, instead
+// of giving up and letting the visibly-selected cover reflow off screen.
+function renderedCardForFocus(photoId) {
+  if (photoId == null) return null;
+  var card = getBrowsePhotoElement(photoId);
+  if (card) return card;
+  var coverId = browseStackCoverIdForPhoto(photoId);
+  return coverId == null ? null : getBrowsePhotoElement(coverId);
+}
+
+// The focused card's box, measured from the top of the grid viewport.
+function focusedCardBox() {
+  var card = renderedCardForFocus(focusedBrowsePhotoId());
+  if (!card) return null;
+  var containerRect = gridContainer.getBoundingClientRect();
+  var cardRect = card.getBoundingClientRect();
+  return {
+    top: cardRect.top - containerRect.top,
+    bottom: cardRect.bottom - containerRect.top,
+    height: cardRect.height,
+  };
+}
+
+var gridViewportSize = gridContainer.clientWidth + 'x' + gridContainer.clientHeight;
+var gridSyncBannerHeight = document.getElementById('syncBanner').offsetHeight;
+var focusedCardWasOnScreen = false;
+
+// Whether the focused card was on screen *before* the reflow. A ResizeObserver
+// only ever sees the layout that already happened, so this has to be sampled
+// as the user scrolls and selects.
+function noteFocusedCardVisibility() {
+  // A reflow can dispatch its scroll event before the observer has compensated
+  // for it. Sampling then would record the post-reflow (usually off-screen)
+  // position and suppress the very correction it exists to authorize.
+  if (gridContainer.clientWidth + 'x' + gridContainer.clientHeight !== gridViewportSize) return;
+  var box = focusedCardBox();
+  focusedCardWasOnScreen = !!box && box.bottom > 0 && box.top < gridContainer.clientHeight;
+}
+
+function keepFocusedCardVisible() {
+  // Scrolled out of view on purpose before the resize: the user is looking
+  // somewhere else, and the reflow is not what moved the card away.
+  if (!focusedCardWasOnScreen) return;
+  var box = focusedCardBox();
+  if (!box) return;
+  var viewHeight = gridContainer.clientHeight;
+  if (box.top >= 0 && box.bottom <= viewHeight) return;
+  // Off-screen after the reflow: land it in the middle of the viewport rather
+  // than flush against whichever edge it drifted past, so the rows around it
+  // stay readable. A card taller than the viewport pins its top edge instead.
+  var wantedTop = box.height >= viewHeight ? 0 : (viewHeight - box.height) / 2;
+  gridContainer.scrollTop += box.top - wantedTop;
+}
+
+if (window.ResizeObserver) {
+  // ResizeObserver runs after layout but before paint, so the correction lands
+  // in the same frame as the reflow — the card never visibly jumps away.
+  new ResizeObserver(function() {
+    var size = gridContainer.clientWidth + 'x' + gridContainer.clientHeight;
+    var bannerHeight = document.getElementById('syncBanner').offsetHeight;
+    var previousSize = gridViewportSize.split('x').map(Number);
+    // Saving the first edit reveals the sync banner. That reduces the
+    // viewport height, but must not recenter a partly visible selected photo
+    // while its filter membership is being refreshed. Actual window/sidebar
+    // resizes still keep the focused photo visible as before.
+    var onlySyncBannerChanged = bannerHeight !== gridSyncBannerHeight
+      && gridContainer.clientWidth === previousSize[0]
+      && Math.abs(gridContainer.clientHeight + bannerHeight
+        - previousSize[1] - gridSyncBannerHeight) <= 1;
+    gridSyncBannerHeight = bannerHeight;
+    // A scrollbar appearing counts (it reflows the columns); anything that
+    // leaves the viewport box alone cannot have moved the card out of view.
+    if (size === gridViewportSize) return;
+    gridViewportSize = size;
+    if (!onlySyncBannerChanged) keepFocusedCardVisible();
+    noteFocusedCardVisibility();
+  }).observe(gridContainer);
+
+  // The grid itself can reflow while the viewport keeps its size: the
+  // thumbnail-size slider changes the column count, a stack tray opens, a page
+  // of photos is appended. None of those fire a scroll event, so the sampled
+  // visibility would go stale — false after a reflow carried the card back
+  // into view, true after one carried it away — and the next resize would act
+  // on that stale answer. Re-sample instead; there is nothing to correct,
+  // because the viewport did not move. The size guard inside
+  // noteFocusedCardVisibility keeps this out of the way during a viewport
+  // resize, which the observer above owns.
+  new ResizeObserver(function() {
+    noteFocusedCardVisibility();
+  }).observe(document.getElementById('grid'));
+}
+
+/* ---------- Scroll Position Tracking ---------- */
+var scrollTimer = null;
+var lastGridScrollTop = gridContainer.scrollTop;
+gridContainer.addEventListener('scroll', function() {
+  var nextScrollTop = gridContainer.scrollTop;
+  if (nextScrollTop < lastGridScrollTop) ensurePreviousViewportHydrated();
+  lastGridScrollTop = nextScrollTop;
+  noteFocusedCardVisibility();
+  ensureViewportHydrated();
+  if (scrollTimer) clearTimeout(scrollTimer);
+  scrollTimer = setTimeout(updateScrollPosition, 50);
+});
+
+// At scrollTop=0 an upward wheel gesture cannot produce a scroll event. It is
+// still an unambiguous request to continue into the earlier photos.
+gridContainer.addEventListener('wheel', function(e) {
+  if (e.deltaY < 0) requestAnimationFrame(ensurePreviousViewportHydrated);
+}, { passive: true });
+
+/* ---------- Photo Selection & Detail ---------- */
+function selectPhoto(e, id, idx, opts) {
+  // Snapshot the pre-click selection so the grid dblclick handler can tell
+  // "these clicks made the selection" from "these clicks reaffirmed an
+  // existing one" — the two produce identical ``selectedPhotos`` when the
+  // click lands on the stack that was already selected. Only the first click
+  // of a click sequence records: the browser numbers sequential clicks in
+  // ``event.detail`` (1 for the first, 2 for the second of a dblclick), so
+  // detail > 1 preserves the pre-first-click snapshot through the second.
+  // Codex P2 on PR #1672.
+  if (!(e && e.detail > 1)) {
+    browseSelectionBeforeStackDblClickStart = new Set(selectedPhotos);
+  }
+  anchorRestoreEpoch++;
+  lastClickedPhotoId = id;
+  // A collapsed stack card is its whole stack (see browseStackMemberIds), so
+  // every branch below acts on this list rather than on `id` alone.
+  var clickIds = browseSelectionIdsForClick(id, opts);
+  if (e.shiftKey && selectedIndex >= 0) {
+    // Shift-click: range select
+    var memberRange = browseStackMemberRange(selectedPhotoId, id);
+    if (memberRange) {
+      memberRange.forEach(function(memberId) { selectedPhotos.add(memberId); });
+    } else {
+      var start = Math.min(selectedIndex, idx);
+      var end = Math.max(selectedIndex, idx);
+      for (var i = start; i <= end; i++) {
+        if (photos[i] && (!photos[i].folder_status ||
+            photos[i].folder_status === 'ok' || photos[i].folder_status === 'partial')) {
+          // Each card in the range contributes what clicking it would: a
+          // stack card contributes its frames, not just its cover.
+          browseSelectionIdsForClick(photos[i].id).forEach(function(rangeId) {
+            selectedPhotos.add(rangeId);
+          });
+        }
+      }
+    }
+    // The anchor of a range is always part of that range. Usually it is
+    // photos[selectedIndex] and the loop already covered it, but a focused
+    // expanded-stack member is not in the top-level photos array at all:
+    // selectBrowseStackMember() anchors selectedIndex on the member's *cover*
+    // grid slot. Without this the loop adds the cover and the intervening
+    // cards while the member keeps painting "selected" off selectedPhotoId,
+    // yet getActiveSelection() prefers the now-nonempty set and drops it —
+    // Export/Delete would silently act on the cover the user never focused.
+    // Fold the anchor in so the highlighted set and the acted-on set cannot
+    // disagree. Codex P2 on PR #1561.
+    if (selectedPhotoId != null) selectedPhotos.add(selectedPhotoId);
+    // Same reasoning for the shift-click *target*: usually id === photos[idx].id
+    // and the loop already added it, but selectBrowseStackMember() passes the
+    // hidden member's id with the cover's grid slot as idx — so the loop can
+    // only reach the cover. Fold the target in so a Shift-click on a hidden
+    // stack member always ends up in the resulting range. Codex P2 on
+    // PR #1561.
+    clickIds.forEach(function(clickId) { selectedPhotos.add(clickId); });
+  } else if (e.metaKey || e.ctrlKey) {
+    // Cmd/Ctrl-click: toggle in selection. Fold the focused photo into the
+    // set so batch operations include it (otherwise the highlighted
+    // selectedPhotoId is silently excluded from keyboard shortcuts).
+    if (selectedPhotos.size === 0 && selectedPhotoId !== null) {
+      selectedPhotos.add(selectedPhotoId);
+    }
+    // A stack toggles as a unit, and it only leaves the selection when every
+    // one of its frames is in it: Cmd-clicking a stack whose tray contributed
+    // three frames adds the rest rather than removing those three.
+    var alreadySelected = clickIds.every(function(clickId) {
+      return selectedPhotos.has(clickId);
+    });
+    clickIds.forEach(function(clickId) {
+      if (alreadySelected) selectedPhotos.delete(clickId);
+      else selectedPhotos.add(clickId);
+    });
+    // If the toggle dropped the focused photo out of a non-empty set, its
+    // highlight/detail focus is now stale: the card still paints "selected"
+    // via the selectedPhotoId branch of the highlight rule, yet
+    // getActiveSelection() returns the set — so destructive actions
+    // (delete/export/develop) would target the set while the user is staring
+    // at a different, visibly-focused card. Reconcile by dropping the focus.
+    //
+    // The same applies when this toggle empties the set entirely and the
+    // focused photo is one of the ids it just removed: collapsing an expanded
+    // stack pins the focus to its cover, so Cmd-clicking that stack off left
+    // getActiveSelection() falling back to the cover — a stack the user
+    // deselected as a unit coming back as a one-photo partial selection.
+    // Codex P2 on PR #1672.
+    if (selectedPhotoId !== null && !selectedPhotos.has(selectedPhotoId)
+        && (selectedPhotos.size > 0 || clickIds.indexOf(selectedPhotoId) !== -1)) {
+      selectedPhotoId = null;
+      selectedIndex = -1;
+      var detail = document.getElementById('detailContent');
+      if (detail && detail.classList.contains('visible')) {
+        detail.classList.remove('visible');
+        var summary = document.getElementById('summaryPanel');
+        if (summary) summary.classList.remove('hidden');
+        loadSummary();
+      }
+      // Same reason as closeDetail: the dropped anchor's EXIF suggestion is
+      // still tagged with its data-photo-id (hidden along with the detail
+      // panel). This path bypasses closeDetail entirely, so without an
+      // explicit scrub a later Select All (or any batch that still contains
+      // the dropped photo) would satisfy renderLocationEmpty's owner-in-
+      // selection check and resurrect the anchor's Accept line for the
+      // whole batch — clicking it would apply the dropped anchor's GPS
+      // place to every selected photo. Codex P2 on PR #1097.
+      clearExifSuggestion();
+      // And null the ambient detail-photo pointer maybeShowExifSuggestion's
+      // post-await guard reads. If A's reverse-geocode is still in flight
+      // when we drop A here, the completion runs later; leaving
+      // _detailPhotoId pointing at A means a subsequent Select All that
+      // contains A would let the async paint path resurrect A's Accept line
+      // into the batch inspector. Codex P2 on PR #1097 (17:04Z follow-up).
+      window._detailPhotoId = null;
+    }
+  } else if (clickIds.length > 1) {
+    // Normal click on a stack card: select the stack, the same state the
+    // tray's "Select all" produces. There is no single photo to focus — the
+    // card stands for all of them — so the panel opens as the batch
+    // inspector rather than showing one frame's detail as if it were the
+    // thing being acted on.
+    selectedPhotos = new Set(clickIds);
+    selectedPhotoId = null;
+    selectedIndex = idx;
+    abandonDetailFocusForBatch();
+  } else {
+    // Normal click: single select
+    selectedPhotos.clear();
+    selectedPhotoId = id;
+    selectedIndex = idx;
+    loadDetail(id);
+  }
+
+  // Update highlights
+  refreshCardSelectionVisuals();
+
+  noteFocusedCardVisibility();
+  updateBatchBar();
+}
+
+// The batch bar drives Develop/Export/Delete/etc. "Active selection" is
+// whichever of {selectedPhotos, selectedPhotoId} has entries — the Set for
+// cmd/shift-clicks, the single id for a normal click focus. Single-focused
+// photos count as selected for the purposes of batch actions.
+function getActiveSelection() {
+  if (window._vireoNativeMenuPhotoIdsOverride && window._vireoNativeMenuPhotoIdsOverride.length) {
+    return window._vireoNativeMenuPhotoIdsOverride.slice();
+  }
+  if (selectedPhotos.size > 0) return Array.from(selectedPhotos);
+  if (selectedPhotoId != null) return [selectedPhotoId];
+  return [];
+}
+
+// Use the same membership query for Select all and selection reconciliation.
+function buildBrowseIdsRequest() {
+  var url;
+  var fetchOpts = {};
+  if (activeCollectionId && !dashboardCollectionScope) {
+    // Mirror the grid's sort AND its Stacks projection so the selection's
+    // first photo — which drives Best Batch seed, burst-review order, and
+    // export preview — matches the first visible card even when the
+    // collection is sorted by name/rating/sharpness/quality or when a
+    // stack's quality-ranked cover isn't the earliest member under the
+    // sort (Codex P2 on PR #1561).
+    var idsParams = new URLSearchParams();
+    idsParams.set('sort', document.getElementById('sortSelect').value);
+    if (browseStacksEnabled()) idsParams.set('stacks', 'true');
+    url = '/api/collections/' + activeCollectionId + '/photo-ids?' + idsParams.toString();
+  } else {
+    url = '/api/photos/query';
+    var idsBody = {
+      rules: getBrowseRules() || [],
+      sort: document.getElementById('sortSelect').value,
+      ids_only: true,
+    };
+    // Mirror the grid's Stacks projection on the general query path as
+    // well — workspace, folder, dashboard-collection, unsaved-filter,
+    // and visual-search Select-all now share the same cover-first
+    // projection so Best Batch, burst-review, and export preview start
+    // from the visible first card even when a stack's quality-ranked
+    // cover isn't the earliest member under the selected sort (Codex
+    // P2 on PR #1561).
+    if (browseStacksEnabled()) idsBody.stacks = true;
+    var idsVisual = window.VireoFilter && VireoFilter.getVisual ? VireoFilter.getVisual() : null;
+    if (idsVisual) idsBody.visual = idsVisual;
+    if (activeFolderId) idsBody.folder_id = activeFolderId;
+    if (activeCollectionId && dashboardCollectionScope) idsBody.collection_id = activeCollectionId;
+    fetchOpts = {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(idsBody),
+    };
+  }
+  return {url: url, options: fetchOpts};
+}
+
+async function selectAllMatchingPhotos() {
+  anchorRestoreEpoch++;
+  selectedPhotoId = null;
+  selectedIndex = -1;
+  var requestSeq = ++selectAllRequestSeq;
+  var selectionEpoch = anchorRestoreEpoch;
+  var windowIsCurrent = observeBrowseWindow();
+  var request = buildBrowseIdsRequest();
+
+  showToast('Selecting all matching photos...', 'info');
+  try {
+    var data = await safeFetch(request.url, request.options, { toast: false });
+    if (requestSeq !== selectAllRequestSeq || selectionEpoch !== anchorRestoreEpoch || !windowIsCurrent()) return;
+    selectedPhotos.clear();
+    (data.photo_ids || data.ids || []).forEach(function(id) { selectedPhotos.add(id); });
+    renderGrid();
+    updateBatchBar();
+    showToast(
+      'Selected ' + selectedPhotos.size.toLocaleString() + ' photo' +
+        (selectedPhotos.size === 1 ? '' : 's'),
+      'success'
+    );
+  } catch(e) {
+    showToast('Could not select all photos: ' + (e.message || e), 'error');
+  }
+}
+
+function selectionIdsKey(ids) {
+  return ids.slice().sort(function(a, b) { return a - b; }).join(',');
+}
+
+function isBrowseCompareOpen() {
+  var overlay = document.getElementById('browseCompareOverlay');
+  return !!(overlay && overlay.classList.contains('active'));
+}
+
+function updateCompareButton(ids) {
+  var btn = document.getElementById('compareBtn');
+  if (!btn) return;
+  var canCompare = ids.length >= 2;
+  btn.style.display = canCompare ? '' : 'none';
+  btn.disabled = !canCompare;
+}
+
+function updateBestBatchButton(ids) {
+  var btn = document.getElementById('bestBatchBtn');
+  if (!btn) return;
+  var canFind = ids.length >= 1;
+  btn.style.display = canFind ? '' : 'none';
+  btn.disabled = !canFind;
+}
+
+function updateBurstReviewButton(ids) {
+  var btn = document.getElementById('burstReviewBtn');
+  if (!btn) return;
+  var canReview = ids.length >= 2;
+  btn.style.display = canReview ? '' : 'none';
+  btn.disabled = !canReview;
+}
+
+function detailMatchesSelectedPhoto() {
+  return selectedPhotoId != null && window._detailPhotoId === selectedPhotoId;
+}
+
+// Wrapping and inspector/sidebar resizing change the space the bar overlays.
+new ResizeObserver(function(entries) {
+  var bar = entries[0].target;
+  bar.parentElement.style.setProperty('--batch-bar-height', bar.offsetHeight + 'px');
+}).observe(document.getElementById('batchBar'));
+
+// The bar floats over the photo pane, and the click that raises it is also
+// the first click of a double-click. If the bar accepted clicks the moment
+// it appeared, a batch button — Delete among them — would sit under the
+// cursor in time to take the second click, so the photo opens nothing and
+// a destructive action is one pixel of bad luck away. Show the bar as
+// inert (visible for feedback but pointer-events: none, so the second
+// click passes through to the photo underneath) and only activate it once
+// the click gesture is clearly done. A fixed hide-delay cannot be trusted
+// alone because platform double-click thresholds vary widely (macOS around
+// 500 ms, Windows around 500, and accessibility settings can push either
+// past a second), so what ends the inert state is the pointer leaving the
+// card it was pressed on: every batch button is somewhere it has to travel
+// to, and a double-click does not travel. (1) That movement releases the
+// bar at once, so buttons respond as soon as someone actually reaches for
+// them; (2) a quiet timer releases it anyway for a pointer that never
+// moves, so the bar is not stuck inert; (3) until the pointer does move, a
+// click landing on the bar is redirected to the card underneath as a
+// synthetic dblclick — which is what covers a double-click slower than
+// that timer, without anyone having to guess the interval. Every fresh
+// card mousedown re-inerts the bar and restarts the timer. Hiding stays
+// immediate.
+var BATCH_BAR_ACTIVATE_QUIET_MS = 1500;
+// Distance the pointer has to travel before we treat the movement as a
+// deliberate reach for a batch button. Well within the noise of a
+// stationary hand, well below the distance from any card centre to the
+// nearest batch button.
+var BATCH_BAR_ACTIVATE_MOVE_PX = 8;
+var batchBarActivateTimer = null;
+var batchBarLastCardMouseDown = null;
+// Whether the pointer has left that mousedown's neighbourhood. This, and not
+// any elapsed time, is what says the click gesture is over: every batch button
+// is somewhere the pointer has to travel to, and a double-click does not
+// travel. While it stays false the gesture is still open no matter how long
+// the platform's double-click interval is, so neither the release below nor
+// the straggling-click redirect needs a window to guess at.
+var batchBarPointerMovedSinceCardDown = true;
+
+function scheduleBatchBarActivation() {
+  if (batchBarActivateTimer) clearTimeout(batchBarActivateTimer);
+  batchBarActivateTimer = setTimeout(activateBatchBar, BATCH_BAR_ACTIVATE_QUIET_MS);
+}
+
+function activateBatchBar() {
+  var bar = document.getElementById('batchBar');
+  if (bar) bar.classList.remove('batch-bar-inert');
+  if (batchBarActivateTimer) {
+    clearTimeout(batchBarActivateTimer);
+    batchBarActivateTimer = null;
+  }
+}
+
+// A mousedown on a photo card could be the first (or Nth) click of a
+// double-click. Record where it landed and reset the moved-since flag the
+// guards below read (recorded even before the bar is visible, so the very
+// first click of a fresh double-click is covered), and re-inert the bar
+// and extend the quiet window whenever the bar is already up — this
+// covers both the initial gesture that raises the bar and gestures on
+// cards while the bar is already visible from an earlier selection.
+// Mousedowns targeting the bar itself (a batch button) are left to the
+// click guard below. Capture phase so this runs even if a card's handler
+// stops propagation.
+document.addEventListener('mousedown', function(event) {
+  if (event.button !== 0) return;
+  var target = event.target;
+  if (!target || !target.closest) return;
+  if (target.closest('.grid-card, .browse-stack-member')) {
+    batchBarLastCardMouseDown = {x: event.clientX, y: event.clientY};
+    batchBarPointerMovedSinceCardDown = false;
+  }
+  var bar = document.getElementById('batchBar');
+  if (!bar || bar.style.display !== 'flex') return;
+  if (target.closest('#batchBar')) return;
+  if (!target.closest('.grid-card, .browse-stack-member')) return;
+  if (!bar.classList.contains('batch-bar-inert')) {
+    bar.classList.add('batch-bar-inert');
+  }
+  scheduleBatchBarActivation();
+}, true);
+
+// Pointer movement past a small threshold from the last card mousedown
+// means the user is reaching for a button rather than continuing to
+// click at the same spot. Activate immediately so batch buttons respond
+// as soon as the user actually wants them to.
+document.addEventListener('mousemove', function(event) {
+  var last = batchBarLastCardMouseDown;
+  if (!last || batchBarPointerMovedSinceCardDown) return;
+  var dx = event.clientX - last.x;
+  var dy = event.clientY - last.y;
+  if (dx * dx + dy * dy < BATCH_BAR_ACTIVATE_MOVE_PX * BATCH_BAR_ACTIVATE_MOVE_PX) return;
+  // Recorded whatever the bar is doing, because the straggling-click redirect
+  // below reads it after the quiet timer has already released the bar.
+  batchBarPointerMovedSinceCardDown = true;
+  var bar = document.getElementById('batchBar');
+  if (bar && bar.style.display === 'flex'
+      && bar.classList.contains('batch-bar-inert')) {
+    activateBatchBar();
+  }
+}, true);
+
+// A click that lands on the bar without the pointer having left the card
+// it was last pressed on is the second half of a double-click that raised
+// the bar over that card. If the bar activated between the two clicks —
+// a double-click interval slower than the quiet timer, which any platform
+// can be configured to have — this cancels the click on the bar and
+// dispatches a dblclick on the card underneath, so the photo opens
+// instead of the button firing.
+document.addEventListener('click', function(event) {
+  var target = event.target;
+  if (!target || !target.closest) return;
+  if (!target.closest('#batchBar')) return;
+  var bar = document.getElementById('batchBar');
+  if (!bar || bar.style.display !== 'flex') return;
+  // A keyboard-activated click (Enter/Space on a focused batch button, or a
+  // script-dispatched click on one) belongs to that button, not to any
+  // mouse gesture. The pointer never moved for it — its coordinates are
+  // meaningless for elementFromPoint — so the guards below would misread
+  // it as the stationary tail of a card's double-click and swallow it. The
+  // browser marks such clicks with detail === 0; a real mouse click is 1
+  // or more.
+  if (event.detail === 0) return;
+  if (!batchBarLastCardMouseDown) return;
+  // The pointer has not left the card it was pressed on, so this click cannot
+  // be a reach for a button — every button is somewhere it would have had to
+  // travel to. It is the second half of that card's double-click, arriving
+  // after the quiet timer gave up waiting. No elapsed-time bound: the whole
+  // point is that the platform's interval is not ours to guess. Once the
+  // pointer does move, the release above fires and this stops applying.
+  if (batchBarPointerMovedSinceCardDown) return;
+  event.stopImmediatePropagation();
+  event.preventDefault();
+  bar.classList.add('batch-bar-inert');
+  scheduleBatchBarActivation();
+  var priorPointerEvents = bar.style.pointerEvents;
+  bar.style.pointerEvents = 'none';
+  var under = document.elementFromPoint(event.clientX, event.clientY);
+  bar.style.pointerEvents = priorPointerEvents;
+  var card = under && under.closest
+    ? under.closest('.grid-card, .browse-stack-member')
+    : null;
+  if (!card) return;
+  card.dispatchEvent(new MouseEvent('dblclick', {
+    bubbles: true, cancelable: true, view: window,
+    button: 0, clientX: event.clientX, clientY: event.clientY,
+  }));
+}, true);
+
+function updateBatchBar() {
+  var bar = document.getElementById('batchBar');
+  if (!bar) return;
+  var ids = getActiveSelection();
+  if (ids.length >= 1) {
+    if (bar.style.display !== 'flex') {
+      // Inert-until-quiet only exists to protect an in-flight card
+      // double-click from being intercepted by the bar raised over that
+      // card. Non-card selection flows — Ctrl/Cmd+A, a stack tray's
+      // Select all, script-driven selection — have no such gesture to
+      // shield, and starting inert there would let a batch-button click
+      // in the quiet window pass through to the grid beneath and
+      // replace the selection we just made. Only inert when a card
+      // mousedown is actually pending.
+      var cardGesturePending = batchBarLastCardMouseDown
+        && !batchBarPointerMovedSinceCardDown;
+      if (cardGesturePending) {
+        bar.classList.add('batch-bar-inert');
+        scheduleBatchBarActivation();
+      } else {
+        bar.classList.remove('batch-bar-inert');
+      }
+      bar.style.display = 'flex';
+    }
+    document.getElementById('batchCount').textContent =
+      ids.length.toLocaleString() + ' selected' + browseSelectionStackNote(ids);
+  } else {
+    if (batchBarActivateTimer) {
+      clearTimeout(batchBarActivateTimer);
+      batchBarActivateTimer = null;
+    }
+    bar.classList.remove('batch-bar-inert');
+    bar.style.display = 'none';
+  }
+  updateCompareButton(ids);
+  updateBestBatchButton(ids);
+  updateBurstReviewButton(ids);
+  updateSelectionPanel(ids);
+}
+
+function openSelectedInBurstReview() {
+  var ids = getActiveSelection();
+  if (ids.length < 2) {
+    showToast('Select at least two photos to review as a burst.', 'error');
+    return;
+  }
+  if (ids.length > 500) {
+    showToast('Select 500 or fewer photos to review as a burst.', 'error');
+    return;
+  }
+  try {
+    window.sessionStorage.setItem('vireo.browseBurstReviewIds', JSON.stringify(ids));
+  } catch (e) {
+    showToast('Could not open burst review for this selection.', 'error');
+    return;
+  }
+  window.location.href = '/pipeline/review?browse_burst=1';
+}
+
+function bestBatchSeedId() {
+  if (selectedPhotoId != null) return selectedPhotoId;
+  var ids = getActiveSelection();
+  return ids.length ? ids[0] : null;
+}
+
+function hideBestBatch() {
+  var modal = document.getElementById('bestBatchModal');
+  if (modal) modal.classList.remove('open');
+}
+
+function bestBatchRoleLabel(role) {
+  if (role === 'best') return 'Best';
+  if (role === 'alternate') return 'Alt';
+  return 'Reject';
+}
+
+function bestBatchScoreText(card) {
+  var parts = [];
+  if (card.quality_pct != null) parts.push('Q ' + card.quality_pct);
+  if (card.focus != null) parts.push('F ' + Math.round(card.focus * 100));
+  if (card.sharpness != null) parts.push('S ' + Math.round(card.sharpness));
+  return parts.join(' · ') || 'No score';
+}
+
+function renderBestBatch(data) {
+  bestBatchData = data;
+  var content = document.getElementById('bestBatchContent');
+  if (!content) return;
+  var best = (data.cards || []).find(function(c) { return c.id === data.best_photo_id; }) || (data.cards || [])[0];
+  if (!best) {
+    content.className = 'best-batch-empty';
+    content.textContent = 'No scored photos found in this batch.';
+    return;
+  }
+  var countText = data.count + ' photos';
+  if (data.sequence_range) {
+    countText += ' · #' + data.sequence_range[0] + '–' + data.sequence_range[1];
+  }
+  var reasonHtml = (data.best_reasons || []).map(function(r) {
+    return '<span class="best-batch-reason">' + escapeHtml(r) + '</span>';
+  }).join('');
+  var cards = (data.cards || []).map(function(card) {
+    var reasons = (card.reasons || []).slice(0, 2).map(escapeHtml).join(' · ');
+    var thumbUrl = window.vireoThumbnailUrl ? window.vireoThumbnailUrl(card) : '/thumbnails/' + card.id + '.jpg';
+    return '<div class="best-batch-card ' + escapeAttr(card.role || '') + '" data-photo-id="' + card.id + '">' +
+      '<img src="' + escapeAttr(thumbUrl) + '" alt="' + escapeAttr(card.filename || '') + '" loading="lazy">' +
+      '<div class="best-batch-card-body">' +
+        '<div class="best-batch-role ' + escapeAttr(card.role || '') + '">#' + card.rank + ' ' + bestBatchRoleLabel(card.role) + '</div>' +
+        '<div class="best-batch-card-name" title="' + escapeAttr(card.filename || '') + '">' + escapeHtml(card.filename || '') + '</div>' +
+        '<div class="best-batch-card-line">' + escapeHtml(bestBatchScoreText(card)) + '</div>' +
+        '<div class="best-batch-card-line">' + reasons + '</div>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+  var bestThumbUrl = window.vireoThumbnailUrl ? window.vireoThumbnailUrl(best) : '/thumbnails/' + best.id + '.jpg';
+  content.className = '';
+  content.innerHTML =
+    '<div class="best-batch-head">' +
+      '<div class="best-batch-pick">' +
+        '<img src="' + escapeAttr(bestThumbUrl) + '" alt="' + escapeAttr(best.filename || '') + '">' +
+        '<div class="best-batch-pick-meta">' +
+          '<div class="best-batch-eyebrow">Best Pick</div>' +
+          '<div class="best-batch-title">' + escapeHtml(best.filename || '') + '</div>' +
+          '<div class="best-batch-score">' + escapeHtml(bestBatchScoreText(best)) + '</div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="best-batch-summary">' +
+        '<div class="best-batch-eyebrow">' + escapeHtml(countText) + '</div>' +
+        '<div>' + escapeHtml(best.filename || 'This photo') + ' is the top-ranked frame in the detected batch.</div>' +
+        '<div class="best-batch-reasons">' + reasonHtml + '</div>' +
+      '</div>' +
+    '</div>' +
+    '<div class="best-batch-list">' + cards + '</div>';
+}
+
+function openBestBatchForIds(ids, seedId) {
+  ids = Array.isArray(ids) ? ids.filter(function(id) { return id != null; }) : [];
+  seedId = seedId || (ids.length ? ids[0] : bestBatchSeedId());
+  if (!seedId) {
+    showToast('Select a photo first.', 'error');
+    return;
+  }
+  try {
+    window.sessionStorage.setItem('vireo.bestBatchIds', JSON.stringify(ids));
+    window.sessionStorage.setItem('vireo.bestBatchSeedId', String(seedId));
+  } catch (e) {
+    showToast('Could not open Best Batch for this selection.', 'error');
+    return;
+  }
+  window.location.href = '/best-batch?photo_id=' + encodeURIComponent(seedId);
+}
+
+function openBestBatch() {
+  var ids = getActiveSelection();
+  openBestBatchForIds(ids, bestBatchSeedId());
+}
+
+function openBestBatchInReview() {
+  if (!bestBatchData || !bestBatchData.photo_ids || bestBatchData.photo_ids.length < 2) return;
+  try {
+    window.sessionStorage.setItem('vireo.browseBurstReviewIds', JSON.stringify(bestBatchData.photo_ids));
+  } catch (e) {
+    showToast('Could not open burst review for this batch.', 'error');
+    return;
+  }
+  window.location.href = '/pipeline/review?browse_burst=1';
+}
+
+async function applyBestBatchPickOnly() {
+  if (!bestBatchData || !bestBatchData.best_photo_id) return;
+  var bestId = bestBatchData.best_photo_id;
+  try {
+    await safeFetch('/api/batch/flag', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: [bestId], flag: 'flagged'}),
+    });
+  } catch(e) { return; }
+  var p = findBrowsePhoto(bestId);
+  if (p) p.flag = 'flagged';
+  await reconcileBrowseStackCovers([bestId]);
+  refreshGridCards([bestId]);
+  refreshExpandedBrowseStackMembers([bestId]);
+  _refreshBatchInspectorIfActive();
+  scheduleCollectionCountsRefresh();
+  showUndoToast();
+  showToast('Flagged best photo.', 'success');
+}
+
+async function applyBestBatchPickAndReject() {
+  if (!bestBatchData || !bestBatchData.best_photo_id) return;
+  var bestId = bestBatchData.best_photo_id;
+  var rejectIds = (bestBatchData.suggested_reject_ids || []).filter(function(id) { return id !== bestId; });
+  try {
+    await safeFetch('/api/batch/best-batch-flags', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({best_photo_id: bestId, reject_photo_ids: rejectIds}),
+    });
+  } catch(e) { return; }
+  var touchedIds = [bestId].concat(rejectIds);
+  touchedIds.forEach(function(id) {
+    var p = findBrowsePhoto(id);
+    var flag = id === bestId ? 'flagged' : 'rejected';
+    if (p) p.flag = flag;
+    _clearRepresentativeStateIfIneligible(id, flag);
+  });
+  await reconcileBrowseStackCovers(touchedIds);
+  refreshGridCards(touchedIds);
+  refreshExpandedBrowseStackMembers(touchedIds);
+  _refreshBatchInspectorIfActive();
+  scheduleCollectionCountsRefresh();
+  showUndoToast();
+  showToast('Applied best-batch flags.', 'success');
+  hideBestBatch();
+}
+
+function updateSelectionPanel(ids) {
+  var panel = document.getElementById('selectionPanel');
+  if (!panel) return;
+  if (ids.length <= 1) {
+    var dc = document.getElementById('detailContent');
+    if (dc) dc.classList.remove('batch-mode');
+    // Clear batch-only Mixed markers immediately so they can't linger while the
+    // single-photo detail fetch is in flight.
+    _batchToggleMixed('ratingMixed', false);
+    _batchToggleMixed('flagMixed', false);
+    _batchToggleMixed('colorMixed', false);
+    var wasVisible = !panel.classList.contains('hidden');
+    panel.classList.add('hidden');
+    selectionKeywordKey = '';
+    selectionKeywordMissingById = {};
+    selectionKeywordPresentById = {};
+    selectionKeywordNameById = {};
+    selectionKeywordRequestSeq++;
+    var list = document.getElementById('selectionKeywordSuggestions');
+    if (list) list.innerHTML = '';
+    // Same teardown for the prediction rows — bumping the sequence drops any
+    // in-flight selection response so it can't paint into the panel the user
+    // has just collapsed back to a single photo.
+    selectionPredictionKey = '';
+    selectionPredictionAcceptableById = {};
+    selectionPredictionSpeciesByIdx = {};
+    selectionPredictionPhotoIdsByIdx = {};
+    selectionPredictionSeq++;
+    var predList = document.getElementById('selectionPredictions');
+    if (predList) predList.innerHTML = '';
+    renderSelectionWildlifeState([]);
+    if (wasVisible && selectedPhotoId) {
+      loadDetail(selectedPhotoId);
+    } else if (wasVisible) {
+      var detail = document.getElementById('detailContent');
+      var summary = document.getElementById('summaryPanel');
+      if (detail) detail.classList.remove('visible');
+      if (summary) summary.classList.remove('hidden');
+      loadSummary();
+    }
+    return;
+  }
+
+  var detail = document.getElementById('detailContent');
+  var summary = document.getElementById('summaryPanel');
+  if (summary) summary.classList.add('hidden');
+  // Reuse the detail panel as a batch inspector for the whole selection:
+  // Rating/Flag/Color/Location act on all selected photos, single-photo-only
+  // sections are hidden via .batch-mode CSS.
+  if (detail) {
+    detail.classList.add('visible');
+    detail.classList.add('batch-mode');
+  }
+  panel.classList.remove('hidden');
+  document.getElementById('selectionCount').textContent =
+    ids.length.toLocaleString() + ' photos selected' + browseSelectionStackNote(ids);
+  updatePasteEditSection(ids);
+  renderSelectionWildlifeState(ids);
+  // Keep any EXIF suggestion fetched for the anchor photo: Accept is
+  // batch-aware (_locationApplyPhotoIds), so growing the selection is the
+  // designed way to apply one suggestion to many photos.
+  renderBatchInspector(ids, { preserveExifSuggestion: true });
+  if (ids.length > 1000) {
+    selectionKeywordKey = selectionIdsKey(ids);
+    selectionKeywordMissingById = {};
+    selectionKeywordPresentById = {};
+    selectionKeywordNameById = {};
+    selectionKeywordRequestSeq++;
+    var list = document.getElementById('selectionKeywordSuggestions');
+    if (list) {
+      list.innerHTML = '<div class="selection-empty">Keyword suggestions are available for selections of 1,000 photos or fewer.</div>';
+    }
+    // Say the cap out loud here too, rather than leaving an empty
+    // Predictions box that reads as "nothing predicted".
+    selectionPredictionKey = selectionIdsKey(ids);
+    selectionPredictionSeq++;
+    selectionPredictionAcceptableById = {};
+    selectionPredictionSpeciesByIdx = {};
+    selectionPredictionPhotoIdsByIdx = {};
+    var predList = document.getElementById('selectionPredictions');
+    if (predList) {
+      predList.innerHTML = '<div class="selection-empty">Predictions are available for selections of 1,000 photos or fewer.</div>';
+    }
+    return;
+  }
+  loadSelectionKeywordSuggestions(ids);
+  loadSelectionPredictions(ids);
+}
+
+function updatePasteEditSection(ids) {
+  var section = document.getElementById('pasteEditSection');
+  var hint = document.getElementById('pasteEditHint');
+  if (!section) return;
+  var copied = window.vireoEditNav ? window.vireoEditNav.getCopiedRecipe() : null;
+  if (!copied || !copied.recipe) {
+    section.hidden = true;
+    return;
+  }
+  section.hidden = false;
+  if (hint) {
+    var n = ids.length.toLocaleString();
+    hint.textContent = copied.source
+      ? 'Copied from ' + copied.source + ' — applies to ' + n + ' selected photos.'
+      : 'Applies the copied development settings to ' + n + ' selected photos.';
+  }
+}
+
+function _browseHasDevelopmentSettings(recipe) {
+  return !!(recipe && typeof recipe === 'object' && Object.keys(recipe).some(function(key) {
+    return key !== 'version';
+  }));
+}
+
+var _browseDevelopmentCopySeq = 0;
+
+async function copyDevelopmentSettingsFromPhoto(photoId) {
+  var photo = photos.find(function(candidate) { return candidate.id === Number(photoId); });
+  if (!photoId || !window.vireoEditNav) return;
+  var copySeq = ++_browseDevelopmentCopySeq;
+  var copyToken = typeof window.vireoEditNav.beginCopiedRecipe === 'function'
+    ? await window.vireoEditNav.beginCopiedRecipe()
+    : null;
+  try {
+    // Fetch the authoritative recipe so a long-lived Browse tab cannot copy
+    // settings that were changed in another surface since its last refresh.
+    var data = await safeFetch('/api/photos/' + photoId + '/edit-recipe', {}, {toast: false});
+    if (copySeq !== _browseDevelopmentCopySeq) return;
+    if (
+      copyToken &&
+      typeof window.vireoEditNav.isCopiedRecipeCurrent === 'function' &&
+      !window.vireoEditNav.isCopiedRecipeCurrent(copyToken)
+    ) return;
+    var recipe = data && data.recipe;
+    if (!_browseHasDevelopmentSettings(recipe)) {
+      if (typeof window.vireoEditNav.cancelCopiedRecipe === 'function') {
+        if (!await window.vireoEditNav.cancelCopiedRecipe(copyToken)) return;
+      }
+      showToast('This photo has no development settings to copy', 'error');
+      return;
+    }
+    var meta = {
+      source: (photo && photo.filename) || null,
+      at: Date.now(),
+    };
+    if (
+      copyToken &&
+      typeof window.vireoEditNav.setCopiedRecipeIfCurrent === 'function'
+    ) {
+      if (!await window.vireoEditNav.setCopiedRecipeIfCurrent(recipe, meta, copyToken)) return;
+    } else {
+      await window.vireoEditNav.setCopiedRecipe(recipe, meta);
+    }
+    showToast('Development settings copied', 'success');
+    updatePasteEditSection(getActiveSelection());
+  } catch (e) {
+    if (copySeq !== _browseDevelopmentCopySeq) return;
+    if (
+      copyToken &&
+      typeof window.vireoEditNav.isCopiedRecipeCurrent === 'function' &&
+      !window.vireoEditNav.isCopiedRecipeCurrent(copyToken)
+    ) return;
+    if (typeof window.vireoEditNav.cancelCopiedRecipe === 'function') {
+      if (!await window.vireoEditNav.cancelCopiedRecipe(copyToken)) return;
+    }
+    showToast(e.message || 'Could not copy development settings', 'error');
+  }
+}
+
+async function openBatchDevelopmentEditor() {
+  try { await VireoBatchEdits.open(getActiveSelection().slice()); }
+  catch (error) { showToast(error.message || 'Could not open batch editor', 'error'); }
+}
+
+var _browseDevelopmentPasteInFlight = false;
+
+async function pasteEditSettingsToSelection() {
+  if (_browseDevelopmentPasteInFlight) {
+    showToast('A development settings paste is already running.', 'warning');
+    return;
+  }
+  var ids = getActiveSelection();
+  if (ids.length < 1) { showToast('Select photos first.', 'error'); return; }
+  var copied = window.vireoEditNav ? window.vireoEditNav.getCopiedRecipe() : null;
+  if (!copied || !copied.recipe) {
+    showToast('Copy development settings from a photo first.', 'error');
+    return;
+  }
+  var btn = document.getElementById('pasteEditBtn');
+  _browseDevelopmentPasteInFlight = true;
+  if (btn) btn.disabled = true;
+  try {
+    var data = await VireoBatchEdits.paste(ids.slice());
+    if (data) showToast(VireoBatchEdits.resultMessage(data), data.skipped.length ? 'warning' : 'success');
+  } catch (e) {
+    showToast(e.message || 'Could not paste development settings', 'error');
+  } finally {
+    _browseDevelopmentPasteInFlight = false;
+    if (btn) btn.disabled = false;
+  }
+}
+
+function openBrowseCompare() {
+  var ids = getActiveSelection();
+  if (ids.length < 2) {
+    showToast('Select at least two photos to compare.', 'error');
+    return;
+  }
+  browseCompareIds = ids.slice();
+  browseCompareOffset = 0;
+
+  var overlay = document.getElementById('browseCompareOverlay');
+  if (!overlay) return;
+  var alreadyOpen = overlay.classList.contains('active');
+  if (alreadyOpen && browseCompareEscToken && window.Keymap) {
+    Keymap.popEsc(browseCompareEscToken);
+    browseCompareEscToken = null;
+  }
+  if (window.Keymap) {
+    browseCompareEscToken = Keymap.pushEsc(function() { closeBrowseCompare(); });
+    if (!alreadyOpen) Keymap.lockBodyScroll();
+  }
+  overlay.classList.add('active');
+  renderBrowseCompare();
+}
+
+function closeBrowseCompare(e) {
+  if (e) {
+    e.stopPropagation();
+    if (e.target && e.currentTarget && e.target !== e.currentTarget && !e.target.classList.contains('browse-compare-close')) {
+      return;
+    }
+  }
+  var overlay = document.getElementById('browseCompareOverlay');
+  var wasOpen = overlay && overlay.classList.contains('active');
+  if (overlay) overlay.classList.remove('active');
+  if (browseCompareEscToken && window.Keymap) {
+    Keymap.popEsc(browseCompareEscToken);
+    browseCompareEscToken = null;
+  }
+  if (wasOpen && window.Keymap) Keymap.unlockBodyScroll();
+}
+
+function browseCompareStep(delta) {
+  if (!isBrowseCompareOpen()) return;
+  var maxOffset = Math.max(0, browseCompareIds.length - 2);
+  var next = Math.max(0, Math.min(maxOffset, browseCompareOffset + delta));
+  if (next === browseCompareOffset) return;
+  browseCompareOffset = next;
+  renderBrowseCompare();
+}
+
+function browseCompareElements(prefix) {
+  return {
+    wrap: document.getElementById('browseCompareWrap' + prefix),
+    img: document.getElementById('browseCompareImg' + prefix),
+    badge: document.getElementById('browseCompareZoom' + prefix)
+  };
+}
+
+function clampBrowseComparePan(prefix) {
+  var view = browseCompareViews[prefix];
+  var els = browseCompareElements(prefix);
+  if (!view || !els.wrap || !els.img) return;
+  if (view.zoom <= 1.001) {
+    view.panX = 0;
+    view.panY = 0;
+    return;
+  }
+  var maxX = Math.max(0, (els.img.clientWidth * view.zoom - els.wrap.clientWidth) / 2);
+  var maxY = Math.max(0, (els.img.clientHeight * view.zoom - els.wrap.clientHeight) / 2);
+  view.panX = Math.max(-maxX, Math.min(maxX, view.panX));
+  view.panY = Math.max(-maxY, Math.min(maxY, view.panY));
+}
+
+function applyBrowseCompareView(prefix) {
+  var view = browseCompareViews[prefix];
+  var els = browseCompareElements(prefix);
+  if (!view || !els.wrap || !els.img) return;
+  clampBrowseComparePan(prefix);
+  els.img.style.transform = 'translate(' + view.panX + 'px, ' + view.panY + 'px) scale(' + view.zoom + ')';
+  els.wrap.classList.toggle('zoomed', view.zoom > 1.001);
+  if (els.badge) els.badge.textContent = view.zoom <= 1.001 ? 'Fit' : Math.round(view.zoom * 100) + '%';
+}
+
+function ensureBrowseCompareOriginal(prefix) {
+  var els = browseCompareElements(prefix);
+  if (!els.img || !els.img.dataset.photoId) return;
+  var loadState = els.img.dataset.originalLoaded;
+  if (loadState === 'true' || loadState === 'loading' || loadState === 'failed') return;
+  var photoId = els.img.dataset.photoId;
+  els.img.dataset.originalLoaded = 'loading';
+  var original = new Image();
+  els.img._browseCompareOriginalProbe = original;
+  original.onload = function() {
+    if (els.img.dataset.photoId !== photoId) return;
+    els.img.dataset.originalLoaded = 'true';
+    els.img.src = original.src;
+    els.img._browseCompareOriginalProbe = null;
+  };
+  original.onerror = function() {
+    if (els.img.dataset.photoId !== photoId) return;
+    els.img.dataset.originalLoaded = 'failed';
+    els.img._browseCompareOriginalProbe = null;
+  };
+  original.src = '/photos/' + photoId + '/original';
+}
+
+function setBrowseCompareZoom(prefix, zoom, clientX, clientY) {
+  var view = browseCompareViews[prefix];
+  var els = browseCompareElements(prefix);
+  if (!view || !els.wrap) return;
+  var oldZoom = view.zoom;
+  var nextZoom = Math.max(1, Math.min(8, zoom));
+  if (nextZoom > 1.001 && oldZoom > 0 && clientX != null && clientY != null) {
+    var rect = els.wrap.getBoundingClientRect();
+    var cursorX = clientX - (rect.left + rect.width / 2);
+    var cursorY = clientY - (rect.top + rect.height / 2);
+    var ratio = nextZoom / oldZoom;
+    view.panX = cursorX - ratio * (cursorX - view.panX);
+    view.panY = cursorY - ratio * (cursorY - view.panY);
+  }
+  view.zoom = nextZoom;
+  if (nextZoom <= 1.001) {
+    view.panX = 0;
+    view.panY = 0;
+  } else {
+    ensureBrowseCompareOriginal(prefix);
+  }
+  applyBrowseCompareView(prefix);
+}
+
+function resetBrowseCompareView(prefix) {
+  var view = browseCompareViews[prefix];
+  if (!view) return;
+  view.zoom = 1;
+  view.panX = 0;
+  view.panY = 0;
+  applyBrowseCompareView(prefix);
+}
+
+function resetBrowseCompareViews() {
+  resetBrowseCompareView('A');
+  resetBrowseCompareView('B');
+}
+
+function browseComparePaneFromEvent(e) {
+  var wrap = e.target && e.target.closest ? e.target.closest('.browse-compare-image-wrap') : null;
+  return wrap && wrap.dataset ? wrap.dataset.pane : null;
+}
+
+(function installBrowseCompareZoomHandlers() {
+  document.addEventListener('wheel', function(e) {
+    if (!isBrowseCompareOpen()) return;
+    var prefix = browseComparePaneFromEvent(e);
+    if (!prefix || !browseCompareViews[prefix]) return;
+    e.preventDefault();
+    var sensitivity = e.ctrlKey ? 0.02 : 0.0015;
+    var factor = Math.exp(-e.deltaY * sensitivity);
+    setBrowseCompareZoom(prefix, browseCompareViews[prefix].zoom * factor, e.clientX, e.clientY);
+  }, { passive: false });
+
+  document.addEventListener('dblclick', function(e) {
+    if (!isBrowseCompareOpen()) return;
+    var prefix = browseComparePaneFromEvent(e);
+    if (!prefix || !browseCompareViews[prefix]) return;
+    e.preventDefault();
+    setBrowseCompareZoom(prefix, browseCompareViews[prefix].zoom > 1.001 ? 1 : 2, e.clientX, e.clientY);
+  });
+
+  document.addEventListener('pointerdown', function(e) {
+    if (!isBrowseCompareOpen() || e.button !== 0) return;
+    var prefix = browseComparePaneFromEvent(e);
+    var view = prefix && browseCompareViews[prefix];
+    if (!view || view.zoom <= 1.001) return;
+    browseComparePointer = {
+      pointerId: e.pointerId,
+      prefix: prefix,
+      startX: e.clientX,
+      startY: e.clientY,
+      panX: view.panX,
+      panY: view.panY
+    };
+    if (e.target.setPointerCapture) e.target.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  });
+
+  document.addEventListener('pointermove', function(e) {
+    var drag = browseComparePointer;
+    if (!drag || drag.pointerId !== e.pointerId) return;
+    var view = browseCompareViews[drag.prefix];
+    view.panX = drag.panX + e.clientX - drag.startX;
+    view.panY = drag.panY + e.clientY - drag.startY;
+    applyBrowseCompareView(drag.prefix);
+    e.preventDefault();
+  });
+
+  function stopBrowseComparePan(e) {
+    if (browseComparePointer && (e.pointerId == null || browseComparePointer.pointerId === e.pointerId)) {
+      browseComparePointer = null;
+    }
+  }
+  document.addEventListener('pointerup', stopBrowseComparePan);
+  document.addEventListener('pointercancel', stopBrowseComparePan);
+  window.addEventListener('resize', function() {
+    if (!isBrowseCompareOpen()) return;
+    applyBrowseCompareView('A');
+    applyBrowseCompareView('B');
+  });
+})();
+
+function findBrowsePhoto(id) {
+  var topLevel = photos.find(function(p) { return p.id === id; });
+  if (topLevel) return topLevel;
+  var coverIds = Object.keys(browseStackMembers);
+  for (var i = 0; i < coverIds.length; i++) {
+    var member = (browseStackMembers[coverIds[i]] || []).find(function(p) {
+      return p.id === id;
+    });
+    if (member) return member;
+  }
+  return null;
+}
+
+async function getBrowseComparePhoto(id) {
+  var local = findBrowsePhoto(id);
+  if (local) return local;
+  try {
+    return await safeFetch('/api/photos/' + id, {}, { toast: false });
+  } catch(e) {
+    return { id: id, filename: 'Photo ' + id };
+  }
+}
+
+function browseCompareMeta(photo) {
+  var parts = [];
+  if (photo.width && photo.height) parts.push(photo.width + ' × ' + photo.height);
+  if (photo.timestamp) parts.push(photo.timestamp.replace('T', ' ').substring(0, 16));
+  if (photo.rating != null && photo.rating > 0) parts.push(photo.rating + ' star' + (photo.rating === 1 ? '' : 's'));
+  if (photo.sharpness != null) parts.push('sharpness ' + Math.round(photo.sharpness));
+  if (photo.flag && photo.flag !== 'none') parts.push(photo.flag);
+  return parts.join(' · ');
+}
+
+function setBrowseComparePane(prefix, photo) {
+  var img = document.getElementById('browseCompareImg' + prefix);
+  var name = document.getElementById('browseCompareName' + prefix);
+  var meta = document.getElementById('browseCompareMeta' + prefix);
+  if (img) {
+    img._browseCompareOriginalProbe = null;
+    img.alt = photo.filename || '';
+    img.dataset.photoId = photo.id;
+    img.dataset.originalLoaded = 'false';
+    img.src = '/photos/' + photo.id + '/full';
+  }
+  if (name) name.textContent = photo.filename || ('Photo ' + photo.id);
+  if (meta) meta.textContent = browseCompareMeta(photo);
+}
+
+async function renderBrowseCompare() {
+  if (!browseCompareIds.length) return;
+  var seq = ++browseCompareSeq;
+  var leftId = browseCompareIds[browseCompareOffset];
+  var rightId = browseCompareIds[browseCompareOffset + 1];
+  if (leftId == null || rightId == null) return;
+  resetBrowseCompareViews();
+
+  var count = document.getElementById('browseCompareCount');
+  if (count) {
+    count.textContent = (browseCompareOffset + 1) + '-' + (browseCompareOffset + 2) + ' of ' + browseCompareIds.length;
+  }
+  var prev = document.getElementById('browseComparePrev');
+  var next = document.getElementById('browseCompareNext');
+  if (prev) prev.disabled = browseCompareOffset <= 0;
+  if (next) next.disabled = browseCompareOffset >= browseCompareIds.length - 2;
+
+  var nameA = document.getElementById('browseCompareNameA');
+  var nameB = document.getElementById('browseCompareNameB');
+  var metaA = document.getElementById('browseCompareMetaA');
+  var metaB = document.getElementById('browseCompareMetaB');
+  if (nameA) nameA.textContent = 'Loading...';
+  if (nameB) nameB.textContent = 'Loading...';
+  if (metaA) metaA.textContent = '';
+  if (metaB) metaB.textContent = '';
+
+  var pair = await Promise.all([getBrowseComparePhoto(leftId), getBrowseComparePhoto(rightId)]);
+  if (seq !== browseCompareSeq || !isBrowseCompareOpen()) return;
+  setBrowseComparePane('A', pair[0]);
+  setBrowseComparePane('B', pair[1]);
+}
+
+/* ---------- Predictions panels ----------
+   Browse shows what the classifier thinks, not just what has been committed.
+   Unambiguous predictions are actionable here; anything needing Review's
+   fuller UI stays visible but routes there instead of offering an Accept
+   this panel cannot honestly carry out. */
+
+// `effective_category` is the server's fresh comparison of this prediction
+// against the CURRENT species keywords on the photo. `category` is only the
+// classify-time snapshot, so a Robin keyword added AFTER a Sparrow prediction
+// leaves the stored category unchanged; without the effective check Browse
+// would offer a bare Accept that silently adds the conflicting species.
+// The fresh comparison wins outright when the server could make one; the
+// stored `category` is only the fallback for when it could not. ORing the two
+// would make ambiguity a one-way ratchet — a photo whose conflicting keyword
+// has since been removed would keep being routed to Review forever, naming a
+// conflict that no longer exists. That is the same staleness the effective
+// check exists to kill, pointing the other way.
+function predictionIsAmbiguous(p) {
+  var eff = p.effective_category;
+  if (p.alternatives && p.alternatives.length) return true;
+  if (eff) return eff === 'conflict' || eff === 'refinement' || eff === 'broader';
+  return p.category === 'disagreement' || p.category === 'refinement';
+}
+
+function predictionAmbiguityReason(p) {
+  var reasons = [];
+  var altCount = (p.alternatives || []).length;
+  if (altCount) {
+    reasons.push(altCount + (altCount === 1 ? ' alternative' : ' alternatives'));
+  }
+  var existing = (p.existing_species || []).join(', ');
+  // Same precedence as predictionIsAmbiguous: name the reason the fresh
+  // comparison found, or the stored one only when there is no fresh one.
+  var eff = p.effective_category;
+  var isConflict = eff ? eff === 'conflict' : p.category === 'disagreement';
+  var isRefinement = eff ? eff === 'refinement' : p.category === 'refinement';
+  var isBroader = eff === 'broader';
+  if (isConflict) {
+    reasons.push(existing ? 'conflicts with keyworded ' + existing : 'conflicts with existing keywords');
+  } else if (isRefinement) {
+    reasons.push(existing ? 'refines keyworded ' + existing : 'refines an existing keyword');
+  } else if (isBroader) {
+    reasons.push(existing ? 'broader than keyworded ' + existing : 'broader than an existing keyword');
+  }
+  return reasons.join(' · ');
+}
+
+// An empty list has five different meanings. Collapsing them into one blank
+// panel would tell the user "no prediction" when the truth might be "nothing
+// has run yet" — see CORE_PHILOSOPHY.md, no black boxes.
+//
+// `classifier_ran` is checked before `detection_count` on purpose: once the
+// classifier has run, the reason the panel is empty is a classifier fact, and
+// "nothing detected" would be a stale explanation. `hiddenCount` splits the
+// last case in two — blaming the threshold when the classifier produced no
+// species at all would name a cause that never fired.
+// A banner, not a row: it qualifies the whole list rather than describing one
+// prediction. Only the `unlisted` verdict is shown, and deliberately so —
+// `listed` would add reassuring chrome to the ordinary case, while
+// `uncalibrated` and `unavailable` have nothing to report. Absence of a
+// threshold is not a passing grade, so neither may be rendered as one.
+//
+// The banner covers the case where EVERY judged run failed. That is not the
+// whole story: a photo can hold two species, and two models can disagree
+// about one subject, so a single passing run flips the photo-level state to
+// `listed` while a displayed prediction is still explicitly `unlisted`.
+// `buildUnlistedRunIndex` below carries those failures down to the rows that
+// produced them, so a passing run can never silence a failing one.
+//
+// The same `unlisted` gate also keeps the banner off a photo where one model
+// failed its floor and another model ran with no calibrated floor at all:
+// `match_confidence.summarize` degrades that photo to `uncalibrated`, because
+// "every species below is not a match" would be asserting a verdict for a
+// model nobody judged. The per-row warning still fires and names the model
+// that actually failed.
+function buildMatchBanner(matchState) {
+  if (!matchState || matchState.state !== 'unlisted') return '';
+  var lines = (matchState.assessments || [])
+    .filter(function(a) { return a && a.state === 'unlisted' && a.explanation; })
+    .map(function(a) {
+      return '<div class="match-banner-detail">' + escapeHtml(a.model) + ': ' +
+        escapeHtml(a.explanation) + '</div>';
+    }).join('');
+  var modelCount = matchState.judged_models || 0;
+  return '<div class="match-banner">' +
+    '<div class="match-banner-title">No label in your list matches this photo well</div>' +
+    '<div class="match-banner-detail">' +
+      'Every species below is the closest available label, not a match. ' +
+      (modelCount === 1
+        ? 'One model was judged.'
+        : modelCount + ' models were judged and all agree.') +
+      ' Consider widening the label list — the real species may not be one this list contains.' +
+    '</div>' + lines +
+  '</div>';
+}
+
+// (detection, model) -> the verdict of the run that produced that row, for
+// runs positively judged as matching nothing in their label list. Only
+// `unlisted` runs are indexed: `uncalibrated` and `unavailable` mean no
+// verdict was reached, and a row must never be marked failing on the strength
+// of a measurement nobody judged.
+function buildUnlistedRunIndex(matchState) {
+  var index = {};
+  ((matchState && matchState.unlisted_runs) || []).forEach(function(run) {
+    if (!run || run.state !== 'unlisted' || run.detection_id == null) return;
+    index[run.detection_id + '|' + (run.classifier_model || '')] = run;
+  });
+  return index;
+}
+
+// Why this bucket carries a warning even though the photo as a whole was not
+// flagged. Names the models that failed and how much of the bucket they
+// account for, because the alternative — a bare "no good match" over a row
+// pooling five detections of which one failed — would replace one misleading
+// number with another.
+function unlistedGroupReason(group) {
+  var models = group.unlisted.map(function(run) {
+    return run.classifier_model || run.model || 'this model';
+  });
+  var uniqueModels = models.filter(function(m, i) {
+    return models.indexOf(m) === i;
+  });
+  // Counted over DETECTIONS, not over prediction rows. A bucket can hold
+  // several rows from one detection (one per model, plus promoted
+  // alternatives), so "3 of the 3 detections" computed from row counts would
+  // be a number the photo does not contain.
+  var total = Object.keys(group.detections).length;
+  var failed = Object.keys(group.unlistedDetections).length;
+  var scope = total === 1
+    ? 'This detection'
+    : (failed >= total
+        ? 'Every detection behind this row'
+        : failed + ' of the ' + total + ' detections behind this row');
+  return scope + ' matched nothing in the label list ' +
+    uniqueModels.join(' and ') + ' ran — the species above is the closest ' +
+    'available label, not a match.';
+}
+
+function predictionEmptyMessage(state, hiddenCount) {
+  if (!state) return 'No predictions for this photo.';
+  if (!state.detector_ran) return 'Not yet classified — no detector has run on this photo.';
+  if (state.classifier_ran) {
+    // A third branch used to sit here, taking a count of buckets the
+    // borrowed-confidence suppression had dropped and naming that as the
+    // reason the panel was empty. Both the suppression and this branch are
+    // retired: the only rows that could reach them were legacy
+    // mixed-consensus bursts, which
+    // `Database.repair_mixed_species_prediction_groups` clears at startup.
+    // The two remaining branches are exhaustive again — with nothing
+    // suppressed, an empty panel under a classifier that ran means either
+    // the floor hid everything or there was nothing to hide.
+    if (hiddenCount) return 'No species above threshold — every prediction is below your confidence floor.';
+    return 'Classification ran and produced no species for this photo.';
+  }
+  if (!state.detection_count) return 'Nothing detected — the detector ran and found no animals.';
+  return 'Not yet classified — detections found, but no classifier has run yet.';
+}
+
+function formatPredictionConfidence(conf) {
+  if (conf == null) return 'confidence unknown';
+  return Math.round(conf * 100) + '%';
+}
+
+// Mirrors Database.DECIDED_PREDICTION_STATUSES (vireo/db.py), which every
+// prediction endpoint uses as its "already decided" precondition. The panel
+// has to agree with it exactly: a row this list omits gets Accept and Reject
+// buttons, and the endpoint behind those buttons answers 409 (single-row) or
+// skips it as `already_decided` (batch) — a button that promises an action
+// the server refuses is the black box CORE_PHILOSOPHY.md rules out. Named
+// once here rather than spelled out at the comparison, so the panel's copy of
+// the rule is findable from the backend's.
+//
+// `alternative` is deliberately absent, matching the backend: a runner-up is
+// awaiting a decision, not carrying one. The panel never sees those as
+// top-level rows anyway — /api/predictions nests them under their parent.
+var PREDICTION_DECIDED_STATUSES = ['accepted', 'rejected', 'reviewed'];
+
+function predictionIsDecided(p) {
+  return PREDICTION_DECIDED_STATUSES.indexOf(p && p.status) >= 0;
+}
+
+// Why a decided row carries no buttons. `reviewed` in particular is not
+// self-explanatory in Browse — it is written from ID Conflicts — so the tag
+// says what it means rather than leaving a bare word where two buttons were.
+function predictionStatusExplanation(status) {
+  // "was confirmed", not "the keyword was added": accepting a prediction for
+  // a photo that already carries the species writes no tag at all
+  // (``accept_prediction`` returns ``changed_tag=false`` for it), and this
+  // tooltip is rendered from the row's stored status — long after the accept,
+  // in a session that never saw that flag. Naming the decision is true in
+  // both cases; naming the write would be a guess dressed as a fact.
+  if (status === 'accepted') return 'Accepted — this species was confirmed for the photo.';
+  if (status === 'rejected') return 'Rejected — this prediction was dismissed.';
+  if (status === 'reviewed') {
+    return 'Marked reviewed in ID Conflicts — settled without accepting or ' +
+      'rejecting, so there is nothing left to decide here.';
+  }
+  return 'This prediction has already been decided.';
+}
+
+// Fold only A-Z→a-z, leaving non-ASCII letters alone. Mirrors the backend's
+// keyword_match_key (vireo/keyword_normalization.py) and SQLite's ASCII
+// NOCASE. JS's Unicode-aware String.prototype.toLowerCase() folds "Éclair"
+// to "éclair", so grouping predictions by toLowerCase() merges rows that the
+// keywords table keeps as distinct species — the resulting Accept submits
+// both ids and /api/predictions/batch-accept rejects the batch because they
+// resolve to different keyword rows, leaving the row unactionable.
+function asciiCaseFoldKey(name) {
+  var s = String(name == null ? '' : name);
+  var out = '';
+  for (var i = 0; i < s.length; i++) {
+    var c = s.charCodeAt(i);
+    if (c >= 65 && c <= 90) out += String.fromCharCode(c + 32);
+    else out += s.charAt(i);
+  }
+  return out;
+}
+
+async function loadDetailPredictions(photoId) {
+  var list = document.getElementById('detailPredictions');
+  if (!list) return;
+  var seq = ++detailPredictionSeq;
+  list.innerHTML = '<div class="selection-empty">Loading predictions...</div>';
+  try {
+    var data = await safeFetch(
+      '/api/predictions?photo_ids=' + encodeURIComponent(photoId), {}, { toast: false },
+    );
+    if (seq !== detailPredictionSeq || window._detailPhotoId !== photoId) return;
+    renderDetailPredictions(data, photoId);
+  } catch(e) {
+    if (seq === detailPredictionSeq) {
+      list.innerHTML = '<div class="selection-empty">Could not load predictions.</div>';
+    }
+  }
+}
+
+function toggleDetailPredictions() {
+  detailPredictionsExpanded = !detailPredictionsExpanded;
+  if (_detailPredictionData) {
+    renderDetailPredictions(_detailPredictionData.data, _detailPredictionData.photoId);
+  }
+}
+
+// Every button this panel renders is wired through here, by one delegated
+// listener on the panel container, and its markup carries integers only: an
+// index into `detailPredictionGroups` and a photo id. See the comment on
+// `detailPredictionGroups` for what interpolating a species name into an
+// inline handler attribute did to Say's Phoebe.
+function handleDetailPredictionClick(ev) {
+  var btn = ev.target && ev.target.closest
+    ? ev.target.closest('[data-prediction-action]') : null;
+  if (!btn) return;
+  var action = btn.getAttribute('data-prediction-action');
+  if (action === 'toggle') { toggleDetailPredictions(); return; }
+  if (action === 'review') {
+    openPredictionInReview(Number(btn.getAttribute('data-photo-id')));
+    return;
+  }
+  // The array is rebuilt on every render alongside the markup that indexes
+  // into it, so a missing entry means the panel repainted under the click.
+  // Doing nothing is the honest outcome: the row the user aimed at is gone.
+  var group = detailPredictionGroups[
+    Number(btn.getAttribute('data-prediction-group'))
+  ];
+  if (!group) return;
+  if (action === 'accept') {
+    acceptDetailPredictions(
+      group.ids, detailPredictionGroupsPhotoId, group.species,
+    );
+  } else if (action === 'reject') {
+    rejectDetailPredictions(group.ids, detailPredictionGroupsPhotoId);
+  }
+}
+
+var detailPredictionsClickBound = false;
+
+function renderDetailPredictions(data, photoId) {
+  var list = document.getElementById('detailPredictions');
+  if (!list) return;
+  // The container is static in the template and only its children are
+  // replaced, so one delegated listener outlives every repaint.
+  if (!detailPredictionsClickBound) {
+    detailPredictionsClickBound = true;
+    list.addEventListener('click', handleDetailPredictionClick);
+  }
+  // Cleared before any early return: buttons from the previous render are
+  // about to be replaced, and a leftover table would let a click resolve to
+  // a row this render decided not to show.
+  detailPredictionGroups = [];
+  detailPredictionGroupsPhotoId = photoId;
+  _detailPredictionData = { data: data, photoId: photoId };
+  var state = (data.photo_states || {})[String(photoId)] || null;
+  // Whether anything in the label list actually matched. This qualifies every
+  // row below: a confidence is a rank within the list, so on its own it cannot
+  // distinguish the right bird from the closest of a list that never contained
+  // it. Rendered first, because reading the rows without it is the mistake.
+  var matchState = (data.match_states || {})[String(photoId)] || null;
+  var matchBanner = buildMatchBanner(matchState);
+  // Per-row failures, for the rows the banner does not speak for. When the
+  // banner rendered, every judged run on the photo failed and it has already
+  // said so for all of them; repeating it per row would be noise. When it did
+  // not, some run still may have failed — a second model, or a second
+  // detection holding a different animal — and those rows are exactly the
+  // ones that would otherwise show a 99% with no warning at all.
+  var unlistedRuns = matchBanner ? {} : buildUnlistedRunIndex(matchState);
+  var threshold = state && state.threshold ? state.threshold : 0;
+  var rows = (data.predictions || []).filter(function(p) {
+    return p.photo_id === photoId;
+  });
+  // Below-threshold rows are summarised rather than dropped: the user set the
+  // floor, so they are entitled to know something is sitting under it.
+  var visible = rows.filter(function(p) { return (p.confidence || 0) >= threshold; });
+  var hidden = rows.length - visible.length;
+
+  if (!visible.length) {
+    list.innerHTML = matchBanner +
+      '<div class="selection-empty">' +
+      escapeHtml(predictionEmptyMessage(state, hidden)) + '</div>' +
+      (hidden ? '<div class="prediction-below-threshold">' + hidden +
+        (hidden === 1 ? ' prediction' : ' predictions') + ' below your confidence threshold (' +
+        formatPredictionConfidence(threshold) + ').</div>' : '');
+    return;
+  }
+
+  // One prediction row per detection means a photo with a dozen boxes of the
+  // same bird lists that bird a dozen times. Group by species+status: the
+  // question the panel answers is "what species is in this photo", and the
+  // detection count is the interesting detail, not a reason to repeat.
+  //
+  // The species used for grouping and display is the one accept_prediction()
+  // will actually apply — the backend exposes it as `consensus_species`. For
+  // a non-grouped prediction that's just `p.species`; for a burst whose
+  // frames disagree it's the individual-vote consensus. Grouping by the raw
+  // per-frame `p.species` here would let a minority Sparrow frame surface
+  // its own row with an Accept button that tags Robin.
+  var groups = [];
+  var groupByKey = {};
+  visible.forEach(function(p) {
+    // ``reviewed`` is a decision too — the user explicitly said "looked and
+    // chose not to act" in Review. Grouping it as pending here would render
+    // Accept/Reject buttons whose click would overwrite that decision and
+    // record a history entry whose "previous" status of ``pending`` is a
+    // fiction. Server guards refuse the flip (see _DECIDED_PREDICTION_STATUSES
+    // in app.py), but the panel must not offer the action in the first place.
+    var decided = predictionIsDecided(p);
+    var displaySpecies = p.consensus_species || p.species || 'Unknown';
+    var key = (p.consensus_species_key || asciiCaseFoldKey(displaySpecies)) + '|' + (decided ? p.status : 'pending');
+    var g = groupByKey[key];
+    if (!g) {
+      g = groupByKey[key] = {
+        species: displaySpecies, status: decided ? p.status : 'pending',
+        decided: decided, ids: [], models: {}, ambiguous: [], confidence: null, count: 0,
+        unlisted: [], detections: {}, unlistedDetections: {},
+      };
+      groups.push(g);
+    }
+    g.count++;
+    g.ids.push(p.id);
+    if (p.model) g.models[p.model] = true;
+    // A bucket pools rows from several detections and models, so the failure
+    // is recorded per contributing row and reported with its own count — "on
+    // 3 detections" beside a warning that only applies to one of them would
+    // be a new way of overstating the evidence.
+    if (p.detection_id != null) g.detections[p.detection_id] = true;
+    var failedRun = unlistedRuns[p.detection_id + '|' + (p.model || '')];
+    if (failedRun) {
+      g.unlistedDetections[p.detection_id] = true;
+      if (g.unlisted.indexOf(failedRun) === -1) g.unlisted.push(failedRun);
+    }
+    // Credit ``p.confidence`` to the bucket only when the row's own raw
+    // label agrees with the consensus. A Sparrow-labelled frame in a
+    // Robin-majority burst is stored with ``p.species == "Sparrow"`` and
+    // its 0.95 score is evidence for Sparrow, not Robin — pooling it here
+    // would render "Robin · 95%" beside a bucket in which nothing scored
+    // Robin at 95%, and let the sort float that bucket above genuine
+    // Robin evidence. Mirrors the server-side aggregator's rule in
+    // ``api_selection_prediction_suggestions``; a bucket with no
+    // contributing row keeps ``confidence == null`` and renders as
+    // "confidence unknown" via ``formatPredictionConfidence``.
+    var matchesConsensus = p.species_key && p.consensus_species_key
+      ? p.species_key === p.consensus_species_key
+      : asciiCaseFoldKey(p.species || '') === asciiCaseFoldKey(g.species);
+    if (matchesConsensus
+        && p.confidence != null
+        && (g.confidence == null || p.confidence > g.confidence)) {
+      g.confidence = p.confidence;
+    }
+    if (!decided && predictionIsAmbiguous(p)) g.ambiguous.push(p);
+  });
+  groups.sort(function(a, b) {
+    if (a.decided !== b.decided) return a.decided ? 1 : -1;
+    // Buckets whose only rows are minority-frame borrowers (confidence ==
+    // null) sink below any bucket carrying real evidence, so a legacy
+    // Robin bucket with no Robin-labelled row does not rank above a
+    // 60% bucket that does.
+    var aConf = a.confidence == null ? -1 : a.confidence;
+    var bConf = b.confidence == null ? -1 : b.confidence;
+    return bConf - aConf;
+  });
+
+  // A bucket-level suppression used to run here, mirroring the server's:
+  // under an active threshold, a pending bucket left with `confidence ==
+  // null` was dropped, counted, and explained in its own empty-state
+  // sentence. Retired along with the server's copy. A pending bucket can
+  // only keep a null confidence when every row in it is labelled with a
+  // species other than the one the accept path applies, and
+  // `Database.repair_mixed_species_prediction_groups` clears that shape out
+  // of the catalog at startup — a grouped row's consensus is now its own
+  // species, so a surviving row always credits its own bucket. (With
+  // `threshold > 0` the row filter above has already dropped any row whose
+  // confidence is null or zero, so there is no second route to a null
+  // bucket here.) The credit gate stays: it is what keeps the number honest
+  // if that invariant is ever broken again.
+
+  var shown = detailPredictionsExpanded
+    ? groups
+    : groups.slice(0, PREDICTION_COLLAPSE_AT);
+  var collapsed = groups.length - shown.length;
+
+  // The rows the markup will index into. Set before the loop so the index
+  // each button carries is the index the handler resolves.
+  detailPredictionGroups = shown;
+
+  var html = '';
+  shown.forEach(function(g, idx) {
+    // A group is only safely acceptable if none of its rows is ambiguous —
+    // otherwise one Accept would silently swallow a decision the user should
+    // be making in Review.
+    var ambiguous = !g.decided && g.ambiguous.length > 0;
+    var cls = 'prediction-row' + (g.decided ? ' decided' : '') + (ambiguous ? ' ambiguous' : '');
+    var meta = formatPredictionConfidence(g.confidence) +
+      ' · ' + Object.keys(g.models).join(', ');
+    if (g.count > 1) meta += ' · on ' + g.count + ' detections';
+    var actions;
+    if (g.decided) {
+      // Decided rows stay listed rather than disappearing, and say which
+      // decision they carry — "reviewed" is a real answer to "what happened
+      // to this prediction", not a row worth hiding.
+      actions = '<span class="prediction-status-tag" title="' +
+        escapeAttr(predictionStatusExplanation(g.status)) + '">' +
+        escapeHtml(g.status) + '</span>';
+    } else if (ambiguous) {
+      actions = '<button class="prediction-review-link"' +
+        ' data-prediction-action="review" data-photo-id="' + photoId + '"' +
+        ' title="This prediction needs Review\'s full decision UI">Open in Review</button>';
+    } else {
+      // Only the row index reaches the markup. The ids and the species the
+      // Accept will apply — passed to the server as `expected_species` so it
+      // can refuse a row whose grouping drifted after this render — are read
+      // back out of `detailPredictionGroups[idx]` by the click handler, so no
+      // species name is ever parsed as HTML.
+      actions =
+        '<button class="prediction-accept" data-prediction-action="accept"' +
+        ' data-prediction-group="' + idx + '"' +
+        ' title="Accept this species and add the keyword">Accept</button>' +
+        '<button class="prediction-reject" data-prediction-action="reject"' +
+        ' data-prediction-group="' + idx + '"' +
+        ' title="Reject this prediction">Reject</button>';
+    }
+    html += '<div class="' + cls + '">' +
+      '<div style="min-width:0;">' +
+        '<div class="prediction-species">' + escapeHtml(g.species) + '</div>' +
+        '<div class="prediction-meta">' + escapeHtml(meta) + '</div>' +
+        (ambiguous ? '<div class="prediction-why">' +
+          escapeHtml(predictionAmbiguityReason(g.ambiguous[0])) + '</div>' : '') +
+        (g.unlisted.length ? '<div class="prediction-why">' +
+          escapeHtml(unlistedGroupReason(g)) + '</div>' : '') +
+      '</div>' +
+      '<div class="prediction-actions">' + actions + '</div>' +
+    '</div>';
+  });
+  // Name what is collapsed and how weak it is, so the shortened list can never
+  // be mistaken for the whole answer.
+  if (collapsed > 0) {
+    var weakest = groups[shown.length].confidence;
+    // "N weaker species (X% and below)" is only truthful when the first
+    // collapsed bucket carries evidence of its own species. Legacy burst
+    // groups whose only rows are minority-frame borrowers land here with
+    // ``confidence == null``; ranking them as "weaker" or claiming an
+    // "X% and below" bound they never had would be the same borrowed-
+    // score problem the meta line was just fixed to avoid.
+    var weakestLabel = weakest == null
+      ? 'confidence unknown'
+      : formatPredictionConfidence(weakest) + ' and below';
+    html += '<button class="prediction-toggle" data-prediction-action="toggle">Show ' +
+      collapsed + ' weaker species (' + weakestLabel + ')</button>';
+  } else if (detailPredictionsExpanded && groups.length > PREDICTION_COLLAPSE_AT) {
+    html += '<button class="prediction-toggle" data-prediction-action="toggle">Show fewer</button>';
+  }
+  if (hidden) {
+    html += '<div class="prediction-below-threshold">' + hidden +
+      (hidden === 1 ? ' more prediction is' : ' more predictions are') +
+      ' below your confidence threshold (' + formatPredictionConfidence(threshold) + ').</div>';
+  }
+  list.innerHTML = matchBanner + html;
+}
+
+function openPredictionInReview(photoId) {
+  // Hand off an EXPLICIT empty filter expression, not just ?photo_id=.
+  // VireoFilter.init() falls through to restorePersisted() whenever the URL
+  // carries no `filters` param, so a filter the user left active on Review
+  // last visit (say "rating >= 3") would silently intersect with this deep
+  // link. If it excludes the photo, Review renders an empty queue under a
+  // pill reading "Showing one photo from Browse" — the pill would be
+  // describing a scope that is not the one in effect. Sending `filters`
+  // makes the deep link's scope exactly what the pill claims: this photo.
+  // A well-formed empty payload (rather than `?filters=`) matters:
+  // init() throws on a present-but-unparseable handoff.
+  var noFilters = encodeURIComponent(JSON.stringify({
+    root: { mode: 'all', rules: [] }, visual: null,
+  }));
+  window.location.href = '/review?photo_id=' + encodeURIComponent(photoId) +
+    '&filters=' + noFilters;
+}
+
+// Everything the prediction panels display is DERIVED state: a row's
+// `effective_category` (ambiguous or not) and a selection row's
+// `keyworded_count` / `missing_photo_ids` are all recomputed by the server
+// from the photos' CURRENT species keywords and prediction_review status. So
+// the panels go stale on far more than accept/reject — any keyword add,
+// remove or retype, and any undo/redo, invalidates them too. An "Accept on 38"
+// button left over from before the user keyworded 10 of those photos states a
+// falsehood, which CORE_PHILOSOPHY.md's "no black boxes" forbids outright.
+//
+// Rather than bolt a reload onto each mutation site (which is how this drifted
+// in the first place), panel freshness hangs off the chokepoints every
+// mutation already passes through:
+//   * `_refreshBrowseKeywordState` — every keyword write in Browse calls it,
+//     because card badges have to be refetched anyway;
+//   * `refreshBrowseSidebarPanels` — the shared history refresh hook repaints
+//     the whole sidebar after undo/redo reverses keywords and predictions;
+//   * `_afterPredictionMutation` / `rejectDetailPredictions` — status writes.
+// A future keyword mutation path therefore gets panel freshness for free.
+//
+// `opts.skipDetail` is for callers about to run a full `loadDetail`, which
+// re-fetches the photo AND its predictions: without it one accept would issue
+// two identical prediction requests.
+function refreshPredictionPanels(opts) {
+  opts = opts || {};
+  // Drop the cache key first: `loadSelectionPredictions` early-returns when
+  // the key matches, and the selection itself has not changed here — only the
+  // state its rows are computed from.
+  selectionPredictionKey = '';
+  var selection = getActiveSelection();
+  if (selection.length > 1) loadSelectionPredictions(selection);
+  // Only one of the two panels is on screen at a time: a multi-selection
+  // replaces the single-photo detail with the batch inspector. Guarding on
+  // the selection as well as the pointer keeps a stale `_detailPhotoId` from
+  // repainting the departed anchor's rows underneath a batch selection.
+  else if (!opts.skipDetail && window._detailPhotoId != null) {
+    loadDetailPredictions(window._detailPhotoId);
+  }
+}
+
+// Undo/redo lives in the shared navbar and writes straight to the database:
+// undoing a `prediction_accept` returns the row to pending AND strips the
+// keyword it added. Both halves of that revert have a panel in Browse's right
+// sidebar, so an undo that repainted only the prediction panels left the
+// Keywords section listing a keyword the database no longer holds — the same
+// falsehood in the other direction.
+//
+// Undo/redo is the one mutation source Browse cannot route through its own
+// call sites: the navbar writes and then calls the refresh hook. So this repaints the
+// sidebar wholesale rather than naming the panel that happens to be wrong
+// today, and a panel added to that sidebar later is refreshed by default
+// instead of silently going stale until someone notices.
+function refreshBrowseSidebarPanels() {
+  var selection = getActiveSelection();
+  // Single photo: `loadDetail` re-fetches the photo AND its predictions in one
+  // request, so it refreshes both halves. Tell the prediction half to skip its
+  // own fetch — the `skipDetail` de-duplication `_afterPredictionMutation`
+  // already relies on.
+  var reloadingDetail = selection.length <= 1 && window._detailPhotoId != null;
+  refreshPredictionPanels({skipDetail: reloadingDetail});
+  // Multi-selection: the batch inspector's keyword suggestions are computed
+  // from the selection's current keywords, and its loader early-returns on an
+  // unchanged selection key — which is exactly this case, since the selection
+  // did not move, only the state behind it.
+  if (selection.length > 1) {
+    selectionKeywordKey = '';
+    loadSelectionKeywordSuggestions(selection);
+  } else if (reloadingDetail) {
+    loadDetail(window._detailPhotoId);
+  }
+}
+
+window.afterHistoryChange = async function() {
+  // History can change membership and ordering, including photos outside the
+  // loaded page. Re-run the current query for both toolbar and keyboard actions.
+  var previousSelection = new Set(selectedPhotos);
+  var cachedMemberIds = new Set();
+  Object.values(browseStackMembers).forEach(function(members) {
+    members.forEach(function(photo) { cachedMemberIds.add(photo.id); });
+  });
+  // ``focusAnchor``: an undone rating or keyword can move the anchored card
+  // anywhere in the current sort, and paging to find it walks the catalog
+  // (Codex P1 on PR #1695). The ids this function restores below all belong
+  // to the anchored card — ``captureSelectedPhotoAnchor`` only anchors a
+  // single photo or a single stack — so the focused window holds them.
+  var loaded = await resetAndLoad({
+    preserveAnchor: true, focusAnchor: true, preserveCollection: true,
+  });
+  if (loaded === false) throw new Error('Could not reload Browse');
+  if (loaded !== true) return;
+  // resetAndLoad has cleared selection; the reload settled with the grid
+  // interactive. If the user clicks another card while we hydrate uncached
+  // stack members below, selectPhoto() bumps anchorRestoreEpoch — the same
+  // signal every other async selection path (Select all, keyword suggestions,
+  // batch-delete companion count) uses to know its captured ids no longer
+  // reflect what the user wants. Snapshot the epoch here so the restore
+  // below can bail out instead of folding the pre-undo ids back into the
+  // fresh selection, which would replace a new single-card pick or merge
+  // into a new batch. Codex P2 on PR #1672.
+  var restoreEpoch = anchorRestoreEpoch;
+  var windowIsCurrent = observeBrowseWindow();
+  for (var cover of photos.slice()) {
+    var memberIds = cover.browse_stack && cover.browse_stack.photo_ids;
+    // Selected members count as much as cached ones. A stack selected by a
+    // click on its collapsed card has never been expanded, so its hidden
+    // frames are in `previousSelection` and in no member cache; without
+    // hydrating them, the restore below finds only the cover and the whole
+    // stack quietly shrinks to one frame across an undo.
+    // Codex P2 on PR #1672.
+    if (memberIds && memberIds.some(function(id) {
+      return cachedMemberIds.has(id) || previousSelection.has(id);
+    })) {
+      var status = await hydrateBrowseStackCoverMembers(cover, windowIsCurrent);
+      if (!windowIsCurrent()) return;
+      if (status === 'unresolved') throw new Error('Could not reload stack members');
+    }
+  }
+  if (anchorRestoreEpoch === restoreEpoch) {
+    // Restore only selections that still belong to the refreshed query.
+    previousSelection.forEach(function(id) {
+      var photo = findBrowsePhoto(id);
+      if (photo && browsePhotoIsAvailable(photo)) selectedPhotos.add(id);
+    });
+  }
+  refreshCardSelectionVisuals();
+  updateBatchBar();
+  refreshBrowseSidebarPanels();
+  scheduleCollectionCountsRefresh();
+  refreshPendingSyncBanner();
+};
+
+// Accepting writes a keyword, so every surface that counts keywords has to be
+// told — the same fan-out applySelectionKeyword performs. refreshPendingSyncBanner
+// matters especially: an accept queues a pending XMP change.
+async function _afterPredictionMutation(photoIds, opts) {
+  opts = opts || {};
+  var reloadingDetail = !!(
+    opts.reloadDetail
+    && opts.photoId != null
+    && window._detailPhotoId === opts.photoId
+  );
+  selectionKeywordKey = '';
+  // Refreshes the grid's keyword state AND, through it, both prediction
+  // panels: the accept changed the photos' species keywords, so the surviving
+  // rows' ambiguity and keyworded counts have both moved. `skipDetail` keeps
+  // one accept from issuing two identical prediction requests, since
+  // `loadDetail` below re-fetches the photo AND its predictions.
+  await _refreshBrowseKeywordState(photoIds, { skipDetail: reloadingDetail });
+  var selection = getActiveSelection();
+  if (selection.length > 1) loadSelectionKeywordSuggestions(selection);
+  if (reloadingDetail) loadDetail(opts.photoId);
+  loadKeywords();
+  scheduleCollectionCountsRefresh();
+  refreshActiveCollectionAfterMembershipChange([MUTATION_KEYWORD, MUTATION_PREDICTION]);
+  refreshPendingSyncBanner();
+  // Only when the call actually accepted something. batch-accept returns
+  // success with `accepted: 0` for a payload whose rows have all been decided
+  // or become ambiguous since the panel rendered, and records no undoable
+  // edit — so an unconditional toast would advertise, and Ctrl+Z would
+  // reverse, some older unrelated edit.
+  if (opts.accepted !== 0) showUndoToast();
+}
+
+// A stale panel can submit rows the server then declines to accept: decided
+// elsewhere, no longer unambiguous against the photos' current keywords, or
+// superseded by a later classification run.
+// The refreshed panel shows the survivors, but the gap between "Accept on 35"
+// and 33 accepts has to be named, not left for the user to notice — the same
+// rule that made the button disclose its count in the first place.
+function _reportSkippedAccepts(data) {
+  if (!data) return;
+  var parts = [];
+  if (data.already_decided) {
+    parts.push(data.already_decided + ' already decided elsewhere');
+  }
+  if (data.skipped_ambiguous) {
+    parts.push(data.skipped_ambiguous +
+      ' now conflicting with keywords — resolve in Review');
+  }
+  // Named separately from the conflict case on purpose: nothing is wrong with
+  // these photos and there is nothing to resolve. Classification re-ran with a
+  // different label set, so the row this panel rendered is no longer the
+  // current one — the refresh below replaces it.
+  if (data.skipped_superseded) {
+    parts.push(data.skipped_superseded +
+      ' replaced by a newer classification run');
+  }
+  // Photo left the workspace between the parse-time ownership check and the
+  // batch's lock (folder moved to another workspace, etc.). Its own name
+  // because the user's next step is neither Review nor a re-run — a panel
+  // refresh drops the photo from view.
+  if (data.skipped_out_of_workspace) {
+    parts.push(data.skipped_out_of_workspace +
+      ' no longer in this workspace');
+  }
+  // Another tab ungrouped or edited the row, so its current consensus
+  // species is not the one this button labelled. Reported so the gap between
+  // "Accept on 35 Bald Eagle" and 33 accepts is spoken, not swallowed.
+  if (data.skipped_species_drifted) {
+    parts.push(data.skipped_species_drifted +
+      ' species changed since the panel loaded');
+  }
+  if (!parts.length) return;
+  var accepted = data.accepted || 0;
+  showToast((accepted ? 'Accepted ' + accepted + ' photo' +
+    (accepted === 1 ? '' : 's') + '; skipped ' : 'Nothing accepted: ') +
+    parts.join(', '), 'warning');
+}
+
+async function acceptDetailPredictions(predictionIds, photoId, expectedSpecies) {
+  if (!predictionIds || !predictionIds.length) return;
+  var data;
+  try {
+    data = await safeFetch('/api/predictions/batch-accept', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        prediction_ids: predictionIds,
+        // The species the button labelled — passed so the server can refuse
+        // rows whose grouping (and therefore consensus) drifted after the
+        // panel rendered but before the accept lands.
+        expected_species: expectedSpecies || null,
+      }),
+    });
+  } catch(e) { return; }
+  await _afterPredictionMutation(
+    [photoId],
+    { photoId: photoId, reloadDetail: true, accepted: (data || {}).accepted },
+  );
+  _reportSkippedAccepts(data);
+}
+
+// The reject side of _reportSkippedAccepts. batch-reject skips the same
+// already-decided and superseded rows, and a stale panel's Reject dropping
+// rows without saying so is the same silent gap on the other button.
+function _reportSkippedRejects(data) {
+  if (!data) return;
+  var parts = [];
+  if (data.already_decided) {
+    parts.push(data.already_decided + ' already decided elsewhere');
+  }
+  if (data.skipped_superseded) {
+    parts.push(data.skipped_superseded +
+      ' replaced by a newer classification run');
+  }
+  // Same workspace-detach race as the accept side: the photo left the active
+  // workspace between the parse-time ownership check and the batch's lock, so
+  // the response is `rejected: 0, skipped_out_of_workspace: 1`. Named
+  // separately for the same reason — silence here is a click that visibly
+  // did nothing, and the user hunting for a broken button.
+  if (data.skipped_out_of_workspace) {
+    parts.push(data.skipped_out_of_workspace +
+      ' no longer in this workspace');
+  }
+  if (!parts.length) return;
+  var rejected = data.rejected || 0;
+  showToast((rejected ? 'Rejected ' + rejected + '; skipped ' :
+    'Nothing rejected: ') + parts.join(', '), 'warning');
+}
+
+async function rejectDetailPredictions(predictionIds, photoId) {
+  if (!predictionIds || !predictionIds.length) return;
+  var data;
+  try {
+    data = await safeFetch('/api/predictions/batch-reject', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({prediction_ids: predictionIds}),
+    });
+  } catch(e) { return; }
+  _reportSkippedRejects(data);
+  // A reject changes no keywords, so only the prediction rows need repainting.
+  // Deliberately no showUndoToast() here: `prediction_reject` is in the DB's
+  // _NON_UNDOABLE set (no _apply_undo handler), so /api/undo/status would
+  // advertise some earlier edit as reversible and Ctrl+Z would undo THAT
+  // instead of the reject — silently reversing an unrelated action.
+  refreshPredictionPanels();
+  // A rejection can change membership in prediction-status collections
+  // (e.g. "pending predictions"): refresh counts and re-evaluate the
+  // active collection so the grid and counts don't lag behind the DB.
+  // The accept path fans out the same way via _afterPredictionMutation.
+  scheduleCollectionCountsRefresh();
+  // Rejection changes prediction status but writes no keywords, so a
+  // keyword/species/count filter cannot notice this edit; naming
+  // ``MUTATION_KEYWORD`` here forced ``dependsOnMutation`` to reload those
+  // grids anyway, clearing the selection and detail panel for a result set
+  // that could not have changed.
+  refreshActiveCollectionAfterMembershipChange([MUTATION_PREDICTION]);
+  refreshPredictionConfidenceBadges([photoId]);
+}
+
+/* The reject path's badge refresh. Rejecting writes no keywords, so it
+   deliberately does not go through _refreshBrowseKeywordState — but it does
+   change the photo's top prediction, and with the Prediction confidence card
+   field on, the badge would otherwise keep showing the score the user just
+   threw away (Codex P2 on PR #1670). Accepts get the same value for free
+   from the /by-ids fetch _refreshBrowseKeywordState already makes.
+
+   Skipped when the card field is off (nothing displays the number) and when
+   the active sort ranks on confidence (the caller reloads the whole grid,
+   which replaces these cards outright). */
+async function refreshPredictionConfidenceBadges(photoIds) {
+  if (cardFields.indexOf('prediction_confidence') === -1) return;
+  if (sortSelectRanksOnPredictionConfidence()) return;
+  var ids = Array.from(new Set(photoIds || [])).filter(function(id) {
+    return !!findBrowsePhoto(id);
+  });
+  if (!ids.length) return;
+  try {
+    var data = await safeFetch('/api/photos/by-ids', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: ids}),
+    }, {toast: false});
+    var touched = [];
+    (data.photos || []).forEach(function(updated) {
+      var local = findBrowsePhoto(updated.id);
+      if (!local || local.prediction_confidence_is_stack_lead) return;
+      local.prediction_confidence = updated.prediction_confidence === undefined
+        ? null : updated.prediction_confidence;
+      touched.push(updated.id);
+    });
+    if (touched.length) refreshGridCards(touched);
+  } catch (e) {
+    // The reject itself succeeded; a stale badge until the next reload is
+    // not worth a toast on top of the ones _reportSkippedRejects may show.
+  }
+}
+
+async function loadSelectionPredictions(ids) {
+  var list = document.getElementById('selectionPredictions');
+  if (!list) return;
+  var key = selectionIdsKey(ids);
+  if (key === selectionPredictionKey) return;
+  selectionPredictionKey = key;
+  var seq = ++selectionPredictionSeq;
+  list.innerHTML = '<div class="selection-empty">Checking predictions...</div>';
+  try {
+    var data = await safeFetch('/api/selection/prediction-suggestions', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: ids}),
+    }, { toast: false });
+    if (seq !== selectionPredictionSeq) return;
+    renderSelectionPredictions(
+      data.predictions || [], data.selected_count || ids.length, data,
+    );
+  } catch(e) {
+    if (seq === selectionPredictionSeq) {
+      // Drop the cache key: it was stored before the request ran, so leaving
+      // it set would make the next call for this same selection early-return
+      // and strand the panel on the error text until the selection changes.
+      selectionPredictionKey = '';
+      list.innerHTML = '<div class="selection-empty">Could not load predictions.</div>';
+    }
+  }
+}
+
+function toggleSelectionPredictions() {
+  selectionPredictionsExpanded = !selectionPredictionsExpanded;
+  if (_selectionPredictionData) {
+    renderSelectionPredictions(
+      _selectionPredictionData.predictions,
+      _selectionPredictionData.selectedCount,
+      _selectionPredictionData.meta,
+    );
+  }
+}
+
+function renderSelectionPredictions(predictions, selectedCount, meta) {
+  var list = document.getElementById('selectionPredictions');
+  if (!list) return;
+  meta = meta || {};
+  _selectionPredictionData = {
+    predictions: predictions, selectedCount: selectedCount, meta: meta,
+  };
+  selectionPredictionAcceptableById = {};
+  selectionPredictionSpeciesByIdx = {};
+  selectionPredictionPhotoIdsByIdx = {};
+  // The floor is the user's own setting, so hidden rows get counted out loud
+  // rather than vanishing into an empty-looking panel.
+  var hidden = meta.below_threshold_count || 0;
+  var hiddenNote = hidden
+    ? '<div class="prediction-below-threshold">' + hidden +
+      (hidden === 1 ? ' prediction is' : ' predictions are') +
+      ' below your confidence threshold (' +
+      formatPredictionConfidence(meta.threshold || 0) + ').</div>'
+    : '';
+  // The endpoint's borrowed-suppression counter, and the two-way empty
+  // state it fed, were retired with the server-side bucket suppression that
+  // produced it: a bucket can no longer be dropped for borrowed evidence,
+  // so the count would always read zero and the two empty-state sentences
+  // would always resolve to the same one. See
+  // ``api_selection_prediction_suggestions``.
+  if (!predictions.length) {
+    list.innerHTML = '<div class="selection-empty">' +
+      'No pending predictions on the selected photos.</div>' + hiddenNote;
+    return;
+  }
+
+  // Sorted strongest-first by the endpoint, so the collapse keeps the species
+  // most worth acting on and names the rest.
+  var shown = selectionPredictionsExpanded
+    ? predictions
+    : predictions.slice(0, PREDICTION_COLLAPSE_AT);
+  var collapsed = predictions.length - shown.length;
+
+  var html = '';
+  shown.forEach(function(p, idx) {
+    var acceptable = p.acceptable_prediction_ids || [];
+    var ambiguous = p.ambiguous_prediction_ids || [];
+    var ambiguousPhotos = p.ambiguous_photo_ids || [];
+    // Distinct photos, not distinct prediction rows: a photo can have several
+    // matching detections and each contributes a prediction id, so `acceptable`
+    // overcounts the photos that would actually be keyworded. Fall back to
+    // acceptable.length for older backend payloads.
+    var acceptablePhotoCount = (typeof p.acceptable_photo_count === 'number')
+      ? p.acceptable_photo_count
+      : acceptable.length;
+    selectionPredictionAcceptableById[idx] = acceptable;
+    // The species the button will apply, sent back with the Accept so the
+    // server can refuse rows whose consensus has drifted from what the panel
+    // rendered (another tab ungrouping the burst, per-vote edits shifting
+    // the winner). See _species_drifted_prediction_ids in app.py.
+    selectionPredictionSpeciesByIdx[idx] = p.species;
+    var predictedPhotos = p.predicted_photo_ids || [];
+    selectionPredictionPhotoIdsByIdx[idx] = predictedPhotos;
+
+    var rowMeta = 'Predicted on ' + p.predicted_count + ' of ' + selectedCount;
+    if (p.keyworded_count) rowMeta += ', already keyworded on ' + p.keyworded_count;
+    var range = p.min_confidence === p.max_confidence
+      ? formatPredictionConfidence(p.max_confidence)
+      : formatPredictionConfidence(p.min_confidence) + '–' + formatPredictionConfidence(p.max_confidence);
+    rowMeta += ' · ' + range;
+
+    // Each Accept button names the photo count it will actually act on.
+    // "Accept on 38" that silently accepts 35 is exactly what
+    // CORE_PHILOSOPHY.md forbids, so the ambiguous remainder is called out
+    // beside it rather than folded in — and "Accept on all" carries the
+    // selection size for the same reason. It is the primary, top button, so
+    // its own number is what has to tell the user whether "all" is a
+    // rounding error on the prediction or a species claim about 68 photos
+    // that never predicted it.
+    var actions = '';
+    var allTitle = acceptablePhotoCount === selectedCount
+      ? 'Accept this species on all ' + selectedCount + ' selected photos'
+      : 'Add this species to all ' + selectedCount +
+        ' selected photos, including those without this prediction. ' +
+        'Existing keywords are kept; conflicts still need review.';
+    actions += '<button class="prediction-accept prediction-accept-all" onclick="acceptSelectionPrediction(' + idx +
+      ', true, this)" title="' + allTitle + '">Accept on all ' + selectedCount + '</button>';
+    // The narrower accept is only a second *action* when it would touch
+    // fewer photos. When every selected photo already predicts this species
+    // unambiguously, the two buttons submit the same work and land the same
+    // undo entry, so the second one is a decision the user has to stop and
+    // make for no difference in outcome.
+    if (acceptablePhotoCount && acceptablePhotoCount !== selectedCount) {
+      actions += '<button class="prediction-accept prediction-accept-subset" onclick="acceptSelectionPrediction(' + idx +
+        ')" title="Accept this species only on the ' + acceptablePhotoCount +
+        ' selected photos that predict it and are unambiguous">Accept on ' +
+        acceptablePhotoCount + '</button>';
+    }
+    // Look before you accept. "Blue-breasted Quail on 2 of 70" is either a
+    // real find or a bad detection, and no count in this row can tell the
+    // user which — only the pixels can. Opens exactly the photos the row's
+    // "Predicted on N" counts, in the lightbox, where 1:1 zoom lives. The
+    // selection is left alone on purpose: the decision this button feeds is
+    // usually "accept the OTHER species on all 70", and narrowing to 2 would
+    // repaint this panel for 2 photos and take that button away.
+    if (predictedPhotos.length) {
+      actions += '<button class="prediction-show" onclick="showSelectionPredictionPhotos(' + idx +
+        ', this)" title="Open the ' + predictedPhotos.length +
+        ' photo' + (predictedPhotos.length === 1 ? '' : 's') +
+        ' predicting this species in the lightbox. Your selection of ' + selectedCount +
+        ' stays as it is.">Show ' + predictedPhotos.length + ' photo' +
+        (predictedPhotos.length === 1 ? '' : 's') + '</button>';
+    }
+    var why = '';
+    if (ambiguousPhotos.length) {
+      why = ambiguousPhotos.length + (ambiguousPhotos.length === 1 ? ' photo needs' : ' photos need') +
+        ' review — alternatives or a conflict with existing keywords';
+      var firstAmbiguousPhoto = ambiguousPhotos[0];
+      if (!acceptablePhotoCount && firstAmbiguousPhoto != null) {
+        actions += '<button class="prediction-review-link" onclick="openPredictionInReview(' +
+          firstAmbiguousPhoto + ')">Open in Review</button>';
+      }
+    } else if (!acceptablePhotoCount) {
+      why = 'Already keyworded on every photo that predicts it';
+    }
+    // "Accept on 38" now covers photos that already carry the keyword — for
+    // those, accepting only clears the still-pending prediction out of Review
+    // and writes no tag. One number must not silently mean two outcomes, so
+    // the split is named. `acceptable_keyworded_count` is the backend's own
+    // intersection, so the panel never recomputes it and drifts.
+    var keywordedInAccept = p.acceptable_keyworded_count || 0;
+    if (acceptablePhotoCount && keywordedInAccept) {
+      var alreadyNote = keywordedInAccept +
+        (keywordedInAccept === 1 ? ' already carries' : ' already carry') +
+        ' the keyword — accepting only clears ' +
+        (keywordedInAccept === 1 ? 'it' : 'them') + ' from Review';
+      why = why ? why + ' · ' + alreadyNote : alreadyNote;
+    }
+
+    html += '<div class="prediction-row' + (ambiguousPhotos.length ? ' ambiguous' : '') + '">' +
+      '<div style="min-width:0;">' +
+        '<div class="prediction-species">' + escapeHtml(p.species) + '</div>' +
+        '<div class="prediction-meta">' + escapeHtml(rowMeta) + '</div>' +
+        (why ? '<div class="prediction-why">' + escapeHtml(why) + '</div>' : '') +
+      '</div>' +
+      '<div class="prediction-actions">' + actions + '</div>' +
+    '</div>';
+  });
+  if (collapsed > 0) {
+    html += '<button class="prediction-toggle" onclick="toggleSelectionPredictions()">Show ' +
+      collapsed + ' more predicted species</button>';
+  } else if (selectionPredictionsExpanded && predictions.length > PREDICTION_COLLAPSE_AT) {
+    html += '<button class="prediction-toggle" onclick="toggleSelectionPredictions()">Show fewer</button>';
+  }
+  list.innerHTML = html + hiddenNote;
+}
+
+// "Show N photos" — open just the photos a prediction row counts, so the
+// user can judge the detection before accepting anything. Deliberately
+// read-only: nothing here changes the selection, the grid, or any keyword.
+async function showSelectionPredictionPhotos(idx, button) {
+  var ids = (selectionPredictionPhotoIdsByIdx[idx] || []).slice();
+  if (!ids.length) return;
+  // Two pins, because two things can go stale under this fetch. The panel
+  // seq drops responses for a selection the user has already moved off of;
+  // the show seq drops responses for a Show click the user has already
+  // moved off of — a slow fetch on row A must not paint over a faster
+  // fetch on row B that the user clicked afterwards.
+  var seq = selectionPredictionSeq;
+  var showSeq = ++selectionPredictionShowSeq;
+  var label = button ? button.textContent : '';
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Loading…';
+  }
+  var fetched = [];
+  try {
+    // /api/photos/by-ids caps each POST at 500 ids, and a selection can
+    // carry up to 1,000 photos, so chunk rather than silently truncating.
+    for (var offset = 0; offset < ids.length; offset += 500) {
+      var data = await safeFetch('/api/photos/by-ids', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({photo_ids: ids.slice(offset, offset + 500)}),
+      });
+      fetched = fetched.concat(data.photos || []);
+    }
+  } catch (e) {
+    return;
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = label;
+    }
+  }
+  if (seq !== selectionPredictionSeq) return;
+  if (showSeq !== selectionPredictionShowSeq) return;
+  if (!fetched.length) {
+    showToast('Could not open those photos — they are no longer in this workspace.', 'warning');
+    return;
+  }
+  // by-ids drops photos that left the workspace between the panel's render
+  // and this click. Say so rather than opening a lightbox whose counter
+  // quietly reads "1 / 1" under a button that promised 2.
+  if (fetched.length < ids.length) {
+    showToast('Showing ' + fetched.length + ' of ' + ids.length +
+      ' photos — the rest are no longer in this workspace.', 'warning');
+  }
+  openLightbox(fetched[0].id, fetched[0].filename || '', fetched);
+}
+
+async function acceptSelectionPrediction(idx, onAll, button) {
+  var ids = selectionPredictionAcceptableById[idx] || [];
+  if (!onAll && !ids.length) return;
+  var expectedSpecies = selectionPredictionSpeciesByIdx[idx];
+  var selection = getActiveSelection();
+  if (!expectedSpecies || !selection.length) return;
+  // Restore whatever label the button was rendered with rather than a
+  // hardcoded one: "Accept on all" now carries the selection count, and a
+  // fixed string here would quietly drop the number on every button that
+  // finished a request.
+  var restoreLabel = button ? button.textContent : null;
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Accepting…';
+  }
+  var data;
+  try {
+    data = await safeFetch('/api/predictions/batch-accept', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        prediction_ids: ids,
+        // Name the species the button will apply. If another tab shifted
+        // the row's consensus after this panel rendered, the server skips
+        // the drifted row rather than tagging with something the user was
+        // never shown.
+        expected_species: expectedSpecies || null,
+        photo_ids: onAll ? selection : undefined,
+      }),
+    });
+  } catch(e) { return; }
+  finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = restoreLabel;
+    }
+  }
+  await _afterPredictionMutation(
+    selection, { accepted: (data || {}).accepted },
+  );
+  _reportSkippedAccepts(data);
+}
+
+async function loadSelectionKeywordSuggestions(ids) {
+  var key = selectionIdsKey(ids);
+  if (key === selectionKeywordKey) return;
+  selectionKeywordKey = key;
+  var seq = ++selectionKeywordRequestSeq;
+  var list = document.getElementById('selectionKeywordSuggestions');
+  if (list) list.innerHTML = '<div class="selection-empty">Checking selected keywords...</div>';
+
+  try {
+    var data = await safeFetch('/api/selection/keyword-suggestions', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: ids}),
+    }, { toast: false });
+    if (seq !== selectionKeywordRequestSeq) return;
+    renderSelectionKeywordSuggestions(data.keywords || [], data.selected_count || ids.length);
+  } catch(e) {
+    if (seq === selectionKeywordRequestSeq && list) {
+      list.innerHTML = '<div class="selection-empty">Could not load keyword suggestions.</div>';
+    }
+  }
+}
+
+function renderSelectionKeywordSuggestions(keywords, selectedCount) {
+  var list = document.getElementById('selectionKeywordSuggestions');
+  if (!list) return;
+  if (!keywords.length) {
+    selectionKeywordMissingById = {};
+    selectionKeywordPresentById = {};
+    selectionKeywordNameById = {};
+    list.innerHTML = '<div class="selection-empty">No keywords on selected photos.</div>';
+    return;
+  }
+
+  var html = '';
+  selectionKeywordMissingById = {};
+  selectionKeywordPresentById = {};
+  selectionKeywordNameById = {};
+  var groupDefinitions = [
+    { type: 'taxonomy', label: 'Species' },
+    { type: 'location', label: 'Locations' },
+    { type: 'individual', label: 'Individuals' },
+    { type: 'genre', label: 'Genres' },
+    { type: 'general', label: 'Keywords' }
+  ];
+  var keywordsByType = {};
+  keywords.forEach(function(k) {
+    var type = k.type || 'general';
+    if (!keywordsByType[type]) keywordsByType[type] = [];
+    keywordsByType[type].push(k);
+  });
+  function renderKeywordRow(k) {
+    var missing = k.missing_count || 0;
+    var count = k.count || 0;
+    selectionKeywordMissingById[String(k.id)] = k.missing_photo_ids || [];
+    selectionKeywordPresentById[String(k.id)] = k.present_photo_ids || [];
+    selectionKeywordNameById[String(k.id)] = k.name;
+    var actions = '';
+    if (missing > 0) {
+      actions += '<button class="selection-keyword-add" onclick="applySelectionKeyword(' + k.id + ')" title="Add this keyword to the selected photos missing it">Add to ' + missing + '</button>';
+    }
+    if (count > 0) {
+      actions += '<button class="selection-keyword-remove" onclick="removeSelectionKeyword(' + k.id + ')" title="Remove this keyword from selected photos that have it">Remove from ' + count + '</button>';
+    }
+    return '<div class="selection-keyword-row">' +
+      '<div style="min-width:0;">' +
+        '<div class="selection-keyword-name">' + escapeHtml(k.name) + '</div>' +
+        '<div class="selection-keyword-meta">On ' + count + ' of ' + selectedCount + (missing ? ', missing from ' + missing : '') + '</div>' +
+      '</div>' +
+      '<div class="selection-keyword-actions">' + actions + '</div>' +
+      '</div>';
+  }
+  groupDefinitions.forEach(function(group) {
+    var rows = keywordsByType[group.type] || [];
+    if (!rows.length) return;
+    html += '<div class="selection-keyword-group" data-keyword-type="' + group.type + '">' +
+      '<div class="selection-keyword-group-title">' + group.label + '</div>' +
+      '<div class="selection-keyword-group-rows">' + rows.map(renderKeywordRow).join('') + '</div>' +
+      '</div>';
+  });
+  list.innerHTML = html;
+}
+
+var selectionWildlifeRequestSeq = 0;
+
+async function renderSelectionWildlifeState(ids) {
+  var status = document.getElementById('selectionWildlifeStatus');
+  var actions = document.getElementById('selectionWildlifeActions');
+  if (!status || !actions) return;
+  if (!ids || !ids.length) {
+    selectionWildlifeRequestSeq++;
+    status.textContent = '';
+    actions.innerHTML = '';
+    return;
+  }
+  // Derive counts from the full selection, not from the loaded grid:
+  // "Select all matching" can include off-page photos that are absent from
+  // ``photos``, and filtering client-side would omit them from the counts
+  // and hide batch controls that should still be available.
+  var seq = ++selectionWildlifeRequestSeq;
+  var data;
+  try {
+    data = await safeFetch('/api/selection/wildlife-state', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: ids}),
+    }, { toast: false });
+  } catch (e) {
+    if (seq === selectionWildlifeRequestSeq) {
+      status.textContent = '';
+      actions.innerHTML = '';
+    }
+    return;
+  }
+  if (seq !== selectionWildlifeRequestSeq) return;
+  var includedCount = (data && data.included_count) || 0;
+  var excludedCount = (data && data.excluded_count) || 0;
+  var selectedCount = (data && data.selected_count) || 0;
+  var missingCount = (data && data.missing_count) || 0;
+  if (!selectedCount && !missingCount) {
+    status.textContent = '';
+    actions.innerHTML = '';
+    return;
+  }
+  var statusText;
+  if (!selectedCount) {
+    statusText = '';
+  } else if (excludedCount === 0) {
+    statusText = 'All accessible photos are included in wildlife processing.';
+  } else if (includedCount === 0) {
+    statusText = 'All accessible photos are excluded from wildlife processing.';
+  } else {
+    statusText = includedCount + ' included · ' + excludedCount + ' excluded';
+  }
+  // Surface missing IDs the same way the state endpoint reports them so
+  // the panel never implies its counts cover the full user selection when
+  // some photos are unavailable in the active workspace.
+  if (missingCount > 0) {
+    var missingText = missingCount + ' unavailable in this workspace';
+    statusText = statusText ? statusText + ' · ' + missingText : missingText;
+  }
+  status.textContent = statusText;
+  var html = '';
+  if (includedCount > 0) {
+    html += '<button class="selection-keyword-remove" onclick="setSelectionWildlifeExcluded(true)">Exclude ' + includedCount + '</button>';
+  }
+  if (excludedCount > 0) {
+    html += '<button class="selection-keyword-add" onclick="setSelectionWildlifeExcluded(false)">Include ' + excludedCount + '</button>';
+  }
+  actions.innerHTML = html;
+}
+
+async function setSelectionWildlifeExcluded(excluded) {
+  var ids = getActiveSelection();
+  if (!ids.length) return;
+  var data;
+  try {
+    data = await safeFetch('/api/batch/wildlife-excluded', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: ids, excluded: excluded}),
+    });
+  } catch (e) { return; }
+  var changed = new Set((data && data.photo_ids) || ids);
+  changed.forEach(function(photoId) {
+    var photo = findBrowsePhoto(photoId);
+    if (photo) photo.wildlife_excluded = excluded ? 1 : 0;
+  });
+  var changedIds = Array.from(changed);
+  refreshGridCards(changedIds);
+  refreshExpandedBrowseStackMembers(changedIds);
+  // The selection may have changed while the batch request was in flight.
+  // Refresh the current selection so this completion cannot supersede a
+  // newer state request with counts and actions for the old photo ids.
+  renderSelectionWildlifeState(getActiveSelection());
+  scheduleCollectionCountsRefresh();
+  refreshActiveCollectionAfterMembershipChange([MUTATION_WILDLIFE]);
+  // The batch endpoint skips missing/out-of-workspace IDs instead of
+  // rejecting the whole selection; tell the user how many were skipped
+  // so a partial apply is never invisible.
+  var skipped = (data && data.skipped_count) || 0;
+  if (skipped > 0 && typeof showToast === 'function') {
+    showToast('Skipped ' + skipped + ' photo' + (skipped === 1 ? '' : 's') +
+              ' not accessible in this workspace.', 'warning');
+  }
+  showUndoToast();
+}
+
+async function applySelectionKeyword(keywordId) {
+  var ids = selectionKeywordMissingById[String(keywordId)] || [];
+  if (!ids.length) return;
+  try {
+    await safeFetch('/api/batch/keyword', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: ids, keyword_id: keywordId}),
+    });
+  } catch(e) { return; }
+  await _refreshBrowseKeywordState(ids);
+  selectionKeywordKey = '';
+  loadSelectionKeywordSuggestions(getActiveSelection());
+  loadKeywords();
+  scheduleCollectionCountsRefresh();
+  refreshActiveCollectionAfterMembershipChange([MUTATION_KEYWORD]);
+  refreshPendingSyncBanner();
+  showUndoToast();
+}
+
+async function removeSelectionKeyword(keywordId) {
+  var ids = selectionKeywordPresentById[String(keywordId)] || [];
+  if (!ids.length) return;
+  var removedName = selectionKeywordNameById[String(keywordId)] || null;
+  try {
+    await safeFetch('/api/batch/keyword-remove', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: ids, keyword_id: keywordId}),
+    });
+  } catch(e) { return; }
+  await _refreshBrowseKeywordState(ids);
+  _clearRepresentativeStateAfterKeywordRemoval(ids, removedName);
+  selectionKeywordKey = '';
+  loadSelectionKeywordSuggestions(getActiveSelection());
+  loadKeywords();
+  scheduleCollectionCountsRefresh();
+  // One reload only. ``refreshActiveCollectionAfterMembershipChange`` runs
+  // ``resetAndLoad({preserveScroll: true})`` when any active rule reads a
+  // keyword-derived field (``dependsOnMutation([MUTATION_KEYWORD])``), and
+  // the sidebar's ``activeKeyword`` path installs the same ``keyword``
+  // rule into VireoFilter — so the earlier follow-up call to
+  // ``refreshActiveKeywordAfterRemoval`` fired a *second* reset that
+  // arrived after the first had already cleared ``photos`` and grid
+  // cards, leaving ``captureBrowseViewportAnchor`` nothing to anchor on
+  // and dropping the scroll position (Codex review r4013311737).
+  refreshActiveCollectionAfterMembershipChange([MUTATION_KEYWORD]);
+  refreshPendingSyncBanner();
+  showUndoToast();
+}
+
+// If the batch inspector is visible, keep its Mixed/active state in sync with
+// the mutation we just applied. Keyboard shortcuts (rate_*, flag, color_*) go
+// straight through batchSetRating/Flag/ColorLabel without touching the sidebar
+// re-render path, so without this the stars/flag/color chips display the
+// pre-edit state — and clicking the same star clears the value the shortcut
+// just applied (batchRate treats matching-unanimous as toggle-off).
+function _refreshBatchInspectorIfActive() {
+  var detail = document.getElementById('detailContent');
+  if (detail && detail.classList.contains('batch-mode')) {
+    // State-only refresh — the selection did not change. Preserve any
+    // in-progress location input the user is typing.
+    renderBatchInspector(getActiveSelection(), { preserveLocation: true });
+  }
+}
+
+async function batchSetRating(rating, photoIds) {
+  var ids = photoIds ? photoIds.slice() : getActiveSelection();
+  try {
+    await safeFetch('/api/batch/rating', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: ids, rating: rating}),
+    });
+  } catch(e) { return; }
+  ids.forEach(function(id) {
+    var p = findBrowsePhoto(id);
+    if (p) p.rating = rating;
+  });
+  await reconcileBrowseStackCovers(ids);
+  refreshGridCards(ids);
+  refreshExpandedBrowseStackMembers(ids);
+  _refreshBatchInspectorIfActive();
+  scheduleCollectionCountsRefresh();
+  refreshPendingSyncBanner();
+  showUndoToast();
+}
+
+// Server-side representative eligibility (see get_species_representatives)
+// hides rejected photos. Mirror that here so the grid badge and the shared
+// representative context menu ("Already representative" hint on the current
+// entry) don't keep treating a just-rejected photo as still representative
+// until a reload. Un-rejecting is left as-is: the client can't know whether
+// the DB preference still points at this photo, so the badge stays hidden
+// until the page reloads rather than lighting up incorrectly.
+function _clearRepresentativeStateIfIneligible(photoId, flag) {
+  if (flag !== 'rejected') return;
+  var p = findBrowsePhoto(photoId);
+  if (!p) return;
+  if (p.is_species_representative) p.is_species_representative = false;
+  if (Array.isArray(p.life_list)) {
+    p.life_list.forEach(function(entry) {
+      if (!entry) return;
+      if (entry.is_current_photo) entry.is_current_photo = false;
+      if (entry.is_species_representative) entry.is_species_representative = false;
+    });
+  }
+}
+
+// Every render path that has (keywordId, name) pairs feeds this map so the
+// single-photo remove path can resolve the name even before the autocomplete
+// field is ever opened. keywordAutocompleteCache starts as null and only
+// populates after that field renders, so on a fresh Browse page the previous
+// lookup returned null and _clearRepresentativeStateAfterKeywordRemoval
+// no-oped — the grid badge/context-menu state stayed stale until reload.
+var _keywordNamesById = {};
+function _rememberKeywordNames(keywords) {
+  if (!Array.isArray(keywords)) return;
+  keywords.forEach(function(k) {
+    if (k && typeof k.id === 'number' && typeof k.name === 'string') {
+      _keywordNamesById[k.id] = k.name;
+    }
+  });
+}
+
+function _keywordNameFromCache(keywordId) {
+  if (Object.prototype.hasOwnProperty.call(_keywordNamesById, keywordId)) {
+    return _keywordNamesById[keywordId];
+  }
+  if (!Array.isArray(keywordAutocompleteCache)) return null;
+  for (var i = 0; i < keywordAutocompleteCache.length; i++) {
+    var k = keywordAutocompleteCache[i];
+    if (k && k.id === keywordId) return k.name;
+  }
+  return null;
+}
+
+// Keyword edits update the detail panel from /api/photos/:id, but Browse card
+// badges render from the separate `photos` cache populated by /api/photos.
+// Refresh the loaded rows from the authoritative batch endpoint after every
+// keyword mutation so taxonomy badges and representative state cannot drift.
+//
+// Rating and flag ride along for the one caller that has no other way to learn
+// them: undo/redo writes on the server and then announces, so nothing applied
+// the reversal to the local rows. They are also the only two edit-reversible
+// inputs to browseStackCoverCompare, so a stale copy does not just mis-render a
+// badge — it leaves a collapsed stack led by a photo the database no longer
+// ranks first. Rather than gate that behind a flag, the rows that actually
+// moved are recorded and only their stacks are reconciled: keyword callers see
+// no rating/flag change and so pay nothing, while any future caller gets the
+// cover fixed for free instead of silently drifting.
+async function _refreshBrowseKeywordState(photoIds, opts) {
+  opts = opts || {};
+  // Species keywords are exactly the input the prediction panels' ambiguity
+  // and "N missing" counts are computed from, so repaint them here rather
+  // than at each keyword call site — see refreshPredictionPanels. Done first,
+  // and before the early returns below, so it still runs when the mutated
+  // photos are outside the loaded grid page. `skipPanels` is for the one
+  // caller that repaints the whole sidebar itself (undo/redo), which would
+  // otherwise fetch the prediction panels twice.
+  if (!opts.skipPanels) refreshPredictionPanels(opts);
+  if (!Array.isArray(photoIds) || !photoIds.length) return;
+  // Invalidate from the full id list, before it is narrowed below to the rows
+  // this function can actually repaint. A stack tray offers "Select all" while
+  // it is still loading, so a keyword edit can land on members that are in
+  // neither `photos` nor `browseStackMembers` yet — exactly the members an
+  // in-flight expansion or cover hydration is about to cache from a pre-edit
+  // response. Narrowing first dropped those ids, and when every touched member
+  // was unloaded the early return below skipped invalidation entirely, letting
+  // the pre-edit payload install members missing the species the user had just
+  // added. The trailing refreshExpandedBrowseStackMembers() marks again for the
+  // rows it repaints; marking is idempotent.
+  markBrowseStackExpansionsStale(photoIds);
+  markBrowseStackHydrationsStale(photoIds);
+  var ids = Array.from(new Set(photoIds)).filter(function(id) {
+    return !!findBrowsePhoto(id);
+  });
+  if (!ids.length) return;
+
+  var refreshed = [];
+  // Photos whose rating or flag actually moved, i.e. whose stack's cover may
+  // need recomputing. Kept separate from `refreshed` so an undo of a keyword
+  // edit does not rehydrate every collapsed stack on the page.
+  var coverRankChanged = [];
+  try {
+    for (var offset = 0; offset < ids.length; offset += 500) {
+      var data = await safeFetch('/api/photos/by-ids', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({photo_ids: ids.slice(offset, offset + 500)}),
+      }, {toast: false});
+      (data.photos || []).forEach(function(updated) {
+        var local = findBrowsePhoto(updated.id);
+        if (!local) return;
+        local.species = Array.isArray(updated.species) ? updated.species : [];
+        local.life_list = Array.isArray(updated.life_list) ? updated.life_list : [];
+        local.species_representatives = Array.isArray(updated.species_representatives)
+          ? updated.species_representatives
+          : local.life_list;
+        local.is_species_representative = !!updated.is_species_representative;
+        // A prediction accept/reject moves this even though no keyword
+        // changed, and the badge would otherwise keep showing the old score
+        // until an unrelated reload (Codex P2 on PR #1670). Skipped for a
+        // stack card whose badge is its leading member's score: /by-ids is
+        // unstacked, so it would answer with the cover's own number. Those
+        // cards only appear under a confidence sort, which reloads the whole
+        // grid on a prediction edit anyway.
+        if (!local.prediction_confidence_is_stack_lead) {
+          local.prediction_confidence = updated.prediction_confidence === undefined
+            ? null : updated.prediction_confidence;
+        }
+        var nextRating = updated.rating === undefined ? null : updated.rating;
+        var nextFlag = updated.flag === undefined ? null : updated.flag;
+        var localRating = local.rating === undefined ? null : local.rating;
+        // `browseStackFlagRank` folds null and 'none' together, which is also
+        // how the card badge renders them, so neither a cover nor a badge can
+        // change between those two spellings.
+        if (localRating !== nextRating
+            || browseStackFlagRank(local.flag) !== browseStackFlagRank(nextFlag)) {
+          coverRankChanged.push(updated.id);
+        }
+        local.rating = nextRating;
+        local.flag = nextFlag;
+        refreshed.push(updated.id);
+      });
+    }
+  } catch (e) {
+    // The keyword save already succeeded; a later page reload remains a safe
+    // fallback if this non-critical card refresh is interrupted. Undo/redo is
+    // the exception and passes `reportFailure`: there the server has already
+    // reversed an edit the grid is still displaying, so staying quiet would
+    // present a working Undo as a no-op.
+    if (opts.reportFailure) {
+      showToast(
+        'Could not refresh the grid after that undo — cards may still show the '
+        + 'previous ratings, flags and stack covers. Reload the page to be sure.',
+        'warning'
+      );
+    }
+  }
+  // Before the card repaints below, for the reason batchSetFlag orders it this
+  // way: a promotion replaces the top-level row, and renderGrid() has to have
+  // put the new cover in place before individual cards are refreshed. Failed
+  // hydrations inside here report themselves with the '!' recheck marker.
+  if (coverRankChanged.length) await reconcileBrowseStackCovers(coverRankChanged);
+  if (refreshed.length) {
+    refreshGridCards(refreshed);
+    refreshExpandedBrowseStackMembers(refreshed);
+  }
+}
+
+// Server-side eligibility requires the photo to still carry the species
+// keyword, so removing a species keyword drops the photo from the eligible
+// representative set. Mirror that locally: strip life_list entries whose
+// species matches the removed keyword name and recompute the badge flag.
+// The context menu reads photo.life_list too, so this also stops the shared
+// "Already representative" hint from lingering on a photo the DB no longer
+// counts. Non-species keywords never appear in life_list, so the filter
+// no-ops for those. If the cache lookup fails to resolve the name, we
+// leave state alone rather than clearing the wrong entry.
+function _clearRepresentativeStateAfterKeywordRemoval(photoIds, keywordName) {
+  if (!Array.isArray(photoIds) || !photoIds.length) return;
+  if (!keywordName) return;
+  var touched = [];
+  photoIds.forEach(function(id) {
+    var p = findBrowsePhoto(id);
+    if (!p || !Array.isArray(p.life_list)) return;
+    var next = p.life_list.filter(function(entry) {
+      return !entry || entry.species !== keywordName;
+    });
+    if (next.length !== p.life_list.length) {
+      p.life_list = next;
+      var isRep = next.some(function(entry) {
+        return entry && entry.is_species_representative;
+      });
+      if (p.is_species_representative !== isRep) {
+        p.is_species_representative = isRep;
+      }
+      touched.push(id);
+    }
+  });
+  if (touched.length) {
+    refreshGridCards(touched);
+    refreshExpandedBrowseStackMembers(touched);
+  }
+}
+
+async function batchSetFlag(flag, photoIds) {
+  var ids = photoIds ? photoIds.slice() : getActiveSelection();
+  try {
+    await safeFetch('/api/batch/flag', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: ids, flag: flag}),
+    });
+  } catch(e) { return; }
+  ids.forEach(function(id) {
+    var p = findBrowsePhoto(id);
+    if (p) p.flag = flag;
+    _clearRepresentativeStateIfIneligible(id, flag);
+  });
+  await reconcileBrowseStackCovers(ids);
+  refreshGridCards(ids);
+  refreshExpandedBrowseStackMembers(ids);
+  if (selectedPhotoId != null && ids.indexOf(selectedPhotoId) !== -1) {
+    updateDetailFlagButtons(flag);
+  }
+  _refreshBatchInspectorIfActive();
+  scheduleCollectionCountsRefresh();
+  showUndoToast();
+}
+
+async function batchSetColorLabel(color, photoIds) {
+  var ids = photoIds ? photoIds.slice() : getActiveSelection();
+  if (!ids.length) return;
+  _noteColorLabelEdits(ids);
+  try {
+    await safeFetch('/api/batch/color_label', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: ids, color: color}),
+    });
+  } catch(e) { _recoverColorLabelsAfterFailedWrite(ids); return; }
+  _noteColorLabelEdits(ids);
+  ids.forEach(function(id) {
+    if (color) colorLabels[id] = color;
+    else delete colorLabels[id];
+    colorLabelsFetched.add(id);
+  });
+  refreshGridCards(ids);
+  refreshExpandedBrowseStackMembers(ids);
+  _refreshBatchInspectorIfActive();
+  scheduleCollectionCountsRefresh();
+  showUndoToast();
+}
+
+function batchAddKeyword() {
+  document.getElementById('batchKeywordTitle').textContent = 'Add keyword to ' + getActiveSelection().length + ' photos';
+  document.getElementById('batchKeywordInput').value = '';
+  getKeywordAutocompleteState('batchKeywordInput').selectedKeyword = null;
+  hideKeywordSuggestions('batchKeywordInput');
+  document.getElementById('batchKeywordModal').classList.add('open');
+  setTimeout(function() { document.getElementById('batchKeywordInput').focus(); }, 50);
+}
+
+function hideBatchKeywordModal() {
+  document.getElementById('batchKeywordModal').classList.remove('open');
+  hideKeywordSuggestions('batchKeywordInput');
+  window._vireoNativeMenuPhotoIdsOverride = null;
+}
+
+async function confirmBatchKeyword() {
+  var input = document.getElementById('batchKeywordInput');
+  var name = input.value.trim();
+  if (!name) return;
+  var ids = getActiveSelection();
+  hideBatchKeywordModal();
+  var state = getKeywordAutocompleteState('batchKeywordInput');
+  var selectedKeyword = state.selectedKeyword && state.selectedKeyword.name === name
+    ? state.selectedKeyword
+    : null;
+  var payload = selectedKeyword && selectedKeyword.id
+    ? {photo_ids: ids, keyword_id: selectedKeyword.id}
+    : {photo_ids: ids, name: name};
+  try {
+    await safeFetch('/api/batch/keyword', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    });
+  } catch(e) { return; }
+  await _refreshBrowseKeywordState(ids);
+  if (!selectedKeyword) invalidateKeywordAutocompleteCache();
+  // Re-read the live selection: it may have moved while the POST and the
+  // refresh were in flight. Loading the pre-await ``ids`` here would win the
+  // sequence race and leave the panel's Add/Remove buttons bound to photos
+  // that are no longer selected.
+  selectionKeywordKey = '';
+  loadSelectionKeywordSuggestions(getActiveSelection());
+  loadKeywords();
+  scheduleCollectionCountsRefresh();
+  refreshActiveCollectionAfterMembershipChange([MUTATION_KEYWORD]);
+  refreshPendingSyncBanner();
+  showUndoToast();
+}
+
+var _batchDeleteRequestSeq = 0;
+
+async function batchDelete() {
+  var ids = getActiveSelection();
+  if (ids.length === 0) return;
+  // Ask the server how many of these carry a companion file. A selection can
+  // hold photos Browse has never loaded — every frame of a collapsed stack,
+  // or a Select all that reaches past the loaded page — and counting the
+  // loaded ones only hides the "Also delete N companion files" checkbox, so a
+  // disk delete silently leaves those companions behind. Refuse to open the
+  // dialog rather than open it with a count that cannot be trusted: a wrong
+  // number here is a file left on disk. Codex P2 on PR #1672.
+  //
+  // The request is async and the grid stays interactive, so the selection can
+  // move under us while the count is in flight. A confirm on a dialog backed
+  // by the old ids would permanently delete photos the user no longer has
+  // selected, and a second Delete pressed before the first response arrives
+  // could open a dialog and then be overwritten by the earlier reply landing
+  // late. Stamp each request with a monotonic seq and snapshot the ids it
+  // asked about — a later request retires the earlier one, and a selection
+  // that no longer matches the snapshot means the user has moved on and gets
+  // a fresh ask rather than a stale dialog. Codex P1 on PR #1672.
+  var seq = ++_batchDeleteRequestSeq;
+  var capturedIds = ids.slice();
+  var companionCount;
+  try {
+    var counted = await safeFetch('/api/photos/companion-count', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: capturedIds}),
+    }, { toast: false });
+    companionCount = counted.count || 0;
+  } catch (e) {
+    if (seq !== _batchDeleteRequestSeq) return;
+    showToast(
+      'Could not check these photos for companion files, so nothing was '
+        + 'deleted. Try again: ' + (e.message || e),
+      'error'
+    );
+    return;
+  }
+  if (seq !== _batchDeleteRequestSeq) return;
+  // The lightbox's Delete button calls showDeleteDialog() through a
+  // different code path (_navbar.html's lightboxDelete), so it does not
+  // advance _batchDeleteRequestSeq. If the user pressed E while our count
+  // was in flight and clicked the lightbox Delete, the modal is already
+  // open backed by a single photo id; calling showDeleteDialog() again
+  // here would overwrite that dialog's ids and callback with the batch's,
+  // and confirming what looked like a one-photo delete would delete the
+  // whole batch. Refuse to open on top of any open delete dialog rather
+  // than trying to coordinate seq across every showDeleteDialog caller.
+  // Codex P1 on PR #1672.
+  var modal = document.getElementById('deleteModal');
+  if (modal && modal.classList.contains('open')) {
+    showToast(
+      'Another delete dialog is already open. Close it and click Delete again.',
+      'info'
+    );
+    return;
+  }
+  // Compared as sorted keys, not by scanning one list for each id of the
+  // other: a Select all can hand this tens of thousands of ids, and the
+  // quadratic version of this check would stall the UI thread on exactly the
+  // selections that most need a delete confirmation.
+  if (selectionIdsKey(getActiveSelection()) !== selectionIdsKey(capturedIds)) {
+    showToast(
+      'Selection changed while checking for companion files. Click Delete again.',
+      'info'
+    );
+    return;
+  }
+  showDeleteDialog(capturedIds, companionCount, function(data) {
+    // The server may have retained rows whose Trash step failed (and the
+    // user declined the permanent-delete fallback). Keep those rows visible
+    // — dropping them from ``photos`` would hide files still on disk until
+    // the next reload.
+    var retained = new Set((data && data.failed_photo_ids) || []);
+    var deletedSet = new Set(ids.filter(function(id) { return !retained.has(id); }));
+    // Removing one member can dissolve a stack or change its representative,
+    // so the logical item count cannot be updated arithmetically. Reload the
+    // current scope from the authoritative projection.
+    if (browseStacksEnabled()) {
+      selectedPhotos.clear();
+      selectedPhotoId = null;
+      selectedIndex = -1;
+      updateBatchBar();
+      resetAndLoad({preserveCollection: true});
+      loadSummary();
+      refreshBrowseSidebarCounts();
+      return;
+    }
+    photos = photos.filter(function(p) { return !deletedSet.has(p.id); });
+    totalPhotos = Math.max(0, totalPhotos - (data.deleted || 0));
+    totalUnderlyingPhotos = Math.max(0, totalUnderlyingPhotos - (data.deleted || 0));
+    selectedPhotos = new Set(Array.from(selectedPhotos).filter(function(id) {
+      return !deletedSet.has(id);
+    }));
+    if (selectedPhotoId != null && deletedSet.has(selectedPhotoId)) {
+      selectedPhotoId = null;
+    }
+    // Re-sync the batch bar (count, compare/best/burst buttons, selection
+    // inspector) against the shrunk selection. Just hiding the bar when the
+    // set empties leaves stale state — the count and buttons stayed sized for
+    // the pre-delete IDs on a partial deletion.
+    updateBatchBar();
+    renderGrid();
+    updateFilterSummary();
+    loadSummary();
+    refreshBrowseSidebarCounts();
+    // Update total count display
+    var countEl = document.getElementById('photoCount');
+    if (countEl) {
+      var current = parseInt(countEl.textContent) || 0;
+      countEl.textContent = Math.max(0, current - (data.deleted || 0));
+    }
+  });
+}
+
+var _batchCollections = [];
+var _batchCollectionSelectedId = null;
+
+function collectionAcceptsManualPhotos(collection) {
+  if (typeof collection.can_add_photos === 'boolean') {
+    return collection.can_add_photos;
+  }
+
+  function rulesAcceptManualPhotos(node) {
+    if (Array.isArray(node)) {
+      return node.every(rulesAcceptManualPhotos);
+    }
+    if (!node || typeof node !== 'object') return false;
+    if (node.field === 'photo_ids') {
+      return Array.isArray(node.value || []);
+    }
+    if (!node.field && Array.isArray(node.rules)) {
+      return (node.mode || 'all') === 'all' && node.rules.every(rulesAcceptManualPhotos);
+    }
+    return false;
+  }
+
+  try {
+    var rules = typeof collection.rules === 'string'
+      ? JSON.parse(collection.rules)
+      : collection.rules;
+    return rulesAcceptManualPhotos(rules);
+  } catch(e) {
+    return false;
+  }
+}
+
+async function addToCollection() {
+  var activeIds = getActiveSelection();
+  if (activeIds.length === 0) {
+    window._vireoNativeMenuPhotoIdsOverride = null;
+    return;
+  }
+
+  var collections;
+  try {
+    collections = await safeFetch('/api/collections', {}, { toast: false });
+  } catch(e) {
+    window._vireoNativeMenuPhotoIdsOverride = null;
+    return;
+  }
+
+  collections = collections.filter(collectionAcceptsManualPhotos);
+  _batchCollections = collections;
+  _batchCollectionSelectedId = null;
+  document.getElementById('batchCollectionTitle').textContent = 'Add ' + activeIds.length + ' photo(s) to collection';
+
+  var listHtml = '';
+  collections.forEach(function(c) {
+    listHtml += '<div class="batch-coll-item" data-id="' + c.id + '" onclick="pickBatchCollection(' + c.id + ')" style="padding:6px 10px;cursor:pointer;border-radius:4px;font-size:13px;color:var(--text-primary);">' + escapeHtml(c.name) + '</div>';
+  });
+  if (collections.length === 0) {
+    listHtml = '<div style="font-size:12px;color:var(--text-dim);padding:4px 10px;">No manual collections yet</div>';
+  }
+  document.getElementById('batchCollectionList').innerHTML = listHtml;
+  document.getElementById('batchCollectionNewName').value = '';
+  document.getElementById('batchCollectionModal').classList.add('open');
+  setTimeout(function() { document.getElementById('batchCollectionNewName').focus(); }, 50);
+}
+
+function pickBatchCollection(id) {
+  _batchCollectionSelectedId = id;
+  document.getElementById('batchCollectionNewName').value = '';
+  document.querySelectorAll('.batch-coll-item').forEach(function(el) {
+    el.style.background = parseInt(el.dataset.id) === id ? 'var(--bg-tertiary)' : '';
+  });
+}
+
+function hideBatchCollectionModal() {
+  document.getElementById('batchCollectionModal').classList.remove('open');
+  window._vireoNativeMenuPhotoIdsOverride = null;
+}
+
+async function confirmBatchCollection() {
+  var newName = document.getElementById('batchCollectionNewName').value.trim();
+  var ids = getActiveSelection();
+  var collectionId = _batchCollectionSelectedId;
+  var collectionName = '';
+
+  if (newName) {
+    // Create a new static collection
+    collectionName = newName;
+    try {
+      var createData = await safeFetch('/api/collections', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          name: collectionName,
+          rules: [{"field": "photo_ids", "value": []}],
+        }),
+      });
+      collectionId = createData.id;
+    } catch(e) { return; }
+  } else if (collectionId != null) {
+    var match = _batchCollections.find(function(c) { return c.id === collectionId; });
+    collectionName = match ? match.name : '';
+  } else {
+    return; // nothing selected
+  }
+
+  hideBatchCollectionModal();
+
+  // Add photos to the collection
+  try {
+    await safeFetch('/api/collections/' + collectionId + '/add-photos', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: ids}),
+    });
+  } catch(e) { return; }
+
+  showToast('Added ' + ids.length + ' photos to "' + collectionName + '"', 'success');
+  loadCollections();
+  clearSelection();
+}
+
+function reviewLocationsForCollection(collectionId, mode) {
+  // Same guard as filterByCollection: degraded collections would just
+  // re-hit the unresolvable rules while building the review queue.
+  var collectionMeta = collectionsById[collectionId];
+  if (collectionMeta && collectionMeta.count_error) {
+    if (typeof showToast === 'function') {
+      showToast(
+        (collectionMeta.name || 'This collection') +
+          " is unavailable — its rules could not be resolved. Right-click → Edit Rules to fix it.",
+        'error'
+      );
+    }
+    return;
+  }
+  sessionStorage.setItem('vireoLocationReviewReturn', window.location.href);
+  sessionStorage.setItem('vireoLocationReviewSource', JSON.stringify({collection_id: collectionId}));
+  window.location.href = '/locations/review?collection_id=' + encodeURIComponent(collectionId) + (mode === 'time' ? '&mode=time' : '');
+}
+
+function reviewLocationsForSelection(mode) {
+  var ids = getActiveSelection();
+  if (!ids.length) return;
+  var payload;
+  try {
+    payload = JSON.stringify({photo_ids: ids});
+  } catch (e) {
+    if (typeof showToast === 'function') {
+      showToast('Could not open location review for this selection.', 'error');
+    }
+    return;
+  }
+  try {
+    sessionStorage.setItem('vireoLocationReviewSource', payload);
+  } catch (e) {
+    // sessionStorage has a per-origin quota (typically ~5MB). Very large
+    // selections (e.g. "Select all matching photos" on a big library) can
+    // exceed it, in which case setItem throws synchronously. Guide the
+    // user to the collection-based flow, which passes an id in the URL
+    // and never touches sessionStorage for the id list.
+    if (typeof showToast === 'function') {
+      showToast(
+        'Selection is too large to open location review directly (' +
+          ids.length.toLocaleString() +
+          ' photos). Save the selection as a collection first, then use Review on Map from the collection menu.',
+        'error'
+      );
+    }
+    return;
+  }
+  sessionStorage.setItem('vireoLocationReviewReturn', window.location.href);
+  window.location.href = '/locations/review?source=selection' + (mode === 'time' ? '&mode=time' : '');
+}
+
+var captureTimePreviewSeq = 0;
+
+function getCaptureTimeMode() {
+  var selected = document.querySelector('input[name="captureTimeMode"]:checked');
+  return selected ? selected.value : 'preserve_instant';
+}
+
+function buildCaptureTimePayload() {
+  var ids = getActiveSelection();
+  var mode = getCaptureTimeMode();
+  var targetOffset = document.getElementById('captureTimeTargetOffset').value.trim();
+  var shiftRaw = document.getElementById('captureTimeManualShift').value;
+  var shiftMinutes = parseInt(shiftRaw, 10);
+  if (isNaN(shiftMinutes)) shiftMinutes = 0;
+  return {
+    photo_ids: ids,
+    mode: mode,
+    target_offset: mode === 'manual' ? null : (targetOffset || null),
+    shift_minutes: shiftMinutes,
+    keep_backups: document.getElementById('captureTimeKeepBackups').checked,
+  };
+}
+
+function syncCaptureTimeFieldState() {
+  var mode = getCaptureTimeMode();
+  var targetInput = document.getElementById('captureTimeTargetOffset');
+  var shiftInput = document.getElementById('captureTimeManualShift');
+  if (!targetInput || !shiftInput) return;
+  if (mode === 'manual') {
+    targetInput.disabled = true;
+    targetInput.title = 'Not used in manual shift mode';
+    shiftInput.disabled = false;
+    shiftInput.title = '';
+  } else {
+    targetInput.disabled = false;
+    targetInput.title = '';
+    shiftInput.disabled = true;
+    shiftInput.title = 'Not used in preserve-instant mode';
+  }
+}
+
+function formatShiftMinutes(mins) {
+  var sign = mins >= 0 ? '+' : '';
+  var hours = mins / 60;
+  var hoursPart = Number.isInteger(hours) ? ' (' + (hours >= 0 ? '+' : '') + hours + ' hours)' : '';
+  return sign + mins + ' minutes' + hoursPart;
+}
+
+function renderCaptureTimePreview(data) {
+  var rows = data.samples || [];
+  var shiftsVary = !!data.shifts_vary;
+  var html = '<div class="capture-time-row header">' +
+    '<div>File</div><div>Current</div><div>After</div></div>';
+  rows.forEach(function(row) {
+    var before = (row.before_time || 'No capture time') + (row.before_offset ? ' ' + row.before_offset : '');
+    var after = (row.after_time || 'No capture time') + (row.after_offset ? ' ' + row.after_offset : '');
+    var perRowShift = '';
+    if (shiftsVary && typeof row.shift_minutes === 'number') {
+      perRowShift = ' <span style="color:var(--text-muted);font-size:11px;">(' + formatShiftMinutes(row.shift_minutes) + ')</span>';
+    }
+    html += '<div class="capture-time-row">' +
+      '<div class="capture-time-filename" title="' + escapeAttr(row.filename || '') + '">' + escapeHtml(row.filename || '') + '</div>' +
+      '<div class="capture-time-before">' + escapeHtml(before) + '</div>' +
+      '<div class="capture-time-after">' + escapeHtml(after) + perRowShift + '</div>' +
+    '</div>';
+  });
+  var summary;
+  if (shiftsVary) {
+    summary = 'Shift varies per photo (each photo is shifted to land on the target offset).';
+  } else if (typeof data.shift_minutes === 'number') {
+    summary = 'Resolved shift: ' + formatShiftMinutes(data.shift_minutes);
+  } else {
+    summary = 'No shift will be applied.';
+  }
+  html += '<div class="capture-time-hint" style="padding:0 10px 10px;margin:0;">' + escapeHtml(summary) + '</div>';
+  document.getElementById('captureTimePreview').innerHTML = html;
+}
+
+async function updateCaptureTimePreview() {
+  var modal = document.getElementById('captureTimeModal');
+  if (!modal.classList.contains('open')) return;
+  var payload = buildCaptureTimePayload();
+  var previewEl = document.getElementById('captureTimePreview');
+  var applyBtn = document.getElementById('captureTimeApplyBtn');
+  if (!payload.photo_ids.length) {
+    previewEl.innerHTML = '<div class="capture-time-hint" style="padding:10px;margin:0;">No photos selected.</div>';
+    applyBtn.disabled = true;
+    return;
+  }
+  var seq = ++captureTimePreviewSeq;
+  applyBtn.disabled = true;
+  previewEl.innerHTML = '<div class="capture-time-hint" style="padding:10px;margin:0;">Loading preview...</div>';
+  try {
+    var data = await safeFetch('/api/capture-time/preview', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    }, { toast: false });
+    if (seq !== captureTimePreviewSeq) return;
+    renderCaptureTimePreview(data);
+    applyBtn.disabled = false;
+    applyBtn.textContent = 'Apply to ' + payload.photo_ids.length + ' photo' + (payload.photo_ids.length === 1 ? '' : 's');
+  } catch(e) {
+    if (seq !== captureTimePreviewSeq) return;
+    previewEl.innerHTML = '<div class="capture-time-hint" style="padding:10px;margin:0;color:var(--danger);">' + escapeHtml(e.message || 'Could not build preview') + '</div>';
+    applyBtn.disabled = true;
+  }
+}
+
+function openCaptureTimeModal() {
+  var ids = getActiveSelection();
+  if (!ids.length) return;
+  document.getElementById('captureTimeTitle').textContent = 'Adjust Capture Time for ' + ids.length + ' photo' + (ids.length === 1 ? '' : 's');
+  document.getElementById('captureTimeApplyBtn').textContent = 'Apply';
+  document.getElementById('captureTimeApplyBtn').disabled = true;
+  document.getElementById('captureTimeModal').classList.add('open');
+  syncCaptureTimeFieldState();
+  updateCaptureTimePreview();
+}
+
+function hideCaptureTimeModal() {
+  document.getElementById('captureTimeModal').classList.remove('open');
+  window._vireoNativeMenuPhotoIdsOverride = null;
+}
+
+async function startCaptureTimeJob() {
+  var payload = buildCaptureTimePayload();
+  if (!payload.photo_ids.length) return;
+  var applyBtn = document.getElementById('captureTimeApplyBtn');
+  applyBtn.disabled = true;
+  try {
+    var data = await safeFetch('/api/jobs/capture-time', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    });
+    hideCaptureTimeModal();
+    showToast(
+      'Adjusting capture time for ' + payload.photo_ids.length + ' photo' +
+        (payload.photo_ids.length === 1 ? '' : 's') + '...',
+      'info'
+    );
+    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+      onProgress: function(prog) {
+        showToast(
+          'Adjusting capture time: ' + prog.current + '/' + prog.total +
+            ' — ' + (prog.current_file || ''),
+          'info'
+        );
+      },
+      onComplete: function(done) {
+        if (done.status && done.status !== 'completed') {
+          var errors = done.errors || [];
+          showToast('Capture time failed: ' + (errors[0] || done.status), 'error');
+          return;
+        }
+        var result = done.result || {};
+        var skippedText = result.skipped ? ', ' + result.skipped + ' skipped' : '';
+        showToast('Capture time updated: ' + (result.updated || 0) + ' updated' + skippedText + ', ' + (result.failed || 0) + ' failed', result.failed ? 'error' : 'success');
+        resetAndLoad();
+        loadSummary();
+      },
+      onError: function() {
+        applyBtn.disabled = false;
+      },
+    });
+  } catch(e) {
+    applyBtn.disabled = false;
+  }
+}
+
+function clearSelection() {
+  anchorRestoreEpoch++;
+  // Clear both tracks that feed getActiveSelection(), otherwise the batch bar
+  // reappears immediately with the single-focus photo still armed for actions.
+  selectedPhotos.clear();
+  selectedPhotoId = null;
+  selectedIndex = -1;
+  // Batch-bar Clear (and every other caller) has to scrub the EXIF suggestion
+  // too. Without this, the suggestion element keeps its data-photo-id and
+  // Accept button after clearing, so a later Select All that still contains
+  // the previously-open anchor satisfies renderLocationEmpty's owner-in-
+  // selection check and resurrects the anchor's Accept line for the whole
+  // batch — one click would apply the anchor's GPS-derived place to every
+  // selected photo. Codex P2 on PR #1097.
+  clearExifSuggestion();
+  // Also drop the ambient detail-photo pointer maybeShowExifSuggestion's
+  // post-await path uses as its owner check. Scrubbing the DOM alone isn't
+  // enough: a reverse-geocode fetch that was in flight when the user clicked
+  // Clear still resolves later, and if _detailPhotoId still points at the
+  // departed anchor a subsequent Select All that contains that photo
+  // re-satisfies both async guards and repaints A's Accept line into the
+  // batch inspector — clicking it would apply A's EXIF place to every
+  // selected photo. Codex P2 on PR #1097 (17:04Z follow-up).
+  window._detailPhotoId = null;
+  // Repaint from the (now empty) selection rather than stripping one class by
+  // hand: a stack card can also be carrying the dashed partial mark, and a
+  // hand-rolled scrub that only knew about `selected` left that mark on a
+  // cleared grid. One rule, one function. Codex P2 on PR #1672.
+  refreshCardSelectionVisuals();
+  // If the detail panel is still open after clearing, its actions (setFlag,
+  // setColorLabel, addKeyword, etc.) early-return on the null selectedPhotoId
+  // and silently do nothing. Hide it so there is no ghost UI to interact with.
+  var detail = document.getElementById('detailContent');
+  if (detail && detail.classList.contains('visible')) {
+    detail.classList.remove('visible');
+    var summary = document.getElementById('summaryPanel');
+    if (summary) summary.classList.remove('hidden');
+    loadSummary();
+  }
+  updateBatchBar();
+}
+
+/* ---------- Undo / Redo ---------- */
+async function undoLast() {
+  return window.doUndo();
+}
+async function redoLast() {
+  return window.doRedo();
+}
+
+async function showUndoToast() {
+  try {
+    var data = await safeFetch('/api/undo/status', {}, { toast: false });
+    if (data.available) showToast(data.description + ' — Ctrl+Z to undo', 'success');
+  } catch(e) {}
+}
+
+/* showToast is now provided globally by _navbar.html */
+
+async function loadDetail(id) {
+  // If a multi-selection is already active, skip this single-photo load — it
+  // would strip .batch-mode and rewire the sidebar (rating stars → setRating(id))
+  // to the anchor while the user still has N photos selected. Common flow:
+  // click A, then Cmd/Ctrl-click B before A's fetch returns. selectedPhotoId
+  // stays A, so both the sync class removal below and the post-await
+  // renderDetail(A) would overwrite the batch inspector the Cmd-click just set up.
+  if (selectedPhotos.size > 1) return;
+  document.getElementById('summaryPanel').classList.add('hidden');
+  var detail = document.getElementById('detailContent');
+  // Loading a single photo's detail always exits batch mode.
+  if (detail) detail.classList.remove('batch-mode');
+  if (detail) detail.classList.toggle('visible', window._detailPhotoId === id);
+
+  // Kill any stale EXIF suggestion tagged for a *different* photo before the
+  // fetch returns. Otherwise: open A (suggestion shown, data-photo-id=A) →
+  // click B → Select All lands before B's /api/photos response resolves.
+  // renderBatchInspector's preserveExifSuggestion check finds A's stale
+  // data-photo-id, sees A is in the Select All ids, and resurrects A's
+  // Accept line for the whole batch — clicking it applies A's GPS place to
+  // every selected photo. Also null _detailPhotoId so any in-flight
+  // reverse-geocode for A can't repaint through maybeShowExifSuggestion's
+  // post-await guard once the batch inspector is on screen. Codex P2 on
+  // PR #1097 (17:23Z).
+  if (window._detailPhotoId !== id) {
+    clearExifSuggestion();
+    window._detailPhotoId = null;
+  }
+
+  try {
+    var photo = await safeFetch('/api/photos/' + id, {}, { toast: false });
+    // Re-check after the fetch: a Cmd/Ctrl-click landing during the await can
+    // promote the selection to multi. The batch inspector is already rendered;
+    // don't clobber it with this stale single-photo response.
+    if (selectedPhotoId === id && selectedPhotos.size <= 1) {
+      renderDetail(photo);
+      if (detail) detail.classList.add('visible');
+      // Fetched separately from /api/photos so the panel renders the same
+      // enriched rows Review does (nested alternatives, disagreement context)
+      // instead of a second, thinner idea of what a prediction is.
+      loadDetailPredictions(id);
+    }
+  } catch(e) {}
+}
+
+function renderDetail(photo) {
+  window._detailPhotoId = photo.id;
+  // Single-photo view: clear any Mixed markers left over from batch mode.
+  _batchToggleMixed('ratingMixed', false);
+  _batchToggleMixed('flagMixed', false);
+  _batchToggleMixed('colorMixed', false);
+  if (
+    typeof window.vireoRememberPhotoEditRecipe === 'function' &&
+    Object.prototype.hasOwnProperty.call(photo, 'edit_recipe')
+  ) {
+    window.vireoRememberPhotoEditRecipe(photo.id, photo.edit_recipe, {
+      skipIfLocallyWritten: true,
+    });
+  }
+  if (typeof window.vireoRememberPhotoPair === 'function') {
+    window.vireoRememberPhotoPair(photo);
+  }
+  if (typeof window.vireoUpdatePairSourceControls === 'function') {
+    window.vireoUpdatePairSourceControls(photo.id);
+  }
+  var detailThumb = window.vireoThumbnailUrl ? window.vireoThumbnailUrl(photo) : '/thumbnails/' + photo.id + '.jpg';
+  document.getElementById('detailImg').src = detailThumb;
+  document.getElementById('detailFilename').textContent = photo.filename;
+  renderCoordinateStatus(photo);
+
+  // Rating stars
+  var ratingHtml = '';
+  for (var i = 1; i <= 5; i++) {
+    var cls = i <= photo.rating ? 'detail-star active' : 'detail-star';
+    ratingHtml += '<span class="' + cls + '" onclick="setRating(' + photo.id + ',' + i + ')">&#9733;</span>';
+  }
+  document.getElementById('detailRating').innerHTML = ratingHtml;
+
+  // Flags
+  updateDetailFlagButtons(photo.flag);
+
+  // Color labels
+  updateDetailColors();
+
+  // Wildlife classification exclusion
+  updateDetailWildlifeExcluded(photo);
+
+  // Keywords
+  var kwTypeIcons = {general:'●', taxonomy:'🌿', individual:'👤', location:'📍', genre:'🎭'};
+  var kwTypeLabels = {general:'General', taxonomy:'Taxonomy', individual:'Individual', location:'Location', genre:'Genre'};
+  _rememberKeywordNames(photo.keywords || []);
+  var kwHtml = '';
+  (photo.keywords || []).forEach(function(k) {
+    var ktype = k.type || 'general';
+    var icon = kwTypeIcons[ktype] || '●';
+    var dropdownHtml = '<div class="keyword-type-dropdown" data-kw-id="' + k.id + '">';
+    Object.keys(kwTypeIcons).forEach(function(t) {
+      var activeClass = t === ktype ? ' active' : '';
+      dropdownHtml += '<span class="keyword-type-option' + activeClass + '" onclick="setKeywordType(' + k.id + ',\'' + t + '\',this)">' + kwTypeIcons[t] + ' ' + kwTypeLabels[t] + '</span>';
+    });
+    dropdownHtml += '</div>';
+    kwHtml += '<span class="keyword-tag">' +
+      '<span class="keyword-type-indicator" onclick="toggleTypeDropdown(this,' + k.id + ')" title="Type: ' + kwTypeLabels[ktype] + '">' + icon + dropdownHtml + '</span>' +
+      escapeHtml(k.name) +
+      '<span class="remove-kw" onclick="removeKeyword(' + photo.id + ',' + k.id + ')">&times;</span></span>';
+  });
+  document.getElementById('detailKeywords').innerHTML = kwHtml;
+
+  // Location section
+  if (photo.location) {
+    renderLocationFilled(photo.location);
+  } else {
+    renderLocationEmpty();
+    maybeShowExifSuggestion(photo);
+  }
+
+  // XMP sidecar
+  var xmpEl = document.getElementById('detailXmp');
+  if (photo.xmp_exists === false) {
+    xmpEl.innerHTML = '<span style="color:var(--text-ghost);">No .xmp sidecar file</span>';
+  } else if (photo.xmp_keywords && photo.xmp_keywords.length > 0) {
+    var dbKwNames = (photo.keywords || []).map(function(k) { return k.name.toLowerCase(); });
+    var xmpHtml = '';
+    photo.xmp_keywords.forEach(function(kw) {
+      var inDb = dbKwNames.indexOf(kw.toLowerCase()) !== -1;
+      var color = inDb ? 'var(--accent)' : 'var(--warning)';
+      var title = inDb ? 'In sync with database' : 'In XMP but not in database';
+      xmpHtml += '<span style="display:inline-block;background:var(--bg-tertiary);padding:2px 6px;border-radius:3px;margin:2px;font-size:11px;border:1px solid ' + color + ';color:' + color + ';" title="' + title + '">' + escapeHtml(kw) + '</span>';
+    });
+    // Check for DB keywords not in XMP
+    var xmpLower = photo.xmp_keywords.map(function(k) { return k.toLowerCase(); });
+    (photo.keywords || []).forEach(function(k) {
+      if (xmpLower.indexOf(k.name.toLowerCase()) === -1) {
+        xmpHtml += '<span style="display:inline-block;background:var(--bg-tertiary);padding:2px 6px;border-radius:3px;margin:2px;font-size:11px;border:1px solid var(--info);color:var(--info);" title="In database but not in XMP (pending sync)">+ ' + escapeHtml(k.name) + '</span>';
+      }
+    });
+    xmpHtml += '<div style="margin-top:4px;font-size:10px;color:var(--text-ghost);">' +
+      '<span style="color:var(--accent);">&#9632;</span> synced ' +
+      '<span style="color:var(--warning);">&#9632;</span> XMP only ' +
+      '<span style="color:var(--info);">&#9632;</span> DB only (pending sync)</div>';
+    xmpEl.innerHTML = xmpHtml;
+  } else if (photo.xmp_exists) {
+    xmpEl.innerHTML = '<span style="color:var(--text-ghost);">XMP file exists but has no keywords</span>';
+  }
+
+  // Quick summary
+  var summary = '';
+  var meta = photo.metadata;
+  if (meta) {
+    var exifTags = meta.EXIF || {};
+    var composite = meta.Composite || {};
+
+    // Camera (remove make from model if model already starts with it)
+    var make = exifTags.Make || '';
+    var model = exifTags.Model || '';
+    var camera = model.startsWith(make) ? model : (make + ' ' + model).trim();
+    if (camera) summary += '<div class="summary-camera">' + escapeHtml(camera) + '</div>';
+
+    // Lens
+    var lens = composite.LensID || exifTags.LensModel || composite.Lens || '';
+    if (lens) summary += '<div class="summary-lens">' + escapeHtml(String(lens)) + '</div>';
+
+    // Exposure line: focal | aperture | shutter | ISO
+    var parts = [];
+    if (exifTags.FocalLength) parts.push(Math.round(exifTags.FocalLength) + 'mm');
+    if (exifTags.FNumber) parts.push('f/' + exifTags.FNumber);
+    if (exifTags.ExposureTime) {
+      if (exifTags.ExposureTime < 1) {
+        parts.push('1/' + Math.round(1 / exifTags.ExposureTime) + 's');
+      } else {
+        parts.push(exifTags.ExposureTime + 's');
+      }
+    }
+    if (exifTags.ISO) parts.push('ISO ' + exifTags.ISO);
+    if (parts.length) summary += '<div class="summary-exposure">' + parts.join('&nbsp;&nbsp;') + '</div>';
+  }
+
+  // Date, dimensions, file size (always from photo fields)
+  if (photo.timestamp) summary += 'Date: ' + photo.timestamp + '<br>';
+  if (photo.width && photo.height) summary += 'Size: ' + photo.width + ' x ' + photo.height + '<br>';
+  if (photo.file_size) {
+    var sz = photo.file_size;
+    summary += 'File: ' + (sz >= 1048576 ? (sz / 1048576).toFixed(1) + ' MB' : Math.round(sz / 1024) + ' KB') + '<br>';
+  }
+  document.getElementById('detailSummary').innerHTML = summary;
+
+  // Path
+  document.getElementById('detailPath').textContent = photo.filename;
+
+  // Clear search and render metadata groups
+  var searchInput = document.getElementById('metadataSearch');
+  if (searchInput) searchInput.value = '';
+  renderMetadataGroups(photo.metadata);
+}
+
+function updateDetailFlagButtons(flag) {
+  document.querySelectorAll('.detail-flag-btn').forEach(function(btn) {
+    btn.className = 'detail-flag-btn';
+  });
+  var flagBtns = document.querySelectorAll('.detail-flag-btn');
+  if (flag === 'flagged') flagBtns[1].classList.add('active-flag');
+  else if (flag === 'rejected') flagBtns[2].classList.add('active-reject');
+}
+
+function renderMetadataGroups(metadata) {
+  var container = document.getElementById('metadataGroups');
+  var section = document.getElementById('detailMetadataSection');
+  container.innerHTML = '';
+
+  if (!metadata) {
+    section.style.display = 'none';
+    return;
+  }
+
+  // Sort groups: EXIF first, then alphabetical, _meta last
+  var groups = Object.keys(metadata).sort(function(a, b) {
+    if (a === 'EXIF') return -1;
+    if (b === 'EXIF') return 1;
+    if (a === '_meta') return 1;
+    if (b === '_meta') return -1;
+    return a.localeCompare(b);
+  });
+
+  // Skip groups with 0 tags
+  groups = groups.filter(function(g) {
+    return Object.keys(metadata[g]).length > 0;
+  });
+
+  if (groups.length === 0) {
+    section.style.display = 'none';
+    return;
+  }
+
+  section.style.display = '';
+
+  groups.forEach(function(group) {
+    var tags = metadata[group];
+    var tagNames = Object.keys(tags).sort();
+
+    var div = document.createElement('div');
+    div.className = 'meta-group';
+    div.setAttribute('data-group', group);
+
+    var header = document.createElement('div');
+    header.className = 'meta-group-header';
+    header.innerHTML = '<span>' + escapeHtml(group) + '</span><span class="meta-group-count">' + tagNames.length + '</span>';
+    header.onclick = function() { div.classList.toggle('open'); };
+
+    var body = document.createElement('div');
+    body.className = 'meta-group-body';
+
+    tagNames.forEach(function(tag) {
+      var val = tags[tag];
+      if (typeof val === 'object' && val !== null) val = JSON.stringify(val);
+      var row = document.createElement('div');
+      row.className = 'meta-tag-row';
+      row.setAttribute('data-tag', tag.toLowerCase());
+      row.setAttribute('data-value', String(val).toLowerCase());
+      row.innerHTML = '<span class="meta-tag-name">' + escapeHtml(tag) + '</span><span class="meta-tag-value">' + escapeHtml(String(val)) + '</span>';
+      body.appendChild(row);
+    });
+
+    div.appendChild(header);
+    div.appendChild(body);
+    container.appendChild(div);
+  });
+}
+
+function filterMetadata(query) {
+  var q = query.toLowerCase().trim();
+  var groups = document.querySelectorAll('#metadataGroups .meta-group');
+
+  groups.forEach(function(group) {
+    if (!q) {
+      // Reset: show all groups, collapse all
+      group.style.display = '';
+      group.classList.remove('open');
+      group.querySelectorAll('.meta-tag-row').forEach(function(row) {
+        row.style.display = '';
+      });
+      return;
+    }
+
+    var rows = group.querySelectorAll('.meta-tag-row');
+    var hasMatch = false;
+
+    rows.forEach(function(row) {
+      var tag = row.getAttribute('data-tag') || '';
+      var val = row.getAttribute('data-value') || '';
+      var matches = tag.indexOf(q) !== -1 || val.indexOf(q) !== -1;
+      row.style.display = matches ? '' : 'none';
+      if (matches) hasMatch = true;
+    });
+
+    // Also check if group name matches
+    var groupName = (group.getAttribute('data-group') || '').toLowerCase();
+    if (groupName.indexOf(q) !== -1) {
+      hasMatch = true;
+      rows.forEach(function(row) { row.style.display = ''; });
+    }
+
+    group.style.display = hasMatch ? '' : 'none';
+    if (hasMatch && q) {
+      group.classList.add('open');
+    }
+  });
+}
+
+function hideDetailPanel() {
+  document.getElementById('detailContent').classList.remove('visible');
+  document.getElementById('summaryPanel').classList.remove('hidden');
+}
+
+// Trading a single-photo detail focus for a batch. The panel is not the only
+// thing that has to go: the EXIF suggestion element keeps its data-photo-id
+// and its Accept button, and an in-flight reverse-geocode keeps
+// window._detailPhotoId as its owner check — so a later selection that still
+// contains the abandoned photo would resurrect its Accept line for the whole
+// batch, and one click would apply that one photo's place to every selected
+// photo. closeDetail() and clearSelection() have retired both since Codex P2
+// on PR #1097; the paths that enter a stack selection need it for the same
+// reason. Codex P1 on PR #1672.
+function abandonDetailFocusForBatch() {
+  hideDetailPanel();
+  clearExifSuggestion();
+  window._detailPhotoId = null;
+}
+
+function closeDetail() {
+  anchorRestoreEpoch++;
+  hideDetailPanel();
+  selectedPhotoId = null;
+  selectedIndex = -1;
+  // Drop any lingering EXIF suggestion attached to the closed detail photo.
+  // Without this, the element keeps its data-photo-id and Accept button; a
+  // later Ctrl+A (or any batch that still contains that photo) would satisfy
+  // renderLocationEmpty's owner-in-selection check and resurrect the anchor's
+  // Accept line for the whole batch — clicking it would apply the anchor's
+  // GPS-derived place to every selected photo. Codex P2 on PR #1097.
+  clearExifSuggestion();
+  // Null the ambient detail-photo pointer for the same reason. maybeShowExif
+  // Suggestion's post-await guard uses window._detailPhotoId as its owner
+  // check: if a reverse-geocode was in flight when we closed the panel, the
+  // fetch keeps running and later resolves. With the pointer still set, a
+  // Ctrl+A that includes the departed photo would satisfy both async guards
+  // and repaint A's Accept line into the batch inspector. Codex P2 on
+  // PR #1097 (17:04Z follow-up).
+  window._detailPhotoId = null;
+  // Re-highlight any cmd/shift-click selections that survive detail close.
+  // A blanket .remove('selected') would leave selectedPhotos armed for batch
+  // actions with no visible indicator — e.g. click A -> cmd-click B -> cmd-click
+  // B drops the set to {A}, and closing detail would otherwise show "1 selected"
+  // in the bar against an unhighlighted photo.
+  refreshCardSelectionVisuals();
+  updateBatchBar();
+  loadSummary();
+}
+
+function buildSummaryParams() {
+  var params = new URLSearchParams();
+  if (activeFolderId) params.set('folder_id', activeFolderId);
+  var rules = getBrowseRules();
+  if (rules) params.set('rules', JSON.stringify(rules));
+  appendVisualScopeParams(params);
+  if (activeCollectionId) params.set('collection_id', activeCollectionId);
+  return params;
+}
+
+function reconcileSummaryLoadRenders() {
+  var gen = summaryLoadGen;
+  while (gen > summaryRenderDecisionGen) {
+    var state = summaryLoadStates[gen];
+    if (!state || state.status === 'pending') return;
+    if (state.status === 'success') {
+      var currentKey = buildSummaryParams().toString();
+      summaryRenderDecisionGen = gen;
+      if (state.key === currentKey) renderSummary(state.data);
+      Object.keys(summaryLoadStates).forEach(function(key) {
+        if (Number(key) <= summaryLoadGen) delete summaryLoadStates[key];
+      });
+      return;
+    }
+    gen--;
+  }
+}
+
+async function loadSummary() {
+  var gen = ++summaryLoadGen;
+  var params = buildSummaryParams();
+  summaryLoadStates[gen] = {
+    status: 'pending',
+    key: params.toString()
+  };
+
+  try {
+    var data = await safeFetch('/api/browse/summary?' + params.toString(), {}, { toast: false });
+    var state = summaryLoadStates[gen];
+    if (!state) return data;
+    state.status = 'success';
+    state.data = data;
+    reconcileSummaryLoadRenders();
+    return data;
+  } catch(e) {
+    var failedState = summaryLoadStates[gen];
+    if (failedState) {
+      failedState.status = 'failure';
+      reconcileSummaryLoadRenders();
+    }
+    return null;
+  }
+}
+
+function renderSummary(data) {
+  var isFiltered = data.filtered_total !== data.total;
+
+  document.getElementById('summaryPhotoCount').textContent = data.filtered_total.toLocaleString();
+  document.getElementById('summaryFilterNote').textContent =
+    isFiltered ? 'of ' + data.total.toLocaleString() + ' total' : '';
+
+  document.getElementById('summaryClassified').textContent = data.classified.toLocaleString() + ' classified';
+  document.getElementById('summaryUnclassified').textContent = data.unclassified.toLocaleString() + ' unclassified';
+
+  // Top species
+  var speciesSection = document.getElementById('summarySpeciesSection');
+  var speciesHtml = '';
+  if (data.top_species && data.top_species.length > 0) {
+    data.top_species.forEach(function(s) {
+      speciesHtml += '<div class="summary-species-row">' +
+        '<span class="summary-species-name">' + escapeHtml(s.species) + '</span>' +
+        '<span class="summary-species-count">' + s.count + '</span></div>';
+    });
+    speciesSection.style.display = '';
+  } else {
+    speciesSection.style.display = 'none';
+  }
+  document.getElementById('summarySpeciesList').innerHTML = speciesHtml;
+
+}
+
+/* ---------- Edit Actions ---------- */
+async function setRating(photoId, rating) {
+  try {
+    await safeFetch('/api/photos/' + photoId + '/rating', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rating: rating }),
+    });
+    // Update local state — findBrowsePhoto looks in the top-level `photos`
+    // array AND in any expanded stack tray's `browseStackMembers`, so a rating
+    // set on a hidden member updates the tray-cached row instead of vanishing.
+    var p = findBrowsePhoto(photoId);
+    if (p) p.rating = rating;
+    await reconcileBrowseStackCovers([photoId]);
+    refreshGridCards([photoId]);
+    refreshExpandedBrowseStackMembers([photoId]);
+    scheduleCollectionCountsRefresh();
+    // The user may have moved on during the POST. loadDetail(A) while B is
+    // open would hide B's panel and null _detailPhotoId, then refuse to render
+    // A, leaving the panel blank.
+    if (selectedPhotoId === photoId) loadDetail(photoId);
+    refreshPendingSyncBanner();
+  } catch(e) {}
+}
+
+async function setFlag(flag) {
+  var sel = getActiveSelection();
+  if (sel.length > 1) {
+    var st = _batchAllLoaded(sel) ? _batchFlagState(sel) : { unanimous: false };
+    var target = (st.unanimous && st.value === flag) ? 'none' : flag;
+    // batchSetFlag runs _refreshBatchInspectorIfActive() against the *current*
+    // selection when the request resolves, so the sidebar reflects whatever is
+    // selected now. Re-rendering with the captured `sel` here would clobber a
+    // fresh render if the user changed the selection during the await.
+    await batchSetFlag(target);
+    return;
+  }
+  if (!selectedPhotoId) return;
+  var photoId = selectedPhotoId;
+  try {
+    await safeFetch('/api/photos/' + photoId + '/flag', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ flag: flag }),
+    });
+    var p = findBrowsePhoto(photoId);
+    if (p) p.flag = flag;
+    _clearRepresentativeStateIfIneligible(photoId, flag);
+    await reconcileBrowseStackCovers([photoId]);
+    refreshGridCards([photoId]);
+    refreshExpandedBrowseStackMembers([photoId]);
+    if (selectedPhotoId === photoId) updateDetailFlagButtons(flag);
+    scheduleCollectionCountsRefresh();
+  } catch(e) {}
+}
+
+function updateDetailWildlifeExcluded(photo) {
+  var btn = document.getElementById('detailWildlifeExcluded');
+  if (!btn) return;
+  var excluded = !!(photo && photo.wildlife_excluded);
+  btn.classList.toggle('active', excluded);
+  btn.textContent = excluded ? 'Include Wildlife Classification' : 'Not Wildlife';
+  btn.title = excluded
+    ? 'Include this photo in wildlife detection and classification'
+    : 'Exclude this photo from wildlife detection and classification';
+}
+
+async function setWildlifeExcludedFor(photoId, excluded) {
+  await safeFetch('/api/photos/' + photoId + '/wildlife_excluded', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ excluded: excluded }),
+  }, { toast: false });
+  var p = findBrowsePhoto(photoId);
+  if (p) p.wildlife_excluded = excluded ? 1 : 0;
+  renderGrid();
+  refreshExpandedBrowseStackMembers([photoId]);
+  if (selectedPhotoId === photoId) loadDetail(photoId);
+  showUndoToast();
+}
+window.setWildlifeExcludedFor = setWildlifeExcludedFor;
+
+async function toggleDetailWildlifeExcluded() {
+  if (!selectedPhotoId) return;
+  // Read the current value via findBrowsePhoto so a stack member that lives
+  // only in browseStackMembers (not the top-level photos array) still yields
+  // its true wildlife_excluded state. photos.find() would return undefined for
+  // hidden members and always send excluded=true — clicking "Include Wildlife
+  // Classification" on an already-excluded member would silently re-exclude
+  // it instead of including it.
+  var p = findBrowsePhoto(selectedPhotoId);
+  var current = p ? !!p.wildlife_excluded : false;
+  try {
+    await setWildlifeExcludedFor(selectedPhotoId, !current);
+  } catch(e) {}
+}
+
+async function fetchColorLabels(photoIds) {
+  if (!photoIds.length) return;
+  var gen = colorLabelGen;
+  // Chunk the GET URL so oversized stacks (or any large id set) don't
+  // exceed the browser/proxy/server request-target limit and drop the
+  // whole page's color labels when a stack expansion hydrates a large
+  // member list (Codex P2 on PR #1561). Matches the 500-id cap the
+  // /api/photos/by-ids stack-expansion path already uses.
+  var combined = {};
+  var chunkFailed = false;
+  for (var offset = 0; offset < photoIds.length; offset += 500) {
+    var chunk = photoIds.slice(offset, offset + 500);
+    var data = await safeFetch(
+      '/api/photos/color_labels?ids=' + chunk.join(','),
+      {}, { toast: false },
+    );
+    if (!data) { chunkFailed = true; break; }
+    for (var id in data) combined[id] = data[id];
+  }
+  if (chunkFailed) return;
+  // Skip per id whose local edit happened after this fetch started: the
+  // delete would drop the fresh value, and the merge would overwrite it with
+  // the older server truth. Ids the user never touched are still applied.
+  photoIds.forEach(function(id) {
+    if ((colorLabelEditGen[id] || 0) > gen) return;
+    delete colorLabels[id];
+  });
+  for (var pid in combined) {
+    if ((colorLabelEditGen[pid] || 0) > gen) continue;
+    colorLabels[pid] = combined[pid];
+  }
+  // Mark every requested id as fetched — an absent id in `combined` means
+  // "no color set" now that we've asked, so the batch inspector can trust
+  // colorLabels[id] === undefined for these ids as a definite value.
+  photoIds.forEach(function(id) { colorLabelsFetched.add(id); });
+  // A batch selection that included any of these ids may have rendered as
+  // unanimous no-colour with no Mixed marker; refresh it now that we can
+  // trust the state.
+  _refreshBatchInspectorIfActive();
+}
+
+async function setColorLabel(color) {
+  var sel = getActiveSelection();
+  if (sel.length > 1) {
+    var st = _batchAllLoaded(sel) ? _batchColorState(sel) : { unanimous: false };
+    var target = (st.unanimous && st.value === color) ? null : color;
+    // See setFlag: batchSetColorLabel already refreshes the inspector for the
+    // current selection, so re-rendering with the captured `sel` risks stomping
+    // a fresh render if the user changed the selection during the await.
+    await batchSetColorLabel(target);
+    return;
+  }
+  if (!selectedPhotoId) return;
+  var photoId = selectedPhotoId;
+  _noteColorLabelEdits([photoId]);
+  var current = colorLabels[photoId] || null;
+  var newColor = (current === color) ? null : color;
+  try {
+    await safeFetch('/api/photos/' + photoId + '/color_label', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({color: newColor}),
+    });
+  } catch(e) { _recoverColorLabelsAfterFailedWrite([photoId]); return; }
+  _noteColorLabelEdits([photoId]);
+  if (newColor) {
+    colorLabels[photoId] = newColor;
+  } else {
+    delete colorLabels[photoId];
+  }
+  colorLabelsFetched.add(photoId);
+  if (selectedPhotoId === photoId) updateDetailColors();
+  refreshGridCards([photoId]);
+  refreshExpandedBrowseStackMembers([photoId]);
+  scheduleCollectionCountsRefresh();
+}
+
+function updateDetailColorsValue(current) {
+  document.querySelectorAll('.detail-color-btn').forEach(function(btn) {
+    btn.classList.toggle('active', btn.dataset.color === current);
+  });
+}
+
+function updateDetailColors() {
+  updateDetailColorsValue(colorLabels[selectedPhotoId] || null);
+}
+
+// --- Multi-select (batch) inspector ---------------------------------------
+// When >1 photos are selected, the detail panel is reused as a batch editor
+// (see updateSelectionPanel). Rating/Flag/Color reflect the selection's shared
+// value when unanimous, or a "Mixed" marker when the selected photos differ,
+// and edits apply to the whole selection.
+
+function _batchToggleMixed(id, show) {
+  var el = document.getElementById(id);
+  if (el) el.hidden = !show;
+}
+
+// Returns {unanimous, value}. get(id) yields the per-photo value.
+function _batchUnanimous(ids, get) {
+  if (!ids.length) return { unanimous: false, value: null };
+  var first = get(ids[0]);
+  for (var i = 1; i < ids.length; i++) {
+    if (get(ids[i]) !== first) return { unanimous: false, value: null };
+  }
+  return { unanimous: true, value: first };
+}
+
+function _batchRatingState(ids) {
+  return _batchUnanimous(ids, function(id) {
+    var p = findBrowsePhoto(id);
+    return p ? (p.rating || 0) : 0;
+  });
+}
+function _batchFlagState(ids) {
+  return _batchUnanimous(ids, function(id) {
+    var p = findBrowsePhoto(id);
+    return p ? (p.flag || 'none') : 'none';
+  });
+}
+function _batchColorState(ids) {
+  return _batchUnanimous(ids, function(id) { return colorLabels[id] || null; });
+}
+
+// Only trust unanimity when every selected photo is loaded in the current grid
+// (and thus its rating/flag/color is known). A selection that reaches beyond the
+// loaded page — e.g. "select all search results" — is shown as Mixed rather than
+// asserting a shared value we can't actually verify.
+function _batchAllLoaded(ids) {
+  return ids.every(function(id) {
+    return !!findBrowsePhoto(id);
+  });
+}
+
+// Colour labels arrive from a separate async /api/photos/color_labels fetch, so
+// having each photo row loaded (via _batchAllLoaded) is not enough to trust the
+// colour column: a selection made before that fetch returns would otherwise
+// render as unanimous no-colour without a Mixed marker.
+function _batchColorLoaded(ids) {
+  return ids.every(function(id) { return colorLabelsFetched.has(id); });
+}
+
+function renderBatchInspector(ids, opts) {
+  opts = opts || {};
+  var known = _batchAllLoaded(ids);
+
+  var coordinateEl = document.getElementById('locationCoordinateStatus');
+  if (coordinateEl) {
+    if (!known) {
+      coordinateEl.className = 'coordinate-status none';
+      coordinateEl.textContent = 'Coordinate sources are mixed or still loading for this selection.';
+    } else {
+      var counts = {exif: 0, assigned: 0, none: 0};
+      ids.forEach(function(id) {
+        var p = findBrowsePhoto(id);
+        var status = p && counts[p.location_status] != null ? p.location_status : 'none';
+        counts[status]++;
+      });
+      coordinateEl.className = 'coordinate-status';
+      coordinateEl.textContent = [
+        counts.exif + ' EXIF GPS',
+        counts.assigned + ' assigned map location' + (counts.assigned === 1 ? '' : 's'),
+        counts.none + ' without coordinates'
+      ].join(' · ');
+    }
+  }
+
+  var rs = known ? _batchRatingState(ids) : { unanimous: false, value: 0 };
+  var r = rs.unanimous ? rs.value : 0;
+  var ratingHtml = '';
+  for (var i = 1; i <= 5; i++) {
+    ratingHtml += '<span class="' + (i <= r ? 'detail-star active' : 'detail-star') +
+      '" onclick="batchRate(' + i + ')">&#9733;</span>';
+  }
+  document.getElementById('detailRating').innerHTML = ratingHtml;
+  // Show Mixed whenever we can't confirm unanimity — including partially-loaded
+  // selections where `known` is false. Hiding Mixed there made "0 stars / None /
+  // no color" render identically to a truly unanimous no-value selection.
+  _batchToggleMixed('ratingMixed', !(known && rs.unanimous));
+
+  var fs = known ? _batchFlagState(ids) : { unanimous: false, value: 'none' };
+  updateDetailFlagButtons(fs.unanimous ? fs.value : 'none');
+  _batchToggleMixed('flagMixed', !(known && fs.unanimous));
+
+  var colorKnown = known && _batchColorLoaded(ids);
+  var cs = colorKnown ? _batchColorState(ids) : { unanimous: false, value: null };
+  updateDetailColorsValue(cs.unanimous ? cs.value : null);
+  _batchToggleMixed('colorMixed', !(colorKnown && cs.unanimous));
+
+  // Location input shares the batch-aware submit path (_locationApplyPhotoIds);
+  // show the empty input rather than any single photo's saved location.
+  // Skip the reset on state-only refreshes (opts.preserveLocation) — the user
+  // may be mid-way through typing a batch location when an async event
+  // (e.g. a /api/photos/color_labels fetch resolving, a batch rating shortcut)
+  // triggers _refreshBatchInspectorIfActive, and we'd otherwise erase it.
+  if (!opts.preserveLocation) {
+    renderLocationEmpty({
+      preserveExifSuggestion: opts.preserveExifSuggestion,
+      selectionIds: ids,
+    });
+  }
+}
+
+async function batchRate(rating) {
+  var ids = getActiveSelection();
+  if (ids.length < 1) return;
+  var st = _batchAllLoaded(ids) ? _batchRatingState(ids) : { unanimous: false };
+  var target = (st.unanimous && st.value === rating) ? 0 : rating;
+  // batchSetRating already refreshes the inspector for the current selection.
+  // A follow-up render using the captured `ids` would clobber that fresh render
+  // if the user changed the selection during the await.
+  await batchSetRating(target);
+}
+
+async function addKeyword(keyword) {
+  var ids = getActiveSelection();
+  var useBatch = ids.length > 1;
+  var batchSelectionKey = selectionIdsKey(ids);
+  if (!selectedPhotoId && !useBatch) return;
+  var input = document.getElementById('addKeywordInput');
+  var name = input.value.trim();
+  if (!name) return;
+  var state = getKeywordAutocompleteState('addKeywordInput');
+  var selectedKeyword = keyword || (
+    state.selectedKeyword && state.selectedKeyword.name === name
+      ? state.selectedKeyword
+      : null
+  );
+  var payload = selectedKeyword && selectedKeyword.id
+    ? { keyword_id: selectedKeyword.id }
+    : { name: name };
+  if (useBatch) payload.photo_ids = ids;
+  try {
+    var endpoint = useBatch
+      ? '/api/batch/keyword'
+      : '/api/photos/' + selectedPhotoId + '/keywords';
+    await safeFetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    // skipDetail when the single-photo branch below runs a full loadDetail,
+    // which re-fetches this photo's predictions anyway.
+    await _refreshBrowseKeywordState(ids, {
+      skipDetail: !useBatch && !!selectedPhotoId,
+    });
+    input.value = '';
+    state.selectedKeyword = null;
+    hideKeywordSuggestions('addKeywordInput');
+    if (!selectedKeyword) invalidateKeywordAutocompleteCache();
+    // Same reason as _afterLocationMutation: if a multi-selection is still
+    // active, re-render the batch inspector instead of collapsing to the
+    // anchor photo's single-detail view via loadDetail.
+    var currentSel = getActiveSelection();
+    if (currentSel.length > 1) {
+      // Selection is unchanged after a batch keyword save; keep any in-progress
+      // location input the user may have typed.
+      renderBatchInspector(currentSel, { preserveLocation: true });
+    } else if (selectedPhotoId) {
+      loadDetail(selectedPhotoId);
+    }
+    if (useBatch && selectionIdsKey(getActiveSelection()) === batchSelectionKey) {
+      selectionKeywordKey = '';
+      loadSelectionKeywordSuggestions(ids);
+    }
+    loadKeywords();
+    scheduleCollectionCountsRefresh();
+    refreshActiveCollectionAfterMembershipChange([MUTATION_KEYWORD]);
+    refreshPendingSyncBanner();
+  } catch(e) {}
+}
+
+async function removeKeyword(photoId, keywordId) {
+  try {
+    await safeFetch('/api/photos/' + photoId + '/keywords/' + keywordId, {
+      method: 'DELETE',
+    });
+    // loadDetail below re-fetches this photo's predictions.
+    await _refreshBrowseKeywordState([photoId], { skipDetail: true });
+    _clearRepresentativeStateAfterKeywordRemoval(
+      [photoId],
+      _keywordNameFromCache(keywordId),
+    );
+    // Same guard as setRating: don't blank the panel of a photo opened since.
+    if (selectedPhotoId === photoId) loadDetail(photoId);
+    loadKeywords();
+    scheduleCollectionCountsRefresh();
+    refreshActiveCollectionAfterMembershipChange([MUTATION_KEYWORD]);
+    refreshPendingSyncBanner();
+  } catch(e) {}
+}
+
+/* ---------- Location section ---------- */
+let googleMapsLoadPromise = null;
+function loadGoogleMapsJs() {
+  if (googleMapsLoadPromise) return googleMapsLoadPromise;
+  const apiKey = window.GOOGLE_MAPS_API_KEY || '';
+  if (!apiKey) {
+    googleMapsLoadPromise = Promise.reject(new Error('no_api_key'));
+    return googleMapsLoadPromise;
+  }
+  googleMapsLoadPromise = new Promise(function(resolve, reject) {
+    window._gmapsCallback = function() { resolve(window.google); };
+    var s = document.createElement('script');
+    s.src = 'https://maps.googleapis.com/maps/api/js?key=' +
+      encodeURIComponent(apiKey) +
+      '&libraries=places' +
+      (window.GOOGLE_MAPS_PREFER_ENGLISH ? '&language=en' : '') +
+      '&loading=async&callback=_gmapsCallback';
+    s.async = true;
+    s.onerror = function() { reject(new Error('gmaps_load_failed')); };
+    document.head.appendChild(s);
+  });
+  return googleMapsLoadPromise;
+}
+
+// Per-input autocomplete state. Keyed by `input` element so we can detect
+// whether a `place_changed` event recently fired (and thus the Enter
+// handler should defer to it).
+var _locationAutocomplete = null;
+var _locationLastPickedAt = 0;
+var _locationAutocompleteBound = false;
+// Pending free-text submit triggered by Enter. Held for ~300ms so a
+// keyboard-selected autocomplete suggestion (where place_changed fires
+// AFTER the keydown event) gets a chance to cancel the text path.
+var _locationPendingTextSubmit = null;
+var _locationKeywordState = {
+  matches: [],
+  activeIndex: -1,
+};
+
+function _showLocationError(msg) {
+  var el = document.getElementById('locationError');
+  if (!el) return;
+  el.textContent = msg;
+  el.hidden = false;
+  setTimeout(function() {
+    if (el.textContent === msg) el.hidden = true;
+  }, 4000);
+}
+
+function _hideLocationError() {
+  var el = document.getElementById('locationError');
+  if (el) el.hidden = true;
+}
+
+function hideLocationKeywordSuggestions() {
+  var dropdown = document.getElementById('locationKeywordSuggestions');
+  if (dropdown) {
+    dropdown.classList.remove('open');
+    dropdown.innerHTML = '';
+  }
+  _locationKeywordState.matches = [];
+  _locationKeywordState.activeIndex = -1;
+}
+
+function renderLocationKeywordSuggestions() {
+  var input = document.getElementById('locationInput');
+  var dropdown = document.getElementById('locationKeywordSuggestions');
+  if (!input || !dropdown) return;
+  var query = input.value.trim().toLowerCase();
+  if (!query || !keywordAutocompleteCache || !keywordAutocompleteCache.length) {
+    hideLocationKeywordSuggestions();
+    return;
+  }
+
+  _locationKeywordState.matches = keywordAutocompleteCache
+    .filter(function(k) { return k && k.type === 'location'; })
+    .map(function(k) {
+      return { keyword: k, score: keywordMatchScore(k.search, query) };
+    })
+    .filter(function(item) { return item.score < 99; })
+    .sort(function(a, b) {
+      return a.score - b.score || a.keyword.search.localeCompare(b.keyword.search) || a.keyword.id - b.keyword.id;
+    })
+    .slice(0, 6)
+    .map(function(item) { return item.keyword; });
+
+  if (!_locationKeywordState.matches.length) {
+    hideLocationKeywordSuggestions();
+    return;
+  }
+  if (_locationKeywordState.activeIndex < 0 || _locationKeywordState.activeIndex >= _locationKeywordState.matches.length) {
+    _locationKeywordState.activeIndex = 0;
+  }
+
+  dropdown.innerHTML = _locationKeywordState.matches.map(function(k, idx) {
+    var active = idx === _locationKeywordState.activeIndex ? ' active' : '';
+    var count = k.photo_count === 1 ? '1 photo' : k.photo_count + ' photos';
+    var source = k.place_id ? 'Saved Google place' : 'Saved location';
+    return '<div class="keyword-suggestion-option' + active + '" role="option" data-index="' + idx + '">' +
+      '<span class="keyword-suggestion-name">' + escapeHtml(k.name) + '</span>' +
+      '<span class="keyword-suggestion-meta">' + escapeHtml(source + ' · ' + count) + '</span>' +
+      '</div>';
+  }).join('');
+  dropdown.classList.add('open');
+}
+
+function updateLocationKeywordSuggestions() {
+  var input = document.getElementById('locationInput');
+  if (!input || !input.value.trim()) {
+    hideLocationKeywordSuggestions();
+    return;
+  }
+  loadKeywordAutocompleteOptions().then(renderLocationKeywordSuggestions);
+}
+
+function chooseLocationKeywordSuggestion(index) {
+  var keyword = _locationKeywordState.matches[index];
+  if (!keyword) return;
+  var input = document.getElementById('locationInput');
+  if (input) input.value = keyword.name;
+  hideLocationKeywordSuggestions();
+  if (_locationPendingTextSubmit) {
+    clearTimeout(_locationPendingTextSubmit);
+    _locationPendingTextSubmit = null;
+  }
+  _locationLastPickedAt = Date.now();
+  _submitLocationKeyword(keyword);
+}
+
+function _locationApplyPhotoIds() {
+  // Batch flow (Cmd/Ctrl-click without ever opening a single-photo detail)
+  // leaves window._detailPhotoId unset even though getActiveSelection() has
+  // targets, so derive from the selection directly rather than gating on
+  // the focused-detail photo.
+  return getActiveSelection();
+}
+
+// The batch location endpoints reject more than 1000 photo_ids per request
+// (vireo/app.py), and reject the whole request — so posting a bigger selection
+// in one shot applied the location to *nothing*. Split it. location_review.html
+// chunks against the same cap.
+var LOCATION_BATCH_LIMIT = 1000;
+
+// A location save is async (a big batch posts 1000 ids per request, so it can
+// take seconds) and the user can open another photo meanwhile. The response
+// describes the photos the save targeted (a batch returns photo_ids[0]'s
+// location), so painting it after the target changed would show the saved
+// place on an unrelated photo, whose × button would then clear *that* photo.
+// Capture the target before the await and paint only if it is still open.
+function _locationTargetKey() {
+  return selectionIdsKey(_locationApplyPhotoIds()) + '|' + (window._detailPhotoId || '');
+}
+
+async function _postLocationBatched(endpoint, baseBody, ids) {
+  var last = null;
+  for (var offset = 0; offset < ids.length; offset += LOCATION_BATCH_LIMIT) {
+    var body = Object.assign({}, baseBody, {
+      photo_ids: ids.slice(offset, offset + LOCATION_BATCH_LIMIT),
+    });
+    last = await safeFetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  }
+  return last;
+}
+
+async function _afterLocationMutation(photoIds, detailPhotoId) {
+  // Bump the location-mutation epoch so any in-flight reverse-geocode from an
+  // earlier maybeShowExifSuggestion(A) bails out of its post-await paint. Every
+  // save/clear/accept path funnels through here, so this is the single choke
+  // point where the batch-save-during-pending-geocode race can be closed.
+  // Codex P2 on PR #1097 (17:39Z): open A → Cmd-click B → save batch location
+  // for {A,B} → geocode resolves. renderBatchInspector rehides #locationFilled,
+  // so the DOM-only guard in maybeShowExifSuggestion can't tell the batch was
+  // just given a location and repaints A's stale Accept line.
+  window._locationMutationEpoch = (window._locationMutationEpoch || 0) + 1;
+  invalidateKeywordAutocompleteCache();
+  loadKeywords();
+  scheduleCollectionCountsRefresh();
+  refreshPendingSyncBanner();
+  if (activeCollectionId) {
+    await filterByCollection(activeCollectionId);
+    return;
+  }
+  // A saved location is a location keyword, so the same rule as the keyword
+  // paths applies: re-run the query when the active expression can notice,
+  // and keep the user where they were when it does.
+  if (window.VireoFilter && VireoFilter.hasFilters() &&
+      (!VireoFilter.dependsOnMutation ||
+       VireoFilter.dependsOnMutation([MUTATION_KEYWORD]))) {
+    resetAndLoad({ preserveScroll: true });
+    return;
+  }
+  if (photoIds && photoIds.length) {
+    var idsToRefresh = photoIds.filter(function(id) {
+      return !!findBrowsePhoto(id);
+    });
+    try {
+      for (var offset = 0; offset < idsToRefresh.length; offset += 500) {
+        var statusData = await safeFetch('/api/photos/by-ids', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({photo_ids: idsToRefresh.slice(offset, offset + 500)})
+        }, {toast: false});
+        (statusData.photos || []).forEach(function(updated) {
+          var local = findBrowsePhoto(updated.id);
+          if (local) local.location_status = updated.location_status || 'none';
+        });
+      }
+    } catch (e) {}
+    refreshGridCards(idsToRefresh);
+    refreshExpandedBrowseStackMembers(idsToRefresh);
+  }
+  // If a multi-selection is still active, keep the batch inspector rendered.
+  // Falling through to loadDetail(anchor) would strip .batch-mode and rewire
+  // the rating stars to setRating(anchorId, i) — collapsing the panel to the
+  // anchor's single-photo view while the user still has N photos selected.
+  var activeSel = getActiveSelection();
+  if (activeSel.length > 1) {
+    renderBatchInspector(activeSel);
+  } else if (detailPhotoId && selectedPhotoId === detailPhotoId) {
+    loadDetail(detailPhotoId);
+  } else {
+    loadSummary();
+  }
+}
+
+async function bindLocationAutocomplete() {
+  if (_locationAutocompleteBound) return;
+  // Wait for the /api/config fetch to resolve so window.GOOGLE_MAPS_API_KEY
+  // is populated. The user can focus the input before _cfgPromise has
+  // resolved on a slow page load — without this await we'd take the
+  // empty-key branch permanently.
+  try { await _cfgPromise; } catch(e) {}
+  if (!window.GOOGLE_MAPS_API_KEY) return;  // no key -> free-text only
+  _locationAutocompleteBound = true;
+  var input = document.getElementById('locationInput');
+  if (!input) return;
+  loadGoogleMapsJs().then(function(google) {
+    if (!google || !google.maps || !google.maps.places) return;
+    _locationAutocomplete = new google.maps.places.Autocomplete(input, {
+      types: ['geocode', 'establishment'],
+      fields: [
+        'place_id',
+        'name',
+        'types',
+        'formatted_address',
+        'geometry',
+        'address_components'
+      ],
+    });
+    _locationAutocomplete.addListener('place_changed', function() {
+      var place = _locationAutocomplete.getPlace();
+      if (!place || !place.place_id) return;
+      _locationLastPickedAt = Date.now();
+      // Cancel any pending free-text submit from the Enter that triggered
+      // this place_changed event — keydown fires synchronously BEFORE
+      // place_changed, so the text path's setTimeout is still queued.
+      if (_locationPendingTextSubmit) {
+        clearTimeout(_locationPendingTextSubmit);
+        _locationPendingTextSubmit = null;
+      }
+      _submitLocationPlace(place.place_id, normalizeGooglePlaceForSubmit(place));
+    });
+  }).catch(function(err) {
+    console.warn('Google Maps load failed:', err);
+    // Don't disable the input — free-text Enter still works.
+  });
+}
+
+function normalizeGooglePlaceForSubmit(place) {
+  if (!place || !place.place_id) return null;
+  var loc = place.geometry && place.geometry.location;
+  var lat = null;
+  var lng = null;
+  if (loc) {
+    lat = (typeof loc.lat === 'function') ? loc.lat() : loc.lat;
+    lng = (typeof loc.lng === 'function') ? loc.lng() : loc.lng;
+  }
+  if (lat == null || lng == null) return null;
+  return {
+    place_id: place.place_id,
+    name: place.name || place.formatted_address || '',
+    types: Array.isArray(place.types) ? place.types : [],
+    lat: lat,
+    lng: lng,
+    address_components: (place.address_components || []).map(function(c) {
+      return {
+        name: c.long_name || c.name || '',
+        short_name: c.short_name || '',
+        types: c.types || [],
+      };
+    }),
+  };
+}
+
+async function _submitLocationPlace(placeId, placeDetails) {
+  _hideLocationError();
+  // Derive the target photos from the batch-aware selection so a fresh
+  // multi-select (Cmd/Ctrl-click without ever opening a single-photo detail)
+  // still applies to every selected photo. window._detailPhotoId is unset in
+  // that flow, so gating on it up front would silently apply to none.
+  var ids = _locationApplyPhotoIds();
+  if (!ids.length) return;
+  var useBatch = ids.length > 1;
+  var detailPhotoId = window._detailPhotoId || null;
+  var targetKey = _locationTargetKey();
+  var body = { place_id: placeId };
+  if (placeDetails) body.place = placeDetails;
+  try {
+    var resp = useBatch
+      ? await _postLocationBatched('/api/batch/location', body, ids)
+      : await safeFetch('/api/photos/' + ids[0] + '/location', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+    if (resp && resp.location && _locationTargetKey() === targetKey) {
+      renderLocationFilled(resp.location);
+    }
+    await _afterLocationMutation(ids, detailPhotoId);
+  } catch(e) {
+    _showLocationError(e && e.message ? e.message : 'Could not save location.');
+  }
+}
+
+async function _submitLocationKeyword(keyword) {
+  if (!keyword || !keyword.id) return;
+  _hideLocationError();
+  var ids = _locationApplyPhotoIds();
+  if (!ids.length) return;
+  var useBatch = ids.length > 1;
+  var detailPhotoId = window._detailPhotoId || null;
+  var targetKey = _locationTargetKey();
+  var body = { keyword_id: keyword.id };
+  try {
+    var resp = useBatch
+      ? await _postLocationBatched('/api/batch/location', body, ids)
+      : await safeFetch('/api/photos/' + ids[0] + '/location', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+    if (resp && resp.location && _locationTargetKey() === targetKey) {
+      renderLocationFilled(resp.location);
+    }
+    await _afterLocationMutation(ids, detailPhotoId);
+  } catch(e) {
+    _showLocationError(e && e.message ? e.message : 'Could not save location.');
+  }
+}
+
+async function _submitLocationText(name) {
+  _hideLocationError();
+  var ids = _locationApplyPhotoIds();
+  if (!ids.length) return;
+  var useBatch = ids.length > 1;
+  var detailPhotoId = window._detailPhotoId || null;
+  var targetKey = _locationTargetKey();
+  try {
+    var resp = useBatch
+      ? await _postLocationBatched('/api/batch/location/text', { name: name }, ids)
+      : await safeFetch('/api/photos/' + ids[0] + '/location/text', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: name }),
+        });
+    if (resp && resp.location) {
+      if (_locationTargetKey() === targetKey) renderLocationFilled(resp.location);
+      await _afterLocationMutation(ids, detailPhotoId);
+    }
+  } catch(e) {
+    _showLocationError(e && e.message ? e.message : 'Could not save location.');
+  }
+}
+
+async function clearPhotoLocation() {
+  var photoId = window._detailPhotoId;
+  if (!photoId) return;
+  _hideLocationError();
+  try {
+    await safeFetch('/api/photos/' + photoId + '/location', { method: 'DELETE' });
+    renderLocationEmpty();
+    await _afterLocationMutation([photoId], photoId);
+  } catch(e) {
+    _showLocationError(e && e.message ? e.message : 'Could not clear location.');
+  }
+}
+
+// Scrub the inline EXIF suggestion line (hide, empty innerHTML, drop the
+// data-photo-id owner tag). Every scrub site must go through this helper so
+// they can't silently diverge — e.g. if a future scrub also needs to clear a
+// stored placeId. Codex nitpick on PR #1097.
+function clearExifSuggestion() {
+  var sugg = document.getElementById('locationExifSuggestion');
+  if (!sugg) return;
+  sugg.hidden = true;
+  sugg.innerHTML = '';
+  if (sugg.dataset) delete sugg.dataset.photoId;
+}
+
+function formatCoordinatePair(latitude, longitude) {
+  if (latitude == null || longitude == null) return '';
+  return Number(latitude).toFixed(5) + ', ' + Number(longitude).toFixed(5);
+}
+
+function renderCoordinateStatus(photo) {
+  var el = document.getElementById('locationCoordinateStatus');
+  if (!el) return;
+  var status = photo && photo.location_status ? photo.location_status : 'none';
+  var text;
+  if (status === 'exif') {
+    text = '📍 EXIF GPS — ' + formatCoordinatePair(photo.latitude, photo.longitude) +
+      '. Embedded in the original photo and used on the map.';
+  } else if (status === 'assigned') {
+    var loc = photo.location || {};
+    var coords = formatCoordinatePair(loc.latitude, loc.longitude);
+    text = '● Assigned map location' + (coords ? ' — ' + coords : '') +
+      '. The original photo does not contain a complete EXIF GPS pair.';
+  } else {
+    text = '⊘ No coordinates — this photo has no complete EXIF GPS pair or assigned map location.';
+  }
+  el.className = 'coordinate-status ' + status;
+  el.textContent = text;
+}
+
+function renderLocationFilled(loc) {
+  var filled = document.getElementById('locationFilled');
+  var empty = document.getElementById('locationEmpty');
+  if (!filled || !empty) return;
+  if (!loc) { renderLocationEmpty(); return; }
+  var parents = (loc.parent_chain || [])
+    .map(function(p) { return p && p.name ? p.name : ''; })
+    .filter(Boolean);
+  var parentsHtml = parents.length
+    ? '<span class="filled-parents">' + parents.map(escapeHtml).join(' · ') + '</span>'
+    : '';
+  filled.innerHTML =
+    '<div class="filled-row">' +
+      '<div class="filled-text">' +
+        '<span class="filled-place">' + escapeHtml(loc.name || '') + '</span>' +
+        parentsHtml +
+      '</div>' +
+      '<button class="clear-location" type="button" title="Clear location" onclick="clearPhotoLocation()">×</button>' +
+    '</div>';
+  filled.hidden = false;
+  empty.hidden = true;
+  // Reset the input value for next time.
+  var input = document.getElementById('locationInput');
+  if (input) input.value = '';
+  // Once a saved location is on screen any pending EXIF suggestion is moot,
+  // and leaving it (hidden) in #locationEmpty makes it stale state: open A
+  // (suggestion fetched) → open B with a saved location → Cmd-click A would
+  // otherwise resurrect A's Accept line for the {B, A} batch and overwrite
+  // B's location (Codex P2 on PR #1097). Clear it at the source instead.
+  clearExifSuggestion();
+}
+
+function renderLocationEmpty(opts) {
+  opts = opts || {};
+  var filled = document.getElementById('locationFilled');
+  var empty = document.getElementById('locationEmpty');
+  if (!filled || !empty) return;
+  filled.innerHTML = '';
+  filled.hidden = true;
+  empty.hidden = false;
+  var input = document.getElementById('locationInput');
+  if (input) input.value = '';
+  hideLocationKeywordSuggestions();
+  // Reset any prior EXIF suggestion. The caller (renderDetail) re-runs
+  // maybeShowExifSuggestion(photo) after this, which decides whether to
+  // populate the line for the new photo. Entering batch mode preserves it
+  // instead (preserveExifSuggestion) so the anchor's suggestion stays
+  // acceptable for the whole selection — but only while the photo that
+  // produced it is still in the selection. Otherwise Accept would apply
+  // that anchor's GPS-derived location to unrelated photos (Codex P1 on
+  // PR #1097: open A → Cmd-click B → Cmd-click A to drop → Cmd-click C).
+  var sugg = document.getElementById('locationExifSuggestion');
+  if (!sugg) return;
+  var keepSugg = false;
+  if (opts.preserveExifSuggestion) {
+    var ownerAttr = sugg.dataset ? sugg.dataset.photoId : '';
+    var owner = ownerAttr ? parseInt(ownerAttr, 10) : NaN;
+    keepSugg = !isNaN(owner)
+      && Array.isArray(opts.selectionIds)
+      && opts.selectionIds.indexOf(owner) !== -1;
+  }
+  if (!keepSugg) clearExifSuggestion();
+}
+
+/* When a photo with EXIF GPS but no location keyword is opened, fetch a
+   reverse-geocode suggestion and offer it as an inline Accept line. Bails
+   silently when there's no key or no coords; the proxy returns null when
+   Google has no match for the cell. */
+async function maybeShowExifSuggestion(photo) {
+  clearExifSuggestion();
+  var sugg = document.getElementById('locationExifSuggestion');
+  if (!sugg) return;
+
+  if (!photo) return;
+  if (photo.location) return;
+  if (photo.latitude == null || photo.longitude == null) return;
+
+  // Capture the photo id at request time so a slow reverse-geocode for an
+  // older photo doesn't paint into the suggestion line for a newer one.
+  var requestPhotoId = photo.id;
+  // Capture the location-mutation epoch BEFORE the first await, so any
+  // save/clear/accept during _cfgPromise or the reverse-geocode fetch bumps
+  // the counter past what we captured. The post-await guard bails on any
+  // mismatch. Closes the batch-save-during-pending-geocode race that the
+  // DOM `!filled.hidden` check alone can't catch (see below).
+  var requestEpoch = window._locationMutationEpoch || 0;
+
+  await _cfgPromise;
+  var apiKey = (window.GOOGLE_MAPS_API_KEY || '').trim();
+  if (!apiKey) return;
+  try {
+    var params = new URLSearchParams({lat: photo.latitude, lng: photo.longitude});
+    var r = await fetch('/api/places/reverse-geocode?' + params.toString());
+    if (!r.ok) return;
+    var data = await r.json();
+    if (!data || !data.place_id || !data.summary) return;
+    // Three races the post-await guards must handle.
+    //   1. Stale response for a photo the detail already navigated away
+    //      from (open A → open B): caught by _detailPhotoId, which
+    //      renderDetail overwrites on every open.
+    //   2. Slow response for an anchor the user has since dropped from a
+    //      batch (open A → Cmd-click B → Cmd-click A out → Cmd-click C):
+    //      renderBatchInspector never touches _detailPhotoId, so the anchor
+    //      pointer could still match while getActiveSelection() no longer
+    //      includes A. Accept posts to getActiveSelection(), so the guard
+    //      must recheck selection membership too. Codex P1 on PR #1097.
+    //   3. Slow response for a photo the user has left behind by closing
+    //      the detail panel, clearing the batch, or Cmd-click-dropping the
+    //      anchor, then Select All that brings the departed photo back
+    //      into the batch. The DOM scrub in each of those sites isn't
+    //      enough on its own: without also nulling _detailPhotoId the
+    //      pointer keeps matching after Select All re-includes the photo,
+    //      and Accept would apply the departed anchor's EXIF place to the
+    //      whole batch. Those sites now null _detailPhotoId, so the first
+    //      guard catches this race too. Codex P2 on PR #1097 (17:04Z).
+    if (window._detailPhotoId !== requestPhotoId) return;
+    if (_locationApplyPhotoIds().indexOf(requestPhotoId) === -1) return;
+    // Fourth race: while we were awaiting reverse-geocode, the user saved
+    // a location for this photo (via the input, a keyword pick, or a batch
+    // op). Every mutation path funnels through _afterLocationMutation, which
+    // bumps _locationMutationEpoch. If it moved, bail. (Codex P2 on PR #1097
+    // at 17:39Z: save-batch-location-during-pending-geocode overwriting the
+    // just-saved batch location. The DOM `!filled.hidden` check below alone
+    // can't catch that — after a batch save, _afterLocationMutation runs
+    // renderBatchInspector → renderLocationEmpty, which rehides
+    // #locationFilled, so the paint sneaks through.)
+    if ((window._locationMutationEpoch || 0) !== requestEpoch) return;
+    // Defense-in-depth: if a filled row is on screen right now, whoever
+    // painted it wanted the suggestion gone. The epoch check above already
+    // covers the batch race; this catches any future save site that renders
+    // filled without funneling through _afterLocationMutation.
+    var filled = document.getElementById('locationFilled');
+    if (filled && !filled.hidden) return;
+
+    sugg.innerHTML = '';
+    var text = document.createElement('span');
+    text.textContent = '💡 EXIF says: ' + data.summary + '  ';
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'accept-btn';
+    btn.textContent = 'Accept';
+    btn.dataset.placeId = data.place_id;
+    btn.addEventListener('click', function() {
+      acceptExifSuggestion(data.place_id);
+    });
+    sugg.appendChild(text);
+    sugg.appendChild(btn);
+    sugg.dataset.photoId = String(requestPhotoId);
+    sugg.hidden = false;
+  } catch (e) {
+    console.warn('reverse-geocode suggestion failed:', e);
+  }
+}
+
+async function acceptExifSuggestion(placeId) {
+  var photoId = window._detailPhotoId;
+  if (!photoId || !placeId) return;
+  _hideLocationError();
+  var ids = _locationApplyPhotoIds();
+  var useBatch = ids.length > 1;
+  var targetKey = _locationTargetKey();
+  try {
+    var resp = useBatch
+      ? await _postLocationBatched('/api/batch/location', { place_id: placeId }, ids)
+      : await safeFetch('/api/photos/' + photoId + '/location', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ place_id: placeId }),
+        });
+    // The suggestion line now belongs to whatever photo is open; only paint
+    // the saved place or clear the line if that is still the accepted target.
+    if (_locationTargetKey() === targetKey) {
+      if (resp && resp.location) renderLocationFilled(resp.location);
+      clearExifSuggestion();
+    }
+    await _afterLocationMutation(useBatch ? ids : [photoId], photoId);
+  } catch(e) {
+    _showLocationError(e && e.message ? e.message : 'Could not save location.');
+  }
+}
+
+function _onLocationInputFocus() {
+  bindLocationAutocomplete();
+  updateLocationKeywordSuggestions();
+}
+
+function _onLocationInputInput() {
+  _locationKeywordState.activeIndex = 0;
+  updateLocationKeywordSuggestions();
+}
+
+function _onLocationInputKeydown(e) {
+  var dropdown = document.getElementById('locationKeywordSuggestions');
+  var localOpen = dropdown && dropdown.classList.contains('open') && _locationKeywordState.matches.length > 0;
+  var googlePlacesMayHandleKeyboard = !!(window.GOOGLE_MAPS_API_KEY || '').trim();
+  if (localOpen && !googlePlacesMayHandleKeyboard && e.key === 'ArrowDown') {
+    e.preventDefault();
+    _locationKeywordState.activeIndex = (_locationKeywordState.activeIndex + 1) % _locationKeywordState.matches.length;
+    renderLocationKeywordSuggestions();
+    return;
+  }
+  if (localOpen && !googlePlacesMayHandleKeyboard && e.key === 'ArrowUp') {
+    e.preventDefault();
+    _locationKeywordState.activeIndex = (_locationKeywordState.activeIndex - 1 + _locationKeywordState.matches.length) % _locationKeywordState.matches.length;
+    renderLocationKeywordSuggestions();
+    return;
+  }
+  if (e.key === 'Escape') {
+    hideLocationKeywordSuggestions();
+    return;
+  }
+  if (e.key !== 'Enter') return;
+  if (localOpen && !googlePlacesMayHandleKeyboard && _locationKeywordState.activeIndex >= 0) {
+    e.preventDefault();
+    chooseLocationKeywordSuggestion(_locationKeywordState.activeIndex);
+    return;
+  }
+  // DO NOT preventDefault — Google's autocomplete listens for Enter to
+  // pick the highlighted suggestion. Suppressing the event would block
+  // keyboard place selection. The input has no surrounding form, so
+  // letting Enter through has no native side effect.
+  // If a place was JUST picked (e.g. mouse click within ~500ms ago),
+  // skip outright.
+  if (Date.now() - _locationLastPickedAt < 500) return;
+  var input = e.target;
+  var val = (input.value || '').trim();
+  if (!val) return;
+  // Defer the free-text submit. If a Google suggestion was highlighted
+  // and the user pressed Enter to pick it, place_changed will fire after
+  // this keydown (synchronously, but still after the event-loop tick) and
+  // cancel our pending timeout. If place_changed never fires (no
+  // suggestion highlighted), the text submit goes through after 300ms.
+  if (_locationPendingTextSubmit) clearTimeout(_locationPendingTextSubmit);
+  _locationPendingTextSubmit = setTimeout(function() {
+    _locationPendingTextSubmit = null;
+    // Final guard: place_changed may have raced in just before this fired.
+    if (Date.now() - _locationLastPickedAt < 1000) return;
+    _submitLocationText(val);
+  }, 300);
+}
+
+// Wire up listeners once on initial script load. The input element exists
+// in the DOM unconditionally (server renders the section), so we don't need
+// to re-bind on every photo load.
+document.addEventListener('DOMContentLoaded', function() {
+  var input = document.getElementById('locationInput');
+  if (input) {
+    input.addEventListener('focus', _onLocationInputFocus);
+    input.addEventListener('input', _onLocationInputInput);
+    input.addEventListener('keydown', _onLocationInputKeydown);
+    input.addEventListener('blur', function() {
+      setTimeout(hideLocationKeywordSuggestions, 120);
+    });
+  }
+  var locationDropdown = document.getElementById('locationKeywordSuggestions');
+  if (locationDropdown) {
+    locationDropdown.addEventListener('mousedown', function(e) {
+      var option = e.target.closest('.keyword-suggestion-option');
+      if (!option) return;
+      e.preventDefault();
+      chooseLocationKeywordSuggestion(parseInt(option.dataset.index, 10));
+    });
+  }
+  bindKeywordAutocomplete('addKeywordInput', 'addKeywordSuggestions', addKeyword);
+  bindKeywordAutocomplete('batchKeywordInput', 'batchKeywordSuggestions', function() {
+    confirmBatchKeyword();
+  });
+});
+
+/* ---------- Keyword Type Dropdown ---------- */
+function toggleTypeDropdown(indicator, kwId) {
+  // Close all other open dropdowns first
+  document.querySelectorAll('.keyword-type-dropdown.open').forEach(function(dd) {
+    if (dd.dataset.kwId !== String(kwId)) dd.classList.remove('open');
+  });
+  var dropdown = indicator.querySelector('.keyword-type-dropdown');
+  if (dropdown) dropdown.classList.toggle('open');
+}
+
+async function setKeywordType(kwId, newType, el) {
+  try {
+    await safeFetch('/api/keywords/' + kwId, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: newType }),
+    });
+    // Close dropdown
+    var dropdown = el.closest('.keyword-type-dropdown');
+    if (dropdown) dropdown.classList.remove('open');
+    // Refresh detail panel and keyword tree
+    // Retyping a keyword to/from `species` changes which predictions count as
+    // disagreements, so the prediction panels move too — _refreshBrowseKeyword
+    // State repaints them, except where loadDetail below already will.
+    await _refreshBrowseKeywordState(
+      loadedBrowsePhotoIds(),
+      { skipDetail: !!selectedPhotoId },
+    );
+    if (selectedPhotoId) loadDetail(selectedPhotoId);
+    loadKeywords();
+  } catch(e) {}
+}
+
+// Close keyword type dropdowns when clicking outside
+document.addEventListener('click', function(e) {
+  if (!e.target.closest('.keyword-type-indicator')) {
+    document.querySelectorAll('.keyword-type-dropdown.open').forEach(function(dd) {
+      dd.classList.remove('open');
+    });
+  }
+});
+
+/* ---------- Keyboard Shortcuts ---------- */
+document.addEventListener('keydown', function(e) {
+  // The shared folder browser installs its Escape handler when it opens.
+  // Leave the underlying export modal alone so that handler can dismiss only
+  // the topmost picker and preserve the user's export settings.
+  if (document.querySelector('.folder-browser-overlay.open')) return;
+  // Same split for the export-preset save/delete dialog: its own Escape
+  // handler dismisses just that dialog and leaves the export modal open.
+  if (document.querySelector('.export-preset-dialog-overlay.open')) return;
+
+  if (isBrowseCompareOpen()) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeBrowseCompare();
+      return;
+    }
+    if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      browseCompareStep(1);
+      return;
+    }
+    if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      browseCompareStep(-1);
+      return;
+    }
+    return;
+  }
+
+  // Suppress browse shortcuts while any modal is open
+  var openModal = document.querySelector('.modal-overlay.open');
+  if (openModal) {
+    if (e.key === 'Escape') {
+      if (openModal.id === 'batchKeywordModal') hideBatchKeywordModal();
+      else if (openModal.id === 'batchCollectionModal') hideBatchCollectionModal();
+      else if (openModal.id === 'exportOverlay') closeExportModal();
+      else if (openModal.id === 'panoramaOverlay') closePanoramaModal();
+      else openModal.classList.remove('open');
+    }
+    return;
+  }
+
+  if (document.getElementById('lightboxOverlay').classList.contains('active')) return;
+
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+
+  if (e.key === 'Escape') {
+    closeDetail();
+    clearSelection();
+    return;
+  }
+
+  if (!_shortcuts) return;
+
+  // Undo
+  if (matchesShortcut(e, _shortcuts.undo)) {
+    e.preventDefault();
+    undoLast();
+    return;
+  }
+
+  // Redo
+  if (matchesShortcut(e, _shortcuts.redo)) {
+    e.preventDefault();
+    redoLast();
+    return;
+  }
+
+  // Select all
+  if (matchesShortcut(e, _shortcuts.select_all)) {
+    e.preventDefault();
+    selectAllMatchingPhotos();
+    return;
+  }
+
+  // Arrow keys: navigate grid (not configurable)
+  if (e.key === 'ArrowRight') {
+    e.preventDefault();
+    moveBrowseSelection(1, e);
+    return;
+  } else if (e.key === 'ArrowLeft') {
+    e.preventDefault();
+    moveBrowseSelection(-1, e);
+    return;
+  } else if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    moveBrowseSelection(getBrowseGridColumnCount(), e);
+    return;
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    moveBrowseSelection(-getBrowseGridColumnCount(), e);
+    return;
+  }
+
+  // Must stay aligned with updateBatchBar(): any non-empty selectedPhotos is
+  // actionable (size >= 1, not > 1), otherwise shortcuts silently no-op while
+  // the bar advertises "1 selected" after cmd-click reduces the set to one.
+  var useBatch = selectedPhotos.size >= 1;
+  var hasActive = useBatch || selectedPhotoId;
+
+  if (matchesShortcut(e, _shortcuts.compare || 'c')) {
+    var compareIds = getActiveSelection();
+    if (compareIds.length >= 2) {
+      e.preventDefault();
+      openBrowseCompare();
+    }
+    return;
+  }
+
+  // Ratings: 0-5
+  if (hasActive) {
+    for (var r = 0; r <= 5; r++) {
+      if (matchesShortcut(e, _shortcuts['rate_' + r])) {
+        if (useBatch) batchSetRating(r);
+        else setRating(selectedPhotoId, r);
+        return;
+      }
+    }
+  }
+
+  // Flag, reject, unflag
+  if (hasActive) {
+    var applyFlag = useBatch ? batchSetFlag : setFlag;
+    var applyColor = useBatch ? batchSetColorLabel : setColorLabel;
+    if (matchesShortcut(e, _shortcuts.flag)) { e.preventDefault(); applyFlag('flagged'); return; }
+    else if (matchesShortcut(e, _shortcuts.reject)) { e.preventDefault(); applyFlag('rejected'); return; }
+    else if (matchesShortcut(e, _shortcuts.unflag)) { e.preventDefault(); applyFlag('none'); return; }
+
+    // Color labels
+    if (matchesShortcut(e, _shortcuts.color_red)) { e.preventDefault(); applyColor('red'); return; }
+    else if (matchesShortcut(e, _shortcuts.color_yellow)) { e.preventDefault(); applyColor('yellow'); return; }
+    else if (matchesShortcut(e, _shortcuts.color_green)) { e.preventDefault(); applyColor('green'); return; }
+    else if (matchesShortcut(e, _shortcuts.color_blue)) { e.preventDefault(); applyColor('blue'); return; }
+  }
+
+  if (!e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && !browseKeyMatchesConfiguredShortcut(e)) {
+    var browseViewKey = e.key.toLowerCase();
+    if (browseViewKey === 'e') {
+      if (openBrowseShortcutPhoto(false)) e.preventDefault();
+      return;
+    }
+    if (browseViewKey === 'f') {
+      if (openBrowseShortcutPhoto(true)) e.preventDefault();
+      return;
+    }
+    if (browseViewKey === 'g') {
+      if (typeof exitLightboxFullscreen === 'function') exitLightboxFullscreen();
+      if (document.getElementById('lightboxOverlay').classList.contains('active')) closeLightbox();
+      e.preventDefault();
+      return;
+    }
+  }
+});
+
+function getBrowseGridColumnCount() {
+  var grid = document.getElementById('grid');
+  if (grid) {
+    var template = window.getComputedStyle(grid).gridTemplateColumns || '';
+    var tracks = template.trim().split(/\s+/).filter(Boolean);
+    if (tracks.length && template !== 'none') return tracks.length;
+  }
+
+  var cards = grid ? grid.querySelectorAll('.grid-card') : document.querySelectorAll('.grid-card');
+  if (!cards.length) return 1;
+
+  var firstTop = cards[0].offsetTop;
+  var count = 0;
+  for (var i = 0; i < cards.length; i++) {
+    if (Math.abs(cards[i].offsetTop - firstTop) > 2) break;
+    count++;
+  }
+  return Math.max(1, count);
+}
+
+async function moveBrowseSelection(delta, e) {
+  var nextIndex = selectedIndex < 0 && delta > 0 ? 0 : selectedIndex + delta;
+  while (true) {
+    while (nextIndex >= 0 && nextIndex < photos.length && photos[nextIndex] &&
+           !browsePhotoIsAvailable(photos[nextIndex])) {
+      nextIndex += delta > 0 ? 1 : -1;
+    }
+    if (nextIndex >= 0 && nextIndex < photos.length && photos[nextIndex]) break;
+    if (delta <= 0 || nextIndex < 0 || allLoaded) return;
+
+    // Skipping trailing offline cards can move us beyond the loaded window.
+    // Fetch the next page and resume the skip until an available row appears
+    // or the dataset is exhausted.
+    var beforeLength = photos.length;
+    await loadPhotos();
+    if (photos.length === beforeLength) return;
+  }
+  var selectionEvent = {
+    shiftKey: !!(e && e.shiftKey),
+    metaKey: !!(e && e.metaKey),
+    ctrlKey: !!(e && e.ctrlKey),
+  };
+  selectPhoto(selectionEvent, photos[nextIndex].id, nextIndex);
+  scrollToCard(selectedIndex);
+}
+
+function scrollToCard(idx) {
+  var cards = document.querySelectorAll('.grid-card');
+  if (cards[idx]) cards[idx].scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
+
+// Lightbox navigation has its own current-photo state. Reconcile that state
+// with Browse only when the overlay closes so returning to the grid focuses
+// the photo the user finished on, without reloading the detail panel on every
+// Previous/Next step while the lightbox is still open.
+// A delete that actually happened reopens the lightbox on the next photo, so
+// the gesture the delete-button close set aside continues into that session —
+// but only if this delete is the one it was set aside for. Deleting some other
+// photo later (after a cancel, say) must not inherit it.
+document.addEventListener('lightbox:photodeleted', function(event) {
+  var deletedId = event && event.detail ? event.detail.photoId : null;
+  var spent = browseLightboxStackGestureSpent;
+  browseLightboxStackGestureSpent = null;
+  if (deletedId == null) return;
+  var represented = browseLightboxRepresentedByPhoto[String(deletedId)];
+  delete browseLightboxRepresentedByPhoto[String(deletedId)];
+  // The deleted photo was a stack cover, so the frames behind it just lost
+  // the only card standing for them — lightboxDelete splices the cover out of
+  // `photos` and nothing reprojects the stack. Selected frames have to go
+  // with it, or the batch bar keeps counting photos no shortcut can show and
+  // the next rating lands on them unseen. Codex P2 on PR #1672.
+  if (represented) {
+    // Recorded while the deleted photo was on screen, and a stack can be
+    // reprojected in between: a rating or flag in the lightbox promotes
+    // another member, so deleting the demoted photo leaves the stack standing
+    // under its new cover. Drop only the ids that no card represents *now* —
+    // a bounded check, over this one stack's ids rather than the whole
+    // selection. Codex P2 on PR #1672.
+    var representedNow = new Set();
+    photos.forEach(function(photo) {
+      representedNow.add(photo.id);
+      var stack = photo.browse_stack;
+      ((stack && stack.photo_ids) || []).forEach(function(id) {
+        representedNow.add(id);
+      });
+      (browseStackMembers[String(photo.id)] || []).forEach(function(member) {
+        representedNow.add(member.id);
+      });
+    });
+    var orphaned = represented.filter(function(id) {
+      return !representedNow.has(id);
+    });
+    var dropped = false;
+    orphaned.forEach(function(id) {
+      if (selectedPhotos.delete(id)) dropped = true;
+    });
+    if (selectedPhotoId != null && orphaned.indexOf(selectedPhotoId) !== -1) {
+      selectedPhotoId = null;
+      selectedIndex = -1;
+      dropped = true;
+    }
+    if (dropped) {
+      refreshCardSelectionVisuals();
+      updateBatchBar();
+    }
+  }
+  // A hidden tray member deleted from its own lightbox is not in ``photos``,
+  // so the splice in ``lightboxDelete`` never runs and nothing above updates
+  // the cover: its ``browse_stack.photo_ids`` and ``count`` still carry the
+  // deleted id, and the ``browseStackMembers`` hydration cache still lists it.
+  // The ``represented`` block above skips this case because the deleted photo
+  // was not itself a top-level representation. After the tray collapses, a
+  // click on the cover reads that stale ``photo_ids`` and puts the deleted
+  // id back into ``selectedPhotos``: the batch bar overcounts, and an
+  // Add Keyword then commits every live id before the stale id trips a
+  // foreign-key failure — partial writes the user cannot see coming.
+  // Prune the deleted id from each cover's stack metadata (and cached
+  // members) so what the card stands for matches what still exists, then
+  // repaint the affected badge so its count matches the pruned list.
+  // Codex P2 on PR #1672.
+  var badgesToRefresh = [];
+  photos.forEach(function(photo) {
+    var stack = photo.browse_stack;
+    var stackIds = stack && stack.photo_ids;
+    if (!Array.isArray(stackIds)) return;
+    var idx = stackIds.indexOf(deletedId);
+    if (idx === -1) return;
+    stackIds.splice(idx, 1);
+    if (typeof stack.count === 'number') {
+      stack.count = Math.max(0, stack.count - 1);
+    }
+    var cacheKey = String(photo.id);
+    var members = browseStackMembers[cacheKey];
+    if (Array.isArray(members)) {
+      browseStackMembers[cacheKey] = members.filter(function(member) {
+        return member.id !== deletedId;
+      });
+    }
+    // A two-photo stack that loses its last hidden member has no frames left to
+    // stand for, so its cover is now an ordinary card. Leaving
+    // ``photo.browse_stack`` truthy keeps ``has-browse-stack`` on the tile and
+    // lets ``restoreExpandedBrowseStacks`` re-insert a tray with a single
+    // member (the cover, or worse the deleted id from a stale hydration cache
+    // before ``browseStackMembers`` was pruned above). Dissolve the stack
+    // instead: drop the cache, retire the expansion, remove any live tray,
+    // and repaint the card so it stops advertising a stack that no longer
+    // exists. Codex P2 on PR #1672.
+    if (stack.count < 2) {
+      photo.browse_stack = null;
+      delete browseStackMembers[cacheKey];
+      expandedBrowseStacks.delete(photo.id);
+      browseStackCoverRecheck.delete(photo.id);
+      var tray = document.querySelector(
+        '.browse-stack-tray[data-stack-cover-id="' + photo.id + '"]');
+      if (tray) tray.remove();
+      var card = document.querySelector(
+        '.grid-card[data-id="' + photo.id + '"]');
+      if (card) {
+        card.classList.remove('has-browse-stack');
+        card.classList.remove('stack-partial');
+      }
+    }
+    badgesToRefresh.push(photo.id);
+  });
+  if (badgesToRefresh.length && typeof refreshBrowseStackBadge === 'function') {
+    badgesToRefresh.forEach(refreshBrowseStackBadge);
+  }
+  // Pruning the cover metadata is only half of what the tray-member delete
+  // needs. ``lightboxDelete`` has already dropped the deleted id from
+  // ``selectedPhotos`` / ``selectedPhotoId`` and rendered the grid, but the
+  // batch bar's "N selected" text was written from the pre-delete count and
+  // never rewrites itself, and a cover whose remaining live members are all
+  // selected stays painted ``stack-partial`` from that same pre-delete
+  // state — because the deleted id was in the members list back then, the
+  // whole-stack check that would repaint it as ``selected`` said no. Refresh
+  // both from the surviving selection so the count and the paint match what
+  // the user can see. Codex P2 on PR #1672.
+  if (badgesToRefresh.length) {
+    if (typeof refreshCardSelectionVisuals === 'function') {
+      refreshCardSelectionVisuals();
+    }
+    if (typeof updateBatchBar === 'function') {
+      updateBatchBar();
+    }
+  }
+  if (!spent) return;
+  if (spent.epoch !== anchorRestoreEpoch) return;
+  if (spent.ids.indexOf(deletedId) === -1) return;
+  browseLightboxStackGesture = spent;
+});
+
+// Reconcile browse selection state for a null-photo close. The only caller
+// of ``closeLightbox(null)`` is ``lightboxDelete()`` after its splice emptied
+// ``_lightboxPhotoList`` — a stack cover was the deleted photo's only
+// top-level representation, and its hidden members are still in
+// ``selectedPhotos`` with no card left on the grid to stand for them. The
+// ``lightbox:photodeleted`` handler that runs immediately after this would
+// otherwise re-arm the set-aside gesture, leaving the batch bar counting
+// photos a shortcut cannot see — see the stack-gesture rules for why this
+// close has to actively clean up rather than return unchanged.
+// Codex P2 on PR #1672.
+function browseReconcileEmptyLightboxClose() {
+  var pending = browseLightboxStackGesture || browseLightboxStackGestureSpent;
+  browseLightboxStackGesture = null;
+  browseLightboxStackGestureSpent = null;
+  var touched = false;
+  if (pending) {
+    pending.ids.forEach(function(id) {
+      if (selectedPhotos.delete(id)) touched = true;
+    });
+    if (selectedPhotoId != null && pending.ids.indexOf(selectedPhotoId) !== -1) {
+      selectedPhotoId = null;
+      touched = true;
+    }
+  }
+  // Even with no gesture in either slot, an empty close means the deleted
+  // photo was the only top-level lightbox entry — and when that photo was
+  // a stack cover selected by a single click (or the tray's Select all),
+  // its hidden members are still in ``selectedPhotos`` but no card on the
+  // grid represents them any more. Batch shortcuts would then act on
+  // photos the user cannot see. Drop any selected id whose cover has left
+  // ``photos`` so the selection matches what is on screen — CORE_PHILOSOPHY
+  // "no black boxes", the batch bar has to count photos the user can see.
+  // Codex P2 on PR #1672.
+  // Only when the grid holds the whole result set — both ends of it.
+  // ``allLoaded`` says the tail is exhausted, which a focused or deep-linked
+  // window reaches while ``earliestPage`` is still past 1 and the pages
+  // before it have never been fetched. "Not in ``photos``" means
+  // "no card on screen" only once there are no more pages to load: with a
+  // Select all that reaches past the loaded window, every id from a later
+  // page looks unreachable here and the sweep would quietly delete most of
+  // the user's selection — photos that exist and are still perfectly valid
+  // members of it. The bounded drop in the ``lightbox:photodeleted`` handler
+  // covers the partial-window case, because it knows which ids the deleted
+  // cover actually stood for. Codex P2 on PR #1672.
+  if (selectedPhotos.size > 0 && allLoaded && earliestPage === 1) {
+    var reachable = new Set();
+    photos.forEach(function(photo) {
+      reachable.add(photo.id);
+      // A collapsed stack that has never been expanded has no entries in
+      // ``browseStackMembers``, but the card still represents every id in
+      // ``photo.browse_stack.photo_ids``. Reading only the hydrated cache
+      // would treat those hidden members as unreachable and drop them from a
+      // batch the surviving card still stands for — for example, select two
+      // collapsed stacks, expand one, delete every member from its tray
+      // lightbox: this empty close would then reduce the untouched second
+      // stack to its cover. Codex P2 on PR #1672.
+      var stackIds = (photo.browse_stack && photo.browse_stack.photo_ids) || [];
+      stackIds.forEach(function(id) { reachable.add(id); });
+      var members = browseStackMembers[String(photo.id)] || [];
+      members.forEach(function(member) { reachable.add(member.id); });
+    });
+    Array.from(selectedPhotos).forEach(function(id) {
+      if (!reachable.has(id)) {
+        selectedPhotos.delete(id);
+        touched = true;
+      }
+    });
+  }
+  if (selectedPhotoId != null && allLoaded && earliestPage === 1) {
+    var focusStillReachable = photos.some(function(photo) {
+      if (photo.id === selectedPhotoId) return true;
+      // Same reasoning as the reachable sweep: a hidden member of an
+      // uncached collapsed stack is still represented by its cover card.
+      // Codex P2 on PR #1672.
+      var stackIds = (photo.browse_stack && photo.browse_stack.photo_ids) || [];
+      if (stackIds.indexOf(selectedPhotoId) !== -1) return true;
+      var members = browseStackMembers[String(photo.id)] || [];
+      return members.some(function(member) { return member.id === selectedPhotoId; });
+    });
+    if (!focusStillReachable) {
+      selectedPhotoId = null;
+      touched = true;
+    }
+  }
+  if (touched) {
+    if (typeof refreshCardSelectionVisuals === 'function') {
+      refreshCardSelectionVisuals();
+    }
+    if (typeof updateBatchBar === 'function') updateBatchBar();
+  }
+}
+
+document.addEventListener('lightbox:closed', function(event) {
+  var photoId = event && event.detail ? event.detail.photoId : null;
+  if (photoId == null) {
+    browseReconcileEmptyLightboxClose();
+    return;
+  }
+  // Every close retires the gesture — including the one the lightbox's own
+  // Delete button causes on its way to the delete dialog (it sits inside the
+  // overlay and does not stop propagating). That close only looks
+  // intermediate: cancelling the dialog reopens nothing, so a gesture held
+  // across it would outlive its lightbox and be mistaken for the next one. It
+  // is set aside instead, and handed back only by a delete that actually
+  // happens — which reopens the lightbox on the next photo, so there is a
+  // real close still to come. Codex P2 on PR #1672.
+  var stackGesture = browseLightboxStackGesture;
+  var deleteDialogOpen = !!document.querySelector('#deleteModal.open');
+  browseLightboxStackGestureSpent = deleteDialogOpen ? stackGesture : null;
+  browseLightboxStackGesture = null;
+  // The delete dialog is open over this close and the lightbox will reopen on
+  // the next photo, so what the viewed photos stood for is still needed. Any
+  // other close is the end of the session. Codex P2 on PR #1672.
+  if (!deleteDialogOpen) browseLightboxRepresentedByPhoto = {};
+  if (selectedPhotos.size > 0) {
+    // Viewing shortcuts can open the lightbox without collapsing an existing
+    // batch. Preserve that batch instead of replacing it with the viewed
+    // photo — unless this lightbox was opened by a double-click on a stack
+    // card and the selection is still the one that gesture made, which is the
+    // only "batch" the user did not assemble. Same ids, different provenance:
+    // an intentional stack selection (tray Select all, then E) bumps the
+    // selection epoch and so still reads as a batch.
+    //
+    // "Still the one that gesture made" allows shrinkage: deleting a photo in
+    // the lightbox drops it from the selection, and that is this gesture's
+    // selection mutated, not someone's batch. Without that, deleting a
+    // stack's cover — its only top-level card — left the hidden members
+    // selected with nothing on screen representing them, and the next batch
+    // shortcut would act on photos the user cannot see.
+    // Codex P2 on PR #1672.
+    var gestureIds = stackGesture && stackGesture.epoch === anchorRestoreEpoch
+      ? new Set(stackGesture.ids) : null;
+    if (!gestureIds || !Array.from(selectedPhotos).every(function(id) {
+      return gestureIds.has(id);
+    })) return;
+    // Finished inside that stack: the viewing gesture ended where it began,
+    // so the stack stays selected rather than shrinking to one frame. The
+    // gesture is spent either way — reopening the same stack with a viewing
+    // shortcut afterwards is a viewing shortcut over a batch, and batches are
+    // preserved. Codex P2 on PR #1672.
+    if (selectedPhotos.has(photoId)) {
+      var stackCoverId = browseStackCoverIdForPhoto(photoId);
+      var stackIdx = photos.findIndex(function(photo) {
+        return photo.id === photoId || photo.id === stackCoverId;
+      });
+      if (stackIdx >= 0) {
+        selectedIndex = stackIdx;
+        scrollToCard(stackIdx);
+      }
+      return;
+    }
+  }
+  var idx = photos.findIndex(function(photo) { return photo.id === photoId; });
+  if (idx < 0) {
+    var coverId = browseStackCoverIdForPhoto(photoId);
+    idx = photos.findIndex(function(photo) { return photo.id === coverId; });
+  }
+  // Nothing to reconcile to — leave every bit of state alone.
+  if (idx < 0 || !findBrowsePhoto(photoId)) return;
+  // Past the guard above, so the gesture's selection is replaced by the photo
+  // the user actually finished on.
+  if (selectedPhotos.size > 0) {
+    selectedPhotos.clear();
+    browseLightboxStackGesture = null;
+  }
+  // Skip `selectPhoto` when the focused photo is already the one being
+  // returned to: it calls `loadDetail`, which refetches and rerenders the
+  // detail panel and would silently discard an unsubmitted `#locationInput`
+  // draft (its blur handler only hides suggestions, it does not save). Only
+  // reload details when lightbox navigation actually changed the photo.
+  if (selectedPhotoId === photoId) {
+    if (selectedIndex !== idx) selectedIndex = idx;
+    scrollToCard(idx);
+    return;
+  }
+  // stackAware: false — this restores the grid focus to the photo the user
+  // finished viewing. Closing the lightbox on a stack cover must not silently
+  // promote a single-photo view into a stack-wide batch.
+  selectPhoto({ shiftKey: false, metaKey: false, ctrlKey: false }, photoId, idx,
+              { stackAware: false });
+  scrollToCard(idx);
+});
+
+function developSelected() {
+  var ids = getActiveSelection();
+  if (!ids.length) return;
+  developPhotos(ids);
+}
+
+/* ---------- Right-click context menu on grid cards ---------- */
+// Single-photo wrappers around the existing batch endpoints. The detail-panel
+// helpers (setFlag, setColorLabel) are coupled to selectedPhotoId; the context
+// menu needs to target an arbitrary id without mutating that focus, so we
+// post directly to the batch endpoints with a 1-photo list.
+// Refresh the batch inspector if it's currently rendered, else fall back to
+// the caller-supplied single-photo update. Prevents context-menu edits on a
+// multi-selection anchor from collapsing the panel back to a single-detail
+// view via loadDetail(anchorId) while the user still has N photos selected.
+function _refreshInspectorAfterSinglePhotoEdit(photoId, singleFallback) {
+  var detail = document.getElementById('detailContent');
+  if (detail && detail.classList.contains('batch-mode')) {
+    // Selection is unchanged — this is a state-only refresh after a
+    // context-menu edit. Preserve any in-progress location input.
+    renderBatchInspector(getActiveSelection(), { preserveLocation: true });
+    return;
+  }
+  if (selectedPhotoId === photoId) singleFallback();
+}
+
+async function setRatingFor(photoId, rating) {
+  try {
+    await safeFetch('/api/batch/rating', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: [photoId], rating: rating}),
+    });
+  } catch(e) { return; }
+  var p = findBrowsePhoto(photoId);
+  if (p) p.rating = rating;
+  await reconcileBrowseStackCovers([photoId]);
+  refreshGridCards([photoId]);
+  refreshExpandedBrowseStackMembers([photoId]);
+  scheduleCollectionCountsRefresh();
+  _refreshInspectorAfterSinglePhotoEdit(photoId, function() { loadDetail(photoId); });
+  refreshPendingSyncBanner();
+}
+
+async function setFlagFor(photoId, flag) {
+  try {
+    await safeFetch('/api/batch/flag', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: [photoId], flag: flag}),
+    });
+  } catch(e) { return false; }
+  var p = findBrowsePhoto(photoId);
+  if (p) p.flag = flag;
+  _clearRepresentativeStateIfIneligible(photoId, flag);
+  await reconcileBrowseStackCovers([photoId]);
+  refreshGridCards([photoId]);
+  refreshExpandedBrowseStackMembers([photoId]);
+  _refreshInspectorAfterSinglePhotoEdit(photoId, function() { updateDetailFlagButtons(flag); });
+  scheduleCollectionCountsRefresh();
+  return true;
+}
+
+async function setColorLabelFor(photoId, color) {
+  _noteColorLabelEdits([photoId]);
+  try {
+    await safeFetch('/api/batch/color_label', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: [photoId], color: color}),
+    });
+  } catch(e) { _recoverColorLabelsAfterFailedWrite([photoId]); return; }
+  _noteColorLabelEdits([photoId]);
+  if (color) colorLabels[photoId] = color;
+  else delete colorLabels[photoId];
+  colorLabelsFetched.add(photoId);
+  refreshGridCards([photoId]);
+  refreshExpandedBrowseStackMembers([photoId]);
+  _refreshInspectorAfterSinglePhotoEdit(photoId, updateDetailColors);
+  scheduleCollectionCountsRefresh();
+}
+
+function revealPhoto(photoId) {
+  safeFetch('/api/files/reveal', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({photo_id: photoId}),
+  }, { toast: false }).then(function(data) {
+    if (typeof showRevealFeedback === 'function') showRevealFeedback(data);
+  }).catch(function(err) {
+    if (typeof showToast === 'function') {
+      showToast('Reveal failed: ' + (err.message || 'request failed'), 'error');
+    } else {
+      console.error('revealPhoto failed', err);
+    }
+  });
+}
+
+function viewPhotoOnMap(photoId) {
+  window.location.href = '/map?photo_id=' + encodeURIComponent(photoId);
+}
+
+async function copyPhotoPaths(photoIds) {
+  var settled = await Promise.allSettled(photoIds.map(function(id) {
+    return safeFetch('/api/photos/' + id, {}, { toast: false });
+  }));
+  var paths = settled
+    .filter(function(s) { return s.status === 'fulfilled' && s.value && s.value.path; })
+    .map(function(s) { return s.value.path; });
+  var failed = settled.length - paths.length;
+  if (!paths.length) {
+    if (failed > 0) {
+      console.warn('copyPhotoPaths: ' + failed + ' path(s) failed');
+      showToast(
+        failed === 1 ? '1 path could not be copied' : failed + ' paths could not be copied',
+        'error'
+      );
+    }
+    return;
+  }
+  if (navigator.clipboard) {
+    try {
+      await navigator.clipboard.writeText(paths.join('\n'));
+      if (failed > 0) {
+        showToast(
+          paths.length + ' of ' + photoIds.length + ' paths copied; ' +
+            failed + ' could not be copied',
+          'warning'
+        );
+      } else {
+        showToast(photoIds.length === 1 ? 'Path copied' : 'Paths copied', 'success');
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  }
+  if (failed > 0) {
+    console.warn('copyPhotoPaths: ' + failed + ' path(s) failed');
+  }
+}
+
+// Re-apply the .selected highlight to match the current state of
+// selectedPhotos / selectedPhotoId. Mirrors the refresh block at the tail
+// of selectPhoto(); factored out so the context-menu handler can coerce
+// selection without paying the full selectPhoto side-effects.
+function refreshCardSelectionVisuals() {
+  var byId = new Map(photos.map(function(photo) { return [photo.id, photo]; }));
+  document.querySelectorAll('.grid-card, .browse-stack-member').forEach(function(el) {
+    var cardId = parseInt(el.dataset.id, 10);
+    // Tray members are single photos even when their cover is a stack card,
+    // so they never take the stack-wide rule: address them by id only.
+    var state = el.classList.contains('browse-stack-member')
+      ? (browseSelectionIncludes(cardId) ? ' selected' : '')
+      : browseCardSelectionClass(byId.get(cardId));
+    el.classList.toggle('selected', state === ' selected');
+    el.classList.toggle('stack-partial', state === ' stack-partial');
+  });
+}
+
+// Open a single grid photo straight in the in-app editor, skipping the
+// lightbox. Hand off the current grid's ordered list so the editor can offer
+// Prev/Next, mirroring the lightbox "Edit Photo" handoff.
+function openPhotoEditor(photoId) {
+  var navigationPhotos = browsePhotoNavigationList(photoId);
+  if (window.vireoEditNav) {
+    window.vireoEditNav.setList(navigationPhotos, photoId);
+    window.vireoEditNav.setLastPhoto(photoId);
+  }
+  window.location.href = '/edit/' + photoId;
+}
+
+function buildPhotoContextMenu(photoIds, contextPhotoId) {
+  var one = photoIds.length === 1;
+  var hint = one ? undefined : 'Select a single photo';
+  // A right-click identifies an unambiguous copy source even when that image
+  // belongs to a multi-selection. The batch-bar More menu only has a source
+  // when exactly one photo is selected.
+  var developmentSourceId = contextPhotoId != null
+    ? Number(contextPhotoId)
+    : (one ? Number(photoIds[0]) : null);
+  var copiedDevelopment = window.vireoEditNav
+    ? window.vireoEditNav.getCopiedRecipe()
+    : null;
+
+  var rateChip = function(n) {
+    return {
+      label: n === 0 ? '\u2606' : String(n),
+      title: n === 0 ? 'No rating' : 'Rate ' + n,
+      onClick: function() {
+        batchSetRating(n, photoIds);
+      },
+    };
+  };
+  var colorChip = function(c, icon, title) {
+    return {
+      label: icon,
+      title: c && window.VireoColorLabels
+        ? window.VireoColorLabels.title(c, title)
+        : title,
+      color: c,
+      colorBaseTitle: title,
+      onClick: function() {
+        batchSetColorLabel(c, photoIds);
+      },
+    };
+  };
+  var flagChip = function(f, icon, title) {
+    return {
+      label: icon, title: title,
+      onClick: function() {
+        batchSetFlag(f, photoIds);
+      },
+    };
+  };
+
+  return [
+    { chips: [0, 1, 2, 3, 4, 5].map(rateChip) },
+    { chips: [
+      colorChip(null, '\u25CB', 'No color'),
+      colorChip('red', '\u25CF', 'Red'),
+      colorChip('yellow', '\u25CF', 'Yellow'),
+      colorChip('green', '\u25CF', 'Green'),
+      colorChip('blue', '\u25CF', 'Blue'),
+      colorChip('purple', '\u25CF', 'Purple'),
+    ] },
+    { chips: [
+      flagChip('flagged', '\u2691', 'Flag as pick'),
+      flagChip('rejected', '\u2715', 'Reject'),
+      flagChip('none', '\u25CB', 'Unflag'),
+    ] },
+    { separator: true },
+    { label: 'Find Similar', disabled: !one, disabledHint: hint,
+      onClick: function() { if (typeof findSimilar === 'function') findSimilar(photoIds[0]); } },
+    { label: 'View on Map', disabled: !one, disabledHint: hint,
+      onClick: function() { viewPhotoOnMap(photoIds[0]); } },
+    { label: 'Review on Map',
+      onClick: function() { reviewLocationsForSelection(); } },
+    { label: 'Add Locations by Capture Time',
+      onClick: function() { reviewLocationsForSelection('time'); } },
+    { label: 'Compare', disabled: photoIds.length < 2, disabledHint: 'Select at least two photos',
+      onClick: function() { openBrowseCompare(); } },
+    { label: 'Best Batch',
+      onClick: function() { openBestBatchForIds(photoIds, photoIds[0]); } },
+    { label: 'Review Burst', disabled: photoIds.length < 2, disabledHint: 'Select at least two photos',
+      onClick: function() { openSelectedInBurstReview(); } },
+    { separator: true },
+    { label: 'Edit Photo', disabled: !one, disabledHint: hint,
+      onClick: function() { openPhotoEditor(photoIds[0]); } },
+    { label: 'Copy Development Settings',
+      disabled: developmentSourceId == null,
+      disabledHint: 'Right-click a photo to choose the settings to copy',
+      onClick: function() { copyDevelopmentSettingsFromPhoto(developmentSourceId); } },
+    { label: 'Paste Development Settings',
+      disabled: _browseDevelopmentPasteInFlight || !(copiedDevelopment && copiedDevelopment.recipe),
+      disabledHint: _browseDevelopmentPasteInFlight
+        ? 'A development settings paste is already running'
+        : 'Copy development settings from a photo first',
+      onClick: function() { pasteEditSettingsToSelection(); } },
+    { label: 'Develop',
+      onClick: function() { developSelected(); } },
+  ].concat(buildOpenInEditorMenuItems(photoIds)).concat([
+    { label: window.VIREO_REVEAL_LABEL, disabled: !one, disabledHint: hint,
+      onClick: function() { revealPhoto(photoIds[0]); } },
+    { label: 'Copy Path',
+      onClick: function() { copyPhotoPaths(photoIds); } },
+    { separator: true },
+    { label: 'Add Keyword\u2026', onClick: function() { batchAddKeyword(); } },
+    { label: 'Add to Collection\u2026', onClick: function() { addToCollection(); } },
+  ]).concat(window.buildSpeciesHighlightMenuItems(photoIds, {
+    showFetchFallback: true,
+  })).concat(window.buildSpeciesRepresentativeMenuItems(photoIds, {
+    getPhoto: function(id) {
+      return findBrowsePhoto(id);
+    },
+  })).concat([
+    { label: 'Adjust Capture Time\u2026', onClick: function() { openCaptureTimeModal(); } },
+    { separator: true },
+    { label: 'Send to iNaturalist', onClick: function() { batchSubmitInat(); } },
+    { label: 'Make Offline', onClick: function() { makeAvailableOffline(); } },
+    { label: 'Prepare Full Resolution',
+      onClick: function() { prepareFullResolutionSelection(photoIds); } },
+    { label: 'Export\u2026', onClick: function() { openExportModal(); } },
+    { label: 'Create Panorama\u2026', disabled: photoIds.length < 2 || photoIds.length > 12,
+      disabledHint: 'Select 2–12 overlapping photos',
+      onClick: function() { openPanoramaModal(photoIds); } },
+    { separator: true },
+    { label: 'Delete', onClick: function() { batchDelete(); } },
+  ]);
+}
+
+// The More button on the batch bar opens the same menu as right-click on a
+// card, anchored under the button. openContextMenu only reads clientX/Y and
+// clamps to the viewport, so a synthetic event object is enough.
+function openBatchMoreMenu(btn) {
+  var ids = getActiveSelection();
+  if (!ids.length) return;
+  var r = btn.getBoundingClientRect();
+  openContextMenu({ clientX: r.left, clientY: r.bottom + 4 },
+                  buildPhotoContextMenu(ids));
+}
+
+// Document-level delegation: grids re-render on sort/filter/scroll, so
+// per-card listeners would go stale.
+document.addEventListener('contextmenu', function(e) {
+  var card = e.target.closest('.grid-card, .browse-stack-member');
+  if (!card || !card.dataset.id) return;
+  // Ignore right-clicks that came from inside the lightbox or a modal; this
+  // handler owns only grid-card context menus. Modal right-clicks are either
+  // handled by their own delegation (lightbox) or fall through to the browser.
+  if (e.target.closest('.vireo-ctx-menu')) return;
+  if (card.classList.contains('offline')) return;
+  e.preventDefault();
+  var pid = parseInt(card.dataset.id, 10);
+  // Finder-style coercion: right-click on an item outside the selection
+  // replaces the selection with that one item. Fold selectedPhotoId in first
+  // so a single-focus click doesn't get silently dropped.
+  if (selectedPhotos.size === 0 && selectedPhotoId !== null) {
+    selectedPhotos.add(selectedPhotoId);
+  }
+  // The "item" a collapsed stack card offers is the stack, so coercion
+  // replaces the selection with every frame behind it unless they are all in
+  // the selection already. A tray member coerces to itself: that is how a
+  // single frame gets a context menu of its own.
+  var stackIds = card.classList.contains('browse-stack-member')
+    ? [pid]
+    : browseSelectionIdsForClick(pid);
+  var wholeStackSelected = stackIds.every(function(stackId) {
+    return selectedPhotos.has(stackId);
+  });
+  var ids;
+  if (stackIds.length > 1 && !wholeStackSelected) {
+    // A selection change like any other: the generation has to move, or a
+    // restore still waiting on stack hydration (undo/redo) considers itself
+    // current and merges the pre-undo ids into the stack just chosen.
+    // selectPhoto() and selectBrowseStackAll() bump it for the same reason.
+    // Codex P2 on PR #1672.
+    anchorRestoreEpoch++;
+    selectedPhotos = new Set(stackIds);
+    selectedPhotoId = null;
+    selectedIndex = photos.findIndex(function(p) { return p.id === pid; });
+    abandonDetailFocusForBatch();
+    ids = stackIds;
+  } else {
+    var beforeCoercion = selectionIdsKey(Array.from(selectedPhotos));
+    ids = coerceSelectionOnContext(selectedPhotos, pid);
+    // Coercion replacing the selection is a selection change like any other,
+    // so the generation moves with it — otherwise a restore still waiting on
+    // stack hydration (undo/redo) considers itself current and merges the
+    // pre-undo ids into the card just right-clicked. Only when it actually
+    // changed: right-clicking inside the selection keeps it, and retiring a
+    // pending restore for that would lose a selection nobody replaced.
+    // Codex P2 on PR #1672.
+    if (selectionIdsKey(ids) !== beforeCoercion) anchorRestoreEpoch++;
+  }
+  // If coercion replaced the set, align selectedPhotoId (so the detail panel
+  // reflects the right-clicked photo) and selectedIndex (the Shift-range
+  // anchor — a subsequent Shift-click must range-select from this card).
+  if (ids.length === 1 && ids[0] === pid && selectedPhotoId !== pid) {
+    selectedPhotoId = pid;
+    selectedIndex = photos.findIndex(function(p) { return p.id === pid; });
+    if (selectedIndex < 0) {
+      var coverId = browseStackCoverIdForPhoto(pid);
+      selectedIndex = photos.findIndex(function(p) { return p.id === coverId; });
+    }
+    loadDetail(pid);
+  }
+  // A right-click is a click: it is the card the user is pointing at, and it
+  // is on screen by construction. Without this, a resize after right-clicking
+  // a card would still be judged against wherever the *previous* selection was
+  // scrolled to, and would refuse to keep this one visible.
+  lastClickedPhotoId = pid;
+  refreshCardSelectionVisuals();
+  noteFocusedCardVisibility();
+  updateBatchBar();
+  openContextMenu(e, buildPhotoContextMenu(ids, pid));
+});
+
+/* ---------- Folder tree context menu ---------- */
+function revealFolder(fid) {
+  safeFetch('/api/files/reveal', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({folder_id: fid}),
+  }, { toast: false }).then(function(data) {
+    if (typeof showRevealFeedback === 'function') showRevealFeedback(data);
+  }).catch(function(err) {
+    if (typeof showToast === 'function') {
+      showToast('Reveal failed: ' + (err.message || 'request failed'), 'error');
+    } else {
+      console.error('revealFolder failed', err);
+    }
+  });
+}
+
+async function copyFolderPath(fid) {
+  try {
+    var resp = await fetch('/api/folders/' + fid);
+    if (!resp.ok) return;
+    var folder = await resp.json();
+    if (folder && folder.path) {
+      await navigator.clipboard.writeText(folder.path);
+    }
+  } catch (err) {
+    console.error('copyFolderPath failed', err);
+  }
+}
+
+var folderWorkspacesRequestSeq = 0;
+
+function hideFolderWorkspaces() {
+  folderWorkspacesRequestSeq += 1;
+  document.getElementById('folderWorkspacesModal').classList.remove('open');
+}
+
+async function showFolderWorkspaces(fid) {
+  var requestSeq = ++folderWorkspacesRequestSeq;
+  var modal = document.getElementById('folderWorkspacesModal');
+  var path = document.getElementById('folderWorkspacesPath');
+  var list = document.getElementById('folderWorkspacesList');
+  path.textContent = '';
+  list.textContent = '';
+  var loading = document.createElement('div');
+  loading.style.cssText = 'color:var(--text-secondary);font-size:13px;';
+  loading.textContent = 'Loading workspaces…';
+  list.appendChild(loading);
+  modal.classList.add('open');
+
+  try {
+    var data = await safeFetch('/api/folders/' + fid + '/workspaces', {}, { toast: false });
+    if (requestSeq !== folderWorkspacesRequestSeq) return;
+    path.textContent = data.folder && data.folder.path ? data.folder.path : '';
+    list.textContent = '';
+    (data.workspaces || []).forEach(function(workspace) {
+      var row = document.createElement('div');
+      row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--bg-tertiary);border:1px solid var(--border-secondary);border-radius:5px;font-size:13px;';
+
+      var name = document.createElement('span');
+      name.style.cssText = 'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+      name.textContent = workspace.name;
+      name.title = workspace.name;
+      row.appendChild(name);
+
+      if (workspace.is_root) {
+        var rootBadge = document.createElement('span');
+        rootBadge.style.cssText = 'font-size:10px;color:var(--text-faint);';
+        rootBadge.textContent = 'Root';
+        row.appendChild(rootBadge);
+      }
+      if (workspace.is_active) {
+        var activeBadge = document.createElement('span');
+        activeBadge.style.cssText = 'font-size:10px;color:var(--accent);font-weight:600;';
+        activeBadge.textContent = 'Current';
+        row.appendChild(activeBadge);
+      }
+      list.appendChild(row);
+    });
+    if (!list.children.length) {
+      var empty = document.createElement('div');
+      empty.style.cssText = 'color:var(--text-secondary);font-size:13px;';
+      empty.textContent = 'This folder is not associated with any workspace.';
+      list.appendChild(empty);
+    }
+  } catch (err) {
+    if (requestSeq !== folderWorkspacesRequestSeq) return;
+    list.textContent = '';
+    var error = document.createElement('div');
+    error.style.cssText = 'color:var(--danger);font-size:13px;';
+    error.textContent = (err && err.message) || 'Could not load associated workspaces.';
+    list.appendChild(error);
+  }
+}
+
+function moveFolder(fid) {
+  window.location.href = '/move?folder_id=' + encodeURIComponent(fid);
+}
+
+function workLocallyFolder(fid) {
+  if (window.vireoLocalFolders) {
+    window.vireoLocalFolders.stage(fid);
+    return;
+  }
+  window.location.href = '/workspace#work-locally';
+}
+
+async function rescanFolder(fid) {
+  showToast('Starting folder rescan...', 'info');
+  try {
+    var data = await safeFetch('/api/folders/' + fid + '/rescan', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({incremental: true}),
+    }, { toast: false });
+    var suffix = data && data.job_id ? ' (' + data.job_id + ')' : '';
+    showToast('Folder rescan queued' + suffix + '.', 'success');
+  } catch (err) {
+    console.error('rescanFolder failed', err);
+    showToast((err && err.message) || 'Could not start folder rescan.', 'error');
+  }
+}
+
+async function removeWorkspaceRootFromBrowse(fid) {
+  var folder = browseFolderRows.find(function(row) {
+    return Number(row.id) === Number(fid);
+  });
+  if (!folder || !folder.is_workspace_root) return;
+
+  // Bind the DELETE to the workspace this tree was rendered against, not
+  // whatever ``/api/workspaces/active`` returns at click time. Workspace
+  // activation is persisted globally, so another tab switching workspaces
+  // after render would otherwise redirect the destructive call at the
+  // wrong workspace (Codex review r3798912101).
+  var wsId = browseWorkspaceId;
+  if (wsId == null) {
+    showToast(
+      'Cannot remove the folder yet — the workspace context is still loading. Try again in a moment.',
+      'error'
+    );
+    return;
+  }
+
+  var path = folder.path || folder.name || 'this folder';
+  var msg = 'Remove "' + path + '" from this workspace?\n\n' +
+    'Photos in this folder and its subfolders will no longer appear in this workspace, ' +
+    'and predictions, collections, and pending changes referencing them will be hidden here too.\n\n' +
+    'Photos and folders are not deleted. You can re-add the folder later to restore visibility.';
+  if (!confirm(msg)) return;
+
+  // Snapshot every folder ID within the removed root's subtree BEFORE the
+  // DELETE mutates state. The URL cleanup below needs this so that a
+  // descendant scope (opened via ``?folder_id=<descendant>``) is stripped
+  // as well; without it, a subsequent reload restores the detached
+  // descendant and loads an empty Browse view because the refreshed tree
+  // no longer contains it (Codex review r3799361364).
+  var removedSubtreeIds = (function collectSubtreeIds() {
+    var childrenByParent = {};
+    browseFolderRows.forEach(function(row) {
+      var pid = row.parent_id;
+      if (pid == null) return;
+      var key = Number(pid);
+      if (!childrenByParent[key]) childrenByParent[key] = [];
+      childrenByParent[key].push(Number(row.id));
+    });
+    var ids = {};
+    ids[Number(fid)] = true;
+    var queue = [Number(fid)];
+    while (queue.length) {
+      var current = queue.shift();
+      (childrenByParent[current] || []).forEach(function(childId) {
+        if (!ids[childId]) {
+          ids[childId] = true;
+          queue.push(childId);
+        }
+      });
+    }
+    return ids;
+  })();
+
+  try {
+    // Verify the workspace the tree was rendered against is still the
+    // globally-active one. If another tab has switched workspaces since
+    // render, refuse the DELETE and reload — running it silently against
+    // the render-time workspace would then leave this tab holding a mixed
+    // view (deleted folder gone from workspace A but the rest of the page
+    // still showing A's data while the app is globally on B).
+    var active = await safeFetch(
+      '/api/workspaces/active', {}, { toast: false }
+    );
+    if (active && Number(active.id) !== Number(wsId)) {
+      showToast(
+        'The active workspace changed in another window. Reloading to sync.',
+        'info'
+      );
+      window.location.reload();
+      return;
+    }
+
+    await safeFetch('/api/workspaces/' + wsId + '/folders/' + fid, {
+      method: 'DELETE',
+    });
+
+    // The DELETE succeeded, so strip any ``?folder_id=<id>`` from the
+    // current URL when it points at a folder that will not survive the
+    // removal. That includes the removed root, its visible descendants,
+    // and any descendant already flagged ``missing`` before the DELETE —
+    // ``browseFolderRows`` excludes missing rows, so a health refresh
+    // that removed the descendant before the click would leave it out of
+    // ``removedSubtreeIds`` and the URL would still restore an empty
+    // scope on any subsequent reload (Codex reviews r3799300182,
+    // r3799361364, and r3799431533). Treating "not currently visible in
+    // ``browseFolderRows``" as also-strip covers the missing-descendant
+    // case without pulling in catalog ancestry.
+    try {
+      var urlParams = new URLSearchParams(window.location.search);
+      var urlFolderId = parseInt(urlParams.get('folder_id'), 10);
+      if (!isNaN(urlFolderId)) {
+        var stillVisible = !removedSubtreeIds[Number(urlFolderId)] &&
+          browseFolderRows.some(function(row) {
+            return Number(row.id) === Number(urlFolderId);
+          });
+        if (!stillVisible) {
+          urlParams.delete('folder_id');
+          var newSearch = urlParams.toString();
+          var newUrl = window.location.pathname +
+            (newSearch ? '?' + newSearch : '') +
+            window.location.hash;
+          window.history.replaceState({}, '', newUrl);
+        }
+      }
+    } catch (urlErr) {
+      console.warn('Could not strip folder_id from URL after removal', urlErr);
+    }
+
+    // Refresh the authoritative local-folder payload before rebuilding
+    // the tree. Without this, ``window.vireoLocalFolderData`` still
+    // carries the removed root when ``renderFolderTree`` runs, so
+    // ``folderLocalStatuses`` synthesizes a phantom top-level row for it
+    // and leaves the removed folder visible until the next blocker poll
+    // (Codex review r3798912105). ``load()`` swallows fetch failures and
+    // returns ``null``; rendering against the pre-DELETE
+    // ``window.vireoLocalFolderData`` in that case would resurrect the
+    // removed root as a phantom, so reload instead of rebuilding from
+    // stale local state (Codex review r3799142116).
+    if (window.vireoLocalFolders &&
+        typeof window.vireoLocalFolders.load === 'function') {
+      var localRefreshed = await window.vireoLocalFolders.load();
+      if (localRefreshed === null) {
+        window.location.reload();
+        return;
+      }
+    }
+
+    var loaded = await Promise.all([
+      loadFolders(),
+      loadKeywords(),
+      loadCollections(),
+    ]);
+    // A transient folder-list failure leaves the old tree in place. Reloading
+    // is safer than showing a removed root until the next health transition.
+    if (loaded[0] === null) {
+      window.location.reload();
+      return;
+    }
+    if (activeFolderId && !loaded[0].some(function(row) {
+      return Number(row.id) === Number(activeFolderId);
+    })) {
+      activeFolderId = null;
+    }
+    await resetAndLoad({ preserveCollection: !!activeCollectionId });
+    loadCollectionCounts();
+    loadSummary();
+    if (timelineMode) loadCalendarData();
+    showToast('Folder removed from this workspace.', 'success');
+  } catch (err) {
+    console.error('removeWorkspaceRootFromBrowse failed', err);
+  }
+}
+
+document.addEventListener('contextmenu', function(e) {
+  var ti = e.target.closest('.tree-item[data-folder-id]');
+  if (!ti) return;
+  // Don't fire if the right-click landed on another context menu.
+  if (e.target.closest('.vireo-ctx-menu')) return;
+  e.preventDefault();
+  var fid = parseInt(ti.dataset.folderId, 10);
+  if (isNaN(fid)) return;
+  var items = [
+    { label: 'Filter by this folder', onClick: function() { filterByFolder(fid); } },
+    { separator: true },
+    { label: window.VIREO_REVEAL_LABEL, onClick: function() { revealFolder(fid); } },
+    { label: 'Copy Path', onClick: function() { copyFolderPath(fid); } },
+    { label: 'Show Associated Workspaces…', onClick: function() { showFolderWorkspaces(fid); } },
+    { separator: true },
+    { label: 'Work Locally\u2026', onClick: function() { workLocallyFolder(fid); } },
+    { label: 'Move\u2026', onClick: function() { moveFolder(fid); } },
+    { label: 'Rescan this Folder', onClick: function() { rescanFolder(fid); } },
+  ];
+  if (ti.dataset.workspaceRoot === '1') {
+    items.push({ separator: true });
+    items.push({
+      label: 'Remove from This Workspace\u2026',
+      onClick: function() { removeWorkspaceRootFromBrowse(fid); },
+    });
+  }
+  openContextMenu(e, items);
+});
+
+/* ---------- Collection sidebar context menu ---------- */
+async function renameCollection(cid, currentName) {
+  var next = window.prompt('Rename collection', currentName || '');
+  if (next === null) return;             // user cancelled
+  next = next.trim();
+  if (!next || next === currentName) return;
+  try {
+    await safeFetch('/api/collections/' + cid, {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name: next}),
+    });
+  } catch (err) {
+    console.error('renameCollection failed', err);
+    return;
+  }
+  await loadCollections();
+  loadCollectionCounts();
+}
+
+async function duplicateCollection(cid) {
+  try {
+    await safeFetch('/api/collections/' + cid + '/duplicate', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: '{}',
+    });
+  } catch (err) {
+    console.error('duplicateCollection failed', err);
+    return;
+  }
+  await loadCollections();
+  loadCollectionCounts();
+}
+
+async function deleteCollectionById(cid, name) {
+  if (!window.confirm('Delete collection "' + (name || '') + '"?')) return;
+  try {
+    await safeFetch('/api/collections/' + cid, { method: 'DELETE' });
+  } catch (err) {
+    console.error('deleteCollectionById failed', err);
+    return;
+  }
+  // If we were filtering by the deleted collection, clear the filter.
+  // ``activeCollectionId`` covers dashboard-scope collection links; opened
+  // collections now live under ``openedCollectionId`` (their saved
+  // expression is loaded into the filter bar instead of being applied as a
+  // scope), so we need to clear that path too — otherwise the sidebar row
+  // disappears but the filter bar and grid keep applying the deleted
+  // collection's expression until the user manually clears it (Codex
+  // review r3621903982).
+  if (activeCollectionId === cid) {
+    activeCollectionId = null;
+    resetAndLoad();
+  } else if (openedCollectionId === cid) {
+    openedCollectionId = null;
+    if (VireoFilter.hasFilters()) VireoFilter.clearAll(true);
+    resetAndLoad();
+  }
+  await loadCollections();
+  loadCollectionCounts();
+}
+
+document.addEventListener('contextmenu', function(e) {
+  var ti = e.target.closest('.tree-item[data-collection-id]');
+  if (!ti) return;
+  // Don't fire inside another menu, and don't collide with folder-tree delegate.
+  if (e.target.closest('.vireo-ctx-menu')) return;
+  if (ti.hasAttribute('data-folder-id')) return;
+  e.preventDefault();
+  var cid = parseInt(ti.dataset.collectionId, 10);
+  if (isNaN(cid)) return;
+  var nameEl = ti.querySelector('.collection-name');
+  var name = nameEl ? nameEl.textContent : '';
+  var meta = collectionsById[cid];
+  var isUnavailable = !!(meta && meta.count_error);
+  // Degraded collections can't be filtered (the /photos endpoint would 400)
+  // and location review reads from the same collection rules — hide both while
+  // keeping the edit/rename/duplicate/delete actions reachable so the user
+  // can fix or discard the row.
+  var items = [];
+  if (!isUnavailable) {
+    items.push({ label: 'Filter by this Collection',
+      onClick: function() { filterByCollection(cid); } });
+    if (!(collectionsById[cid] || {}).has_visual) {
+      items.push({ label: 'Add Locations by Capture Time',
+        onClick: function() { reviewLocationsForCollection(cid, 'time'); } });
+    }
+    if (name === 'GPS Without Location Keyword') {
+      items.push({
+        label: 'Review Photo Locations',
+        onClick: function() { reviewLocationsForCollection(cid); },
+      });
+    }
+  }
+  var editActions = [
+    { label: 'Edit Rules',
+      onClick: function() { editCollection(cid); } },
+    { label: 'Rename',
+      onClick: function() { renameCollection(cid, name); } },
+    { label: 'Duplicate',
+      onClick: function() { duplicateCollection(cid); } },
+    { separator: true },
+    { label: 'Delete Collection',
+      onClick: function() { deleteCollectionById(cid, name); } },
+  ];
+  // Only emit a leading separator when there are filter/review actions above it
+  // to divide from — for degraded rows the menu starts at Edit Rules.
+  if (items.length) items.push({ separator: true });
+  items = items.concat(editActions);
+  openContextMenu(e, items);
+});
+
+/* ---------- Deep-link: scroll to photo_id if present in URL ---------- */
+// Cap retry loops so a folder that keeps flapping (health event on every
+// interval) can't spin this indefinitely — after this many stale
+// interruptions, fall through to whatever refreshBrowseAfterFolderHealthChange
+// last rendered rather than deep-link forever (Codex review r3686778061).
+var _DEEP_LINK_MAX_RETRIES = 5;
+async function _runPhotoDeepLink(photoId) {
+  // A focused deep link must expose the requested photo as a top-level card.
+  // Disable stacks for this view so its later lazy pages use the same shape.
+  var stackToggle = document.getElementById('browseStacksToggle');
+  if (stackToggle) stackToggle.checked = false;
+  // Snapshot the health-refresh generation BEFORE any await. If a
+  // vireo:folder-health-changed event fires while this loader is awaiting
+  // /api/photos/<id> or its folder-scoped /api/browse/init,
+  // refreshBrowseAfterFolderHealthChange() has already reloaded folders,
+  // keywords, collections, and the grid from the fresh post-flip state and
+  // owns the ``loading`` mutex. Rendering pre-flip data from initData or
+  // releasing ``loading`` here would either clobber that fresher refresh
+  // or let the intersection observer fire a duplicate page-1 request
+  // against the same loadEpoch (Codex review r3686696351).
+  var deepLinkHealthSeq = folderHealthRefreshSeq;
+  var isDeepLinkHealthCurrent = function() {
+    return folderHealthRefreshSeq === deepLinkHealthSeq;
+  };
+  // Signal to the outer retry loop whether we bailed out due to a
+  // concurrent health refresh (retryable) versus completed / errored
+  // (terminal). Returning a boolean keeps the existing return-early
+  // pattern intact — every ``return`` inside the try body is a stale
+  // detection.
+  var wasSuperseded = false;
+
+  // Prevent the IntersectionObserver from triggering loadPhotos() while deep-link is loading
+  loading = true;
+  var deepLinkLoaded = false;
+  var isDeepLinkDatasetCurrent = null;
+  try {
+    applyBrowseConfig(await _cfgPromise);
+    if (!isDeepLinkHealthCurrent()) { wasSuperseded = true; return wasSuperseded; }
+    var photo = await safeFetch('/api/photos/' + photoId, {}, { toast: false });
+    if (!isDeepLinkHealthCurrent()) { wasSuperseded = true; return wasSuperseded; }
+    if (!photo || !photo.folder_id) {
+      // Don't release ``loading`` if a concurrent health refresh owns it
+      // (its loadPhotos would then race the intersection observer). The
+      // isDeepLinkHealthCurrent check above already returns early in that
+      // case, so reaching here means it's safe to release.
+      loading = false;
+      return wasSuperseded;
+    }
+
+    // Take ownership of the grid window BEFORE clearing it. A sort change or
+    // folder click that happened while /api/photos/<id> was pending already
+    // ran resetAndLoad(), which advanced loadEpoch and started its own
+    // loadPhotos(). Merely snapshotting the epoch that reset installed would
+    // leave that in-flight load valid: it would land after this deep link had
+    // claimed the target folder and append its unscoped workspace rows into
+    // the folder-scoped grid (and, once earliestPage is set below, leave the
+    // "N earlier photos aren't loaded" banner counting against a dataset that
+    // is no longer on screen). Claiming discards every load started before
+    // this point (Codex review r3792769108).
+    var deepLinkWindowIsCurrent = claimBrowseWindow();
+
+    // Navigate to the photo's folder
+    activeFolderId = photo.folder_id;
+    activeKeyword = null;
+    activeCollectionId = null;
+    browseDatasetReady = false;
+    photos = [];
+    currentPage = 1;
+    allLoaded = false;
+    earliestPage = 1;
+    updatePreviousPhotosButton();
+    // Same hazard as filterByCollection: leaving selectedPhotos populated
+    // across a dataset switch leaves the batch bar armed against stale ids.
+    selectedPhotos.clear();
+    selectedPhotoId = null;
+    selectedIndex = -1;
+    closeDetail();
+    document.getElementById('grid').innerHTML = '';
+
+    // A folder click, sort change, or filter edit calls resetAndLoad(), which
+    // advances loadEpoch (and scope changes also advance browseScopeGen).
+    // Snapshot the scope generation alongside the window claim above so a
+    // later user selection cannot be overwritten by this deep-link response.
+    var deepLinkScopeGen = browseScopeGen;
+    var deepLinkFolderId = photo.folder_id;
+    var deepLinkSort = document.getElementById('sortSelect').value;
+    isDeepLinkDatasetCurrent = function() {
+      return deepLinkWindowIsCurrent() &&
+        browseScopeGen === deepLinkScopeGen &&
+        activeFolderId === deepLinkFolderId &&
+        document.getElementById('sortSelect').value === deepLinkSort;
+    };
+
+    // bootstrapBrowse was skipped, so load the target folder's first page and
+    // the shared folder/keyword/collection trees before locating the photo.
+    var missingSnapshotVersionAtInitStart =
+      typeof _missingFoldersSnapshotVersion !== 'undefined'
+        ? _missingFoldersSnapshotVersion
+        : null;
+    var initParams = new URLSearchParams();
+    initParams.set('folder_id', photo.folder_id);
+    initParams.set('per_page', perPage);
+    initParams.set('sort', deepLinkSort);
+    initParams.set('focus_photo_id', photoId);
+    var initData = await safeFetch('/api/browse/init?' + initParams.toString(), {}, { toast: false });
+    if (!isDeepLinkHealthCurrent()) { wasSuperseded = true; return wasSuperseded; }
+    if (!isDeepLinkDatasetCurrent()) return wasSuperseded;
+    if (initData) {
+      // Seed the navbar's missing-folder snapshot from init's workspace-scoped
+      // view so the first /api/folders/missing observation has a baseline to
+      // compare against. bootstrapBrowse() does the same seed but returns
+      // immediately for ?photo_id=..., so without this the deep-link path
+      // leaves _missingFoldersLastIds null: a background _folder_health_loop
+      // flip that runs between init and the first navbar poll then lands
+      // silently (null-baseline branch), later polls see the same IDs and
+      // never dispatch, and Browse stays stuck on the pre-flip state
+      // indefinitely. The shared snapshot-version helper adopts init when a
+      // baseline was already present before this request, but dispatches an
+      // init→current transition when a newer observation landed in flight;
+      // the subsequent isDeepLinkHealthCurrent check then skips stale render
+      // data (Codex reviews r3686696347 and r3687277899).
+      if (Array.isArray(initData.missing_folder_ids) &&
+          typeof _reconcileMissingFoldersInitSnapshot === 'function') {
+        _reconcileMissingFoldersInitSnapshot(
+          initData.missing_folder_ids,
+          missingSnapshotVersionAtInitStart,
+          'deep-link-reconcile',
+          initData.folder_health_version);
+        if (!isDeepLinkHealthCurrent()) { wasSuperseded = true; return wasSuperseded; }
+        if (!isDeepLinkDatasetCurrent()) return wasSuperseded;
+      }
+      // Pin the workspace this tree came from so a later Remove action
+      // targets the same workspace even on the deep-link entry point.
+      if (initData.active_workspace_id != null) {
+        browseWorkspaceId = Number(initData.active_workspace_id);
+      }
+      renderFolderTree(initData.folders || []);
+      renderKeywordTree(initData.keywords || []);
+      renderCollectionList(initData.collections || []);
+      loadCollectionCounts();
+      photos = initData.photos || [];
+      setBrowseTotals(initData);
+      var focusPage = parseInt(initData.focus_page, 10);
+      var hasFocusPage = Number.isInteger(focusPage) && focusPage >= 1;
+      earliestPage = hasFocusPage ? focusPage : 1;
+      currentPage = hasFocusPage ? focusPage + 1 : 2;
+      if (loadedWindowOffset() + photos.length >= totalPhotos) allLoaded = true;
+      renderGrid();
+      updatePreviousPhotosButton();
+      browseDatasetReady = true;
+      document.getElementById('loadingState').style.display = 'none';
+      deepLinkLoaded = true;
+      hydrateColorLabelsForRenderedPage(function() {
+        return isDeepLinkHealthCurrent() && isDeepLinkDatasetCurrent();
+      });
+    }
+
+    // The focused init response normally includes the bounded page containing
+    // the target from one SQLite read snapshot. Later pages remain lazy so a
+    // deep target cannot force Browse to render every preceding card. Fall
+    // back to the old serial scan for compatibility or if the target vanished.
+    if (!isDeepLinkHealthCurrent()) { wasSuperseded = true; return wasSuperseded; }
+    if (!isDeepLinkDatasetCurrent()) return wasSuperseded;
+    var el = getGridCard(photoId);
+    if (!el) {
+      // loadPhotos() honors the setup guard, so release it before the explicit
+      // compatibility/reconciliation scan or it would return immediately.
+      loading = false;
+      el = await loadUntilPhotoRendered(photoId, function() {
+        return isDeepLinkHealthCurrent() && isDeepLinkDatasetCurrent();
+      });
+    }
+    if (!isDeepLinkHealthCurrent()) { wasSuperseded = true; return wasSuperseded; }
+    if (!isDeepLinkDatasetCurrent()) return wasSuperseded;
+
+    // Update folder tree active state
+    document.querySelectorAll('#folderTree .tree-item').forEach(function(el) {
+      el.classList.toggle('active', parseInt(el.dataset.folderId) === activeFolderId);
+    });
+
+    // Scroll to and highlight the target photo
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      el.style.outline = '3px solid var(--accent)';
+      el.style.outlineOffset = '2px';
+      setTimeout(function() {
+        el.style.outline = '';
+        el.style.outlineOffset = '';
+      }, 2000);
+    }
+
+    // bootstrapBrowse (which owns VireoFilter.init) short-circuits when
+    // ?photo_id=... is present, so without this the filter bar renders but
+    // has no event handlers: quick-search does nothing, chips can't be
+    // added, and the total stays at "–". Initialize here so the bar is
+    // live once the deep-link has finished loading. Drop any persisted
+    // workspace filter — the explicit ?photo_id link should not be
+    // silently overridden by whatever the user had saved on Browse.
+    if (window.VireoFilter && !VireoFilter.isReady()) {
+      VireoFilter.init({
+        page: 'browse',
+        root: document.getElementById('vireoFilterBar'),
+        scopeLabel: 'Workspace · All available photos',
+        onChange: function(info) {
+          if (timelineMode) loadCalendarData();
+          if (activeCollectionId && !dashboardCollectionScope) activeCollectionId = null;
+          resetAndLoad(browseFilterReloadOptions(info));
+          loadSummary();
+        },
+        getScope: function() {
+          return {
+            folder_id: activeFolderId,
+            collection_id: (activeCollectionId && dashboardCollectionScope)
+              ? activeCollectionId : null,
+          };
+        },
+      }).then(function() {
+        VireoFilter.setResultTotal(totalUnderlyingPhotos);
+        if (VireoFilter.hasFilters()) VireoFilter.clearAll(true);
+      }).catch(function() {});
+    }
+  } catch(e) { /* ignore deep-link errors silently */ }
+  // A concurrent refreshBrowseAfterFolderHealthChange() owns ``loading``
+  // and rearms the observer itself when its loadPhotos settles; releasing
+  // ``loading`` here would let a second page-1 request race against the
+  // same loadEpoch, producing duplicate cards and off-by-one pagination
+  // (Codex review r3686696351).
+  if (isDeepLinkHealthCurrent() &&
+      (!isDeepLinkDatasetCurrent || isDeepLinkDatasetCurrent())) {
+    loading = false;
+    if (deepLinkLoaded) {
+      rearmInfiniteScrollObserver();
+      requestAnimationFrame(ensureViewportHydrated);
+    }
+  }
+  return wasSuperseded;
+}
+
+(async function() {
+  var params = new URLSearchParams(window.location.search);
+  var photoId = params.get('photo_id');
+  if (!photoId) return;
+  photoId = parseInt(photoId, 10);
+  if (isNaN(photoId)) return;
+
+  // If a folder-health refresh interrupts us, wait for it to finish and
+  // retry — otherwise the deep-link is silently abandoned and Browse is
+  // left on whatever the refresh happened to load (usually the unscoped
+  // workspace grid, with the target photo never scrolled into view and
+  // VireoFilter uninitialized) (Codex review r3686778061).
+  for (var attempt = 0; attempt < _DEEP_LINK_MAX_RETRIES; attempt++) {
+    var wasSuperseded = await _runPhotoDeepLink(photoId);
+    if (!wasSuperseded) return;
+    // Await the refresh that stole the load so the next attempt starts
+    // from a settled state and its pre-await snapshot is guaranteed to
+    // match the current generation (unless yet another refresh fires
+    // during the retry, which the loop handles).
+    await waitForFolderHealthRefreshesToSettle();
+  }
+})();
+
+/* ---------- Export Modal ---------- */
+var exportRequestGeneration = 0;
+var exportDismissible = true;
+var _exportPhotoIds = null;
+
+function setExportControlsBusy(busy) {
+  document.querySelectorAll('#exportOverlay input, #exportOverlay select, #exportOverlay button').forEach(function(control) {
+    if (control.id === 'exportSubmitBtn' || control.hasAttribute('data-export-cancel')) return;
+    if (busy) {
+      control.setAttribute('data-export-was-disabled', control.disabled ? '1' : '0');
+      control.disabled = true;
+    } else if (control.hasAttribute('data-export-was-disabled')) {
+      control.disabled = control.getAttribute('data-export-was-disabled') === '1';
+      control.removeAttribute('data-export-was-disabled');
+    }
+  });
+}
+
+function setExportDismissible(dismissible) {
+  exportDismissible = dismissible;
+  document.querySelectorAll('#exportOverlay [data-export-cancel]').forEach(function(control) {
+    control.disabled = !dismissible;
+  });
+}
+
+function migrateExportCaptureDateTimePreference() {
+  var combinedKey = 'vireo.browse.export.metadata.captureDateTime';
+  if (VireoViewPreferences.read(combinedKey) !== null) return;
+
+  var legacyDate = VireoViewPreferences.read('vireo.browse.export.metadata.captureDate');
+  var legacyTime = VireoViewPreferences.read('vireo.browse.export.metadata.captureTime');
+  if (legacyDate === null && legacyTime === null) return;
+
+  VireoViewPreferences.write(
+    combinedKey,
+    legacyDate === '1' || legacyTime === '1' ? '1' : '0'
+  );
+}
+
+function openExportModal(photoIds) {
+  var activeIds = Array.isArray(photoIds) ? photoIds.slice() : getActiveSelection();
+  if (activeIds.length === 0) return;
+  exportRequestGeneration++;
+  setExportControlsBusy(false);
+  setExportDismissible(true);
+  // Snapshot the requested photos for the lifetime of the modal. In
+  // particular, the lightbox menu exports the displayed photo even when the
+  // Browse grid has a different single- or multi-photo selection behind it.
+  _exportPhotoIds = activeIds;
+  // Drop on-demand preview hydration from the previous open so a rename (or
+  // a photo that has since left the workspace) can't be previewed from a
+  // stale cache. Requests still in flight are dropped with it: they carry
+  // the superseded generation and are ignored on arrival, so this session
+  // refetches instead of waiting on (and trusting) their payload. Reset both
+  // maps here — before the control resets below, which fire change handlers
+  // that repaint the preview — so a request this session starts is still
+  // tracked afterwards and cannot be issued twice.
+  _exportPreviewPhotos = {};
+  _exportPreviewFetches = {};
+  document.getElementById('exportSubmitBtn').textContent = 'Export ' + activeIds.length + ' photo' + (activeIds.length === 1 ? '' : 's');
+  document.getElementById('exportSubmitBtn').disabled = false;
+  document.getElementById('exportPreset').value = 'original-jpg';
+  applyExportPreset('original-jpg');
+  document.getElementById('exportTemplate').value = '{original}';
+  document.querySelectorAll('.export-metadata-option input').forEach(function(input) {
+    input.checked = false;
+  });
+  document.getElementById('exportDest').value = '';
+  document.getElementById('exportSubfolder').checked = false;
+  document.getElementById('exportSubfolderName').value = 'exported';
+  migrateExportCaptureDateTimePreference();
+  VireoViewPreferences.restoreAll(document.getElementById('exportOverlay'));
+  document.getElementById('exportOverlay').classList.add('open');
+  // Re-applies the last-used preset (saved or built-in) over the defaults
+  // and view preferences restored above; async but near-instant locally.
+  VireoExportPresets.modalOpened();
+  updateExportPreview();
+}
+
+// The shared lightbox only offers photo export when its host page exposes
+// this capability. Other pages use openExportModal for unrelated exports
+// (for example Life List data), so the context menu must not key off that
+// generic function name.
+function openPhotoExportModal(photoIds) {
+  if (document.getElementById('lightboxOverlay').classList.contains('active')) {
+    closeLightbox();
+  }
+  openExportModal(photoIds);
+}
+
+function selectedExportMetadataFields() {
+  return Array.from(document.querySelectorAll('.export-metadata-option input:checked'))
+    .reduce(function(fields, input) {
+      if (input.value === 'capture_date_time') {
+        // A preset saved in Photo Editor may specify just date or just time.
+        // VireoExportPresets.applySettings stashes that split here so we
+        // honor it instead of quietly promoting the box to "both". Manual
+        // edits clear the stash, at which point the combined box means both.
+        if (input.dataset.presetFields) {
+          input.dataset.presetFields.split(',').forEach(function(field) {
+            if (field) fields.push(field);
+          });
+        } else {
+          fields.push('capture_date', 'capture_time');
+        }
+      } else {
+        fields.push(input.value);
+      }
+      return fields;
+    }, []);
+}
+
+function closeExportModal() {
+  if (!exportDismissible) return;
+  exportRequestGeneration++;
+  setExportControlsBusy(false);
+  document.getElementById('exportOverlay').classList.remove('open');
+  _exportPhotoIds = null;
+}
+
+const exportFolderBrowser = new VireoFolderBrowser({
+  overlayId: 'folderBrowser',
+  defaultMode: 'destination',
+  modes: {
+    panorama: {
+      title: 'Choose Panorama Folder',
+      multiple: false,
+      showCounts: false,
+      startPath: function() { return document.getElementById('panoramaDestination').value.trim(); },
+      onSelect: function(path) { document.getElementById('panoramaDestination').value = path; },
+    },
+    destination: {
+      title: 'Select Export Folder',
+      multiple: false,
+      showCounts: false,
+      startPath: function() {
+        return document.getElementById('exportDest').value.trim();
+      },
+      onSelect: function(path) {
+        document.getElementById('exportDest').value = path;
+        VireoExportPresets.markCustom();
+      },
+    },
+  },
+});
+
+async function browseForExportDestination() {
+  var destination = document.getElementById('exportDest');
+  if (typeof pickDirectory === 'function') {
+    var seqBeforePicker = exportFolderBrowser.sequence;
+    var result = await pickDirectory('Select export folder', {
+      defaultPath: destination.value.trim() || undefined,
+    });
+    if (result) {
+      destination.value = Array.isArray(result) ? result[0] : result;
+      VireoExportPresets.markCustom();
+      return;
+    }
+    if (typeof isTauri === 'function' && isTauri()) return;
+    if (exportFolderBrowser.sequence !== seqBeforePicker) {
+      exportFolderBrowser.open('destination', {skipInitialBrowse: true});
+      return;
+    }
+  }
+  exportFolderBrowser.open('destination');
+}
+
+function insertTemplateVar(v) {
+  var input = document.getElementById('exportTemplate');
+  var start = input.selectionStart;
+  var end = input.selectionEnd;
+  var val = input.value;
+  input.value = val.substring(0, start) + v + val.substring(end);
+  input.selectionStart = input.selectionEnd = start + v.length;
+  input.focus();
+  VireoExportPresets.markCustom();
+  updateExportPreview();
+}
+
+function exportExtensionForFormat(format) {
+  if (format === 'png') return 'png';
+  if (format === 'tiff') return 'tiff';
+  return 'jpg';
+}
+
+function updateExportFormatControls() {
+  var isJpeg = document.getElementById('exportFormat').value === 'jpg';
+  document.getElementById('exportQualityLabel').style.display = isJpeg ? 'block' : 'none';
+  document.getElementById('exportQualityRow').style.display = isJpeg ? 'flex' : 'none';
+}
+
+function applyExportPreset(preset) {
+  var resize = '';
+  var customResize = '';
+  var format = 'jpg';
+  var quality = 92;
+  if (preset === 'web-jpg') {
+    resize = '2048';
+    quality = 85;
+  } else if (preset === 'small-jpg') {
+    resize = '1080';
+    quality = 82;
+  } else if (preset === 'archive-tiff') {
+    format = 'tiff';
+  } else if (preset === 'png') {
+    format = 'png';
+  } else if (preset === 'custom') {
+    return;
+  }
+  document.getElementById('exportFormat').value = format;
+  document.getElementById('exportResize').value = resize;
+  document.getElementById('exportResizeCustom').value = customResize;
+  document.getElementById('exportResizeCustom').style.display = resize === 'custom' ? 'block' : 'none';
+  document.getElementById('exportQuality').value = quality;
+  document.getElementById('exportQualityVal').textContent = String(quality);
+  updateExportFormatControls();
+  updateExportPreview();
+}
+
+function markExportCustom() {
+  document.getElementById('exportPreset').value = 'custom';
+}
+
+// Photos fetched on demand for the export preview, keyed by id (null means
+// "asked, and the server could not resolve it"). The preview names the first
+// file the export will write, so when that photo is not in the grid, an
+// expanded stack tray, or the lightbox cache, it has to be resolved rather
+// than substituted. /api/photos/<id> returns the same species-rank keyword
+// list the export worker names files with, so the preview matches the file
+// on disk. Cleared each time the modal opens so a renamed photo cannot show
+// a stale name (Codex P2 on PR #1561).
+var _exportPreviewPhotos = {};
+var _exportPreviewFetches = {};
+
+function hydrateExportPreviewPhoto(photoId) {
+  if (photoId == null) return;
+  var key = String(photoId);
+  if (_exportPreviewFetches[key]) return;
+  // Closing the modal does not cancel a fetch already in flight. Without a
+  // generation stamp, that response lands after the next open and writes the
+  // cache openExportModal just cleared, repainting the reopened modal with
+  // the pre-rename name the clearing existed to drop — and because the
+  // pending entry also survives in _exportPreviewFetches, the new session
+  // would never issue its own request. exportRequestGeneration is the
+  // modal's existing request token (bumped on open, close, and export), so
+  // stamp against it rather than adding a second counter.
+  var generation = exportRequestGeneration;
+  var request = safeFetch('/api/photos/' + photoId, {}, { toast: false })
+    .then(function(photo) {
+      if (generation !== exportRequestGeneration) return;
+      _exportPreviewPhotos[key] = (photo && photo.id != null) ? photo : null;
+    })
+    .catch(function() {
+      if (generation !== exportRequestGeneration) return;
+      _exportPreviewPhotos[key] = null;
+    })
+    .then(function() {
+      // Only clear the in-flight marker this call installed: a superseded
+      // session must not drop the current session's pending request.
+      if (_exportPreviewFetches[key] === request) delete _exportPreviewFetches[key];
+      if (generation !== exportRequestGeneration) return;
+      // Only repaint while the modal is still open; a closed modal has
+      // already dropped _exportPhotoIds and would preview a stale id.
+      if (document.getElementById('exportOverlay').classList.contains('open')) {
+        updateExportPreview();
+      }
+    });
+  _exportPreviewFetches[key] = request;
+  return request;
+}
+
+function updateExportPreview() {
+  var template = document.getElementById('exportTemplate').value;
+  if (!template) { document.getElementById('exportPreview').textContent = ''; return; }
+  // Use first selected photo for preview
+  var firstId = (_exportPhotoIds || getActiveSelection())[0];
+  if (firstId == null) { document.getElementById('exportPreview').textContent = ''; return; }
+  var photo = findBrowsePhoto(firstId);
+  // Find Similar and other shared-lightbox entry points can display photos
+  // outside Browse's currently loaded page. Their metadata remains available
+  // through the lightbox cache/list after the viewer closes for this modal.
+  if (!photo && typeof _lbPhotoData === 'function') photo = _lbPhotoData(firstId);
+  // Select-all-matching with Stacks enabled puts every underlying member id
+  // in selectedPhotos, but browseStackMembers only carries trays the user
+  // expanded — and the selection spans pages the grid never loaded. So the
+  // first id is often absent from findBrowsePhoto and the lightbox cache.
+  // Resolve that photo from the server rather than previewing a stand-in:
+  // rendering the stack's loaded cover here would assert a filename the
+  // export will never write, which is exactly the kind of plausible-looking
+  // proxy CORE_PHILOSOPHY forbids (Codex P2 on PR #1561).
+  if (!photo && Object.prototype.hasOwnProperty.call(_exportPreviewPhotos, String(firstId))) {
+    photo = _exportPreviewPhotos[String(firstId)];
+    if (!photo) {
+      document.getElementById('exportPreview').textContent =
+        'Preview unavailable: could not load photo ' + firstId + '.';
+      return;
+    }
+  }
+  if (!photo) {
+    hydrateExportPreviewPhoto(firstId);
+    document.getElementById('exportPreview').textContent =
+      'Preview: loading photo ' + firstId + '\u2026';
+    return;
+  }
+  if (!photo.filename) { document.getElementById('exportPreview').textContent = ''; return; }
+  var stem = photo.filename.replace(/\.[^.]+$/, '');
+  var ts = photo.timestamp || '';
+  var datePart = ts ? ts.substring(0, 10) : 'unknown-date';
+  var timePart = ts && ts.length >= 19 ? ts.substring(11, 19).replace(/:/g, '') : '000000';
+  var species = (photo.species && photo.species.length > 0) ? photo.species[0] : 'unknown';
+  var preview = template
+    .replace('{original}', stem)
+    .replace('{date}', datePart)
+    .replace('{datetime}', datePart + '_' + timePart)
+    .replace('{species}', species)
+    .replace('{rating}', String(photo.rating || 0))
+    .replace('{seq}', '0001')
+    .replace('{folder}', '');
+  var ext = exportExtensionForFormat(document.getElementById('exportFormat').value);
+  var subPrefix = document.getElementById('exportSubfolder').checked
+    ? VireoExportPresets.subfolderName() + '/'
+    : '';
+  document.getElementById('exportPreview').textContent =
+    'Preview: ' + subPrefix + preview + '.' + ext;
+}
+
+document.getElementById('exportTemplate').addEventListener('input', updateExportPreview);
+
+// The preset dropdown's change handling (built-in and saved presets) lives
+// in the shared vireo-export-presets.js module.
+
+document.getElementById('exportFormat').addEventListener('change', function() {
+  markExportCustom();
+  updateExportFormatControls();
+  updateExportPreview();
+});
+
+document.getElementById('exportResize').addEventListener('change', function() {
+  markExportCustom();
+  document.getElementById('exportResizeCustom').style.display =
+    this.value === 'custom' ? 'block' : 'none';
+  updateExportPreview();
+});
+
+document.getElementById('exportQuality').addEventListener('input', function() {
+  markExportCustom();
+  document.getElementById('exportQualityVal').textContent = this.value;
+});
+
+async function startExport() {
+  var requestGeneration = ++exportRequestGeneration;
+  var dest = document.getElementById('exportDest').value.trim();
+  var exportToSubfolder = document.getElementById('exportSubfolder').checked;
+  var revealAfterExport = document.getElementById('exportRevealAfter').checked;
+
+  var resizeSelect = document.getElementById('exportResize').value;
+  var maxSize = null;
+  if (resizeSelect === 'custom') {
+    maxSize = parseInt(document.getElementById('exportResizeCustom').value) || null;
+  } else if (resizeSelect) {
+    maxSize = parseInt(resizeSelect);
+  }
+
+  var quality = parseInt(document.getElementById('exportQuality').value) || 92;
+  var format = document.getElementById('exportFormat').value || 'jpg';
+  var template = document.getElementById('exportTemplate').value || '{original}';
+  var btn = document.getElementById('exportSubmitBtn');
+  var activeIds = (_exportPhotoIds || getActiveSelection()).slice();
+  var count = activeIds.length;
+  var buttonLabel = 'Export ' + count + ' photo' + (count === 1 ? '' : 's');
+  btn.disabled = true;
+  btn.textContent = 'Checking filenames…';
+  setExportControlsBusy(true);
+
+  var exportRequest = {
+    photo_ids: activeIds,
+    destination: dest,
+    export_to_subfolder: exportToSubfolder,
+    subfolder_name: VireoExportPresets.subfolderName(),
+    naming_template: template,
+    max_size: maxSize,
+    quality: quality,
+    format: format,
+    metadata_fields: selectedExportMetadataFields(),
+    reveal_after_export: revealAfterExport,
+  };
+
+  var preflight;
+  try {
+    preflight = await safeFetch('/api/jobs/export/preflight', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(exportRequest),
+    }, {toast: false});
+  } catch (err) {
+    if (requestGeneration !== exportRequestGeneration) return;
+    alert('Export check failed: ' + err.message);
+    setExportControlsBusy(false);
+    btn.disabled = false;
+    btn.textContent = buttonLabel;
+    return;
+  }
+  if (requestGeneration !== exportRequestGeneration ||
+      !document.getElementById('exportOverlay').classList.contains('open')) return;
+  if (preflight.error) {
+    alert('Export check failed: ' + preflight.error);
+    setExportControlsBusy(false);
+    btn.disabled = false;
+    btn.textContent = buttonLabel;
+    return;
+  }
+  if (preflight.rename_count > 0) {
+    var renameLines = (preflight.renames || []).slice(0, 5).map(function(rename) {
+      return rename.requested_name + ' → ' + rename.export_name;
+    });
+    if (preflight.rename_count > renameLines.length) {
+      renameLines.push('…and ' + (preflight.rename_count - renameLines.length) + ' more');
+    }
+    var renameMessage = preflight.rename_count + ' export filename' +
+      (preflight.rename_count === 1 ? ' is' : 's are') +
+      ' already in use. Existing files will be kept, and Vireo will save the new export' +
+      (preflight.rename_count === 1 ? '' : 's') + ' with numbered names:\n\n' +
+      renameLines.join('\n') + '\n\nContinue with export?';
+    if (!window.confirm(renameMessage)) {
+      setExportControlsBusy(false);
+      btn.disabled = false;
+      btn.textContent = buttonLabel;
+      return;
+    }
+  }
+
+  try {
+    btn.textContent = 'Starting export…';
+    setExportDismissible(false);
+    var data = await safeFetch('/api/jobs/export', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(exportRequest),
+    });
+    if (requestGeneration !== exportRequestGeneration ||
+        !document.getElementById('exportOverlay').classList.contains('open')) return;
+    if (data.error) {
+      setExportDismissible(true);
+      alert('Export error: ' + data.error);
+      setExportControlsBusy(false);
+      btn.disabled = false;
+      btn.textContent = buttonLabel;
+      return;
+    }
+    setExportDismissible(true);
+    closeExportModal();
+    showToast('Export started (' + count + ' photos)', 'info');
+  } catch(err) {
+    if (requestGeneration !== exportRequestGeneration) return;
+    setExportDismissible(true);
+    alert('Export failed: ' + err.message);
+    setExportControlsBusy(false);
+    btn.disabled = false;
+    btn.textContent = buttonLabel;
+  }
+}
+
+async function makeAvailableOffline() {
+  var activeIds = getActiveSelection();
+  if (activeIds.length === 0) return;
+  try {
+    var data = await safeFetch('/api/jobs/offline-cache', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: activeIds}),
+    });
+    if (data.error) {
+      showToast('Offline cache error: ' + data.error, 'error');
+      return;
+    }
+    showToast(
+      'Offline caching started (' + activeIds.length + ' photo' +
+        (activeIds.length === 1 ? '' : 's') + ')',
+      'info'
+    );
+  } catch(err) {
+    showToast('Offline cache failed: ' + err.message, 'error');
+  }
+}
+
+var _prepareFullResolutionJobId = null;
+
+function _setPrepareFullResolutionButton(running, current, total) {
+  var btn = document.getElementById('prepareFullResolutionBtn');
+  if (!btn) return;
+  btn.disabled = !!running;
+  if (running && current != null && total) {
+    btn.textContent = 'Preparing ' + current + '/' + total;
+  } else if (running) {
+    btn.textContent = 'Preparing…';
+  } else {
+    btn.textContent = 'Prepare Full Resolution';
+  }
+}
+
+async function prepareFullResolutionSelection(photoIds) {
+  var activeIds = Array.isArray(photoIds) ? photoIds.slice() : getActiveSelection();
+  if (!activeIds.length || _prepareFullResolutionJobId) return;
+  _setPrepareFullResolutionButton(true);
+  try {
+    var data = await safeFetch('/api/jobs/prepare-full-resolution', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: activeIds}),
+    });
+    _prepareFullResolutionJobId = data.job_id;
+    showToast(
+      'Preparing ' + activeIds.length.toLocaleString() +
+      ' photo' + (activeIds.length === 1 ? '' : 's') +
+      ' for full-resolution inspection…',
+      'info'
+    );
+    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+      onProgress: function(progress) {
+        _setPrepareFullResolutionButton(
+          true, progress.current || 0, progress.total || activeIds.length
+        );
+      },
+      onComplete: function(done) {
+        _prepareFullResolutionJobId = null;
+        _setPrepareFullResolutionButton(false);
+        var result = done.result || {};
+        if (done.status === 'cancelled') {
+          showToast('Full-resolution preparation was stopped.', 'error');
+          return;
+        }
+        if (done.status === 'failed' && !done.result) {
+          var errors = done.errors || [];
+          var failureMessage = errors.length
+            ? errors[0]
+            : 'The preparation job ended before producing a result.';
+          showToast(
+            'Full-resolution preparation failed: ' + failureMessage,
+            'error'
+          );
+          return;
+        }
+        var ready = result.ready || 0;
+        var failed = result.failed || 0;
+        var copied = result.copied || 0;
+        var summary = ready.toLocaleString() + ' ready';
+        if (copied) summary += ', ' + copied.toLocaleString() + ' copied locally';
+        var skippedDeleted = result.skipped_deleted || 0;
+        if (skippedDeleted) {
+          summary += ', ' + skippedDeleted.toLocaleString() + ' skipped (deleted during preparation)';
+        }
+        if (failed) summary += ', ' + failed.toLocaleString() + ' failed';
+        showToast(
+          'Full-resolution preparation complete: ' + summary,
+          failed ? 'error' : 'success'
+        );
+        try {
+          window.dispatchEvent(new CustomEvent('vireo-job-done', {
+            detail: {job_id: data.job_id}
+          }));
+        } catch (_) {}
+      },
+      onError: function() {
+        _prepareFullResolutionJobId = null;
+        _setPrepareFullResolutionButton(false);
+      },
+    });
+  } catch(err) {
+    _prepareFullResolutionJobId = null;
+    _setPrepareFullResolutionButton(false);
+    showToast(
+      'Could not start full-resolution preparation: ' + err.message,
+      'error'
+    );
+  }
+}
+
+// Close on overlay click
+document.getElementById('exportOverlay').addEventListener('click', function(e) {
+  if (e.target === this) closeExportModal();
+});
