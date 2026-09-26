@@ -710,8 +710,18 @@ def test_scan_conflict_ignores_stage_job_in_terminal_state(staged, tmp_path):
     assert stage_pending_source_paths(list_jobs, db) == []
 
 
+@pytest.mark.parametrize("job_type,path_key", [
+    ("scan", "roots"),
+    ("scan", "root"),
+    ("metadata-repair", "roots"),
+    ("import-full", "source"),
+    ("import-full", "destination"),
+    ("import-in-place", "sources"),
+    ("import", "sources"),
+    ("import", "destination"),
+])
 def test_stage_admission_refuses_when_scan_registered_first(
-    staged, tmp_path, monkeypatch,
+    staged, tmp_path, monkeypatch, job_type, path_key,
 ):
     """``_busy_job`` includes queued/running scan and import jobs whose
     ``config`` paths overlap the stage source, even when those jobs live
@@ -729,10 +739,13 @@ def test_stage_admission_refuses_when_scan_registered_first(
     real_runner = staged["app"]._job_runner
     fake_scan_job = {
         "id": "scan-1",
-        "type": "scan",
+        "type": job_type,
         "status": "running",
         "workspace_id": 99,
-        "config": {"roots": [str(pending_source)]},
+        "config": {
+            path_key: [str(pending_source)]
+            if path_key in {"roots", "sources"} else str(pending_source),
+        },
         "blocks_local_transitions": True,
     }
     monkeypatch.setattr(
@@ -744,4 +757,4 @@ def test_stage_admission_refuses_when_scan_registered_first(
         json={"root_folder_ids": [stage_fid]},
     )
     assert resp.status_code == 409
-    assert "scan" in resp.get_json()["error"].lower()
+    assert job_type in resp.get_json()["error"].lower()
