@@ -3,6 +3,7 @@ import builtins
 import json
 import os
 
+from page_scripts import page_with_scripts
 from PIL import Image
 from wait import wait_for_job_via_client
 
@@ -215,7 +216,7 @@ def test_api_job_batch_delete_vireo_mode(app_and_db):
 def test_delete_modal_has_persistent_stage_progress(app_and_db):
     """Disk deletes show stable bars instead of reusing one resetting bar."""
     app, _ = app_and_db
-    html = app.test_client().get("/browse").data.decode()
+    html = page_with_scripts(app.test_client(), "/browse")
 
     stage_ids = [
         "deleteProgressFilesStage",
@@ -248,7 +249,7 @@ def test_delete_modal_marks_files_stage_partial_on_trash_failure(app_and_db):
     """
     app, _ = app_and_db
     client = app.test_client()
-    html = client.get("/browse").data.decode()
+    html = page_with_scripts(client, "/browse")
     css = client.get("/static/vireo-navbar.css").data.decode()
 
     # A partial CSS state (styled distinctly from complete) must exist so
@@ -436,7 +437,7 @@ def test_delete_modal_marks_catalog_stage_partial_from_finishing_map(
     'complete')`` on every stage and quietly turn a retained catalog into
     a green ✓ complete row."""
     app, _ = app_and_db
-    html = app.test_client().get("/browse").data.decode()
+    html = page_with_scripts(app.test_client(), "/browse")
 
     # The Finishing branch must read the per-stage map and route each stage
     # with recorded failures through markDeleteStageFailed instead of

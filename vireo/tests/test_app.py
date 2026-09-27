@@ -5,25 +5,8 @@ import re
 from pathlib import Path
 
 import pytest
+from page_scripts import page_with_scripts as _page_with_scripts
 from wait import wait_for_job_via_client
-
-_STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
-_STATIC_SCRIPT_RE = re.compile(r'<script src="/static/([\w.-]+\.js)"></script>')
-
-
-def _page_with_scripts(client, path):
-    """The rendered page with its ``/static`` scripts inlined.
-
-    Page JS lives in ``vireo/static/``, so a test that checks what a page
-    does reads the page the way the browser assembles it.
-    """
-    html = client.get(path).get_data(as_text=True)
-    return _STATIC_SCRIPT_RE.sub(
-        lambda m: "<script>\n"
-        + (_STATIC_DIR / m.group(1)).read_text(encoding="utf-8")
-        + "</script>",
-        html,
-    )
 
 
 def _run_missing_originals_check(client, folder_id=None):
@@ -3934,9 +3917,9 @@ def test_id_conflicts_link_in_navbar(app_and_db):
     """The navbar includes a link to /id-conflicts."""
     app, _ = app_and_db
     client = app.test_client()
-    resp = client.get('/id-conflicts')
-    assert b'/id-conflicts' in resp.data
-    assert b'ID Conflicts' in resp.data
+    html = _page_with_scripts(client, '/id-conflicts')
+    assert '/id-conflicts' in html
+    assert 'ID Conflicts' in html
 
 
 def test_compare_predictions_api(app_and_db):
@@ -6856,7 +6839,7 @@ def test_trash_paths_preserves_explicit_none_network_roots(
 
 
 def test_navbar_js_fallbacks_match_python_constants():
-    """The hardcoded fallback lists in _navbar.html must mirror the
+    """The hardcoded fallback lists in navbar-tabs.js must mirror the
     canonical Python lists. The navbar's JS uses these fallbacks when
     /api/workspace/tabs fails — drift would mean a broken navbar in
     failure mode (e.g. a removed page still in the JS list).
@@ -6869,7 +6852,7 @@ def test_navbar_js_fallbacks_match_python_constants():
     from db import DEFAULT_TABS
 
     template_path = os.path.normpath(
-        os.path.join(os.path.dirname(__file__), '..', 'templates', '_navbar.html')
+        os.path.join(os.path.dirname(__file__), '..', 'static', 'navbar-tabs.js')
     )
     with open(template_path, encoding='utf-8') as f:
         text = f.read()
@@ -6880,8 +6863,8 @@ def test_navbar_js_fallbacks_match_python_constants():
     pages_match = re.search(
         r'window\.NAV_ALL_PAGES\s*=\s*(\[.*?\n\];)', text, re.DOTALL
     )
-    assert tabs_match, "window.NAV_DEFAULT_TABS not found in _navbar.html"
-    assert pages_match, "window.NAV_ALL_PAGES not found in _navbar.html"
+    assert tabs_match, "window.NAV_DEFAULT_TABS not found in navbar-tabs.js"
+    assert pages_match, "window.NAV_ALL_PAGES not found in navbar-tabs.js"
 
     # Coerce JS-ish list literals to JSON: single→double quotes, strip
     # trailing semicolon, quote bare object keys.
@@ -6895,12 +6878,12 @@ def test_navbar_js_fallbacks_match_python_constants():
     js_pages = json.loads(js_to_json(pages_match.group(1)))
 
     assert js_tabs == list(DEFAULT_TABS), (
-        f"window.NAV_DEFAULT_TABS in _navbar.html drifted from db.DEFAULT_TABS.\n"
+        f"window.NAV_DEFAULT_TABS in navbar-tabs.js drifted from db.DEFAULT_TABS.\n"
         f"  JS:     {js_tabs}\n"
         f"  Python: {list(DEFAULT_TABS)}"
     )
     assert js_pages == ALL_PAGES, (
-        "window.NAV_ALL_PAGES in _navbar.html drifted from app.ALL_PAGES."
+        "window.NAV_ALL_PAGES in navbar-tabs.js drifted from app.ALL_PAGES."
     )
 
 
@@ -18374,7 +18357,9 @@ def test_native_import_commands_route_to_import_page():
     repo_root = os.path.normpath(
         os.path.join(os.path.dirname(__file__), "..", "..")
     )
-    navbar_path = os.path.join(repo_root, "vireo", "templates", "_navbar.html")
+    navbar_path = os.path.join(
+        repo_root, "vireo", "static", "navbar-shared-helpers.js"
+    )
     menu_path = os.path.join(repo_root, "src-tauri", "src", "menu.rs")
 
     with open(navbar_path, encoding="utf-8") as f:
