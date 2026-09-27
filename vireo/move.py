@@ -1011,6 +1011,22 @@ def _run_rsync_streamed(src_path, dest_spec, rsync_flags, total_files,
 FINDER_METADATA_FILES = frozenset({".DS_Store"})
 
 
+def _escape_rsync_pattern(component):
+    """Escape rsync wildmatch metacharacters in a literal path component so
+    the resulting include/exclude pattern matches only that spelling. rsync
+    treats ``*``, ``?`` and ``[`` as wildcards in patterns (``**`` matches
+    multiple components; ``\\`` escapes the next character), so an on-disk
+    directory literally named ``a*`` would otherwise turn the generated
+    ``--exclude=/a*/.DS_Store`` into a glob that also drops an unrelated
+    ``abc/.DS_Store`` subtree — the transfer and verification skip those
+    entries, and the post-merge source removal then destroys them. Escape
+    ``\\`` first so the escapes themselves aren't double-escaped."""
+    return (component.replace("\\", "\\\\")
+                     .replace("*", "\\*")
+                     .replace("?", "\\?")
+                     .replace("[", "\\["))
+
+
 def _rsync_finder_metadata_excludes(src_path):
     """rsync filter args that skip Finder metadata FILES on both sides.
 
@@ -1029,8 +1045,12 @@ def _rsync_finder_metadata_excludes(src_path):
     ``.DS_Store`` entries (not directories, not symlinks — a ``.DS_Store``
     symlink to a directory is classified as a symlink by rsync and would
     slip past an ``--include=<name>/`` guard), and emit an anchored
-    ``--exclude=/<relpath>`` for each. The excludes apply to both sides of
-    every rsync command they're passed to (transfer, ``--existing``
+    ``--exclude=/<relpath>`` for each. Every parent component in the
+    relative path is passed through ``_escape_rsync_pattern`` so a real
+    directory whose name contains rsync wildmatch metacharacters
+    (``*``/``?``/``[``/``\\``) doesn't widen the exclude into a glob that
+    catches unrelated sibling subtrees. The excludes apply to both sides
+    of every rsync command they're passed to (transfer, ``--existing``
     conflict probe, ``--checksum`` verify), so a same-path Finder-managed
     difference at the destination is skipped alongside its source twin,
     and every other entry type — including symlinks and any real directory
@@ -1049,7 +1069,9 @@ def _rsync_finder_metadata_excludes(src_path):
             if os.path.islink(full):
                 continue
             rel = os.path.relpath(full, src_path).replace(os.sep, "/")
-            args.append(f"--exclude=/{rel}")
+            escaped = "/".join(_escape_rsync_pattern(part)
+                               for part in rel.split("/"))
+            args.append(f"--exclude=/{escaped}")
     return args
 
 
@@ -1147,18 +1169,26 @@ def _first_missing_source_file(src_path, dest_path, *, verify_contents=False):
     case; `samefile` catches the symlinked-parent case where `src_file`
     and `dst_file` resolve to the same inode.
 
-    Finder metadata (``.DS_Store``) is skipped: the merge deliberately does
-    not copy it, so a source ``.DS_Store`` with no counterpart -- or a
-    differently-sized counterpart -- at the destination must not be
-    reported as missing and refuse the delete. The source's copy vanishes
-    with the whole source tree after the delete goes through.
+    Finder metadata (``.DS_Store``) is skipped for REGULAR non-symlink
+    source files: those are the ones ``_rsync_finder_metadata_excludes``
+    drops from the transfer, so a missing or differently-sized destination
+    counterpart is expected and must not refuse the delete. A ``.DS_Store``
+    symlink is NOT excluded by the rsync helper (which preserves symlinks
+    with that name), but ``--ignore-existing`` skips it whenever the
+    destination already holds an entry at that path; without a real check
+    here, the source tree would then be deleted with the symlink never
+    landing at the destination. So the exemption applies only to regular
+    non-symlink files; every other entry type (symlink, directory, missing
+    source) falls through to the normal verification.
     """
     for root, _, files in os.walk(src_path):
         rel = os.path.relpath(root, src_path)
         for fn in files:
-            if fn in FINDER_METADATA_FILES:
-                continue
             src_file = os.path.join(root, fn)
+            if fn in FINDER_METADATA_FILES and \
+                    not os.path.islink(src_file) and \
+                    os.path.isfile(src_file):
+                continue
             rel_name = fn if rel == "." else os.path.join(rel, fn)
             dst_file = os.path.join(dest_path, rel_name)
             if not os.path.lexists(dst_file) or os.path.islink(dst_file):

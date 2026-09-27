@@ -3566,6 +3566,94 @@ def test_rsync_finder_metadata_excludes_missing_source_returns_empty(tmp_path):
     assert _rsync_finder_metadata_excludes(str(stray_file)) == []
 
 
+def test_rsync_finder_metadata_excludes_escape_wildmatch_metacharacters(tmp_path):
+    """When a parent directory's name contains rsync wildmatch
+    metacharacters (``*``, ``?``, ``[``, ``\\``), the generated exclude
+    must escape them. A bare ``--exclude=/a*/.DS_Store`` would otherwise
+    also drop any unrelated ``a<anything>/.DS_Store`` subtree from the
+    transfer, the conflict probe and the verify — and the post-merge
+    ``shutil.rmtree(src_path)`` would then destroy that neighbor without
+    ever copying it. Every wildmatch char in each parent component gets
+    a leading backslash so the pattern matches its own literal path."""
+    from move import _rsync_finder_metadata_excludes
+
+    src = tmp_path / "src"
+    src.mkdir()
+    tricky = src / "a*b"
+    tricky.mkdir()
+    (tricky / ".DS_Store").write_bytes(b"one")
+    bracket = src / "c[d]"
+    bracket.mkdir()
+    (bracket / ".DS_Store").write_bytes(b"two")
+    question = src / "q?x"
+    question.mkdir()
+    (question / ".DS_Store").write_bytes(b"three")
+
+    args = _rsync_finder_metadata_excludes(str(src))
+    # Every wildmatch metacharacter in a parent path component is escaped
+    # so the exclude matches only its own literal spelling.
+    assert "--exclude=/a\\*b/.DS_Store" in args, args
+    assert "--exclude=/c\\[d]/.DS_Store" in args, args
+    assert "--exclude=/q\\?x/.DS_Store" in args, args
+    # A neighbor that would be caught by an unescaped ``a*`` glob must
+    # not appear as a target.
+    assert "--exclude=/a*/.DS_Store" not in args, args
+
+
+def test_first_missing_source_file_flags_ds_store_symlink_at_destination(
+        tmp_path):
+    """A source ``.DS_Store`` that is a symlink is NOT excluded by
+    ``_rsync_finder_metadata_excludes`` (which preserves symlinks with that
+    name), so rsync tries to transfer it — but ``--ignore-existing`` skips
+    it when the destination already has an entry at that path. The
+    post-copy verifier must therefore NOT waive the check for the symlink:
+    a basename-only skip would authorize deleting the source tree without
+    the symlink ever landing at the destination. The exemption applies
+    only to REGULAR non-symlink ``.DS_Store`` files."""
+    from move import _first_missing_source_file
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "photo.jpg").write_bytes(b"\xff\xd8")
+    real_file = tmp_path / "elsewhere.bin"
+    real_file.write_bytes(b"pointed-to")
+    try:
+        os.symlink(str(real_file), str(src / ".DS_Store"))
+    except (OSError, NotImplementedError):
+        pytest.skip("Filesystem does not support symlinks")
+
+    dst = tmp_path / "dst"
+    dst.mkdir()
+    (dst / "photo.jpg").write_bytes(b"\xff\xd8")
+    # Destination has a regular .DS_Store (Finder wrote its own layout);
+    # the source-side symlink was skipped by rsync --ignore-existing.
+    (dst / ".DS_Store").write_bytes(b"archive window layout")
+
+    # Verification must flag the source symlink as missing at the
+    # destination so the source tree is not deleted.
+    assert _first_missing_source_file(str(src), str(dst)) == ".DS_Store"
+
+
+def test_first_missing_source_file_still_skips_regular_ds_store(tmp_path):
+    """The verification exemption for regular-file ``.DS_Store`` still
+    applies: the rsync helper excludes those from transfer and verify, so
+    a differently-sized destination counterpart -- or none at all -- must
+    not be reported as missing and refuse the delete. Guards against the
+    symlink-only fix over-tightening the check."""
+    from move import _first_missing_source_file
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "photo.jpg").write_bytes(b"\xff\xd8")
+    (src / ".DS_Store").write_bytes(b"source window layout")
+    dst = tmp_path / "dst"
+    dst.mkdir()
+    (dst / "photo.jpg").write_bytes(b"\xff\xd8")
+    (dst / ".DS_Store").write_bytes(b"archive window layout, larger")
+
+    assert _first_missing_source_file(str(src), str(dst)) is None
+
+
 def test_move_folder_merge_preserves_directory_named_ds_store(move_env):
     """A source subtree whose directory is literally named ``.DS_Store``
     must survive a merge. ``--exclude=.DS_Store`` alone would match the
