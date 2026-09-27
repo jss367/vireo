@@ -3501,23 +3501,69 @@ def test_move_folder_merge_ignores_differing_finder_metadata(move_env):
     assert not env["src"].exists()
 
 
-def test_rsync_finder_metadata_excludes_allows_same_named_directory():
-    """A bare ``--exclude=.DS_Store`` matches directories too, and would
-    drop a whole subtree from the transfer, the conflict probe and the
-    checksum verify -- with ``shutil.rmtree(src_path)`` then removing it
-    from the source after a "successful" merge. The filter must include
-    the directory form so rsync still recurses into it, then exclude only
-    the file entry."""
+def test_rsync_finder_metadata_excludes_targets_only_regular_files(tmp_path):
+    """The filter must skip Finder-managed ``.DS_Store`` files without
+    dropping same-named directories or symlinks. A pattern-based
+    ``--exclude=.DS_Store`` matches every entry type and would silently
+    drop those subtrees or links from the transfer, the conflict probe
+    and the checksum verify -- ``shutil.rmtree(src_path)`` after a
+    "successful" merge would then remove them from the source. rsync's
+    filter language can't distinguish entry type, so the helper walks the
+    source itself and emits anchored ``--exclude=/<relpath>`` for each
+    regular ``.DS_Store`` file only."""
     from move import _rsync_finder_metadata_excludes
 
-    args = _rsync_finder_metadata_excludes()
-    # For every metadata name, the directory include must come BEFORE the
-    # bare exclude so rsync's first-match-wins keeps same-named dirs.
-    assert "--include=.DS_Store/" in args
-    assert "--exclude=.DS_Store" in args
-    include_idx = args.index("--include=.DS_Store/")
-    exclude_idx = args.index("--exclude=.DS_Store")
-    assert include_idx < exclude_idx, args
+    src = tmp_path / "src"
+    (src / "sub").mkdir(parents=True)
+    (src / ".DS_Store").write_bytes(b"top")
+    (src / "sub" / ".DS_Store").write_bytes(b"sub")
+    (src / "sub" / "keeper.jpg").write_bytes(b"\xff\xd8")
+    # Something else with the same NAME as .DS_Store that must survive: a
+    # directory in one place, a symlink-to-directory in another. Both
+    # would be swept up by an untyped exclude pattern.
+    quirky_dir = src / "quirky"
+    quirky_dir.mkdir()
+    (quirky_dir / ".DS_Store").mkdir()  # directory named .DS_Store
+    (quirky_dir / ".DS_Store" / "keeper.jpg").write_bytes(b"in-dir")
+    real_dir = tmp_path / "elsewhere"
+    real_dir.mkdir()
+    (real_dir / "photo.jpg").write_bytes(b"pointed-to")
+    (src / "linked").mkdir()
+    try:
+        os.symlink(str(real_dir), str(src / "linked" / ".DS_Store"),
+                   target_is_directory=True)
+    except (OSError, NotImplementedError):
+        # Windows without symlink privilege; the other assertions still
+        # exercise the file/dir split. Guard so the test remains portable.
+        symlink_supported = False
+    else:
+        symlink_supported = True
+
+    args = _rsync_finder_metadata_excludes(str(src))
+    # Every regular .DS_Store file has an anchored, relative-path exclude.
+    assert "--exclude=/.DS_Store" in args, args
+    assert "--exclude=/sub/.DS_Store" in args, args
+    # No pattern-form exclude that would sweep up dirs/symlinks by name.
+    assert "--exclude=.DS_Store" not in args, args
+    assert "--include=.DS_Store/" not in args, args
+    # The directory and (when supported) the symlink share the same
+    # basename as the metadata file, but neither is a regular file: they
+    # must NOT get an exclude.
+    assert "--exclude=/quirky/.DS_Store" not in args, args
+    if symlink_supported:
+        assert "--exclude=/linked/.DS_Store" not in args, args
+
+
+def test_rsync_finder_metadata_excludes_missing_source_returns_empty(tmp_path):
+    """An absent or non-directory source (a caller passing a path that
+    hasn't been created yet, or a file) yields no excludes rather than an
+    error. Callers still layer the excludes onto rsync's args safely."""
+    from move import _rsync_finder_metadata_excludes
+
+    assert _rsync_finder_metadata_excludes(str(tmp_path / "missing")) == []
+    stray_file = tmp_path / "file"
+    stray_file.write_text("x")
+    assert _rsync_finder_metadata_excludes(str(stray_file)) == []
 
 
 def test_move_folder_merge_preserves_directory_named_ds_store(move_env):
@@ -3553,6 +3599,53 @@ def test_move_folder_merge_preserves_directory_named_ds_store(move_env):
         b"\xff\xd8" + b"\x11" * 128
     assert (landing / ".DS_Store" / "extra.xmp").is_file()
     # And the source is gone after the successful merge.
+    assert not env["src"].exists()
+
+
+def test_move_folder_merge_preserves_ds_store_directory_symlink(move_env):
+    """A source ``.DS_Store`` entry that is a symlink to a directory must
+    survive a merge. rsync classifies such an entry as a symlink, not a
+    directory, so an ``--include=.DS_Store/`` guard doesn't cover it — a
+    pattern-form ``--exclude=.DS_Store`` would then drop it from the
+    transfer, the conflict probe and the checksum verify, and the
+    post-merge ``shutil.rmtree`` on the source would remove the symlink
+    itself. Matches how ``preview_merge`` and the shutil fallback both
+    preserve directory symlinks."""
+    from move import move_folder
+
+    env = move_env
+    # Something for the symlink to point at, outside the src tree so the
+    # merge doesn't traverse it as part of the source.
+    target_dir = env["tmp_path"] / "linked_target"
+    target_dir.mkdir()
+    (target_dir / "pointed.jpg").write_bytes(b"link-target")
+
+    linked_parent = env["src"] / "linked"
+    linked_parent.mkdir()
+    try:
+        os.symlink(str(target_dir), str(linked_parent / ".DS_Store"),
+                   target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("Filesystem does not support directory symlinks")
+
+    landing = env["dst"] / "src"
+    landing.mkdir()
+
+    result = move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]),
+        merge=True,
+    )
+    assert not result.get("errors"), result
+    # The symlink itself must land at the destination, still pointing at
+    # the same target (rsync -a preserves symlinks rather than following
+    # them, matching the shutil fallback's os.symlink handling).
+    dst_link = landing / "linked" / ".DS_Store"
+    assert dst_link.is_symlink(), (
+        "the .DS_Store symlink must land at the destination, not be dropped"
+    )
+    assert os.readlink(str(dst_link)) == str(target_dir)
+    # And the source is gone after the successful merge (a lingering
+    # source symlink would mean the merge only pretended to carry it).
     assert not env["src"].exists()
 
 

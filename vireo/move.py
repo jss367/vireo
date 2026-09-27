@@ -745,7 +745,7 @@ def _remote_verify_complete(rsync_bin, src_path, rsync_target, remote,
     cmd = [rsync_bin, "-an", "--checksum", "--out-format=%n",
            "-e", _ssh_rsh_string(remote)]
     if is_merge:
-        cmd += _rsync_finder_metadata_excludes()
+        cmd += _rsync_finder_metadata_excludes(src_path)
     cmd += [src_path + "/", rsync_target + "/"]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True,
@@ -1011,7 +1011,7 @@ def _run_rsync_streamed(src_path, dest_spec, rsync_flags, total_files,
 FINDER_METADATA_FILES = frozenset({".DS_Store"})
 
 
-def _rsync_finder_metadata_excludes():
+def _rsync_finder_metadata_excludes(src_path):
     """rsync filter args that skip Finder metadata FILES on both sides.
 
     Used for merges only. A fresh move still carries these along, matching
@@ -1019,24 +1019,37 @@ def _rsync_finder_metadata_excludes():
     holds its own copies needs to skip them so a Finder-managed difference
     doesn't fail the copy or the verification.
 
-    A bare ``--exclude=<name>`` also drops *directories* named ``.DS_Store``
-    (rsync patterns without a trailing slash match files and directories
-    alike). If a source happened to hold such a directory -- unlikely but
-    not impossible on cross-platform disks -- rsync would skip the whole
-    subtree during transfer, conflict probe and verification alike, then
-    ``shutil.rmtree(src_path)`` after a "successful" merge would delete
-    it from the source without ever copying it. Include the directory
-    form first so rsync still recurses into it; the exclude then drops
-    only the same-named file entry.
+    The exclude has to skip regular files while leaving directories and
+    symlinks with the same name alone: a pattern that matches every entry
+    type would silently drop those from the transfer, the conflict probe
+    and the checksum verify, and ``shutil.rmtree(src_path)`` after a
+    "successful" merge would then delete them from the source without ever
+    copying them. rsync's filter language can't distinguish entry type on
+    its own, so we walk ``src_path`` ourselves, collect the regular-file
+    ``.DS_Store`` entries (not directories, not symlinks — a ``.DS_Store``
+    symlink to a directory is classified as a symlink by rsync and would
+    slip past an ``--include=<name>/`` guard), and emit an anchored
+    ``--exclude=/<relpath>`` for each. The excludes apply to both sides of
+    every rsync command they're passed to (transfer, ``--existing``
+    conflict probe, ``--checksum`` verify), so a same-path Finder-managed
+    difference at the destination is skipped alongside its source twin,
+    and every other entry type — including symlinks and any real directory
+    that happens to be named ``.DS_Store`` — is untouched.
     """
     args = []
-    for name in sorted(FINDER_METADATA_FILES):
-        # Trailing '/' matches directories only -- let rsync descend into
-        # any same-named directory (an edge case, but a silently-dropped
-        # subtree combined with post-merge source removal would lose data).
-        args.append(f"--include={name}/")
-        # No trailing slash: matches the file entry we actually want to skip.
-        args.append(f"--exclude={name}")
+    if not os.path.isdir(src_path):
+        return args
+    for root, _, files in os.walk(src_path):
+        for fn in files:
+            if fn not in FINDER_METADATA_FILES:
+                continue
+            full = os.path.join(root, fn)
+            # os.walk lists symlinks-to-files under `files`; skip them so a
+            # source-side symlink named .DS_Store survives the merge.
+            if os.path.islink(full):
+                continue
+            rel = os.path.relpath(full, src_path).replace(os.sep, "/")
+            args.append(f"--exclude=/{rel}")
     return args
 
 
@@ -1094,7 +1107,7 @@ def _find_remote_content_conflict(rsync_bin, src_path, rsync_target, remote):
     cmd = [rsync_bin, "-an", "--existing", "--checksum",
            "--out-format=%n",
            "-e", _ssh_rsh_string(remote),
-           *_rsync_finder_metadata_excludes(),
+           *_rsync_finder_metadata_excludes(src_path),
            src_path + "/", rsync_target + "/"]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True,
@@ -3198,7 +3211,7 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     # until the whole tree is removed after a successful merge; a failed
     # merge leaves it untouched with the rest of the source.
     if dest_exists:
-        rsync_flags += _rsync_finder_metadata_excludes()
+        rsync_flags += _rsync_finder_metadata_excludes(src_path)
 
     try:
         returncode, stderr, timed_out = _run_rsync_streamed(
