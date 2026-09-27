@@ -55,6 +55,8 @@ def _make_cancellation_error():
     try:
         from classifier import ClassificationCancelled
     except Exception:
+        # Cancellation must still surface as a cancellation when the
+        # classifier module cannot load; a local stand-in keeps the name.
         class ClassificationCancelled(RuntimeError):
             pass
     return ClassificationCancelled("classification cancelled")

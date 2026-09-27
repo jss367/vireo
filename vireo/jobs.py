@@ -3,6 +3,7 @@
 import json
 import logging
 import queue
+import sqlite3
 import threading
 import time
 from collections import deque
@@ -339,7 +340,7 @@ class JobRunner:
         # Migration: add workspace_id to existing job_history tables
         try:
             db.conn.execute("SELECT workspace_id FROM job_history LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:  # no such column: add it
             db.conn.execute(
                 "ALTER TABLE job_history ADD COLUMN workspace_id INTEGER"
             )
@@ -349,12 +350,12 @@ class JobRunner:
         # Migration: add tree column
         try:
             db.conn.execute("SELECT tree FROM job_history LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:  # no such column: add it
             db.conn.execute("ALTER TABLE job_history ADD COLUMN tree TEXT")
         # Migration: add summary column
         try:
             db.conn.execute("SELECT summary FROM job_history LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:  # no such column: add it
             db.conn.execute("ALTER TABLE job_history ADD COLUMN summary TEXT DEFAULT ''")
         for column, definition in (
             ("resource_wait_seconds", "REAL DEFAULT 0"),
@@ -365,7 +366,7 @@ class JobRunner:
         ):
             try:
                 db.conn.execute(f"SELECT {column} FROM job_history LIMIT 0")
-            except Exception:
+            except sqlite3.OperationalError:  # no such column: add it
                 db.conn.execute(
                     f"ALTER TABLE job_history ADD COLUMN {column} {definition}"
                 )
@@ -1688,6 +1689,7 @@ class JobRunner:
                 result.append(d)
             return result
         except Exception:
+            log.warning("Could not read job history", exc_info=True)
             return []
 
     def push_event(self, job_id, event_type, data):

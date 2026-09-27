@@ -278,6 +278,10 @@ def detect_stage(
                         "detector_confidence", 0.2,
                     )
                 except Exception:
+                    log.warning(
+                        "Could not read workspace detector settings; using defaults",
+                        exc_info=True,
+                    )
                     _effective_cfg = {}
                     _det_conf = 0.2
 
@@ -465,6 +469,11 @@ def detect_stage(
                             if crt:
                                 known_classifier_runtimes.add(crt)
                     except Exception:
+                        log.warning(
+                            "Could not compute classifier runtime fingerprints; "
+                            "reapplying without a classifier filter",
+                            exc_info=True,
+                        )
                         known_classifier_runtimes = set()
                 from computation_cache import ArtifactStore
 

@@ -15,6 +15,10 @@ routes that decide predictions do that through ``services.prediction_decisions``
 
 from __future__ import annotations
 
+import logging
+
+log = logging.getLogger(__name__)
+
 
 def effective_category_resolver(db, photo_ids):
     """Build ``(photo_id, species) -> category`` against *current* keywords.
@@ -56,7 +60,8 @@ def effective_category_resolver(db, photo_ids):
         return None
     try:
         from compare import compare_prediction_to_keywords
-    except Exception:
+    except ImportError:
+        log.warning("compare module unavailable; using stored ambiguity snapshots", exc_info=True)
         return None
     # Cached by mtime inside load_local_taxonomy, so this is a lookup on
     # the hot path rather than a re-parse per request. None degrades
@@ -68,6 +73,7 @@ def effective_category_resolver(db, photo_ids):
         from taxonomy import load_local_taxonomy
         taxonomy = load_local_taxonomy()
     except Exception:
+        log.warning("Local taxonomy unavailable; comparing species by exact name", exc_info=True)
         taxonomy = None
     from species_identity import SpeciesResolver
     resolver = SpeciesResolver(db=db)

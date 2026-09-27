@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import logging
 import math
 import os
 import shutil
@@ -19,6 +20,8 @@ import threading
 import zipfile
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
+
+log = logging.getLogger(__name__)
 
 ARTIFACT_SCHEMA = 1
 BUNDLE_FORMAT = 1
@@ -232,6 +235,7 @@ def local_label_descriptions_identity(active_model):
             os.path.join(weights_path, LABEL_DESCRIPTIONS_FILE),
         )
     except Exception:
+        log.debug("Could not read label descriptions under %s", weights_path, exc_info=True)
         return NO_LABEL_DESCRIPTIONS
     return label_descriptions_identity(descs)
 
@@ -387,6 +391,7 @@ def local_taxonomy_identity():
     try:
         tax = load_local_taxonomy()
     except Exception:
+        log.debug("Could not load the local taxonomy for its identity", exc_info=True)
         return "no-tax"
     return taxonomy_identity(tax)
 
@@ -409,6 +414,7 @@ def local_synonyms_identity():
     try:
         return scientific_synonyms_identity()
     except Exception:
+        log.debug("Could not read the scientific-name synonym map identity", exc_info=True)
         return "no-synonyms"
 
 
@@ -1863,6 +1869,7 @@ def _local_classifier_runtimes(classifier_model, cache):
     try:
         installed = get_models()
     except Exception:
+        log.warning("Could not list installed models to match classifier identities", exc_info=True)
         cache[classifier_model] = identities
         return identities
     for model in installed:

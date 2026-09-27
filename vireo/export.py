@@ -815,7 +815,7 @@ def export_photos(db, vireo_dir, photo_ids, destination=None, options=None,
             if claimed_out_path:
                 with contextlib.suppress(OSError):
                     os.unlink(claimed_out_path)
-            log.warning("Export failed for %s: %s", photo["filename"], exc)
+            log.warning("Export failed for %s: %s", photo["filename"], exc, exc_info=True)
             errors.append(f"{photo['filename']}: {exc}")
 
         if progress_cb:
@@ -1234,6 +1234,9 @@ def _developed_can_satisfy_size(dev_path, photo, max_size, recipe=None, exif_dat
         with Image.open(dev_path) as img:
             dev_w, dev_h = _image_size_after_exif_orientation(img)
     except Exception:
+        # PIL raises a wide set (OSError, SyntaxError, DecompressionBombError);
+        # an unreadable developed file keeps the documented default.
+        log.debug("Could not read the developed output size of %s", dev_path, exc_info=True)
         return True
     dev_long = _recipe_result_long_edge(dev_w, dev_h, recipe)
     original_w, original_h = _recipe_source_dimensions(photo, exif_data)
@@ -1728,6 +1731,7 @@ def _working_copy_can_satisfy_export(
         with Image.open(wc_path) as wc_img:
             wc_w, wc_h = wc_img.size
     except Exception:
+        log.debug("Could not read the working copy size of %s", wc_path, exc_info=True)
         return False
 
     wc_render_long = _recipe_result_long_edge(wc_w, wc_h, recipe)
@@ -1783,6 +1787,7 @@ def _companion_can_satisfy_export(
         with Image.open(companion) as img:
             comp_w, comp_h = _image_size_after_exif_orientation(img)
     except Exception:
+        log.debug("Could not read the companion JPEG size of %s", companion, exc_info=True)
         return None
 
     original_w, original_h = _recipe_source_dimensions(photo, exif_data)

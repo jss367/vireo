@@ -159,6 +159,7 @@ def create_workspace_blueprint(
         try:
             tabs = db.get_tabs()
         except Exception:
+            log.warning("Could not read workspace tabs; showing defaults", exc_info=True)
             tabs = list(DEFAULT_TABS)
         return jsonify({
             "tabs": tabs,
@@ -351,6 +352,7 @@ def create_workspace_blueprint(
                 ws = db.get_workspace(ws_id)
             return jsonify(dict(ws))
         except Exception as e:
+            log.warning("Workspace creation failed", exc_info=True)
             return json_error(str(e))
 
     @blueprint.route("/api/workspaces/<int:ws_id>", methods=["PUT"])
@@ -711,6 +713,7 @@ def create_workspace_blueprint(
                 try:
                     target_ws_id = db.create_workspace(new_ws_name)
                 except Exception as e:
+                    log.warning("Workspace creation for folder move failed", exc_info=True)
                     return json_error(f"Failed to create workspace: {e}")
 
             try:
@@ -759,10 +762,10 @@ def create_workspace_blueprint(
             return jsonify({})
         overrides = {}
         if ws["config_overrides"]:
-            try:  # noqa: SIM105 (moved verbatim from app.py)
+            try:
                 overrides = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
-            except Exception:
-                pass
+            except (TypeError, ValueError):
+                log.warning("Workspace %s has unreadable config overrides", ws["id"], exc_info=True)
         return jsonify(overrides)
 
     @blueprint.route("/api/workspaces/active/config", methods=["POST"])
@@ -803,10 +806,13 @@ def create_workspace_blueprint(
             ws = db.get_workspace(db._active_workspace_id)
             existing = {}
             if ws and ws["config_overrides"]:
-                try:  # noqa: SIM105 (moved verbatim from app.py)
+                try:
                     existing = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
-                except Exception:
-                    pass
+                except (TypeError, ValueError):
+                    log.warning(
+                        "Workspace %s has unreadable config overrides; this save replaces them",
+                        ws["id"], exc_info=True,
+                    )
             if not isinstance(existing, dict):
                 existing = {}
             # A stored "abc" or {} used to write through here and then fail
@@ -883,7 +889,11 @@ def create_workspace_blueprint(
             if ws["config_overrides"]:
                 try:
                     existing = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
-                except Exception:
+                except (TypeError, ValueError):
+                    log.warning(
+                        "Workspace %s has unreadable config overrides; this save replaces them",
+                        ws_id, exc_info=True,
+                    )
                     existing = {}
             # `config_overrides` is JSON, so a previous PUT /api/workspaces/<id>
             # could have stored a list/string/number. Coerce to {} before key

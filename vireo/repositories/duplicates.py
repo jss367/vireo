@@ -42,7 +42,7 @@ def _volume_offline(path):
     """
     try:
         from volume_reachability import get_shared as _volume_reachability
-    except Exception:
+    except ImportError:
         return False
     root, reachable = _volume_reachability().check(path)
     return root is not None and not reachable

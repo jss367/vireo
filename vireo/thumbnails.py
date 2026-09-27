@@ -168,7 +168,7 @@ def _retry_thumbnail_with_companion(
     )
     file_mtime = _photo_value(photo, "file_mtime")
     if file_mtime is not None and photo_id is not None and hasattr(db, "conn"):
-        with contextlib.suppress(Exception):
+        try:
             db.conn.execute(
                 "UPDATE photos SET"
                 " working_copy_failed_at=datetime('now'),"
@@ -178,6 +178,9 @@ def _retry_thumbnail_with_companion(
                 (file_mtime, photo_id),
             )
             db.conn.commit()
+        except Exception:
+            # Without the marker the RAW decode is simply retried next time.
+            log.warning("Could not record RAW decode failure for photo %s", photo_id, exc_info=True)
     recipe_kwargs = {"recipe": recipe} if recipe else {}
     if recipe:
         recipe_kwargs["camera_metadata"] = photo
@@ -214,7 +217,7 @@ def _retry_thumbnail_with_working_copy(
     )
     file_mtime = _photo_value(photo, "file_mtime")
     if file_mtime is not None and photo_id is not None and hasattr(db, "conn"):
-        with contextlib.suppress(Exception):
+        try:
             db.conn.execute(
                 "UPDATE photos SET"
                 " working_copy_failed_at=datetime('now'),"
@@ -224,6 +227,9 @@ def _retry_thumbnail_with_working_copy(
                 (file_mtime, photo_id),
             )
             db.conn.commit()
+        except Exception:
+            # Without the marker the RAW decode is simply retried next time.
+            log.warning("Could not record RAW decode failure for photo %s", photo_id, exc_info=True)
     recipe_kwargs = {"recipe": recipe, "native_size": _recipe_source_dimensions(photo), "camera_metadata": photo}
     return generate_thumbnail(
         photo_id,

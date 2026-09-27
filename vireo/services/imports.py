@@ -496,6 +496,7 @@ class ImportService:
                 None,
             )
         except Exception as e:
+            log.warning("Could not create the import's new workspace %r", name, exc_info=True)
             return None, None, previous_active_ws, ImportFailure(str(e))
 
     def _rollback_import_workspace(self, db, created_workspace, previous_active_ws):

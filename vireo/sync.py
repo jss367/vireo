@@ -720,6 +720,7 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
                 sync_location_keywords_state,
             )
         except Exception as e:
+            log.warning("Could not plan XMP sync for photo %s", photo_id, exc_info=True)
             # A malformed queue row -- a rating whose value is NULL or not an
             # integer, which the schema permits -- must fail its own photo, as
             # it did when planning ran inside the per-photo try, rather than
@@ -761,6 +762,7 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
                     allow_sync_only=True,
                 )
             except Exception as e:
+                log.warning("Could not read location for XMP sync of photo %s", photo_id, exc_info=True)
                 # Historically this lookup ran inside the per-photo try, so a
                 # photo the workspace can no longer see failed alone rather
                 # than aborting the run.
@@ -848,6 +850,7 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
                     create_missing_sidecars=create_missing_sidecars,
                 )
             except Exception as e:
+                log.warning("XMP sidecar write failed for photo %s", photo_id, exc_info=True)
                 errors.setdefault(photo_id, e)
         if not errors:
             return dict.fromkeys(photo_ids)

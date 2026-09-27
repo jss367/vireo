@@ -243,10 +243,12 @@ def classify_stage(
                 f"Resume to keep classifying."
             )
             if step_id is not None:
-                with contextlib.suppress(Exception):
+                try:
                     run.runner.update_step(
                         run.job["id"], step_id, current_file=message,
                     )
+                except Exception:
+                    log.warning("Could not publish the classify pause reason", exc_info=True)
             run.emit_progress(
                 run.runner, run.job["id"], run.stages, "classify",
                 message,
@@ -262,10 +264,12 @@ def classify_stage(
             and Resume" banner visible while classify happily runs.
             """
             if step_id is not None:
-                with contextlib.suppress(Exception):
+                try:
                     run.runner.update_step(
                         run.job["id"], step_id, current_file="",
                     )
+                except Exception:
+                    log.warning("Could not clear the classify pause reason", exc_info=True)
             run.emit_progress(
                 run.runner, run.job["id"], run.stages, "classify",
                 "Resumed classification",
@@ -307,8 +311,10 @@ def classify_stage(
             pause = getattr(run.runner, "pause_job", None)
             paused = False
             if pause is not None:
-                with contextlib.suppress(Exception):
+                try:
                     paused = bool(pause(run.job["id"]))
+                except Exception:
+                    log.warning("Could not pause classify for an offline source", exc_info=True)
             if not paused:
                 # ``pause_job`` returns False in two very different
                 # cases: (a) the job is not pausable at all — a
@@ -327,8 +333,10 @@ def classify_stage(
                 pause_probe = getattr(run.runner, "pause_requested", None)
                 already_pausing = False
                 if pause_probe is not None:
-                    with contextlib.suppress(Exception):
+                    try:
                         already_pausing = bool(pause_probe(run.job["id"]))
+                    except Exception:
+                        log.warning("Could not read the job's pause request", exc_info=True)
                 if not already_pausing:
                     # Nothing to park on. Stop rather than spin
                     # through the rest of the collection
@@ -755,6 +763,7 @@ def classify_stage(
 
             def _close_pending_inference(inference_batch=inference_batch):
                 for entry in inference_batch:
+                    # Releasing decoded images; a close failure frees nothing more.
                     with contextlib.suppress(Exception):
                         entry["img"].close()
                 inference_batch.clear()

@@ -309,7 +309,7 @@ def _preserve_corrupt_config():
         shutil.copy2(CONFIG_PATH, backup)
         log.warning("Config file is unreadable; preserved a copy at %s", backup)
     except OSError:
-        pass
+        log.warning("Could not back up the unreadable config file to %s", backup, exc_info=True)
 
 
 def load():
@@ -320,7 +320,10 @@ def load():
             with open(CONFIG_PATH) as f:
                 config = _deep_merge(config, json.load(f))
         except Exception:
-            log.warning("Failed to read config, using defaults")
+            # Broad on purpose: config.load() runs on nearly every request and
+            # at startup, and a corrupt file must fall back to defaults rather
+            # than take the app down (the original is preserved first).
+            log.warning("Failed to read config, using defaults", exc_info=True)
             _preserve_corrupt_config()
     return _repair_types(config)
 

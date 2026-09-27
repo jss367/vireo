@@ -23,7 +23,6 @@ others. This module holds the canonical implementations; the per-flow modules
 import them so a single change covers every flow.
 """
 
-import contextlib
 import json
 import logging
 import os
@@ -152,8 +151,11 @@ def image_size_after_exif_orientation(img):
     """Return an opened image's (width, height) after EXIF transpose."""
     width, height = img.size
     orientation = None
-    with contextlib.suppress(Exception):
+    try:
         orientation = img.getexif().get(EXIF_ORIENTATION_TAG)
+    except Exception:
+        # Malformed EXIF raises a wide set from PIL; treat as unrotated.
+        log.debug("Could not read EXIF orientation", exc_info=True)
     if orientation_swaps_axes(orientation):
         return height, width
     return width, height
@@ -279,6 +281,8 @@ def working_copy_satisfies_recipe_render(
         with _PILImage.open(wc_path) as wc_img:
             wc_w, wc_h = image_size_after_exif_orientation(wc_img)
     except Exception:
+        # PIL raises a wide set (OSError, SyntaxError, DecompressionBombError).
+        log.debug("Could not read working copy size of %s", wc_path, exc_info=True)
         return False
     original_w, original_h = recipe_source_dimensions(photo)
     if original_w <= 0 or original_h <= 0:
@@ -347,6 +351,7 @@ def path_satisfies_recipe_render(path, photo, recipe, max_size):
         with _PILImage.open(path) as img:
             width, height = image_size_after_exif_orientation(img)
     except Exception:
+        log.debug("Could not read image size of %s", path, exc_info=True)
         return False
     required_w, required_h = rendered_recipe_dimensions(
         original_w, original_h, recipe,

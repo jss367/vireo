@@ -22,6 +22,7 @@ import logging
 import math
 import os
 import re
+import sqlite3
 import tempfile
 import time
 
@@ -430,6 +431,7 @@ def create_media_blueprint(
             try:
                 row = get_db().offline_original_get(photo["id"])
             except Exception:
+                log.warning("Could not read offline original for photo %s", photo["id"], exc_info=True)
                 return None
             if not row or not row[column]:
                 return None
@@ -1350,7 +1352,7 @@ def create_media_blueprint(
             and db.preview_cache_get(photo_id, size)
             and os.path.exists(cache_path)
         ):
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(sqlite3.Error):
                 db.preview_cache_touch(photo_id, size)
             return send_file(cache_path, mimetype="image/jpeg")
 
@@ -1373,7 +1375,9 @@ def create_media_blueprint(
                 db.preview_cache_insert(photo_id, size, len(data))
                 evict_preview_cache_if_over_quota(db, vireo_dir)
             except Exception:
-                pass
+                # The bytes are already in memory; bookkeeping must not
+                # turn a cache hit into a 500.
+                log.warning("Could not adopt untracked preview for photo %s", photo_id, exc_info=True)
             return Response(data, mimetype="image/jpeg")
 
         # Paired-render cache hit: an earlier equal-key producer already
@@ -1458,8 +1462,10 @@ def create_media_blueprint(
         if not bypass_cache and rendered.published:
             invalid_preview_cache_paths.discard(cache_path)
             clear_preview_cache_invalid(db, photo_id, size)
-            with contextlib.suppress(Exception):
+            try:
                 evict_preview_cache_if_over_quota(db, vireo_dir)
+            except Exception:
+                log.warning("Preview cache eviction failed after render", exc_info=True)
         # Publish the paired-render bytes so an equal-key follower still
         # inside preview_artifact_flights.run() finds a ready artifact when
         # it re-enters _serve_preview instead of decoding the same source.
@@ -1787,7 +1793,7 @@ def create_media_blueprint(
                         # Some RAW formats cannot be opened by Pillow. Their
                         # stored native dimensions remain the best available
                         # decode bound.
-                        pass
+                        log.debug("Could not read dimensions of %s", canonical, exc_info=True)
                     if all(selected_dims):
                         selected_source_long = max(selected_dims)
                         rendered_long = rendered_recipe_long_edge(
@@ -2306,6 +2312,7 @@ def create_media_blueprint(
                 with _PILImage.open(wc_path) as _wc_img:
                     wc_w, wc_h = _image_size_after_exif_orientation(_wc_img)
             except Exception:
+                log.debug("Could not read working copy size of %s", wc_path, exc_info=True)
                 wc_w = wc_h = 0
             # Compare in display-orientation space: ``extract_working_copy``
             # writes the EXIF-transposed JPEG (e.g. 4000x6000 for a portrait
@@ -2372,6 +2379,7 @@ def create_media_blueprint(
                 with _PILImage.open(companion_abs) as _cimg:
                     c_w, c_h = _cimg.size
             except Exception:
+                log.debug("Could not read companion JPEG size of %s", companion_abs, exc_info=True)
                 return None
             # Camera JPEGs commonly omit a narrow sensor border. Match the
             # tolerance used by camera-rendered RAW loading so a near-full
@@ -3065,7 +3073,7 @@ def create_media_blueprint(
                     while chunk := rendition_fh.read(1024 * 1024):
                         yield chunk
                 finally:
-                    with contextlib.suppress(Exception):
+                    with contextlib.suppress(OSError):  # close of a read-only handle
                         rendition_fh.close()
                     with contextlib.suppress(OSError):
                         os.unlink(transient_path)

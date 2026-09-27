@@ -870,6 +870,7 @@ def extract_working_copy(
                     tmp_path, exc_info=True,
                 )
         if img is not None:
+            # Cleanup in ``finally`` must not replace the extraction result.
             with contextlib.suppress(Exception):
                 img.close()
 
@@ -981,6 +982,8 @@ def _extract_embedded_jpeg(raw):
     try:
         thumb = raw.extract_thumb()
     except Exception:
+        # rawpy raises LibRawError subclasses for files without a preview.
+        log.debug("RAW file has no extractable embedded preview", exc_info=True)
         return None
     if thumb.format != rawpy.ThumbFormat.JPEG:
         return None
@@ -993,6 +996,7 @@ def _extract_embedded_jpeg(raw):
         img = ImageOps.exif_transpose(img)
         return img.convert("RGB")
     except Exception:
+        log.debug("Could not decode the embedded RAW preview", exc_info=True)
         return None
 
 

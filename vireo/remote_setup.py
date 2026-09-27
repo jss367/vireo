@@ -176,7 +176,9 @@ def friendly_host_name(host, resolver=None):
         return host
     try:
         name = (resolver or _reverse_dns)(host)
-    except Exception:
+    except (OSError, ValueError):
+        # No PTR record, timeout (TimeoutError), or an undecodable name: a
+        # missing friendly name is routine, so the raw address stands.
         return host
     return (name or host).rstrip(".") or host
 

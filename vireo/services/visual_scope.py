@@ -93,6 +93,7 @@ def inject_active_visual_model(rules):
         from models import get_active_model
         active = get_active_model()
     except Exception:
+        log.warning("Could not resolve the active visual model; treating it as none", exc_info=True)
         active = None
     model_name = active.get("name") if active else None
     injected_model = model_name or _NO_ACTIVE_VISUAL_MODEL

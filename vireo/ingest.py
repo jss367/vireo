@@ -761,7 +761,7 @@ def ingest(
         try:
             token = checker.match(source_file) if checker is not None else None
         except Exception as e:
-            log.warning("Failed to ingest %s: %s", source_file, e)
+            log.warning("Failed to ingest %s: %s", source_file, e, exc_info=True)
             failed += 1
         else:
             if token is None:
@@ -1102,7 +1102,7 @@ def ingest(
             copied += 1
 
         except Exception as e:
-            log.warning("Failed to ingest %s: %s", source_file, e)
+            log.warning("Failed to ingest %s: %s", source_file, e, exc_info=True)
             failed += 1
 
         finally:

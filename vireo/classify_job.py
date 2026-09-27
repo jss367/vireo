@@ -10,6 +10,7 @@ import json
 import logging
 import math
 import os
+import sqlite3
 import time
 from dataclasses import dataclass
 
@@ -108,6 +109,24 @@ def _load_taxonomy(taxonomy_path):
         log.warning(
             "Could not load taxonomy: %s — continuing without taxonomy enrichment", e
         )
+        return None
+
+
+def _photo_timestamp(photo):
+    """Parse a photo row's stored ISO timestamp, or ``None``.
+
+    A malformed stored value only costs the prediction its capture time, so it
+    is logged rather than failing the photo's classification.
+    """
+    raw = photo["timestamp"]
+    if not raw:
+        return None
+    from datetime import datetime
+
+    try:
+        return datetime.fromisoformat(raw)
+    except (TypeError, ValueError):
+        log.debug("Ignoring unparseable photo timestamp %r", raw)
         return None
 
 
@@ -970,6 +989,10 @@ def _stored_detection_list(db, photo_id, min_conf=None):
             else db.get_detections(photo_id, min_conf=min_conf)
         )
     except Exception:
+        log.warning(
+            "Could not read stored detections for photo %s; treating it as having none",
+            photo_id, exc_info=True,
+        )
         return []
     return [{
         "id": d["id"],
@@ -1067,8 +1090,12 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
                         # Empty and now-subthreshold cached runs still need
                         # to clear outputs from their former primary.
                         processed_ids.add(photo["id"])
-                except Exception:
-                    pass
+                except sqlite3.Error:
+                    log.warning(
+                        "Could not read cached detections for photo %s; "
+                        "skipping its subject-analysis backfill",
+                        photo["id"], exc_info=True,
+                    )
             detection_photos: list = []
         else:
             detection_photos = photos
@@ -1310,6 +1337,11 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
                             finally:
                                 img.close()
                         except Exception:
+                            log.debug(
+                                "Subject-region sharpness failed for photo %s; "
+                                "using whole-frame sharpness",
+                                photo["id"], exc_info=True,
+                            )
                             subject_sharpness = overall_sharpness
 
                         if subject_sharpness is not None and subject_size is not None:
@@ -1994,7 +2026,6 @@ def _flush_batch(batch, clf, model_type, model_name, db, raw_results, top_k=1,
     while the batch waited for an inference slot) instead of retrying each
     image and counting every one as a failure. The images are still closed.
     """
-    from datetime import datetime as dt
 
     images = [entry["img"] for entry in batch]
     failed = 0
@@ -2079,12 +2110,7 @@ def _flush_batch(batch, clf, model_type, model_name, db, raw_results, top_k=1,
                 top["score"] * 100,
             )
 
-            timestamp = None
-            if entry["photo"]["timestamp"]:
-                try:
-                    timestamp = dt.fromisoformat(entry["photo"]["timestamp"])
-                except Exception:
-                    pass
+            timestamp = _photo_timestamp(entry["photo"])
 
             # Build alternatives list (predictions 2..top_k)
             alternatives = []
@@ -2161,7 +2187,6 @@ def _classify_photos(
     # Fall back to the legacy sentinel when the caller didn't compute a
     # fingerprint — matches the default used by classifier_runs.
     fp = labels_fingerprint or "legacy"
-    from datetime import datetime as dt
 
     if load_image is None:
         raise ImportError("image_loader module is required for classification")
@@ -2353,12 +2378,7 @@ def _classify_photos(
             # lowered `detector_confidence`, leaving them unclassified
             # until --reclassify. The per-detection classifier_runs gate
             # below handles incremental work correctly.
-            timestamp = None
-            if photo["timestamp"]:
-                try:
-                    timestamp = dt.fromisoformat(photo["timestamp"])
-                except Exception:
-                    pass
+            timestamp = _photo_timestamp(photo)
 
             for detection in photo_detections:
                 # Classifier-run gate: if (detection, model, fingerprint)
@@ -2530,12 +2550,7 @@ def _classify_photos(
                     if cached:
                         skipped_existing += 1
                         top = cached[0]
-                        timestamp = None
-                        if photo["timestamp"]:
-                            try:
-                                timestamp = dt.fromisoformat(photo["timestamp"])
-                            except Exception:
-                                pass
+                        timestamp = _photo_timestamp(photo)
                         embedding = None
                         if model_type != "timm":
                             # Full-image detections are always single per
@@ -3335,7 +3350,6 @@ def _finalize_cached_only(
 
     Returns the count dict ``run_classify_job`` returns to the runner.
     """
-    from datetime import datetime as dt
 
     from taxonomy import load_local_taxonomy
 
@@ -3435,12 +3449,7 @@ def _finalize_cached_only(
     for photo in photos:
         folder_path = folders.get(photo["folder_id"], "")
         image_path = os.path.join(folder_path, photo["filename"])
-        timestamp = None
-        if photo["timestamp"]:
-            try:
-                timestamp = dt.fromisoformat(photo["timestamp"])
-            except Exception:
-                timestamp = None
+        timestamp = _photo_timestamp(photo)
         for detection in detection_map.get(photo["id"], []):
             cached = thread_db.get_predictions_for_detection(
                 detection["id"],
@@ -3806,6 +3815,10 @@ def run_classify_job(
             # the explicit request so either the guard below propagates
             # the lookup failure or the cache filter still rejects
             # wrong-model runs.
+            log.warning(
+                "Could not resolve the requested classifier before the cache check",
+                exc_info=True,
+            )
             peek_model = None
             if params.model_id:
                 desired_classifier_model = None
@@ -3864,6 +3877,11 @@ def run_classify_job(
             # selection the authoritative load below rejects.
             raise
         except Exception:
+            log.warning(
+                "Could not load labels before the cache check; "
+                "cache reuse falls back to model-only filtering",
+                exc_info=True,
+            )
             desired_labels_fingerprint = None
 
         # Resolve the installed classifier's portable identity so the
@@ -4540,6 +4558,11 @@ def run_classify_job(
                             if crt:
                                 known_classifier_runtimes.add(crt)
                     except Exception:
+                        log.warning(
+                            "Could not compute classifier runtime fingerprints; "
+                            "reapplying without a classifier filter",
+                            exc_info=True,
+                        )
                         known_classifier_runtimes = set()
 
                 from computation_cache import ArtifactStore

@@ -11,11 +11,11 @@ destinations history, and revealing a photo or folder in the OS file manager.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
 import os
 import queue
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -359,6 +359,7 @@ def create_system_blueprint(
         except subprocess.TimeoutExpired:
             return jsonify({"success": False, "error": "Installation timed out after 5 minutes"})
         except Exception as e:
+            log.warning("ExifTool install via Homebrew failed", exc_info=True)
             return jsonify({"success": False, "error": str(e)})
 
     @blueprint.route("/api/recent-destinations", methods=["POST"])
@@ -462,6 +463,8 @@ def create_system_blueprint(
                             ):
                                 label = buf.value or None
                         except Exception:
+                            # The label is cosmetic; the drive letter still lists.
+                            log.debug("Could not read the volume label of %s", root, exc_info=True)
                             label = None
                         name = f"{label} ({letter}:)" if label else f"{letter}:"
                         _add_volume(name, root)
@@ -506,6 +509,10 @@ def create_system_blueprint(
         try:
             effective = get_db().get_effective_config(cfg.load())
         except Exception:
+            log.warning(
+                "Could not apply workspace overrides for system info; using global config",
+                exc_info=True,
+            )
             effective = cfg.load()
         info["platform_support"] = platform_support_info(effective)
 
@@ -625,17 +632,7 @@ def create_system_blueprint(
         if not description:
             return json_error("A description is required")
 
-        # --- Version (same logic as api_version) ---
-        try:
-            from importlib.metadata import version as pkg_version
-            vireo_version = pkg_version("vireo")
-        except Exception:
-            import tomllib
-            try:
-                with open(os.path.join(os.path.dirname(__file__), "..", "..", "pyproject.toml"), "rb") as f:
-                    vireo_version = tomllib.load(f)["project"]["version"]
-            except Exception:
-                vireo_version = "unknown"
+        vireo_version = _application_version()
 
         # --- App state ---
         db = None
@@ -656,6 +653,9 @@ def create_system_blueprint(
                 (db._ws_id(),)
             ).fetchone()[0]
         except Exception:
+            # Issue reports are how users report a degraded catalog; collect
+            # what we can and keep going.
+            log.warning("Could not read catalog state for issue report", exc_info=True)
             ws_name = "unknown"
             folder_count = photo_count = pred_count = 0
 
@@ -663,6 +663,7 @@ def create_system_blueprint(
         try:
             recent_jobs = get_runner().get_history(db, limit=10)
         except Exception:
+            log.warning("Could not read job history for issue report", exc_info=True)
             recent_jobs = []
 
         # --- Config (sanitized) ---
@@ -732,11 +733,16 @@ def create_system_blueprint(
         # the user can paste a path into the description when it is relevant.
         private_paths = []
         if db is not None:
-            with contextlib.suppress(Exception):
+            try:
                 private_paths = [
                     row[0] for row in db.conn.execute("SELECT path FROM folders")
                     if row[0]
                 ]
+            except sqlite3.Error:
+                log.warning(
+                    "Could not read folder paths; issue report will not redact catalog roots",
+                    exc_info=True,
+                )
 
         def _sanitize_text(value):
             text = str(value)
@@ -769,11 +775,14 @@ def create_system_blueprint(
             })
             support_info = _redact(platform_support_info(cfg.load()))
         except Exception:
+            log.warning("Could not collect platform support info for issue report", exc_info=True)
             filesystems = []
             support_info = {}
         execution_info = {}
-        with contextlib.suppress(Exception):
+        try:
             execution_info = runtime_execution_info()
+        except Exception:
+            log.warning("Could not collect inference runtime info for issue report", exc_info=True)
 
         # --- Build the bundle ---
         from datetime import datetime

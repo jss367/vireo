@@ -659,8 +659,8 @@ def get_saved_labels():
                 with open(os.path.join(LABELS_DIR, fname)) as f:
                     meta = json.load(f)
                 result.append(meta)
-            except Exception:
-                pass
+            except (OSError, ValueError):
+                log.warning("Skipping unreadable saved label set %s", fname, exc_info=True)
     return result
 
 
@@ -678,7 +678,8 @@ def get_active_labels():
     try:
         with open(config_path) as f:
             data = json.load(f)
-    except Exception:
+    except (OSError, ValueError):
+        log.warning("Could not read the active label selection %s", config_path, exc_info=True)
         return []
 
     # New format: {"active_labels": ["/path/a.txt", "/path/b.txt"]}

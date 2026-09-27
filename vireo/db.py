@@ -874,7 +874,9 @@ class Database:
         """
         conn = getattr(self, "conn", None)
         if conn is not None:
-            with contextlib.suppress(Exception):
+            # sqlite3 raises ProgrammingError when closed from a foreign
+            # thread; nothing useful can be done with a handle we are dropping.
+            with contextlib.suppress(sqlite3.Error):
                 conn.close()
             self.conn = None
 

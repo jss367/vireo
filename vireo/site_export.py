@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
@@ -11,6 +12,8 @@ from tempfile import TemporaryFile, mkdtemp
 
 from export import _DevelopedDirIndex, _get_photo_exif_data, load_export_image
 from site_publish import _write_json, slugify
+
+log = logging.getLogger(__name__)
 
 README = """# Photo site export
 
@@ -228,6 +231,7 @@ def _render_snapshot(snapshot, captured, workspace_id, vireo_dir, destination,
                     images[pid] = path
                     exported += 1
                 except Exception as exc:
+                    log.warning("Site export failed for photo %s", pid, exc_info=True)
                     (output / path).unlink(missing_ok=True)
                     record["error"] = str(exc)
                     errors.append(f"Photo {pid} ({filename}): {exc}")
