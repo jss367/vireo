@@ -1128,7 +1128,7 @@ def _rsync_finder_metadata_excludes(src_path):
 @contextlib.contextmanager
 def _rsync_finder_metadata_exclude_file(src_path):
     """Yield rsync flags that exclude every regular ``.DS_Store`` file
-    under ``src_path`` via ``--exclude-from=<file>``.
+    under ``src_path`` via ``--exclude-from=<file>`` plus ``--from0``.
 
     Passing the patterns through a file (rather than a fresh ``--exclude=``
     argv entry per file, as ``_rsync_finder_metadata_excludes`` returns)
@@ -1140,8 +1140,19 @@ def _rsync_finder_metadata_exclude_file(src_path):
     time, and the primary transfer only catches ``FileNotFoundError``, so
     it would escape the normal move-error path.
 
+    Records are written NUL-delimited (bytes via ``os.fsencode``) and
+    rsync is asked to parse them that way with ``--from0``. Newline is a
+    legal POSIX filename byte, so a plain ``\\n`` join would split one
+    pattern like ``/foo\\nbar/.DS_Store`` into two filter records
+    (``/foo`` and ``bar/.DS_Store``) — rsync would then exclude an
+    unrelated ``/foo`` subtree on both the transfer and the ``--checksum``
+    verify, letting the post-merge ``shutil.rmtree`` destroy source files
+    that never landed at the destination. NUL is the one byte the
+    filesystem cannot put in a filename, so it is the only safe record
+    separator.
+
     Yields ``[]`` when there are no patterns (no temp file is created);
-    otherwise yields a single ``['--exclude-from=<file>']`` flag and
+    otherwise yields ``['--from0', '--exclude-from=<file>']`` flags and
     cleans up the file on exit.
     """
     patterns = _rsync_finder_metadata_exclude_patterns(src_path)
@@ -1149,12 +1160,13 @@ def _rsync_finder_metadata_exclude_file(src_path):
         yield []
         return
     fd, path = tempfile.mkstemp(
-        prefix="vireo-rsync-excludes-", suffix=".txt")
+        prefix="vireo-rsync-excludes-", suffix=".bin")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write("\n".join(patterns))
-            f.write("\n")
-        yield [f"--exclude-from={path}"]
+        with os.fdopen(fd, "wb") as f:
+            for pattern in patterns:
+                f.write(os.fsencode(pattern))
+                f.write(b"\0")
+        yield ["--from0", f"--exclude-from={path}"]
     finally:
         with contextlib.suppress(OSError):
             os.unlink(path)

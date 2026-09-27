@@ -3714,26 +3714,80 @@ def test_rsync_finder_metadata_exclude_file_writes_patterns_to_tempfile(
     (src / "quirky" / ".DS_Store" / "keeper.jpg").write_bytes(b"in-dir")
 
     with _rsync_finder_metadata_exclude_file(str(src)) as flags:
-        # One flag total — regardless of how many patterns are inside it,
-        # argv stays fixed-size.
-        assert len(flags) == 1, flags
+        # ``--from0`` + ``--exclude-from=<path>`` — regardless of how many
+        # patterns are inside the file, argv stays fixed-size. ``--from0``
+        # is required so rsync reads the file as NUL-delimited records
+        # (newline is a legal POSIX filename byte, so line-oriented
+        # parsing would split ``/foo\nbar/.DS_Store`` into two filters).
+        assert flags[0] == "--from0", flags
+        assert len(flags) == 2, flags
         prefix = "--exclude-from="
-        assert flags[0].startswith(prefix), flags
-        exclude_file = flags[0][len(prefix):]
+        assert flags[1].startswith(prefix), flags
+        exclude_file = flags[1][len(prefix):]
         assert os.path.exists(exclude_file), exclude_file
-        with open(exclude_file, encoding="utf-8") as f:
-            lines = f.read().splitlines()
+        with open(exclude_file, "rb") as f:
+            body = f.read()
+        # Records are separated by NUL and each record ends with NUL, so
+        # splitting on NUL yields the patterns plus a trailing empty
+        # entry from the final terminator.
+        parts = body.split(b"\0")
+        assert parts[-1] == b"", parts
+        records = [os.fsdecode(p) for p in parts[:-1]]
         # The anchored patterns match the argv form emitted by
         # _rsync_finder_metadata_excludes, minus the ``--exclude=`` prefix.
-        assert "/.DS_Store" in lines, lines
-        assert "/sub/.DS_Store" in lines, lines
+        assert "/.DS_Store" in records, records
+        assert "/sub/.DS_Store" in records, records
         # A .DS_Store directory shares the basename but isn't a regular
         # file, so it must not receive a pattern.
-        assert "/quirky/.DS_Store" not in lines, lines
+        assert "/quirky/.DS_Store" not in records, records
 
     # Once the context exits the temp file is removed, so callers never
     # leak per-merge scratch state.
     assert not os.path.exists(exclude_file), exclude_file
+
+
+def test_rsync_finder_metadata_exclude_file_preserves_newlines_in_filenames(
+        tmp_path):
+    """A parent directory whose name contains an embedded newline is a
+    legal POSIX filename. A line-oriented ``--exclude-from`` would split
+    one pattern (e.g. ``/foo\\nbar/.DS_Store``) into two filter records
+    (``/foo`` and ``bar/.DS_Store``), causing rsync to exclude an
+    unrelated ``/foo`` subtree on both the transfer and the
+    ``--checksum`` verify. The ``rmtree`` after the merge would then
+    delete the source files that never landed at the destination.
+
+    The exclude file must be NUL-delimited (with ``--from0`` passed to
+    rsync), so an embedded newline stays inside one record."""
+    from move import _rsync_finder_metadata_exclude_file
+
+    src = tmp_path / "src"
+    src.mkdir()
+    # Some filesystems (macOS HFS+/APFS) disallow newlines in filenames,
+    # so skip cleanly if the fixture can't be created. Every POSIX
+    # filesystem we care about here (ext4, xfs, btrfs, tmpfs) allows it.
+    weird = src / "foo\nbar"
+    try:
+        weird.mkdir()
+    except OSError:
+        pytest.skip("filesystem rejects newlines in filenames")
+    (weird / ".DS_Store").write_bytes(b"weird")
+
+    with _rsync_finder_metadata_exclude_file(str(src)) as flags:
+        assert flags[0] == "--from0", flags
+        prefix = "--exclude-from="
+        exclude_file = flags[1][len(prefix):]
+        with open(exclude_file, "rb") as f:
+            body = f.read()
+        parts = body.split(b"\0")
+        assert parts[-1] == b"", parts
+        records = [os.fsdecode(p) for p in parts[:-1]]
+        # The whole path stays inside a single record — the newline is
+        # part of the directory name, not a record separator.
+        assert "/foo\nbar/.DS_Store" in records, records
+        # And it was not split into pieces that could match unrelated
+        # subtrees.
+        assert "/foo" not in records, records
+        assert "bar/.DS_Store" not in records, records
 
 
 def test_rsync_finder_metadata_exclude_file_empty_tree_yields_no_flags(
