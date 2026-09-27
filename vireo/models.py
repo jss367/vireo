@@ -14,6 +14,7 @@ import tempfile
 import threading
 
 import model_verify
+from config import _replace_with_windows_retry
 
 log = logging.getLogger(__name__)
 
@@ -206,6 +207,15 @@ KNOWN_MODELS = [
 # each load the old file and save over the other's change.
 _CONFIG_LOCK = threading.RLock()
 
+# Held only across opening/reading ``models.json`` and the ``os.replace``
+# that publishes a new one. Windows refuses to replace a file another thread
+# has open, and an open that lands mid-replace fails with "Permission
+# denied", so a readiness poll racing a model download would fail one side.
+# Kept separate from ``_CONFIG_LOCK`` so readers do not wait behind a
+# mutator's slower work (``remove_model``'s rmtree). Order: ``_CONFIG_LOCK``
+# before ``_FILE_IO_LOCK``.
+_FILE_IO_LOCK = threading.Lock()
+
 
 def _default_config():
     return {"models": [], "active_model": None}
@@ -318,7 +328,7 @@ def _load_config():
     repaired) pathname would destroy the true corrupt-bytes backup.
     """
     try:
-        with open(CONFIG_PATH, "rb") as f:
+        with _FILE_IO_LOCK, open(CONFIG_PATH, "rb") as f:
             raw = f.read()
     except FileNotFoundError:
         return _default_config()
@@ -356,7 +366,8 @@ def _save_config(config):
             json.dump(config, f, indent=2)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp_path, CONFIG_PATH)
+        with _FILE_IO_LOCK:
+            _replace_with_windows_retry(tmp_path, CONFIG_PATH)
     except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(tmp_path)

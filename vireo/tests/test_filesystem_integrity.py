@@ -25,6 +25,13 @@ import staged_copy
 from db import Database
 from PIL import Image
 
+# The racer unlinks our O_EXCL placeholder while we still hold it open. Windows
+# refuses to delete an open file, so that interleaving cannot happen there.
+_POSIX_UNLINK_WHILE_OPEN = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows cannot unlink a file another handle holds open",
+)
+
 
 def _jpeg(path, color="red", mtime=None):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -139,6 +146,7 @@ def test_copy_via_temp_no_hardlink_fallback_promotes_when_slot_is_free(
     assert _no_partials(dst.parent) == []
 
 
+@_POSIX_UNLINK_WHILE_OPEN
 def test_copy_via_temp_no_hardlink_fallback_never_overwrites_replacement(
     tmp_path, monkeypatch,
 ):
@@ -1516,6 +1524,7 @@ def test_ingest_advances_past_dangling_primary_symlink(tmp_path):
     assert (day_dir / "IMG_0001_1.JPG").is_file()
 
 
+@_POSIX_UNLINK_WHILE_OPEN
 def test_rollback_leaves_racer_bytes_at_scratch_when_hardlinks_unavailable(
     tmp_path, monkeypatch,
 ):
