@@ -1083,17 +1083,30 @@ def _find_content_conflict(src_path, dest_path):
     filecmp with shallow=False compares contents — so we never overwrite or
     later delete the source over a genuinely different destination file.
 
-    Finder metadata (``.DS_Store``) is ignored on both sides: the merge does
-    not copy it, so a difference here is not a photo collision, and the
-    source's copy is preserved until the whole tree is removed after a
-    successful merge.
+    Finder metadata (``.DS_Store``) is ignored only for REGULAR non-symlink
+    source files: those are the ones ``_rsync_finder_metadata_excludes``
+    drops from the transfer, so a same-name Finder-managed difference at
+    the destination is not a photo collision and the source's own copy is
+    preserved until the whole tree is removed after a successful merge. A
+    ``.DS_Store`` symlink is NOT excluded by the rsync helper (which keeps
+    such symlinks) and ``--ignore-existing`` then leaves any pre-existing
+    destination entry in place; a basename-only skip here would then let
+    a same-sized destination file (different bytes, so a real collision)
+    pass the pre-merge check, and the verifier's size-only compare would
+    also accept it (``os.path.getsize`` follows the source link), silently
+    losing the source symlink when the tree is removed. So the exemption
+    applies only to regular non-symlink Finder metadata files; every other
+    entry type (symlink, missing source) falls through to the normal
+    content check.
     """
     for root, _, files in os.walk(src_path):
         rel = os.path.relpath(root, src_path)
         for fn in files:
-            if fn in FINDER_METADATA_FILES:
-                continue
             src_file = os.path.join(root, fn)
+            if fn in FINDER_METADATA_FILES and \
+                    not os.path.islink(src_file) and \
+                    os.path.isfile(src_file):
+                continue
             rel_name = fn if rel == "." else os.path.join(rel, fn)
             dst_file = os.path.join(dest_path, rel_name)
             if os.path.isfile(dst_file) and \

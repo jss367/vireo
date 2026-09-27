@@ -3654,6 +3654,61 @@ def test_first_missing_source_file_still_skips_regular_ds_store(tmp_path):
     assert _first_missing_source_file(str(src), str(dst)) is None
 
 
+def test_find_content_conflict_flags_ds_store_symlink_with_differing_dest(
+        tmp_path):
+    """A source ``.DS_Store`` that is a symlink to a regular file with
+    the SAME size but DIFFERENT bytes than the destination's regular
+    ``.DS_Store`` must be caught as a content conflict. A basename-only
+    skip here would let the merge proceed: ``_rsync_finder_metadata_excludes``
+    keeps ``.DS_Store`` symlinks in the transfer, ``--ignore-existing`` then
+    leaves the destination unchanged, and the verifier's size compare
+    (``os.path.getsize`` follows the source link) accepts the same-sized
+    destination — silently losing the source symlink when the source tree
+    is removed. So the exemption applies only to REGULAR non-symlink
+    ``.DS_Store`` files."""
+    from move import _find_content_conflict
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "photo.jpg").write_bytes(b"\xff\xd8")
+    real_file = tmp_path / "elsewhere.bin"
+    real_file.write_bytes(b"aaaaaaaaaa")  # 10 bytes
+    try:
+        os.symlink(str(real_file), str(src / ".DS_Store"))
+    except (OSError, NotImplementedError):
+        pytest.skip("Filesystem does not support symlinks")
+
+    dst = tmp_path / "dst"
+    dst.mkdir()
+    (dst / "photo.jpg").write_bytes(b"\xff\xd8")
+    # Same size as the symlink target, different bytes: the size-only
+    # verifier would accept this without a content conflict check.
+    (dst / ".DS_Store").write_bytes(b"bbbbbbbbbb")
+
+    assert _find_content_conflict(str(src), str(dst)) == ".DS_Store"
+
+
+def test_find_content_conflict_still_skips_regular_ds_store(tmp_path):
+    """The conflict-check exemption for regular-file ``.DS_Store`` still
+    applies: the rsync helper drops those from the transfer, the verifier
+    exempts them, and a Finder-written difference here is not a photo
+    collision. Guards against the symlink-only fix over-tightening the
+    check and re-introducing the original bug the merge is meant to
+    tolerate."""
+    from move import _find_content_conflict
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "photo.jpg").write_bytes(b"\xff\xd8")
+    (src / ".DS_Store").write_bytes(b"source window layout")
+    dst = tmp_path / "dst"
+    dst.mkdir()
+    (dst / "photo.jpg").write_bytes(b"\xff\xd8")
+    (dst / ".DS_Store").write_bytes(b"archive window layout")
+
+    assert _find_content_conflict(str(src), str(dst)) is None
+
+
 def test_move_folder_merge_preserves_directory_named_ds_store(move_env):
     """A source subtree whose directory is literally named ``.DS_Store``
     must survive a merge. ``--exclude=.DS_Store`` alone would match the
