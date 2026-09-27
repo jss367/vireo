@@ -3479,7 +3479,8 @@ def test_move_folder_merge_detects_same_size_different_content(move_env):
 def test_move_folder_merge_ignores_differing_finder_metadata(move_env):
     """Finder's .DS_Store differs between a browsed staging folder and the
     archive folder it merges into. That must not refuse the merge: the
-    destination keeps its own copy and the source's is discarded."""
+    destination keeps its own copy and the source's vanishes with the rest
+    of the source tree after the successful merge."""
     from move import move_folder, preview_merge
 
     env = move_env
@@ -3498,6 +3499,36 @@ def test_move_folder_merge_ignores_differing_finder_metadata(move_env):
     assert (landing / ".DS_Store").read_bytes() == b"archive window layout"
     assert (landing / "bird1.jpg").exists()
     assert not env["src"].exists()
+
+
+def test_move_folder_failed_merge_preserves_source_finder_metadata(move_env):
+    """When a merge is refused (a real photo collision), the source
+    ``.DS_Store`` must be left in place along with the rest of the source.
+    The failure path reports ``moved: 0`` and preserves originals, and a
+    silent pre-scrub of Finder metadata would contradict that guarantee —
+    the user could not re-run without re-recording their window layout."""
+    from move import move_folder
+
+    env = move_env
+    (env["src"] / ".DS_Store").write_bytes(b"source window layout")
+    landing = env["dst"] / "src"
+    landing.mkdir()
+    (landing / ".DS_Store").write_bytes(b"archive window layout")
+    # A real photo collision cancels the merge with nothing changed.
+    src_bytes = (env["src"] / "bird1.jpg").read_bytes()
+    decoy = bytes((b + 1) % 256 for b in src_bytes)
+    (landing / "bird1.jpg").write_bytes(decoy)
+
+    result = move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]), merge=True
+    )
+    assert result["moved"] == 0
+    assert any("Conflict" in e for e in result["errors"])
+    # Nothing changed on either side, including Finder metadata.
+    assert (env["src"] / ".DS_Store").read_bytes() == b"source window layout"
+    assert (env["src"] / "bird1.jpg").exists()
+    assert (landing / ".DS_Store").read_bytes() == b"archive window layout"
+    assert (landing / "bird1.jpg").read_bytes() == decoy
 
 
 def test_move_folder_merge_refuses_tracked_destination(move_env):
