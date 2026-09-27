@@ -512,7 +512,7 @@ def test_snapshot_import_refuses_paths_inside_staged_source(staged):
     assert "local copy" in resp.get_json()["error"]
 
 
-def _stub_final_check_conflict(monkeypatch, marker):
+def _stub_final_check_conflict(monkeypatch, workflow, marker):
     """Make the final atomic ``local_copy_scan_conflict`` fail while the
     pre-flight passes.
 
@@ -524,8 +524,6 @@ def _stub_final_check_conflict(monkeypatch, marker):
     stubbing ``local_copy_scan_conflict`` so only the final call (the one
     after workspace creation) reports a conflict.
     """
-    from web import imports as imports_module
-
     calls = {"count": 0}
 
     def flaky_conflict(*args, **kwargs):
@@ -535,7 +533,7 @@ def _stub_final_check_conflict(monkeypatch, marker):
         return "simulated race: overlapping stage published between checks"
 
     monkeypatch.setattr(
-        imports_module, "local_copy_scan_conflict", flaky_conflict,
+        f"services.{workflow}.local_copy_scan_conflict", flaky_conflict,
     )
     return calls
 
@@ -559,12 +557,10 @@ def test_import_in_place_conflict_rolls_back_new_workspace(
     fresh_source = tmp_path / "unrelated"
     fresh_source.mkdir()
     (fresh_source / "b.jpg").write_bytes(b"jpg")
-    # Two calls fire inside the route (explicit-sources branch): the
+    # Two calls fire inside the workflow (explicit-sources branch): the
     # pre-flight at request entry and the atomic re-check before
     # ``runner.start``. Trip only the second one.
-    _stub_final_check_conflict(monkeypatch, marker=2)
-
-    call_log = _stub_final_check_conflict(monkeypatch, marker=2)
+    call_log = _stub_final_check_conflict(monkeypatch, "import_in_place", marker=2)
 
     resp = staged["client"].post(
         "/api/jobs/import-in-place",
@@ -608,9 +604,9 @@ def test_import_photos_conflict_rolls_back_new_workspace(
     (card / "DSC_0001.jpg").write_bytes(b"jpg")
     dest = tmp_path / "archive-photos"
     dest.mkdir()
-    # Two calls fire inside the route: the pre-flight at request entry
+    # Two calls fire inside the workflow: the pre-flight at request entry
     # and the atomic re-check before ``runner.start``. Trip only the second.
-    _stub_final_check_conflict(monkeypatch, marker=2)
+    _stub_final_check_conflict(monkeypatch, "import_photos", marker=2)
 
     resp = staged["client"].post(
         "/api/jobs/import-photos",
