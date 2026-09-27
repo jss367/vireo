@@ -189,3 +189,55 @@ def test_color_search_is_workspace_scoped_for_shared_photos(catalog):
     assert db.query_photo_ids(rule) == []
     db.set_active_workspace(original_ws)
     assert db.query_photo_ids(rule) == [ids["robin"]]
+
+
+@pytest.mark.parametrize("raw_exif, term", [
+    ('{"EXIF": {"Artist": "\\u0068awk-watcher"}}', "hawk"),  # escape hides ASCII
+    ('{"EXIF": {"Note": "line\\nbreak"}}', "line\nbreak"),
+    ('{"EXIF": {"Note": "say \\"cheese\\""}}', 'say "cheese"'),
+    ('{"EXIF": {"ExposureTime": 1e-05}}', "1.0e-05"),
+    ('{"EXIF": {"Offset": 0.7999999999999999}}', "0.8"),
+    ('{"EXIF": {"Offset": 5.0e2}}', "500.0"),
+    ('{"EXIF": {"Serial": 12345678901234567890}}', "1.23456789012346e+19"),
+    ('{"EXIF": {"Huge": 1e999}}', "Inf"),
+    ('{"EXIF": {"Huge": -1e999}}', "-inf"),
+    ('{"EXIF": {"Model": "Plain text"}}', "plain TEXT"),
+    ('{"EXIF": {"Flash": false}}', "fals"),
+])
+def test_raw_text_shortcut_never_drops_a_rendered_match(catalog, raw_exif, term):
+    """Values whose rendering differs from the stored JSON still match."""
+    db, ids = catalog
+    db.conn.execute("UPDATE photos SET exif_data=? WHERE id=?", (raw_exif, ids["robin"]))
+    rule = {"field": "metadata", "op": "contains", "value": term}
+    assert ids["robin"] in db.query_photo_ids([rule])
+    rule["op"] = "not_contains"
+    assert ids["robin"] not in db.query_photo_ids([rule])
+
+
+@pytest.mark.parametrize("term, shortcut", [
+    ("hawk", True), ("f/2.8", True), ("Info", True), ("_", True),
+    ("2024", False), ("1.4", False), ("1E-05", False), ("inf", False), ("-In", False),
+])
+def test_raw_text_shortcut_only_for_terms_no_number_renders_as(term, shortcut):
+    from metadata_search import raw_text_rules_out
+    assert raw_text_rules_out(term) is shortcut
+
+
+def test_browse_summary_runs_the_metadata_filter_once(catalog):
+    db, ids = catalog
+    db.conn.execute("UPDATE photos SET rating=5 WHERE id=?", (ids["owl"],))  # caller's open write
+    statements = []
+    db.conn.set_trace_callback(statements.append)
+    try:
+        summary = db.get_browse_summary(
+            rules=[{"field": "metadata", "op": "contains", "value": "Perched"}])
+    finally:
+        db.conn.set_trace_callback(None)
+    assert summary["filtered_total"] == 2
+    assert summary["folder_counts"][0]["count"] == 2
+    assert sum("json_tree" in sql for sql in statements) == 1
+    assert db.conn.execute(
+        "SELECT 1 FROM temp.sqlite_master WHERE name='_browse_summary_ids'").fetchone() is None
+    assert db.conn.in_transaction
+    db.conn.rollback()
+    assert db.conn.execute("SELECT rating FROM photos WHERE id=?", (ids["owl"],)).fetchone()[0] != 5
