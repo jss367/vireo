@@ -985,6 +985,28 @@ def _run_rsync_streamed(src_path, dest_spec, rsync_flags, total_files,
     return proc.returncode, "".join(stderr_chunks), state["timed_out"]
 
 
+# Finder writes .DS_Store (window layout, icon positions) into every folder it
+# opens, so a staged import the user browsed and the archive folder it merges
+# into each hold their own copy with different bytes. That is not a collision
+# between photos and must not refuse the merge.
+FINDER_METADATA_FILES = frozenset({".DS_Store"})
+
+
+def _discard_source_finder_metadata(src_path):
+    """Delete Finder metadata files from the source tree before a merge.
+
+    The source tree is removed after a successful merge anyway. Discarding
+    these first leaves the destination's own copies in place, and the
+    conflict check, copy and verification never see them. A file that can't
+    be removed is left for the conflict check to report as before.
+    """
+    for root, _dirs, files in os.walk(src_path):
+        for fn in files:
+            if fn in FINDER_METADATA_FILES:
+                with contextlib.suppress(OSError):
+                    os.remove(os.path.join(root, fn))
+
+
 def _find_content_conflict(src_path, dest_path):
     """Return the relative path of the first source file that ALSO exists at
     dest_path but with different content, or None. Run before a merge copies
@@ -1183,6 +1205,8 @@ def preview_merge(src_path, dest_path):
             else:
                 will_copy += 1
         for fn in files:
+            if fn in FINDER_METADATA_FILES:
+                continue  # discarded, not transferred, by the merge
             src_file = os.path.join(root, fn)
             rel_name = fn if rel == "." else os.path.join(rel, fn)
             dst_file = os.path.join(dest_path, rel_name)
@@ -2697,7 +2721,8 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
             (this is how an interrupted move is resumed). Originals are deleted
             only after every source file is verified present at the
             destination. A failed merge never removes the destination, since it
-            may hold the user's pre-existing files.
+            may hold the user's pre-existing files. Finder ``.DS_Store`` files
+            in the source are discarded rather than merged.
         developed_dir: optional path to the configured
             `darktable_output_dir`. When set, the folder's developed
             subdirectory — nested under a hash of its source path, see
@@ -2983,6 +3008,7 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
         }
 
     if dest_exists:
+        _discard_source_finder_metadata(src_path)
         # Refuse if any same-name file already at the destination differs in
         # content. Never overwrite or later delete the user's data over a real
         # collision — only files that are byte-identical (a genuine resume)

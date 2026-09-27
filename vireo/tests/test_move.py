@@ -3476,6 +3476,30 @@ def test_move_folder_merge_detects_same_size_different_content(move_env):
     assert (env["src"] / "bird1.jpg").exists()
 
 
+def test_move_folder_merge_ignores_differing_finder_metadata(move_env):
+    """Finder's .DS_Store differs between a browsed staging folder and the
+    archive folder it merges into. That must not refuse the merge: the
+    destination keeps its own copy and the source's is discarded."""
+    from move import move_folder, preview_merge
+
+    env = move_env
+    (env["src"] / ".DS_Store").write_bytes(b"source window layout")
+    landing = env["dst"] / "src"
+    landing.mkdir()
+    (landing / ".DS_Store").write_bytes(b"archive window layout")
+
+    preview = preview_merge(str(env["src"]), str(landing))
+    assert preview["will_skip"] == 0
+
+    result = move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]), merge=True
+    )
+    assert not result.get("errors"), result
+    assert (landing / ".DS_Store").read_bytes() == b"archive window layout"
+    assert (landing / "bird1.jpg").exists()
+    assert not env["src"].exists()
+
+
 def test_move_folder_merge_refuses_tracked_destination(move_env):
     """Merging into a destination Vireo already tracks as a folder is refused
     (a correct tracked-tree merge is out of scope and would dangle descendant
