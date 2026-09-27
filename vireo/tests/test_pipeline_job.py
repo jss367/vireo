@@ -10770,8 +10770,8 @@ def test_extract_masks_aborts_when_rollback_fails():
 
 def test_extract_masks_pause_waits_outside_photo_lock(tmp_path, monkeypatch):
     """Pause may be requested under a photo lock but must wait after release."""
-    import pipeline_job as pj
     import pipeline_locks
+    from pipeline_stages import features
 
     pause_state = {
         "requested": False,
@@ -10796,7 +10796,7 @@ def test_extract_masks_pause_waits_outside_photo_lock(tmp_path, monkeypatch):
                 pause_state["lock_held"] = False
 
     monkeypatch.setattr(
-        pj, "acquire_photo_mask",
+        features, "acquire_photo_mask",
         lambda photo_id: TrackingLock(real_acquire(photo_id)),
     )
 
@@ -19978,7 +19978,7 @@ def test_known_mount_roots_round_trip_through_db_meta(tmp_path):
 
 def test_pipeline_classifier_factory_uses_non_parking_cancel_probe():
     """Regression: the ``_construct_classifier`` factory inside
-    ``run_pipeline_job`` runs while ``ModelCache._Entry.load_lock`` is
+    ``load_model_bundle`` runs while ``ModelCache._Entry.load_lock`` is
     held. ``Classifier._compute_embeddings_with_progress`` calls the
     factory-supplied ``cancel_check`` between labels; if that closure
     invokes the parking ``_should_abort`` (which parks on pause via
@@ -19994,9 +19994,9 @@ def test_pipeline_classifier_factory_uses_non_parking_cancel_probe():
     import ast
     import inspect
 
-    import pipeline_job
+    from pipeline_stages.models import load_model_bundle
 
-    source = inspect.getsource(pipeline_job.run_pipeline_job)
+    source = inspect.getsource(load_model_bundle)
     tree = ast.parse(source)
 
     def _find_construct_classifier(node):
@@ -20011,7 +20011,7 @@ def test_pipeline_classifier_factory_uses_non_parking_cancel_probe():
     construct_fn = _find_construct_classifier(tree)
     assert construct_fn is not None, (
         "_construct_classifier factory not found inside "
-        "run_pipeline_job — test needs update if this refactored"
+        "load_model_bundle — test needs update if this refactored"
     )
 
     inner_cancel_check = None
@@ -20027,7 +20027,7 @@ def test_pipeline_classifier_factory_uses_non_parking_cancel_probe():
     )
 
     body_src = ast.unparse(inner_cancel_check)
-    assert "_should_abort_without_pause" in body_src, (
+    assert "run.control.should_abort_without_pause" in body_src, (
         "_construct_classifier's inner cancel_check must call "
         "_should_abort_without_pause (the non-parking probe), not "
         "_should_abort. Codex thread review#4945197220 on "
@@ -20041,8 +20041,8 @@ def test_pipeline_classifier_factory_uses_non_parking_cancel_probe():
     calls = [
         node for node in ast.walk(inner_cancel_check)
         if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "_should_abort"
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "should_abort"
     ]
     assert not calls, (
         "_construct_classifier's inner cancel_check must not call the "
