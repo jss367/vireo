@@ -3689,6 +3689,70 @@ def test_rsync_finder_metadata_excludes_skips_non_regular_ds_store(tmp_path):
     assert "--exclude=/special/.DS_Store" not in args, args
 
 
+def test_rsync_finder_metadata_exclude_file_writes_patterns_to_tempfile(
+        tmp_path):
+    """A merge with many ``.DS_Store`` files must not append one
+    ``--exclude=`` argv entry per file: on macOS especially, ``execve``'s
+    argument-size limit is small enough that a large photo archive can hit
+    ``E2BIG`` before rsync starts. The file-form helper writes the same
+    anchored patterns to a temp file and passes just
+    ``--exclude-from=<path>`` to rsync, so argv stays constant regardless
+    of how many files are excluded. This test verifies the file exists
+    during the ``with`` block with the expected patterns, and is cleaned
+    up on exit."""
+    from move import _rsync_finder_metadata_exclude_file
+
+    src = tmp_path / "src"
+    (src / "sub").mkdir(parents=True)
+    (src / ".DS_Store").write_bytes(b"top")
+    (src / "sub" / ".DS_Store").write_bytes(b"sub")
+    (src / "sub" / "keeper.jpg").write_bytes(b"\xff\xd8")
+    # A directory named .DS_Store must NOT get a pattern — matches the
+    # regular-file predicate used by _rsync_finder_metadata_excludes.
+    (src / "quirky").mkdir()
+    (src / "quirky" / ".DS_Store").mkdir()
+    (src / "quirky" / ".DS_Store" / "keeper.jpg").write_bytes(b"in-dir")
+
+    with _rsync_finder_metadata_exclude_file(str(src)) as flags:
+        # One flag total — regardless of how many patterns are inside it,
+        # argv stays fixed-size.
+        assert len(flags) == 1, flags
+        prefix = "--exclude-from="
+        assert flags[0].startswith(prefix), flags
+        exclude_file = flags[0][len(prefix):]
+        assert os.path.exists(exclude_file), exclude_file
+        with open(exclude_file, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+        # The anchored patterns match the argv form emitted by
+        # _rsync_finder_metadata_excludes, minus the ``--exclude=`` prefix.
+        assert "/.DS_Store" in lines, lines
+        assert "/sub/.DS_Store" in lines, lines
+        # A .DS_Store directory shares the basename but isn't a regular
+        # file, so it must not receive a pattern.
+        assert "/quirky/.DS_Store" not in lines, lines
+
+    # Once the context exits the temp file is removed, so callers never
+    # leak per-merge scratch state.
+    assert not os.path.exists(exclude_file), exclude_file
+
+
+def test_rsync_finder_metadata_exclude_file_empty_tree_yields_no_flags(
+        tmp_path):
+    """A source tree without any regular ``.DS_Store`` files yields an
+    empty flag list and creates no temp file: adding an
+    ``--exclude-from=<empty>`` argument would still cost an argv slot for
+    a merge that has nothing to exclude, and creating an unused temp file
+    every merge is wasteful."""
+    from move import _rsync_finder_metadata_exclude_file
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "photo.jpg").write_bytes(b"\xff\xd8")
+
+    with _rsync_finder_metadata_exclude_file(str(src)) as flags:
+        assert flags == [], flags
+
+
 def test_first_missing_source_file_flags_ds_store_symlink_at_destination(
         tmp_path):
     """A source ``.DS_Store`` that is a symlink is NOT excluded by
