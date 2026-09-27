@@ -3501,6 +3501,61 @@ def test_move_folder_merge_ignores_differing_finder_metadata(move_env):
     assert not env["src"].exists()
 
 
+def test_rsync_finder_metadata_excludes_allows_same_named_directory():
+    """A bare ``--exclude=.DS_Store`` matches directories too, and would
+    drop a whole subtree from the transfer, the conflict probe and the
+    checksum verify -- with ``shutil.rmtree(src_path)`` then removing it
+    from the source after a "successful" merge. The filter must include
+    the directory form so rsync still recurses into it, then exclude only
+    the file entry."""
+    from move import _rsync_finder_metadata_excludes
+
+    args = _rsync_finder_metadata_excludes()
+    # For every metadata name, the directory include must come BEFORE the
+    # bare exclude so rsync's first-match-wins keeps same-named dirs.
+    assert "--include=.DS_Store/" in args
+    assert "--exclude=.DS_Store" in args
+    include_idx = args.index("--include=.DS_Store/")
+    exclude_idx = args.index("--exclude=.DS_Store")
+    assert include_idx < exclude_idx, args
+
+
+def test_move_folder_merge_preserves_directory_named_ds_store(move_env):
+    """A source subtree whose directory is literally named ``.DS_Store``
+    must survive a merge. ``--exclude=.DS_Store`` alone would match the
+    directory too, rsync would silently skip the whole subtree, the
+    checksum verify would find nothing to fault, and the post-merge
+    ``shutil.rmtree`` on the source would then destroy it."""
+    from move import move_folder
+
+    env = move_env
+    # A directory named .DS_Store holding a real photo. Unusual on macOS
+    # (Finder always writes a file), but nothing on other filesystems
+    # prevents it, and a silently-dropped subtree combined with the
+    # post-merge source removal would lose data.
+    quirky_dir = env["src"] / ".DS_Store"
+    quirky_dir.mkdir()
+    (quirky_dir / "keeper.jpg").write_bytes(b"\xff\xd8" + b"\x11" * 128)
+    (quirky_dir / "extra.xmp").write_text("<xmp/>")
+    # Destination exists (merge path). No pre-existing entry named
+    # .DS_Store at the destination -- rsync must create the directory.
+    landing = env["dst"] / "src"
+    landing.mkdir()
+
+    result = move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]), merge=True
+    )
+    assert not result.get("errors"), result
+    # The photo nested under the .DS_Store directory must have transferred.
+    assert (landing / ".DS_Store").is_dir()
+    assert (landing / ".DS_Store" / "keeper.jpg").is_file()
+    assert (landing / ".DS_Store" / "keeper.jpg").read_bytes() == \
+        b"\xff\xd8" + b"\x11" * 128
+    assert (landing / ".DS_Store" / "extra.xmp").is_file()
+    # And the source is gone after the successful merge.
+    assert not env["src"].exists()
+
+
 def test_move_folder_failed_merge_preserves_source_finder_metadata(move_env):
     """When a merge is refused (a real photo collision), the source
     ``.DS_Store`` must be left in place along with the rest of the source.

@@ -1012,14 +1012,32 @@ FINDER_METADATA_FILES = frozenset({".DS_Store"})
 
 
 def _rsync_finder_metadata_excludes():
-    """rsync ``--exclude=<name>`` args for every Finder metadata file.
+    """rsync filter args that skip Finder metadata FILES on both sides.
 
     Used for merges only. A fresh move still carries these along, matching
     the pre-fix behavior; only a merge into a destination that already
     holds its own copies needs to skip them so a Finder-managed difference
     doesn't fail the copy or the verification.
+
+    A bare ``--exclude=<name>`` also drops *directories* named ``.DS_Store``
+    (rsync patterns without a trailing slash match files and directories
+    alike). If a source happened to hold such a directory -- unlikely but
+    not impossible on cross-platform disks -- rsync would skip the whole
+    subtree during transfer, conflict probe and verification alike, then
+    ``shutil.rmtree(src_path)`` after a "successful" merge would delete
+    it from the source without ever copying it. Include the directory
+    form first so rsync still recurses into it; the exclude then drops
+    only the same-named file entry.
     """
-    return [f"--exclude={name}" for name in sorted(FINDER_METADATA_FILES)]
+    args = []
+    for name in sorted(FINDER_METADATA_FILES):
+        # Trailing '/' matches directories only -- let rsync descend into
+        # any same-named directory (an edge case, but a silently-dropped
+        # subtree combined with post-merge source removal would lose data).
+        args.append(f"--include={name}/")
+        # No trailing slash: matches the file entry we actually want to skip.
+        args.append(f"--exclude={name}")
+    return args
 
 
 def _find_content_conflict(src_path, dest_path):
