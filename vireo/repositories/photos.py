@@ -747,11 +747,15 @@ class PhotoRepository:
             )
             summary = self._browse_summary_aggregates(ws, detector_confidence)
         except BaseException:
-            self.conn.execute("ROLLBACK TO browse_summary")
+            # An interrupted INSERT (a superseded search) makes SQLite roll
+            # back the whole transaction itself, savepoint included.
+            if self.conn.in_transaction:
+                self.conn.execute("ROLLBACK TO browse_summary")
             raise
         finally:
             self.conn.execute("DROP TABLE IF EXISTS temp._browse_summary_ids")
-            self.conn.execute("RELEASE browse_summary")
+            if self.conn.in_transaction:
+                self.conn.execute("RELEASE browse_summary")
         return {"total": total, **summary}
 
     def _browse_summary_aggregates(self, ws, detector_confidence):

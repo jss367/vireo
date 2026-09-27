@@ -52,6 +52,7 @@ from render_source import (
     recipe_source_dimensions as _recipe_source_dimensions,
 )
 from services.visual_scope import inject_active_visual_model, validate_visual_arg
+from web.app_hooks import claim_search_lane
 from web.background_jobs import make_background_job
 from web.location_edits import (
     serialize_photo_location,
@@ -497,6 +498,7 @@ def create_photos_blueprint(
         Design: docs/plans/2026-07-19-universal-filters-design.md.
         """
         db = get_db()
+        claim_search_lane(db)
         payload = request.get_json(silent=True)
         if payload is None or not isinstance(payload, dict):
             return json_error("request body must be a JSON object", 400)
@@ -980,6 +982,7 @@ def create_photos_blueprint(
     @blueprint.route("/api/photos/calendar")
     def api_photos_calendar():
         db = get_db()
+        claim_search_lane(db)
         from datetime import date
 
         year = request.args.get("year", date.today().year, type=int)

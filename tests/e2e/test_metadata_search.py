@@ -91,3 +91,51 @@ def test_collection_editor_supports_metadata_rules(live_server, page):
     expect(modal.locator("#rulePreview")).to_have_text("Matches: 3 photos")
     modal.locator('#ruleRows select:has(option[value="not_contains"])').select_option("not_contains")
     expect(modal.locator("#rulePreview")).to_have_text("Matches: 2 photos")
+
+
+def test_new_search_cancels_the_superseded_one_quietly(live_server, page, monkeypatch):
+    """Typing a new search stops the server's work on the old one.
+
+    The first term's SQL is made to take many seconds. When the user types a
+    second term, the grid query and the summary for the first must come back
+    as quiet ``search_superseded`` 409s well before they could have finished,
+    with no error toast, while the grid and summary show the second search.
+    """
+    import threading
+
+    import metadata_search
+
+    original = metadata_search.photo_metadata_predicates
+    slow_started = threading.Semaphore(0)
+
+    def slow_for_one_term(like, term):
+        parts, params = original(like, term)
+        if term == "slowterm":
+            slow_started.release()
+            # Uncorrelated, so SQLite evaluates it once per statement:
+            # tens of seconds unless the progress handler interrupts it.
+            parts.append(
+                "(SELECT COUNT(*) FROM (WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL "
+                "SELECT i + 1 FROM n WHERE i < 300000000) SELECT i FROM n)) < 0"
+            )
+        return parts, params
+
+    monkeypatch.setattr(metadata_search, "photo_metadata_predicates", slow_for_one_term)
+    search = open_browse(page, live_server)
+
+    search.fill("slowterm")
+    for _ in range(2):  # the grid query and the summary
+        assert slow_started.acquire(timeout=10), "slow search never reached the server"
+
+    def superseded(path):
+        return lambda r: path in r.url and r.status == 409
+
+    with page.expect_response(superseded("/api/photos/query"), timeout=10000) as grid, \
+            page.expect_response(superseded("/api/browse/summary"), timeout=10000) as summary:
+        search.fill("robin")
+    assert grid.value.json()["code"] == "search_superseded"
+    assert summary.value.json()["code"] == "search_superseded"
+
+    expect(page.locator(".vf-total strong")).to_have_text("2")
+    expect(page.locator("#summaryPhotoCount")).to_have_text("2")
+    expect(page.locator('#toastContainer [data-type="error"]')).to_have_count(0)

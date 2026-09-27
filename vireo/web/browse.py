@@ -23,6 +23,7 @@ from flask import Blueprint, current_app, jsonify, request
 from photo_payload import prepare_browse_photo_dicts
 from services.prediction_ambiguity import ambiguous_prediction_ids
 from services.visual_scope import collection_rules_state, inject_active_visual_model
+from web.app_hooks import claim_search_lane
 from web.collections import _collection_accepts_manual_photos
 from web.request_args import (
     MAX_PER_PAGE,
@@ -305,6 +306,7 @@ def create_browse_blueprint(
     @blueprint.route("/api/browse/summary")
     def api_browse_summary():
         db = get_db()
+        claim_search_lane(db)
         folder_id = request.args.get("folder_id", None, type=int)
         collection_id = request.args.get("collection_id", None, type=int)
         # ``get_browse_summary`` narrows through ``_build_collection_query``,
