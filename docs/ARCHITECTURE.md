@@ -46,6 +46,19 @@ that information for interactive use.
   `vireo/web/background_jobs.py`. The view receives a `JobLaunch` (runner,
   active workspace id, worker-thread database factory) and returns
   `ctx.start(job_type, work, ...)`; do not re-implement that prologue inline.
+- Processing stages live in `vireo/pipeline_stages/`: scanning and collection
+  creation, thumbnails and previews, model loading, detection, classification,
+  masks and eye keypoints, and grouping and miss detection. `pipeline_job.py`
+  owns thread scheduling, pause participation, the regroup/misses lock, and
+  final failure aggregation. Stages receive a fresh `PipelineRun` and explicit
+  queues, events, model/detection outputs, and helper callbacks; they never
+  import the orchestrator. `PipelineControl` distinguishes parking checkpoints
+  from cancellation probes that are safe while holding a lock. The collection
+  stage publishes `run.collection_id` before signalling `collection_ready`;
+  later stages read that shared value instead of capturing an earlier ID.
+  Existing helper entry points remain in `pipeline_job.py` for callers and
+  diagnostics, and `PipelineParams` remains importable from there. New stage
+  work belongs in the stage modules, not inside `run_pipeline_job`.
 - Repositories (`vireo/repositories/`) own SQL for one domain; `Database`
   is the façade over them. It keeps each method as a one-line wrapper around
   its repository, plus cross-domain composition and the active-workspace

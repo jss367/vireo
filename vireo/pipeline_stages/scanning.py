@@ -1,0 +1,1344 @@
+"""Scanning stages for the streaming photo pipeline."""
+
+import json
+import logging
+import os
+import time
+
+from pipeline_stages.context import PipelineRun
+
+log = logging.getLogger(__name__)
+
+
+def scanner_stage(
+    run: PipelineRun,
+    *,
+    _SENTINEL,
+    _filter_excluded,
+    _find_broken_metadata_folders,
+    _missing_archive_mount_root,
+    _put_scan_item,
+    collected_photo_ids,
+    effective_thumb_cache_dir,
+    effective_vireo_dir,
+    final_destination,
+    missing_originals_invalidator,
+    remote_archive,
+    skip_scan,
+    snapshot_paths,
+):
+    # Note: stages["scan"]["status"] is NOT set to "running" here. It is
+    # flipped to "running" just before each do_scan() call below, so
+    # numScan doesn't pulse during the ingest sub-phase.
+    # Collect the scan roots actually fed to do_scan so the finally clause
+    # can invalidate the new-images cache for each one, matching the
+    # try/finally pattern used by api_job_scan / api_job_import_full in
+    # vireo/app.py. scanner.scan commits photo rows incrementally, so even
+    # a mid-scan failure needs invalidation.
+    scanned_roots: list[str] = []
+    thread_db = None
+    try:
+        import config as cfg
+        from scanner import ScanCancelled
+        from scanner import scan as do_scan
+
+        thread_db = run.database_factory(run.db_path)
+        thread_db.set_active_workspace(run.workspace_id)
+
+        effective_cfg = thread_db.get_effective_config(cfg.load())
+        pipeline_cfg = effective_cfg.get("pipeline", {})
+
+        def photo_cb(photo_id, path):
+            collected_photo_ids.append(photo_id)
+            # Abort/pause-aware: a blocking put would wedge the scanner
+            # if the thumbnail consumer parked or failed on a full queue.
+            _put_scan_item((photo_id, path))
+            run.stages["scan"]["count"] = len(collected_photo_ids)
+            run.runner.update_step(run.job["id"], "scan",
+                               current_file=os.path.basename(path))
+
+        def status_cb(message, phase_current=None, phase_total=None, phase_label=None):
+            run.runner.update_step(run.job["id"], "scan", current_file=message)
+            extra = {"current_file": message}
+            if phase_current is not None or phase_total is not None:
+                extra.update({
+                    "phase_current": phase_current,
+                    "phase_total": phase_total,
+                    "phase_label": phase_label,
+                })
+            run.emit_progress(
+                run.runner, run.job["id"], run.stages, "scan",
+                phase_label or message, **extra,
+            )
+
+        def cancel_check():
+            return run.control.should_abort(run.abort) or run.control.cancellation_requested()
+
+        def scan_pause_check():
+            # Non-blocking pause probe for scanner.scan. When the
+            # pipeline is about to pause, this returns True *before*
+            # ``cancel_check`` parks — giving the scanner a chance to
+            # terminate its worker processes and release its CPU
+            # permits back to the ledger, so replacement scans,
+            # model loads, and CPU inference aren't starved for the
+            # duration of the pause.
+            probe = getattr(run.runner, "pause_requested", None)
+            return bool(probe and probe(run.job["id"]))
+
+        # Accumulator so multi-folder scans (repair loop, scan-in-place
+        # with sources=[...]) don't rewind the overall progress at each
+        # folder boundary. scan() reports (current, total) local to the
+        # invocation; we fold those into cumulative counters that the
+        # weighted overall bar reads via stages["scan"].
+        scan_acc = {"prior": 0, "last_total": 0}
+
+        def progress_cb(current, total):
+            scan_acc["last_total"] = total
+            cum_current = scan_acc["prior"] + current
+            cum_total = scan_acc["prior"] + total
+            run.stages["scan"]["count"] = cum_current
+            run.stages["scan"]["total"] = cum_total
+            elapsed = time.time() - run.job["_start_time"]
+            rate = round(cum_current / max(elapsed, 0.01) * 60, 1)  # files/min
+            remaining = cum_total - cum_current
+            rate_per_sec = cum_current / max(elapsed, 0.01)
+            eta = round(remaining / rate_per_sec) if rate_per_sec > 0 and cum_current >= 10 else None
+            run.runner.update_step(run.job["id"], "scan",
+                               progress={"current": cum_current, "total": cum_total})
+            run.emit_progress(
+                run.runner, run.job["id"], run.stages, "scan", "Scanning photos",
+                rate=rate,
+                eta_seconds=eta,
+            )
+
+        def advance_scan_acc():
+            scan_acc["prior"] += scan_acc["last_total"]
+            scan_acc["last_total"] = 0
+
+        # Collection mode: no scan targets, but check whether any
+        # photos in the collection have broken metadata (NULL timestamp
+        # or RAW thumbnail-sized dimensions) that would poison
+        # downstream stages. If so, run a targeted repair scan on just
+        # the affected folders. This is the self-healing path — when
+        # nothing's broken, we keep the historical "Skipped" summary.
+        if skip_scan:
+            coll_photos = thread_db.get_collection_photos(
+                run.collection_id, per_page=999999,
+            )
+            # Respect the user's preview-time exclusions: photos removed
+            # from this run must not be rescanned or have their metadata
+            # rewritten as a side effect of repair.
+            in_scope_photos = _filter_excluded(coll_photos)
+            broken = _find_broken_metadata_folders(
+                thread_db, [p["id"] for p in in_scope_photos],
+            )
+            if not broken:
+                run.stages["scan"]["status"] = "skipped"
+                run.runner.update_step(
+                    run.job["id"], "scan", status="completed",
+                    summary="Skipped (using collection)",
+                )
+                run.update_stages(run.runner, run.job["id"], run.stages)
+                _put_scan_item(_SENTINEL)
+                return
+
+            total_broken = sum(len(paths) for _, paths in broken)
+            run.stages["scan"]["label"] = (
+                f"Repair metadata ({total_broken} photos)"
+            )
+            run.stages["scan"]["status"] = "running"
+            run.runner.update_step(
+                run.job["id"], "scan", status="running",
+                summary=(f"Repairing {total_broken} photos in "
+                         f"{len(broken)} folder"
+                         f"{'s' if len(broken) != 1 else ''}"),
+            )
+            run.update_stages(run.runner, run.job["id"], run.stages)
+
+            # Display-only callback for the repair path: updates the
+            # scan step's current_file indicator but does NOT enqueue
+            # into scan_to_thumb. In collection mode thumbnail_stage
+            # already replays the full collection against the thumb
+            # cache, so enqueueing here would double-process every
+            # repaired photo and inflate the thumbnail totals.
+            def repair_photo_cb(photo_id, path):
+                run.runner.update_step(
+                    run.job["id"], "scan",
+                    current_file=os.path.basename(path),
+                )
+
+            unreachable = 0
+            for folder_path, file_paths in broken:
+                if not os.path.isdir(folder_path):
+                    log.warning(
+                        "Repair scan skipped for missing folder: %s",
+                        folder_path,
+                    )
+                    unreachable += 1
+                    continue
+                # Track the repair folder so the outer finally
+                # invalidates the Missing Originals cache for it —
+                # scanner.scan touches the folder on disk and can
+                # revalidate a restored original that a ready
+                # /api/photos/missing payload still lists as a
+                # ghost. Matches the append pattern used by the
+                # normal ingest/scan-in-place paths below.
+                scanned_roots.append(folder_path)
+                try:
+                    # restrict_files limits discovery to the known
+                    # broken photos in this folder. Without it, new
+                    # untracked files in the same folder would get
+                    # ingested as a side effect of the repair.
+                    do_scan(
+                        folder_path, thread_db,
+                        progress_callback=progress_cb,
+                        incremental=True,
+                        extract_full_metadata=pipeline_cfg.get(
+                            "extract_full_metadata", True,
+                        ),
+                        photo_callback=repair_photo_cb,
+                        status_callback=status_cb,
+                        restrict_dirs=[folder_path],
+                        restrict_files=set(file_paths),
+                        vireo_dir=effective_vireo_dir,
+                        thumb_cache_dir=effective_thumb_cache_dir,
+                        cancel_check=cancel_check,
+                        pause_check=scan_pause_check,
+                        cancel_only_check=run.control.cancellation_requested,
+                        register_restrict_dirs_as_roots=False,
+                        allow_photo_inserts=False,
+                    )
+                except (OSError, RuntimeError) as e:
+                    if isinstance(e, ScanCancelled) and (
+                        run.control.should_abort(run.abort) or run.control.cancellation_requested()
+                    ):
+                        run.abort.set()
+                        run.stages["scan"]["status"] = "skipped"
+                        run.runner.update_step(
+                            run.job["id"], "scan",
+                            status="completed",
+                            summary="Cancelled",
+                        )
+                        break
+                    log.warning(
+                        "Repair scan failed for %s: %s", folder_path, e,
+                    )
+                    unreachable += 1
+                finally:
+                    advance_scan_acc()
+
+            if run.control.should_abort(run.abort) or run.control.cancellation_requested():
+                run.stages["scan"]["status"] = "skipped"
+                run.runner.update_step(
+                    run.job["id"], "scan",
+                    status="completed",
+                    summary="Cancelled",
+                )
+                _put_scan_item(_SENTINEL)
+                return
+
+            from metadata import scan_metadata_warning
+
+            summary = f"{total_broken} photos repaired"
+            if unreachable:
+                summary += (f", {unreachable} folder"
+                            f"{'s' if unreachable != 1 else ''} unreachable")
+            # Mirror the standalone scan/import paths in app.py: append
+            # the missing-exiftool warning so a repair scan that lost
+            # metadata reads as degraded, not as a clean success.
+            metadata_warning = scan_metadata_warning()
+            if metadata_warning:
+                summary += f" — {metadata_warning}"
+            run.stages["scan"]["status"] = "completed"
+            run.runner.update_step(
+                run.job["id"], "scan", status="completed", summary=summary,
+            )
+            _put_scan_item(_SENTINEL)
+            return
+
+        # Determine source folder(s)
+        sources = run.params.sources or ([run.params.source] if run.params.source else [])
+
+        if run.params.destination:
+            from pathlib import Path
+
+            from import_dedup import CatalogIndex, DuplicateChecker
+            from ingest import ingest as do_ingest
+
+            # Duplicate-oracle infrastructure shared by the
+            # local-processing preflight and the ingest loop. The
+            # catalog index is loaded once; every prediction pass
+            # gets a FRESH checker over it (seen-state must not
+            # leak between predictions or into the real ingest),
+            # while the shared times cache keeps each source
+            # file's EXIF header read to once per run.
+            dedup_times_cache: dict = {}
+            catalog_index = None
+            if run.params.skip_duplicates:
+                catalog_index = CatalogIndex.from_db(thread_db)
+
+            def _fresh_checker():
+                if catalog_index is None:
+                    return None
+                return DuplicateChecker(
+                    catalog_index,
+                    verify_by_hash=run.params.verify_by_hash,
+                    times_cache=dedup_times_cache,
+                )
+
+            if run.params.local_processing:
+                from local_processing import (
+                    archive_conflict_report,
+                    existing_archive_bytes,
+                    format_bytes,
+                    non_duplicate_files,
+                    selected_source_files,
+                    storage_plan,
+                    total_file_bytes,
+                )
+                run.stages["storage"]["status"] = "running"
+                run.runner.update_step(run.job["id"], "storage", status="running")
+                run.update_stages(run.runner, run.job["id"], run.stages)
+
+                def _bail_storage(msg):
+                    # collection_stage spins on stages["scan"]["status"]
+                    # until it reaches a terminal value, so a storage
+                    # failure that skips scan and ingest entirely must
+                    # mark both as skipped here — otherwise its join()
+                    # blocks the whole pipeline forever.
+                    run.errors.append(f"[storage] Fatal: {msg}")
+                    run.stages["storage"]["status"] = "failed"
+                    run.runner.update_step(
+                        run.job["id"], "storage",
+                        status="failed", error=msg,
+                    )
+                    for skipped in ("ingest", "scan"):
+                        run.stages[skipped]["status"] = "skipped"
+                        run.runner.update_step(
+                            run.job["id"], skipped,
+                            status="completed", summary="Skipped",
+                        )
+                    run.abort.set()
+                    _put_scan_item(_SENTINEL)
+
+                try:
+                    if remote_archive is not None:
+                        import move as move_mod
+
+                        # Refuse BEFORE staging/processing hours of
+                        # work, in the same spirit as the local
+                        # archive-parent checks below: a missing GNU
+                        # rsync or an unreachable target would
+                        # otherwise only surface at the final archive
+                        # move, stranding processed results in
+                        # staging.
+                        rsync_bin = move_mod.resolve_rsync_bin(
+                            effective_cfg.get("rsync_bin", "") or "",
+                        )
+                        if rsync_bin and not move_mod.is_gnu_rsync(
+                            rsync_bin,
+                        ):
+                            rsync_bin = ""
+                        if not rsync_bin:
+                            _bail_storage(
+                                "No usable GNU rsync was found for the "
+                                "remote archive. Install GNU rsync for "
+                                "your platform or set its executable "
+                                "under Settings → Paths."
+                            )
+                            return
+                        conn = move_mod.test_remote_connection(
+                            remote_archive["target"], rsync_bin,
+                        )
+                        if not conn.get("ok"):
+                            _bail_storage(
+                                "Remote archive target "
+                                f"'{remote_archive['target']['name']}'"
+                                f" ({remote_archive['display']}) "
+                                "isn't usable: "
+                                f"{conn.get('message') or 'connection test failed'}"
+                            )
+                            return
+
+                    # A tracked archive destination (the import lands at
+                    # or inside a folder Vireo already manages) is no
+                    # longer a hard failure: the archive move opts into
+                    # merging (allow_tracked_merge=True) and folds the
+                    # staged tree into the existing archive. The precise
+                    # per-file content-conflict guard below
+                    # (conflicting_archive_paths) still refuses any
+                    # same-path file whose bytes differ.
+                    #
+                    # BUT — the merge only supports the "exact overlap"
+                    # (destination IS a tracked folder) and the "ancestor
+                    # overlap" (destination is INSIDE a tracked folder)
+                    # cases. A tracked row STRICTLY BELOW the destination
+                    # (e.g. /Photos/USA already tracked and the user
+                    # picks /Photos) is the "wrap a fresh parent around
+                    # an existing tracked subtree" case which
+                    # move_folder refuses even with allow_tracked_merge.
+                    # Without an early refuse here the pipeline would
+                    # stage and process everything, then fail only at
+                    # the archive step and leave processed results
+                    # stranded under staging. Mirror move_folder's
+                    # alias-folded check so a symlink or case-only alias
+                    # of the tracked path is treated as the exact-match
+                    # case, not a descendant.
+                    from move import (
+                        _path_equal_or_descends,
+                        _tracked_destination_overlap,
+                    )
+                    # For a remote archive, final_destination is the
+                    # catalog-facing MOUNT path (see where
+                    # remote_archive is resolved) — the tracked check
+                    # applies there too, because a prior remote
+                    # archive to the same target leaves tracked rows
+                    # at the mount path and the archive move merges
+                    # into (or refuses around) those exactly like a
+                    # local destination.
+                    preflight_tracked = _tracked_destination_overlap(
+                        thread_db, -1, final_destination,
+                    )
+                    if preflight_tracked and not _path_equal_or_descends(
+                        final_destination, preflight_tracked["path"],
+                    ):
+                        _bail_storage(
+                            f"Archive destination {final_destination} "
+                            "sits above a folder Vireo already manages "
+                            f"({preflight_tracked['path']}). Merging "
+                            "around a tracked subfolder isn't "
+                            "supported. Pick the tracked folder itself "
+                            "or a location outside it."
+                        )
+                        return
+
+                    if remote_archive is None:
+                        # Make sure the archive parent exists NOW. Otherwise
+                        # the pipeline would stage and process everything,
+                        # then fail at the final move_folder call when rsync
+                        # tries to write to a missing parent — leaving the
+                        # staged copy stranded under ~/.vireo/staging with no
+                        # archive at the final destination. Nested archive
+                        # targets like /mnt/nas/NewShoot/Photos are the
+                        # common case: the parent /mnt/nas/NewShoot may not
+                        # have been created yet by the user.
+                        #
+                        # All four checks in this branch are
+                        # local-filesystem-only. For a remote archive
+                        # the destination lives on the NAS: the SSH
+                        # connection test above already proved the
+                        # remote base is a writable directory, and
+                        # move_folder's remote path mkdir-p's the
+                        # subpath parents itself. The local mount
+                        # path deliberately isn't probed — it may
+                        # legitimately be unmounted while archiving
+                        # over SSH (that's the point of this mode).
+                        archive_parent = os.path.dirname(
+                            os.path.normpath(final_destination),
+                        )
+                        # Use lexists so a broken/dangling symlink at
+                        # final_destination is caught here too. os.path
+                        # .exists returns False for a broken symlink, so
+                        # a stale link left by an unmounted or moved
+                        # archive root would slip through, let the
+                        # pipeline stage and process everything, and
+                        # only fail when move_folder/rsync tried to
+                        # create a directory at a path already occupied
+                        # by that symlink entry.
+                        if (
+                            os.path.lexists(final_destination)
+                            and not os.path.isdir(final_destination)
+                        ):
+                            _bail_storage(
+                                f"Archive destination {final_destination} "
+                                "already exists and is not a directory."
+                            )
+                            return
+                        # Existing archive roots can be mounted volumes; new
+                        # archive leaves have to probe the existing parent.
+                        archive_space_path = (
+                            final_destination
+                            if os.path.exists(final_destination)
+                            else archive_parent
+                        )
+                        missing_mount_root = (
+                            _missing_archive_mount_root(final_destination)
+                            or _missing_archive_mount_root(archive_parent)
+                        )
+                        if missing_mount_root:
+                            _bail_storage(
+                                f"Archive mount root {missing_mount_root} "
+                                "is not available. Check that the "
+                                "destination drive is mounted and writable."
+                            )
+                            return
+                        try:
+                            os.makedirs(archive_parent, exist_ok=True)
+                        except OSError as exc:
+                            _bail_storage(
+                                f"Archive parent {archive_parent} could "
+                                f"not be created: {exc}. Check that the "
+                                "destination drive is mounted and writable."
+                            )
+                            return
+
+                    os.makedirs(run.params.destination, exist_ok=True)
+                    selected_files = selected_source_files(
+                        sources,
+                        run.params.file_types,
+                        recursive=run.params.recursive,
+                        exclude_paths=run.params.exclude_paths,
+                    )
+                    # When skip_duplicates is on, ingest() will skip
+                    # sources that duplicate cataloged photos before
+                    # they ever reach staging. Give the conflict
+                    # preflight a fresh instance of the same
+                    # duplicate oracle so a duplicate-source that
+                    # happens to share an archive path with an
+                    # unrelated file does not falsely abort the run
+                    # — ingest will not copy it, so it cannot
+                    # conflict at archive time.
+
+                    from move import _case_insensitive_root
+
+                    def _indexed_archive_paths(root: str) -> set[str]:
+                        # Fold symlink/case aliases before deciding a
+                        # cataloged row belongs under this destination:
+                        # the tracked-destination preflight above
+                        # accepts alias-equal roots via
+                        # _path_equal_or_descends, so anything less here
+                        # would drop indexed rows whose stored path uses
+                        # a different alias than the user-picked
+                        # destination (symlink target vs. link, or a
+                        # case-only twin on case-insensitive POSIX like
+                        # default APFS — os.path.normcase is a no-op on
+                        # POSIX and os.path.realpath preserves the
+                        # supplied spelling, so a lexical
+                        # commonpath/is_relative_to check misses the
+                        # case-only alias). Dropping the row would then
+                        # feed an empty index to
+                        # archive_conflict_report and get a
+                        # zero-byte/truncated indexed archive file
+                        # labelled as unindexed failed-copy debris —
+                        # telling the user to remove a cataloged file.
+                        # Probe the case-insensitive fold root once and
+                        # reuse it per row so
+                        # _path_equal_or_descends' listdir/samefile
+                        # probe doesn't re-run per catalog folder.
+                        root_path = Path(os.path.normpath(root))
+                        root_real = os.path.normcase(
+                            os.path.realpath(root),
+                        )
+                        dest_ci_root = _case_insensitive_root(root)
+                        indexed: set[str] = set()
+                        rows = thread_db.conn.execute(
+                            """SELECT f.path, p.filename
+                                 FROM photos p
+                                 JOIN folders f ON f.id = p.folder_id"""
+                        ).fetchall()
+                        for row in rows:
+                            folder = row["path"]
+                            if not _path_equal_or_descends(
+                                folder, root,
+                                case_insensitive_root=dest_ci_root,
+                            ):
+                                continue
+                            # Extract the below-root portion of the
+                            # folder path so we can rebase onto the
+                            # user-picked root spelling
+                            # (archive_conflict_report joins
+                            # `path`/rel_folder/filename to build the
+                            # dest_key we're matching against). A
+                            # realpath-based string prefix covers the
+                            # same-case and symlink-alias cases; the
+                            # case-fold branch mirrors
+                            # _path_equal_or_descends' probed-CI-root
+                            # logic so a POSIX case-only alias still
+                            # yields the right tail.
+                            folder_real = os.path.normcase(
+                                os.path.realpath(folder),
+                            )
+                            rel_suffix: str | None = None
+                            if folder_real == root_real:
+                                rel_suffix = ""
+                            elif folder_real.startswith(
+                                root_real + os.sep,
+                            ):
+                                rel_suffix = folder_real[
+                                    len(root_real) + 1:
+                                ]
+                            elif dest_ci_root:
+                                root_low = root_real.lower()
+                                folder_low = folder_real.lower()
+                                if folder_low == root_low:
+                                    rel_suffix = ""
+                                elif folder_low.startswith(
+                                    root_low + os.sep,
+                                ):
+                                    rel_suffix = folder_real[
+                                        len(root_real) + 1:
+                                    ]
+                            if rel_suffix is None:
+                                # _path_equal_or_descends accepted the
+                                # row via a samefile walk-up (missing
+                                # intermediate leaf whose parent aliases
+                                # to root), so the realpath spelling
+                                # doesn't line up as a string prefix and
+                                # we can't safely rebase onto the
+                                # user-picked spelling. Catalog folders
+                                # exist on disk by construction — this
+                                # branch is rare — so drop the row
+                                # rather than fabricate a spelling.
+                                continue
+                            indexed_folder = (
+                                root_path if rel_suffix == ""
+                                else root_path.joinpath(
+                                    *rel_suffix.split(os.sep),
+                                )
+                            )
+                            indexed.add(
+                                str(indexed_folder / row["filename"]),
+                            )
+                        return indexed
+
+                    if remote_archive is None:
+                        archive_report = archive_conflict_report(
+                            final_destination,
+                            selected_files,
+                            run.params.folder_template,
+                            duplicate_checker=_fresh_checker(),
+                            indexed_paths=_indexed_archive_paths(
+                                final_destination,
+                            ),
+                        )
+                        archive_conflicts = (
+                            archive_report["empty"]
+                            + archive_report["partial"]
+                            + archive_report["conflicts"]
+                        )
+                    else:
+                        # The conflict report walks the destination
+                        # tree, which for a remote archive lives on
+                        # the NAS and isn't locally walkable. The
+                        # archive move itself runs the equivalent
+                        # guard over SSH before any file is copied —
+                        # move_folder's remote merge path probes with
+                        # ``rsync -an --existing --checksum`` and
+                        # refuses on any same-path file whose bytes
+                        # differ — so a conflict still cancels
+                        # cleanly, just at archive time instead of
+                        # here.
+                        archive_conflicts = []
+                    if archive_conflicts:
+                        incomplete = (
+                            archive_report["empty"]
+                            + archive_report["partial"]
+                        )
+                        if incomplete:
+                            # Only surface incomplete-file paths in
+                            # this branch: the message tells the user
+                            # to remove empty/partial debris, so
+                            # mixing full-content conflict paths into
+                            # the example list would point them at
+                            # files that are neither empty nor
+                            # truncated.
+                            incomplete_examples = ", ".join(
+                                incomplete[:3],
+                            )
+                            incomplete_more = (
+                                f" and {len(incomplete) - 3} more"
+                                if len(incomplete) > 3 else ""
+                            )
+                            bits = []
+                            if archive_report["empty"]:
+                                bits.append(
+                                    f"{len(archive_report['empty'])} empty"
+                                )
+                            if archive_report["partial"]:
+                                bits.append(
+                                    f"{len(archive_report['partial'])} "
+                                    "partial"
+                                )
+                            _bail_storage(
+                                "Archive destination contains "
+                                f"{' and '.join(bits)} unindexed file"
+                                f"{'s' if len(incomplete) != 1 else ''} "
+                                "at incoming import paths: "
+                                f"{incomplete_examples}"
+                                f"{incomplete_more}. This looks like "
+                                "an interrupted previous archive "
+                                "copy. Remove or replace those "
+                                "incomplete files, then retry; Vireo "
+                                "will not suffix around likely "
+                                "corrupt archive files."
+                            )
+                            return
+                        examples = ", ".join(archive_conflicts[:3])
+                        more = (
+                            f" and {len(archive_conflicts) - 3} more"
+                            if len(archive_conflicts) > 3 else ""
+                        )
+                        _bail_storage(
+                            "Archive destination already contains "
+                            "different files at the same import paths: "
+                            f"{examples}{more}. Pick an empty archive "
+                            "folder, remove the conflicting files, or "
+                            "import without local processing."
+                        )
+                        return
+                    planning_files = selected_files
+                    if (
+                        run.params.skip_duplicates
+                        and selected_files
+                        and catalog_index is not None
+                    ):
+                        # Plan against the exact files ingest will
+                        # stage, not the full selection. This keeps
+                        # both source_bytes and resume credit aligned
+                        # with skip_duplicates even when the unfiltered
+                        # plan appears to have enough space.
+                        planning_files = non_duplicate_files(
+                            selected_files, _fresh_checker(),
+                        )
+                    source_bytes = total_file_bytes(planning_files)
+                    remote_summary_bits = []
+                    if remote_archive is None:
+                        # When a previous archive attempt left a partial
+                        # untracked directory at final_destination, the
+                        # retry uses move_folder(..., merge=True), which
+                        # rsyncs only the missing files. Credit the bytes
+                        # already published so the preflight doesn't
+                        # reject a retry whose remaining delta would fit.
+                        existing_bytes = existing_archive_bytes(
+                            final_destination,
+                            planning_files,
+                            run.params.folder_template,
+                        )
+                        plan = storage_plan(
+                            run.params.destination, source_bytes,
+                            archive_parent=archive_space_path,
+                            archive_existing_bytes=existing_bytes,
+                        )
+                    else:
+                        # Staging-only local plan (the archive volume
+                        # is the NAS, never the same device), then a
+                        # remote df probe for the archive side.
+                        # Probe failures degrade to "check skipped" —
+                        # logged and surfaced in the step summary and
+                        # result payload, never faked as numbers; the
+                        # archive move's own rsync failure is the
+                        # backstop if space actually runs out.
+                        from local_processing import (
+                            RESERVED_FREE_BYTES,
+                        )
+                        from move import _remote_free_bytes
+                        plan = storage_plan(
+                            run.params.destination, source_bytes,
+                        )
+                        target = remote_archive["target"]
+                        # No merge/resume credit for a remote archive:
+                        # the local resume-credit path (existing_archive_bytes)
+                        # compares each destination file's size+content
+                        # against the source, but a remote equivalent
+                        # would need a per-file walk over SSH. A
+                        # whole-tree `du` reports every byte at the
+                        # path — including unrelated files or stale
+                        # partials that rsync --ignore-existing will
+                        # still copy past — which could cancel out
+                        # source_bytes and let the preflight pass on
+                        # a nearly-full NAS. Budget the full source
+                        # here; a retry whose remaining delta would
+                        # actually fit but the full source wouldn't
+                        # is a rare batch-reject we take over the
+                        # false-positive that lets processing burn
+                        # hours before the transfer fails on space.
+                        archive_delta = source_bytes
+                        plan["archive_existing_bytes"] = 0
+                        plan["archive_required_bytes"] = archive_delta
+                        # df the configured base (just verified as an
+                        # existing writable dir by the connection
+                        # test) rather than the not-yet-created leaf.
+                        remote_free = _remote_free_bytes(
+                            target, target["remote_path"],
+                        )
+                        plan["archive_free_bytes"] = remote_free
+                        if remote_free is None:
+                            log.warning(
+                                "Couldn't probe free space at %s; "
+                                "skipping remote free-space check",
+                                remote_archive["display"],
+                            )
+                            remote_summary_bits.append(
+                                "remote free-space check skipped "
+                                "(probe failed)"
+                            )
+                            plan["archive_usable_bytes"] = None
+                        else:
+                            archive_usable = max(
+                                0, remote_free - RESERVED_FREE_BYTES,
+                            )
+                            plan["archive_usable_bytes"] = archive_usable
+                            plan["archive_enough"] = (
+                                archive_delta <= archive_usable
+                            )
+                            plan["enough"] = (
+                                plan["staging_enough"]
+                                and plan["archive_enough"]
+                            )
+                            plan["batching_required"] = not plan["enough"]
+                            remote_summary_bits.append(
+                                f"{format_bytes(remote_free)} free at "
+                                f"{target['name']}"
+                            )
+                    run.result["local_processing"] = {
+                        **plan,
+                        "staging_destination": run.params.destination,
+                        "final_destination": final_destination,
+                    }
+                    if remote_archive is not None:
+                        target = remote_archive["target"]
+                        run.result["local_processing"]["remote"] = {
+                            "target_id": target["id"],
+                            "target_name": target["name"],
+                            "host": target["host"],
+                            "user": target["user"],
+                            "ssh_destination": remote_archive["ssh_final"],
+                            "free_space_checked": (
+                                plan["archive_free_bytes"] is not None
+                            ),
+                        }
+                    if plan["batching_required"]:
+                        # Tell the user which volume came up short — the
+                        # destination running out of room reads as a
+                        # different problem (pick a bigger archive
+                        # drive) than the staging volume running out
+                        # (free space on ~/.vireo or batch later).
+                        if not plan.get("archive_enough", True):
+                            if remote_archive is not None:
+                                _bail_storage(
+                                    "Remote archive needs about "
+                                    f"{format_bytes(plan['archive_required_bytes'])}, "
+                                    "but only "
+                                    f"{format_bytes(plan['archive_usable_bytes'] or 0)} "
+                                    "is free at "
+                                    f"{remote_archive['display']} after "
+                                    "the free-space reserve. Free space "
+                                    "on the remote volume or pick a "
+                                    "different target or subpath."
+                                )
+                            else:
+                                _bail_storage(
+                                    "Archive destination needs about "
+                                    f"{format_bytes(plan['archive_required_bytes'])}, "
+                                    "but only "
+                                    f"{format_bytes(plan['archive_usable_bytes'] or 0)} "
+                                    f"is free under {archive_parent} after "
+                                    "the free-space reserve. Free space at "
+                                    "the destination or pick a different "
+                                    "archive folder."
+                                )
+                        else:
+                            _bail_storage(
+                                "Local processing needs about "
+                                f"{format_bytes(plan['required_bytes'])}, but "
+                                f"only {format_bytes(plan['usable_bytes'])} is "
+                                "available after keeping local free-space "
+                                "reserve. This import needs "
+                                f"{plan['batch_count']} local-processing "
+                                "batches; automatic batch execution is not "
+                                "available in this build yet."
+                            )
+                        return
+                    summary = (
+                        f"{format_bytes(plan['required_bytes'])} needed, "
+                        f"{format_bytes(plan['usable_bytes'])} available"
+                    )
+                    if remote_summary_bits:
+                        summary += "; " + "; ".join(remote_summary_bits)
+                    run.stages["storage"]["status"] = "completed"
+                    run.runner.update_step(
+                        run.job["id"], "storage",
+                        status="completed",
+                        summary=summary,
+                    )
+                except Exception as e:
+                    log.exception("Pipeline local-storage preflight failed")
+                    _bail_storage(str(e))
+                    return
+
+            # Same accumulator pattern as scan_acc: do_ingest() is called
+            # once per source folder, with (current, total) local to each
+            # call. Without accumulation, overall progress rewinds at each
+            # source boundary.
+            ingest_acc = {"prior": 0, "last_total": 0}
+
+            def ingest_cb(current, total, filename):
+                ingest_acc["last_total"] = total
+                cum_current = ingest_acc["prior"] + current
+                cum_total = ingest_acc["prior"] + total
+                run.stages["ingest"]["count"] = cum_current
+                run.stages["ingest"]["total"] = cum_total
+                run.runner.update_step(run.job["id"], "ingest",
+                                   current_file=filename,
+                                   progress={"current": cum_current, "total": cum_total})
+                run.emit_progress(
+                    run.runner, run.job["id"], run.stages, "ingest", "Importing photos",
+                    current_file=filename,
+                )
+
+            def advance_ingest_acc():
+                ingest_acc["prior"] += ingest_acc["last_total"]
+                ingest_acc["last_total"] = 0
+
+        if run.params.destination:
+            # Copy mode: ingest all sources first, then scan destination
+            # subfolders that received files.
+            run.stages["ingest"]["status"] = "running"
+            run.runner.update_step(run.job["id"], "ingest", status="running")
+            run.update_stages(run.runner, run.job["id"], run.stages)
+
+            # One shared checker across the whole source loop: files
+            # copied by earlier iterations are recorded in it, so
+            # later sources treat them as duplicates even before the
+            # DB scan (this replaces the old accumulated-hashes
+            # re-read of every copied file between sources).
+            ingest_checker = _fresh_checker()
+            all_copied_paths: list = []
+            all_duplicate_folders: set = set()
+            total_copied = 0
+            total_skipped = 0
+            total_failed = 0
+            for src_folder in sources:
+                try:
+                    result_info = do_ingest(
+                        source_dir=src_folder,
+                        destination_dir=run.params.destination,
+                        db=thread_db,
+                        file_types=run.params.file_types,
+                        folder_template=run.params.folder_template,
+                        skip_duplicates=run.params.skip_duplicates,
+                        progress_callback=ingest_cb,
+                        duplicate_checker=ingest_checker,
+                        skip_paths=run.params.exclude_paths,
+                        recursive=run.params.recursive,
+                    )
+                finally:
+                    advance_ingest_acc()
+                all_copied_paths.extend(result_info.get("copied_paths", []))
+                all_duplicate_folders.update(result_info.get("duplicate_folders", []))
+                total_copied += result_info.get("copied", 0)
+                total_skipped += result_info.get("skipped_duplicate", 0)
+                total_failed += result_info.get("failed", 0)
+
+            # In local-processing mode, ingest failures must fail the
+            # ingest stage so archive_stage's "any earlier stage failed"
+            # gate skips publishing. ingest() catches per-file copy
+            # errors (unreadable source, disk full mid-card) and returns
+            # a non-zero ``failed`` count without raising. Without
+            # propagating that here the archive step would happily move
+            # the partial staging tree to the user's final destination
+            # — publishing a partial result that the rest of the
+            # pipeline would otherwise treat as a successful import.
+            parts = []
+            if total_copied:
+                parts.append(f"{total_copied} copied")
+            if total_skipped:
+                parts.append(f"{total_skipped} skipped")
+            if total_failed:
+                parts.append(f"{total_failed} failed")
+            summary = ", ".join(parts) or "0 files"
+            if run.params.local_processing and total_failed:
+                msg = (
+                    f"{total_failed} file"
+                    f"{'s' if total_failed != 1 else ''} failed to copy "
+                    f"during ingest; archive skipped to avoid publishing "
+                    f"a partial result"
+                )
+                run.errors.append(f"[ingest] Fatal: {msg}")
+                run.stages["ingest"]["status"] = "failed"
+                run.runner.update_step(
+                    run.job["id"], "ingest",
+                    status="failed",
+                    error=msg,
+                    summary=summary,
+                )
+                # Stop the run here. Without abort, scanner/previews/
+                # classify/regroup would all execute against the
+                # partial subset ingest did manage to copy — regroup
+                # in particular overwrites the workspace pipeline
+                # results with photo IDs that archive_stage's
+                # deindex_staging is then going to delete, leaving
+                # the workspace pointing at rows that no longer
+                # exist. archive_stage already gates on abort and
+                # any earlier-stage failure, so this also publishes
+                # nothing. Finalize the remaining step rows as
+                # skipped so the SSE clients don't see perpetually
+                # pending stages.
+                run.abort.set()
+                run.stages["scan"]["status"] = "skipped"
+                run.runner.update_step(
+                    run.job["id"], "scan",
+                    status="completed",
+                    summary="Skipped (ingest failed)",
+                )
+                run.update_stages(run.runner, run.job["id"], run.stages)
+                # The finally clause at the bottom of scanner_stage
+                # puts the sentinel on scan_to_thumb so the
+                # thumbnail consumer drains and exits.
+                return
+            else:
+                run.stages["ingest"]["status"] = "completed"
+                # Ingest is the only stage that ever reads the source
+                # (SD card/etc.) — everything after this point works
+                # from the copy. Record counts so the UI can tell the
+                # user the card is safe to eject instead of leaving
+                # them to guess. Only claim this when every discovered
+                # file actually made it off the card: local_processing
+                # aborts above on any failure, but plain copy mode
+                # (local_processing=False) reaches this branch even
+                # with total_failed > 0, and the card still holds
+                # files that never got copied.
+                if total_failed == 0:
+                    run.stages["ingest"]["copied"] = total_copied
+                    run.stages["ingest"]["skipped_duplicate"] = total_skipped
+                    run.result["stages"]["ingest"] = {
+                        "copied": total_copied,
+                        "skipped_duplicate": total_skipped,
+                    }
+                run.runner.update_step(
+                    run.job["id"], "ingest", status="completed",
+                    summary=summary,
+                )
+            run.update_stages(run.runner, run.job["id"], run.stages)
+
+            # Scan only the destination subfolders that actually contain
+            # files we care about, not the entire destination tree. Use
+            # restrict_dirs so the scanner still roots the folder hierarchy
+            # at the destination, preserving parent folder links. Include
+            # folders that received copies AND folders that already hold
+            # duplicates of the source files — both need to be linked to
+            # the active workspace. Guard every candidate at this seam:
+            # scanner._ensure_folder recurses parents until it equals the
+            # scan root; a non-descendant path would recurse all the way
+            # to '/', so restrict_dirs must contain only descendants of
+            # params.destination. ingest() already enforces this, but
+            # we re-check here to keep the invariant local and obvious.
+            # Both sides are lexically normalized via os.path.normpath so
+            # a stored path containing ``..`` can't defeat the check.
+            import os as _os
+            dest_p = Path(_os.path.normpath(run.params.destination))
+
+            def _under_destination(path: str) -> bool:
+                return Path(_os.path.normpath(path)).is_relative_to(dest_p)
+
+            restrict_set: set[str] = set()
+            if all_copied_paths:
+                restrict_set.update(
+                    str(Path(p).parent) for p in all_copied_paths
+                    if _under_destination(str(Path(p).parent))
+                )
+            restrict_set.update(
+                f for f in all_duplicate_folders if _under_destination(f)
+            )
+            restrict = sorted(restrict_set) if restrict_set else None
+            # Flip scan to running and reset job progress so status
+            # events during enumeration don't carry ingest's numbers.
+            run.stages["scan"]["status"] = "running"
+            run.runner.update_step(run.job["id"], "scan", status="running")
+            run.job["progress"]["current"] = 0
+            run.job["progress"]["total"] = 0
+            run.update_stages(run.runner, run.job["id"], run.stages)
+            # Surface kernel-level enumeration denials (macOS TCC EPERM,
+            # POSIX EACCES) into job["errors"]. Without this, scanner.scan
+            # silently skipped the subtree and the scan stage finished as
+            # "completed" with 0 photos — a black-box outcome the user
+            # reads as "no photos found here" when the truth is "Vireo
+            # was denied access". Dedup per path because the walk may
+            # signal the same dir more than once.
+            denied_seen: set[str] = set()
+            def _on_denied(path: str) -> None:
+                if path in denied_seen:
+                    return
+                denied_seen.add(path)
+                run.errors.append(
+                    f"[scan] PERMISSION_DENIED: {path} — macOS or "
+                    f"filesystem refused enumeration. On macOS open "
+                    f"System Settings → Privacy & Security → Files "
+                    f"and Folders (or Removable/Network Volumes) and "
+                    f"grant Vireo access."
+                )
+            scanned_roots.append(run.params.destination)
+            do_scan(
+                run.params.destination, thread_db,
+                progress_callback=progress_cb,
+                incremental=True,
+                extract_full_metadata=pipeline_cfg.get("extract_full_metadata", True),
+                photo_callback=photo_cb,
+                status_callback=status_cb,
+                restrict_dirs=restrict,
+                vireo_dir=effective_vireo_dir,
+                thumb_cache_dir=effective_thumb_cache_dir,
+                permission_error_callback=_on_denied,
+                cancel_check=cancel_check,
+                pause_check=scan_pause_check,
+                cancel_only_check=run.control.cancellation_requested,
+            )
+        else:
+            # Scan-in-place: scan each source folder independently.
+            run.stages["scan"]["status"] = "running"
+            run.runner.update_step(run.job["id"], "scan", status="running")
+            run.job["progress"]["current"] = 0
+            run.job["progress"]["total"] = 0
+            run.update_stages(run.runner, run.job["id"], run.stages)
+            # See ingest branch above — same denial-surfacing rationale.
+            denied_seen: set[str] = set()
+            def _on_denied(path: str) -> None:
+                if path in denied_seen:
+                    return
+                denied_seen.add(path)
+                run.errors.append(
+                    f"[scan] PERMISSION_DENIED: {path} — macOS or "
+                    f"filesystem refused enumeration. On macOS open "
+                    f"System Settings → Privacy & Security → Files "
+                    f"and Folders (or Removable/Network Volumes) and "
+                    f"grant Vireo access."
+                )
+            # Snapshot-scoped: hand the scanner the exact file set
+            # captured at snapshot time so a file that landed in the
+            # folder AFTER the snapshot doesn't get cataloged here.
+            # Without this, the scan walks the whole folder, commits
+            # a photos row for the late arrival, then the collection
+            # stage filters it out of downstream work AND the finally
+            # block invalidates the new-images cache — orphaning the
+            # file (cataloged in DB, never classified, never
+            # re-surfaced by a later banner probe). Skipping it at
+            # scan time keeps it uncataloged so the next probe
+            # rediscovers it.
+            snapshot_files_set = (
+                set(snapshot_paths) if snapshot_paths is not None else None
+            )
+            for src_folder in sources:
+                scanned_roots.append(src_folder)
+                snapshot_restrict_dirs = None
+                snapshot_restrict_files = None
+                if snapshot_files_set is not None:
+                    src_norm = os.path.normpath(src_folder)
+                    prefix = (
+                        src_norm if src_norm.endswith(os.sep)
+                        else src_norm + os.sep
+                    )
+                    files_under_src = [
+                        p for p in snapshot_paths
+                        if os.path.normpath(p).startswith(prefix)
+                    ]
+                    snapshot_restrict_files = set(files_under_src)
+                    snapshot_restrict_dirs = sorted(
+                        {os.path.dirname(p) for p in files_under_src}
+                    )
+                try:
+                    do_scan(
+                        src_folder, thread_db,
+                        progress_callback=progress_cb,
+                        incremental=True,
+                        extract_full_metadata=pipeline_cfg.get("extract_full_metadata", True),
+                        photo_callback=photo_cb,
+                        skip_paths=run.params.exclude_paths,
+                        status_callback=status_cb,
+                        recursive=run.params.recursive,
+                        restrict_dirs=snapshot_restrict_dirs,
+                        restrict_files=snapshot_restrict_files,
+                        vireo_dir=effective_vireo_dir,
+                        thumb_cache_dir=effective_thumb_cache_dir,
+                        permission_error_callback=_on_denied,
+                        cancel_check=cancel_check,
+                        pause_check=scan_pause_check,
+                        cancel_only_check=run.control.cancellation_requested,
+                    )
+                finally:
+                    advance_scan_acc()
+        if run.control.should_abort(run.abort) or run.control.cancellation_requested():
+            run.stages["scan"]["status"] = "skipped"
+            run.runner.update_step(
+                run.job["id"], "scan", status="completed", summary="Cancelled",
+            )
+        else:
+            from metadata import scan_metadata_warning
+
+            run.stages["scan"]["status"] = "completed"
+            # Pipeline scans use scanner.scan exactly like the standalone
+            # /api/jobs/scan path, so a missing exiftool silently strips
+            # capture dates, GPS, and camera info here too. Append the
+            # same warning the standalone path appends.
+            scan_summary = f"{run.stages['scan']['count']} photos"
+            metadata_warning = scan_metadata_warning()
+            if metadata_warning:
+                scan_summary += f" — {metadata_warning}"
+            run.runner.update_step(run.job["id"], "scan", status="completed",
+                               summary=scan_summary)
+    except Exception as e:
+        if isinstance(e, ScanCancelled) and (
+            run.control.should_abort(run.abort) or run.control.cancellation_requested()
+        ):
+            run.abort.set()
+            run.stages["scan"]["status"] = "skipped"
+            run.runner.update_step(
+                run.job["id"], "scan", status="completed", summary="Cancelled",
+            )
+        else:
+            run.errors.append(f"[scan] Fatal: {e}")
+            log.exception("Pipeline scan stage failed")
+            run.abort.set()
+            run.stages["scan"]["status"] = "failed"
+            run.runner.update_step(run.job["id"], "scan", status="failed", error=str(e))
+    finally:
+        # Invalidate the new-images cache for every root fed to do_scan,
+        # on both success and exception paths. scanner.scan commits photo
+        # rows incrementally, so even a mid-scan failure can leave DB
+        # state that invalidates cached new-image counts. Mirrors the
+        # try/finally in api_job_scan and api_job_import_full.
+        if thread_db is not None and scanned_roots:
+            from new_images import invalidate_new_images_after_scan
+            for scanned_root in scanned_roots:
+                try:
+                    invalidate_new_images_after_scan(thread_db, scanned_root)
+                except Exception:
+                    log.exception(
+                        "Failed to invalidate new-images cache for %s",
+                        scanned_root,
+                    )
+                # scanner.scan touches disk and may add or remove
+                # photo rows; a ready Missing Originals payload
+                # computed before the pipeline scan can now be
+                # stale (e.g. user restored an original before
+                # running Process). Standalone scan / import jobs
+                # already invalidate here — mirror that for
+                # pipeline scans so GET /api/photos/missing does
+                # not keep serving the pre-scan photo list.
+                if missing_originals_invalidator is not None:
+                    try:
+                        missing_originals_invalidator()
+                    except Exception:
+                        log.exception(
+                            "Failed to invalidate missing-originals "
+                            "cache for %s",
+                            scanned_root,
+                        )
+        _put_scan_item(_SENTINEL)
+        run.update_stages(run.runner, run.job["id"], run.stages)
+
+
+def _collection_stage_body(
+    run: PipelineRun,
+    *,
+    collected_photo_ids,
+    skip_scan,
+    snapshot_paths,
+):
+
+    if skip_scan:
+        return
+
+    # Wait for scanner to complete (don't check abort -- we want the
+    # collection regardless so the user can see scanned photos)
+    while True:
+        # Pause is different from abort: this worker can park while it
+        # waits without giving up the collection the scanner produced.
+        run.control.pause_checkpoint()
+        if run.stages["scan"]["status"] in ("completed", "failed", "skipped"):
+            break
+        time.sleep(0.1)
+
+    # Snapshot-scoped runs: resolve the captured file paths to photo IDs
+    # now that the scanner has committed rows, and trim the collection
+    # to exactly that set. The scan stage already restricted the walk
+    # to the snapshot's file set via ``restrict_dirs`` + ``restrict_files``
+    # so late arrivals aren't cataloged in the first place; this filter
+    # is a belt-and-suspenders trim in case a pre-existing (already
+    # cataloged) photo somehow ends up in ``collected_photo_ids``. Any
+    # snapshot path that never resolved (file was moved/deleted between
+    # snapshot and pipeline run) is logged so an unexpectedly small
+    # collection is auditable.
+    if snapshot_paths is not None:
+        resolver_db = run.database_factory(run.db_path)
+        resolver_db.set_active_workspace(run.workspace_id)
+        # Split each snapshot path into (dirname, basename) and match on
+        # the two columns directly. Concatenating with a hardcoded '/'
+        # would mismatch Windows paths captured via os.path.join, where
+        # both the snapshot and folders.path use backslash separators.
+        pairs = [os.path.split(p) for p in snapshot_paths]
+        resolved: set[int] = set()
+        # 2 placeholders per pair; cap below SQLite's default 999-param
+        # limit (pre-3.32) with headroom.
+        _CHUNK = 400
+        for i in range(0, len(pairs), _CHUNK):
+            chunk = pairs[i : i + _CHUNK]
+            values = ",".join("(?, ?)" for _ in chunk)
+            flat_params = tuple(v for pair in chunk for v in pair)
+            rows = resolver_db.conn.execute(
+                f"""SELECT p.id
+                      FROM photos p
+                      JOIN folders f ON f.id = p.folder_id
+                     WHERE (f.path, p.filename) IN (VALUES {values})""",
+                flat_params,
+            ).fetchall()
+            resolved.update(r["id"] for r in rows)
+        snapshot_photo_ids = resolved
+
+        missing = len(snapshot_paths) - len(snapshot_photo_ids)
+        log.info(
+            "pipeline: snapshot %s had %d files, %d ingested, %d missing on disk",
+            run.params.source_snapshot_id,
+            len(snapshot_paths),
+            len(snapshot_photo_ids),
+            missing,
+        )
+
+        # Filter collected_photo_ids to the snapshot set. collected_photo_ids
+        # is only read by this stage (to build the collection); the thumbnail
+        # queue has already drained it independently.
+        collected_photo_ids[:] = [
+            pid for pid in collected_photo_ids if pid in snapshot_photo_ids
+        ]
+
+    if not collected_photo_ids:
+        return
+
+    thread_db = run.database_factory(run.db_path)
+    thread_db.set_active_workspace(run.workspace_id)
+    from datetime import datetime as dt
+
+    name = "Pipeline " + dt.now().strftime("%Y-%m-%d %H:%M")
+    run.collection_id = thread_db.add_collection(
+        name,
+        json.dumps([{"field": "photo_ids", "value": collected_photo_ids}]),
+    )
+    run.result["collection_id"] = run.collection_id
+
+
+def collection_stage(
+    run: PipelineRun,
+    *,
+    _collection_stage_body,
+    collection_ready,
+):
+    """Wait for scan to finish, build collection, signal classifier."""
+    # Every exit must set ``collection_ready``: detect_stage waits on it
+    # unconditionally, so an exception that skipped the set (e.g. the
+    # snapshot resolver hitting a locked DB) would hang the job and
+    # pin one of the pipeline slots forever. A failure is recorded as a
+    # failed ``collection`` stage so the job reports failed rather than
+    # completing with every downstream stage "Skipped".
+    try:
+        _collection_stage_body()
+    except Exception as e:
+        run.errors.append(f"[collection] Fatal: {e}")
+        log.exception("Pipeline collection stage failed")
+        run.abort.set()
+        run.stages["collection"] = {
+            "status": "failed",
+            "label": "Building collection",
+            "error": str(e),
+        }
+        run.update_stages(run.runner, run.job["id"], run.stages)
+    finally:
+        collection_ready.set()
