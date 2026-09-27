@@ -7,6 +7,7 @@ as "Detection unavailable", fresh passes classifying boxes the cached path
 filters out, a batch-inference Stop counted as per-image failures, and a
 summary count that could go negative.
 """
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -228,7 +229,7 @@ def test_fresh_detection_classifies_only_confident_animal_boxes(db, tmp_path):
     job = _job()
     detection_map, detected = _run_patched(
         _detector_patches(
-            lambda path: [dict(b) for b in boxes[path.rsplit("/", 1)[-1]]]
+            lambda path: [dict(b) for b in boxes[os.path.basename(path)]]
         ),
         lambda: _detect_subjects(photos, folders, _Runner(), job, False, db),
     )

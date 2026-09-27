@@ -3598,6 +3598,9 @@ def test_rsync_finder_metadata_excludes_missing_source_returns_empty(tmp_path):
     assert _rsync_finder_metadata_excludes(str(stray_file)) == []
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="Windows filenames cannot contain * or ?",
+)
 def test_rsync_finder_metadata_excludes_escape_wildmatch_metacharacters(tmp_path):
     """When a parent directory's name contains rsync wildmatch
     metacharacters (``*``, ``?``, ``[``, ``\\``), the generated exclude
@@ -4026,7 +4029,11 @@ def test_move_folder_merge_preserves_ds_store_directory_symlink(move_env):
     assert dst_link.is_symlink(), (
         "the .DS_Store symlink must land at the destination, not be dropped"
     )
-    assert os.readlink(str(dst_link)) == str(target_dir)
+    link_target = os.readlink(str(dst_link))
+    if sys.platform == "win32":
+        # Windows reports the substitute name, which carries the \\?\ prefix.
+        link_target = link_target.removeprefix("\\\\?\\")
+    assert link_target == str(target_dir)
     # And the source is gone after the successful merge (a lingering
     # source symlink would mean the merge only pretended to carry it).
     assert not env["src"].exists()

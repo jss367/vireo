@@ -4,7 +4,8 @@ const vm = require('node:vm');
 const assert = require('node:assert/strict');
 
 const settings = 'vireo/templates/settings.html';
-const src = fs.readFileSync(settings, 'utf8');
+// Windows checkouts get CRLF line endings; the extractors below match on \n.
+const src = fs.readFileSync(settings, 'utf8').replace(/\r\n/g, '\n');
 function fn(name) {
   const found = src.match(new RegExp('(?:async )?function ' + name + '\\([^]*?\\n\\}'));
   assert(found, name);
