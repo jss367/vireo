@@ -523,8 +523,7 @@ class CollectionRepository:
                 if len(value) > 4096:
                     raise ValueError("metadata search is limited to 4,096 characters")
                 like = f"%{self._escape_like(value)}%"
-                parts = photo_metadata_predicates()
-                params = [like] * len(parts)
+                parts, params = photo_metadata_predicates(like, value)
                 parts.append(
                     "EXISTS (SELECT 1 FROM photo_color_labels search_color "
                     "WHERE search_color.photo_id = p.id AND search_color.workspace_id = ? "

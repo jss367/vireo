@@ -728,24 +728,48 @@ class PhotoRepository:
             (ws,),
         ).fetchone()[0]
 
-        # Filtered count
+        # Every aggregate below describes the same filtered set, and a
+        # metadata search is by far the costliest part of computing it, so
+        # the matching ids are materialized once. The TEMP table lives on
+        # this request's connection and is dropped before returning; the
+        # SAVEPOINT reads all four aggregates from one snapshot without
+        # committing a caller's open transaction (as ``stage_scope_ids``).
+        self.conn.execute("SAVEPOINT browse_summary")
+        try:
+            self.conn.execute("DROP TABLE IF EXISTS temp._browse_summary_ids")
+            self.conn.execute(
+                "CREATE TEMP TABLE _browse_summary_ids (id INTEGER PRIMARY KEY)"
+            )
+            self.conn.execute(
+                "INSERT INTO _browse_summary_ids (id) "
+                f"SELECT DISTINCT p.id FROM photos p {join_clause} {where}",
+                params,
+            )
+            summary = self._browse_summary_aggregates(ws, detector_confidence)
+        except BaseException:
+            self.conn.execute("ROLLBACK TO browse_summary")
+            raise
+        finally:
+            self.conn.execute("DROP TABLE IF EXISTS temp._browse_summary_ids")
+            self.conn.execute("RELEASE browse_summary")
+        return {"total": total, **summary}
+
+    def _browse_summary_aggregates(self, ws, detector_confidence):
+        """The Browse summary's aggregates over ``temp._browse_summary_ids``."""
         filtered_total = self.conn.execute(
-            f"SELECT COUNT(DISTINCT p.id) FROM photos p {join_clause} {where}",
-            params,
+            "SELECT COUNT(*) FROM _browse_summary_ids"
         ).fetchone()[0]
 
         # Classified vs unclassified (within filter).  Detections and
-        # predictions are global; workspace scoping comes from the outer
-        # join_clause and the detector_confidence read-time threshold.
+        # predictions are global; workspace scoping comes from the filtered
+        # ids and the detector_confidence read-time threshold.
         min_conf = detector_confidence()
         classified = self.conn.execute(
-            f"""SELECT COUNT(DISTINCT p.id) FROM photos p
-                {join_clause}
-                JOIN detections det ON det.photo_id = p.id
+            """SELECT COUNT(DISTINCT s.id) FROM _browse_summary_ids s
+                JOIN detections det ON det.photo_id = s.id
                 JOIN predictions pred ON pred.detection_id = det.id
-                {where}
-                  AND det.detector_confidence >= ?""",
-            params + [min_conf],
+                WHERE det.detector_confidence >= ?""",
+            (min_conf,),
         ).fetchone()[0]
 
         # Top species (within filter).  Review status is workspace-scoped via
@@ -756,7 +780,7 @@ class PhotoRepository:
         # sets doesn't have stale higher-confidence rows from an old
         # fingerprint dominating the top-species ranking.
         top_species = self.conn.execute(
-            f"""WITH best_pred AS (
+            """WITH best_pred AS (
                     SELECT det.photo_id, pred.species,
                            ROW_NUMBER() OVER (
                                PARTITION BY det.photo_id
@@ -777,30 +801,26 @@ class PhotoRepository:
                           LIMIT 1
                       )
                 )
-                SELECT bp.species, COUNT(DISTINCT p.id) as count
-                FROM photos p
-                {join_clause}
-                JOIN best_pred bp ON bp.photo_id = p.id AND bp.rn = 1
-                {where}
+                SELECT bp.species, COUNT(DISTINCT s.id) as count
+                FROM _browse_summary_ids s
+                JOIN best_pred bp ON bp.photo_id = s.id AND bp.rn = 1
                 GROUP BY bp.species
                 ORDER BY count DESC
                 LIMIT 5""",
-            [ws, min_conf] + params,
+            (ws, min_conf),
         ).fetchall()
 
         # Folder breakdown (within filter)
         folder_counts = self.conn.execute(
-            f"""SELECT f.id as folder_id, f.name, COUNT(DISTINCT p.id) as count
-                FROM photos p
-                {join_clause}
-                {where}
+            """SELECT f.id as folder_id, f.name, COUNT(*) as count
+                FROM _browse_summary_ids s
+                JOIN photos p ON p.id = s.id
+                JOIN folders f ON f.id = p.folder_id
                 GROUP BY f.id
-                ORDER BY count DESC""",
-            params,
+                ORDER BY count DESC"""
         ).fetchall()
 
         return {
-            "total": total,
             "filtered_total": filtered_total,
             "classified": classified,
             "unclassified": filtered_total - classified,

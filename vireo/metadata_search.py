@@ -29,8 +29,28 @@ def values_contain(columns):
     )
 
 
-def photo_metadata_predicates():
-    """Photo, folder, keyword/taxon and file-tag predicates, one bind each.
+# Every character SQLite can produce when it reads a JSON number back as
+# text ("1.0e-05", "1.23456789012346e+19", "-Inf"), case-folded like LIKE.
+_NUMBER_TEXT_CHARS = frozenset("0123456789.+-e")
+
+
+def raw_text_rules_out(term):
+    """Whether a row's raw EXIF text lacking ``term`` proves no value matches.
+
+    The per-value search compares SQLite's rendering of each value, which
+    can differ from the stored text. Strings differ only through escapes
+    (``"\\u0068awk"`` renders as ``hawk``); the SQL takes any row holding a
+    backslash down the full walk. Numbers are re-rendered outright:
+    ``0.7999999999999999`` reads back as ``0.8``, ``5.0e2`` as ``500.0`` and
+    ``1e999`` as ``Inf``. So the shortcut is only sound for a term no number
+    can render as.
+    """
+    folded = term.lower()
+    return not (set(folded) <= _NUMBER_TEXT_CHARS or folded in "-inf")
+
+
+def photo_metadata_predicates(like, term):
+    """Photo, folder, keyword/taxon and file-tag predicates with their binds.
 
     Existing relation indexes keep correlated lookups scoped to each candidate
     photo. JSON is expanded in SQLite, never loaded into Python or the browser.
@@ -67,4 +87,13 @@ def photo_metadata_predicates():
         + ")) search_tag WHERE (CASE WHEN search_tag.type IN ('true', 'false') "
         "THEN search_tag.type ELSE CAST(search_tag.atom AS TEXT) END) LIKE ? ESCAPE '\\')"
     )
-    return [photo, folder, keyword, tags]
+    tag_params = [like]
+    if raw_text_rules_out(term):
+        # Parsing and walking every photo's EXIF is nearly all of a search's
+        # cost; one pass over the raw text skips the photos that cannot match.
+        tags = (
+            "((typeof(p.exif_data) != 'text' OR p.exif_data LIKE ? ESCAPE '\\' "
+            "OR instr(p.exif_data, char(92)) > 0) AND " + tags + ")"
+        )
+        tag_params = [like, like]
+    return [photo, folder, keyword, tags], [like, like, like, *tag_params]
