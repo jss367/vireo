@@ -243,6 +243,12 @@ def _copy_tree_with_progress(src_path, dest_path, skip_existing, total_files,
                 continue
             os.symlink(os.readlink(src_sub), dst_sub)
         for fn in files:
+            # Merges skip Finder metadata (``.DS_Store``) — the destination
+            # keeps its own copy, and the source's is discarded when the
+            # source tree is removed after a successful merge. Fresh moves
+            # carry them along, matching the primary rsync path.
+            if skip_existing and fn in FINDER_METADATA_FILES:
+                continue
             src_file = os.path.join(root, fn)
             dst_file = os.path.join(target_dir, fn)
             # lexists (not exists): a broken or symlinked destination entry
@@ -711,7 +717,8 @@ def test_remote_connection(remote, rsync_bin):
     return result
 
 
-def _remote_verify_complete(rsync_bin, src_path, rsync_target, remote):
+def _remote_verify_complete(rsync_bin, src_path, rsync_target, remote,
+                            *, is_merge=False):
     """Independent verification that the remote copy is complete and correct.
 
     The local move's safety check walks the destination filesystem before
@@ -729,27 +736,37 @@ def _remote_verify_complete(rsync_bin, src_path, rsync_target, remote):
         timed out; treated as a verification failure (originals preserved).
     Bandwidth-cheap: the NAS checksums its own local disk and only hashes
     cross the wire, so no bulk data is re-transferred.
+
+    ``is_merge`` excludes Finder metadata (``.DS_Store``) on both sides so a
+    ``.DS_Store`` that the merge deliberately did not copy is never reported
+    as a verification failure. A fresh move carries these along and asks
+    for a full compare.
     """
-    cmd = [rsync_bin, "-an", "--checksum", "--out-format=%n",
-           "-e", _ssh_rsh_string(remote),
-           src_path + "/", rsync_target + "/"]
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=REMOTE_VERIFY_TIMEOUT,
-                              **no_window_kwargs())
-    except subprocess.TimeoutExpired:
-        return ("__ERROR__", f"verification timed out after "
-                f"{REMOTE_VERIFY_TIMEOUT // 60} minutes")
-    except OSError as exc:
-        return ("__ERROR__", str(exc))
-    if proc.returncode != 0:
-        return ("__ERROR__", proc.stderr.strip() or f"rsync exit {proc.returncode}")
-    for line in proc.stdout.splitlines():
-        name = line.rstrip("\n")
-        if not name or name.endswith("/"):
-            continue  # directory entry, not a file needing transfer
-        return (name, None)
-    return None
+    exclude_ctx = (_rsync_finder_metadata_exclude_file(src_path)
+                   if is_merge else contextlib.nullcontext([]))
+    with exclude_ctx as metadata_excludes:
+        cmd = [rsync_bin, "-an", "--checksum", "--out-format=%n",
+               "-e", _ssh_rsh_string(remote),
+               *metadata_excludes,
+               src_path + "/", rsync_target + "/"]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True,
+                                  timeout=REMOTE_VERIFY_TIMEOUT,
+                                  **no_window_kwargs())
+        except subprocess.TimeoutExpired:
+            return ("__ERROR__", f"verification timed out after "
+                    f"{REMOTE_VERIFY_TIMEOUT // 60} minutes")
+        except OSError as exc:
+            return ("__ERROR__", str(exc))
+        if proc.returncode != 0:
+            return ("__ERROR__",
+                    proc.stderr.strip() or f"rsync exit {proc.returncode}")
+        for line in proc.stdout.splitlines():
+            name = line.rstrip("\n")
+            if not name or name.endswith("/"):
+                continue  # directory entry, not a file needing transfer
+            return (name, None)
+        return None
 
 
 def remote_verify_files(rsync_bin, src_specs, rsync_target, remote,
@@ -985,17 +1002,208 @@ def _run_rsync_streamed(src_path, dest_spec, rsync_flags, total_files,
     return proc.returncode, "".join(stderr_chunks), state["timed_out"]
 
 
+# Finder writes .DS_Store (window layout, icon positions) into every folder it
+# opens, so a staged import the user browsed and the archive folder it merges
+# into each hold their own copy with different bytes. That is not a collision
+# between photos and must not refuse the merge. A merge ignores these on both
+# sides: the pre-merge conflict check, the copy and the post-copy verification
+# all skip them, so the destination keeps its own copy and the source's is
+# discarded only when the whole source tree is removed after a successful
+# merge. If any of those steps refuses the merge, the originals -- .DS_Store
+# included -- are left untouched.
+FINDER_METADATA_FILES = frozenset({".DS_Store"})
+
+
+def _escape_rsync_pattern(component):
+    """Escape rsync wildmatch metacharacters in a literal path component so
+    the resulting include/exclude pattern matches only that spelling. rsync
+    treats ``*``, ``?`` and ``[`` as wildcards in patterns (``**`` matches
+    multiple components; ``\\`` escapes the next character), so an on-disk
+    directory literally named ``a*`` would otherwise turn the generated
+    ``--exclude=/a*/.DS_Store`` into a glob that also drops an unrelated
+    ``abc/.DS_Store`` subtree — the transfer and verification skip those
+    entries, and the post-merge source removal then destroys them.
+
+    Backslash is intentionally encoded as the character class ``[\\\\]``
+    rather than doubled. In wildmatch a bare ``\\`` escapes the next
+    character (which fails for a trailing ``\\`` and is only interpreted as
+    an escape when the pattern contains at least one other wildcard), so
+    doubling to ``\\\\`` would emit a pattern that matches two literal
+    backslashes on filesystems where wildmatch isn't triggered — a real
+    sibling with two backslashes would then swap places with the intended
+    target and the transfer/verify would drop its ``.DS_Store`` subtree
+    from the merge, letting the post-merge source removal delete it. A
+    character class matches exactly one literal ``\\`` under wildmatch
+    (its brackets also force wildmatch mode for the other escapes in this
+    same pattern) and is a stable rewrite for every literal component.
+
+    A single character-by-character pass rather than chained ``str.replace``
+    calls: the class ``[\\\\]`` inserted for a backslash contains a ``[``
+    and two ``\\`` characters that would themselves be re-escaped by a
+    later replace, either doubling the escape or breaking the class.
+    """
+    out = []
+    for ch in component:
+        if ch == "\\":
+            # A character class matching exactly one literal backslash.
+            # Emits 4 chars: [ \ \ ]
+            out.append("[\\\\]")
+        elif ch in "*?[":
+            out.append("\\" + ch)
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _rsync_finder_metadata_exclude_patterns(src_path):
+    """Anchored rsync exclude patterns for regular Finder metadata FILES
+    under ``src_path`` (one pattern per file, without any ``--exclude=``
+    prefix — the caller decides whether to splat them as argv flags or
+    stream them through ``--exclude-from``).
+
+    Used for merges only. A fresh move still carries these along, matching
+    the pre-fix behavior; only a merge into a destination that already
+    holds its own copies needs to skip them so a Finder-managed difference
+    doesn't fail the copy or the verification.
+
+    The exclude has to skip regular files while leaving directories and
+    symlinks with the same name alone: a pattern that matches every entry
+    type would silently drop those from the transfer, the conflict probe
+    and the checksum verify, and ``shutil.rmtree(src_path)`` after a
+    "successful" merge would then delete them from the source without ever
+    copying them. rsync's filter language can't distinguish entry type on
+    its own, so we walk ``src_path`` ourselves, collect the regular-file
+    ``.DS_Store`` entries (not directories, not symlinks — a ``.DS_Store``
+    symlink to a directory is classified as a symlink by rsync and would
+    slip past an ``--include=<name>/`` guard; a FIFO/socket/device lands in
+    ``os.walk``'s ``files`` list too, and ``rsync -a`` would recreate it
+    from ``-D``, so an exclude would drop it from every side of the merge
+    while the post-merge ``shutil.rmtree`` still deletes it from the
+    source), and emit an anchored ``/<relpath>`` for each. Every parent
+    component in the relative path is passed through
+    ``_escape_rsync_pattern`` so a real directory whose name contains rsync
+    wildmatch metacharacters (``*``/``?``/``[``/``\\``) doesn't widen the
+    exclude into a glob that catches unrelated sibling subtrees. The
+    excludes apply to both sides of every rsync command they're passed to
+    (transfer, ``--existing`` conflict probe, ``--checksum`` verify), so a
+    same-path Finder-managed difference at the destination is skipped
+    alongside its source twin, and every other entry type — including
+    symlinks and any real directory that happens to be named
+    ``.DS_Store`` — is untouched.
+    """
+    patterns = []
+    if not os.path.isdir(src_path):
+        return patterns
+    for root, _, files in os.walk(src_path):
+        for fn in files:
+            if fn not in FINDER_METADATA_FILES:
+                continue
+            full = os.path.join(root, fn)
+            if os.path.islink(full):
+                continue
+            if not os.path.isfile(full):
+                continue
+            rel = os.path.relpath(full, src_path).replace(os.sep, "/")
+            escaped = "/".join(_escape_rsync_pattern(part)
+                               for part in rel.split("/"))
+            patterns.append(f"/{escaped}")
+    return patterns
+
+
+def _rsync_finder_metadata_excludes(src_path):
+    """rsync ``--exclude=PATTERN`` args, one per regular Finder metadata
+    file under ``src_path``. Thin wrapper around
+    ``_rsync_finder_metadata_exclude_patterns`` for tests and callers that
+    build a small argv directly; production merge callers should prefer
+    ``_rsync_finder_metadata_exclude_file`` to keep argv fixed-size even
+    when the source tree carries thousands of ``.DS_Store`` files (each
+    ``--exclude=`` is its own argv entry, and ``execve``'s argument-size
+    limit is finite on every platform — ~256 KB on older macOS — so a
+    large enough merge would fail with ``E2BIG`` before rsync could start).
+    """
+    return [f"--exclude={p}"
+            for p in _rsync_finder_metadata_exclude_patterns(src_path)]
+
+
+@contextlib.contextmanager
+def _rsync_finder_metadata_exclude_file(src_path):
+    """Yield rsync flags that exclude every regular ``.DS_Store`` file
+    under ``src_path`` via ``--exclude-from=<file>`` plus ``--from0``.
+
+    Passing the patterns through a file (rather than a fresh ``--exclude=``
+    argv entry per file, as ``_rsync_finder_metadata_excludes`` returns)
+    keeps rsync's argv fixed-size no matter how many ``.DS_Store`` files
+    the merge source contains. A photo archive with thousands of them can
+    otherwise exceed the platform's ``execve`` argument-size limit before
+    rsync starts (macOS is the tightest, historically ~256 KB) — the
+    ``E2BIG`` that results is a plain ``OSError`` at ``subprocess.run``
+    time, and the primary transfer only catches ``FileNotFoundError``, so
+    it would escape the normal move-error path.
+
+    Records are written NUL-delimited (bytes via ``os.fsencode``) and
+    rsync is asked to parse them that way with ``--from0``. Newline is a
+    legal POSIX filename byte, so a plain ``\\n`` join would split one
+    pattern like ``/foo\\nbar/.DS_Store`` into two filter records
+    (``/foo`` and ``bar/.DS_Store``) — rsync would then exclude an
+    unrelated ``/foo`` subtree on both the transfer and the ``--checksum``
+    verify, letting the post-merge ``shutil.rmtree`` destroy source files
+    that never landed at the destination. NUL is the one byte the
+    filesystem cannot put in a filename, so it is the only safe record
+    separator.
+
+    Yields ``[]`` when there are no patterns (no temp file is created);
+    otherwise yields ``['--from0', '--exclude-from=<file>']`` flags and
+    cleans up the file on exit.
+    """
+    patterns = _rsync_finder_metadata_exclude_patterns(src_path)
+    if not patterns:
+        yield []
+        return
+    fd, path = tempfile.mkstemp(
+        prefix="vireo-rsync-excludes-", suffix=".bin")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            for pattern in patterns:
+                f.write(os.fsencode(pattern))
+                f.write(b"\0")
+        yield ["--from0", f"--exclude-from={path}"]
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+
+
 def _find_content_conflict(src_path, dest_path):
     """Return the relative path of the first source file that ALSO exists at
     dest_path but with different content, or None. Run before a merge copies
     anything: a same-name destination file is only safe to treat as "already
     there" if its bytes match the source. A size match alone is not enough —
     filecmp with shallow=False compares contents — so we never overwrite or
-    later delete the source over a genuinely different destination file."""
+    later delete the source over a genuinely different destination file.
+
+    Finder metadata (``.DS_Store``) is ignored only for REGULAR non-symlink
+    source files: those are the ones ``_rsync_finder_metadata_excludes``
+    drops from the transfer, so a same-name Finder-managed difference at
+    the destination is not a photo collision and the source's own copy is
+    preserved until the whole tree is removed after a successful merge. A
+    ``.DS_Store`` symlink is NOT excluded by the rsync helper (which keeps
+    such symlinks) and ``--ignore-existing`` then leaves any pre-existing
+    destination entry in place; a basename-only skip here would then let
+    a same-sized destination file (different bytes, so a real collision)
+    pass the pre-merge check, and the verifier's size-only compare would
+    also accept it (``os.path.getsize`` follows the source link), silently
+    losing the source symlink when the tree is removed. So the exemption
+    applies only to regular non-symlink Finder metadata files; every other
+    entry type (symlink, missing source) falls through to the normal
+    content check.
+    """
     for root, _, files in os.walk(src_path):
         rel = os.path.relpath(root, src_path)
         for fn in files:
             src_file = os.path.join(root, fn)
+            if fn in FINDER_METADATA_FILES and \
+                    not os.path.islink(src_file) and \
+                    os.path.isfile(src_file):
+                continue
             rel_name = fn if rel == "." else os.path.join(rel, fn)
             dst_file = os.path.join(dest_path, rel_name)
             if os.path.isfile(dst_file) and \
@@ -1023,31 +1231,39 @@ def _find_remote_content_conflict(rsync_bin, src_path, rsync_target, remote):
     the conflict — leaving the newly-copied files orphaned on the NAS,
     breaking the local-merge contract that a content conflict cancels with
     nothing changed.
+
+    Finder metadata (``.DS_Store``) is excluded on both sides so a Finder
+    difference between the local staging tree and the NAS never refuses the
+    merge; the local counterpart applies the same skip.
     """
-    cmd = [rsync_bin, "-an", "--existing", "--checksum",
-           "--out-format=%n",
-           "-e", _ssh_rsh_string(remote),
-           src_path + "/", rsync_target + "/"]
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=REMOTE_VERIFY_TIMEOUT,
-                              **no_window_kwargs())
-    except subprocess.TimeoutExpired:
-        return ("__ERROR__", f"conflict check timed out after "
-                f"{REMOTE_VERIFY_TIMEOUT // 60} minutes")
-    except OSError as exc:
-        return ("__ERROR__", str(exc))
-    if proc.returncode != 0:
-        return ("__ERROR__", proc.stderr.strip() or f"rsync exit {proc.returncode}")
-    for line in proc.stdout.splitlines():
-        name = line.rstrip("\n")
-        if not name or name.endswith("/"):
-            continue  # directory entry, not a file rsync would transfer
-        return (name, None)
-    return None
+    with _rsync_finder_metadata_exclude_file(src_path) as metadata_excludes:
+        cmd = [rsync_bin, "-an", "--existing", "--checksum",
+               "--out-format=%n",
+               "-e", _ssh_rsh_string(remote),
+               *metadata_excludes,
+               src_path + "/", rsync_target + "/"]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True,
+                                  timeout=REMOTE_VERIFY_TIMEOUT,
+                                  **no_window_kwargs())
+        except subprocess.TimeoutExpired:
+            return ("__ERROR__", f"conflict check timed out after "
+                    f"{REMOTE_VERIFY_TIMEOUT // 60} minutes")
+        except OSError as exc:
+            return ("__ERROR__", str(exc))
+        if proc.returncode != 0:
+            return ("__ERROR__",
+                    proc.stderr.strip() or f"rsync exit {proc.returncode}")
+        for line in proc.stdout.splitlines():
+            name = line.rstrip("\n")
+            if not name or name.endswith("/"):
+                continue  # directory entry, not a file rsync would transfer
+            return (name, None)
+        return None
 
 
-def _first_missing_source_file(src_path, dest_path, *, verify_contents=False):
+def _first_missing_source_file(src_path, dest_path, *, verify_contents=False,
+                               is_merge=False):
     """Return the relative path of the first source file absent (or
     size-mismatched, or a symlink) at dest_path, or None if every source
     file is present and matches. Used to verify a merge before deleting
@@ -1065,11 +1281,36 @@ def _first_missing_source_file(src_path, dest_path, *, verify_contents=False):
     missing instead of crashing later checks; `islink` catches the direct
     case; `samefile` catches the symlinked-parent case where `src_file`
     and `dst_file` resolve to the same inode.
+
+    Finder metadata (``.DS_Store``) is skipped for REGULAR non-symlink
+    source files, and only when ``is_merge`` says the caller is verifying
+    a merge into an existing destination: those are the ones
+    ``_rsync_finder_metadata_excludes`` drops from the transfer, so a
+    missing or differently-sized destination counterpart is expected and
+    must not refuse the delete. A fresh (non-merge) move with
+    ``verify_contents`` also reaches this verifier, but there ``.DS_Store``
+    IS transferred by the primary rsync path and the shutil fallback, so
+    the destination must hold a matching copy before ``rmtree`` removes
+    the source — a destination ``.DS_Store`` that disappears between copy
+    and verify would otherwise be silently forgiven and take the source's
+    copy with it. A ``.DS_Store`` symlink is NOT excluded by the rsync
+    helper (which preserves symlinks with that name), but
+    ``--ignore-existing`` skips it whenever the destination already holds
+    an entry at that path; without a real check here, the source tree
+    would then be deleted with the symlink never landing at the
+    destination. So the exemption applies only to regular non-symlink
+    files under a merge; every other entry type (symlink, directory,
+    missing source) and every fresh-move call fall through to the normal
+    verification.
     """
     for root, _, files in os.walk(src_path):
         rel = os.path.relpath(root, src_path)
         for fn in files:
             src_file = os.path.join(root, fn)
+            if is_merge and fn in FINDER_METADATA_FILES and \
+                    not os.path.islink(src_file) and \
+                    os.path.isfile(src_file):
+                continue
             rel_name = fn if rel == "." else os.path.join(rel, fn)
             dst_file = os.path.join(dest_path, rel_name)
             if not os.path.lexists(dst_file) or os.path.islink(dst_file):
@@ -1184,6 +1425,18 @@ def preview_merge(src_path, dest_path):
                 will_copy += 1
         for fn in files:
             src_file = os.path.join(root, fn)
+            # Merges discard Finder-managed regular ``.DS_Store`` files, so
+            # they don't count as a transfer here. Every other entry type
+            # with that name (symlink to a file, FIFO/socket, ...) is NOT
+            # excluded by ``_rsync_finder_metadata_excludes`` — rsync would
+            # copy it (or fail verification if the destination twin blocks
+            # it). Apply the same regular-non-symlink predicate the exclude
+            # helper uses so a source ``.DS_Store`` symlink still surfaces
+            # as a copy/skip/block instead of a silent no-op that the merge
+            # dialog reports as "0 files".
+            if fn in FINDER_METADATA_FILES and not os.path.islink(src_file) \
+                    and os.path.isfile(src_file):
+                continue
             rel_name = fn if rel == "." else os.path.join(rel, fn)
             dst_file = os.path.join(dest_path, rel_name)
             if not os.path.lexists(dst_file):
@@ -2697,7 +2950,11 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
             (this is how an interrupted move is resumed). Originals are deleted
             only after every source file is verified present at the
             destination. A failed merge never removes the destination, since it
-            may hold the user's pre-existing files.
+            may hold the user's pre-existing files. Finder ``.DS_Store`` files
+            are ignored on both sides: the copy skips them, the conflict and
+            verification checks skip them, and the source's copy is discarded
+            only when the whole source tree is removed after success — a
+            failed merge leaves the source ``.DS_Store`` in place.
         developed_dir: optional path to the configured
             `darktable_output_dir`. When set, the folder's developed
             subdirectory — nested under a hash of its source path, see
@@ -2988,7 +3245,8 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
         # collision — only files that are byte-identical (a genuine resume)
         # may be treated as already-moved. Both branches enforce the same
         # contract: a content conflict cancels the move with NOTHING copied
-        # or deleted on either end.
+        # or deleted on either end. Finder ``.DS_Store`` files are ignored on
+        # both sides; see ``FINDER_METADATA_FILES``.
         if remote:
             # The destination lives on the NAS, so the walk is delegated to
             # rsync over SSH: ``-an --existing --checksum`` inspects only
@@ -3106,33 +3364,46 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
         rsync_flags = ["--ignore-existing"] if dest_exists else []
     else:
         rsync_flags = ["--ignore-existing"] if dest_exists else ["--checksum"]
-
-    try:
-        returncode, stderr, timed_out = _run_rsync_streamed(
-            src_path, rsync_target, rsync_flags, total_files, progress_cb,
-            rsync_bin=rsync_bin, extra_args=extra_args,
-        )
-    except FileNotFoundError:
-        if remote:
-            # No shutil fallback over SSH — the binary path was resolved before
-            # the move started, so this means it vanished. Surface it plainly.
-            return {"moved": 0, "errors": [
-                f"GNU rsync not found at '{rsync_bin}'. Install GNU rsync or "
-                f"set its path in Settings."
-            ]}
-        # Local rsync missing: fall back to shutil. skip_existing mirrors
-        # --ignore-existing for a merge; a fresh move copies everything.
+    # A merge deliberately skips Finder metadata (``.DS_Store``). Without the
+    # exclude, rsync ``--ignore-existing`` would leave a same-name file at the
+    # destination in place -- fine on its own -- but the post-copy verifier
+    # would then compare bytes/size and refuse the delete, so the originals
+    # would be preserved for a difference that is not a photo collision.
+    # Excluding on the copy AND the checks keeps the source's copy in place
+    # until the whole tree is removed after a successful merge; a failed
+    # merge leaves it untouched with the rest of the source.
+    exclude_ctx = (_rsync_finder_metadata_exclude_file(src_path)
+                   if dest_exists else contextlib.nullcontext([]))
+    with exclude_ctx as metadata_excludes:
+        rsync_flags += metadata_excludes
         try:
-            _copy_tree_with_progress(
-                src_path, catalog_path, dest_exists, total_files, progress_cb,
+            returncode, stderr, timed_out = _run_rsync_streamed(
+                src_path, rsync_target, rsync_flags, total_files, progress_cb,
+                rsync_bin=rsync_bin, extra_args=extra_args,
             )
-            returncode, stderr, timed_out = 0, "", False
-        except Exception as exc:
-            # Only remove a destination we created — never one that
-            # pre-existed (a merge target may hold the user's own files).
-            if not dest_exists:
-                shutil.rmtree(catalog_path, ignore_errors=True)
-            return {"moved": 0, "errors": [f"Copy failed: {exc}"]}
+        except FileNotFoundError:
+            if remote:
+                # No shutil fallback over SSH — the binary path was resolved
+                # before the move started, so this means it vanished. Surface
+                # it plainly.
+                return {"moved": 0, "errors": [
+                    f"GNU rsync not found at '{rsync_bin}'. Install GNU rsync "
+                    f"or set its path in Settings."
+                ]}
+            # Local rsync missing: fall back to shutil. skip_existing mirrors
+            # --ignore-existing for a merge; a fresh move copies everything.
+            try:
+                _copy_tree_with_progress(
+                    src_path, catalog_path, dest_exists, total_files,
+                    progress_cb,
+                )
+                returncode, stderr, timed_out = 0, "", False
+            except Exception as exc:
+                # Only remove a destination we created — never one that
+                # pre-existed (a merge target may hold the user's own files).
+                if not dest_exists:
+                    shutil.rmtree(catalog_path, ignore_errors=True)
+                return {"moved": 0, "errors": [f"Copy failed: {exc}"]}
 
     if timed_out:
         mins = RSYNC_STALL_TIMEOUT // 60
@@ -3205,7 +3476,8 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
         # is missing or differs at the destination. Covers both fresh and
         # merge moves, and is the safety backstop replacing the local
         # content-conflict and file-count checks.
-        verify = _remote_verify_complete(rsync_bin, src_path, rsync_target, remote)
+        verify = _remote_verify_complete(rsync_bin, src_path, rsync_target, remote,
+                                         is_merge=dest_exists)
         if verify is not None:
             name, detail = verify
             if name == "__ERROR__":
@@ -3222,7 +3494,9 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
         # files (and leftover temp files from an interrupted run), so a
         # count comparison is meaningless. Instead require that every
         # source file is present at the destination with a matching size.
-        missing = _first_missing_source_file(src_path, transfer_dest, verify_contents=verify_contents)
+        missing = _first_missing_source_file(
+            src_path, transfer_dest,
+            verify_contents=verify_contents, is_merge=dest_exists)
         if missing is not None:
             return {"moved": 0, "errors": [
                 f"Verification failed: '{missing}' missing, size mismatch, "
