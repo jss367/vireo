@@ -3501,6 +3501,38 @@ def test_move_folder_merge_ignores_differing_finder_metadata(move_env):
     assert not env["src"].exists()
 
 
+def test_preview_merge_surfaces_ds_store_symlink(tmp_path):
+    """A source ``.DS_Store`` that is a symlink is NOT excluded by
+    ``_rsync_finder_metadata_excludes`` — rsync copies it and the verifier
+    then rejects any destination symlink. A basename-only skip in
+    ``preview_merge`` would report zero copy/skip/block for that entry,
+    silently promising the confirm dialog a no-op while the actual job
+    still transfers (or fails verifying) the symlink. The predicate must
+    match the exclude helper's: only regular non-symlink ``.DS_Store``
+    files are discarded here."""
+    from move import preview_merge
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "photo.jpg").write_bytes(b"\xff\xd8")
+    real_file = tmp_path / "elsewhere.bin"
+    real_file.write_bytes(b"pointed-to")
+    try:
+        os.symlink(str(real_file), str(src / ".DS_Store"))
+    except (OSError, NotImplementedError):
+        pytest.skip("Filesystem does not support symlinks")
+
+    landing = tmp_path / "dst"
+    landing.mkdir()
+    # No destination entry for the symlinked .DS_Store: rsync -a would
+    # recreate it as a symlink at the destination, which the verifier
+    # then rejects. Surface it as blocked instead of a silent skip.
+    preview = preview_merge(str(src), str(landing))
+    assert preview["will_block"] == 1, preview
+    assert preview["will_copy"] == 1, preview  # photo.jpg
+    assert preview["will_skip"] == 0, preview
+
+
 def test_rsync_finder_metadata_excludes_targets_only_regular_files(tmp_path):
     """The filter must skip Finder-managed ``.DS_Store`` files without
     dropping same-named directories or symlinks. A pattern-based
@@ -3600,6 +3632,63 @@ def test_rsync_finder_metadata_excludes_escape_wildmatch_metacharacters(tmp_path
     assert "--exclude=/a*/.DS_Store" not in args, args
 
 
+def test_escape_rsync_pattern_encodes_backslash_as_char_class():
+    """A literal backslash in a parent component must be encoded so
+    wildmatch matches exactly one on-disk backslash. Doubling to ``\\\\``
+    would emit a pattern that matches two literal backslashes when the
+    pattern has no other wildcards to trigger wildmatch's escape handling
+    (rsync only interprets ``\\`` as an escape when at least one other
+    wildcard is present), so a real ``back\\\\slash`` sibling would swap
+    places with the intended target ``back\\slash`` and take its
+    ``.DS_Store`` subtree with it when the source tree is later removed.
+    The character-class form ``[\\\\]`` matches exactly one literal ``\\``
+    and its brackets also force wildmatch mode for the other escapes."""
+    from move import _escape_rsync_pattern
+
+    # A component with one literal backslash between two letters. The
+    # escaped form is a character class matching exactly one backslash.
+    assert _escape_rsync_pattern("a\\b") == "a[\\\\]b"
+    # A doubled sibling must produce a distinct escape (two character
+    # classes), not the same pattern as the single-backslash spelling.
+    assert _escape_rsync_pattern("a\\\\b") == "a[\\\\][\\\\]b"
+    assert _escape_rsync_pattern("a\\b") != _escape_rsync_pattern("a\\\\b")
+    # A plain component is unchanged so uncontroversial paths stay short.
+    assert _escape_rsync_pattern("plain") == "plain"
+
+
+def test_rsync_finder_metadata_excludes_skips_non_regular_ds_store(tmp_path):
+    """A FIFO/socket/device named ``.DS_Store`` lands in ``os.walk``'s
+    ``files`` list. ``rsync -a`` includes ``-D`` and would recreate it at
+    the destination, but an anchored exclude would drop it from the
+    transfer, the conflict probe and the checksum verify while the
+    post-merge ``shutil.rmtree`` still deletes it from the source. Only
+    regular files match Finder's own metadata, so the exclude must skip
+    every other entry type."""
+    from move import _rsync_finder_metadata_excludes
+
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("Platform does not support mkfifo")
+
+    src = tmp_path / "src"
+    src.mkdir()
+    # A real .DS_Store file in a sibling directory: an exclude MUST be
+    # emitted for it so the merge behavior around regular Finder metadata
+    # keeps working.
+    (src / "ok").mkdir()
+    (src / "ok" / ".DS_Store").write_bytes(b"real")
+    # A FIFO named .DS_Store: no exclude should be emitted for it.
+    fifo_dir = src / "special"
+    fifo_dir.mkdir()
+    try:
+        os.mkfifo(str(fifo_dir / ".DS_Store"))
+    except OSError:
+        pytest.skip("Filesystem does not support mkfifo")
+
+    args = _rsync_finder_metadata_excludes(str(src))
+    assert "--exclude=/ok/.DS_Store" in args, args
+    assert "--exclude=/special/.DS_Store" not in args, args
+
+
 def test_first_missing_source_file_flags_ds_store_symlink_at_destination(
         tmp_path):
     """A source ``.DS_Store`` that is a symlink is NOT excluded by
@@ -3631,15 +3720,16 @@ def test_first_missing_source_file_flags_ds_store_symlink_at_destination(
 
     # Verification must flag the source symlink as missing at the
     # destination so the source tree is not deleted.
-    assert _first_missing_source_file(str(src), str(dst)) == ".DS_Store"
+    assert _first_missing_source_file(
+        str(src), str(dst), is_merge=True) == ".DS_Store"
 
 
 def test_first_missing_source_file_still_skips_regular_ds_store(tmp_path):
     """The verification exemption for regular-file ``.DS_Store`` still
-    applies: the rsync helper excludes those from transfer and verify, so
-    a differently-sized destination counterpart -- or none at all -- must
-    not be reported as missing and refuse the delete. Guards against the
-    symlink-only fix over-tightening the check."""
+    applies to merges: the rsync helper excludes those from transfer and
+    verify, so a differently-sized destination counterpart -- or none at
+    all -- must not be reported as missing and refuse the delete. Guards
+    against the symlink-only fix over-tightening the check."""
     from move import _first_missing_source_file
 
     src = tmp_path / "src"
@@ -3651,7 +3741,39 @@ def test_first_missing_source_file_still_skips_regular_ds_store(tmp_path):
     (dst / "photo.jpg").write_bytes(b"\xff\xd8")
     (dst / ".DS_Store").write_bytes(b"archive window layout, larger")
 
-    assert _first_missing_source_file(str(src), str(dst)) is None
+    assert _first_missing_source_file(
+        str(src), str(dst), is_merge=True) is None
+
+
+def test_first_missing_source_file_fresh_move_verifies_ds_store(tmp_path):
+    """A fresh (non-merge) local move with ``verify_contents=True`` reaches
+    this verifier too. ``.DS_Store`` is NOT excluded from a fresh move's
+    rsync transfer, so the destination must actually hold a matching copy
+    before the source is removed -- otherwise a destination ``.DS_Store``
+    that disappears between copy and verify would be silently forgiven and
+    the source's copy would be lost with the rest of the tree. Without
+    ``is_merge=True`` (the caller passes ``dest_exists``), the exemption
+    does not apply."""
+    from move import _first_missing_source_file
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "photo.jpg").write_bytes(b"\xff\xd8")
+    (src / ".DS_Store").write_bytes(b"source window layout")
+    dst = tmp_path / "dst"
+    dst.mkdir()
+    (dst / "photo.jpg").write_bytes(b"\xff\xd8")
+    # Destination .DS_Store went missing after the copy, before verify.
+
+    # Fresh move: verifier must NOT exempt .DS_Store and must report it
+    # missing so the source is preserved.
+    assert _first_missing_source_file(str(src), str(dst)) == ".DS_Store"
+
+    # Same source and destination, but the caller declares a merge (the
+    # rsync path excluded .DS_Store from transfer, so a missing destination
+    # copy is expected): the exemption kicks back in.
+    assert _first_missing_source_file(
+        str(src), str(dst), is_merge=True) is None
 
 
 def test_find_content_conflict_flags_ds_store_symlink_with_differing_dest(

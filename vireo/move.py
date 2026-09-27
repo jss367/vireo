@@ -1019,12 +1019,37 @@ def _escape_rsync_pattern(component):
     directory literally named ``a*`` would otherwise turn the generated
     ``--exclude=/a*/.DS_Store`` into a glob that also drops an unrelated
     ``abc/.DS_Store`` subtree — the transfer and verification skip those
-    entries, and the post-merge source removal then destroys them. Escape
-    ``\\`` first so the escapes themselves aren't double-escaped."""
-    return (component.replace("\\", "\\\\")
-                     .replace("*", "\\*")
-                     .replace("?", "\\?")
-                     .replace("[", "\\["))
+    entries, and the post-merge source removal then destroys them.
+
+    Backslash is intentionally encoded as the character class ``[\\\\]``
+    rather than doubled. In wildmatch a bare ``\\`` escapes the next
+    character (which fails for a trailing ``\\`` and is only interpreted as
+    an escape when the pattern contains at least one other wildcard), so
+    doubling to ``\\\\`` would emit a pattern that matches two literal
+    backslashes on filesystems where wildmatch isn't triggered — a real
+    sibling with two backslashes would then swap places with the intended
+    target and the transfer/verify would drop its ``.DS_Store`` subtree
+    from the merge, letting the post-merge source removal delete it. A
+    character class matches exactly one literal ``\\`` under wildmatch
+    (its brackets also force wildmatch mode for the other escapes in this
+    same pattern) and is a stable rewrite for every literal component.
+
+    A single character-by-character pass rather than chained ``str.replace``
+    calls: the class ``[\\\\]`` inserted for a backslash contains a ``[``
+    and two ``\\`` characters that would themselves be re-escaped by a
+    later replace, either doubling the escape or breaking the class.
+    """
+    out = []
+    for ch in component:
+        if ch == "\\":
+            # A character class matching exactly one literal backslash.
+            # Emits 4 chars: [ \ \ ]
+            out.append("[\\\\]")
+        elif ch in "*?[":
+            out.append("\\" + ch)
+        else:
+            out.append(ch)
+    return "".join(out)
 
 
 def _rsync_finder_metadata_excludes(src_path):
@@ -1067,6 +1092,15 @@ def _rsync_finder_metadata_excludes(src_path):
             # os.walk lists symlinks-to-files under `files`; skip them so a
             # source-side symlink named .DS_Store survives the merge.
             if os.path.islink(full):
+                continue
+            # A FIFO/socket/device named .DS_Store also lands in `files`.
+            # ``rsync -a`` includes ``-D`` and would recreate those at the
+            # destination, but an anchored exclude here would drop them from
+            # the transfer, the conflict probe and the checksum verify while
+            # the post-merge ``shutil.rmtree`` still deletes them from the
+            # source. Only regular files match Finder's own metadata; every
+            # other entry type keeps the primary rsync path's semantics.
+            if not os.path.isfile(full):
                 continue
             rel = os.path.relpath(full, src_path).replace(os.sep, "/")
             escaped = "/".join(_escape_rsync_pattern(part)
@@ -1163,7 +1197,8 @@ def _find_remote_content_conflict(rsync_bin, src_path, rsync_target, remote):
     return None
 
 
-def _first_missing_source_file(src_path, dest_path, *, verify_contents=False):
+def _first_missing_source_file(src_path, dest_path, *, verify_contents=False,
+                               is_merge=False):
     """Return the relative path of the first source file absent (or
     size-mismatched, or a symlink) at dest_path, or None if every source
     file is present and matches. Used to verify a merge before deleting
@@ -1183,22 +1218,31 @@ def _first_missing_source_file(src_path, dest_path, *, verify_contents=False):
     and `dst_file` resolve to the same inode.
 
     Finder metadata (``.DS_Store``) is skipped for REGULAR non-symlink
-    source files: those are the ones ``_rsync_finder_metadata_excludes``
-    drops from the transfer, so a missing or differently-sized destination
-    counterpart is expected and must not refuse the delete. A ``.DS_Store``
-    symlink is NOT excluded by the rsync helper (which preserves symlinks
-    with that name), but ``--ignore-existing`` skips it whenever the
-    destination already holds an entry at that path; without a real check
-    here, the source tree would then be deleted with the symlink never
-    landing at the destination. So the exemption applies only to regular
-    non-symlink files; every other entry type (symlink, directory, missing
-    source) falls through to the normal verification.
+    source files, and only when ``is_merge`` says the caller is verifying
+    a merge into an existing destination: those are the ones
+    ``_rsync_finder_metadata_excludes`` drops from the transfer, so a
+    missing or differently-sized destination counterpart is expected and
+    must not refuse the delete. A fresh (non-merge) move with
+    ``verify_contents`` also reaches this verifier, but there ``.DS_Store``
+    IS transferred by the primary rsync path and the shutil fallback, so
+    the destination must hold a matching copy before ``rmtree`` removes
+    the source — a destination ``.DS_Store`` that disappears between copy
+    and verify would otherwise be silently forgiven and take the source's
+    copy with it. A ``.DS_Store`` symlink is NOT excluded by the rsync
+    helper (which preserves symlinks with that name), but
+    ``--ignore-existing`` skips it whenever the destination already holds
+    an entry at that path; without a real check here, the source tree
+    would then be deleted with the symlink never landing at the
+    destination. So the exemption applies only to regular non-symlink
+    files under a merge; every other entry type (symlink, directory,
+    missing source) and every fresh-move call fall through to the normal
+    verification.
     """
     for root, _, files in os.walk(src_path):
         rel = os.path.relpath(root, src_path)
         for fn in files:
             src_file = os.path.join(root, fn)
-            if fn in FINDER_METADATA_FILES and \
+            if is_merge and fn in FINDER_METADATA_FILES and \
                     not os.path.islink(src_file) and \
                     os.path.isfile(src_file):
                 continue
@@ -1315,9 +1359,19 @@ def preview_merge(src_path, dest_path):
             else:
                 will_copy += 1
         for fn in files:
-            if fn in FINDER_METADATA_FILES:
-                continue  # discarded, not transferred, by the merge
             src_file = os.path.join(root, fn)
+            # Merges discard Finder-managed regular ``.DS_Store`` files, so
+            # they don't count as a transfer here. Every other entry type
+            # with that name (symlink to a file, FIFO/socket, ...) is NOT
+            # excluded by ``_rsync_finder_metadata_excludes`` — rsync would
+            # copy it (or fail verification if the destination twin blocks
+            # it). Apply the same regular-non-symlink predicate the exclude
+            # helper uses so a source ``.DS_Store`` symlink still surfaces
+            # as a copy/skip/block instead of a silent no-op that the merge
+            # dialog reports as "0 files".
+            if fn in FINDER_METADATA_FILES and not os.path.islink(src_file) \
+                    and os.path.isfile(src_file):
+                continue
             rel_name = fn if rel == "." else os.path.join(rel, fn)
             dst_file = os.path.join(dest_path, rel_name)
             if not os.path.lexists(dst_file):
@@ -3372,7 +3426,9 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
         # files (and leftover temp files from an interrupted run), so a
         # count comparison is meaningless. Instead require that every
         # source file is present at the destination with a matching size.
-        missing = _first_missing_source_file(src_path, transfer_dest, verify_contents=verify_contents)
+        missing = _first_missing_source_file(
+            src_path, transfer_dest,
+            verify_contents=verify_contents, is_merge=dest_exists)
         if missing is not None:
             return {"moved": 0, "errors": [
                 f"Verification failed: '{missing}' missing, size mismatch, "
