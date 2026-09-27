@@ -41,7 +41,7 @@ def run(session):
     # if the workspace page's own button is removed even while the
     # navbar action remains.
     has_new_ws_btn = session.eval(
-        """!!document.querySelector('.content button[onclick*="showCreateWorkspaceModal"]')"""
+        """!!document.querySelector('.content button[onclick*="vireoWorkspaceSwitcher.showCreate"]')"""
     )
     session.assert_that(has_new_ws_btn, "expected '+ New Workspace' button on workspace page")
 

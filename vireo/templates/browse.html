@@ -2537,16 +2537,16 @@ body.sidebar-resizing {
 </div>
 
 <!-- Browse Compare Overlay -->
-<div class="browse-compare-overlay" id="browseCompareOverlay" onclick="closeBrowseCompare(event)">
+<div class="browse-compare-overlay" id="browseCompareOverlay" onclick="browseCompare.close(event)">
   <div class="browse-compare-toolbar" onclick="event.stopPropagation()">
     <span class="browse-compare-title">Compare</span>
     <span class="browse-compare-count" id="browseCompareCount"></span>
     <span class="browse-compare-hint">Scroll to zoom · drag to pan · double-click to toggle</span>
     <span class="browse-compare-spacer"></span>
-    <button class="browse-compare-btn" onclick="resetBrowseCompareViews()" title="Fit both photos to their panes">Reset views</button>
-    <button class="browse-compare-btn" id="browseComparePrev" onclick="browseCompareStep(-1)" title="Previous pair">Previous</button>
-    <button class="browse-compare-btn" id="browseCompareNext" onclick="browseCompareStep(1)" title="Next pair">Next</button>
-    <button class="browse-compare-close" onclick="closeBrowseCompare(event)" title="Close">&times;</button>
+    <button class="browse-compare-btn" onclick="browseCompare.resetViews()" title="Fit both photos to their panes">Reset views</button>
+    <button class="browse-compare-btn" id="browseComparePrev" onclick="browseCompare.step(-1)" title="Previous pair">Previous</button>
+    <button class="browse-compare-btn" id="browseCompareNext" onclick="browseCompare.step(1)" title="Next pair">Next</button>
+    <button class="browse-compare-close" onclick="browseCompare.close(event)" title="Close">&times;</button>
   </div>
   <div class="browse-compare-stage" onclick="event.stopPropagation()">
     <div class="browse-compare-pane">
@@ -2580,6 +2580,7 @@ body.sidebar-resizing {
 <script src="/static/vireo-batch-edits.js"></script>
 <script src="/static/vireo-thumbnail-queue.js"></script>
 <script src="/static/vireo-panorama.js"></script>
+<script src="/static/vireo-browse-compare.js"></script>
 <script src="/static/browse.js"></script>
 
 

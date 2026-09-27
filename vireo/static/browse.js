@@ -312,16 +312,6 @@ var browseFolderRows = [];
 // destructive call to the wrong workspace (Codex review r3798912101).
 var browseWorkspaceId = null;
 var collectionsById = {};
-var browseCompareIds = [];
-var browseCompareOffset = 0;
-var browseCompareSeq = 0;
-var browseCompareEscToken = null;
-var browseCompareViews = {
-  A: { zoom: 1, panX: 0, panY: 0 },
-  B: { zoom: 1, panX: 0, panY: 0 }
-};
-var browseComparePointer = null;
-
 /* ---------- Resizable sidebar ---------- */
 var BROWSE_SIDEBAR_DEFAULT_WIDTH = 260;
 var BROWSE_SIDEBAR_MIN_WIDTH = 200;
@@ -6731,11 +6721,6 @@ function selectionIdsKey(ids) {
   return ids.slice().sort(function(a, b) { return a - b; }).join(',');
 }
 
-function isBrowseCompareOpen() {
-  var overlay = document.getElementById('browseCompareOverlay');
-  return !!(overlay && overlay.classList.contains('active'));
-}
-
 function updateCompareButton(ids) {
   var btn = document.getElementById('compareBtn');
   if (!btn) return;
@@ -7334,214 +7319,15 @@ async function pasteEditSettingsToSelection() {
   }
 }
 
+const browseCompare = VireoBrowseCompare.create({
+  findPhoto: findBrowsePhoto,
+  fetch: safeFetch,
+  showToast: showToast
+});
+
 function openBrowseCompare() {
-  var ids = getActiveSelection();
-  if (ids.length < 2) {
-    showToast('Select at least two photos to compare.', 'error');
-    return;
-  }
-  browseCompareIds = ids.slice();
-  browseCompareOffset = 0;
-
-  var overlay = document.getElementById('browseCompareOverlay');
-  if (!overlay) return;
-  var alreadyOpen = overlay.classList.contains('active');
-  if (alreadyOpen && browseCompareEscToken && window.Keymap) {
-    Keymap.popEsc(browseCompareEscToken);
-    browseCompareEscToken = null;
-  }
-  if (window.Keymap) {
-    browseCompareEscToken = Keymap.pushEsc(function() { closeBrowseCompare(); });
-    if (!alreadyOpen) Keymap.lockBodyScroll();
-  }
-  overlay.classList.add('active');
-  renderBrowseCompare();
+  return browseCompare.open(getActiveSelection());
 }
-
-function closeBrowseCompare(e) {
-  if (e) {
-    e.stopPropagation();
-    if (e.target && e.currentTarget && e.target !== e.currentTarget && !e.target.classList.contains('browse-compare-close')) {
-      return;
-    }
-  }
-  var overlay = document.getElementById('browseCompareOverlay');
-  var wasOpen = overlay && overlay.classList.contains('active');
-  if (overlay) overlay.classList.remove('active');
-  if (browseCompareEscToken && window.Keymap) {
-    Keymap.popEsc(browseCompareEscToken);
-    browseCompareEscToken = null;
-  }
-  if (wasOpen && window.Keymap) Keymap.unlockBodyScroll();
-}
-
-function browseCompareStep(delta) {
-  if (!isBrowseCompareOpen()) return;
-  var maxOffset = Math.max(0, browseCompareIds.length - 2);
-  var next = Math.max(0, Math.min(maxOffset, browseCompareOffset + delta));
-  if (next === browseCompareOffset) return;
-  browseCompareOffset = next;
-  renderBrowseCompare();
-}
-
-function browseCompareElements(prefix) {
-  return {
-    wrap: document.getElementById('browseCompareWrap' + prefix),
-    img: document.getElementById('browseCompareImg' + prefix),
-    badge: document.getElementById('browseCompareZoom' + prefix)
-  };
-}
-
-function clampBrowseComparePan(prefix) {
-  var view = browseCompareViews[prefix];
-  var els = browseCompareElements(prefix);
-  if (!view || !els.wrap || !els.img) return;
-  if (view.zoom <= 1.001) {
-    view.panX = 0;
-    view.panY = 0;
-    return;
-  }
-  var maxX = Math.max(0, (els.img.clientWidth * view.zoom - els.wrap.clientWidth) / 2);
-  var maxY = Math.max(0, (els.img.clientHeight * view.zoom - els.wrap.clientHeight) / 2);
-  view.panX = Math.max(-maxX, Math.min(maxX, view.panX));
-  view.panY = Math.max(-maxY, Math.min(maxY, view.panY));
-}
-
-function applyBrowseCompareView(prefix) {
-  var view = browseCompareViews[prefix];
-  var els = browseCompareElements(prefix);
-  if (!view || !els.wrap || !els.img) return;
-  clampBrowseComparePan(prefix);
-  els.img.style.transform = 'translate(' + view.panX + 'px, ' + view.panY + 'px) scale(' + view.zoom + ')';
-  els.wrap.classList.toggle('zoomed', view.zoom > 1.001);
-  if (els.badge) els.badge.textContent = view.zoom <= 1.001 ? 'Fit' : Math.round(view.zoom * 100) + '%';
-}
-
-function ensureBrowseCompareOriginal(prefix) {
-  var els = browseCompareElements(prefix);
-  if (!els.img || !els.img.dataset.photoId) return;
-  var loadState = els.img.dataset.originalLoaded;
-  if (loadState === 'true' || loadState === 'loading' || loadState === 'failed') return;
-  var photoId = els.img.dataset.photoId;
-  els.img.dataset.originalLoaded = 'loading';
-  var original = new Image();
-  els.img._browseCompareOriginalProbe = original;
-  original.onload = function() {
-    if (els.img.dataset.photoId !== photoId) return;
-    els.img.dataset.originalLoaded = 'true';
-    els.img.src = original.src;
-    els.img._browseCompareOriginalProbe = null;
-  };
-  original.onerror = function() {
-    if (els.img.dataset.photoId !== photoId) return;
-    els.img.dataset.originalLoaded = 'failed';
-    els.img._browseCompareOriginalProbe = null;
-  };
-  original.src = '/photos/' + photoId + '/original';
-}
-
-function setBrowseCompareZoom(prefix, zoom, clientX, clientY) {
-  var view = browseCompareViews[prefix];
-  var els = browseCompareElements(prefix);
-  if (!view || !els.wrap) return;
-  var oldZoom = view.zoom;
-  var nextZoom = Math.max(1, Math.min(8, zoom));
-  if (nextZoom > 1.001 && oldZoom > 0 && clientX != null && clientY != null) {
-    var rect = els.wrap.getBoundingClientRect();
-    var cursorX = clientX - (rect.left + rect.width / 2);
-    var cursorY = clientY - (rect.top + rect.height / 2);
-    var ratio = nextZoom / oldZoom;
-    view.panX = cursorX - ratio * (cursorX - view.panX);
-    view.panY = cursorY - ratio * (cursorY - view.panY);
-  }
-  view.zoom = nextZoom;
-  if (nextZoom <= 1.001) {
-    view.panX = 0;
-    view.panY = 0;
-  } else {
-    ensureBrowseCompareOriginal(prefix);
-  }
-  applyBrowseCompareView(prefix);
-}
-
-function resetBrowseCompareView(prefix) {
-  var view = browseCompareViews[prefix];
-  if (!view) return;
-  view.zoom = 1;
-  view.panX = 0;
-  view.panY = 0;
-  applyBrowseCompareView(prefix);
-}
-
-function resetBrowseCompareViews() {
-  resetBrowseCompareView('A');
-  resetBrowseCompareView('B');
-}
-
-function browseComparePaneFromEvent(e) {
-  var wrap = e.target && e.target.closest ? e.target.closest('.browse-compare-image-wrap') : null;
-  return wrap && wrap.dataset ? wrap.dataset.pane : null;
-}
-
-(function installBrowseCompareZoomHandlers() {
-  document.addEventListener('wheel', function(e) {
-    if (!isBrowseCompareOpen()) return;
-    var prefix = browseComparePaneFromEvent(e);
-    if (!prefix || !browseCompareViews[prefix]) return;
-    e.preventDefault();
-    var sensitivity = e.ctrlKey ? 0.02 : 0.0015;
-    var factor = Math.exp(-e.deltaY * sensitivity);
-    setBrowseCompareZoom(prefix, browseCompareViews[prefix].zoom * factor, e.clientX, e.clientY);
-  }, { passive: false });
-
-  document.addEventListener('dblclick', function(e) {
-    if (!isBrowseCompareOpen()) return;
-    var prefix = browseComparePaneFromEvent(e);
-    if (!prefix || !browseCompareViews[prefix]) return;
-    e.preventDefault();
-    setBrowseCompareZoom(prefix, browseCompareViews[prefix].zoom > 1.001 ? 1 : 2, e.clientX, e.clientY);
-  });
-
-  document.addEventListener('pointerdown', function(e) {
-    if (!isBrowseCompareOpen() || e.button !== 0) return;
-    var prefix = browseComparePaneFromEvent(e);
-    var view = prefix && browseCompareViews[prefix];
-    if (!view || view.zoom <= 1.001) return;
-    browseComparePointer = {
-      pointerId: e.pointerId,
-      prefix: prefix,
-      startX: e.clientX,
-      startY: e.clientY,
-      panX: view.panX,
-      panY: view.panY
-    };
-    if (e.target.setPointerCapture) e.target.setPointerCapture(e.pointerId);
-    e.preventDefault();
-  });
-
-  document.addEventListener('pointermove', function(e) {
-    var drag = browseComparePointer;
-    if (!drag || drag.pointerId !== e.pointerId) return;
-    var view = browseCompareViews[drag.prefix];
-    view.panX = drag.panX + e.clientX - drag.startX;
-    view.panY = drag.panY + e.clientY - drag.startY;
-    applyBrowseCompareView(drag.prefix);
-    e.preventDefault();
-  });
-
-  function stopBrowseComparePan(e) {
-    if (browseComparePointer && (e.pointerId == null || browseComparePointer.pointerId === e.pointerId)) {
-      browseComparePointer = null;
-    }
-  }
-  document.addEventListener('pointerup', stopBrowseComparePan);
-  document.addEventListener('pointercancel', stopBrowseComparePan);
-  window.addEventListener('resize', function() {
-    if (!isBrowseCompareOpen()) return;
-    applyBrowseCompareView('A');
-    applyBrowseCompareView('B');
-  });
-})();
 
 function findBrowsePhoto(id) {
   var topLevel = photos.find(function(p) { return p.id === id; });
@@ -7554,73 +7340,6 @@ function findBrowsePhoto(id) {
     if (member) return member;
   }
   return null;
-}
-
-async function getBrowseComparePhoto(id) {
-  var local = findBrowsePhoto(id);
-  if (local) return local;
-  try {
-    return await safeFetch('/api/photos/' + id, {}, { toast: false });
-  } catch(e) {
-    return { id: id, filename: 'Photo ' + id };
-  }
-}
-
-function browseCompareMeta(photo) {
-  var parts = [];
-  if (photo.width && photo.height) parts.push(photo.width + ' × ' + photo.height);
-  if (photo.timestamp) parts.push(photo.timestamp.replace('T', ' ').substring(0, 16));
-  if (photo.rating != null && photo.rating > 0) parts.push(photo.rating + ' star' + (photo.rating === 1 ? '' : 's'));
-  if (photo.sharpness != null) parts.push('sharpness ' + Math.round(photo.sharpness));
-  if (photo.flag && photo.flag !== 'none') parts.push(photo.flag);
-  return parts.join(' · ');
-}
-
-function setBrowseComparePane(prefix, photo) {
-  var img = document.getElementById('browseCompareImg' + prefix);
-  var name = document.getElementById('browseCompareName' + prefix);
-  var meta = document.getElementById('browseCompareMeta' + prefix);
-  if (img) {
-    img._browseCompareOriginalProbe = null;
-    img.alt = photo.filename || '';
-    img.dataset.photoId = photo.id;
-    img.dataset.originalLoaded = 'false';
-    img.src = '/photos/' + photo.id + '/full';
-  }
-  if (name) name.textContent = photo.filename || ('Photo ' + photo.id);
-  if (meta) meta.textContent = browseCompareMeta(photo);
-}
-
-async function renderBrowseCompare() {
-  if (!browseCompareIds.length) return;
-  var seq = ++browseCompareSeq;
-  var leftId = browseCompareIds[browseCompareOffset];
-  var rightId = browseCompareIds[browseCompareOffset + 1];
-  if (leftId == null || rightId == null) return;
-  resetBrowseCompareViews();
-
-  var count = document.getElementById('browseCompareCount');
-  if (count) {
-    count.textContent = (browseCompareOffset + 1) + '-' + (browseCompareOffset + 2) + ' of ' + browseCompareIds.length;
-  }
-  var prev = document.getElementById('browseComparePrev');
-  var next = document.getElementById('browseCompareNext');
-  if (prev) prev.disabled = browseCompareOffset <= 0;
-  if (next) next.disabled = browseCompareOffset >= browseCompareIds.length - 2;
-
-  var nameA = document.getElementById('browseCompareNameA');
-  var nameB = document.getElementById('browseCompareNameB');
-  var metaA = document.getElementById('browseCompareMetaA');
-  var metaB = document.getElementById('browseCompareMetaB');
-  if (nameA) nameA.textContent = 'Loading...';
-  if (nameB) nameB.textContent = 'Loading...';
-  if (metaA) metaA.textContent = '';
-  if (metaB) metaB.textContent = '';
-
-  var pair = await Promise.all([getBrowseComparePhoto(leftId), getBrowseComparePhoto(rightId)]);
-  if (seq !== browseCompareSeq || !isBrowseCompareOpen()) return;
-  setBrowseComparePane('A', pair[0]);
-  setBrowseComparePane('B', pair[1]);
 }
 
 /* ---------- Predictions panels ----------
@@ -11424,20 +11143,20 @@ document.addEventListener('keydown', function(e) {
   // handler dismisses just that dialog and leaves the export modal open.
   if (document.querySelector('.export-preset-dialog-overlay.open')) return;
 
-  if (isBrowseCompareOpen()) {
+  if (browseCompare.isOpen()) {
     if (e.key === 'Escape') {
       e.preventDefault();
-      closeBrowseCompare();
+      browseCompare.close();
       return;
     }
     if (e.key === 'ArrowRight') {
       e.preventDefault();
-      browseCompareStep(1);
+      browseCompare.step(1);
       return;
     }
     if (e.key === 'ArrowLeft') {
       e.preventDefault();
-      browseCompareStep(-1);
+      browseCompare.step(-1);
       return;
     }
     return;
