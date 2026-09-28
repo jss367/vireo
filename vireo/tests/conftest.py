@@ -100,6 +100,36 @@ def _shutdown_created_job_runners(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _detach_leaked_file_log_handlers():
+    """Keep ``app.main()``'s file handler out of the rest of the worker.
+
+    ``main()`` attaches a RotatingFileHandler for ``~/.vireo/vireo.log`` to
+    the root logger. A test that runs ``main()`` without stubbing
+    ``_setup_file_logging`` leaves that handler on the root logger, so every
+    later test on the same xdist worker writes its log output into the
+    user's real log. Detach it and fail the test that attached it.
+    """
+    import logging
+
+    root = logging.getLogger()
+    before = list(root.handlers)
+    yield
+    leaked = [
+        h for h in root.handlers
+        if h not in before and getattr(h, "_vireo_file_handler", False)
+    ]
+    for handler in leaked:
+        root.removeHandler(handler)
+        handler.close()
+    if leaked:
+        paths = ", ".join(getattr(h, "baseFilename", "?") for h in leaked)
+        pytest.fail(
+            "test left Vireo's file log handler on the root logger ("
+            + paths + "); stub app._setup_file_logging before calling main()"
+        )
+
+
+@pytest.fixture(autouse=True)
 def _reset_model_cache():
     """Drop the process-wide ModelCache between tests.
 
