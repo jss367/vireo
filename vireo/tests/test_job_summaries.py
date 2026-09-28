@@ -491,3 +491,33 @@ def test_full_resolution_summary_explains_deleted_photos():
     )
     assert out["error"] is None
     assert out["details"] == []
+
+
+def test_partial_failure_leads_with_counts_not_the_error():
+    """A job that did its work but had some items fail is 'failed', yet
+    its summary is still the counts, with how many failed beside them;
+    the first error leads the details."""
+    out = describe_result(
+        "export",
+        {"exported": 410, "errors": [], "error": "c.jpg: disk full", "partial_failure": 3},
+    )
+    assert out["summary"].endswith("· 3 errors")
+    assert "410" in out["summary"]
+    assert out["details"][0] == "c.jpg: disk full"
+    assert out["error"] == "c.jpg: disk full"
+
+
+def test_partial_failure_does_not_repeat_a_describer_error_count():
+    out = describe_result(
+        "move-photos",
+        {"moved": 5, "errors": ["x.jpg: already exists at destination"],
+         "error": "x.jpg: already exists at destination", "partial_failure": 1},
+    )
+    assert out["summary"] == "5 photos moved, 1 error"
+
+
+def test_fatal_failure_still_leads_with_the_error():
+    out = describe_result(
+        "export", {"exported": 0, "errors": [], "error": "destination unmounted"},
+    )
+    assert out["summary"] == "destination unmounted"

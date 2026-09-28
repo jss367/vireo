@@ -148,6 +148,17 @@ def create_job_launchers_blueprint(
                 )
                 if result.get("deleted"):
                     invalidate_missing_originals()
+                # Photos retained after a Trash/filesystem error mean the
+                # delete partly failed; the result still lists them so the
+                # dialog can offer the permanent-delete fallback.
+                result["ok"] = not result.get("failed_photo_ids")
+                for failure in result.get("trash_failed") or []:
+                    msg = (
+                        f'{failure.get("path") or "photo " + str(failure.get("photo_id"))}: '
+                        f'{failure.get("error") or "could not be removed"}'
+                    )
+                    if msg not in job["errors"]:
+                        job["errors"].append(msg)
                 return result
             finally:
                 thread_db.conn.close()
@@ -1015,6 +1026,8 @@ def create_job_launchers_blueprint(
             if rule_id:
                 thread_db.touch_move_rule(rule_id)
 
+            # Per-photo move failures fail the job (the runner folds them in).
+            result["ok"] = not result.get("errors")
             return result
 
         return ctx.start(

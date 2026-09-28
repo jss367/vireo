@@ -310,7 +310,9 @@ def test_batch_delete_progress_reports_failed_count_on_trash_failure(
     job_id = resp.get_json()["job_id"]
 
     job = wait_for_job_via_client(client, job_id)
-    assert job["status"] == "completed"
+    # A retained photo means the delete partly failed; the result still
+    # carries it so the dialog can offer the permanent-delete fallback.
+    assert job["status"] == "failed"
     assert job["result"]["failed_photo_ids"] == [photo["id"]]
 
     # Inspect emitted progress events for the disk-phase completion and
@@ -389,7 +391,8 @@ def test_batch_delete_progress_marks_catalog_stage_partial_on_revalidation_skip(
     assert resp.status_code == 200
     job_id = resp.get_json()["job_id"]
     job = wait_for_job_via_client(client, job_id)
-    assert job["status"] == "completed"
+    # The concurrently moved photo was retained, so the delete partly failed.
+    assert job["status"] == "failed"
 
     events = app._job_runner.get_events(job_id)
 

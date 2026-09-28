@@ -316,6 +316,35 @@ def test_move_folder_job_starts(app_and_db, tmp_path):
     assert data["job_id"].startswith("move-folder-")
 
 
+def test_move_folder_job_partial_move_is_failed_with_both_counts(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """Rollup rule: a move that moved some photos but hit errors on others
+    failed. Its summary keeps both counts so the partial progress shows."""
+    import move as move_module
+    from wait import wait_for_job_via_client
+
+    app, db = app_and_db
+    parent = tmp_path / "partial_dst"
+    parent.mkdir()
+    fid = db.get_folder_tree()[0]["id"]
+
+    def fake_move_folder(db, folder_id, destination, **_kwargs):
+        return {"moved": 4, "errors": ["c.jpg: Permission denied"]}
+
+    monkeypatch.setattr(move_module, "move_folder", fake_move_folder)
+    client = app.test_client()
+    resp = client.post("/api/jobs/move-folder", json={
+        "folder_id": fid, "destination": str(parent),
+    })
+    assert resp.status_code == 200
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "failed"
+    assert job["result"]["moved"] == 4
+    assert job["summary"] == "Moved 4 photos, 1 error(s)"
+    assert "c.jpg: Permission denied" in job["errors"]
+
+
 def test_move_folder_job_passes_explicit_destination_name(
     app_and_db, tmp_path, monkeypatch,
 ):

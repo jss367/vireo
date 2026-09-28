@@ -605,22 +605,68 @@ def test_job_result_ok_false_marks_failed(tmp_path):
     assert "rsync timed out" in job['errors']
 
 
-def test_job_result_ok_true_with_warnings_stays_completed(tmp_path):
-    """A work function returning {"ok": True, "errors": [...]} represents a
-    partial success: the job completes, but the result errors are still
-    folded into the job's error tally so the count is honest."""
+def test_job_result_ok_is_the_jobs_own_verdict(tmp_path):
+    """An explicit "ok" is the job's verdict and wins over the any-error
+    rollup: an import lists card-safety notices ("1 file you deselected was
+    not copied") in its errors without anything having failed. The notices
+    still fold into the job's error tally."""
     from jobs import JobRunner
 
     runner = JobRunner()
 
     def work(job):
-        return {"moved": 5, "errors": ["one file skipped"], "ok": True}
+        return {"copied": 5, "errors": ["Deselected files: 1 not copied"], "ok": True}
 
-    job_id = runner.start('move-folder', work)
+    job_id = runner.start('import-photos', work)
 
     job = wait_for_job_via_runner(runner, job_id)
     assert job['status'] == 'completed'
-    assert "one file skipped" in job['errors']
+    assert "Deselected files: 1 not copied" in job['errors']
+
+
+def test_job_recording_item_errors_is_failed_not_completed(tmp_path):
+    """A work function that returns normally after recording per-item
+    errors in job["errors"] ran to completion, but some items failed, so
+    the job is 'failed'. The history row keeps the counts as the summary,
+    with how many failed beside them and the first error in the details."""
+    from db import Database
+    from jobs import JobRunner
+
+    db = Database(str(tmp_path / "test.db"))
+    runner = JobRunner(db=db)
+
+    def work(job):
+        job["errors"].append("a.jpg: unreadable")
+        job["errors"].append("b.jpg: unreadable")
+        return {"moved": 3, "errors": [], "destination_folder_id": 1}
+
+    job_id = runner.start('move-photos', work)
+    job = wait_for_job_via_runner(runner, job_id, wait_for_history=True)
+    assert job['status'] == 'failed'
+    assert job['result']['moved'] == 3
+
+    row = db.conn.execute(
+        "SELECT status, error_count, summary, result FROM job_history WHERE id = ?",
+        (job_id,),
+    ).fetchone()
+    assert row["status"] == "failed"
+    assert row["error_count"] == 2
+    assert row["summary"].startswith("3 photos moved")
+    assert row["summary"].endswith("· 2 errors")
+
+    live = runner.get(job_id)
+    JobRunner._attach_result_text(live)
+    assert live["summary"] == row["summary"]
+    assert live["result_details"][0] == "a.jpg: unreadable"
+
+
+def test_job_without_errors_stays_completed(tmp_path):
+    from jobs import JobRunner
+
+    runner = JobRunner()
+    job_id = runner.start('test', lambda job: {"moved": 3})
+    job = wait_for_job_via_runner(runner, job_id)
+    assert job['status'] == 'completed'
 
 
 def test_job_result_without_ok_key_unaffected(tmp_path):

@@ -5202,7 +5202,12 @@ function updateDeleteProgress(data) {
 
 async function handleDeleteJobComplete(evt, savedCallback, mode, includeCompanions) {
   var data = evt && evt.result;
-  if (!evt || evt.status !== 'completed' || !data) {
+  // A delete that retained some photos after file errors ends "failed" but
+  // still carries its result: handle it like a completed one so the
+  // retained photos stay visible and the permanent-delete fallback is offered.
+  var partial = !!(evt && evt.status === 'failed' && data &&
+    data.failed_photo_ids && data.failed_photo_ids.length);
+  if (!evt || !data || (evt.status !== 'completed' && !partial)) {
     hideDeleteModal();
     var errors = (evt && evt.errors) || [];
     showToast('Delete failed' + (errors.length ? ': ' + errors[0] : ''), 'error');
