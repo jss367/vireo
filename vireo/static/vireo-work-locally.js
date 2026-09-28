@@ -126,6 +126,7 @@
   }
 
   var blockingJobTimer = null;
+  var blockingJobRefreshDue = false;
   var stageBlockedByJob = false;
 
   function blockingJobMessage(job) {
@@ -198,6 +199,7 @@
   function scheduleBlockingJobRefresh() {
     if (blockingJobTimer) clearTimeout(blockingJobTimer);
     blockingJobTimer = null;
+    blockingJobRefreshDue = false;
     if (!data) return;
     // Fast refresh while a block is active so the UI re-enables promptly,
     // slow keep-alive otherwise so a scan/pipeline started in another tab
@@ -205,9 +207,21 @@
     var delay = data.blocking_job ? 3000 : 15000;
     blockingJobTimer = setTimeout(function() {
       blockingJobTimer = null;
+      // Nobody reads the controls of a hidden window: wait for it to come
+      // back, then refresh at once.
+      if (document.hidden) {
+        blockingJobRefreshDue = true;
+        return;
+      }
       refreshBlockingJob();
     }, delay);
   }
+
+  document.addEventListener('visibilitychange', function() {
+    if (document.hidden || !blockingJobRefreshDue) return;
+    blockingJobRefreshDue = false;
+    refreshBlockingJob();
+  });
 
   function selectedItems(folderIds, localOnly) {
     var wanted = folderIds && folderIds.length

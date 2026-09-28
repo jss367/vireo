@@ -813,6 +813,19 @@ function formatDuration(seconds) {
   var _jobPollTimer = null;
   var _navJobPollTimer = null;
 
+  // Job polls pause while the window is hidden, except while a job is live:
+  // the dock/taskbar progress is read from a minimized window. (``active``
+  // also carries jobs that finished within the last hour.)
+  function startJobPoll(intervalMs) {
+    return Vireo.pollWhileVisible(pollJobs, intervalMs, {
+      runWhileHidden: function() { return activeJobs.some(isLiveJob); },
+    });
+  }
+  function stopJobPoll(poll) {
+    if (poll) poll.stop();
+    return null;
+  }
+
   function runtimeWarningDismissKey(id) {
     return 'vireo_runtime_warning_dismissed_' + String(id || '');
   }
@@ -972,8 +985,8 @@ function formatDuration(seconds) {
         isInternalNav = true;
         // Kill SSE and polling NOW so threads are freed for the next page
         if (lpSource) { lpSource.close(); lpSource = null; }
-        if (_jobPollTimer) { clearInterval(_jobPollTimer); _jobPollTimer = null; }
-        if (_navJobPollTimer) { clearInterval(_navJobPollTimer); _navJobPollTimer = null; }
+        _jobPollTimer = stopJobPoll(_jobPollTimer);
+        _navJobPollTimer = stopJobPoll(_navJobPollTimer);
       }
     });
 
@@ -1028,15 +1041,15 @@ function formatDuration(seconds) {
     pollJobs();
 
     // Clear any existing timers before starting new ones
-    if (_jobPollTimer) { clearInterval(_jobPollTimer); _jobPollTimer = null; }
-    if (_navJobPollTimer) { clearInterval(_navJobPollTimer); _navJobPollTimer = null; }
+    _jobPollTimer = stopJobPoll(_jobPollTimer);
+    _navJobPollTimer = stopJobPoll(_navJobPollTimer);
 
     if (panelOpen) {
       // Fast poll when panel is open; no slow poll needed
-      _jobPollTimer = setInterval(pollJobs, 2000);
+      _jobPollTimer = startJobPoll(2000);
     } else {
       // Slow background poll keeps navbar badge current
-      _navJobPollTimer = setInterval(pollJobs, 15000);
+      _navJobPollTimer = startJobPoll(15000);
     }
   }
 
@@ -1330,13 +1343,13 @@ function formatDuration(seconds) {
     if (isOpen) {
       startLogStream();
       // Fast poll while panel open; pause slow nav poll to avoid double-polling
-      if (_navJobPollTimer) { clearInterval(_navJobPollTimer); _navJobPollTimer = null; }
-      if (!_jobPollTimer) { pollJobs(); _jobPollTimer = setInterval(pollJobs, 2000); }
+      _navJobPollTimer = stopJobPoll(_navJobPollTimer);
+      if (!_jobPollTimer) { pollJobs(); _jobPollTimer = startJobPoll(2000); }
     } else {
       stopLogStream();
-      if (_jobPollTimer) { clearInterval(_jobPollTimer); _jobPollTimer = null; }
+      _jobPollTimer = stopJobPoll(_jobPollTimer);
       // Resume slow poll for navbar badge
-      if (!_navJobPollTimer) { _navJobPollTimer = setInterval(pollJobs, 15000); }
+      if (!_navJobPollTimer) { _navJobPollTimer = startJobPoll(15000); }
     }
     setTimeout(function() { panel.classList.remove('animating'); }, 200);
   };

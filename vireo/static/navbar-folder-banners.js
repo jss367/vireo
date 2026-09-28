@@ -267,9 +267,9 @@ function dismissMissingBanner() {
   if (match) _missingBannerDismissedCount = parseInt(match[1]);
 }
 
-// Check on page load and every 10 minutes
+// Check on page load and every 10 minutes while the window is visible
 checkMissingFolders();
-setInterval(checkMissingFolders, 600000);
+Vireo.pollWhileVisible(checkMissingFolders, 600000);
 
 /* ---------- Missing Originals Banner ---------- */
 let _missingPhotosCache = [];
@@ -301,7 +301,6 @@ let _missingPhotosBannerInFlight = false;
 // originals…" until the user closed and reopened it.
 let _missingPhotosBannerStatusPoll = null;
 let _missingPhotosModalStatusPoll = null;
-let _missingPhotosAutomaticTimer = null;
 const MISSING_PHOTOS_INITIAL_DELAY_MS = 180000;
 const MISSING_PHOTOS_AUTOMATIC_INTERVAL_MS = 30 * 60 * 1000;
 
@@ -330,17 +329,6 @@ function _scheduleMissingPhotosPoll(folderId, modal) {
       checkMissingPhotos();
     }, 3000);
   }
-}
-
-function _scheduleAutomaticMissingPhotosCheck(delayMs) {
-  if (_missingPhotosAutomaticTimer !== null) clearTimeout(_missingPhotosAutomaticTimer);
-  _missingPhotosAutomaticTimer = setTimeout(async function() {
-    _missingPhotosAutomaticTimer = null;
-    try {
-      await startMissingPhotosCheck({ automatic: true });
-    } catch (e) { /* ignore */ }
-    _scheduleAutomaticMissingPhotosCheck(MISSING_PHOTOS_AUTOMATIC_INTERVAL_MS);
-  }, delayMs);
 }
 
 async function startMissingPhotosCheck(opts) {
@@ -426,15 +414,21 @@ function dismissMissingPhotosBanner() {
 // Missing-originals scan touches every photo's source path on disk. On large
 // libraries backed by SMB/NAS volumes it can take minutes, so startup uses a
 // delayed background job and the banner only renders cached results. After the
-// initial run, keep re-arming a self-scheduling timer so a long-lived tab still
-// picks up files deleted, or skipped earlier because a heavy job was active.
+// initial run, keep re-checking so a long-lived tab still picks up files
+// deleted, or skipped earlier because a heavy job was active, but only while
+// the window is visible: a hidden window left open overnight used to re-stat
+// the whole library every 30 minutes for a banner nobody was reading.
 //
 // Read any existing cache immediately: this app spans multiple pages, so each
 // navigation resets the delayed POST timer. Without this cheap cache-only GET,
 // a ready payload from a prior scan or another tab would stay hidden for the
 // full delay window even though showing it costs no filesystem work.
 checkMissingPhotos();
-_scheduleAutomaticMissingPhotosCheck(MISSING_PHOTOS_INITIAL_DELAY_MS);
+Vireo.pollWhileVisible(
+  function() { return startMissingPhotosCheck({ automatic: true }); },
+  MISSING_PHOTOS_AUTOMATIC_INTERVAL_MS,
+  { initialDelayMs: MISSING_PHOTOS_INITIAL_DELAY_MS }
+);
 
 /* ---------- New Images Banner ---------- */
 // Per-workspace dismissal: one sessionStorage key per workspace id so that
@@ -820,11 +814,13 @@ async function reviewNewImagesImport(btn) {
   window.location.href = '/import?new_images=preparing';
 }
 
-// Run on page load and every 60s. Banner dismissal is per-workspace via
-// sessionStorage and re-arms automatically on any count delta (scan
-// reducing it, or new imports increasing it).
+// Run on page load and every 60s while the window is visible. Once the
+// server's answer expires (30 minutes), a check re-walks every library
+// folder, so a hidden window must not keep asking. Banner dismissal is
+// per-workspace via sessionStorage and re-arms automatically on any count
+// delta (scan reducing it, or new imports increasing it).
 checkNewImages();
-setInterval(checkNewImages, 60000);
+Vireo.pollWhileVisible(checkNewImages, 60000);
 
 /* ---------- Duplicate-Cleanup Banner ---------- */
 // Surfaces auto-resolved duplicate losers whose files may still be on disk.
@@ -893,7 +889,7 @@ function formatBytesNav(n) {
 }
 
 checkDupCleanup();
-setInterval(checkDupCleanup, 60000);
+Vireo.pollWhileVisible(checkDupCleanup, 60000);
 
 /* ---------- Missing Folders Modal ---------- */
 let _relocatingFolderId = null;

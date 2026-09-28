@@ -229,6 +229,101 @@ test('a delete job that failed outright reports the failure and runs no callback
   assert.deepEqual(calls.toasts, [['Delete failed: database is locked', 'error']]);
 });
 
+// A fake clock and document for vireo-visible-poll.js: timers fire only when
+// the test advances time, and visibility flips dispatch visibilitychange.
+function visiblePollHarness() {
+  const env = {now: 0, timers: [], nextId: 1, listeners: [], hidden: false};
+  env.document = {
+    get hidden() { return env.hidden; },
+    addEventListener(type, fn) { if (type === 'visibilitychange') env.listeners.push(fn); },
+    removeEventListener(type, fn) { env.listeners = env.listeners.filter(l => l !== fn); },
+  };
+  const ctx = load([source('vireo-visible-poll.js')], {
+    window: {document: env.document},
+    Date: {now: () => env.now},
+    setTimeout(fn, ms) { const id = env.nextId++; env.timers.push({id, at: env.now + ms, fn}); return id; },
+    clearTimeout(id) { env.timers = env.timers.filter(t => t.id !== id); },
+  });
+  env.poll = (...args) => ctx.window.Vireo.pollWhileVisible(...args);
+  env.advance = (ms) => {
+    const end = env.now + ms;
+    for (;;) {
+      env.timers.sort((a, b) => a.at - b.at);
+      const next = env.timers[0];
+      if (!next || next.at > end) break;
+      env.timers.shift();
+      env.now = next.at;
+      next.fn();
+    }
+    env.now = end;
+  };
+  env.setHidden = (hidden) => { env.hidden = hidden; env.listeners.slice().forEach(l => l()); };
+  return env;
+}
+
+test('pollWhileVisible ticks on its interval while visible', () => {
+  const env = visiblePollHarness();
+  const runs = [];
+  env.poll(() => runs.push(env.now), 1000);
+  env.advance(3500);
+  assert.deepEqual(runs, [1000, 2000, 3000]);
+});
+
+test('pollWhileVisible schedules nothing while hidden and catches up on return', () => {
+  const env = visiblePollHarness();
+  const runs = [];
+  env.poll(() => runs.push(env.now), 1000);
+  env.advance(1000);
+  env.setHidden(true);
+  env.advance(60000);
+  assert.deepEqual(runs, [1000]);
+  assert.equal(env.timers.length, 0);
+  // The overdue tick runs at once, then the normal cadence resumes.
+  env.setHidden(false);
+  env.advance(0);
+  assert.deepEqual(runs, [1000, 61000]);
+  env.advance(1000);
+  assert.deepEqual(runs, [1000, 61000, 62000]);
+});
+
+test('pollWhileVisible keeps an undue tick on schedule across a brief hide', () => {
+  const env = visiblePollHarness();
+  const runs = [];
+  env.poll(() => runs.push(env.now), 1000, {initialDelayMs: 5000});
+  env.advance(1000);
+  env.setHidden(true);
+  env.setHidden(false);
+  env.advance(3999);
+  assert.deepEqual(runs, []);
+  env.advance(1);
+  assert.deepEqual(runs, [5000]);
+});
+
+test('pollWhileVisible runWhileHidden keeps ticking while its predicate holds', () => {
+  const env = visiblePollHarness();
+  const runs = [];
+  let busy = true;
+  env.poll(() => runs.push(env.now), 1000, {runWhileHidden: () => busy});
+  env.setHidden(true);
+  env.advance(2000);
+  busy = false;
+  env.advance(5000);
+  assert.deepEqual(runs, [1000, 2000]);
+});
+
+test('pollWhileVisible stop cancels the poll and its visibility listener', () => {
+  const env = visiblePollHarness();
+  const runs = [];
+  const handle = env.poll(() => runs.push(env.now), 1000);
+  env.setHidden(true);
+  env.advance(2000);
+  handle.stop();
+  env.setHidden(false);
+  env.advance(5000);
+  assert.deepEqual(runs, []);
+  assert.equal(env.listeners.length, 0);
+});
+
 let failed = 0;
 for (const [name, body] of tests) {
   try {
