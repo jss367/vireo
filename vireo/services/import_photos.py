@@ -289,7 +289,7 @@ def enqueue_import_photos(service: ImportService, db: Database, body: dict) -> d
     # every deleted-process retry outright.
     parent_id_raw = body.get("parent_import_job_id")
     parent_config = None
-    parent_interrupted = False
+    parent_resume = None
     parent_allowed_ids = None
     parent_allowed_fingerprints = None
     parent_source_snapshots = None
@@ -309,7 +309,7 @@ def enqueue_import_photos(service: ImportService, db: Database, body: dict) -> d
             parent_allowed_ids,
             parent_allowed_fingerprints,
             parent_source_snapshots,
-            parent_interrupted,
+            parent_resume,
             parent_err,
         ) = service._validate_parent_import_job(
             parent_id_raw.strip(), db._active_workspace_id, db,
@@ -731,18 +731,16 @@ def enqueue_import_photos(service: ImportService, db: Database, body: dict) -> d
         "workspace_id": active_ws,
         "created_workspace": created_workspace,
         "carry_photo_ids": carry_photo_ids,
-        # Largest photo id when the first import of this retry chain was
-        # enqueued. Every row the chain lands is newer, so a resume of an
-        # interrupted run recognizes that run's landings by id even where
-        # its checkpointed ``photo_ids`` lagged a catalog commit (see
-        # ``import_job._note_recovered``).
-        "photo_id_floor": (
-            parent_config["photo_id_floor"]
-            if parent_config is not None
-            and parent_config.get("photo_id_floor") is not None
-            else db.conn.execute(
-                "SELECT COALESCE(MAX(id), 0) FROM photos",
-            ).fetchone()[0]
+        # Resume of an interrupted parent only (see
+        # ``_validate_parent_import_job``): the paths its landings sit at,
+        # so this run recovers rows the parent's checkpoint missed, and the
+        # photos still owed the tag/GPS pass. Persisted so a resume of
+        # this run, should it be interrupted too, inherits both.
+        "recover_landed_paths": (
+            parent_resume["landed_paths"] if parent_resume else []
+        ),
+        "untagged_photo_ids": (
+            parent_resume["untagged_ids"] if parent_resume else []
         ),
         # Fingerprint sidecar to carry_photo_ids so a retry-of-retry
         # can still verify the inherited scope by stable identity
@@ -1026,9 +1024,9 @@ def enqueue_import_photos(service: ImportService, db: Database, body: dict) -> d
             previewed_count=previewed_count,
             checked_count=checked_count,
             carry_photo_ids=carry_photo_ids,
-            recover_after_photo_id=(
-                parent_config.get("photo_id_floor")
-                if parent_interrupted else None
+            recover_landed_paths=(
+                frozenset(parent_resume["landed_paths"])
+                if parent_resume else None
             ),
         )
         try:
@@ -1039,25 +1037,23 @@ def enqueue_import_photos(service: ImportService, db: Database, body: dict) -> d
                 result["local_processing"] = True
                 result["final_destination"] = destination
                 result["staging_destination"] = import_destination
-            # A resume's carried photos never reached the parent's own
-            # post-``run_import_job`` tag/GPS pass (a restart killed it
-            # first), and this run skips their files as already
-            # imported, so ``result["photo_ids"]`` alone would leave
-            # every photo landed before the restart missing the
-            # requested tags and GPS-derived location. Only an
-            # interrupted parent skipped that pass: an ordinary
-            # failed-file parent already tagged and located its photos,
-            # and re-resolving GPS for them here would overwrite any
-            # location the user has corrected since.
+            # An interrupted parent never reached its tag/GPS pass, so a
+            # resume applies it to the photos that parent landed (its
+            # checkpointed ids, inherited untagged ids, and rows this run
+            # recovered by path) along with its own. Every other carried
+            # photo was tagged and located by the run that landed it;
+            # re-resolving GPS for those would overwrite any location the
+            # user has corrected since.
+            carried = set(carry_photo_ids or ())
             tag_photo_ids = list(result.get("photo_ids") or [])
-            if parent_interrupted:
-                seen = set(tag_photo_ids)
-                for pid in list(carry_photo_ids or []) + list(
-                    result.get("recovered_photo_ids") or [],
-                ):
-                    if pid not in seen:
-                        seen.add(pid)
-                        tag_photo_ids.append(pid)
+            seen = set(tag_photo_ids)
+            for pid in [
+                pid for pid in (parent_resume or {}).get("untagged_ids", [])
+                if pid in carried
+            ] + list(result.get("recovered_photo_ids") or []):
+                if pid not in seen:
+                    seen.add(pid)
+                    tag_photo_ids.append(pid)
             service._apply_import_tags(
                 active_ws, tag_photo_ids, import_tags,
                 location_from_gps, result, job=job, runner=runner,

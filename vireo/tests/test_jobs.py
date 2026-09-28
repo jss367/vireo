@@ -1696,6 +1696,30 @@ def test_checkpoint_snapshot_and_write_serialize_across_callers(tmp_path):
     assert runner.shutdown(timeout=5)
 
 
+def test_flush_partial_result_is_on_the_row_before_it_returns(tmp_path):
+    import json
+
+    from db import Database
+    from jobs import JobRunner
+
+    db = Database(str(tmp_path / "test.db"))
+    runner = JobRunner(db=db)
+    flushed = []
+
+    def work(job):
+        job["partial_result"] = {"landed_paths": ["/a/1.jpg"]}
+        flushed.append(runner.flush_partial_result(job))
+        flushed.append(json.loads(_history_row(db, job["id"])["result"]))
+        return {"ok": True}
+
+    job_id = runner.start("import", work)
+    wait_for_job_via_runner(runner, job_id, wait_for_history=True)
+    assert flushed == [True, {"landed_paths": ["/a/1.jpg"]}]
+    # Without history there is nothing to wait for.
+    assert JobRunner().flush_partial_result({"partial_result": {}}) is True
+    assert runner.shutdown(timeout=5)
+
+
 def test_ephemeral_job_is_never_checkpointed(tmp_path):
     from db import Database
     from jobs import JobRunner

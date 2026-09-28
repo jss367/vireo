@@ -54,6 +54,10 @@ class FakeRunner:
         self.checkpoint_calls += 1
         return 0
 
+    def flush_partial_result(self, job):
+        self.checkpoint_calls += 1
+        return True
+
 
 def test_catalog_scan_preservation_pause_publishes_paused_without_cancelling(
     tmp_path,
@@ -7352,10 +7356,10 @@ def test_each_resume_scope_publish_is_flushed_before_the_next_batch(
     interleaving = []
     real_publish = import_job._publish_resume_scope
 
-    def spy_publish(job, db_, state, source_snapshots, runner=None):
+    def spy_publish(job, db_, state, source_snapshots, runner=None, **kw):
         # Before the publish: how many syncs the fake runner has seen.
         before = runner.checkpoint_calls if runner is not None else None
-        real_publish(job, db_, state, source_snapshots, runner=runner)
+        real_publish(job, db_, state, source_snapshots, runner=runner, **kw)
         after = runner.checkpoint_calls if runner is not None else None
         interleaving.append({
             "before": before,

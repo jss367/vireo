@@ -614,6 +614,23 @@ class JobRunner:
                             live["_checkpointed_partial"] = snap["_partial_result"]
             return written
 
+    def flush_partial_result(self, job, attempts=10):
+        """Write ``job["partial_result"]`` to its history row now.
+
+        For a worker that must not proceed until the row holds its latest
+        partial result. A checkpoint skips a write it can't get the lock
+        for, so retry with a short backoff. Returns True once the row holds
+        it, or at once when this runner keeps no history for the job.
+        """
+        if not self._db_path or job.get("ephemeral"):
+            return True
+        for attempt in range(attempts):
+            self.checkpoint_live_jobs()
+            if job.get("_checkpointed_partial") is job.get("partial_result"):
+                return True
+            time.sleep(0.2 * (attempt + 1))
+        return False
+
     def _write_checkpoints(self, snapshots):
         """Write checkpoint snapshots in one transaction.
 

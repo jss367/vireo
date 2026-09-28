@@ -666,11 +666,14 @@ class ImportService:
         retry is allowed to inherit.
 
         Returns ``(parent_config, allowed_ids, allowed_fingerprints,
-        parent_source_snapshots, parent_interrupted, None)`` on success
-        or ``(None, None, None, None, False, error_response)`` when the
-        parent can't be used. ``parent_interrupted`` says a Vireo restart
-        killed the parent before its post-copy steps (tags, GPS
-        locations) ran for the photos it had landed.
+        parent_source_snapshots, parent_resume, None)`` on success or
+        ``(None, None, None, None, None, error_response)`` when the parent
+        can't be used. ``parent_resume`` is None unless a Vireo restart
+        interrupted the parent; then it holds what only that parent's own
+        records can say: ``landed_paths`` (every destination path the
+        parent, or an interrupted run it resumed, recorded before
+        cataloging) and ``untagged_ids`` (photos the parent landed or
+        inherited as untagged, whose tag/GPS pass it never reached).
         ``parent_config`` is the parent job's persisted config dict (it
         also carries ``root_import_job_id`` when the parent is itself
         a retry, so the caller can persist a single root pointer
@@ -716,7 +719,7 @@ class ImportService:
                 (parent_id,),
             ).fetchone()
             if row is None:
-                return None, None, None, None, False, ImportFailure(
+                return None, None, None, None, None, ImportFailure(
                     "parent_import_job_id not found — the original import "
                     "may have aged out of history; start a new import",
                     404,
@@ -733,19 +736,19 @@ class ImportService:
             except (json.JSONDecodeError, TypeError):
                 parent_result = {}
         if parent_type != "import":
-            return None, None, None, None, False, ImportFailure(
+            return None, None, None, None, None, ImportFailure(
                 "parent_import_job_id must reference an import job "
                 f"(got type {parent_type!r})"
             )
         if parent_status not in {"completed", "failed", "cancelled"}:
-            return None, None, None, None, False, ImportFailure(
+            return None, None, None, None, None, ImportFailure(
                 "parent_import_job_id is still active "
                 f"(status {parent_status!r}); wait for the original import "
                 "to finish before retrying",
                 409,
             )
         if parent_workspace != active_ws:
-            return None, None, None, None, False, ImportFailure(
+            return None, None, None, None, None, ImportFailure(
                 "parent_import_job_id belongs to a different workspace "
                 "than the active one; switch workspaces or start a new "
                 "import instead of retrying"
@@ -797,9 +800,36 @@ class ImportService:
             allowed_ids,
             allowed_fingerprints,
             parent_source_snapshots,
-            bool(parent_result.get("interrupted")),
+            self._interrupted_parent_resume(parent_config, parent_result),
             None,
         )
+
+    @staticmethod
+    def _interrupted_parent_resume(parent_config, parent_result):
+        """What a resume inherits from an interrupted parent (see
+        ``_validate_parent_import_job``); None for any other parent."""
+        if not parent_result.get("interrupted"):
+            return None
+
+        def ids(values):
+            return [
+                pid for pid in values or []
+                if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0
+            ]
+
+        def paths(values):
+            return [p for p in values or [] if isinstance(p, str) and p]
+
+        return {
+            "landed_paths": sorted(set(
+                paths(parent_result.get("landed_paths"))
+                + paths(parent_config.get("recover_landed_paths"))
+            )),
+            "untagged_ids": sorted(set(
+                ids(parent_result.get("photo_ids"))
+                + ids(parent_config.get("untagged_photo_ids"))
+            )),
+        }
 
     def _validate_after_import(self, value, db, *, allow_missing=False):
         """Return an admission failure for a bad after_import spec, else None.

@@ -576,12 +576,13 @@ class ImportParams:
     # validated against the parent's scope). The run finishes their
     # working copies, which an interrupted parent may never have reached.
     carry_photo_ids: list | None = None
-    # Set only when resuming an interrupted import: the largest photo id
-    # in the catalog when the interrupted import was enqueued. A card file
-    # this run skips as a duplicate of a newer row under the destination
-    # is one the interrupted run landed, whether or not its checkpoint got
-    # to record it. See ``_note_recovered``.
-    recover_after_photo_id: int | None = None
+    # Set only when resuming an interrupted import: the destination paths
+    # the interrupted run (and any interrupted run it resumed) recorded as
+    # landed before cataloging them. A card file this run skips as a
+    # duplicate of a row at one of these paths is that run's landing,
+    # whether or not its checkpoint got to record the photo id. See
+    # ``_note_recovered``.
+    recover_landed_paths: frozenset | None = None
 
 
 @dataclass(frozen=True)
@@ -636,6 +637,10 @@ class _ImportRunState:
     # Rows an interrupted parent landed, found by this resume's duplicate
     # gate (see ``_note_recovered``).
     recovered_photo_ids: set = field(default_factory=set)
+    # Destination paths this run landed, recorded (and flushed to the
+    # history row) before each batch is cataloged, so a resume can tell
+    # this run's rows from anyone else's. See ``_record_landed_paths``.
+    landed_paths: set = field(default_factory=set)
     linked_dup_dirs: set = field(default_factory=set)
     run_dest_folders: dict = field(default_factory=dict)
     run_verified_hashes: dict = field(default_factory=dict)
@@ -1389,14 +1394,16 @@ def _note_recovered(state, rows, params, ctx):
     A resume skips the parent's landed files as duplicates. The parent's
     checkpointed ``photo_ids`` can lag its catalog commits (a kill between
     a batch's commit and the next checkpoint), so the resume identifies
-    them itself: a twin under this destination created after the parent
-    was enqueued is the parent's landing of this very card file.
+    them itself: the parent recorded each file's destination path before
+    cataloging it, and a twin at one of those paths is the parent's own
+    landing. Rows another import put elsewhere never match.
     """
-    floor = params.recover_after_photo_id
-    if floor is None:
+    paths = params.recover_landed_paths
+    if not paths:
         return
     for row in rows:
-        if row["id"] > floor and ctx.path_under_destination(row["folder_path"]):
+        path = os.path.normpath(os.path.join(row["folder_path"], row["filename"]))
+        if path in paths:
             state.recovered_photo_ids.add(row["id"])
 
 
@@ -2169,7 +2176,23 @@ def _extract_deferred_working_copies(state, params, runner, job, db):
             state.cancelled = True
 
 
-def _publish_resume_scope(job, db, state, source_snapshots, runner=None):
+def _record_landed_paths(job, db, state, batch_st, source_snapshots, runner):
+    """Record this batch's landed destination paths before cataloging it.
+
+    Recorded first, so an interrupted row never lacks a path whose photo
+    row exists: a resume finds every row this run cataloged, even ones its
+    checkpointed ``photo_ids`` missed, by path (``_note_recovered``).
+    """
+    state.landed_paths.update(
+        os.path.normpath(landed.dest_path) for landed in batch_st.landed
+    )
+    _publish_resume_scope(
+        job, db, state, source_snapshots, runner=runner, require_flush=True,
+    )
+
+
+def _publish_resume_scope(job, db, state, source_snapshots, runner=None,
+                          require_flush=False):
     """Publish what a Resume needs if Vireo dies before this run finishes.
 
     The runner checkpoints ``partial_result`` onto the job's history row
@@ -2196,8 +2219,17 @@ def _publish_resume_scope(job, db, state, source_snapshots, runner=None):
         "photo_ids": sorted(state.imported_photo_ids),
         "photo_fingerprints": dict(state.resume_fingerprints),
         "source_snapshots": source_snapshots,
+        "landed_paths": sorted(state.landed_paths),
     }
-    if runner is not None:
+    if runner is not None and require_flush:
+        # The landed paths must be on disk before the batch is cataloged.
+        if not runner.flush_partial_result(job):
+            log.warning(
+                "Import %s: could not record landed paths before cataloging; "
+                "a crash now could leave this batch out of a resume",
+                job.get("id"),
+            )
+    elif runner is not None:
         # Best-effort synchronous flush. ``checkpoint_live_jobs`` swallows
         # transient ``OperationalError`` on its own — a checkpoint that
         # can't grab the lock right now will still be retried by the 2s
@@ -2777,6 +2809,9 @@ def _finalize_import(job, runner, db, state, params, *,
             - state.imported_photo_ids
             - set(params.carry_photo_ids or ()),
         ),
+        # See ``_record_landed_paths``; a resume of a later interruption
+        # in this retry chain inherits them through its parent's config.
+        "landed_paths": sorted(state.landed_paths),
         # Stable-identity map so a recovery retry can verify each carried
         # ID still points at the same file. Without this the retry
         # authorizes any current photo row that happens to share an ID
@@ -4808,6 +4843,9 @@ def run_import_job(job, runner, db_path, workspace_id, params):
         # batches keep cataloging like before. See PR #1423 review
         # (Codex P2 r3716433824, r3716433830).
         if batch_st.landed and not batch_st.dest_read_cancelled:
+            _record_landed_paths(
+                job, db, state, batch_st, source_snapshots, runner,
+            )
             pre_scan_hashes = _catalog_scan_and_prescan(
                 state, batch_st, db, params, scan, destination, rel,
                 attests_bytes, runner=runner, job=job,
