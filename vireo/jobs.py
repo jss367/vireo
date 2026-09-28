@@ -557,7 +557,9 @@ class JobRunner:
 
         Writes the step tree, progress, partial result and elapsed time
         onto the job's ``running`` history row so a crash leaves a record
-        of what the job got done. Returns the number of rows updated.
+        of what the job got done. Until the job has a real ``result``, a
+        worker's ``job["partial_result"]`` stands in for it, so the
+        startup sweep keeps it on the interrupted row. Returns the number of rows updated.
         Public so tests (and callers that just did something worth
         recording) can checkpoint deterministically instead of waiting
         for the timer.
@@ -565,13 +567,32 @@ class JobRunner:
         if not self._db_path:
             return 0
         with self._lock:
-            snapshots = [
-                self._snapshot_job(j)
-                for j in self._live_persisted_jobs_locked()
-            ]
+            snapshots = []
+            for j in self._live_persisted_jobs_locked():
+                snap = self._snapshot_job(j)
+                # A worker publishes ``partial_result`` (a fresh dict per
+                # update) for what a crash must not lose. Write it only
+                # when it changed: it can be large, and the row keeps the
+                # last written copy between writes.
+                partial = j.get("partial_result")
+                if (
+                    snap.get("result") is None
+                    and partial is not None
+                    and partial is not j.get("_checkpointed_partial")
+                ):
+                    snap["result"] = partial
+                    snap["_partial_result"] = partial
+                snapshots.append(snap)
         if not snapshots:
             return 0
-        return self._write_checkpoints(snapshots)
+        written = self._write_checkpoints(snapshots)
+        if written:
+            with self._lock:
+                for snap in snapshots:
+                    live = self._jobs.get(snap["id"])
+                    if live is not None and "_partial_result" in snap:
+                        live["_checkpointed_partial"] = snap["_partial_result"]
+        return written
 
     def _write_checkpoints(self, snapshots):
         """Write checkpoint snapshots in one transaction.
@@ -598,7 +619,8 @@ class JobRunner:
                 self._insert_running_row(conn, job)
                 cur = conn.execute(
                     "UPDATE job_history "
-                    "SET duration=?, result=?, error_count=?, tree=?, "
+                    "SET duration=?, result=COALESCE(?, result), "
+                    "    error_count=?, tree=?, "
                     "    summary=?, progress=?, resource_wait_seconds=?, "
                     "    resource_wait_count=? "
                     "WHERE id = ? AND status = 'running'",
@@ -1551,6 +1573,9 @@ class JobRunner:
         the nested mutable containers under the lock too.
         """
         snap = dict(job)
+        # Checkpoint-only state: can be large, and callers read ``result``.
+        snap.pop("partial_result", None)
+        snap.pop("_checkpointed_partial", None)
         snap["progress"] = dict(job.get("progress") or {})
         snap["steps"] = [dict(s) for s in (job.get("steps") or [])]
         snap["errors"] = list(job.get("errors") or [])

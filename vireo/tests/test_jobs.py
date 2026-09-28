@@ -1546,6 +1546,84 @@ def test_running_job_has_history_row_and_checkpoint_records_work(tmp_path):
     assert runner.shutdown(timeout=5)
 
 
+def test_checkpoint_persists_partial_result_until_the_real_result(tmp_path):
+    """A worker's ``partial_result`` is what a crash must not lose: the
+    checkpoint writes it as the row's result (rewriting it only when the
+    worker publishes a new one), the startup sweep keeps it on the
+    interrupted row, and it never rides along in API snapshots.
+    """
+    import json
+
+    from db import Database
+    from jobs import INTERRUPTED_BY_RESTART, JobRunner
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    runner = JobRunner(db=db)
+    published = threading.Event()
+    republish = threading.Event()
+    republished = threading.Event()
+    release = threading.Event()
+
+    def work(job):
+        job["partial_result"] = {"photo_ids": [1, 2]}
+        published.set()
+        republish.wait(timeout=5)
+        job["partial_result"] = {"photo_ids": [1, 2, 3]}
+        republished.set()
+        release.wait(timeout=5)
+        return {"photo_ids": [1, 2, 3], "ok": True}
+
+    job_id = runner.start("import", work)
+    assert published.wait(timeout=5)
+    assert "partial_result" not in runner.get(job_id)
+    assert all("partial_result" not in j for j in runner.list_jobs())
+
+    assert runner.checkpoint_live_jobs() == 1
+    row = _history_row(db, job_id)
+    assert json.loads(row["result"]) == {"photo_ids": [1, 2]}
+
+    # An unchanged partial is not rewritten; the row keeps the last copy.
+    db.conn.execute(
+        "UPDATE job_history SET result = '{\"marker\": 1}' WHERE id = ?",
+        (job_id,),
+    )
+    db.conn.commit()
+    assert runner.checkpoint_live_jobs() == 1
+    assert json.loads(_history_row(db, job_id)["result"]) == {"marker": 1}
+
+    republish.set()
+    assert republished.wait(timeout=5)
+    assert runner.checkpoint_live_jobs() == 1
+    assert json.loads(_history_row(db, job_id)["result"]) == {
+        "photo_ids": [1, 2, 3],
+    }
+
+    # Simulate the crash: a fresh runner's startup sweep keeps the partial.
+    second_db = Database(db_path)
+    try:
+        JobRunner(db=second_db)
+        swept = json.loads(_history_row(second_db, job_id)["result"])
+        assert swept["photo_ids"] == [1, 2, 3]
+        assert swept["interrupted"] is True
+        assert swept["error"] == INTERRUPTED_BY_RESTART
+    finally:
+        second_db.close()
+
+    # (The first process "survives" in this test; its final write still
+    # lands the real result over the checkpoint.)
+    db.conn.execute(
+        "UPDATE job_history SET status = 'running' WHERE id = ?", (job_id,),
+    )
+    db.conn.commit()
+    release.set()
+    wait_for_job_via_runner(runner, job_id, wait_for_history=True)
+    assert json.loads(_history_row(db, job_id)["result"]) == {
+        "photo_ids": [1, 2, 3], "ok": True,
+    }
+    assert runner.shutdown(timeout=5)
+
+
 def test_ephemeral_job_is_never_checkpointed(tmp_path):
     from db import Database
     from jobs import JobRunner

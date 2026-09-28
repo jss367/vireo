@@ -770,6 +770,30 @@
     });
   }
 
+  // An import a Vireo restart cut short. Resumable only when its
+  // checkpoint recorded which photos it had already landed
+  // (``photo_ids``, even if empty): a resume must carry those into the
+  // after-import processing, and an older interrupted row without the
+  // list would silently leave them unprocessed.
+  function isResumableImport(job) {
+    var result = job && job.result;
+    return !!(job && job.type === 'import' && job.status === 'failed' &&
+      result && result.interrupted && Array.isArray(result.photo_ids));
+  }
+
+  function importResumeHint(job) {
+    var landed = job.result.photo_ids.length;
+    if (!landed) {
+      return 'Same source and destination. Nothing was imported before it stopped.';
+    }
+    var hint = 'Same source and destination. The ' + landed.toLocaleString() +
+      ' photo' + (landed === 1 ? '' : 's') + ' already imported won\'t be copied again';
+    if (jobConfig(job).after_import != null) {
+      hint += '; they\'re processed with the rest';
+    }
+    return hint + '.';
+  }
+
   function importRetryBody(job) {
     var cfg = jobConfig(job);
     if (!job || job.type !== 'import' || cfg.mode === 'in_place' ||
@@ -943,7 +967,8 @@
     html += renderSourceCleanup(job);
 
     var failedImportCount = job.result && Number(job.result.failed || 0);
-    if (!isLive && failedImportCount > 0 && importRetryBody(job)) {
+    var resumableImport = isResumableImport(job);
+    if (!isLive && (failedImportCount > 0 || resumableImport) && importRetryBody(job)) {
       var retryInFlight = hasActiveRetryFor(job.id);
       html += '<div style="padding:10px 0 2px;font-size:12px;color:var(--text-muted);">';
       if (retryInFlight) {
@@ -956,6 +981,10 @@
           'title="A retry for this import is already running">' +
           'Retry in progress…</button>';
         html += '<span style="margin-left:8px;">Retry already launched for this job; wait for it to finish before starting another.</span>';
+      } else if (resumableImport) {
+        html += '<button class="btn-retry" data-retry-import-job="' +
+          escapeAttr(job.id) + '" data-import-resume>Resume import</button>';
+        html += '<span style="margin-left:8px;">' + esc(importResumeHint(job)) + '</span>';
       } else {
         html += '<button class="btn-retry" data-retry-import-job="' +
           escapeAttr(job.id) + '">Retry ' + failedImportCount + ' failed file' +
@@ -1635,8 +1664,9 @@
       // below can restore it exactly — dropping to a generic "Retry
       // failed files" would silently hide the real failed-file count.
       var retryOriginalLabel = retryImportBtn.textContent;
+      var isResume = retryImportBtn.hasAttribute('data-import-resume');
       retryImportBtn.disabled = true;
-      retryImportBtn.textContent = 'Starting retry…';
+      retryImportBtn.textContent = isResume ? 'Resuming…' : 'Starting retry…';
       fetch('/api/jobs/import-photos', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -1650,7 +1680,9 @@
         });
       }).then(function(data) {
         if (typeof showToast === 'function') {
-          showToast('Import retry started. Successful files will be skipped.', 'info');
+          showToast(isResume
+            ? 'Import resumed. Files already imported will be skipped.'
+            : 'Import retry started. Successful files will be skipped.', 'info');
         }
         selectedJobId = data.job_id;
         selectedSource = 'active';

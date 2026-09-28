@@ -718,6 +718,10 @@ def test_jobs_page_returns_200(app_and_db):
     assert b'job.progress && job.progress.pause_reason' in resp.data
     assert b'data-retry-import-job' in resp.data
     assert b'importRetryBody' in resp.data
+    # An import a restart interrupted offers Resume, but only when its
+    # checkpoint recorded the photos it landed (older rows lack them).
+    assert b'data-import-resume' in resp.data
+    assert b'result.interrupted && Array.isArray(result.photo_ids)' in resp.data
     # Import-in-place's overall counter pauses during discovery/metadata.
     # The jobs page must not turn that pause into a growing ETA or keep
     # rendering the previous source's filenames under the new phase.
@@ -11157,6 +11161,121 @@ def test_import_retry_chains_carried_photo_ids(app_and_db, tmp_path):
         # The collection must cover the original scope so quick-look runs
         # against every photo the user intended to import.
         assert sorted(p["id"] for p in photos) == sorted(seed_ids)
+
+
+def test_interrupted_import_resumes_with_the_photos_it_landed(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """An import a restart cut short keeps, on its interrupted history row,
+    the photos it had landed (via the checkpointed ``partial_result``). The
+    Jobs page's Resume sends them as the carry list: the resume copies
+    nothing again, finishes their working copies, and chains the
+    after-import process over them.
+    """
+    import import_job
+    import scanner
+    from jobs import INTERRUPTED_BY_RESTART
+
+    app, db = app_and_db
+    runner = app._job_runner
+    quick_look_id = next(
+        pr["id"] for pr in db.get_saved_processes()
+        if pr["name"] == "Quick look")
+    card = _chain_card(tmp_path)
+    archive = tmp_path / "arch"
+
+    partials = {}
+    real_publish = import_job._publish_resume_scope
+
+    def recording_publish(job, db_, state, source_snapshots):
+        real_publish(job, db_, state, source_snapshots)
+        partials[job["id"]] = job["partial_result"]
+
+    monkeypatch.setattr(import_job, "_publish_resume_scope", recording_publish)
+
+    with app.test_client() as client:
+        parent_id = _post_import(client, card, archive, quick_look_id)
+        parent = wait_for_job_via_client(client, parent_id)
+        final = parent["result"]
+        wait_for_job_via_client(client, final["process_job_id"])
+
+        # The last checkpointable scope matches what the finished run
+        # reports, so a resume sees exactly what a retry would.
+        partial = partials[parent_id]
+        assert partial["photo_ids"] == final["photo_ids"] and partial["photo_ids"]
+        assert partial["photo_fingerprints"] == final["photo_fingerprints"]
+        assert partial["source_snapshots"] == final["source_snapshots"]
+
+        # Replay the crash: the row holds the checkpoint, the process is
+        # gone, and the next start's sweep marks it interrupted.
+        with runner._lock:
+            runner._jobs.pop(parent_id)
+        db.conn.execute(
+            "UPDATE job_history SET status = 'running', result = ? "
+            "WHERE id = ?",
+            (json.dumps(partial), parent_id),
+        )
+        # The interrupted run never reached its working-copy pass.
+        seed_ids = partial["photo_ids"]
+        db.conn.execute(
+            "UPDATE photos SET working_copy_path = NULL WHERE id IN (%s)"
+            % ",".join("?" * len(seed_ids)),
+            seed_ids,
+        )
+        db.conn.commit()
+        runner._startup_sweep(db)
+        db.conn.commit()
+        row = next(
+            h for h in client.get("/api/jobs/history").get_json()
+            if h["id"] == parent_id
+        )
+        assert row["status"] == "failed"
+        assert row["result"]["interrupted"] is True
+        assert row["result"]["error"] == INTERRUPTED_BY_RESTART
+        assert row["result"]["photo_ids"] == seed_ids
+
+        wc_scopes = []
+        monkeypatch.setattr(
+            scanner, "_extract_working_copies",
+            lambda db_, vireo_dir, **kw: wc_scopes.append(kw.get("scope")),
+        )
+        # The body the Jobs page's importRetryBody builds for this row.
+        cfg = row["config"]
+        resp = client.post("/api/jobs/import-photos", json={
+            "sources": cfg["sources"],
+            "destination": cfg["destination"],
+            "recursive": True,
+            "folder_template": cfg["folder_template"],
+            "file_types": cfg["file_types"],
+            "skip_duplicates": cfg["skip_duplicates"],
+            "after_import": cfg["after_import"],
+            "parent_import_job_id": parent_id,
+            "carry_photo_ids": row["result"]["photo_ids"],
+            "local_processing": False,
+            "defer_nas_transfer": False,
+        })
+        assert resp.status_code == 200, resp.get_json()
+        resumed = wait_for_job_via_client(client, resp.get_json()["job_id"])
+        result = resumed["result"]
+
+        assert result["copied"] == 0
+        assert result["photo_ids"] == []
+        assert sorted(result["carried_photo_ids"]) == sorted(seed_ids)
+        assert result.get("process_job_id"), result
+        assert sorted(
+            p["id"] for p in db.get_collection_photos(
+                result["collection_id"], per_page=999999)
+        ) == sorted(seed_ids)
+        seed_folders = {
+            r["path"] for r in db.conn.execute(
+                "SELECT DISTINCT f.path FROM photos p "
+                "JOIN folders f ON f.id = p.folder_id WHERE p.id IN (%s)"
+                % ",".join("?" * len(seed_ids)),
+                seed_ids,
+            )
+        }
+        assert wc_scopes, "the resume must finish the carried working copies"
+        assert {d for d, _mode in wc_scopes[0]} == seed_folders
 
 
 def test_import_pauses_chained_classification_when_labels_are_missing(

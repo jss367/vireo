@@ -1005,6 +1005,7 @@ def enqueue_import_photos(service: ImportService, db: Database, body: dict) -> d
             include_paths=include_paths,
             previewed_count=previewed_count,
             checked_count=checked_count,
+            carry_photo_ids=carry_photo_ids,
         )
         try:
             result = run_import_job(

@@ -572,6 +572,10 @@ class ImportParams:
     # it; ``None`` falls back to the default location downstream. See PR
     # #1107 review.
     thumb_cache_dir: str | None = None
+    # Photo IDs a recovery retry carries from its parent import (already
+    # validated against the parent's scope). The run finishes their
+    # working copies, which an interrupted parent may never have reached.
+    carry_photo_ids: list | None = None
 
 
 @dataclass(frozen=True)
@@ -620,6 +624,9 @@ class _ImportRunState:
     folder_counts: dict = field(default_factory=dict)
     discovery_errors: list = field(default_factory=list)
     imported_photo_ids: set = field(default_factory=set)
+    # Fingerprints of ``imported_photo_ids`` captured so far for the
+    # resume scope (see ``_publish_resume_scope``).
+    resume_fingerprints: dict = field(default_factory=dict)
     linked_dup_dirs: set = field(default_factory=set)
     run_dest_folders: dict = field(default_factory=dict)
     run_verified_hashes: dict = field(default_factory=dict)
@@ -2132,6 +2139,51 @@ def _extract_deferred_working_copies(state, params, runner, job, db):
             )
         if runner.is_cancelled(job["id"]):
             state.cancelled = True
+
+
+def _publish_resume_scope(job, db, state, source_snapshots):
+    """Publish what a Resume needs if Vireo dies before this run finishes.
+
+    The runner checkpoints ``partial_result`` onto the job's history row
+    and the startup sweep keeps it on the interrupted row, so a recovery
+    retry can carry the photos this run already landed (with the same
+    identity and source checks a finished run's result offers). Each
+    publish is a fresh dict: the checkpoint thread serializes it outside
+    the worker.
+    """
+    fresh = state.imported_photo_ids.difference(
+        int(pid) for pid in state.resume_fingerprints
+    )
+    if fresh:
+        state.resume_fingerprints.update(
+            _capture_photo_fingerprints(db, fresh),
+        )
+    job["partial_result"] = {
+        "photo_ids": sorted(state.imported_photo_ids),
+        "photo_fingerprints": dict(state.resume_fingerprints),
+        "source_snapshots": source_snapshots,
+    }
+
+
+def _add_carried_working_copy_folders(state, params, db):
+    """Put the folders of carried photos still lacking a working copy into
+    the deferred extraction scope. A parent interrupted before (or during)
+    its working-copy pass left them without one, and this run skips their
+    files as already imported, so nothing else would extract them.
+    """
+    if not params.vireo_dir or not params.carry_photo_ids:
+        return
+    for chunk in _chunks(sorted(set(params.carry_photo_ids))):
+        placeholders = ",".join("?" for _ in chunk)
+        rows = db.conn.execute(
+            f"""SELECT DISTINCT f.path AS path
+                FROM photos p
+                JOIN folders f ON f.id = p.folder_id
+                WHERE p.id IN ({placeholders})
+                  AND p.working_copy_path IS NULL""",
+            list(chunk),
+        ).fetchall()
+        state.wc_dest_folders.update(row["path"] for row in rows)
 
 
 def _make_stop_check(runner, job):
@@ -4459,6 +4511,7 @@ def run_import_job(job, runner, db_path, workspace_id, params):
     appeared = plan.appeared
     checker = plan.checker
     batches = plan.batches
+    _publish_resume_scope(job, db, state, source_snapshots)
 
     # --- Ledger -----------------------------------------------------
     # Every discovered file ends in exactly one terminal bucket on
@@ -4769,9 +4822,11 @@ def run_import_job(job, runner, db_path, workspace_id, params):
         _link_twins_and_emit(
             state, batch_st, db, workspace_id, _emit, rel, queued,
         )
+        _publish_resume_scope(job, db, state, source_snapshots)
         if state.cancelled:
             break
 
+    _add_carried_working_copy_folders(state, params, db)
     _extract_deferred_working_copies(state, params, runner, job, db)
 
     # ``remote_unverified`` is the honesty gate — only a transport that
