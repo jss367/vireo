@@ -429,7 +429,7 @@ def test_apply_recipe_white_balance_preserves_palette_transparency():
 
 
 def test_edit_math_version_template_constant_matches_python():
-    """The client-side `_VIREO_EDIT_MATH_VERSION` in `navbar-lightbox.js` is folded
+    """The client-side `_VIREO_EDIT_MATH_VERSION` in `lightbox/edits.js` is folded
     into the `er` query param on every rendered URL so a math bump busts the
     browser's cached thumbnail/preview bytes (server response is
     `Cache-Control: public, max-age=86400`, so server purges alone are not
@@ -439,7 +439,7 @@ def test_edit_math_version_template_constant_matches_python():
     import re
 
     navbar = os.path.join(
-        os.path.dirname(__file__), '..', 'static', 'navbar-lightbox.js',
+        os.path.dirname(__file__), '..', 'static', 'lightbox', 'edits.js',
     )
     with open(navbar, encoding='utf-8') as f:
         src = f.read()
@@ -447,7 +447,7 @@ def test_edit_math_version_template_constant_matches_python():
         r'var\s+_VIREO_EDIT_MATH_VERSION\s*=\s*([0-9]+)\s*;', src,
     )
     assert match, (
-        'could not find `var _VIREO_EDIT_MATH_VERSION = ...;` in navbar-lightbox.js'
+        'could not find `var _VIREO_EDIT_MATH_VERSION = ...;` in lightbox/edits.js'
     )
     assert int(match.group(1)) == image_edits.EDIT_MATH_VERSION
 

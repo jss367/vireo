@@ -3836,7 +3836,7 @@ def test_pipeline_review_page(app_and_db):
     client = app.test_client()
     resp = client.get('/pipeline/review')
     assert resp.status_code == 200
-    html = resp.get_data(as_text=True)
+    html = _page_with_scripts(client, '/pipeline/review')
     assert "Inventory" in html
     assert "Triage" in html
     assert "Species Review" in html
@@ -7089,7 +7089,7 @@ def test_settings_has_edit_history_config(app_and_db):
     app, _ = app_and_db
     client = app.test_client()
     resp = client.get('/settings')
-    html = resp.data.decode()
+    html = _page_with_scripts(client, '/settings')
     assert 'max_edit_history' in html
 
 
@@ -9278,7 +9278,7 @@ def test_settings_no_shortcuts_editor(app_and_db):
     app, _ = app_and_db
     client = app.test_client()
     resp = client.get('/settings')
-    html = resp.data.decode()
+    html = _page_with_scripts(client, '/settings')
     assert 'shortcutsEditor' not in html
 
 
@@ -17850,7 +17850,7 @@ def test_import_page_returns_200(app_and_db):
     client = app.test_client()
     resp = client.get("/import")
     assert resp.status_code == 200
-    html = resp.data.decode()
+    html = _page_with_scripts(client, '/import')
     assert "navbar" in html
     # Core controls, by id: the import mode radios, the after-import strategy
     # menu (including the import-only null choice), the duplicate preview
@@ -17874,7 +17874,7 @@ def test_import_page_returns_200(app_and_db):
 def test_import_page_uses_only_working_copy_subphase_for_main_progress(app_and_db):
     """Per-batch remote transfer progress must not reset the overall bar."""
     app, _ = app_and_db
-    html = app.test_client().get("/import").data.decode()
+    html = _page_with_scripts(app.test_client(), '/import')
 
     assert "data.phase_label === 'Generating working copies'" in html
     assert "const visibleCurrent = workingCopyPhase" in html
@@ -17888,7 +17888,7 @@ def test_import_page_surfaces_remote_target_load_failure(app_and_db):
     that looks complete (import-incident follow-up)."""
     app, _ = app_and_db
     client = app.test_client()
-    html = client.get("/import").data.decode()
+    html = _page_with_scripts(client, '/import')
     assert 'id="remoteTargetsError"' in html
     # The loader bounds the fetch (a hung endpoint used to leave the
     # dropdown local-only with no error at all) and offers a retry.
@@ -18182,7 +18182,7 @@ def test_import_page_after_move_hint_names_the_archive_root(app_and_db):
     """The Import hint distinguishes no-root / root-missing / outside-root
     and shows the configured path, so a typo is visible at a glance."""
     app, _ = app_and_db
-    html = app.test_client().get("/import").data.decode()
+    html = _page_with_scripts(app.test_client(), '/import')
     assert "function afterMoveUnavailableReason(destination)" in html
     assert "no remote target has a local archive root configured" in html
     assert "does not exist on this machine" in html
@@ -18197,7 +18197,7 @@ def test_settings_page_test_connection_warns_on_missing_archive_root(
     app_and_db,
 ):
     app, _ = app_and_db
-    html = app.test_client().get("/settings").data.decode()
+    html = _page_with_scripts(app.test_client(), '/settings')
     assert "archive_root_present === false" in html
     assert "res.archive_root_invalid" in html
     assert "res.archive_root_volume_offline" in html
@@ -18211,7 +18211,7 @@ def test_import_page_after_move_eligibility_requires_existing_root(
     make the target eligible \u2014 that would offer the chained move through
     a typo'd root and contradict the Settings warning."""
     app, _ = app_and_db
-    html = app.test_client().get("/import").data.decode()
+    html = _page_with_scripts(app.test_client(), '/import')
     start = html.index("function afterMoveEligibleTargets()")
     body = html[start:html.index("}", start)]
     assert "t.local_archive_root_present !== false" in body
@@ -18260,7 +18260,7 @@ def test_import_page_surfaces_destination_errors_and_recovery_actions(
     """Import validation belongs beside the field and before the preview,
     while failed copy runs offer a preconfigured recovery action."""
     app, _ = app_and_db
-    html = app.test_client().get("/import").data.decode()
+    html = _page_with_scripts(app.test_client(), '/import')
 
     assert 'id="remoteSubpathError"' in html
     assert 'aria-required="true"' in html
@@ -18278,7 +18278,7 @@ def test_import_page_collapses_duplicate_thumbnails(app_and_db):
     """A one-file retry must not render or fetch thumbnails for every
     catalogued duplicate on the card."""
     app, _ = app_and_db
-    html = app.test_client().get("/import").data.decode()
+    html = _page_with_scripts(app.test_client(), '/import')
 
     assert "collapsed-duplicate-preview" in html
     assert "duplicateCount.toLocaleString()" in html
@@ -18300,7 +18300,7 @@ def test_import_page_resolves_default_process_client_side(app_and_db):
     user-first scenario)."""
     app, _ = app_and_db
     client = app.test_client()
-    html = client.get("/import").data.decode()
+    html = _page_with_scripts(client, '/import')
     assert "/api/workspaces/active" in html
     assert "default_process_id" in html
     assert "/api/processes" in html
@@ -18312,7 +18312,7 @@ def test_import_page_offers_common_and_custom_folder_templates(app_and_db):
     flexibility or breaking custom templates loaded from config."""
     app, _ = app_and_db
     client = app.test_client()
-    html = client.get("/import").data.decode()
+    html = _page_with_scripts(client, '/import')
 
     assert 'id="folderTemplatePreset"' in html
     assert '<option value="%Y/%m/%d">%Y/%m/%d</option>' in html

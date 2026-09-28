@@ -7,7 +7,7 @@ const assert = require('node:assert/strict');
 
 const STATIC = 'vireo/static/';
 function source(file) {
-  return fs.readFileSync(STATIC + file, 'utf8');
+  return [].concat(file).map(f => fs.readFileSync(STATIC + f, 'utf8')).join('\n');
 }
 function fn(file, name) {
   const found = source(file).match(new RegExp('(?:async )?function ' + name + '\\([^]*?\\n\\}'));
@@ -31,7 +31,12 @@ function test(name, body) { tests.push([name, body]); }
 const inspector = 'navbar-pipeline-inspector.js';
 const banners = 'navbar-folder-banners.js';
 const helpers = 'navbar-shared-helpers.js';
-const lightbox = 'navbar-lightbox.js';
+// Follow the same order as the browser instead of duplicating the script list.
+const lightbox = Array.from(
+  fs.readFileSync('vireo/templates/_navbar.html', 'utf8').matchAll(
+    /<script src="\/static\/(lightbox\/[^"]+\.js)"><\/script>/g
+  ), match => match[1]
+);
 
 test('formatMatchScore renders logits and probabilities at their own precision', () => {
   const ctx = load([fn(inspector, 'formatMatchScore')]);
