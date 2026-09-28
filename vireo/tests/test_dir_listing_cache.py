@@ -170,6 +170,46 @@ def test_a_recheck_reads_every_folder_and_refreshes_the_cache(tmp_path, scandir_
     assert later.unchanged == 1
 
 
+def test_clear_stops_an_in_flight_pass_from_repopulating_the_cache(tmp_path):
+    """An automatic pass mid-read when the user clicks "Check again" must not
+    hand the freshly cleared cache its pre-recheck listing, or the follow-up
+    walk would reuse it and skip the folder the user asked to re-read."""
+    (tmp_path / "a.jpg").write_bytes(b"x")
+    _age(tmp_path)
+    cache = DirListingCache()
+
+    inflight = ListingPass(cache)
+    token, listing = inflight.begin(str(tmp_path))
+    assert listing is None
+
+    cache.clear()
+
+    inflight.finish(str(tmp_path), token, [("a.jpg", False, False)])
+    assert cache.lookup(str(tmp_path), token[0]) is None
+
+    follow_up = ListingPass(cache)
+    read_directory(str(tmp_path), follow_up)
+    assert (follow_up.read, follow_up.unchanged) == (1, 0)
+
+
+def test_clear_stops_a_racy_pass_from_evicting_a_fresh_entry():
+    """The racy-window branch of ``store`` also honours the generation: a
+    pre-clear pass that lands on a too-recent folder must not pop the entry
+    a post-clear pass just stored."""
+    cache = DirListingCache(racy_seconds=10, wall_clock=lambda: 10_000.0)
+    stale_generation = cache.generation()
+    cache.clear()
+
+    cache.store("/lib/a", _st(int(1 * 10**9)), 10_000.0, [("a.jpg", False, False)])
+    assert cache.lookup("/lib/a", _st(int(1 * 10**9))) is not None
+
+    cache.store(
+        "/lib/a", _st(int(9_995 * 10**9)), 10_000.0,
+        [("b.jpg", False, False)], generation=stale_generation,
+    )
+    assert cache.lookup("/lib/a", _st(int(1 * 10**9))) is not None
+
+
 # --- safe_scan_walk ----------------------------------------------------------
 
 

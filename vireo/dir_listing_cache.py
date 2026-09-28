@@ -32,6 +32,11 @@ Three guards keep a reused listing from hiding a change:
   stay hidden for more than a day.
 * An explicit user recheck bypasses reuse (``ListingPass(reuse=False)`` or
   :meth:`DirListingCache.clear`), so "Check again" really looks again.
+  :meth:`DirListingCache.clear` bumps a generation counter, and a
+  :meth:`ListingPass` records the generation at :meth:`begin` and refuses to
+  :meth:`store` under a later one: an automatic pass mid-flight when the
+  recheck runs cannot repopulate a freshly cleared cache with its
+  pre-recheck read.
 """
 import os
 import threading
@@ -116,7 +121,14 @@ class DirListingCache:
         self._wall_clock = wall_clock
         self._monotonic = monotonic
         self._entries = OrderedDict()
+        self._generation = 0
         self._lock = threading.Lock()
+
+    def generation(self):
+        """The current cache generation, bumped by :meth:`clear`. A store
+        carrying an older generation is refused."""
+        with self._lock:
+            return self._generation
 
     def lookup(self, path, st):
         """Return the listing stored for ``path`` if ``st`` still vouches
@@ -137,13 +149,17 @@ class DirListingCache:
             self._entries.move_to_end(key)
             return stored.listing
 
-    def store(self, path, st, stat_wall_time, entries):
+    def store(self, path, st, stat_wall_time, entries, generation=None):
         """Remember ``entries`` — ``(name, is_dir, is_symlink)`` triples read
         after ``st`` was taken at ``stat_wall_time`` — unless the directory
-        changed too recently for its mtime to be trusted."""
+        changed too recently for its mtime to be trusted, or ``generation``
+        is older than the current one (:meth:`clear` bumped it while the
+        caller was reading, so this listing is now pre-recheck)."""
         key = _key(path)
         if stat_wall_time - st.st_mtime_ns / 1e9 < self._racy_seconds:
             with self._lock:
+                if generation is not None and generation != self._generation:
+                    return
                 self._entries.pop(key, None)
             return
         stored = _Stored(
@@ -151,6 +167,8 @@ class DirListingCache:
             DirListing.from_entries(entries),
         )
         with self._lock:
+            if generation is not None and generation != self._generation:
+                return
             self._entries[key] = stored
             self._entries.move_to_end(key)
             while len(self._entries) > self._max_directories:
@@ -159,6 +177,7 @@ class DirListingCache:
     def clear(self):
         with self._lock:
             self._entries.clear()
+            self._generation += 1
 
     def wall_clock(self):
         return self._wall_clock()
@@ -183,20 +202,27 @@ class ListingPass:
     def begin(self, path):
         """``stat`` ``path`` and return ``(token, listing)``: ``listing`` is
         the reusable cached listing or None, and ``token`` must be handed to
-        :meth:`finish` after a fresh read. Raises ``OSError`` from the stat."""
-        wall = self.cache.wall_clock() if self.cache is not None else time.time()
+        :meth:`finish` after a fresh read. Raises ``OSError`` from the stat.
+        The token carries the cache generation at ``begin`` time so a store
+        after an intervening :meth:`DirListingCache.clear` is refused."""
+        if self.cache is not None:
+            wall = self.cache.wall_clock()
+            generation = self.cache.generation()
+        else:
+            wall = time.time()
+            generation = None
         st = os.stat(path)
         listing = self.cache.lookup(path, st) if self.reuse else None
         if listing is not None:
             self.unchanged += 1
-        return (st, wall), listing
+        return (st, wall, generation), listing
 
     def finish(self, path, token, entries):
         """Record a complete fresh read of ``path``."""
         self.read += 1
         if self.cache is not None:
-            st, wall = token
-            self.cache.store(path, st, wall, entries)
+            st, wall, generation = token
+            self.cache.store(path, st, wall, entries, generation=generation)
 
     def failed(self):
         """Count a fresh read that did not complete (nothing is stored)."""
