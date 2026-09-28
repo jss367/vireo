@@ -14,6 +14,7 @@ and counting its list fields, so a new job type never regresses to JSON.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -25,8 +26,11 @@ MAX_DETAIL_ITEMS = 10
 _SKIPPED_KEYS = {
     "ok", "summary", "photo_ids", "failed_photo_ids", "stages", "duration",
     "collection_id", "workspace_id", "mode", "cancelled", "root_folder_id",
-    "interrupted", "last_progress_at", "checkpoint_at",
+    "interrupted", "last_progress_at", "checkpoint_at", "partial_failure",
 }
+
+
+_MENTIONS_FAILURE = re.compile(r"\b(errors?|failed|failures?)\b", re.IGNORECASE)
 
 
 def _n(count: Any, singular: str, plural: str | None = None) -> str:
@@ -822,7 +826,22 @@ def describe_result(job_type: str, result: Any, config: dict | None = None) -> d
             summary = explicit.strip()
 
     details = list(details)
-    if error_text and not authored:
+    partial = result.get("partial_failure")
+    if error_text and not authored and summary and partial:
+        # The run finished its work but some items failed: the counts are
+        # the answer ("412 photos imported"), with how many failed beside
+        # them and the first error leading the details.
+        try:
+            failed_count = int(partial)
+        except (TypeError, ValueError):
+            failed_count = 0
+        # Describers that already count failures ("5 moved, 2 errors")
+        # say it themselves; don't repeat it.
+        if failed_count > 0 and not _MENTIONS_FAILURE.search(summary):
+            summary = f"{summary} · {_n(failed_count, 'error')}"
+        if error_text not in details:
+            details.insert(0, error_text)
+    elif error_text and not authored:
         # A failed job leads with why it failed. Whatever partial progress
         # the result records ("344 of 548 photos classified") stays
         # visible as the first detail line rather than competing with the

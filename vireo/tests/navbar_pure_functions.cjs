@@ -193,6 +193,42 @@ test('_vireoUrlWithRenderVersion applies only a known per-photo version', () => 
   assert.equal(ctx._vireoUrlWithRenderVersion('/p/5/full', null), '/p/5/full');
 });
 
+test('a partly failed delete job keeps its retained photos and reports both counts', () => {
+  const calls = {toasts: [], confirms: [], callback: null, hidden: 0};
+  const ctx = load([fn(lightbox, 'handleDeleteJobComplete')], {
+    hideDeleteModal: () => { calls.hidden++; },
+    showToast: (msg, kind) => { calls.toasts.push([msg, kind]); },
+    confirm: msg => { calls.confirms.push(msg); return false; },
+    safeFetch: () => { throw new Error('no retry expected'); },
+  });
+  ctx.handleDeleteJobComplete({
+    status: 'failed',
+    errors: ['/a/2.jpg: SMB Trash unavailable'],
+    result: {deleted: 1, trashed: 1, failed_photo_ids: [2],
+             trash_failed: [{path: '/a/2.jpg', error: 'SMB Trash unavailable', photo_id: 2}]},
+  }, data => { calls.callback = data; }, 'disk', false);
+  // The permanent-delete fallback is still offered for the retained file...
+  assert.equal(calls.confirms.length, 1);
+  // ...and the grid callback still runs, so the deleted photo leaves the grid.
+  assert.deepEqual(Array.from(calls.callback.failed_photo_ids), [2]);
+  assert.deepEqual(calls.toasts, [['1 photo moved to Trash; 1 retained after file errors', 'error']]);
+});
+
+test('a delete job that failed outright reports the failure and runs no callback', () => {
+  const calls = {toasts: [], callback: null};
+  const ctx = load([fn(lightbox, 'handleDeleteJobComplete')], {
+    hideDeleteModal: () => {},
+    showToast: (msg, kind) => { calls.toasts.push([msg, kind]); },
+    confirm: () => { throw new Error('no prompt expected'); },
+  });
+  ctx.handleDeleteJobComplete(
+    {status: 'failed', errors: ['database is locked'], result: null},
+    data => { calls.callback = data; }, 'disk', false,
+  );
+  assert.equal(calls.callback, null);
+  assert.deepEqual(calls.toasts, [['Delete failed: database is locked', 'error']]);
+});
+
 let failed = 0;
 for (const [name, body] of tests) {
   try {

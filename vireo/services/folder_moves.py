@@ -333,7 +333,9 @@ class FolderMoves:
             # Tell the JobRunner whether the move actually succeeded. Without
             # this the runner marks any normal return "completed" — so a move
             # that copied nothing because rsync timed out used to read as
-            # "completed, 0 errors" in the history. A `needs_merge` return is
+            # "completed, 0 errors" in the history. A partial move (some
+            # photos moved, some errors) failed too; its summary keeps both
+            # counts. A `needs_merge` return is
             # NOT a failure: it's a soft signal that the destination already
             # exists and the UI should re-prompt for a merge/resume, so leave
             # it for the caller without flagging the job failed.
@@ -345,7 +347,7 @@ class FolderMoves:
                     result["summary"] = f"Move failed — {errors[0]}"
                 else:
                     cleanup_error = result.get("cleanup_error")
-                    result["ok"] = True
+                    result["ok"] = not errors
                     result["summary"] = (
                         f"Moved {moved} photo{'s' if moved != 1 else ''}"
                         + (f", {len(errors)} error(s)" if errors else "")
@@ -354,21 +356,23 @@ class FolderMoves:
                             if cleanup_error else ""
                         )
                     )
-            if result.get("ok"):
-                if managed_staging_root:
-                    from path_guard import contains_resolved
-                    # Remove only empty staging ancestors. Failed transfers and
-                    # concurrent sibling moves keep their originals intact.
-                    parent = os.path.dirname(source_path)
-                    root = os.path.realpath(managed_staging_root)
-                    while contains_resolved(root, parent):
-                        try:
-                            os.rmdir(parent)
-                        except OSError:
-                            break
-                        if os.path.realpath(parent) == root:
-                            break
-                        parent = os.path.dirname(parent)
+            if result.get("ok") and managed_staging_root:
+                from path_guard import contains_resolved
+                # Remove only empty staging ancestors. Failed transfers and
+                # concurrent sibling moves keep their originals intact.
+                parent = os.path.dirname(source_path)
+                root = os.path.realpath(managed_staging_root)
+                while contains_resolved(root, parent):
+                    try:
+                        os.rmdir(parent)
+                    except OSError:
+                        break
+                    if os.path.realpath(parent) == root:
+                        break
+                    parent = os.path.dirname(parent)
+            # A partial move already rewrote the catalog for the photos that
+            # moved, so cached missing-original entries are stale either way.
+            if result.get("ok") or result.get("moved"):
                 try:
                     self._invalidate_missing_originals()
                 except Exception:

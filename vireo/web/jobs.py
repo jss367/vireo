@@ -499,9 +499,13 @@ def create_jobs_blueprint(
             results = model_verify.verify_all_models(
                 progress_callback=progress_cb, pause_callback=lambda: ctx.checkpoint(job),
             )
+            failed = [mid for mid, r in results.items() if not r.ok]
+            # A model that failed verification fails the job (rollup rule).
+            for mid in failed:
+                job["errors"].append(f"{mid}: failed verification")
             return {
                 "verified": len(results),
-                "failed": [mid for mid, r in results.items() if not r.ok],
+                "failed": failed,
                 "ok": [mid for mid, r in results.items() if r.ok],
             }
 

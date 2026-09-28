@@ -372,6 +372,8 @@ def create_export_blueprint(
                 and not ctx.runner.is_cancelled(job["id"])
                 and reveal_exported_files(exported_files)
             )
+            # Per-photo export failures fail the job (the runner folds them in).
+            result["ok"] = not result.get("errors")
             return result
 
         return ctx.start(
@@ -608,7 +610,7 @@ def create_export_blueprint(
                     "phase": "Publishing website",
                 })
 
-            return publish_site(
+            result = publish_site(
                 db=thread_db,
                 vireo_dir=vireo_dir,
                 destination=destination,
@@ -625,6 +627,9 @@ def create_export_blueprint(
                 cancel_check=lambda: ctx.runner.is_cancelled(job["id"]),
                 begin_commit=lambda: ctx.runner.begin_uncancellable(job["id"]),
             )
+            # Per-image publish failures fail the job (the runner folds them in).
+            result["ok"] = not result.get("errors")
+            return result
 
         return ctx.start(
             "publish-site",

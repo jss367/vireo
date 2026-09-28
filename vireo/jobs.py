@@ -1291,14 +1291,31 @@ class JobRunner:
                     # its errors into the job's tally so error_count is
                     # accurate, and demote a falsy "ok" to "failed" so the
                     # history doesn't read "completed, 0 errors" for a run
-                    # that accomplished nothing.
-                    if isinstance(result, dict) and "ok" in result:
+                    # that accomplished nothing. Only a boolean is a verdict:
+                    # verify-models uses "ok" for the list of models that
+                    # passed.
+                    has_verdict = isinstance(result, dict) and isinstance(result.get("ok"), bool)
+                    if has_verdict:
                         for err in (result.get("errors") or []):
                             err_str = str(err)
                             if err_str not in job["errors"]:
                                 job["errors"].append(err_str)
                         if result["ok"] is False:
                             job["status"] = "failed"
+                    # Rollup rule: a run that recorded any error failed,
+                    # even though its loop finished. The result keeps the
+                    # per-item counts, so "412 imported, 3 failed" is
+                    # still shown; only the status stops reading as a
+                    # clean success. An explicit "ok" is the job's own
+                    # verdict and wins: an import lists card-safety
+                    # notices ("1 file you deselected was not copied") in
+                    # its errors without anything having failed.
+                    if job["errors"] and job["status"] == "completed" and not has_verdict:
+                        job["status"] = "failed"
+                    # It ran to the end, so its summary leads with what it
+                    # did; only a crash leads with the error.
+                    if job["status"] == "failed":
+                        job["_partial_failure"] = True
                 job["result"] = result
             if job["status"] == "failed":
                 log.warning(
@@ -1384,6 +1401,26 @@ class JobRunner:
             if job["type"] == "pipeline":
                 self._try_promote_queued()
 
+    @staticmethod
+    def _error_total(job):
+        """How many errors a finished job recorded.
+
+        A result dict may report ``errors_total`` when its ``errors`` list
+        is capped (e.g. the importer caps its per-file failures at 50). The
+        capped list is what the runner folded into ``job["errors"]``, so
+        ``len(job["errors"])`` under-reports the real failure count; prefer
+        ``errors_total`` when it is larger so the persisted ``error_count``
+        and the Jobs-page badge reflect the true total.
+        """
+        count = len(job.get("errors") or [])
+        if isinstance(job.get("result"), dict):
+            try:
+                total = int(job["result"].get("errors_total") or 0)
+            except (TypeError, ValueError):
+                total = 0
+            count = max(count, total)
+        return count
+
     def _persist_job(self, job, duration):
         """Persist job to history table using a thread-local connection."""
         if not self._db_path:
@@ -1404,26 +1441,15 @@ class JobRunner:
             primary_error = job.get("_fatal_error") or job["errors"][0]
             if isinstance(result_data, dict):
                 result_data = {**result_data, "error": primary_error}
+                if job.get("_partial_failure"):
+                    result_data["partial_failure"] = self._error_total(job)
             else:
                 result_data = {"error": primary_error}
 
         tree_json = json.dumps(job.get("steps", []))
         summary = self._build_summary(job, result_data)
 
-        # A result dict may report ``errors_total`` when its ``errors`` list
-        # is capped (e.g. the importer caps its per-file failures at 50). The
-        # capped list is what the runner folded into ``job["errors"]``, so
-        # ``len(job["errors"])`` under-reports the real failure count. Prefer
-        # ``errors_total`` when it is larger so the persisted ``error_count``
-        # and the Jobs-page badge reflect the true total.
-        persisted_error_count = len(job["errors"])
-        if isinstance(job.get("result"), dict):
-            try:
-                total = int(job["result"].get("errors_total") or 0)
-            except (TypeError, ValueError):
-                total = 0
-            if total > persisted_error_count:
-                persisted_error_count = total
+        persisted_error_count = self._error_total(job)
 
         params = (
             job["id"],
@@ -1609,7 +1635,12 @@ class JobRunner:
         ):
             fatal = job.get("_fatal_error") or (job.get("errors") or [None])[0]
             if fatal:
-                result = {**result, "error": fatal} if isinstance(result, dict) else {"error": fatal}
+                if isinstance(result, dict):
+                    result = {**result, "error": fatal}
+                    if job.get("_partial_failure"):
+                        result["partial_failure"] = JobRunner._error_total(job)
+                else:
+                    result = {"error": fatal}
         described = describe_result(job.get("type") or "", result, job.get("config"))
         steps = job.get("steps") or job.get("tree") or []
         if isinstance(steps, str):
