@@ -11683,6 +11683,7 @@ def test_api_photos_missing_cancel_does_not_write_ready_cache(
         folder_id=None,
         progress_callback=None,
         cancel_callback=None,
+        listing_pass=None,
     ):
         scan_entered.set()
         deadline = time.time() + 3.0

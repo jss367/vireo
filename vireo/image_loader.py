@@ -345,7 +345,7 @@ def safe_iter_dir(top, onerror=None):
 
 
 def safe_scan_walk(top, onerror=None, cancel_check=None, on_scandir_batch=None,
-                   on_entry=None):
+                   on_entry=None, listing_pass=None):
     """Yield ``(dirpath, dirnames, filenames)`` like ``os.walk(top,
     followlinks=False)``, but never stat-following a symlinked excluded
     bundle.
@@ -391,22 +391,47 @@ def safe_scan_walk(top, onerror=None, cancel_check=None, on_scandir_batch=None,
     still filling one directory's buffer; without this hook a single very
     large directory would appear stalled after the initial discovery event
     until the whole enumeration finishes.
+
+    ``listing_pass`` (a :class:`dir_listing_cache.ListingPass`) makes the walk
+    ``stat`` each directory first and replay the listing it recorded last
+    time when the directory is unchanged, reading from disk only the
+    directories that changed. Replayed entries go through the same filters
+    as fresh ones, so exclusions and symlink targets are still judged live.
     """
     if cancel_check is not None and cancel_check():
         raise ScanCancelled("directory walk cancelled")
-    try:
-        scandir_it = os.scandir(top)
-    except OSError as exc:
-        if onerror is not None:
-            onerror(exc)
-        return
+    listing_token = cached_listing = None
+    if listing_pass is not None:
+        try:
+            listing_token, cached_listing = listing_pass.begin(top)
+        except OSError as exc:
+            if onerror is not None:
+                onerror(exc)
+            return
+    if cached_listing is not None:
+        scandir_it = contextlib.nullcontext()
+        entries_it = cached_listing.entries(top)
+    else:
+        try:
+            scandir_it = os.scandir(top)
+        except OSError as exc:
+            if listing_pass is not None:
+                listing_pass.failed()
+            if onerror is not None:
+                onerror(exc)
+            return
+        entries_it = scandir_it
+    # Raw entries of a fresh read, recorded for the next pass. A read with
+    # any per-entry error is not recorded, so it is read again next time.
+    record = [] if listing_pass is not None and cached_listing is None else None
+    record_complete = True
     dirs = []
     nondirs = []
     skipped = []
     seen = set()
     try:
         with scandir_it:
-            for i, entry in enumerate(scandir_it):
+            for i, entry in enumerate(entries_it):
                 if on_entry is not None:
                     on_entry()
                 # Poll cancellation while we're still filling the buffer.
@@ -429,6 +454,15 @@ def safe_scan_walk(top, onerror=None, cancel_check=None, on_scandir_batch=None,
                 if name in seen:
                     continue
                 seen.add(name)
+                if record is not None:
+                    try:
+                        record.append((
+                            name,
+                            entry.is_dir(follow_symlinks=False),
+                            entry.is_symlink(),
+                        ))
+                    except OSError:
+                        record_complete = False
                 # Name-based exclusion catches direct bundle entries
                 # (``Photos Library.photoslibrary``) without any stat.
                 if is_excluded_scan_dir(name):
@@ -455,9 +489,16 @@ def safe_scan_walk(top, onerror=None, cancel_check=None, on_scandir_batch=None,
         # when opening) is reported and the directory is abandoned. macOS
         # raises ``ENOTCONN`` from the iterator when an SMB share drops
         # mid-walk; without this the whole walk died with a traceback.
+        if record is not None:
+            listing_pass.failed()
         if onerror is not None:
             onerror(exc)
         return
+    if record is not None:
+        if record_complete:
+            listing_pass.finish(top, listing_token, record)
+        else:
+            listing_pass.failed()
     if skipped:
         log.info(
             "Skipping other-app data bundle(s) under %s: %s",
@@ -468,6 +509,7 @@ def safe_scan_walk(top, onerror=None, cancel_check=None, on_scandir_batch=None,
         yield from safe_scan_walk(
             os.path.join(top, subdir), onerror=onerror, cancel_check=cancel_check,
             on_scandir_batch=on_scandir_batch, on_entry=on_entry,
+            listing_pass=listing_pass,
         )
 
 

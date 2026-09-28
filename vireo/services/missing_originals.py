@@ -22,6 +22,7 @@ import threading
 import time
 from datetime import UTC, datetime
 
+import dir_listing_cache
 from db import Database, MissingPhotosCancelled
 from photo_payload import attach_nested_edit_recipes
 
@@ -192,6 +193,7 @@ class MissingOriginals:
         folder_id=None,
         progress_callback=None,
         cancel_callback=None,
+        listing_pass=None,
     ):
         thumb_dir = self._config["THUMB_CACHE_DIR"]
         vireo_dir = os.path.dirname(thumb_dir)
@@ -229,6 +231,7 @@ class MissingOriginals:
             folder_id=folder_id,
             progress_callback=progress_callback,
             cancel_callback=cancel_callback,
+            listing_pass=listing_pass,
         ):
             check_cancelled()
             pid = row["id"]
@@ -415,11 +418,18 @@ class MissingOriginals:
                 def cancel_check():
                     return runner.is_cancelled(job["id"])
 
+                # The 30-minute automatic check reuses the listing of every
+                # folder unchanged since it was last read; a check the user
+                # asked for reads every folder, and records what it read.
+                listing_pass = dir_listing_cache.ListingPass(
+                    dir_listing_cache.get_shared(), reuse=automatic,
+                )
                 photos = self.build_rows(
                     thread_db,
                     folder_id=folder_id,
                     progress_callback=progress,
                     cancel_callback=cancel_check,
+                    listing_pass=listing_pass,
                 )
                 if cancel_check():
                     return {"cancelled": True, "scope": scope_label}
@@ -450,6 +460,10 @@ class MissingOriginals:
                     "checked_at": checked_at,
                     "scope": scope_label,
                     "stale": stale,
+                    # Which folders were read from disk and which were
+                    # reused unchanged since the last look.
+                    "folders_read": listing_pass.read,
+                    "folders_unchanged": listing_pass.unchanged,
                 }
             except MissingPhotosCancelled:
                 raise
