@@ -559,8 +559,8 @@ class JobRunner:
         onto the job's ``running`` history row so a crash leaves a record
         of what the job got done. Until the job has a real ``result``, a
         worker's ``job["partial_result"]`` stands in for it, so the
-        startup sweep keeps it on the interrupted row. Returns the number of rows updated.
-        Public so tests (and callers that just did something worth
+        startup sweep keeps it on the interrupted row. Returns the number
+        of rows updated. Public so tests (and callers that just did something worth
         recording) can checkpoint deterministically instead of waiting
         for the timer.
         """
