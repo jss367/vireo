@@ -1,0 +1,8 @@
+# The node harnesses in vireo/tests/*.cjs lift functions out of the shipped
+# templates and scripts with regexes anchored on "\n". Windows checkouts
+# (core.autocrlf) would hand them CRLF and break every extractor, so web
+# sources always check out with LF.
+*.js   text eol=lf
+*.cjs  text eol=lf
+*.html text eol=lf
+*.css  text eol=lf
