@@ -407,7 +407,7 @@ class JobRunner:
         now = datetime.now().isoformat()
         msg = INTERRUPTED_BY_RESTART
         rows = db.conn.execute(
-            "SELECT id, status, result, tree, progress, error_count "
+            "SELECT id, type, status, result, tree, progress, error_count "
             "FROM job_history WHERE status IN ('running', 'queued')",
         ).fetchall()
         for row in rows:
@@ -422,6 +422,27 @@ class JobRunner:
             if not isinstance(progress, dict):
                 progress = {}
             last_progress_at = progress.pop("checkpoint_at", None)
+            # ``_record_job_started`` stamps this on the row the first time
+            # ``_run_job`` runs — before any user work. Its absence on a
+            # ``running`` row means the queued->running promotion in
+            # ``_try_promote_queued`` committed but the worker thread never
+            # installed (a crash between the two, or the shutdown-race branch
+            # right after). Legacy rows written before the marker existed
+            # lack it too; infer worker_started for those from actual
+            # evidence of work (a checkpoint wrote ``last_progress_at``, or
+            # the step tree records progress beyond ``pending``), and for
+            # non-pipeline types, whose only path to ``status='running'`` in
+            # ``job_history`` is through ``_record_job_started`` itself.
+            worker_started = bool(progress.pop("worker_started", False))
+            if not worker_started and not was_queued:
+                if row["type"] != "pipeline":
+                    worker_started = True
+                elif last_progress_at is not None or any(
+                    isinstance(s, dict) and s.get("status") != "pending"
+                    for s in tree
+                ):
+                    worker_started = True
+            never_started = was_queued or not worker_started
             for step in tree:
                 if isinstance(step, dict) and step.get("status") == "running":
                     step["status"] = "failed"
@@ -434,12 +455,13 @@ class JobRunner:
                 "interrupted": True,
                 "last_progress_at": last_progress_at,
             })
-            if was_queued:
-                # Durable marker so callers can distinguish a queued row
-                # the sweep failed from one that actually started (e.g.
-                # a chained pipeline swept before any slot promoted it,
-                # which _chained_job_exists must not treat as proof the
-                # import handed its photos to processing).
+            if never_started:
+                # Durable marker so callers can distinguish a row whose work
+                # never ran — a queued row the sweep failed, or a pipeline
+                # promoted queued->running but whose worker never installed —
+                # from one that actually started. ``_chained_job_exists``
+                # filters on it so a parent import whose chained pipeline
+                # never actually ran can still resume its processing.
                 result["never_started"] = True
             db.conn.execute(
                 "UPDATE job_history "
@@ -451,7 +473,7 @@ class JobRunner:
                     json.dumps(result, default=str),
                     int(row["error_count"] or 0) + 1,
                     json.dumps(tree) if tree else row["tree"],
-                    self._interrupted_summary(msg, was_queued, tree, progress),
+                    self._interrupted_summary(msg, never_started, tree, progress),
                     json.dumps(progress, default=str) if progress else None,
                     row["id"],
                 ),
@@ -459,9 +481,9 @@ class JobRunner:
         db.conn.commit()
 
     @staticmethod
-    def _interrupted_summary(msg, was_queued, tree, progress):
+    def _interrupted_summary(msg, never_started, tree, progress):
         """One-line history summary for a job the restart cut short."""
-        if was_queued:
+        if never_started:
             return f"{msg} before it started"
         if tree:
             done = sum(
@@ -507,6 +529,15 @@ class JobRunner:
     def _record_job_started(self, job):
         """Write the running row before any work happens.
 
+        Also stamps ``progress.worker_started`` so the startup sweep can
+        tell a row whose worker actually reached the work loop from one
+        that only reached the ``queued``->``running`` promotion in
+        ``_try_promote_queued`` before a crash. Without the marker, an
+        after-import pipeline that was promoted but never installed a
+        worker would be treated by ``ImportService._chained_job_exists``
+        as proof that the import handed its photos to processing, and
+        Resume would refuse the parent even though nothing ran.
+
         Bookkeeping must never break the job: lock contention is logged
         and skipped (the checkpoint thread retries the insert on its next
         tick).
@@ -517,6 +548,16 @@ class JobRunner:
         try:
             conn = sqlite3.connect(self._db_path, timeout=5)
             self._insert_running_row(conn, job)
+            # ``json_set`` on a null progress column returns null, so seed
+            # a ``{}`` object first via COALESCE. Preserves anything the
+            # checkpoint thread wrote after this UPDATE lands.
+            conn.execute(
+                "UPDATE job_history "
+                "SET progress = json_set(COALESCE(progress, '{}'), "
+                "                        '$.worker_started', json('true')) "
+                "WHERE id = ?",
+                (job["id"],),
+            )
             conn.commit()
         except sqlite3.Error as exc:
             log.warning(

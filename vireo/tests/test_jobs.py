@@ -1944,6 +1944,131 @@ def test_startup_sweep_keeps_checkpointed_work_on_interrupted_rows(tmp_path):
         db.close()
 
 
+def test_startup_sweep_marks_promoted_but_unstarted_pipeline_never_started(
+    tmp_path,
+):
+    """A pipeline the promote step flipped queued->running but whose
+    worker never installed (a crash between the durable status update in
+    ``_try_promote_queued`` and ``_start_worker_thread`` completing) has
+    no work-loop artifacts: no ``worker_started`` marker, no checkpoint,
+    no advanced tree. The sweep must recognize that and stamp
+    ``never_started`` on the failed row, so ``_chained_job_exists`` does
+    not treat it as proof that the after-import processing began. Without
+    the marker Resume of the parent import would be refused even though
+    nothing ran.
+    """
+    import json
+
+    from db import Database
+    from jobs import INTERRUPTED_BY_RESTART, JobRunner
+
+    db_path = str(tmp_path / "test.db")
+    first_db = Database(db_path)
+    JobRunner(db=first_db)  # ensures schema
+    first_db.conn.execute(
+        "INSERT INTO job_history (id, type, status, started_at, error_count, "
+        " config, workspace_id) "
+        "VALUES ('pipeline-promoted-unstarted', 'pipeline', 'running', "
+        " '2026-09-08T10:00:00', 0, ?, 1)",
+        (json.dumps({"chained_from": "parent-import-42"}),),
+    )
+    first_db.conn.commit()
+    first_db.close()
+
+    db = Database(db_path)
+    try:
+        JobRunner(db=db)
+        row = db.conn.execute(
+            "SELECT status, result, summary FROM job_history "
+            "WHERE id = 'pipeline-promoted-unstarted'"
+        ).fetchone()
+        assert row["status"] == "failed"
+        result = json.loads(row["result"])
+        assert result["interrupted"] is True
+        assert result["never_started"] is True
+        assert row["summary"] == f"{INTERRUPTED_BY_RESTART} before it started"
+    finally:
+        db.close()
+
+
+def test_record_job_started_stamps_worker_started_marker(tmp_path):
+    """The sweep uses the ``worker_started`` marker to tell a row whose
+    worker installed and reached the work loop from one that only reached
+    the durable ``running`` status via ``_try_promote_queued``. The
+    marker must land on the row *before* user work begins so a crash
+    inside the first work call still leaves it visible to the next sweep.
+    """
+    import json
+
+    from db import Database
+    from jobs import JobRunner
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    runner = JobRunner(db=db)
+    try:
+        job = {
+            "id": "job-record-test",
+            "type": "scan",
+            "started_at": "2026-09-08T10:00:00",
+            "config": {},
+            "workspace_id": 1,
+        }
+        runner._record_job_started(job)
+        row = db.conn.execute(
+            "SELECT status, progress FROM job_history WHERE id = ?",
+            (job["id"],),
+        ).fetchone()
+        assert row["status"] == "running"
+        assert json.loads(row["progress"]).get("worker_started") is True
+    finally:
+        runner.shutdown()
+        db.close()
+
+
+def test_sweep_of_row_with_worker_started_marker_does_not_stamp_never_started(
+    tmp_path,
+):
+    """A running row that carries ``worker_started`` in its progress must
+    NOT be marked ``never_started`` by the sweep, even when it has no
+    checkpoint yet and no tree — the marker itself is the durable proof
+    that the worker reached ``_run_job``.
+    """
+    import json
+
+    from db import Database
+    from jobs import INTERRUPTED_BY_RESTART, JobRunner
+
+    db_path = str(tmp_path / "test.db")
+    first_db = Database(db_path)
+    JobRunner(db=first_db)  # ensures schema
+    first_db.conn.execute(
+        "INSERT INTO job_history (id, type, status, started_at, error_count, "
+        " progress, workspace_id) "
+        "VALUES ('pipeline-just-started', 'pipeline', 'running', "
+        " '2026-09-08T10:00:00', 0, ?, 1)",
+        (json.dumps({"worker_started": True}),),
+    )
+    first_db.conn.commit()
+    first_db.close()
+
+    db = Database(db_path)
+    try:
+        JobRunner(db=db)
+        row = db.conn.execute(
+            "SELECT status, result, summary FROM job_history "
+            "WHERE id = 'pipeline-just-started'"
+        ).fetchone()
+        assert row["status"] == "failed"
+        result = json.loads(row["result"])
+        assert result["interrupted"] is True
+        assert "never_started" not in result
+        # Not "before it started": the worker DID reach _run_job.
+        assert row["summary"] != f"{INTERRUPTED_BY_RESTART} before it started"
+    finally:
+        db.close()
+
+
 def test_catalog_independent_job_types_do_not_block_local_transitions():
     """Model/label/embedding work must not hold Work Locally hostage.
 

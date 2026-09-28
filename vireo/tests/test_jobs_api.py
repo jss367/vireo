@@ -11871,6 +11871,65 @@ def test_resume_allows_a_parent_whose_chained_pipeline_never_started(
         assert resp.status_code == 200, resp.get_json()
 
 
+def test_resume_refuses_a_parent_whose_retry_already_chained(
+    app_and_db, tmp_path,
+):
+    """After one Resume succeeds, its retry ``R`` chains its processing
+    pipeline with ``chained_from == R.id`` — not the original interrupted
+    parent's id. Reopening the parent must not allow a second Resume:
+    ``_chained_job_exists`` walks ``R.root_import_job_id`` back to the
+    parent and refuses, preventing a duplicate collection, a second tag
+    replay, and a second chained processing/NAS-move run.
+    """
+    app, db = app_and_db
+    quick_look_id = next(
+        pr["id"] for pr in db.get_saved_processes()
+        if pr["name"] == "Quick look")
+    card = _chain_card(tmp_path)
+    with app.test_client() as client:
+        parent_id = _post_import(client, card, tmp_path / "arch", quick_look_id)
+        parent = wait_for_job_via_client(client, parent_id)["result"]
+        # Let the parent's original chained pipeline finish so its rows
+        # settle, then replay a crash that stripped the parent's final
+        # write (the interrupted-parent shape).
+        wait_for_job_via_client(client, parent["process_job_id"])
+        _interrupt_import_row(app, db, parent_id, {
+            "landed_files": parent["landed_files"],
+            "photo_ids": parent["photo_ids"],
+            "photo_fingerprints": parent["photo_fingerprints"],
+            "source_snapshots": parent["source_snapshots"],
+        })
+        # First Resume succeeds and chains its own processing job. The
+        # chained pipeline records the RESUME retry's id in
+        # ``chained_from``, not the parent's — which is exactly what
+        # would let a second Resume slip past the old
+        # ``_chained_job_exists`` check.
+        first = client.post(
+            "/api/jobs/import-photos", json=_resume_body(client, parent_id),
+        )
+        assert first.status_code == 200, first.get_json()
+        retry_id = first.get_json()["job_id"]
+        retry = wait_for_job_via_client(client, retry_id)["result"]
+        assert retry.get("process_job_id"), retry
+        pj = client.get(f"/api/jobs/{retry['process_job_id']}").get_json()
+        assert pj["config"]["chained_from"] == retry_id
+        # Verify the retry carries the parent as its retry-chain root so
+        # ``_chained_job_exists`` can find the descendant chain.
+        retry_cfg = client.get(f"/api/jobs/{retry_id}").get_json()["config"]
+        assert retry_cfg["root_import_job_id"] == parent_id
+        # Let the retry's chained pipeline finish so nothing races the
+        # second Resume attempt below.
+        wait_for_job_via_client(client, retry["process_job_id"])
+
+        # A second Resume must be refused: the parent's descendant chain
+        # already handed its photos to processing.
+        second = client.post(
+            "/api/jobs/import-photos", json=_resume_body(client, parent_id),
+        )
+        assert second.status_code == 409, second.get_json()
+        assert "nothing to resume" in second.get_json()["error"]
+
+
 def test_resume_replays_tags_when_chain_ran_but_tags_owed(
     app_and_db, tmp_path, monkeypatch,
 ):

@@ -825,27 +825,69 @@ class ImportService:
         )
 
     def _chained_job_exists(self, db, parent_id):
-        """Whether any job records ``parent_id`` as the import it was
-        chained from (the after-import processing run). ``enqueue_pipeline``
-        persists the queued row, so this survives a restart.
+        """Whether ``parent_id`` — or any retry descended from it — records
+        an after-import processing run. ``enqueue_pipeline`` persists the
+        queued row, so this survives a restart.
 
-        Skips history rows the startup sweep marked ``never_started``: if
-        both pipeline slots were occupied when the parent import checkpointed
-        its chain-enqueue, the child stayed ``queued`` and never picked up a
-        slot before a restart. ``JobRunner._startup_sweep`` fails such rows
-        as "before it started"; treating them as proof that processing began
-        would strand the parent's photos with no way to resume them.
+        The check follows the whole retry chain, not just direct
+        descendants: a Resume of ``parent_id`` creates a retry ``R`` whose
+        chained pipeline records ``chained_from == R.id``, not
+        ``parent_id``. Since every retry (and retry-of-retry) carries
+        ``root_import_job_id == parent_id`` (see
+        ``import_photos._build_import_job_config``), reopening the
+        original interrupted parent after Resume finished must not let
+        another Resume enqueue a second processing chain.
+
+        Skips history rows the startup sweep marked ``never_started``: a
+        chained pipeline that stayed ``queued`` because both slots were
+        occupied (or that was promoted queued->running but crashed before
+        its worker actually installed) is failed by ``JobRunner._startup_sweep``
+        with ``never_started=True``; treating those as proof that processing
+        began would strand the parent's photos with no way to resume them.
         """
+        descendant_ids = self._retry_chain_ids(db, parent_id)
         for job in self.get_runner().list_jobs():
-            if (job.get("config") or {}).get("chained_from") == parent_id:
+            if (job.get("config") or {}).get("chained_from") in descendant_ids:
                 return True
+        placeholders = ",".join("?" * len(descendant_ids))
         return db.conn.execute(
-            "SELECT 1 FROM job_history "
-            "WHERE json_extract(config, '$.chained_from') = ? "
-            "  AND COALESCE(json_extract(result, '$.never_started'), 0) = 0 "
-            "LIMIT 1",
-            (parent_id,),
+            f"SELECT 1 FROM job_history "
+            f"WHERE json_extract(config, '$.chained_from') IN ({placeholders}) "
+            f"  AND COALESCE(json_extract(result, '$.never_started'), 0) = 0 "
+            f"LIMIT 1",
+            tuple(descendant_ids),
         ).fetchone() is not None
+
+    def _retry_chain_ids(self, db, parent_id):
+        """Return ``{parent_id}`` plus every retry descended from it.
+
+        A retry (Resume or Retry) records ``parent_import_job_id`` (its
+        direct parent) and ``root_import_job_id`` (the original interrupted
+        import at the head of the chain) in its ``job_config``. Every hop
+        propagates ``root_import_job_id``, so a single equality on it
+        catches retries and retry-of-retries alike. Falls back to
+        ``parent_import_job_id`` for the direct hop in case a legacy row
+        lacks ``root_import_job_id``.
+        """
+        ids = {parent_id}
+        for job in self.get_runner().list_jobs():
+            cfg = job.get("config") or {}
+            if (
+                cfg.get("root_import_job_id") == parent_id
+                or cfg.get("parent_import_job_id") == parent_id
+            ):
+                jid = job.get("id")
+                if jid is not None:
+                    ids.add(jid)
+        for row in db.conn.execute(
+            "SELECT id FROM job_history "
+            "WHERE type = 'import' "
+            "  AND (json_extract(config, '$.root_import_job_id') = ? "
+            "       OR json_extract(config, '$.parent_import_job_id') = ?)",
+            (parent_id, parent_id),
+        ).fetchall():
+            ids.add(row["id"])
+        return ids
 
     @staticmethod
     def _interrupted_parent_resume(parent_config, parent_result):
