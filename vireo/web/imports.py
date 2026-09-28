@@ -785,6 +785,7 @@ def create_imports_blueprint(
         from import_dedup import (
             CatalogIndex,
             DuplicateChecker,
+            recover_companion_identities,
             source_capture_timestamps,
         )
         from ingest import _is_unsafe_path, build_destination_path
@@ -800,16 +801,15 @@ def create_imports_blueprint(
                 "folder_template must be a relative path without '..' "
                 "or backslashes", 400)
 
-        db = get_db()
         # The checker still runs when skip_duplicates=False, but only for
         # its EXIF-batching side effect (needed by _recovery_candidate in
         # default mode). check_and_record() is skipped in the generator
         # below so no library-dedup verdict is produced — matching the
         # import job, which doesn't create the checker at all in that
-        # mode.
-        checker = DuplicateChecker(
-            CatalogIndex.from_db(db), verify_by_hash=verify_by_hash,
-        )
+        # mode. It is built inside the stream (see generate()), because
+        # indexing the catalog can first have to hash paired JPEGs on a
+        # network share.
+        checker = None
 
         # str(path) -> capture datetime for recovery planning and day summaries when
         # verify_by_hash disables the checker's own EXIF batching.
@@ -1017,6 +1017,26 @@ def create_imports_blueprint(
                 counter += 1
 
         def generate():
+            nonlocal checker
+            # Index the catalog before any per-file work. Companion
+            # identities the catalog is missing are recovered here, a batch
+            # per frame, instead of before the response starts: a catalog
+            # with a thousand paired JPEGs on a NAS took minutes to hash,
+            # during which the page showed nothing, a superseded preview
+            # could not be stopped (no yield, so no disconnect), and every
+            # re-run started the whole hash over. The request's own DB is
+            # closed once the view returns, so the stream opens its own --
+            # without re-running the schema pass, which app startup already
+            # did (the request connection skips it the same way).
+            with Database(
+                db_path, initialize_schema=(db_path == ":memory:"),
+            ) as index_db:
+                for checked, missing in recover_companion_identities(index_db):
+                    yield f"data: {json.dumps({'catalog_recovery': {'checked': checked, 'total': missing}})}\n\n"
+                checker = DuplicateChecker(
+                    CatalogIndex.from_db(index_db, recover_companions=False),
+                    verify_by_hash=verify_by_hash,
+                )
             total = len(paths)
             duplicate_count = 0
             recovered_count = 0

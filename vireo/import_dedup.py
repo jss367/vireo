@@ -34,10 +34,12 @@ Failure modes, by construction:
   page flags the extra copy.
 """
 
+import bisect
 import contextlib
 import logging
 import os
 import re
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -183,6 +185,109 @@ def stored_metadata_key(filename, file_size, ts_text):
     return (filename.casefold(), int(file_size), ts_text[:19])
 
 
+# Companion identities recovered per locked batch. Every file is read in
+# full for its hash, so on a network share one batch is seconds of I/O:
+# small enough that a streaming caller yields (and notices a disconnected
+# client) often, large enough that the per-batch commit stays cheap.
+COMPANION_RECOVERY_BATCH_SIZE = 25
+
+# One recovery batch at a time per process. Held per batch rather than per
+# run, so a second caller (a re-run preview, an import job) waits at most
+# one batch and then continues past the rows already written instead of
+# hashing the same files over the same share again.
+_companion_recovery_lock = threading.Lock()
+
+_MISSING_COMPANION_IDENTITIES_SQL = (
+    "SELECT p.id, p.companion_path, f.path FROM photos p "
+    "JOIN folders f ON f.id=p.folder_id "
+    "LEFT JOIN companion_identities c "
+    "ON c.photo_id=p.id AND c.filename=p.companion_path "
+    "WHERE p.companion_path IS NOT NULL AND c.photo_id IS NULL "
+    "AND f.status IN ('ok', 'partial')"
+)
+
+
+def recover_companion_identities(db, batch_size=None):
+    """Backfill missing ``companion_identities`` rows, one batch at a time.
+
+    Pairing a RAW with its JPEG hides the JPEG row but keeps the JPEG's
+    import identity in ``companion_identities`` (see
+    ``scanner._pair_raw_jpeg_companions``). Catalogs paired before that
+    table existed, and companions whose identity a capture-time edit
+    invalidated, have no row, so a card holding the same JPEG would not be
+    recognized as a duplicate. Recovery reads each companion's capture time
+    and hashes its bytes.
+
+    A generator: yields ``(checked, total)`` after each committed batch,
+    where ``total`` is the number of identities missing when it started.
+    Each batch commits on its own, so work survives a caller that stops
+    early; a caller that stops between batches (a closed preview stream)
+    leaves the rest for the next one. Offline companions are skipped and
+    retried by a later call.
+    """
+    batch_size = batch_size or COMPANION_RECOVERY_BATCH_SIZE
+    pending_ids = [
+        row["id"]
+        for row in db.conn.execute(
+            _MISSING_COMPANION_IDENTITIES_SQL + " ORDER BY p.id"
+        ).fetchall()
+    ]
+    if not pending_ids:
+        return
+    total = len(pending_ids)
+    after_id = 0
+    while True:
+        with _companion_recovery_lock:
+            # Re-read under the lock: another caller may have recovered
+            # rows past the cursor since the last batch.
+            rows = db.conn.execute(
+                _MISSING_COMPANION_IDENTITIES_SQL
+                + " AND p.id > ? ORDER BY p.id LIMIT ?",
+                (after_id, batch_size),
+            ).fetchall()
+            if not rows:
+                return
+            after_id = rows[-1]["id"]
+            _recover_companion_batch(db, rows)
+        yield bisect.bisect_right(pending_ids, after_id), total
+
+
+def _recover_companion_batch(db, rows):
+    available = []
+    for row in rows:
+        path = Path(row["path"]) / row["companion_path"]
+        try:
+            available.append((row, path, path.stat().st_size))
+        except OSError:
+            continue
+    if not available:
+        return
+    captures = source_capture_timestamps([path for _, path, _ in available])
+    recovered = []
+    for row, path, size in available:
+        try:
+            capture = captures.get(path)
+            recovered.append((row["id"], row["companion_path"], size,
+                              capture.isoformat() if capture else None,
+                              compute_file_hash(str(path)) if size else None))
+        except OSError:
+            continue
+    if not recovered:
+        return
+    db.conn.execute("SAVEPOINT recover_companion_identities")
+    try:
+        db.conn.executemany(
+            "INSERT OR REPLACE INTO companion_identities "
+            "(photo_id, filename, file_size, timestamp, file_hash) VALUES (?, ?, ?, ?, ?)",
+            recovered,
+        )
+    except BaseException:
+        db.conn.execute("ROLLBACK TO recover_companion_identities")
+        raise
+    finally:
+        db.conn.execute("RELEASE recover_companion_identities")
+
+
 class CatalogIndex:
     """Immutable duplicate-identity view of the photos table.
 
@@ -219,46 +324,17 @@ class CatalogIndex:
         self.sizes_complete = sizes_complete
 
     @classmethod
-    def from_db(cls, db):
-        # Older catalogs predate companion identity storage. Recover those
-        # identities once from available companions; offline files can be
-        # recovered on a later import without inventing a RAW-derived key.
-        missing = db.conn.execute(
-            "SELECT p.id, p.companion_path, f.path FROM photos p "
-            "JOIN folders f ON f.id=p.folder_id "
-            "LEFT JOIN companion_identities c ON c.photo_id=p.id AND c.filename=p.companion_path "
-            "WHERE p.companion_path IS NOT NULL AND c.photo_id IS NULL AND f.status IN ('ok', 'partial')"
-        ).fetchall()
-        available = []
-        for row in missing:
-            path = Path(row["path"]) / row["companion_path"]
-            try:
-                available.append((row, path, path.stat().st_size))
-            except OSError:
-                continue
-        captures = source_capture_timestamps([path for _, path, _ in available]) if available else {}
-        recovered = []
-        for row, path, size in available:
-            try:
-                capture = captures.get(path)
-                recovered.append((row["id"], row["companion_path"], size,
-                                  capture.isoformat() if capture else None,
-                                  compute_file_hash(str(path)) if size else None))
-            except OSError:
-                continue
-        if recovered:
-            db.conn.execute("SAVEPOINT recover_companion_identities")
-            try:
-                db.conn.executemany(
-                    "INSERT OR REPLACE INTO companion_identities "
-                    "(photo_id, filename, file_size, timestamp, file_hash) VALUES (?, ?, ?, ?, ?)",
-                    recovered,
-                )
-            except BaseException:
-                db.conn.execute("ROLLBACK TO recover_companion_identities")
-                raise
-            finally:
-                db.conn.execute("RELEASE recover_companion_identities")
+    def from_db(cls, db, recover_companions=True):
+        """Index every cataloged identity, paired companions included.
+
+        ``recover_companions`` first backfills any companion identity the
+        catalog is missing (see ``recover_companion_identities``). Callers
+        that already drained that generator themselves — to stream its
+        progress — pass False.
+        """
+        if recover_companions:
+            for _ in recover_companion_identities(db):
+                pass
         known_hashes = set()
         known_keys = set()
         hash_sizes = set()

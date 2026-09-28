@@ -438,3 +438,102 @@ def test_non_duplicate_files_accepts_checker_and_legacy_set(tmp_path):
         files, {compute_file_hash(str(src / "IMG_0001.jpg"))},
     )
     assert legacy == [src / "IMG_0002.jpg"]
+
+
+def _seed_paired_catalog(tmp_path, count):
+    """A catalog of ``count`` RAW rows whose JPEG companions have no stored
+    identity, as in catalogs paired before companion_identities existed."""
+    db = Database(str(tmp_path / "paired.db"))
+    library = tmp_path / "paired"
+    library.mkdir()
+    fid = db.add_folder(str(library), name="paired")
+    jpegs = []
+    for i in range(count):
+        jpeg = library / f"IMG_{i:04d}.jpg"
+        _save_jpeg(jpeg, exif_dt=datetime(2024, 5, 1, 10, 0, i), color=(i, 0, 0))
+        raw = library / f"IMG_{i:04d}.nef"
+        raw.write_bytes(b"raw bytes %d" % i)
+        pid = db.add_photo(
+            folder_id=fid, filename=raw.name, extension=".nef",
+            file_size=raw.stat().st_size, file_mtime=1,
+        )
+        db.conn.execute(
+            "UPDATE photos SET companion_path=? WHERE id=?", (jpeg.name, pid),
+        )
+        jpegs.append(jpeg)
+    db.conn.commit()
+    return db, jpegs
+
+
+def _identity_count(db):
+    return db.conn.execute(
+        "SELECT COUNT(*) FROM companion_identities").fetchone()[0]
+
+
+def test_companion_recovery_commits_each_batch(tmp_path):
+    """A caller that stops mid-recovery (a closed preview stream) keeps the
+    batches already done, and the next caller resumes after them."""
+    db, _ = _seed_paired_catalog(tmp_path, 5)
+
+    recovery = import_dedup.recover_companion_identities(db, batch_size=2)
+    assert next(recovery) == (2, 5)
+    recovery.close()
+    assert _identity_count(db) == 2
+    assert not db.conn.in_transaction
+
+    assert list(import_dedup.recover_companion_identities(db, batch_size=2)) == [
+        (2, 3), (3, 3),
+    ]
+    assert _identity_count(db) == 5
+    assert list(import_dedup.recover_companion_identities(db)) == []
+    db.close()
+
+
+def test_concurrent_companion_recoveries_do_not_rehash(tmp_path, monkeypatch):
+    """Two callers recovering at once (a re-run preview while the old one is
+    still reading the NAS) split the work instead of each hashing it all."""
+    db, jpegs = _seed_paired_catalog(tmp_path, 4)
+    other = Database(str(tmp_path / "paired.db"))
+    hashed = []
+    real_hash = import_dedup.compute_file_hash
+    monkeypatch.setattr(
+        import_dedup, "compute_file_hash",
+        lambda path: hashed.append(path) or real_hash(path),
+    )
+
+    first = import_dedup.recover_companion_identities(db, batch_size=1)
+    second = import_dedup.recover_companion_identities(other, batch_size=1)
+    progress = []
+    for step in (first, second, first, second, first, second):
+        progress.append(next(step, None))
+
+    assert sorted(hashed) == sorted(str(p) for p in jpegs)
+    assert _identity_count(db) == 4
+    # Each caller reports its position against what was missing when it
+    # started, so skipping past the other caller's rows moves it forward.
+    assert progress == [(1, 4), (1, 3), (3, 4), (3, 3), None, None]
+    other.close()
+    db.close()
+
+
+def test_offline_companion_is_skipped_not_retried_forever(tmp_path):
+    db, jpegs = _seed_paired_catalog(tmp_path, 3)
+    jpegs[1].unlink()
+
+    assert list(import_dedup.recover_companion_identities(db, batch_size=1)) == [
+        (1, 3), (2, 3), (3, 3),
+    ]
+    assert _identity_count(db) == 2
+    db.close()
+
+
+def test_recovered_companion_is_a_duplicate(tmp_path):
+    db, jpegs = _seed_paired_catalog(tmp_path, 2)
+    card = tmp_path / "card"
+    card.mkdir()
+    copy = card / jpegs[0].name
+    copy.write_bytes(jpegs[0].read_bytes())
+
+    assert DuplicateChecker(CatalogIndex.from_db(db)).match(copy) is not None
+    assert _identity_count(db) == 2
+    db.close()

@@ -5888,3 +5888,52 @@ def test_import_file_type_folders_preview_and_start(live_server, page, tmp_path)
     assert len(submitted) == 1
     assert submitted[0]["folder_template"] == "{file_type}"
     assert submitted[0]["destination"] == str(archive)
+
+
+def test_duplicate_check_names_catalog_fingerprinting(live_server, page):
+    """While the server fingerprints paired JPEGs already in the catalog —
+    whole-file reads that take minutes on a NAS — the preview says so, with
+    a count, instead of sitting on an idle "checking for duplicates"."""
+    url = live_server["url"]
+    page.goto(f"{url}/import")
+    page.evaluate(TWO_FILE_PREVIEW_STUB)
+    page.evaluate(
+        """
+        () => {
+          const stubbedFetch = window.fetch;
+          window.__dupStream = null;
+          window.fetch = (input, init) => {
+            const target = typeof input === 'string' ? input : input.url;
+            if (target && target.indexOf('/api/import/check-duplicates') === 0) {
+              window.__dupStream = window.__sseStream();
+              return Promise.resolve(window.__dupStream.response);
+            }
+            return stubbedFetch(input, init);
+          };
+        }
+        """
+    )
+
+    page.locator("#modeCopy").check()
+    page.locator("#destInput").fill("/archive")
+    page.locator("#sourceInput").fill("/tmp/card-a")
+    page.locator("#btnAddSource").click()
+    page.wait_for_function("window.__dupStream !== null")
+
+    page.evaluate(
+        "() => window.__dupStream.push({catalog_recovery: {checked: 25, total: 1050}})"
+    )
+    summary = page.locator("#previewSummary")
+    expect(summary).to_contain_text(
+        "fingerprinting paired JPEGs already in your catalog")
+    expect(summary).to_contain_text("25 of 1,050")
+    expect(page.locator("#btnStart")).to_have_text("Checking duplicates…")
+
+    page.evaluate(
+        """() => {
+          window.__dupStream.push({done: true, duplicate_count: 0, checked: 2, total: 2});
+          window.__dupStream.close();
+        }"""
+    )
+    expect(summary).not_to_contain_text("fingerprinting")
+    expect(page.locator("#btnStart")).not_to_have_text("Checking duplicates…")
