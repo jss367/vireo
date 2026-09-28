@@ -488,6 +488,49 @@ def _scan(result: dict, config: dict) -> tuple[str, list[str]]:
     return _n(_int(result, "photos_indexed"), "photo") + " indexed", []
 
 
+def _folder_reuse(result: dict) -> str:
+    """How many folders a periodic check read from disk versus reused
+    unchanged, or "" for results that predate the listing cache."""
+    if "folders_read" not in result and "folders_unchanged" not in result:
+        return ""
+    read = _int(result, "folders_read")
+    unchanged = _int(result, "folders_unchanged")
+    if not unchanged:
+        return f" ({_n(read, 'folder')} read)"
+    if not read:
+        return f" ({_n(unchanged, 'folder')} unchanged since the last check, not re-read)"
+    return f" ({read:,} folders re-read, {unchanged:,} unchanged since the last check)"
+
+
+def _new_images_walk(result: dict, config: dict) -> tuple[str, list[str]]:
+    summary = (
+        f"{_n(_int(result, 'new_count'), 'new file')} among "
+        f"{_n(_int(result, 'files_checked'), 'file')} checked"
+    )
+    summary += _folder_reuse(result)
+    unreachable = result.get("unreachable_roots") or []
+    if unreachable:
+        summary += f"; {_n(len(unreachable), 'folder')} offline, not checked"
+    return summary, _list_details(unreachable, "Offline, not checked:")
+
+
+def _missing_originals_scan(result: dict, config: dict) -> tuple[str, list[str]]:
+    if result.get("cancelled"):
+        return "Check cancelled", []
+    missing = _int(result, "missing_count")
+    summary = (
+        f"{_n(missing, 'photo')} with a missing original" if missing
+        else "No missing originals"
+    )
+    scope = result.get("scope")
+    if scope and scope != "workspace":
+        summary += f" in {scope}"
+    summary += _folder_reuse(result)
+    if result.get("stale"):
+        summary += "; not kept, the library changed during the check"
+    return summary, []
+
+
 def _verify_hashes(result: dict, config: dict) -> tuple[str, list[str]]:
     checked = _int(result, "checked")
     summary = _n(checked, "file") + " checked"
@@ -727,6 +770,8 @@ _DESCRIBERS: dict[str, Callable[[dict, dict], tuple[str, list[str]]]] = {
     "scan": _scan,
     "sync": _sync,
     "verify-hashes": _verify_hashes,
+    "new_images_walk": _new_images_walk,
+    "missing_originals_scan": _missing_originals_scan,
     "card-cleanup-scan": _card_cleanup_scan,
     "staging-verify": _staging_verify,
     "card-cleanup-verify": _card_cleanup_verify,

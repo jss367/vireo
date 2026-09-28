@@ -8,6 +8,7 @@ import sqlite3
 import time
 import unicodedata
 
+import dir_listing_cache
 from keyword_identity import resolve_import_alias
 from keyword_normalization import (
     keyword_match_key,
@@ -185,6 +186,28 @@ class IncompatibleDatabaseError(RuntimeError):
 
 class MissingPhotosCancelled(RuntimeError):
     """Raised when a Missing Originals filesystem scan is cancelled."""
+
+
+def _present_names_via_listing(folder_path, listing_pass, check_cancelled):
+    """NFC names present in ``folder_path``, read through ``listing_pass``.
+
+    Mirrors the direct ``os.scandir`` read in ``get_missing_photos``: a
+    symlink whose target is gone does not count as present. A remembered
+    listing cannot vouch for a target, so symlinks are checked live whether
+    the listing was reused or just read. Raises ``OSError`` like the direct
+    read.
+    """
+    listing = dir_listing_cache.read_directory(
+        folder_path, listing_pass, on_entry=check_cancelled,
+    )
+    names = set()
+    for name in listing.names:
+        if name in listing.symlinks and not os.path.exists(
+            os.path.join(folder_path, name)
+        ):
+            continue
+        names.add(_nfc(name))
+    return names
 
 
 def _nfc(name: str) -> str:
@@ -2099,6 +2122,7 @@ class Database:
         folder_id=None,
         progress_callback=None,
         cancel_callback=None,
+        listing_pass=None,
     ):
         """Return photos whose source file is missing from disk.
 
@@ -2135,6 +2159,11 @@ class Database:
 
         ``cancel_callback`` is optional. When supplied, it is polled between
         filesystem operations and may abort the scan by returning true.
+
+        ``listing_pass`` is optional (a :class:`dir_listing_cache.ListingPass`).
+        When supplied, each folder is read through it: an unchanged folder's
+        remembered listing is reused instead of read from disk again, and its
+        symlinks are still checked live.
         """
         def check_cancelled():
             if cancel_callback is not None and cancel_callback():
@@ -2218,20 +2247,26 @@ class Database:
                 continue
             if fid not in folder_names:
                 try:
-                    names_set: set[str] = set()
-                    with os.scandir(row["folder_path"]) as it:
-                        for entry in it:
-                            check_cancelled()
-                            # Broken symlinks: scandir returns the basename even
-                            # when the target is gone, but the prior os.path.exists
-                            # check returned False. Filter them so missing
-                            # originals tracked via symlinks still surface.
-                            # is_symlink() uses cached lstat from scandir, so
-                            # non-symlinks don't pay an extra stat.
-                            if entry.is_symlink() and not os.path.exists(entry.path):
-                                continue
-                            names_set.add(_nfc(entry.name))
-                    folder_names[fid] = names_set
+                    if listing_pass is not None:
+                        folder_names[fid] = _present_names_via_listing(
+                            row["folder_path"], listing_pass, check_cancelled,
+                        )
+                    else:
+                        names_set: set[str] = set()
+                        with os.scandir(row["folder_path"]) as it:
+                            for entry in it:
+                                check_cancelled()
+                                # Broken symlinks: scandir returns the basename
+                                # even when the target is gone, but the prior
+                                # os.path.exists check returned False. Filter
+                                # them so missing originals tracked via
+                                # symlinks still surface. is_symlink() uses
+                                # cached lstat from scandir, so non-symlinks
+                                # don't pay an extra stat.
+                                if entry.is_symlink() and not os.path.exists(entry.path):
+                                    continue
+                                names_set.add(_nfc(entry.name))
+                        folder_names[fid] = names_set
                 except OSError:
                     # Folder vanished between isdir and scandir, or unreadable;
                     # treat the same as "folder offline" so we don't bulk-flag

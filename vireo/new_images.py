@@ -7,6 +7,7 @@ import threading
 import time
 from pathlib import Path
 
+import dir_listing_cache
 import volume_reachability
 from image_loader import (
     SUPPORTED_EXTENSIONS,
@@ -118,9 +119,11 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit=5,
                                    progress_callback=None,
                                    progress_every=250,
                                    reachability=None,
-                                   stall_timeout=None):
+                                   stall_timeout=None,
+                                   listing_cache=None):
     """Return {'new_count': int, 'per_root': [...], 'sample': [abs_path, ...],
-    'unreachable_roots': [abs_path, ...]}.
+    'unreachable_roots': [abs_path, ...], 'folders_read': int,
+    'folders_unchanged': int}.
 
     Walks each mapped root recursively, collects image files, and diffs against
     the set of photo paths already ingested into the workspace.
@@ -150,6 +153,12 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit=5,
     including ones we skip), and once at the end with the final totals.
     Callers use this to surface live progress for transparency without
     needing to refactor the walk.
+
+    ``listing_cache`` (a :class:`dir_listing_cache.DirListingCache`) lets the
+    walk reuse the listing of every directory whose modification time has not
+    changed since it was last read, so a periodic check re-reads only the
+    folders that changed. ``folders_read`` / ``folders_unchanged`` say how
+    many directories were read from disk versus reused.
     """
     if reachability is None:
         reachability = volume_reachability.get_shared()
@@ -173,6 +182,8 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit=5,
     last_emitted = 0
     seen_new_paths = set()
     live_mount_roots = set()
+    folders_read = 0
+    folders_unchanged = 0
 
     def _unreachable(root, mount_root):
         log.warning(
@@ -245,11 +256,13 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit=5,
                 per_root.append({"folder_id": root["id"], "path": root_path, "new_count": 0})
                 continue
 
+        listing_pass = dir_listing_cache.ListingPass(listing_cache)
         outcome = _walk_root_bounded(
             root, root_path, mount_root, known, seen_new_paths, reachability,
             files_checked, total, progress_callback, progress_every,
             last_emitted, stall_timeout,
             reachability_generation=reachability_generation,
+            listing_pass=listing_pass,
         )
         if outcome is None:
             # Offline (error or stall): nothing from this root is kept.
@@ -257,6 +270,8 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit=5,
             continue
         root_new_paths, checked, last_emitted = outcome
         files_checked += checked
+        folders_read += listing_pass.read
+        folders_unchanged += listing_pass.unchanged
         total += len(root_new_paths)
         seen_new_paths.update(root_new_paths)
         for path in root_new_paths:
@@ -280,6 +295,8 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit=5,
         "sample": sample,
         "sample_complete": sample_limit is None or len(sample) >= total,
         "unreachable_roots": unreachable_roots,
+        "folders_read": folders_read,
+        "folders_unchanged": folders_unchanged,
         # Wall-clock stamp of when this answer was produced. The banner shows
         # it whenever a root was skipped: a user who clicks "Check again" on a
         # volume that is *still* offline gets the same sentence back, and the
@@ -396,7 +413,7 @@ def _reachability_generation(reachability):
 def _walk_root_bounded(root, root_path, mount_root, known, seen_new_paths,
                        reachability, files_checked, total, progress_callback,
                        progress_every, last_emitted, stall_timeout,
-                       reachability_generation=None):
+                       reachability_generation=None, listing_pass=None):
     """Walk one root on a worker thread under a stall watchdog.
 
     Returns ``(root_new_paths, files_checked_in_root, last_emitted)`` on
@@ -405,7 +422,8 @@ def _walk_root_bounded(root, root_path, mount_root, known, seen_new_paths,
     ``stall_timeout`` seconds. The worker never mutates the caller's
     counters or ``seen_new_paths``: it works on a snapshot and the caller
     merges only on success, so an abandoned thread that wakes up later can
-    not corrupt a result that has already been published.
+    not corrupt a result that has already been published. ``listing_pass``
+    is this root's own, and the caller reads its counts only on success.
     """
     # Recorded on this root if the watchdog fires: it dates the outage to the
     # world this walk started in, so a later recheck can tell it apart from
@@ -529,6 +547,7 @@ def _walk_root_bounded(root, root_path, mount_root, known, seen_new_paths,
             # than 256 entries taking a while) is not mistaken for a stall.
             walk = safe_scan_walk(
                 root_path, onerror=_on_walk_error, on_entry=_beat,
+                listing_pass=listing_pass,
             )
             _walk_root_for_new_images(
                 walk, known, local_seen, state["paths"],

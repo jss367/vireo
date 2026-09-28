@@ -928,6 +928,7 @@ def create_workspace_blueprint(
         panel and mirrors its progress into ``new_images_walk_progress``
         so pending API responses can report live totals.
         """
+        import dir_listing_cache
         from db import Database
         from new_images import count_new_images_for_workspace
 
@@ -949,9 +950,12 @@ def create_workspace_blueprint(
             wdb = Database(db_path)
             try:
                 wdb.set_active_workspace(ws_id)
+                # Reuse the listing of every folder unchanged since the last
+                # walk; "Check again" clears the cache so a recheck reads all.
                 result = count_new_images_for_workspace(
                     wdb, ws_id, sample_limit=None,
                     progress_callback=progress_callback,
+                    listing_cache=dir_listing_cache.get_shared(),
                 )
                 walk_result["result"] = result
                 return result
@@ -991,6 +995,10 @@ def create_workspace_blueprint(
                 payload = {
                     "files_checked": progress_state["checked"],
                     "new_count": progress_state["found"],
+                    # Which folders this walk read from disk and which it
+                    # reused unchanged since the last look.
+                    "folders_read": result.get("folders_read", 0),
+                    "folders_unchanged": result.get("folders_unchanged", 0),
                 }
                 # An offline volume is a completed walk with a caveat, not
                 # a failure: name the roots that were skipped so the Jobs
@@ -1173,6 +1181,7 @@ def create_workspace_blueprint(
         workspace plus every cached volume verdict; the client's follow-up
         poll then starts a genuinely fresh walk.
         """
+        import dir_listing_cache
         import new_images
         import volume_reachability
 
@@ -1181,6 +1190,9 @@ def create_workspace_blueprint(
         if ws_id is None:
             return jsonify({"workspace_id": None, "rechecked": False})
         volume_reachability.invalidate_caches()
+        # "Look now" means read every folder again, not trust the listings
+        # the automatic checks remembered.
+        dir_listing_cache.get_shared().clear()
         # An offline answer can also come from the walk-side watchdog rather
         # than a volume probe, and that registry is separate: without this a
         # root whose walk wedged would be reported offline again without the

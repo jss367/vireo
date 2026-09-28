@@ -521,3 +521,49 @@ def test_fatal_failure_still_leads_with_the_error():
         "export", {"exported": 0, "errors": [], "error": "destination unmounted"},
     )
     assert out["summary"] == "destination unmounted"
+
+
+def test_new_images_walk_leads_with_the_count_and_says_which_folders_were_read():
+    out = describe_result("new_images_walk", {
+        "files_checked": 138218, "new_count": 37,
+        "folders_read": 3, "folders_unchanged": 410,
+    })
+    assert out["summary"] == (
+        "37 new files among 138,218 files checked "
+        "(3 folders re-read, 410 unchanged since the last check)"
+    )
+    out = describe_result("new_images_walk", {
+        "files_checked": 9, "new_count": 1, "folders_read": 0,
+        "folders_unchanged": 4, "unreachable_roots": ["/Volumes/NAS/Raw"],
+        "phase": "1 folder(s) offline, not checked",
+    })
+    assert out["summary"] == (
+        "1 new file among 9 files checked (4 folders unchanged since the last "
+        "check, not re-read); 1 folder offline, not checked"
+    )
+    assert out["details"] == ["Offline, not checked:", "/Volumes/NAS/Raw"]
+    # History rows written before the listing cache carry no folder counts.
+    out = describe_result("new_images_walk", {"files_checked": 5, "new_count": 0})
+    assert out["summary"] == "0 new files among 5 files checked"
+
+
+def test_missing_originals_scan_leads_with_the_answer():
+    out = describe_result("missing_originals_scan", {
+        "missing_count": 0, "checked_at": "2026-09-28T19:00:00Z",
+        "scope": "workspace", "stale": False,
+        "folders_read": 3, "folders_unchanged": 57,
+    })
+    assert out["summary"] == (
+        "No missing originals (3 folders re-read, 57 unchanged since the last check)"
+    )
+    out = describe_result("missing_originals_scan", {
+        "missing_count": 2, "checked_at": "2026-09-28T19:00:00Z",
+        "scope": "folder #4", "stale": True, "folders_read": 1,
+        "folders_unchanged": 0,
+    })
+    assert out["summary"] == (
+        "2 photos with a missing original in folder #4 (1 folder read); "
+        "not kept, the library changed during the check"
+    )
+    out = describe_result("missing_originals_scan", {"cancelled": True, "scope": "workspace"})
+    assert out["summary"] == "Check cancelled"
