@@ -11416,6 +11416,127 @@ def test_interrupted_import_resume_tags_the_carried_photos(
         assert current_kw == keyword_id
 
 
+def _interrupt_import_row(app, db, job_id, result):
+    """Replay a crash: the history row holds ``result`` as its last
+    checkpoint, the process is gone, and the next start sweeps it."""
+    runner = app._job_runner
+    with runner._lock:
+        runner._jobs.pop(job_id, None)
+    db.conn.execute(
+        "UPDATE job_history SET status = 'running', result = ? WHERE id = ?",
+        (json.dumps(result), job_id),
+    )
+    db.conn.commit()
+    runner._startup_sweep(db)
+    db.conn.commit()
+
+
+def _resume_body(client, parent_id):
+    row = next(
+        h for h in client.get("/api/jobs/history").get_json()
+        if h["id"] == parent_id
+    )
+    assert row["result"]["interrupted"] is True
+    cfg = row["config"]
+    return {
+        "sources": cfg["sources"],
+        "destination": cfg["destination"],
+        "folder_template": cfg["folder_template"],
+        "file_types": cfg["file_types"],
+        "skip_duplicates": True,
+        "after_import": cfg["after_import"],
+        "tags": cfg["tags"],
+        "parent_import_job_id": parent_id,
+        "carry_photo_ids": row["result"]["photo_ids"],
+    }
+
+
+def test_resume_recovers_landings_its_parent_checkpoint_missed(
+    app_and_db, tmp_path,
+):
+    """A kill between a batch's catalog commit and the next checkpoint
+    leaves photos cataloged but missing from the interrupted row's
+    ``photo_ids``. The resume skips their files as duplicates, and must
+    still carry them: a twin under the destination newer than the
+    parent's enqueue-time id floor is one the parent landed.
+    """
+    app, db = app_and_db
+    quick_look_id = next(
+        pr["id"] for pr in db.get_saved_processes()
+        if pr["name"] == "Quick look")
+    card = _chain_card(tmp_path, n=4)
+    for i, color in enumerate(("red", "green", "blue", "white")):
+        path = card / f"DSC_{i:04d}.jpg"
+        stat = path.stat()
+        Image.new("RGB", (16, 16), color).save(str(path))
+        os.utime(str(path), (stat.st_atime, stat.st_mtime))
+    with app.test_client() as client:
+        parent_id = _post_import(client, card, tmp_path / "arch", quick_look_id)
+        final = wait_for_job_via_client(client, parent_id)["result"]
+        wait_for_job_via_client(client, final["process_job_id"])
+        landed = sorted(final["photo_ids"])
+        assert len(landed) == 4
+        # The checkpoint recorded only the first two before the kill.
+        recorded, missed = landed[:2], landed[2:]
+        _interrupt_import_row(app, db, parent_id, {
+            "photo_ids": recorded,
+            "photo_fingerprints": {
+                str(pid): final["photo_fingerprints"][str(pid)]
+                for pid in recorded
+            },
+            "source_snapshots": final["source_snapshots"],
+        })
+
+        resp = client.post(
+            "/api/jobs/import-photos", json=_resume_body(client, parent_id),
+        )
+        assert resp.status_code == 200, resp.get_json()
+        result = wait_for_job_via_client(
+            client, resp.get_json()["job_id"])["result"]
+
+        assert result["copied"] == 0
+        assert result["recovered_photo_ids"] == missed
+        assert sorted(result["carried_photo_ids"]) == landed
+        assert result.get("process_job_id"), result
+        assert sorted(
+            p["id"] for p in db.get_collection_photos(
+                result["collection_id"], per_page=999999)
+        ) == landed
+
+
+def test_resume_does_not_recover_an_earlier_import_of_the_same_card(
+    app_and_db, tmp_path,
+):
+    """The id floor keeps a resume to its own parent's landings: photos
+    an earlier, finished import of the same card already cataloged are
+    older than the floor and stay out of the resumed scope."""
+    app, db = app_and_db
+    card = _chain_card(tmp_path)
+    with app.test_client() as client:
+        earlier_id = _post_import(client, card, tmp_path / "arch")
+        earlier = wait_for_job_via_client(client, earlier_id)["result"]
+        assert earlier["photo_ids"]
+
+        parent_id = _post_import(client, card, tmp_path / "arch")
+        parent = wait_for_job_via_client(client, parent_id)["result"]
+        assert parent["photo_ids"] == []
+        _interrupt_import_row(app, db, parent_id, {
+            "photo_ids": [],
+            "photo_fingerprints": {},
+            "source_snapshots": parent["source_snapshots"],
+        })
+
+        resp = client.post(
+            "/api/jobs/import-photos", json=_resume_body(client, parent_id),
+        )
+        assert resp.status_code == 200, resp.get_json()
+        result = wait_for_job_via_client(
+            client, resp.get_json()["job_id"])["result"]
+        assert result["recovered_photo_ids"] == []
+        assert not result.get("carried_photo_ids")
+        assert result.get("collection_id") is None
+
+
 def test_failed_file_retry_leaves_carried_photos_tags_alone(
     app_and_db, tmp_path,
 ):

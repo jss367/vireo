@@ -731,6 +731,19 @@ def enqueue_import_photos(service: ImportService, db: Database, body: dict) -> d
         "workspace_id": active_ws,
         "created_workspace": created_workspace,
         "carry_photo_ids": carry_photo_ids,
+        # Largest photo id when the first import of this retry chain was
+        # enqueued. Every row the chain lands is newer, so a resume of an
+        # interrupted run recognizes that run's landings by id even where
+        # its checkpointed ``photo_ids`` lagged a catalog commit (see
+        # ``import_job._note_recovered``).
+        "photo_id_floor": (
+            parent_config["photo_id_floor"]
+            if parent_config is not None
+            and parent_config.get("photo_id_floor") is not None
+            else db.conn.execute(
+                "SELECT COALESCE(MAX(id), 0) FROM photos",
+            ).fetchone()[0]
+        ),
         # Fingerprint sidecar to carry_photo_ids so a retry-of-retry
         # can still verify the inherited scope by stable identity
         # even after the grandparent's job has aged out of history.
@@ -821,6 +834,11 @@ def enqueue_import_photos(service: ImportService, db: Database, body: dict) -> d
         carry_photo_ids = list(
             (job.get("config") or {}).get("carry_photo_ids") or []
         )
+        carried_already = set(carry_photo_ids)
+        carry_photo_ids += [
+            pid for pid in result.get("recovered_photo_ids") or []
+            if pid not in carried_already
+        ]
         thread_db, col_id = service._record_import_collection(
             result, active_ws, chain_photo_ids=carry_photo_ids,
         )
@@ -1008,6 +1026,10 @@ def enqueue_import_photos(service: ImportService, db: Database, body: dict) -> d
             previewed_count=previewed_count,
             checked_count=checked_count,
             carry_photo_ids=carry_photo_ids,
+            recover_after_photo_id=(
+                parent_config.get("photo_id_floor")
+                if parent_interrupted else None
+            ),
         )
         try:
             result = run_import_job(
@@ -1028,11 +1050,14 @@ def enqueue_import_photos(service: ImportService, db: Database, body: dict) -> d
             # and re-resolving GPS for them here would overwrite any
             # location the user has corrected since.
             tag_photo_ids = list(result.get("photo_ids") or [])
-            if parent_interrupted and carry_photo_ids:
+            if parent_interrupted:
                 seen = set(tag_photo_ids)
-                tag_photo_ids += [
-                    pid for pid in carry_photo_ids if pid not in seen
-                ]
+                for pid in list(carry_photo_ids or []) + list(
+                    result.get("recovered_photo_ids") or [],
+                ):
+                    if pid not in seen:
+                        seen.add(pid)
+                        tag_photo_ids.append(pid)
             service._apply_import_tags(
                 active_ws, tag_photo_ids, import_tags,
                 location_from_gps, result, job=job, runner=runner,

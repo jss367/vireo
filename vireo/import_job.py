@@ -576,6 +576,12 @@ class ImportParams:
     # validated against the parent's scope). The run finishes their
     # working copies, which an interrupted parent may never have reached.
     carry_photo_ids: list | None = None
+    # Set only when resuming an interrupted import: the largest photo id
+    # in the catalog when the interrupted import was enqueued. A card file
+    # this run skips as a duplicate of a newer row under the destination
+    # is one the interrupted run landed, whether or not its checkpoint got
+    # to record it. See ``_note_recovered``.
+    recover_after_photo_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -627,6 +633,9 @@ class _ImportRunState:
     # Fingerprints of ``imported_photo_ids`` captured so far for the
     # resume scope (see ``_publish_resume_scope``).
     resume_fingerprints: dict = field(default_factory=dict)
+    # Rows an interrupted parent landed, found by this resume's duplicate
+    # gate (see ``_note_recovered``).
+    recovered_photo_ids: set = field(default_factory=set)
     linked_dup_dirs: set = field(default_factory=set)
     run_dest_folders: dict = field(default_factory=dict)
     run_verified_hashes: dict = field(default_factory=dict)
@@ -1374,6 +1383,23 @@ _GATE_PROCEED = "proceed"
 _GATE_CANCELLED = "cancelled"
 
 
+def _note_recovered(state, rows, params, ctx):
+    """Record duplicate twins an interrupted parent import landed.
+
+    A resume skips the parent's landed files as duplicates. The parent's
+    checkpointed ``photo_ids`` can lag its catalog commits (a kill between
+    a batch's commit and the next checkpoint), so the resume identifies
+    them itself: a twin under this destination created after the parent
+    was enqueued is the parent's landing of this very card file.
+    """
+    floor = params.recover_after_photo_id
+    if floor is None:
+        return
+    for row in rows:
+        if row["id"] > floor and ctx.path_under_destination(row["folder_path"]):
+            state.recovered_photo_ids.add(row["id"])
+
+
 def _duplicate_gate(state, batch_st, *, source_file, rel, checker, db,
                     params, ctx, stop_requested):
     """Decide whether ``source_file`` is a duplicate of cataloged or
@@ -1400,6 +1426,7 @@ def _duplicate_gate(state, batch_st, *, source_file, rel, checker, db,
             db, token, source_file, ctx.path_under_any_source,
         )
         if likely_rows:
+            _note_recovered(state, likely_rows, params, ctx)
             state.skipped_duplicate += 1
             state.unverified_duplicate += 1
             _counts(state, rel)["skipped_duplicate"] += 1
@@ -1523,6 +1550,7 @@ def _duplicate_gate(state, batch_st, *, source_file, rel, checker, db,
         # the same (possibly dead) mount.
         return _GATE_CANCELLED
     if accept:
+        _note_recovered(state, verified_twin_rows, params, ctx)
         state.skipped_duplicate += 1
         _counts(state, rel)["skipped_duplicate"] += 1
         batch_st.dup_skips.append((source_file, False))
@@ -2184,9 +2212,10 @@ def _add_carried_working_copy_folders(state, params, db):
     its working-copy pass left them without one, and this run skips their
     files as already imported, so nothing else would extract them.
     """
-    if not params.vireo_dir or not params.carry_photo_ids:
+    carried = set(params.carry_photo_ids or ()) | state.recovered_photo_ids
+    if not params.vireo_dir or not carried:
         return
-    for chunk in _chunks(sorted(set(params.carry_photo_ids))):
+    for chunk in _chunks(sorted(carried)):
         placeholders = ",".join("?" for _ in chunk)
         rows = db.conn.execute(
             f"""SELECT DISTINCT f.path AS path
@@ -2740,6 +2769,14 @@ def _finalize_import(job, runner, db, state, params, *,
         # the local path. Without this the remote import always missed
         # after-import processing. See PR #1113 review.
         "photo_ids": sorted(state.imported_photo_ids),
+        # Photos an interrupted parent landed that this resume found as
+        # duplicates (``_note_recovered``) and its carry list lacked; the
+        # caller carries them too, into tags, the collection and processing.
+        "recovered_photo_ids": sorted(
+            state.recovered_photo_ids
+            - state.imported_photo_ids
+            - set(params.carry_photo_ids or ()),
+        ),
         # Stable-identity map so a recovery retry can verify each carried
         # ID still points at the same file. Without this the retry
         # authorizes any current photo row that happens to share an ID
