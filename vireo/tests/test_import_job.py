@@ -14971,3 +14971,40 @@ def test_file_type_import_matches_preview_and_recovers_existing_files(
             assert {c["dest_spec"] for c in calls["rsync"]} == {
                 "me@nas:/volume1/Photography/JPEG/2026/2026-07-03",
             }
+
+
+def test_resume_recovers_a_raw_through_its_recorded_companion(
+        tmp_path, monkeypatch):
+    """Recovery looks rows up by the parent's recorded landing paths, so
+    a RAW whose only recorded landing was its merged-in JPEG companion is
+    still the parent's photo."""
+    from import_job import ImportParams, _ImportRunState, _recover_parent_landings
+
+    _stub_extractor(monkeypatch, lambda src: True)
+    card = tmp_path / "card"
+    card.mkdir()
+    Image.new("RGB", (16, 16), "red").save(str(card / "DSC_0501.jpg"))
+    raw_bytes = (card / "DSC_0501.jpg").read_bytes() + b"RAW-SENSOR-DATA"
+    (card / "DSC_0501.NEF").write_bytes(raw_bytes)
+    archive = tmp_path / "archive"
+    db, _ws_id, result = _run_import(tmp_path, ImportParams(
+        sources=[str(card)], destination=str(archive),
+        vireo_dir=str(tmp_path / "vireo"),
+    ))
+    (raw_row,) = _photo_rows(db)
+    jpeg_path = next(p for p in result["landed_paths"] if p.endswith(".jpg"))
+
+    state = _ImportRunState(log_label="test")
+    _recover_parent_landings(state, ImportParams(
+        sources=[str(card)], destination=str(archive),
+        recover_landed_paths=frozenset({jpeg_path}),
+    ), db)
+    assert state.recovered_photo_ids == {raw_row["id"]}
+
+    # A path the parent never recorded recovers nothing.
+    state = _ImportRunState(log_label="test")
+    _recover_parent_landings(state, ImportParams(
+        sources=[str(card)], destination=str(archive),
+        recover_landed_paths=frozenset({str(archive / "elsewhere.jpg")}),
+    ), db)
+    assert state.recovered_photo_ids == set()

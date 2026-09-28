@@ -578,10 +578,9 @@ class ImportParams:
     carry_photo_ids: list | None = None
     # Set only when resuming an interrupted import: the destination paths
     # the interrupted run (and any interrupted run it resumed) recorded as
-    # landed before cataloging them. A card file this run skips as a
-    # duplicate of a row at one of these paths is that run's landing,
-    # whether or not its checkpoint got to record the photo id. See
-    # ``_note_recovered``.
+    # landed before cataloging them. A photo row at one of these paths is
+    # that run's landing, whether or not its checkpoint got to record the
+    # photo id. See ``_recover_parent_landings``.
     recover_landed_paths: frozenset | None = None
 
 
@@ -634,8 +633,7 @@ class _ImportRunState:
     # Fingerprints of ``imported_photo_ids`` captured so far for the
     # resume scope (see ``_publish_resume_scope``).
     resume_fingerprints: dict = field(default_factory=dict)
-    # Rows an interrupted parent landed, found by this resume's duplicate
-    # gate (see ``_note_recovered``).
+    # Rows an interrupted parent landed (see ``_recover_parent_landings``).
     recovered_photo_ids: set = field(default_factory=set)
     # Destination paths this run landed, recorded (and flushed to the
     # history row) before each batch is cataloged, so a resume can tell
@@ -1388,25 +1386,6 @@ _GATE_PROCEED = "proceed"
 _GATE_CANCELLED = "cancelled"
 
 
-def _note_recovered(state, rows, params, ctx):
-    """Record duplicate twins an interrupted parent import landed.
-
-    A resume skips the parent's landed files as duplicates. The parent's
-    checkpointed ``photo_ids`` can lag its catalog commits (a kill between
-    a batch's commit and the next checkpoint), so the resume identifies
-    them itself: the parent recorded each file's destination path before
-    cataloging it, and a twin at one of those paths is the parent's own
-    landing. Rows another import put elsewhere never match.
-    """
-    paths = params.recover_landed_paths
-    if not paths:
-        return
-    for row in rows:
-        path = os.path.normpath(os.path.join(row["folder_path"], row["filename"]))
-        if path in paths:
-            state.recovered_photo_ids.add(row["id"])
-
-
 def _duplicate_gate(state, batch_st, *, source_file, rel, checker, db,
                     params, ctx, stop_requested):
     """Decide whether ``source_file`` is a duplicate of cataloged or
@@ -1433,7 +1412,6 @@ def _duplicate_gate(state, batch_st, *, source_file, rel, checker, db,
             db, token, source_file, ctx.path_under_any_source,
         )
         if likely_rows:
-            _note_recovered(state, likely_rows, params, ctx)
             state.skipped_duplicate += 1
             state.unverified_duplicate += 1
             _counts(state, rel)["skipped_duplicate"] += 1
@@ -1557,7 +1535,6 @@ def _duplicate_gate(state, batch_st, *, source_file, rel, checker, db,
         # the same (possibly dead) mount.
         return _GATE_CANCELLED
     if accept:
-        _note_recovered(state, verified_twin_rows, params, ctx)
         state.skipped_duplicate += 1
         _counts(state, rel)["skipped_duplicate"] += 1
         batch_st.dup_skips.append((source_file, False))
@@ -2181,7 +2158,7 @@ def _record_landed_paths(job, db, state, batch_st, source_snapshots, runner):
 
     Recorded first, so an interrupted row never lacks a path whose photo
     row exists: a resume finds every row this run cataloged, even ones its
-    checkpointed ``photo_ids`` missed, by path (``_note_recovered``).
+    checkpointed ``photo_ids`` missed, by path (``_recover_parent_landings``).
     """
     state.landed_paths.update(
         os.path.normpath(landed.dest_path) for landed in batch_st.landed
@@ -2236,6 +2213,34 @@ def _publish_resume_scope(job, db, state, source_snapshots, runner=None,
         # timer thread, so the failure mode degrades to the pre-fix
         # window rather than losing the batch.
         runner.checkpoint_live_jobs()
+
+
+def _recover_parent_landings(state, params, db):
+    """Find the catalog rows an interrupted parent import landed.
+
+    A resume skips the parent's landed files as duplicates. The parent's
+    checkpointed ``photo_ids`` can lag its catalog commits (a kill between
+    a batch's commit and the next checkpoint), but it recorded every
+    landed destination path before cataloging it, so look the rows up by
+    those paths: a photo whose own file or companion (a JPEG merged into
+    its RAW) sits at one is the parent's. Rows other imports put
+    elsewhere never match.
+    """
+    by_folder = {}
+    for path in params.recover_landed_paths or ():
+        by_folder.setdefault(os.path.dirname(path), set()).add(
+            os.path.basename(path),
+        )
+    for folder, names in by_folder.items():
+        rows = db.conn.execute(
+            """SELECT p.id, p.filename, p.companion_path
+               FROM photos p JOIN folders f ON f.id = p.folder_id
+               WHERE f.path = ?""",
+            (folder,),
+        ).fetchall()
+        for row in rows:
+            if row["filename"] in names or row["companion_path"] in names:
+                state.recovered_photo_ids.add(row["id"])
 
 
 def _add_carried_working_copy_folders(state, params, db):
@@ -2801,9 +2806,9 @@ def _finalize_import(job, runner, db, state, params, *,
         # the local path. Without this the remote import always missed
         # after-import processing. See PR #1113 review.
         "photo_ids": sorted(state.imported_photo_ids),
-        # Photos an interrupted parent landed that this resume found as
-        # duplicates (``_note_recovered``) and its carry list lacked; the
-        # caller carries them too, into tags, the collection and processing.
+        # Photos an interrupted parent landed that its carry list lacked
+        # (``_recover_parent_landings``); the caller carries them too, into
+        # tags, the collection and processing.
         "recovered_photo_ids": sorted(
             state.recovered_photo_ids
             - state.imported_photo_ids
@@ -4914,6 +4919,7 @@ def run_import_job(job, runner, db_path, workspace_id, params):
         if state.cancelled:
             break
 
+    _recover_parent_landings(state, params, db)
     _add_carried_working_copy_folders(state, params, db)
     _extract_deferred_working_copies(state, params, runner, job, db)
 
