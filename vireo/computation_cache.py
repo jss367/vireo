@@ -21,6 +21,8 @@ import zipfile
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
+from file_replace import replace_file
+
 log = logging.getLogger(__name__)
 
 ARTIFACT_SCHEMA = 1
@@ -1161,7 +1163,7 @@ class ArtifactStore:
                 # replacing an existing file with identical bytes is
                 # safe; fall back to os.replace to keep bundle import
                 # and result publication working on those volumes.
-                os.replace(temp_name, destination)
+                replace_file(temp_name, destination)
                 created = True
             if not created and destination.read_bytes() != body:
                 raise CacheFormatError("content-addressed object collision")
@@ -1280,7 +1282,7 @@ class ArtifactStore:
                 handle.write(body)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temp_name, self.trust_path)
+            replace_file(temp_name, self.trust_path)
         finally:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(temp_name)
@@ -1326,7 +1328,7 @@ def write_bundle(destination, artifacts, device_label=None):
             archive.writestr("manifest.json", manifest_body)
             for digest, body in sorted(objects.items()):
                 archive.writestr(f"objects/{digest}.json", body)
-        os.replace(temp_name, destination)
+        replace_file(temp_name, destination)
     finally:
         with contextlib.suppress(FileNotFoundError):
             os.unlink(temp_name)

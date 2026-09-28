@@ -1521,8 +1521,9 @@ def test_save_retries_on_windows_permission_error(tmp_path, monkeypatch):
     where two consecutive saves in ``test_import_replaces_global_file`` hit
     ``[WinError 5] Access is denied`` from the second ``os.replace``."""
     import config as cfg
+    import file_replace
 
-    monkeypatch.setattr(cfg, "sys", _FakeWin32Sys())
+    monkeypatch.setattr(file_replace, "sys", _FakeWin32Sys())
     monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
 
     real_replace = cfg.os.replace
@@ -1535,7 +1536,7 @@ def test_save_retries_on_windows_permission_error(tmp_path, monkeypatch):
         return real_replace(src, dst)
 
     monkeypatch.setattr(cfg.os, "replace", flaky_replace)
-    monkeypatch.setattr(cfg.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(file_replace.time, "sleep", lambda _s: None)
 
     cfg.save({"classification_threshold": 0.42})
 
@@ -1548,15 +1549,16 @@ def test_save_raises_when_windows_retry_budget_exhausted(tmp_path, monkeypatch):
     exception is re-raised so callers see the underlying failure rather than
     silently dropping the write."""
     import config as cfg
+    import file_replace
 
-    monkeypatch.setattr(cfg, "sys", _FakeWin32Sys())
+    monkeypatch.setattr(file_replace, "sys", _FakeWin32Sys())
     monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
 
     def always_fail(src, dst):
         raise PermissionError(5, "Access is denied", dst)
 
     monkeypatch.setattr(cfg.os, "replace", always_fail)
-    monkeypatch.setattr(cfg.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(file_replace.time, "sleep", lambda _s: None)
 
     import pytest
 
@@ -1569,7 +1571,7 @@ def test_save_raises_when_windows_retry_budget_exhausted(tmp_path, monkeypatch):
 
 class _FakeWin32Sys:
     """Stand-in for ``sys`` that reports ``platform == 'win32'`` so the retry
-    branch in ``config._replace_with_windows_retry`` exercises on POSIX CI."""
+    branch in ``file_replace.replace_file`` exercises on POSIX CI."""
 
     platform = "win32"
 

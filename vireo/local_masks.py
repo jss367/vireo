@@ -26,6 +26,7 @@ import shutil
 import tempfile
 import time
 
+from file_replace import replace_file
 from PIL import Image
 
 log = logging.getLogger(__name__)
@@ -166,7 +167,7 @@ def create_snapshot(*, photo_id, mask_row, vireo_dir, native_size=None):
             with os.fdopen(fd, "wb") as f:
                 f.write(data)
             try:
-                os.replace(tmp, dest)
+                replace_file(tmp, dest)
             except PermissionError:
                 # Windows: concurrent os.replace() calls targeting the
                 # same destination can raise PermissionError even after
@@ -308,7 +309,7 @@ def transfer_snapshots(vireo_dir, old_photo_id, new_photo_id):
         src = os.path.join(directory, name)
         dst = snapshot_path(vireo_dir, int(new_photo_id), ref)
         try:
-            os.replace(src, dst)
+            replace_file(src, dst)
         except OSError:
             log.warning(
                 "Could not rename edit-mask snapshot %s -> %s; trying a copy",

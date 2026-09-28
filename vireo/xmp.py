@@ -18,6 +18,7 @@ import weakref
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
+from file_replace import replace_file
 from keyword_normalization import keyword_match_key
 
 log = logging.getLogger(__name__)
@@ -296,7 +297,7 @@ def _write_tree_atomic(tree, xmp_path):
             os.fsync(stream.fileno())
         if source_stat is not None:
             _preserve_sidecar_access(path, temp_path, source_stat)
-        os.replace(temp_path, path)
+        replace_file(temp_path, path)
     finally:
         if temp_path is not None:
             temp_path.unlink(missing_ok=True)

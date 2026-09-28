@@ -12,6 +12,7 @@ import threading
 
 import numpy as np
 import onnx_runtime
+from file_replace import replace_file
 from PIL import Image, ImageFilter
 from resource_ledger import ResourceWaitCancelled
 
@@ -144,7 +145,7 @@ def ensure_sam2_weights(variant="sam2-small", progress_callback=None):
                     # state or a fully written weights file — never a
                     # partial copy.
                     shutil.copy2(cached_path, tmp_path)
-                    os.replace(tmp_path, final_path)
+                    replace_file(tmp_path, final_path)
                 except Exception:
                     with contextlib.suppress(OSError):
                         os.unlink(tmp_path)

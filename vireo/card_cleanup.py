@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import path_guard
+from file_replace import replace_file
 from image_loader import (
     SUPPORTED_EXTENSIONS,
     ScanCancelled,
@@ -88,7 +89,7 @@ def write_manifest(manifest_dir, manifest):
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(manifest, f)
-        os.replace(tmp, path)
+        replace_file(tmp, path)
     except Exception:
         with contextlib.suppress(OSError):
             os.unlink(tmp)

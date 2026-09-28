@@ -37,6 +37,7 @@ from datetime import date
 
 import certifi
 import requests
+from file_replace import replace_file
 
 log = logging.getLogger(__name__)
 
@@ -634,7 +635,7 @@ def _write_taxonomy_json_atomically(path, data):
         # data, so private is the right default there.
         with contextlib.suppress(OSError):
             os.chmod(tmp_path, stat_module.S_IMODE(os.stat(target).st_mode))
-        os.replace(tmp_path, target)
+        replace_file(tmp_path, target)
     except BaseException:
         with contextlib.suppress(OSError):
             os.remove(tmp_path)

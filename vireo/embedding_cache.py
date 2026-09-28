@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 import numpy as np
+from file_replace import replace_file
 
 log = logging.getLogger(__name__)
 
@@ -374,7 +375,7 @@ class EmbeddingCheckpoint:
                 np.save(handle, value, allow_pickle=False)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temporary, self.path)
+            replace_file(temporary, self.path)
         finally:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(temporary)
@@ -650,7 +651,7 @@ class EmbeddingCache:
             if not np.array_equal(loaded, value):
                 raise ValueError("embedding payload changed during write")
             del loaded
-            os.replace(temporary, os.path.join(self.cache_dir, f"{digest}.npy"))
+            replace_file(temporary, os.path.join(self.cache_dir, f"{digest}.npy"))
         finally:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(temporary)
@@ -689,7 +690,7 @@ class EmbeddingCache:
                     handle.write("\n")
                     handle.flush()
                     os.fsync(handle.fileno())
-                os.replace(temporary, self.manifest_path)
+                replace_file(temporary, self.manifest_path)
             finally:
                 with contextlib.suppress(FileNotFoundError):
                     os.unlink(temporary)

@@ -19,6 +19,7 @@ from collections import defaultdict
 from contextlib import suppress
 
 import numpy as np
+from file_replace import replace_file
 
 log = logging.getLogger(__name__)
 
@@ -40,7 +41,7 @@ def _atomic_json_dump(data, path):
     try:
         with os.fdopen(fd, "w") as f:
             json.dump(data, f)
-        os.replace(tmp_path, path)
+        replace_file(tmp_path, path)
     except Exception:
         with suppress(OSError):
             os.unlink(tmp_path)
@@ -54,7 +55,7 @@ def _quarantine_corrupt_cache(path, exc):
         n += 1
         backup = f"{path}.corrupt-{int(time.time())}-{n}"
     try:
-        os.replace(path, backup)
+        replace_file(path, backup)
     except OSError:
         log.warning(
             "Pipeline cache at %s is invalid JSON and could not be moved aside: %s",

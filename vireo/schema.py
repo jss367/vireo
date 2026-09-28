@@ -20,6 +20,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from db import Database, IncompatibleDatabaseError
+from file_replace import replace_file
 
 log = logging.getLogger(__name__)
 
@@ -1115,7 +1116,7 @@ def _snapshot_before_migrations(db_path, target_version):
     try:
         with contextlib.closing(sqlite3.connect(db_path)) as conn:
             conn.execute("VACUUM INTO ?", (tmp,))
-        os.replace(tmp, backup)
+        replace_file(tmp, backup)
         log.info("Backed up database to %s before schema migration", backup)
     except (sqlite3.Error, OSError):
         log.warning(

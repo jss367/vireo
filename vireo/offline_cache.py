@@ -8,6 +8,8 @@ import threading
 import time
 import weakref
 
+from file_replace import replace_file
+
 # Weak values release idle locks without losing a lock held by a waiter.
 _original_locks = weakref.WeakValueDictionary()
 _original_locks_guard = threading.Lock()
@@ -61,7 +63,7 @@ def _copy_atomic(src, dst):
     os.close(fd)
     try:
         shutil.copy2(src, tmp)
-        os.replace(tmp, dst)
+        replace_file(tmp, dst)
     finally:
         if os.path.exists(tmp):
             with contextlib.suppress(OSError):

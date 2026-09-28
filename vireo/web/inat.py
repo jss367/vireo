@@ -19,6 +19,7 @@ import tempfile
 from camera_denoise import render_cache_fields as _camera_render_cache_fields
 from config import read_raw_config_file, settings_write_lock
 from db import Database
+from file_replace import replace_file
 from flask import Blueprint, jsonify, request
 from render_source import (
     companion_image_can_replace_raw_result as _companion_image_can_replace_raw_result,
@@ -634,7 +635,7 @@ def create_inat_blueprint(
             os.close(fd)
             fd = None
             rendered.save(tmp_path, format="JPEG", quality=quality)
-            os.replace(tmp_path, out_path)
+            replace_file(tmp_path, out_path)
             with open(meta_path, "w", encoding="utf-8") as f:
                 json.dump(expected_meta, f, sort_keys=True)
         except Exception:

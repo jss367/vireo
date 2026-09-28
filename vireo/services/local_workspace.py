@@ -33,7 +33,7 @@ import unicodedata
 from contextlib import suppress
 from pathlib import Path
 
-from config import _replace_with_windows_retry
+from file_replace import replace_file
 
 MANIFEST_VERSION = 2
 
@@ -392,7 +392,7 @@ def _write_manifest(path: Path, data: dict) -> None:
         os.fsync(handle.fileno())
     # Windows AV/indexers can hold the destination open transiently; use the
     # same retry-aware replace as config writes.
-    _replace_with_windows_retry(str(tmp), str(path))
+    replace_file(str(tmp), str(path))
 
 
 def _load_manifest(vireo_dir: str, workspace_id: int) -> dict | None:
@@ -798,7 +798,7 @@ def _copy_regular_with_hash(source: str, destination: str, source_root: str, can
                 if attempt == 0:
                     continue
                 raise LocalWorkspaceError(f"Source kept changing while it was copied: {source}")
-            os.replace(tmp, destination)
+            replace_file(tmp, destination)
             return {
                 "type": "file",
                 "size": after.st_size,
@@ -1293,7 +1293,7 @@ def _atomic_publish(local_path: str, remote_path: str) -> None:
         try:
             os.unlink(temp)
             os.symlink(os.readlink(local_path), temp)
-            os.replace(temp, remote_path)
+            replace_file(temp, remote_path)
             return
         except BaseException:
             with suppress(FileNotFoundError):
@@ -1305,7 +1305,7 @@ def _atomic_publish(local_path: str, remote_path: str) -> None:
         # rejects read-only handles with EBADF).
         with open(temp, "rb+") as handle:
             os.fsync(handle.fileno())
-        os.replace(temp, remote_path)
+        replace_file(temp, remote_path)
     except BaseException:
         with suppress(FileNotFoundError):
             os.unlink(temp)
