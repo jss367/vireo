@@ -11285,6 +11285,137 @@ def test_interrupted_import_resumes_with_the_photos_it_landed(
         assert {d for d, _mode in wc_scopes[0]} == seed_folders
 
 
+def test_interrupted_import_resume_tags_the_carried_photos(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """Codex PR #1842 P1: when an import with common tags is
+    interrupted after landing a batch, the parent dies before the
+    post-``run_import_job`` tag apply, so its photos are cataloged
+    without their requested tags. The resume forces
+    ``skip_duplicates=true``, so those photos are absent from
+    ``result["photo_ids"]``; if the tag apply only saw the newly
+    imported ids, every photo landed before the restart would silently
+    miss the tags. The resume must apply the tags to the union of
+    newly imported and carried ids.
+    """
+    import import_job
+    import scanner
+    from jobs import INTERRUPTED_BY_RESTART
+
+    app, db = app_and_db
+    runner = app._job_runner
+    card = _chain_card(tmp_path)
+    archive = tmp_path / "arch"
+    tag_name = "Kenya trip"
+
+    partials = {}
+    real_publish = import_job._publish_resume_scope
+
+    def recording_publish(job, db_, state, source_snapshots, runner=None):
+        real_publish(job, db_, state, source_snapshots, runner=runner)
+        partials[job["id"]] = job["partial_result"]
+
+    monkeypatch.setattr(import_job, "_publish_resume_scope", recording_publish)
+
+    with app.test_client() as client:
+        # Parent import with common tags, no chained after-import so the
+        # test doesn't need a saved process for this leg.
+        resp = client.post("/api/jobs/import-photos", json={
+            "sources": [str(card)],
+            "destination": str(archive),
+            "after_import": None,
+            "tags": [tag_name],
+        })
+        assert resp.status_code == 200, resp.get_json()
+        parent_id = resp.get_json()["job_id"]
+        parent = wait_for_job_via_client(client, parent_id)
+        final = parent["result"]
+        assert final["photo_ids"]
+
+        # Simulate the parent dying BEFORE its post-import tag apply:
+        # strip the tag rows the completed parent added, so we start
+        # the resume from the state an interrupted parent would leave.
+        keyword_id = db.conn.execute(
+            "SELECT id FROM keywords WHERE name = ?", (tag_name,),
+        ).fetchone()["id"]
+        db.conn.execute(
+            "DELETE FROM photo_keywords WHERE photo_id IN (%s)"
+            % ",".join("?" * len(final["photo_ids"])),
+            final["photo_ids"],
+        )
+        db.conn.commit()
+
+        # Replay the crash on the parent row so the sweep marks it
+        # interrupted with its landed ``photo_ids`` (partials was
+        # captured by the recording publish).
+        partial = partials[parent_id]
+        with runner._lock:
+            runner._jobs.pop(parent_id)
+        db.conn.execute(
+            "UPDATE job_history SET status = 'running', result = ? "
+            "WHERE id = ?",
+            (json.dumps(partial), parent_id),
+        )
+        seed_ids = partial["photo_ids"]
+        db.conn.execute(
+            "UPDATE photos SET working_copy_path = NULL WHERE id IN (%s)"
+            % ",".join("?" * len(seed_ids)),
+            seed_ids,
+        )
+        db.conn.commit()
+        runner._startup_sweep(db)
+        db.conn.commit()
+        row = next(
+            h for h in client.get("/api/jobs/history").get_json()
+            if h["id"] == parent_id
+        )
+        assert row["status"] == "failed"
+        assert row["result"]["interrupted"] is True
+        assert row["result"]["error"] == INTERRUPTED_BY_RESTART
+
+        # Skip the working-copy pass — it isn't what this test covers.
+        monkeypatch.setattr(
+            scanner, "_extract_working_copies",
+            lambda db_, vireo_dir, **kw: None,
+        )
+        cfg = row["config"]
+        resp = client.post("/api/jobs/import-photos", json={
+            "sources": cfg["sources"],
+            "destination": cfg["destination"],
+            "recursive": True,
+            "folder_template": cfg["folder_template"],
+            "file_types": cfg["file_types"],
+            "skip_duplicates": True,
+            "after_import": cfg["after_import"],
+            "tags": cfg["tags"],
+            "parent_import_job_id": parent_id,
+            "carry_photo_ids": row["result"]["photo_ids"],
+            "local_processing": False,
+            "defer_nas_transfer": False,
+        })
+        assert resp.status_code == 200, resp.get_json()
+        resumed = wait_for_job_via_client(client, resp.get_json()["job_id"])
+        result = resumed["result"]
+
+        # The resume copies nothing new (all files skipped as
+        # duplicates) — ``photo_ids`` is empty — but the carried photos
+        # still get the tag.
+        assert result["photo_ids"] == []
+        assert sorted(result["carried_photo_ids"]) == sorted(seed_ids)
+        assert result["tagging"]["tagged_photos"] == len(seed_ids), (
+            result["tagging"]
+        )
+        for pid in seed_ids:
+            names = {row["name"] for row in db.get_photo_keywords(pid)}
+            assert tag_name in names, (pid, names)
+        # ``keyword_id`` didn't change under us — the tag apply must
+        # reuse the same keyword rather than create a shadow.
+        current_kw = db.conn.execute(
+            "SELECT id FROM keywords WHERE name = ?", (tag_name,),
+        ).fetchone()["id"]
+        assert current_kw == keyword_id
+
+
 def test_import_pauses_chained_classification_when_labels_are_missing(
     app_and_db, tmp_path, monkeypatch,
 ):

@@ -1015,8 +1015,29 @@ def enqueue_import_photos(service: ImportService, db: Database, body: dict) -> d
                 result["local_processing"] = True
                 result["final_destination"] = destination
                 result["staging_destination"] = import_destination
+            # A resume's carried photos never reached the parent's own
+            # post-``run_import_job`` tag/GPS pass (the parent died
+            # first), and this run skips their files as already
+            # imported, so ``result["photo_ids"]`` alone would leave
+            # every photo landed before the restart silently missing
+            # the requested tags and GPS-derived location. Fold in the
+            # carried scope so the tag apply covers every photo the
+            # user asked to be tagged. Tag insertion is already
+            # idempotent (existing ``photo_keywords`` rows are skipped)
+            # and GPS resolution rewrites each photo's location from
+            # its own EXIF, so passing already-tagged/located carried
+            # photos from an ordinary failed-file retry is a no-op.
+            carried = carry_photo_ids or []
+            fresh = result.get("photo_ids") or []
+            seen = set()
+            tag_photo_ids = []
+            for pid in list(fresh) + list(carried):
+                if pid in seen:
+                    continue
+                seen.add(pid)
+                tag_photo_ids.append(pid)
             service._apply_import_tags(
-                active_ws, result.get("photo_ids") or [], import_tags,
+                active_ws, tag_photo_ids, import_tags,
                 location_from_gps, result, job=job, runner=runner,
             )
             # Atomically honor a pending pause/cancel before collection
