@@ -335,6 +335,56 @@ def test_raw_falls_back_to_embedded_on_postprocess_failure(tmp_path, monkeypatch
     assert max(result.size) == 1600, "should return the embedded JPEG as-is"
 
 
+def test_linear_raw_falls_back_to_embedded_after_failed_decode(tmp_path, monkeypatch):
+    """HE* in the editor: a failed unpack poisons the LibRaw handle.
+
+    Real LibRaw answers every call after a failed decode with
+    LibRawOutOfOrderCallError, including extract_thumb(). Linear mode reads
+    the preview only after the decode fails, so it must use a fresh handle;
+    reading it from the failed one left the editor with no image at all.
+    """
+    import rawpy
+    from float_image import FloatImage
+    from image_loader import RAW_DECODE_LINEAR, load_image
+
+    nef = tmp_path / "test.nef"
+    nef.write_bytes(b"fake NEF content")
+
+    class _PoisonedAfterFailure(_FakeRaw):
+        failed = False
+
+        def postprocess(self, half_size=False, **kwargs):
+            self.failed = True
+            return super().postprocess(half_size=half_size, **kwargs)
+
+        def extract_thumb(self):
+            if self.failed:
+                raise rawpy.LibRawOutOfOrderCallError(
+                    b'Out of order call of libraw function'
+                )
+            return super().extract_thumb()
+
+    opened = []
+
+    def _imread(path):
+        opened.append(_PoisonedAfterFailure(
+            embedded_jpeg=_jpeg_bytes((1600, 1067)),
+            postprocess_error=rawpy.LibRawFileUnsupportedError(
+                b'Unsupported file format or not RAW file'
+            ),
+        ))
+        return opened[-1]
+
+    monkeypatch.setattr(rawpy, 'imread', _imread)
+
+    result = load_image(str(nef), max_size=None, raw_decode=RAW_DECODE_LINEAR)
+
+    assert result is not None
+    assert not isinstance(result, FloatImage)
+    assert result.size == (1600, 1067)
+    assert len(opened) == 2
+
+
 def test_raw_fallback_log_claims_full_output_only_when_embedded_matches_sensor(
     tmp_path, monkeypatch, caplog
 ):

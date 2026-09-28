@@ -949,7 +949,11 @@ def _load_raw(path, max_size, raw_decode=RAW_DECODE_JPEG_FIRST):
             )
         except Exception as e:
             if raw_decode == RAW_DECODE_LINEAR:
-                embedded = _extract_embedded_jpeg(raw)
+                # A failed unpack leaves this LibRaw handle refusing further
+                # calls (LibRawOutOfOrderCallError), so extract_thumb() on it
+                # would always miss; read the preview from a fresh handle.
+                with rawpy.imread(str(path)) as fresh:
+                    embedded = _extract_embedded_jpeg(fresh)
             if embedded is not None:
                 # Only claim "full camera output" when the embedded JPEG
                 # actually matches the sensor's active dimensions on both
