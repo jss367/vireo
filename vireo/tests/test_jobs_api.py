@@ -722,6 +722,13 @@ def test_jobs_page_returns_200(app_and_db):
     # checkpoint recorded the photos it landed (older rows lack them).
     assert b'data-import-resume' in resp.data
     assert b'result.interrupted && Array.isArray(result.photo_ids)' in resp.data
+    # Resume must force ``skip_duplicates=true`` — a parent import
+    # configured with ``skip_duplicates=false`` would otherwise carry
+    # that false through ``importRetryBody`` and the collision resolver
+    # would suffix-copy every previously-landed file, duplicating
+    # catalog rows and chaining after-import over both the carried
+    # originals and the new copies.
+    assert b'if (isResume) retryBody.skip_duplicates = true;' in resp.data
     # Import-in-place's overall counter pauses during discovery/metadata.
     # The jobs page must not turn that pause into a growing ETA or keep
     # rendering the previous source's filenames under the new phase.

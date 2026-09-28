@@ -192,6 +192,16 @@ class JobRunner:
         # test suite creates) own no thread.
         self._checkpoint_thread = None
         self._checkpoint_wakeup = threading.Event()
+        # Serializes the whole snapshot+write path so a late-finishing
+        # older snapshot (the 2s timer's) cannot overwrite the row with
+        # a scope that a fresher snapshot (a worker's synchronous flush
+        # right after a batch commit) already persisted. Without this
+        # the two callers can each snapshot under ``_lock`` and then
+        # race in ``_write_checkpoints``, leaving the interrupted row
+        # holding stale ``photo_ids`` if Vireo crashes in that window.
+        # Held around the whole checkpoint sequence, above ``_lock`` in
+        # lock order: nothing else acquires it.
+        self._checkpoint_write_lock = threading.Lock()
         # Worker ownership is explicit.  Daemon threads alone are not a
         # lifecycle: short-lived create_app() callers (especially tests) must
         # be able to cancel and join their work before tearing down databases
@@ -563,36 +573,46 @@ class JobRunner:
         of rows updated. Public so tests (and callers that just did something worth
         recording) can checkpoint deterministically instead of waiting
         for the timer.
+
+        The whole snapshot+write path runs under
+        ``_checkpoint_write_lock``: without it, a worker's synchronous
+        flush after a batch commit (scope N+1) can race the 2s timer
+        that started earlier with scope N — both snapshot under
+        ``_lock``, both release it, and whichever ``_write_checkpoints``
+        finishes last wins. A late-finishing N would overwrite N+1 on
+        disk and, on a crash inside that window, leave the interrupted
+        row missing the latest cataloged photo ids.
         """
         if not self._db_path:
             return 0
-        with self._lock:
-            snapshots = []
-            for j in self._live_persisted_jobs_locked():
-                snap = self._snapshot_job(j)
-                # A worker publishes ``partial_result`` (a fresh dict per
-                # update) for what a crash must not lose. Write it only
-                # when it changed: it can be large, and the row keeps the
-                # last written copy between writes.
-                partial = j.get("partial_result")
-                if (
-                    snap.get("result") is None
-                    and partial is not None
-                    and partial is not j.get("_checkpointed_partial")
-                ):
-                    snap["result"] = partial
-                    snap["_partial_result"] = partial
-                snapshots.append(snap)
-        if not snapshots:
-            return 0
-        written = self._write_checkpoints(snapshots)
-        if written:
+        with self._checkpoint_write_lock:
             with self._lock:
-                for snap in snapshots:
-                    live = self._jobs.get(snap["id"])
-                    if live is not None and "_partial_result" in snap:
-                        live["_checkpointed_partial"] = snap["_partial_result"]
-        return written
+                snapshots = []
+                for j in self._live_persisted_jobs_locked():
+                    snap = self._snapshot_job(j)
+                    # A worker publishes ``partial_result`` (a fresh dict
+                    # per update) for what a crash must not lose. Write
+                    # it only when it changed: it can be large, and the
+                    # row keeps the last written copy between writes.
+                    partial = j.get("partial_result")
+                    if (
+                        snap.get("result") is None
+                        and partial is not None
+                        and partial is not j.get("_checkpointed_partial")
+                    ):
+                        snap["result"] = partial
+                        snap["_partial_result"] = partial
+                    snapshots.append(snap)
+            if not snapshots:
+                return 0
+            written = self._write_checkpoints(snapshots)
+            if written:
+                with self._lock:
+                    for snap in snapshots:
+                        live = self._jobs.get(snap["id"])
+                        if live is not None and "_partial_result" in snap:
+                            live["_checkpointed_partial"] = snap["_partial_result"]
+            return written
 
     def _write_checkpoints(self, snapshots):
         """Write checkpoint snapshots in one transaction.
