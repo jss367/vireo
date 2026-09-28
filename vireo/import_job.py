@@ -2253,8 +2253,10 @@ def _publish_resume_scope(job, db, state, source_snapshots, runner=None,
         # row's result with an error and lose the scope earlier batches
         # recorded, so wait for the database; Stop ends the wait (the
         # caller then leaves the batch uncataloged).
+        def cancel_check():
+            return runner.is_cancelled(job["id"])
         waiting = False
-        while not runner.flush_partial_result(job):
+        while not runner.flush_partial_result(job, cancel_check=cancel_check):
             if runner.is_cancelled(job["id"]):
                 return False
             if not waiting:
@@ -5027,7 +5029,22 @@ def run_import_job(job, runner, db_path, workspace_id, params):
         _link_twins_and_emit(
             state, batch_st, db, workspace_id, _emit, rel, queued,
         )
-        _publish_resume_scope(job, db, state, source_snapshots, runner=runner)
+        # A rejected landing is removed from ``state.landed_files`` in
+        # memory, but its pre-catalog identity is already on the history
+        # row (``_record_landed_files`` above required a flush). If this
+        # end-of-batch publish is only best-effort, a crash or transient
+        # checkpoint failure between now and the next required flush
+        # would leave the rejected entry on disk — recovery could then
+        # match its unchanged bad bytes by size/mtime (a merged JPEG
+        # companion has no cataloged hash to compare) and fold the RAW
+        # row into the resumed tag/GPS and processing scopes. Wait for
+        # the removal to land before continuing.
+        need_durable = bool(batch_st.reclassified_landed_paths)
+        if not _publish_resume_scope(
+            job, db, state, source_snapshots, runner=runner,
+            require_flush=need_durable,
+        ) and need_durable:
+            state.cancelled = True
         if state.cancelled:
             break
 

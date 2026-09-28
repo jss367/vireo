@@ -1720,6 +1720,35 @@ def test_flush_partial_result_is_on_the_row_before_it_returns(tmp_path):
     assert runner.shutdown(timeout=5)
 
 
+def test_flush_partial_result_honors_cancel_check_between_attempts(tmp_path):
+    """When SQLite stays write-locked, a Stop pressed by the worker must not
+    have to wait through the whole retry window; the cancel_check callback
+    returns False on the next attempt."""
+    from db import Database
+    from jobs import JobRunner
+
+    db = Database(str(tmp_path / "test.db"))
+    runner = JobRunner(db=db)
+
+    # Simulate a checkpoint that never lands: partial is set but the
+    # internal checkpointed_partial is never updated.
+    def stuck_checkpoint():
+        return 0
+
+    runner.checkpoint_live_jobs = stuck_checkpoint
+    calls = {"n": 0}
+
+    def cancel_after_two():
+        calls["n"] += 1
+        return calls["n"] > 2
+
+    job = {"id": "x", "partial_result": {"a": 1}}
+    assert runner.flush_partial_result(job, cancel_check=cancel_after_two) is False
+    # Cancel_check was polled once per attempt; the third poll ended the wait.
+    assert calls["n"] == 3
+    assert runner.shutdown(timeout=5)
+
+
 def test_ephemeral_job_is_never_checkpointed(tmp_path):
     from db import Database
     from jobs import JobRunner

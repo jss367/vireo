@@ -777,12 +777,18 @@
   // list would silently leave them unprocessed.
   function isResumableImport(job) {
     var result = job && job.result;
-    // An import whose after-import chain ran before the restart finished
-    // everything but the final write; resuming would collect and process
-    // its photos twice.
-    return !!(job && job.type === 'import' && job.status === 'failed' &&
-      result && result.interrupted && Array.isArray(result.photo_ids) &&
-      !result.chained);
+    if (!(job && job.type === 'import' && job.status === 'failed' &&
+        result && result.interrupted && Array.isArray(result.photo_ids))) {
+      return false;
+    }
+    // An import whose chain ran AND whose tag pass was marked applied
+    // finished everything but the final write; resuming would collect
+    // and process its photos twice.
+    if (result.chained && result.tags_applied) return false;
+    // Chain ran but tag/GPS work is still owed (a Stop cut the pass
+    // short, or an error left tags unmarked). The resume replays only
+    // the tag pass and skips re-chaining server-side.
+    return true;
   }
 
   function importResumeHint(job) {

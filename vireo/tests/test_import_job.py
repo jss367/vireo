@@ -54,7 +54,7 @@ class FakeRunner:
         self.checkpoint_calls += 1
         return 0
 
-    def flush_partial_result(self, job):
+    def flush_partial_result(self, job, cancel_check=None):
         self.checkpoint_calls += 1
         return True
 
@@ -15044,7 +15044,7 @@ def test_landed_files_wait_for_the_database_before_cataloging(tmp_path):
             self.busy_for = busy_for
             self.stop = stop
 
-        def flush_partial_result(self, job):
+        def flush_partial_result(self, job, cancel_check=None):
             self.checkpoint_calls += 1
             if self.checkpoint_calls > 2 and self.busy_for:
                 self.busy_for -= 1
@@ -15090,7 +15090,7 @@ def test_stop_while_waiting_before_planning_skips_the_card_walk(
     )
 
     class StoppedRunner(FakeRunner):
-        def flush_partial_result(self, job):
+        def flush_partial_result(self, job, cancel_check=None):
             self.cancelled_ids.add(job["id"])
             return False
 

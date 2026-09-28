@@ -621,17 +621,24 @@ class JobRunner:
                             live["_checkpointed_partial"] = snap["_partial_result"]
             return written
 
-    def flush_partial_result(self, job, attempts=10):
+    def flush_partial_result(self, job, attempts=10, cancel_check=None):
         """Write ``job["partial_result"]`` to its history row now.
 
         For a worker that must not proceed until the row holds its latest
         partial result. A checkpoint skips a write it can't get the lock
         for, so retry with a short backoff. Returns True once the row holds
         it, or at once when this runner keeps no history for the job.
+
+        ``cancel_check``, when passed, is polled before each attempt so a
+        Stop pressed while SQLite stays write-locked can end the wait
+        without sitting through the full retry window (each internal
+        checkpoint call blocks up to the 5s SQLite busy timeout).
         """
         if not self._db_path or job.get("ephemeral"):
             return True
         for attempt in range(attempts):
+            if cancel_check is not None and cancel_check():
+                return False
             self.checkpoint_live_jobs()
             if job.get("_checkpointed_partial") is job.get("partial_result"):
                 return True

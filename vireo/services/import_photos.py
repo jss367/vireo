@@ -1081,21 +1081,31 @@ def enqueue_import_photos(service: ImportService, db: Database, body: dict) -> d
                 active_ws, tag_photo_ids, import_tags,
                 location_from_gps, result, job=job, runner=runner,
             )
+            tag_errors = bool((result.get("tagging") or {}).get("errors"))
             # A pass Stop cut short, or one with failed tags or locations,
             # still owes work; leave it unmarked so a resume replays it.
-            if not result.get("cancelled") and not (
-                (result.get("tagging") or {}).get("errors")
-            ):
+            if not result.get("cancelled") and not tag_errors:
                 _mark_post_import_step(job, "tags_applied")
             # Atomically honor a pending pause/cancel before collection
             # publication and child-job handoff. The shared runner gate
             # rejects new requests once this final phase begins.
             if not runner.begin_uncancellable(job["id"]):
                 result["cancelled"] = True
-            _chain_after_import(job, result)
+            # Skip re-chaining when this run is a tag-only resume of a
+            # parent whose chain already ran (see
+            # ``_interrupted_parent_resume``): the collection and
+            # processing child are already there.
+            if not (parent_resume and parent_resume.get("chain_already_ran")):
+                _chain_after_import(job, result)
+            else:
+                result["after_import_skipped"] = (
+                    "chain already ran on the interrupted parent"
+                )
             # A cancelled run skipped the chain (and may owe tags), so it
-            # stays resumable; only a chain that ran is marked.
-            if not result.get("cancelled"):
+            # stays resumable; a chain that ran with owed tag work also
+            # stays resumable — the mark is a promise both post-import
+            # steps landed.
+            if not result.get("cancelled") and not tag_errors:
                 _mark_post_import_step(job, "chained", result)
             return result
         finally:

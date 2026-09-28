@@ -798,12 +798,17 @@ class ImportService:
         parent_resume = self._interrupted_parent_resume(
             parent_config, parent_result,
         )
-        if parent_resume is not None and self._chained_job_exists(
-            db, parent_id,
+        if (
+            parent_resume is not None
+            and not parent_resume.get("chain_already_ran")
+            and self._chained_job_exists(db, parent_id)
         ):
             # The restart landed after the parent handed its photos to
             # processing but before its ``chained`` mark reached the row.
             # Resuming would collect and process them a second time.
+            # (A resume that DOES know the chain ran — ``chain_already_ran``
+            # from the parent's own ``chained`` mark — is fine: it replays
+            # only the owed tag pass and skips re-chaining below.)
             return None, None, None, None, None, ImportFailure(
                 "This import had already started processing its photos "
                 "before Vireo restarted, so there is nothing to resume. "
@@ -846,11 +851,17 @@ class ImportService:
     def _interrupted_parent_resume(parent_config, parent_result):
         """What a resume inherits from an interrupted parent (see
         ``_validate_parent_import_job``); None for any other parent."""
-        # A parent that finished its after-import chain before the restart
-        # has nothing left to resume; its row only missed the final write.
-        if not parent_result.get("interrupted") or parent_result.get("chained"):
+        if not parent_result.get("interrupted"):
             return None
         tags_applied = bool(parent_result.get("tags_applied"))
+        chain_already_ran = bool(parent_result.get("chained"))
+        # Both post-import steps ran — nothing left to resume; the row
+        # only missed the final write. A ``chained`` mark without
+        # ``tags_applied`` means a Stop cut the tag pass short or an
+        # error left tags/GPS owed after the chain enqueued; that stays
+        # resumable as a tag-only replay (the chain isn't re-run).
+        if chain_already_ran and tags_applied:
+            return None
 
         def ids(values):
             return [
@@ -876,6 +887,10 @@ class ImportService:
             },
             # Its tag/GPS pass covered everything it owed once it ran.
             "tags_applied": tags_applied,
+            # The chain already ran (collection created, processing
+            # child enqueued) — the resume must not re-chain, only
+            # replay the owed tag pass.
+            "chain_already_ran": chain_already_ran,
             # The parent's own landings, minus photos it only carried (a
             # retry with duplicate skipping off adopts those into its
             # photo_ids, but their own import already tagged them), plus

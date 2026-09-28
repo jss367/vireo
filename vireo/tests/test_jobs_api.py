@@ -725,7 +725,10 @@ def test_jobs_page_returns_200(app_and_db):
     # resume recovered from its interrupted parent.
     assert b"['photo_ids', 'carried_photo_ids', 'recovered_photo_ids']" in resp.data
     assert b'result.interrupted && Array.isArray(result.photo_ids)' in resp.data
-    assert b'!result.chained' in resp.data
+    # A parent with both post-import steps done has nothing to resume;
+    # a parent whose chain ran but still owes tag/GPS work stays
+    # resumable as a tag-only replay.
+    assert b'result.chained && result.tags_applied' in resp.data
     # Resume must force ``skip_duplicates=true`` — a parent import
     # configured with ``skip_duplicates=false`` would otherwise carry
     # that false through ``importRetryBody`` and the collision resolver
@@ -11866,6 +11869,99 @@ def test_resume_allows_a_parent_whose_chained_pipeline_never_started(
             "/api/jobs/import-photos", json=_resume_body(client, parent_id),
         )
         assert resp.status_code == 200, resp.get_json()
+
+
+def test_resume_replays_tags_when_chain_ran_but_tags_owed(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """Tag errors leave ``tags_applied`` unset while ``_chain_after_import``
+    still runs, so a crash before the final job write leaves the row with
+    ``chained=True`` and ``tags_applied=False``. Without the tag-only
+    resume path the row is dead — Retry needs ``failed > 0`` (tag errors
+    don't set it), and Resume used to refuse any ``chained=True`` row.
+    Resume must now offer to replay the owed tag pass and skip re-chain.
+    """
+    from services.imports import ImportService
+
+    first_call = {"done": False}
+
+    def flaky_tag_pass(self, workspace_id, photo_ids, tags,
+                       location_from_gps, result, **kw):
+        if not first_call["done"]:
+            first_call["done"] = True
+            result["tagging"] = {"errors": ["Kenya trip: transient DB lock"]}
+            return
+        # The resume replays the pass — apply for real this time.
+        real_apply(self, workspace_id, photo_ids, tags,
+                   location_from_gps, result, **kw)
+
+    real_apply = ImportService._apply_import_tags
+    monkeypatch.setattr(ImportService, "_apply_import_tags", flaky_tag_pass)
+
+    app, db = app_and_db
+    quick_look_id = next(
+        pr["id"] for pr in db.get_saved_processes()
+        if pr["name"] == "Quick look")
+    card = _chain_card(tmp_path)
+    tag_name = "Kenya trip"
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/import-photos", json={
+            "sources": [str(card)],
+            "destination": str(tmp_path / "arch"),
+            "tags": [tag_name],
+            "after_import": quick_look_id,
+        })
+        assert resp.status_code == 200, resp.get_json()
+        parent_id = resp.get_json()["job_id"]
+        parent = wait_for_job_via_client(client, parent_id)["result"]
+        # Let the chained pipeline finish (the parent chained even though
+        # tags failed) before replaying a crash on the parent alone.
+        if parent.get("process_job_id"):
+            wait_for_job_via_client(client, parent["process_job_id"])
+        with app._job_runner._lock:
+            marks = app._job_runner._jobs[parent_id]["partial_result"]
+        # The chain ran, but tags are owed — the row is resumable via the
+        # tag-only path.
+        assert "tags_applied" not in marks
+        assert "chained" not in marks
+        own = parent["photo_ids"]
+        assert own
+
+        _interrupt_import_row(app, db, parent_id, {
+            "landed_files": parent["landed_files"],
+            "photo_ids": own,
+            "photo_fingerprints": parent["photo_fingerprints"],
+            "source_snapshots": parent["source_snapshots"],
+            # Simulate the crash-window state: chain flushed, tags still
+            # owed.
+            "chained": True,
+        }, chained=True)
+        # Nothing is tagged yet on the interrupted row's photos.
+        tagged = db.conn.execute(
+            "SELECT COUNT(*) FROM photo_keywords WHERE photo_id IN (%s)"
+            % ",".join("?" * len(own)),
+            own,
+        ).fetchone()[0]
+        assert tagged == 0
+
+        resp = client.post(
+            "/api/jobs/import-photos", json=_resume_body(client, parent_id),
+        )
+        assert resp.status_code == 200, resp.get_json()
+        resume_id = resp.get_json()["job_id"]
+        resume = wait_for_job_via_client(client, resume_id)["result"]
+        # The resume must skip re-chaining (chain already ran on the parent).
+        assert resume.get("process_job_id") is None
+        assert resume.get("after_import_skipped") == (
+            "chain already ran on the interrupted parent"
+        )
+        # And the owed tags must have landed.
+        tagged = db.conn.execute(
+            "SELECT COUNT(*) FROM photo_keywords WHERE photo_id IN (%s)"
+            % ",".join("?" * len(own)),
+            own,
+        ).fetchone()[0]
+        assert tagged == len(own)
 
 
 def test_resume_with_duplicate_skipping_off_adopts_the_parents_landings(
