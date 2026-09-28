@@ -11427,6 +11427,10 @@ def _interrupt_import_row(app, db, job_id, result, *, chained=False):
     ``chained``, the crash came before the import chained its processing
     run, so that run never existed."""
     runner = app._job_runner
+    # The job reads as finished before its thread writes the final history
+    # row; let that land first, or it overwrites the replayed checkpoint
+    # below and the sweep never sees an interrupted row.
+    wait_for_job_via_runner(runner, job_id, wait_for_history=True)
     with runner._lock:
         chained_ids = [
             jid for jid, j in runner._jobs.items()
