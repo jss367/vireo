@@ -11692,6 +11692,8 @@ def test_tag_pass_cut_short_is_not_marked_applied(
         with app._job_runner._lock:
             marks = app._job_runner._jobs[job_id]["partial_result"]
         assert "tags_applied" not in marks
+        # The cancelled run skipped its chain, so it stays resumable.
+        assert "chained" not in marks
 
 
 def test_tag_pass_with_failures_is_not_marked_applied(

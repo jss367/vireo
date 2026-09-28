@@ -15036,7 +15036,8 @@ def test_landed_files_wait_for_the_database_before_cataloging(tmp_path):
     ])
 
     class BusyRunner(FakeRunner):
-        """Lands the pre-planning flush, then is busy ``busy_for`` times."""
+        """Lands the two flushes before copying (empty scope, discovered
+        snapshots), then is busy ``busy_for`` times."""
 
         def __init__(self, busy_for, stop=False):
             super().__init__()
@@ -15045,7 +15046,7 @@ def test_landed_files_wait_for_the_database_before_cataloging(tmp_path):
 
         def flush_partial_result(self, job):
             self.checkpoint_calls += 1
-            if self.checkpoint_calls > 1 and self.busy_for:
+            if self.checkpoint_calls > 2 and self.busy_for:
                 self.busy_for -= 1
                 if self.stop:
                     self.cancelled_ids.add(job["id"])
@@ -15122,3 +15123,31 @@ def test_landing_whose_stat_fails_stays_in_the_record(tmp_path, monkeypatch):
         recover_landed_files=result["landed_files"],
     ), db)
     assert state.recovered_photo_ids == {r["id"] for r in _photo_rows(db)}
+
+
+def test_companion_recorded_without_stat_matches_by_current_hash(tmp_path):
+    """A merged JPEG companion recorded without a stat is matched by
+    hashing the file; replaced bytes don't match."""
+    from import_job import _is_parent_landing
+    from scanner import compute_file_hash
+
+    jpeg = tmp_path / "DSC_0001.jpg"
+    jpeg.write_bytes(b"companion bytes")
+    landed = {str(jpeg): [-1, -1, compute_file_hash(str(jpeg))]}
+    assert _is_parent_landing(str(tmp_path), "DSC_0001.jpg", None, landed)
+    jpeg.write_bytes(b"replaced bytes!")
+    assert not _is_parent_landing(str(tmp_path), "DSC_0001.jpg", None, landed)
+
+
+def test_rejected_landing_leaves_the_resume_record():
+    from import_job import _ImportRunState, _LandedFile, _reclassify_landed_failed
+
+    state = _ImportRunState(log_label="test")
+    state.landed_files["/arch/a.jpg"] = [1, 2, "h"]
+    state.copied = 1
+    entry = _LandedFile(
+        dest_path="/arch/a.jpg", verified_hash="h", source_path="/card/a.jpg",
+        origin="copied", src_size=1, src_mtime_ns=2,
+    )
+    _reclassify_landed_failed(state, "2026", entry, "hash mismatch", True)
+    assert state.landed_files == {}

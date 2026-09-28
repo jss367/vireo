@@ -1093,7 +1093,10 @@ def enqueue_import_photos(service: ImportService, db: Database, body: dict) -> d
             if not runner.begin_uncancellable(job["id"]):
                 result["cancelled"] = True
             _chain_after_import(job, result)
-            _mark_post_import_step(job, "chained", result)
+            # A cancelled run skipped the chain (and may owe tags), so it
+            # stays resumable; only a chain that ran is marked.
+            if not result.get("cancelled"):
+                _mark_post_import_step(job, "chained", result)
             return result
         finally:
             # run_import_job can flip destination folders from

@@ -938,6 +938,9 @@ def _reclassify_landed_failed(state, rel, entry, reason,
     elif origin == "skipped_duplicate":
         state.skipped_duplicate -= 1
         _counts(state, rel)["skipped_duplicate"] -= 1
+    # A rejected landing is not this run's; keep it out of what a resume
+    # may recover (see ``_record_landed_files``).
+    state.landed_files.pop(os.path.normpath(dest_path), None)
     _fail(state, rel, dest_path, reason)
 
 
@@ -2182,6 +2185,13 @@ def _is_parent_landing(folder, name, file_hash, landed):
     recorded_hash = identity[2] if len(identity) > 2 else None
     if file_hash and recorded_hash:
         return file_hash == recorded_hash
+    if list(identity[:2]) == [-1, -1]:
+        # Recorded without a stat (see ``_record_landed_files``) and no
+        # cataloged hash to compare (a merged companion): read the bytes.
+        try:
+            return bool(recorded_hash) and compute_file_hash(path) == recorded_hash
+        except OSError:
+            return False
     return _landed_identity(path) == list(identity[:2])
 
 
@@ -4676,7 +4686,19 @@ def run_import_job(job, runner, db_path, workspace_id, params):
     appeared = plan.appeared
     checker = plan.checker
     batches = plan.batches
-    _publish_resume_scope(job, db, state, source_snapshots, runner=runner)
+    # The source snapshots gate a resume's drift check (a different card
+    # at the same path), so they must be on the row before any copy.
+    if not _publish_resume_scope(
+        job, db, state, source_snapshots, runner=runner, require_flush=True,
+    ):
+        state.cancelled = True
+        return _finalize_import(
+            job, runner, db, state, params,
+            discovered=discovered, include_paths=include_paths,
+            source_snapshots=source_snapshots, deselected=deselected,
+            vanished_paths=vanished_paths, appeared=appeared,
+            remote_unverified=False,
+        )
 
     # --- Ledger -----------------------------------------------------
     # Every discovered file ends in exactly one terminal bucket on
