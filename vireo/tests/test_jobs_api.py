@@ -11201,8 +11201,10 @@ def test_interrupted_import_resumes_with_the_photos_it_landed(
     real_publish = import_job._publish_resume_scope
 
     def recording_publish(job, db_, state, source_snapshots, runner=None, **kw):
-        real_publish(job, db_, state, source_snapshots, runner=runner, **kw)
+        published = real_publish(
+            job, db_, state, source_snapshots, runner=runner, **kw)
         partials[job["id"]] = job["partial_result"]
+        return published
 
     monkeypatch.setattr(import_job, "_publish_resume_scope", recording_publish)
 
@@ -11310,8 +11312,10 @@ def test_interrupted_import_resume_tags_the_carried_photos(
     real_publish = import_job._publish_resume_scope
 
     def recording_publish(job, db_, state, source_snapshots, runner=None, **kw):
-        real_publish(job, db_, state, source_snapshots, runner=runner, **kw)
+        published = real_publish(
+            job, db_, state, source_snapshots, runner=runner, **kw)
         partials[job["id"]] = job["partial_result"]
+        return published
 
     monkeypatch.setattr(import_job, "_publish_resume_scope", recording_publish)
 

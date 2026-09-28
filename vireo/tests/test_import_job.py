@@ -7359,13 +7359,15 @@ def test_each_resume_scope_publish_is_flushed_before_the_next_batch(
     def spy_publish(job, db_, state, source_snapshots, runner=None, **kw):
         # Before the publish: how many syncs the fake runner has seen.
         before = runner.checkpoint_calls if runner is not None else None
-        real_publish(job, db_, state, source_snapshots, runner=runner, **kw)
+        published = real_publish(
+            job, db_, state, source_snapshots, runner=runner, **kw)
         after = runner.checkpoint_calls if runner is not None else None
         interleaving.append({
             "before": before,
             "after": after,
             "photo_ids": tuple(job["partial_result"]["photo_ids"]),
         })
+        return published
 
     monkeypatch.setattr(import_job, "_publish_resume_scope", spy_publish)
 
@@ -15020,3 +15022,51 @@ def test_resume_recovers_a_raw_through_its_recorded_companion(
     with open(jpeg_path, "ab") as f:
         f.write(b"replaced")
     assert recovered(jpeg_landing) == set()
+
+
+def test_landed_files_wait_for_the_database_before_cataloging(tmp_path):
+    """The landings must reach the history row before their batch is
+    cataloged. A flush that can't land yet is waited out (failing the
+    import would replace the row with an error and lose the resume scope);
+    Stop ends the wait and the batch stays uncataloged, booked failed."""
+    from import_job import ImportParams
+
+    card = _make_card(tmp_path, [
+        ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+    ])
+
+    class BusyRunner(FakeRunner):
+        """Lands the pre-planning flush, then is busy ``busy_for`` times."""
+
+        def __init__(self, busy_for, stop=False):
+            super().__init__()
+            self.busy_for = busy_for
+            self.stop = stop
+
+        def flush_partial_result(self, job):
+            self.checkpoint_calls += 1
+            if self.checkpoint_calls > 1 and self.busy_for:
+                self.busy_for -= 1
+                if self.stop:
+                    self.cancelled_ids.add(job["id"])
+                return False
+            return True
+
+    # Busy for a while, then free: the import completes normally.
+    runner = BusyRunner(busy_for=3)
+    db, _ws, result = _run_import(tmp_path, ImportParams(
+        sources=[str(card)], destination=str(tmp_path / "archive"),
+    ), runner=runner)
+    assert result["copied"] == 1 and result["failed"] == 0
+    assert len(_photo_rows(db)) == 1
+
+    # Stopped while waiting: nothing cataloged, the landing booked failed.
+    runner = BusyRunner(busy_for=10, stop=True)
+    db, _ws, result = _run_import(tmp_path / "second", ImportParams(
+        sources=[str(card)], destination=str(tmp_path / "archive2"),
+    ), runner=runner)
+    assert result["cancelled"] is True
+    assert result["failed"] == 1 and result["copied"] == 0
+    assert _photo_rows(db) == []
+    assert "cataloged" in result["unsafe_files"][0]["reason"]
+    assert list((tmp_path / "archive2").rglob("DSC_0001.jpg"))

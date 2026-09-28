@@ -2199,7 +2199,7 @@ def _record_landed_files(job, db, state, batch_st, source_snapshots, runner):
         identity = _landed_identity(path)
         if identity is not None:
             state.landed_files[path] = identity + [landed.verified_hash]
-    _publish_resume_scope(
+    return _publish_resume_scope(
         job, db, state, source_snapshots, runner=runner, require_flush=True,
     )
 
@@ -2235,13 +2235,27 @@ def _publish_resume_scope(job, db, state, source_snapshots, runner=None,
         "landed_files": dict(state.landed_files),
     }
     if runner is not None and require_flush:
-        # The landed paths must be on disk before the batch is cataloged.
-        if not runner.flush_partial_result(job):
-            log.warning(
-                "Import %s: could not record landed paths before cataloging; "
-                "a crash now could leave this batch out of a resume",
-                job.get("id"),
-            )
+        # The landed files must be on the history row before the batch is
+        # cataloged, or a crash right after the catalog commit leaves them
+        # out of a resume. Failing the import instead would replace the
+        # row's result with an error and lose the scope earlier batches
+        # recorded, so wait for the database; Stop ends the wait (the
+        # caller then leaves the batch uncataloged).
+        waiting = False
+        while not runner.flush_partial_result(job):
+            if runner.is_cancelled(job["id"]):
+                return False
+            if not waiting:
+                waiting = True
+                log.warning(
+                    "Import %s: waiting for the database to record import "
+                    "progress before cataloging", job.get("id"),
+                )
+                runner.update_step(
+                    job["id"], "import",
+                    current_file="Waiting for the database to record progress",
+                )
+        return True
     elif runner is not None:
         # Best-effort synchronous flush. ``checkpoint_live_jobs`` swallows
         # transient ``OperationalError`` on its own — a checkpoint that
@@ -2249,6 +2263,7 @@ def _publish_resume_scope(job, db, state, source_snapshots, runner=None,
         # timer thread, so the failure mode degrades to the pre-fix
         # window rather than losing the batch.
         runner.checkpoint_live_jobs()
+    return True
 
 
 def _recover_parent_landings(state, params, db):
@@ -4894,10 +4909,25 @@ def run_import_job(job, runner, db_path, workspace_id, params):
         # leaves ``dest_read_cancelled`` False, so partially-landed
         # batches keep cataloging like before. See PR #1423 review
         # (Codex P2 r3716433824, r3716433830).
-        if batch_st.landed and not batch_st.dest_read_cancelled:
-            _record_landed_files(
+        if (
+            batch_st.landed and not batch_st.dest_read_cancelled
+            and not _record_landed_files(
                 job, db, state, batch_st, source_snapshots, runner,
             )
+        ):
+            # Stopped while waiting to record the landings. Never catalog
+            # them unrecorded: book them failed (the bytes are in the
+            # destination, and a retry adopts them) and skip the catalog.
+            state.cancelled = True
+            for entry in batch_st.landed:
+                _reclassify_landed_failed(
+                    state, rel, entry,
+                    "import stopped before this file could be cataloged; "
+                    "it is in the destination, and a retry catalogs it",
+                    attests_bytes,
+                )
+            batch_st.landed = []
+        if batch_st.landed and not batch_st.dest_read_cancelled:
             pre_scan_hashes = _catalog_scan_and_prescan(
                 state, batch_st, db, params, scan, destination, rel,
                 attests_bytes, runner=runner, job=job,
