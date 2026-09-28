@@ -1,4 +1,5 @@
 import os
+import shutil
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -34,6 +35,29 @@ def _expanduser_prefers_test_home(monkeypatch):
         return real_expanduser(path)
 
     monkeypatch.setattr(os.path, "expanduser", expanduser)
+
+
+_REAL_DISK_USAGE = shutil.disk_usage
+
+
+@pytest.fixture(autouse=True)
+def _ample_free_disk(monkeypatch):
+    """Report ample free space unless a test fakes its own.
+
+    Work Locally, managed imports and staging refuse to start without room
+    for the copy plus a reserve of up to tens of GB, measured with
+    ``shutil.disk_usage``. Left real, every such test failed whenever the
+    machine running it was low on space (145 of them below ~20 GB free). A
+    test about low-space handling patches ``disk_usage`` itself, which
+    overrides this.
+    """
+    def disk_usage(path):
+        real = _REAL_DISK_USAGE(path)  # still raises for a missing path
+        total = max(real.total, 4 * 1024**4)
+        free = max(real.free, total // 2)
+        return type(real)(total, total - free, free)
+
+    monkeypatch.setattr(shutil, "disk_usage", disk_usage)
 
 
 @pytest.fixture(autouse=True)
