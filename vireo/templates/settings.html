@@ -4731,7 +4731,9 @@ async function verifyAllModels() {
       },
       onComplete: function(result) {
         btn.disabled = false;
-        if (result.status === 'completed' && result.result) {
+        // A run where a model failed verification ends "failed" but still
+        // carries the per-model result; show it rather than a bare failure.
+        if ((result.status === 'completed' || result.status === 'failed') && result.result) {
           var ok = (result.result.ok || []).length;
           var failed = (result.result.failed || []);
           if (failed.length > 0) {

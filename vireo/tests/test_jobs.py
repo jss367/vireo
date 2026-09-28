@@ -660,6 +660,22 @@ def test_job_recording_item_errors_is_failed_not_completed(tmp_path):
     assert live["result_details"][0] == "a.jpg: unreadable"
 
 
+def test_non_boolean_ok_is_not_a_verdict(tmp_path):
+    """verify-models uses "ok" for the list of models that passed; that is
+    not a verdict, so recorded errors still fail the job."""
+    from jobs import JobRunner
+
+    runner = JobRunner()
+
+    def work(job):
+        job["errors"].append("bioclip: failed verification")
+        return {"verified": 2, "failed": ["bioclip"], "ok": ["timm"]}
+
+    job_id = runner.start('verify-models', work)
+    job = wait_for_job_via_runner(runner, job_id)
+    assert job['status'] == 'failed'
+
+
 def test_job_without_errors_stays_completed(tmp_path):
     from jobs import JobRunner
 

@@ -1291,8 +1291,11 @@ class JobRunner:
                     # its errors into the job's tally so error_count is
                     # accurate, and demote a falsy "ok" to "failed" so the
                     # history doesn't read "completed, 0 errors" for a run
-                    # that accomplished nothing.
-                    if isinstance(result, dict) and "ok" in result:
+                    # that accomplished nothing. Only a boolean is a verdict:
+                    # verify-models uses "ok" for the list of models that
+                    # passed.
+                    has_verdict = isinstance(result, dict) and isinstance(result.get("ok"), bool)
+                    if has_verdict:
                         for err in (result.get("errors") or []):
                             err_str = str(err)
                             if err_str not in job["errors"]:
@@ -1307,7 +1310,6 @@ class JobRunner:
                     # verdict and wins: an import lists card-safety
                     # notices ("1 file you deselected was not copied") in
                     # its errors without anything having failed.
-                    has_verdict = isinstance(result, dict) and "ok" in result
                     if job["errors"] and job["status"] == "completed" and not has_verdict:
                         job["status"] = "failed"
                     # It ran to the end, so its summary leads with what it

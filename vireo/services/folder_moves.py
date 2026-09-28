@@ -356,21 +356,23 @@ class FolderMoves:
                             if cleanup_error else ""
                         )
                     )
-            if result.get("ok"):
-                if managed_staging_root:
-                    from path_guard import contains_resolved
-                    # Remove only empty staging ancestors. Failed transfers and
-                    # concurrent sibling moves keep their originals intact.
-                    parent = os.path.dirname(source_path)
-                    root = os.path.realpath(managed_staging_root)
-                    while contains_resolved(root, parent):
-                        try:
-                            os.rmdir(parent)
-                        except OSError:
-                            break
-                        if os.path.realpath(parent) == root:
-                            break
-                        parent = os.path.dirname(parent)
+            if result.get("ok") and managed_staging_root:
+                from path_guard import contains_resolved
+                # Remove only empty staging ancestors. Failed transfers and
+                # concurrent sibling moves keep their originals intact.
+                parent = os.path.dirname(source_path)
+                root = os.path.realpath(managed_staging_root)
+                while contains_resolved(root, parent):
+                    try:
+                        os.rmdir(parent)
+                    except OSError:
+                        break
+                    if os.path.realpath(parent) == root:
+                        break
+                    parent = os.path.dirname(parent)
+            # A partial move already rewrote the catalog for the photos that
+            # moved, so cached missing-original entries are stale either way.
+            if result.get("ok") or result.get("moved"):
                 try:
                     self._invalidate_missing_originals()
                 except Exception:

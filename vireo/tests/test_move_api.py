@@ -320,14 +320,19 @@ def test_move_folder_job_partial_move_is_failed_with_both_counts(
     app_and_db, tmp_path, monkeypatch,
 ):
     """Rollup rule: a move that moved some photos but hit errors on others
-    failed. Its summary keeps both counts so the partial progress shows."""
+    failed. Its summary keeps both counts so the partial progress shows, and
+    the photos that did move already changed the catalog, so cached Missing
+    Originals results are dropped as they are after a clean move."""
     import move as move_module
+    from services.missing_originals import cache_key
     from wait import wait_for_job_via_client
 
     app, db = app_and_db
     parent = tmp_path / "partial_dst"
     parent.mkdir()
     fid = db.get_folder_tree()[0]["id"]
+    stale_key = cache_key(db, None)
+    app._missing_originals_cache[stale_key] = {"status": "ready", "photos": []}
 
     def fake_move_folder(db, folder_id, destination, **_kwargs):
         return {"moved": 4, "errors": ["c.jpg: Permission denied"]}
@@ -343,6 +348,7 @@ def test_move_folder_job_partial_move_is_failed_with_both_counts(
     assert job["result"]["moved"] == 4
     assert job["summary"] == "Moved 4 photos, 1 error(s)"
     assert "c.jpg: Permission denied" in job["errors"]
+    assert stale_key not in app._missing_originals_cache
 
 
 def test_move_folder_job_passes_explicit_destination_name(
