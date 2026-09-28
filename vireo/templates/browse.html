@@ -2581,7 +2581,44 @@ body.sidebar-resizing {
 <script src="/static/vireo-thumbnail-queue.js"></script>
 <script src="/static/vireo-panorama.js"></script>
 <script src="/static/vireo-browse-compare.js"></script>
-<script src="/static/browse.js"></script>
+{# Browse's page script, split by concern into classic scripts that share page
+   globals. Order is load-time dependency order: a file may only use, while it
+   loads, what an earlier file (or itself) declares. Files that only declare come
+   first; scroll/keyboard/lightbox/context-menu handlers come late so a handler
+   cannot fire before the code it reaches has loaded; boot.js is last because it
+   starts the work (bootstrap, folder-health subscription, infinite scroll, photo
+   deep link) that reaches every other file. #}
+<script src="/static/browse/state.js"></script>
+<script src="/static/browse/keyword-autocomplete.js"></script>
+<script src="/static/browse/config.js"></script>
+<script src="/static/browse/cards.js"></script>
+<script src="/static/browse/stacks.js"></script>
+<script src="/static/browse/grid.js"></script>
+<script src="/static/browse/anchors.js"></script>
+<script src="/static/browse/sidebar-folders.js"></script>
+<script src="/static/browse/sidebar-keywords.js"></script>
+<script src="/static/browse/sidebar-collections.js"></script>
+<script src="/static/browse/folder-health.js"></script>
+<script src="/static/browse/collection-editor.js"></script>
+<script src="/static/browse/loading.js"></script>
+<script src="/static/browse/layout.js"></script>
+<script src="/static/browse/calendar.js"></script>
+<script src="/static/browse/view-controls.js"></script>
+<script src="/static/browse/selection.js"></script>
+<script src="/static/browse/batch-bar.js"></script>
+<script src="/static/browse/best-batch.js"></script>
+<script src="/static/browse/selection-panel.js"></script>
+<script src="/static/browse/prediction-panels.js"></script>
+<script src="/static/browse/batch-actions.js"></script>
+<script src="/static/browse/detail.js"></script>
+<script src="/static/browse/edit-actions.js"></script>
+<script src="/static/browse/location.js"></script>
+<script src="/static/browse/export.js"></script>
+<script src="/static/browse/lightbox.js"></script>
+<script src="/static/browse/scroll.js"></script>
+<script src="/static/browse/keyboard.js"></script>
+<script src="/static/browse/context-menus.js"></script>
+<script src="/static/browse/boot.js"></script>
 
 
 </body>

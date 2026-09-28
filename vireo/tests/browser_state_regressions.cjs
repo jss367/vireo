@@ -3,12 +3,12 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
 function fn(file, name) {
-  const src = fs.readFileSync(file, 'utf8');
+  const src = [].concat(file).map(f => fs.readFileSync(f, 'utf8')).join('\n');
   const found = src.match(new RegExp('(?:async )?function ' + name + '\\([^]*?\\n\\}'));
   assert(found, name);
   return found[0];
 }
-const browse = 'vireo/static/browse.js';
+const browse = ['vireo/static/browse/loading.js', 'vireo/static/browse/selection.js'];
 const review = 'vireo/templates/pipeline_review.html';
 async function main() {
   let complete;

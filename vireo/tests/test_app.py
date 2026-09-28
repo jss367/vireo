@@ -17183,7 +17183,7 @@ def test_browse_filter_by_collection_guards_degraded_rows():
     (with a toast) rather than firing the request.
     """
     from pathlib import Path
-    src = Path(__file__).parent.parent / "static" / "browse.js"
+    src = Path(__file__).parent.parent / "static" / "browse" / "sidebar-collections.js"
     text = src.read_text(encoding="utf-8")
     fn_start = text.find("async function filterByCollection")
     assert fn_start != -1, "filterByCollection function not found"
@@ -17191,30 +17191,30 @@ def test_browse_filter_by_collection_guards_degraded_rows():
     # must reference count_error and return before the normal load path runs.
     body = text[fn_start:fn_start + 3000]
     assert "count_error" in body, (
-        "browse.js filterByCollection does not check count_error"
+        "Browse's filterByCollection does not check count_error"
     )
     guard_end = body.find("return;")
     # Collections open into the filter bar now (Phase 5): the load path is
     # VireoFilter.loadExpression rather than a collection-endpoint fetch.
     fetch_start = body.find("loadExpression")
     assert guard_end != -1 and fetch_start != -1 and guard_end < fetch_start, (
-        "browse.js filterByCollection does not early-return before loading"
+        "Browse's filterByCollection does not early-return before loading"
     )
 
 
 def _browse_editor_field_ops():
-    """Parse ``FIELD_OPS`` out of browse.js, resolving the NUMERIC_OPS alias.
+    """Parse ``FIELD_OPS`` out of the collection editor, resolving the NUMERIC_OPS alias.
 
     The saved-collection editor keeps its own field maps rather than
     reading the registry, so tests have to read them the way the browser
     does to catch drift.
     """
-    text = (Path(__file__).parent.parent / "static" / "browse.js").read_text(
-        encoding="utf-8")
+    text = (Path(__file__).parent.parent / "static" / "browse"
+            / "collection-editor.js").read_text(encoding="utf-8")
     numeric_start = text.find("var NUMERIC_OPS = [")
     numeric_ops = re.findall(
         r"'([^']+)'", text[numeric_start:text.find("];", numeric_start)])
-    assert numeric_ops, "NUMERIC_OPS not found in browse.js"
+    assert numeric_ops, "NUMERIC_OPS not found in browse/collection-editor.js"
     ops_start = text.find("var FIELD_OPS = {")
     block = text[ops_start:text.find("};", ops_start)]
     field_ops = {}
@@ -17254,7 +17254,7 @@ def test_browse_collection_editor_round_trips_registry_numeric_rules():
     labels_start = text.find("var FIELD_LABELS = {")
     labels = text[labels_start:text.find("};", labels_start)]
     assert "species_count: 'Species Count'" in labels, (
-        "browse.js FIELD_LABELS omits species_count — the editor's field "
+        "the collection editor's FIELD_LABELS omits species_count — the editor's field "
         "dropdown would show the wrong field for a saved rule"
     )
 
@@ -17278,7 +17278,7 @@ def test_browse_collection_editor_round_trips_registry_numeric_rules():
             continue  # editor-only field (e.g. crop_complete); no registry ops
         missing = set(spec["ops"]) - set(field_ops.get(field, []))
         assert not missing, (
-            f"browse.js editor can't represent {field} {sorted(missing)} — "
+            f"the collection editor can't represent {field} {sorted(missing)} — "
             "a collection saved from the filter bar would reopen with a "
             "different operator"
         )
@@ -17293,7 +17293,7 @@ def test_browse_collection_editor_round_trips_registry_numeric_rules():
 def test_browse_undo_confirmation_uses_success_toast():
     """Successful edits must not inherit showToast's red error default."""
     from pathlib import Path
-    src = Path(__file__).parent.parent / "static" / "browse.js"
+    src = Path(__file__).parent.parent / "static" / "browse" / "detail.js"
     text = src.read_text(encoding="utf-8")
     fn_start = text.find("async function showUndoToast")
     assert fn_start != -1, "showUndoToast function not found"
@@ -17306,7 +17306,7 @@ def test_browse_undo_confirmation_uses_success_toast():
 def test_browse_export_started_uses_info_toast():
     """Starting an export is informational, not an error."""
     from pathlib import Path
-    src = Path(__file__).parent.parent / "static" / "browse.js"
+    src = Path(__file__).parent.parent / "static" / "browse" / "export.js"
     text = src.read_text(encoding="utf-8")
     fn_start = text.find("async function startExport")
     assert fn_start != -1, "startExport function not found"
@@ -22117,10 +22117,13 @@ def test_batch_reject_skips_already_rejected_predictions(app_and_db):
 def _browse_js_function_body(html, signature):
     """The source text of one inline Browse function, for structure asserts."""
     start = html.find(signature)
-    assert start != -1, f"{signature} must exist in browse.js"
+    assert start != -1, f"{signature} must exist in Browse's scripts"
     nxt = html.find("\nfunction ", start + 1)
     nxt_async = html.find("\nasync function ", start + 1)
-    ends = [i for i in (nxt, nxt_async) if i != -1]
+    # Browse's JS is several scripts; the last function in one ends at its
+    # script's close, not at the next file's first function.
+    script_end = html.find("</script>", start + 1)
+    ends = [i for i in (nxt, nxt_async, script_end) if i != -1]
     return html[start: min(ends) if ends else len(html)]
 
 
@@ -22293,7 +22296,7 @@ var document = {
   },
   createTextNode: function(text) { return { text: String(text) }; },
 };
-// Declared in browse.js above the panel code, outside the slice below.
+// Declared in browse/state.js, outside the slice below.
 var PREDICTION_COLLAPSE_AT = 5;
 var detailPredictionsExpanded = false;
 var _detailPredictionData = null;
@@ -22745,7 +22748,7 @@ def _run_detail_prediction_panel(html, mode, payload):
     start = html.find("function predictionIsAmbiguous(")
     end = html.find("function openPredictionInReview(")
     assert start != -1 and end > start, (
-        "browse.js's detail prediction panel could not be located"
+        "Browse's detail prediction panel could not be located"
     )
     source = "\n".join([
         _PANEL_DOM_STUB, _browse_escape_helpers(), html[start:end],
@@ -23179,7 +23182,7 @@ def test_right_click_stack_branch_scrubs_the_previous_detail_owner(app_and_db):
     # cleanup calls without depending on the exact line numbers.
     marker = "document.addEventListener('contextmenu', function(e) {"
     start = html.find(marker)
-    assert start != -1, "contextmenu handler not found in browse.js"
+    assert start != -1, "contextmenu handler not found in Browse's scripts"
     stack_branch_marker = "if (stackIds.length > 1 && !wholeStackSelected) {"
     branch_start = html.find(stack_branch_marker, start)
     assert branch_start != -1, "right-click stack branch not found"
@@ -24858,7 +24861,7 @@ def test_browse_detail_panel_keeps_row_data_out_of_markup(app_and_db):
     client = app.test_client()
     html = _page_with_scripts(client, "/browse")
     body = _browse_js_function_body(html, "function renderDetailPredictions(")
-    assert body, "renderDetailPredictions must exist in browse.js"
+    assert body, "renderDetailPredictions must exist in Browse's scripts"
     assert "onclick" not in body, (
         "the detail prediction panel must wire its buttons through the "
         "delegated listener, not inline handlers built by concatenation"
@@ -24891,7 +24894,7 @@ def test_browse_reject_reporter_names_workspace_detach_skips(app_and_db):
     client = app.test_client()
     html = _page_with_scripts(client, "/browse")
     body = _browse_js_function_body(html, "function _reportSkippedRejects(")
-    assert body, "_reportSkippedRejects must exist in browse.js"
+    assert body, "_reportSkippedRejects must exist in Browse's scripts"
     assert "skipped_out_of_workspace" in body, (
         "the reject reporter must surface skipped_out_of_workspace the same "
         "way _reportSkippedAccepts does — silence would be a black box"
