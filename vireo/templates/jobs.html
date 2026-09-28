@@ -836,8 +836,13 @@
     // growing rather than reset to only the last retry's landed files.
     var parentCarry = Array.isArray(cfg.carry_photo_ids)
       ? cfg.carry_photo_ids : [];
-    var parentImported = Array.isArray(job.result && job.result.photo_ids)
-      ? job.result.photo_ids : [];
+    // Everything the parent carried (its own carry list plus photos a
+    // resume recovered from an interrupted run) stays in scope too.
+    var parentImported = [];
+    ['photo_ids', 'carried_photo_ids', 'recovered_photo_ids'].forEach(function(key) {
+      var ids = job.result && job.result[key];
+      if (Array.isArray(ids)) parentImported = parentImported.concat(ids);
+    });
     var carry = [];
     var carrySeen = {};
     parentCarry.concat(parentImported).forEach(function(pid) {

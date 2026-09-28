@@ -17883,6 +17883,8 @@ def test_import_page_returns_200(app_and_db):
     assert "capture time to the second" in html
     assert "res.unverified_duplicates_only" in html
     assert 'id="safeToFormatPill"' in html
+    # The recovery retry keeps everything its parent carried.
+    assert "['photo_ids', 'carried_photo_ids', 'recovered_photo_ids']" in html
     assert "/api/jobs/import-in-place" in html
 
 

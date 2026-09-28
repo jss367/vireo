@@ -4320,8 +4320,10 @@ function retryBodyFromFinishedJob(job) {
   // original attempt.
   const parentCarry = Array.isArray(cfg.carry_photo_ids)
     ? cfg.carry_photo_ids : [];
-  const parentImported = Array.isArray(job.result && job.result.photo_ids)
-    ? job.result.photo_ids : [];
+  // Everything the parent carried (its own carry list plus photos a
+  // resume recovered from an interrupted run) stays in scope too.
+  const parentImported = ['photo_ids', 'carried_photo_ids', 'recovered_photo_ids']
+    .flatMap((key) => (Array.isArray(job.result && job.result[key]) ? job.result[key] : []));
   const carry = [];
   const carrySeen = new Set();
   parentCarry.concat(parentImported).forEach((pid) => {

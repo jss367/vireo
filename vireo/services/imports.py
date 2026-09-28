@@ -754,6 +754,7 @@ class ImportService:
         for source in (
             parent_result.get("photo_ids") or [],
             parent_result.get("carried_photo_ids") or [],
+            parent_result.get("recovered_photo_ids") or [],
             parent_config.get("carry_photo_ids") or [],
         ):
             for pid in source:

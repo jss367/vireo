@@ -721,6 +721,9 @@ def test_jobs_page_returns_200(app_and_db):
     # An import a restart interrupted offers Resume, but only when its
     # checkpoint recorded the photos it landed (older rows lack them).
     assert b'data-import-resume' in resp.data
+    # A retry keeps everything its parent carried, including photos a
+    # resume recovered from its interrupted parent.
+    assert b"['photo_ids', 'carried_photo_ids', 'recovered_photo_ids']" in resp.data
     assert b'result.interrupted && Array.isArray(result.photo_ids)' in resp.data
     # Resume must force ``skip_duplicates=true`` — a parent import
     # configured with ``skip_duplicates=false`` would otherwise carry
@@ -11502,6 +11505,15 @@ def test_resume_recovers_landings_its_parent_checkpoint_missed(
             p["id"] for p in db.get_collection_photos(
                 result["collection_id"], per_page=999999)
         ) == landed
+
+        # A later retry of this resume may carry the recovered photos:
+        # the resume isn't interrupted, so it can't recover them again.
+        body = _resume_body(client, parent_id)
+        body["parent_import_job_id"] = resp.get_json()["job_id"]
+        body["carry_photo_ids"] = result["recovered_photo_ids"]
+        retry = client.post("/api/jobs/import-photos", json=body)
+        assert retry.status_code == 200, retry.get_json()
+        wait_for_job_via_client(client, retry.get_json()["job_id"])
 
 
 def test_resume_does_not_recover_an_earlier_import_of_the_same_card(
