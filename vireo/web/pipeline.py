@@ -1135,7 +1135,7 @@ def create_pipeline_blueprint(
                     raw["ingest"] = ingest_cfg
                     cfg.save(raw)
             except Exception:
-                log.warning("Failed to save recent destination to config")
+                log.warning("Failed to save recent destination to config", exc_info=True)
 
         runner = get_runner()
         active_ws = db._active_workspace_id
@@ -1494,8 +1494,10 @@ def create_pipeline_blueprint(
         ws = db.get_workspace(db._active_workspace_id)
         ws_overrides = {}
         if ws and ws["config_overrides"]:
-            with contextlib.suppress(Exception):
+            try:
                 ws_overrides = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
+            except (TypeError, ValueError):
+                log.warning("Workspace %s has unreadable config overrides", ws["id"], exc_info=True)
 
         # "Available" must mean *usable*, not just *file exists*: a 0-byte
         # stub from a failed download passed os.path.exists and hid the

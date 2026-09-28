@@ -31,7 +31,10 @@ lease is returned; its mutex is never held during inference. The accelerator
 semaphore remains innermost: nothing else may be acquired while it is held.
 """
 
+import logging
 import threading
+
+log = logging.getLogger(__name__)
 
 # Single GPU operation at a time across the whole process. Size 1 by
 # design — see docs/plans/2026-05-26-pipeline-concurrency-design.md
@@ -133,6 +136,7 @@ def _session_uses_gpu(session):
     try:
         providers = session.get_providers()
     except Exception:
+        log.debug("Session providers unreadable; assuming GPU", exc_info=True)
         return True
     return any(p in _GPU_PROVIDERS for p in providers)
 
@@ -279,6 +283,7 @@ def acquire_inference_resources(session, *, cancel_check=None):
         try:
             providers = set(session.get_providers())
         except Exception:
+            log.debug("Session providers unreadable; treating as compound", exc_info=True)
             providers = None
         if providers is None or "CPUExecutionProvider" in providers:
             ledger, request = _build_cpu_request(
@@ -289,6 +294,7 @@ def acquire_inference_resources(session, *, cancel_check=None):
     try:
         providers = set(session.get_providers())
     except Exception:
+        log.debug("Session providers unreadable; treating as compound", exc_info=True)
         # Unknown provider surface: fall through to the same
         # conservative compound path — matches the pre-branch behavior
         # for accelerator sessions with unreadable provider lists.

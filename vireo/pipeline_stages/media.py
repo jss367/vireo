@@ -4,6 +4,7 @@ import contextlib
 import logging
 import os
 import queue
+import sqlite3
 import time
 
 from artifact_flight import ArtifactProducerFailed
@@ -546,8 +547,15 @@ def previews_stage(
             recipe = thread_db.get_photo_edit_recipe(photo["id"])
             if os.path.exists(cache_path):
                 cache_row = None
-                with contextlib.suppress(Exception):
+                try:
                     cache_row = thread_db.preview_cache_get(photo["id"], max_size)
+                except sqlite3.Error:
+                    # Treated as untracked: an edited photo's preview is
+                    # then re-rendered rather than trusted.
+                    log.warning(
+                        "Could not read the preview cache row for photo %s",
+                        photo["id"], exc_info=True,
+                    )
                 if recipe and (cache_row is None or not _camera_cache_matches(cache_path, detail_photo, recipe)):
                     with contextlib.suppress(OSError):
                         os.remove(cache_path)
@@ -568,8 +576,13 @@ def previews_stage(
                                 max_size,
                                 os.path.getsize(cache_path),
                             )
-                    except Exception:
-                        pass  # photo may have been deleted mid-pipeline
+                    except (sqlite3.Error, OSError):
+                        # The photo (FK) or the file may have been deleted
+                        # mid-pipeline; the preview itself is already on disk.
+                        log.debug(
+                            "Could not track existing preview for photo %s",
+                            photo["id"], exc_info=True,
+                        )
                     continue
             if not os.path.exists(cache_path):
                 folder_path = folders.get(detail_photo["folder_id"])

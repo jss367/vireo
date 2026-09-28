@@ -156,8 +156,8 @@ def score_collection_photos(db, collection_id, progress_callback=None, vireo_dir
         if p["timestamp"]:
             try:
                 timestamp = datetime.fromisoformat(p["timestamp"])
-            except Exception:
-                pass
+            except (TypeError, ValueError):
+                log.debug("Ignoring unparseable timestamp %r on photo %s", p["timestamp"], p["id"])
         # Load stored embedding if available
         embedding = None
         emb_blob = p["embedding"] if "embedding" in p.keys() else None

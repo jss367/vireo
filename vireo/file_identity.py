@@ -78,6 +78,7 @@ def distinct_existing_file(path, other, *, timeout=None, allow_missing_source=Fa
                 try:
                     future.set_result(check())
                 except BaseException as exc:
+                    # Delivered to the waiting caller through the future.
                     future.set_exception(exc)
                 finally:
                     with _lock:

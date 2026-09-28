@@ -11,7 +11,6 @@ unsigned, so a fail-closed signature check would reject every legitimate
 download.  See docs/superpowers/specs/2026-07-26-darktable-download-design.md.
 """
 
-import contextlib
 import hashlib
 import json
 import logging
@@ -507,8 +506,10 @@ def download(asset, dest_dir=None, byte_callback=None, should_cancel=None):
         # _download_with_resume's contract that callbacks may not raise —
         # there they would be misreported as network failures.
         if byte_callback is not None:
-            with contextlib.suppress(Exception):
+            try:
                 byte_callback(expected_size, expected_size)
+            except Exception:
+                log.debug("Progress callback raised on a completed download", exc_info=True)
     else:
         _download_with_resume(
             asset["url"], dest,

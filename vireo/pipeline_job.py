@@ -963,7 +963,7 @@ def _retry_thumbnail_with_companion(
     )
     file_mtime = _photo_value(photo, "file_mtime")
     if file_mtime is not None:
-        with contextlib.suppress(Exception):
+        try:
             thread_db.conn.execute(
                 "UPDATE photos SET"
                 " working_copy_failed_at=datetime('now'),"
@@ -973,6 +973,9 @@ def _retry_thumbnail_with_companion(
                 (file_mtime, photo_id),
             )
             commit_with_retry(thread_db.conn)
+        except Exception:
+            # Without the marker the RAW decode is simply retried next time.
+            log.warning("Could not record RAW decode failure for photo %s", photo_id, exc_info=True)
     recipe_kwargs = {"recipe": recipe} if recipe else {}
     if recipe:
         recipe_kwargs["camera_metadata"] = photo
@@ -1009,7 +1012,7 @@ def _retry_thumbnail_with_working_copy(
     )
     file_mtime = _photo_value(photo, "file_mtime")
     if file_mtime is not None:
-        with contextlib.suppress(Exception):
+        try:
             thread_db.conn.execute(
                 "UPDATE photos SET"
                 " working_copy_failed_at=datetime('now'),"
@@ -1019,6 +1022,9 @@ def _retry_thumbnail_with_working_copy(
                 (file_mtime, photo_id),
             )
             commit_with_retry(thread_db.conn)
+        except Exception:
+            # Without the marker the RAW decode is simply retried next time.
+            log.warning("Could not record RAW decode failure for photo %s", photo_id, exc_info=True)
     return generate_thumbnail(
         photo_id,
         wc_path,
@@ -1847,6 +1853,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         )
                     resolved_specs.append(spec)
             except Exception as e:
+                # Reported to the user through the pipeline's model step.
+                log.warning("Could not resolve pipeline models", exc_info=True)
                 resolution_error = str(e)
 
         # Define step tracking for the jobs page

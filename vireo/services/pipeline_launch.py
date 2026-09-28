@@ -10,7 +10,6 @@ request database — every dependency is passed in explicitly.
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import threading
 
@@ -247,12 +246,14 @@ class PipelineChain:
             # surface a stepped job shows, so record the machinery
             # failure there too. Best-effort — never let step plumbing
             # mask the original failure being handled here.
-            with contextlib.suppress(Exception):
+            try:
                 self._get_runner().append_step(
                     job["id"], "after-move", "Move to NAS",
                     status="failed", summary="Chaining failed",
                     error=msg, error_count=1,
                 )
+            except Exception:
+                log.warning("Could not record the chaining failure step", exc_info=True)
             if isinstance(result, dict):
                 # The pipeline succeeded but the chain machinery itself
                 # failed (e.g. creating the thread Database) — surface it

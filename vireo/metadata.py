@@ -113,6 +113,7 @@ def _probe_exiftool_ver(path: str) -> tuple[bool, str | None, str | None]:
             ),
         )
     except Exception as e:
+        # Reported to the caller, which shows it as the ExifTool status.
         return False, None, str(e) or e.__class__.__name__
 
 

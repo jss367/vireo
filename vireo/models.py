@@ -1967,7 +1967,8 @@ def get_taxonomy_info():
             "last_updated": last_updated,
             "file_size": size,
         }
-    except Exception:
+    except (OSError, ValueError):
+        log.warning("Could not read taxonomy header from %s", taxonomy_path, exc_info=True)
         return {
             "available": False,
             "path": taxonomy_path,

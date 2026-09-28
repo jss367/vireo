@@ -10,6 +10,9 @@ from keyword_identity import validate_import_locations
 from keyword_normalization import keyword_match_key, normalize_keyword_display
 from xmp import write_sidecar
 
+# Error strings kept on the job result; the rest are counted in errors_total.
+_MAX_IMPORT_ERRORS = 50
+
 log = logging.getLogger(__name__)
 
 
@@ -112,6 +115,7 @@ def preview_import(catalog_paths, db):
         dict with catalogs (list of previews), conflict_count, conflicts (list)
     """
     catalogs = []
+    errors = []
     merged = {}  # normalized path -> {file_path, keywords_by_catalog: {cat_name: set}}
     spellings = {}  # folded key -> normalized paths already grouped under it
 
@@ -139,8 +143,11 @@ def preview_import(catalog_paths, db):
                 merged[key]["keywords_by_catalog"][cat_name] = kw_data[
                     "flat_keywords"
                 ]
-        except Exception:
+        except Exception as exc:
+            # The catalog is left out of the preview; say so rather than
+            # silently showing fewer catalogs than the user picked.
             log.exception("Failed to read catalog: %s", cat_path)
+            errors.append(f"{os.path.basename(cat_path)}: {exc}")
 
     # Detect conflicts: files in multiple catalogs with different keywords
     conflicts = []
@@ -160,6 +167,7 @@ def preview_import(catalog_paths, db):
         "catalogs": catalogs,
         "conflict_count": len(conflicts),
         "conflicts": conflicts,
+        "errors": errors,
     }
 
 
@@ -177,7 +185,10 @@ def execute_import(
         progress_callback: optional callable(current, total)
 
     Returns:
-        dict with imported, skipped, failed counts
+        dict with imported, skipped, failed counts, ``errors`` (unreadable
+        catalogs and per-file failures, capped at ``_MAX_IMPORT_ERRORS`` with
+        the full count in ``errors_total``) and ``ok`` — False when any
+        catalog or file failed, which the job runner reports as a failed run.
     """
     # Build path -> DB photo lookup.
     photos_by_path = _PhotoPathIndex()
@@ -191,13 +202,17 @@ def execute_import(
 
     # Merge catalog data
     merged = {}  # group key -> {path, photo, flat_keywords, hierarchical_keywords}
+    errors = []
+    unreadable_catalogs = 0
     for idx, cat_path in enumerate(catalog_paths):
         if pause_callback:
             pause_callback()
         try:
             data = read_catalog(cat_path, pause_callback=pause_callback)
-        except (OSError, sqlite3.Error):
+        except (OSError, sqlite3.Error) as exc:
             log.exception("Failed to read catalog: %s", cat_path)
+            unreadable_catalogs += 1
+            errors.append(f"Could not read catalog {os.path.basename(cat_path)}: {exc}")
             continue
 
         for raw_file_path, kw_data in data.items():
@@ -315,9 +330,10 @@ def execute_import(
                 )
 
             imported += 1
-        except Exception:
+        except Exception as exc:
             failed += 1
             log.warning("Failed to import keywords for %s", file_path, exc_info=True)
+            errors.append(f"{file_path}: {exc}")
 
         if progress_callback:
             progress_callback(i + 1, total)
@@ -325,8 +341,17 @@ def execute_import(
     log.info(
         "Import complete: %d imported, %d skipped, %d failed", imported, skipped, failed
     )
-    return {
+    result = {
         "imported": imported,
         "skipped": skipped,
         "failed": failed,
+        # Any unreadable catalog or failed file makes the run a failure
+        # (a mixed outcome is not "completed").
+        "ok": not errors,
+        "errors": errors[:_MAX_IMPORT_ERRORS],
     }
+    if unreadable_catalogs:
+        result["unreadable_catalogs"] = unreadable_catalogs
+    if len(errors) > _MAX_IMPORT_ERRORS:
+        result["errors_total"] = len(errors)
+    return result

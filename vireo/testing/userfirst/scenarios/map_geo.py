@@ -52,6 +52,7 @@ def run(session):
         #   - 408/429/5xx: transient CDN issue → tolerate
         #   - no response (network error): CDN unreachable → tolerate
         probe_status = None
+        # No response at all means the CDN is unreachable: tolerated above.
         with contextlib.suppress(Exception):
             probe_status = session.page.request.fetch(
                 leaflet_src, method="GET", timeout=5000

@@ -152,6 +152,7 @@ def create_app(data_dir):
 
                 xmp_paths = photo.get("member_xmp_paths", [])
                 written = 0
+                failed = []
                 for xp in xmp_paths:
                     try:
                         write_sidecar(
@@ -162,7 +163,18 @@ def create_app(data_dir):
                         written += 1
                     except Exception:
                         log.warning("Failed to write XMP: %s", xp, exc_info=True)
+                        failed.append(xp)
 
+                if failed:
+                    # A group whose members did not all get the keyword is
+                    # not accepted: leave it pending so a retry can finish it.
+                    return jsonify({
+                        "ok": False,
+                        "error": f"Could not write {len(failed)} of {len(xmp_paths)} sidecars",
+                        "accepted_count": written,
+                        "failed": failed,
+                        "prediction": prediction,
+                    }), 500
                 photo["status"] = "accepted"
                 _save_results(data)
                 return jsonify(
@@ -188,6 +200,7 @@ def create_app(data_dir):
 
         data = _load_results()
         accepted = 0
+        failed = 0
         for photo in data["photos"]:
             if photo["status"] != "pending":
                 continue
@@ -233,6 +246,7 @@ def create_app(data_dir):
                         photo.get("filename"),
                         exc_info=True,
                     )
+                    failed += 1
 
             # Handle groups
             elif photo.get("consensus"):
@@ -245,6 +259,7 @@ def create_app(data_dir):
                 if pred["confidence"] < min_confidence:
                     continue
 
+                group_ok = True
                 for xp in photo.get("member_xmp_paths", []):
                     try:
                         write_sidecar(
@@ -254,12 +269,17 @@ def create_app(data_dir):
                         )
                     except Exception:
                         log.warning("Failed to write XMP: %s", xp, exc_info=True)
+                        group_ok = False
 
+                if not group_ok:
+                    # Stays pending so a retry can finish the group.
+                    failed += 1
+                    continue
                 photo["status"] = "accepted"
                 accepted += 1
 
         _save_results(data)
-        return jsonify({"ok": True, "accepted": accepted})
+        return jsonify({"ok": failed == 0, "accepted": accepted, "failed": failed})
 
     @app.route("/api/settings", methods=["GET"])
     def get_settings():

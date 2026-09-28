@@ -1699,6 +1699,7 @@ def _catalog_scan_and_prescan(state, batch_st, db, params, scan, destination,
                 cancel_only_check=lambda: False,
             )
     except Exception as e:  # scan failure fails the whole batch
+        log.warning("Catalog scan failed for import batch %s", rel, exc_info=True)
         # Each entry was already booked into copied or
         # skipped_duplicate — reclassify (roll back origin, add
         # to failed) so the ledger never double-counts.

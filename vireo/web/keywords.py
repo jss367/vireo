@@ -340,6 +340,7 @@ def create_keywords_blueprint(get_db, json_error):
                 try:
                     global_cfg = cfg.load()
                 except Exception:
+                    log.warning("Could not load config for location rename requeue", exc_info=True)
                     global_cfg = {}
                 for row in affected:
                     ws_id = row["workspace_id"]

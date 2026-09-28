@@ -3399,6 +3399,7 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
                 )
                 returncode, stderr, timed_out = 0, "", False
             except Exception as exc:
+                log.warning("Copy fallback failed for %s", src_path, exc_info=True)
                 # Only remove a destination we created — never one that
                 # pre-existed (a merge target may hold the user's own files).
                 if not dest_exists:

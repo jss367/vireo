@@ -199,7 +199,7 @@ def read_exif_timestamp(image_path):
                 if dt_str:
                     return datetime.strptime(dt_str, "%Y:%m:%d %H:%M:%S")
     except Exception:
-        pass
+        log.debug("Pillow could not read a capture time from %s", image_path, exc_info=True)
 
     # Pillow didn't produce a timestamp — try exifread (handles RAW and
     # TIFF variants where Pillow may open the file but miss EXIF fields)
@@ -218,7 +218,7 @@ def read_exif_timestamp(image_path):
             if tag:
                 return datetime.strptime(str(tag), "%Y:%m:%d %H:%M:%S")
     except Exception:
-        pass
+        log.debug("exifread could not read a capture time from %s", image_path, exc_info=True)
 
     log.warning("Could not read EXIF from %s", image_path)
     return None

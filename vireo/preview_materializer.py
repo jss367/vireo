@@ -13,6 +13,7 @@ import contextlib
 import io
 import logging
 import os
+import sqlite3
 from dataclasses import dataclass
 
 from artifact_flight import atomic_write_bytes, preview_artifact_flights
@@ -284,6 +285,7 @@ def render_preview_bytes(
         img.save(encoded, format="JPEG", quality=preview_quality, **cache_save_options(photo, recipe))
         return encoded.getvalue()
     finally:
+        # Cleanup must not replace the render's own exception.
         with contextlib.suppress(Exception):
             img.close()
 
@@ -359,8 +361,14 @@ def materialize_preview(
                 )
             else:
                 published = True
-                with contextlib.suppress(Exception):
-                    db.preview_cache_insert(photo_id, size, len(data))
+                try:
+                    # Standalone renders (no catalog) pass db=None.
+                    if db is not None:
+                        db.preview_cache_insert(photo_id, size, len(data))
+                except sqlite3.Error:
+                    # The file is published; an untracked preview is adopted
+                    # on its next hit. Usually the photo was deleted (FK).
+                    log.debug("Could not track preview for photo %s", photo_id, exc_info=True)
         return PreviewMaterialization(
             data=data, generated=True, published=published,
         )

@@ -11,7 +11,6 @@ deliberately evicted copy from a missing copy eligible for extraction.
 A source-file change makes the marker stale and allows extraction again.
 """
 
-import contextlib
 import logging
 import os
 import threading
@@ -637,8 +636,7 @@ def arrange_deferred_over_quota_retry(
                     )
                     return
                 finally:
-                    with contextlib.suppress(Exception):
-                        retry_db.conn.close()
+                    retry_db.close()
                 if not result.get("deferred"):
                     return
                 delay = min(delay * 2, _DEFERRED_RETRY_MAX_DELAY)

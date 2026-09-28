@@ -1,5 +1,9 @@
 """Can this install classify right now? Shared by onboarding and /api/models/status."""
 
+import logging
+
+log = logging.getLogger(__name__)
+
 
 def classification_readiness(db):
     """Whether the active model can actually classify right now.
@@ -73,6 +77,9 @@ def classification_readiness(db):
                 os.path.exists(ls.get("labels_file", "")) for ls in active_sets
             )
         except Exception:
+            # Readiness is a status probe; an unreadable label selection
+            # reports "not ready" rather than failing the page.
+            log.warning("Could not load the active species labels for readiness", exc_info=True)
             labels_ready = False
             labels_blocked = False
 

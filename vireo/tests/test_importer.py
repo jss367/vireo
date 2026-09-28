@@ -461,3 +461,81 @@ def test_preview_import_keeps_two_case_distinct_files_apart(tmp_path, monkeypatc
     result = preview_import([cat1, cat2], db)
 
     assert result['conflict_count'] == 0
+
+
+def _one_photo_catalog(tmp_path):
+    """A readable catalog tagging one photo that is in the Vireo catalog."""
+    from db import Database
+
+    root = str(tmp_path / "photos") + '/'
+    os.makedirs(root)
+    with open(os.path.join(root, 'DSC_0001.NEF'), 'wb') as f:
+        f.write(b'\x00' * 100)
+    cat_path = str(tmp_path / "good.lrcat")
+    _create_test_catalog(cat_path, root, [('DSC_0001.NEF', '', [('Cardinal', 'Birds')])])
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(root, name='photos')
+    db.add_photo(folder_id=fid, filename='DSC_0001.NEF', extension='.nef',
+                 file_size=100, file_mtime=1.0)
+    return cat_path, db
+
+
+def test_execute_import_clean_run_is_ok(tmp_path):
+    from importer import execute_import
+
+    cat_path, db = _one_photo_catalog(tmp_path)
+    result = execute_import([cat_path], db, write_xmp=False)
+
+    assert result['imported'] == 1
+    assert result['ok'] is True
+    assert result['errors'] == []
+
+
+def test_execute_import_reports_unreadable_catalog_as_failure(tmp_path):
+    """An unreadable catalog used to be logged and skipped, so the job read
+    "completed, 0 failed" while none of that catalog's keywords arrived."""
+    from importer import execute_import
+
+    cat_path, db = _one_photo_catalog(tmp_path)
+    broken = tmp_path / "broken.lrcat"
+    broken.write_bytes(b"this is not a sqlite catalog")
+
+    result = execute_import([cat_path, str(broken)], db, write_xmp=False)
+
+    assert result['imported'] == 1  # the readable catalog still imports
+    assert result['ok'] is False
+    assert result['unreadable_catalogs'] == 1
+    assert len(result['errors']) == 1
+    assert 'broken.lrcat' in result['errors'][0]
+
+
+def test_execute_import_reports_failed_file_as_failure(tmp_path, monkeypatch):
+    """A per-file failure makes the run a failure, not a quiet "failed: 1"."""
+    import importer
+    from importer import execute_import
+
+    cat_path, db = _one_photo_catalog(tmp_path)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("keyword write refused")
+
+    monkeypatch.setattr(importer, 'validate_import_locations', boom)
+    result = execute_import([cat_path], db, write_xmp=False)
+
+    assert result['failed'] == 1
+    assert result['ok'] is False
+    assert result['errors'] and 'keyword write refused' in result['errors'][0]
+
+
+def test_preview_import_reports_unreadable_catalog(tmp_path):
+    from importer import preview_import
+
+    cat_path, db = _one_photo_catalog(tmp_path)
+    broken = tmp_path / "broken.lrcat"
+    broken.write_bytes(b"this is not a sqlite catalog")
+
+    result = preview_import([cat_path, str(broken)], db)
+
+    assert [c['catalog'] for c in result['catalogs']] == ['good.lrcat']
+    assert len(result['errors']) == 1
+    assert 'broken.lrcat' in result['errors'][0]

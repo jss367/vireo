@@ -224,10 +224,16 @@ def _compute_file_features(path_str):
     failure yields None for that field rather than raising.
     """
     phash = None
+    # PIL raises a wide set on bad files (OSError, SyntaxError,
+    # DecompressionBombError); a missing pHash only disables near-duplicate
+    # grouping for this photo. This runs in a pool worker, whose log
+    # records never reach the app log, so nothing is logged here.
     with contextlib.suppress(Exception), Image.open(path_str) as img:
         phash = str(imagehash.phash(img))
     file_hash = None
-    with contextlib.suppress(Exception):
+    # Unreadable file: the caller logs the ``None`` hash and leaves the stored
+    # mtime stale so the next scan retries the file.
+    with contextlib.suppress(OSError):
         file_hash = compute_file_hash(path_str)
     return phash, file_hash
 
@@ -245,7 +251,8 @@ def _resolve_worker_count(files_to_process):
     try:
         import config as cfg
         configured = int(cfg.get("scan_workers") or 0)
-    except Exception:
+    except (TypeError, ValueError):
+        log.warning("Ignoring non-integer scan_workers setting", exc_info=True)
         configured = 0
     if configured == 1:
         return 1
@@ -3980,6 +3987,8 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                         # held so a replacement scan cannot claim the same
                         # permits while old workers are still consuming CPU.
                         for proc in list(getattr(pool, "_processes", {}).values()):
+                            # Best-effort kill of a worker that may already be
+                            # gone; shutdown(wait=True) below reaps the rest.
                             with contextlib.suppress(Exception):
                                 proc.terminate()
                         pool.shutdown(wait=True, cancel_futures=True)
@@ -3994,6 +4003,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                         # process-wide budget, and ``JobRunner.shutdown()``
                         # could report completion while hashing continued.
                         for proc in list(getattr(pool, "_processes", {}).values()):
+                            # Must not replace the in-flight exception.
                             with contextlib.suppress(Exception):
                                 proc.terminate()
                         pool.shutdown(wait=True, cancel_futures=True)
@@ -4061,6 +4071,11 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                     image_path,
                 )
                 file_hash = None
+            elif file_hash is None and file_size > 0:
+                log.warning(
+                    "Could not read %s to hash it; it will be retried on the next scan",
+                    image_path,
+                )
 
             # XMP sidecar
             xmp_path = image_path.with_suffix(".xmp")

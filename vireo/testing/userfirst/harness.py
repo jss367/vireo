@@ -65,6 +65,7 @@ def _wait_for_health(base_url, timeout=30.0):
                 if r.status == 200:
                     return
         except Exception as e:
+            # Not up yet; the last error is reported if it never comes up.
             last_err = e
         time.sleep(0.1)
     raise RuntimeError(f"server at {base_url} not healthy in {timeout}s (last: {last_err})")
@@ -156,6 +157,7 @@ class VireoSession:
         try:
             resp = self.page.goto(url, wait_until=wait_until, timeout=timeout)
         except Exception as e:
+            # Recorded as a bug finding in the run report.
             self.report.record_step(f"goto {path}", status=None, elapsed_ms=None, error=str(e))
             self.report.add(Finding.bug(f"goto failed: {e}", url=path))
             return None
@@ -171,6 +173,7 @@ class VireoSession:
             self.page.click(selector, timeout=timeout)
             self.report.record_step(f"click {selector}")
         except Exception as e:
+            # Recorded as a bug finding in the run report.
             self.report.record_step(f"click {selector}", error=str(e))
             self.report.add(Finding.bug(f"click failed: {e}", selector=selector))
 
@@ -179,6 +182,7 @@ class VireoSession:
             self.page.fill(selector, text, timeout=timeout)
             self.report.record_step(f"fill {selector!r}")
         except Exception as e:
+            # Recorded as a bug finding in the run report.
             self.report.record_step(f"fill {selector}", error=str(e))
             self.report.add(Finding.bug(f"fill failed: {e}", selector=selector))
 
@@ -193,6 +197,7 @@ class VireoSession:
             self.page.screenshot(path=str(path), full_page=False)
             self.report.add_screenshot(path)
         except Exception as e:
+            # Recorded as a failed step in the run report.
             self.report.record_step(f"screenshot {label}", error=str(e))
 
     def assert_that(self, cond, msg, **ctx):
@@ -266,6 +271,7 @@ def vireo_session(name="session", startup_timeout=30.0, keep_runs=20, seed=None)
     _fake_config = fake_home / ".vireo" / "config.json"
     _cfg_data = {}
     if _fake_config.exists():
+        # An unreadable fake-home config is simply replaced below.
         with contextlib.suppress(Exception):
             _cfg_data = json.loads(_fake_config.read_text())
     _cfg_data["setup_complete"] = True
@@ -294,8 +300,10 @@ def vireo_session(name="session", startup_timeout=30.0, keep_runs=20, seed=None)
         # findings and screenshots from a crashed scenario are silently lost.
         if report is not None:
             report.duration_s = time.time() - started
+            # Teardown must not mask the scenario's own failure.
             with contextlib.suppress(Exception):
                 report.write_json(run_dir / "findings.json")
+            # Same: best-effort, never masks the scenario's failure.
             with contextlib.suppress(Exception):
                 report.write_markdown(run_dir / "report.md")
         for close in (
@@ -303,6 +311,7 @@ def vireo_session(name="session", startup_timeout=30.0, keep_runs=20, seed=None)
             lambda: browser and browser.close(),
             lambda: pw and pw.stop(),
         ):
+            # Best-effort browser teardown.
             with contextlib.suppress(Exception):
                 close()
         if proc.poll() is None:

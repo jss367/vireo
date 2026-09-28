@@ -116,7 +116,8 @@ def _embedding_usable(stored_variant, expected_variant, emb_bytes):
         try:
             from dino_embed import get_embedding_dim
             expected_dim = get_embedding_dim(expected_variant)
-        except Exception:
+        except (ImportError, ValueError):
+            # Unknown variant (ValueError): nothing can match its width.
             return False
         return emb_bytes is not None and (len(emb_bytes) // 4) == expected_dim
     return False
@@ -1827,7 +1828,7 @@ def _count_usable_embeddings(db, expected_variant, detected_only=False):
     try:
         from dino_embed import get_embedding_dim
         expected_bytes = get_embedding_dim(expected_variant) * 4
-    except Exception:
+    except (ImportError, ValueError):
         # Unknown variant — only the exact-match branch can pass.
         row = db.conn.execute(
             f"""SELECT COUNT(DISTINCT p.id) AS n

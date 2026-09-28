@@ -70,11 +70,14 @@ caller owns the transaction, and no method here commits unless the
 """
 
 import json
+import logging
 import os
 import sqlite3
 
 from keyword_identity import free_sibling_name, keywords_claim_different_taxa
 from keyword_normalization import keyword_match_key, normalize_keyword_display
+
+log = logging.getLogger(__name__)
 
 # ``Database`` methods the moved bodies call through the façade.
 FACADE_METHODS = (
@@ -2485,6 +2488,11 @@ class KeywordProvenanceRepository:
                 _replace_taxonomy = _llt()
                 _compare_pred_to_kws = _cpk
             except Exception:
+                log.warning(
+                    "Taxonomy unavailable for species replacement; "
+                    "protecting only exact-name keywords",
+                    exc_info=True,
+                )
                 _replace_taxonomy = None
                 _compare_pred_to_kws = None
         pred = self.conn.execute(

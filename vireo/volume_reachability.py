@@ -532,6 +532,7 @@ def _drive_is_remote(drive):
         root = drive.replace("/", "\\").rstrip("\\") + "\\"
         kind = ctypes.windll.kernel32.GetDriveTypeW(root)  # type: ignore[attr-defined]
     except Exception:
+        log.debug("GetDriveTypeW failed for %s; treating it as remote", drive, exc_info=True)
         return True
     # DRIVE_UNKNOWN (0) / DRIVE_NO_ROOT_DIR (1) are not provably local:
     # fail closed and treat them like a remote mount.
@@ -666,7 +667,9 @@ def _live_forgotten_network_probes():
     Callers must hold ``_NETWORK_PROBE_LOCK``.
     """
     for process in list(_FORGOTTEN_NETWORK_PROBES):
-        with contextlib.suppress(Exception):
+        # waitpid can raise ChildProcessError for an already-reaped probe;
+        # it stays counted until a later poll succeeds.
+        with contextlib.suppress(OSError):
             if process.poll() is not None:
                 _FORGOTTEN_NETWORK_PROBES.discard(process)
     return len(_FORGOTTEN_NETWORK_PROBES)
@@ -869,6 +872,11 @@ def load_known_mount_roots(db) -> set[str]:
             (KNOWN_MOUNT_ROOTS_KEY,),
         ).fetchone()
     except Exception:
+        log.warning(
+            "Could not read known mount roots; detached-stub detection "
+            "runs without cross-run evidence",
+            exc_info=True,
+        )
         return set()
     if row is None or row["value"] is None:
         return set()
@@ -912,6 +920,7 @@ def record_known_mount_roots(db, baseline: dict[str, bool]) -> None:
         db.conn.commit()
     except Exception:
         if transaction_started:
+            # Must not replace the failure logged just below.
             with contextlib.suppress(Exception):
                 db.conn.rollback()
         log.debug(

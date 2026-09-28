@@ -589,6 +589,7 @@ def _image_encoder_embedding_dim(image_session):
     try:
         shape = image_session.get_outputs()[0].shape
     except Exception:
+        log.debug("Could not read the image encoder output shape", exc_info=True)
         return None
     if not shape:
         return None

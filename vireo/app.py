@@ -99,7 +99,7 @@ from web.settings import create_settings_blueprint
 from web.species import create_species_blueprint
 from web.storage import create_storage_blueprint
 from web.sync import create_sync_blueprint
-from web.system import create_system_blueprint
+from web.system import _application_version, create_system_blueprint
 from web.workspaces import create_workspace_blueprint
 from working_copy_cache import (
     evict_if_over_quota as evict_working_copy_cache_if_over_quota,
@@ -983,6 +983,9 @@ def _trash_paths(filepaths, progress_callback=None, already_missing_out=None,
                                 "Finder existence check timed out"
                             )
                     except Exception as exc:
+                        # Fail safe: every path in the batch is reported as a
+                        # send error, so nothing is pruned on a failed recheck.
+                        log.warning("Finder existence recheck failed", exc_info=True)
                         for path in paths_still_on_network:
                             finder_recheck_errors.add(path)
                             send_errors[path] = (
@@ -1167,10 +1170,7 @@ def _migrate_legacy_preview_cache(app):
         if orphaned:
             log.info("Removed %d orphaned legacy preview files", orphaned)
     finally:
-        try:
-            db.conn.close()
-        except Exception:
-            pass
+        db.close()
 
 
 def _migrate_edit_math_render_caches(app):
@@ -1348,10 +1348,7 @@ def _migrate_edit_math_render_caches(app):
                 "invalidate", stored_version, EDIT_MATH_VERSION,
             )
     finally:
-        try:
-            db.conn.close()
-        except Exception:
-            pass
+        db.close()
 
 
 def _migrate_unedited_raw_preview_sources(app):
@@ -1468,10 +1465,7 @@ def _migrate_unedited_raw_preview_sources(app):
                 len(affected),
             )
     finally:
-        try:
-            db.conn.close()
-        except Exception:
-            pass
+        db.close()
 
 
 def _enforce_preview_cache_quota_at_startup(app):
@@ -1491,10 +1485,7 @@ def _enforce_preview_cache_quota_at_startup(app):
         reconcile_preview_cache(db, vireo_dir)
         evict_if_over_quota(db, vireo_dir)
     finally:
-        try:
-            db.conn.close()
-        except Exception:
-            pass
+        db.close()
 
 
 def _enforce_working_copy_cache_quota_at_startup(app):
@@ -1519,10 +1510,7 @@ def _enforce_working_copy_cache_quota_at_startup(app):
     try:
         evict_working_copy_cache_if_over_quota(db, vireo_dir, startup=True)
     finally:
-        try:
-            db.conn.close()
-        except Exception:
-            pass
+        db.close()
 
 
 def _sweep_abandoned_transient_originals(app):
@@ -2366,6 +2354,7 @@ def main():
 
     # Open browser after server is ready, not before
     if not args.no_browser:
+        import http.client
         import threading
         import urllib.request
 
@@ -2376,27 +2365,20 @@ def main():
                     urllib.request.urlopen(url, timeout=0.1)
                     webbrowser.open(url)
                     return
-                except Exception:
+                except (OSError, http.client.HTTPException):
+                    # Server not accepting connections yet; poll again.
                     time.sleep(0.1)
+            log.warning("Server did not answer on %s within 5s; not opening a browser", url)
 
         threading.Thread(target=_open_browser, daemon=True).start()
 
-    # Look up the running version using the same fallback chain as
-    # /api/version: package metadata, then pyproject.toml, then "0.0.0".
+    # Look up the running version with the helper /api/version uses:
+    # package metadata, then pyproject.toml, then "0.0.0".
     # In source/dev runs where importlib.metadata is missing but
     # pyproject.toml is present, runtime.json must agree with
     # /api/v1/version — external callers use it to make compatibility
     # decisions and a bare "0.0.0" would mislead them.
-    try:
-        from importlib.metadata import version as pkg_version
-        ver = pkg_version("vireo")
-    except Exception:
-        import tomllib
-        try:
-            with open(os.path.join(os.path.dirname(__file__), "..", "pyproject.toml"), "rb") as f:
-                ver = tomllib.load(f)["project"]["version"]
-        except Exception:
-            ver = "0.0.0"
+    ver = _application_version()
 
     # Finalize runtime.json, replacing the reservation marker with the full
     # payload now that the port and token are known. Cleanup handlers were

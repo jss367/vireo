@@ -556,8 +556,12 @@ def create_imports_blueprint(
                             "UPDATE pending_archives SET state = 'complete', error = '' WHERE id = ?", (archive_id,),
                         )
                         thread_db.conn.commit()
-                        with contextlib.suppress(Exception):
+                        try:
                             invalidate_missing_originals()
+                        except Exception:
+                            # The archive already completed; a stale Missing
+                            # Originals cache refreshes on its next scan.
+                            log.warning("Could not invalidate Missing Originals after archive", exc_info=True)
                         return result
                     except Exception as e:
                         thread_db.conn.execute(
@@ -588,6 +592,7 @@ def create_imports_blueprint(
             result = preview_import(catalogs, db)
             return jsonify(result)
         except Exception as e:
+            log.exception("Catalog import preview failed")
             return json_error(str(e), 500)
 
     @blueprint.route("/api/import/folder-preview-stream", methods=["POST"])

@@ -13,6 +13,7 @@ or removable volume, independent volumes overlapping under a global cap.
 """
 
 import json
+import logging
 import os
 import queue
 import threading
@@ -24,6 +25,8 @@ import source_scan_policy
 from image_loader import ScanCancelled
 from import_dedup import source_capture_timestamps
 from ingest import discover_source_files
+
+log = logging.getLogger(__name__)
 
 GLOBAL_SCAN_LIMIT = 4
 # Progress frames are throttled per folder; heartbeats double as the
@@ -257,6 +260,7 @@ def stream_folder_preview(folders, file_types="both", recursive=True,
             except Exception:
                 # A walker must never die silently: the scheduler would wait
                 # on its completion forever. Surface the folder as unavailable.
+                log.warning("Source discovery failed for %s", folder, exc_info=True)
                 result = _empty_result(folder, error=True)
             events.put({"_completed": folder, "_result": result})
         finally:

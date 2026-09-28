@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import copy
 import json
+import logging
 import os
 import re
 import shutil
@@ -19,6 +20,8 @@ from export import (
     _get_photo_exif_data,
     load_export_image,
 )
+
+log = logging.getLogger(__name__)
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 # Local filesystem details: a published site must never reveal where the
@@ -83,6 +86,7 @@ def _export_image(vireo_dir, photo, rel_path, destination, options, folders, ind
             developed_dir=options.get("developed_dir") or "", developed_index=index,
         )
     except Exception as exc:
+        log.warning("Could not load photo %s for publishing", photo.get("id"), exc_info=True)
         return False, f"{photo.get('filename') or photo.get('id')}: {exc}"
     try:
         out_path = Path(destination) / rel_path

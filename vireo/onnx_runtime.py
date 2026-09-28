@@ -272,7 +272,9 @@ def get_providers():
 def _remember_session_cpu_threads(session, threads):
     """Associate an ONNX session with its enforceable CPU thread budget."""
     threads = max(1, int(threads))
-    with contextlib.suppress(Exception):
+    # Slotted or extension-backed sessions refuse attributes; the weak map
+    # below still records the budget for them.
+    with contextlib.suppress(AttributeError, TypeError):
         # The Python InferenceSession wrapper normally accepts attributes.
         # Keeping the value on the object lets top-level and package-qualified
         # imports observe the same budget in mixed test/tooling environments.
@@ -297,7 +299,8 @@ def _remember_session_cpu_threads(session, threads):
 
 def session_cpu_threads(session, default=None):
     """Return the configured CPU threads for ``session`` when known."""
-    with contextlib.suppress(Exception):
+    # No attribute (AttributeError) or a foreign value: use the map below.
+    with contextlib.suppress(AttributeError, TypeError, ValueError):
         threads = int(session._vireo_cpu_threads)
         if threads >= 1:
             return threads

@@ -342,3 +342,54 @@ def test_batch_accept_rejects_non_finite_min_confidence():
         assert 'Northern cardinal' not in read_keywords(
             os.path.join(tmpdir, 'bird1.xmp')
         )
+
+
+def _fail_writes_for(monkeypatch, failing_name):
+    """Make review_server's sidecar writer raise for one member path."""
+    import review_server
+    from xmp import write_sidecar
+
+    def flaky(path, *args, **kwargs):
+        if os.path.basename(path) == failing_name:
+            raise OSError("disk full")
+        return write_sidecar(path, *args, **kwargs)
+
+    monkeypatch.setattr(review_server, 'write_sidecar', flaky)
+
+
+def test_accept_group_with_failed_member_write_stays_pending(monkeypatch):
+    """A group whose member sidecars were not all written is not accepted.
+
+    Previously the failed write was logged and the group was marked accepted
+    anyway, so the response said ok and the group never came back for retry.
+    """
+    from review_server import create_app
+    with tempfile.TemporaryDirectory() as tmpdir:
+        results_path = _create_group_data(tmpdir)
+        _fail_writes_for(monkeypatch, 'bird_b.xmp')
+        client = create_app(tmpdir).test_client()
+
+        resp = client.post('/api/accept-group/g0001', json={'model': 'bioclip-vit-b-16'})
+        assert resp.status_code == 500
+        data = resp.get_json()
+        assert data['ok'] is False
+        assert data['accepted_count'] == 2
+        assert [os.path.basename(p) for p in data['failed']] == ['bird_b.xmp']
+        with open(results_path) as f:
+            assert json.load(f)['photos'][0]['status'] == 'pending'
+
+
+def test_batch_accept_reports_group_with_failed_member_write(monkeypatch):
+    """Batch accept counts a partially written group as failed, not accepted."""
+    from review_server import create_app
+    with tempfile.TemporaryDirectory() as tmpdir:
+        results_path = _create_group_data(tmpdir)
+        _fail_writes_for(monkeypatch, 'bird_c.xmp')
+        client = create_app(tmpdir).test_client()
+
+        resp = client.post('/api/accept-batch', json={'min_confidence': 0.0})
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data == {'ok': False, 'accepted': 0, 'failed': 1}
+        with open(results_path) as f:
+            assert json.load(f)['photos'][0]['status'] == 'pending'

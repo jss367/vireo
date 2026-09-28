@@ -171,6 +171,7 @@ def rearm_pending_label_desc_heal(model_str, model_dir):
         import models as _models_mod
         descs = _models_mod.load_label_descriptions(label_desc_path)
     except Exception:
+        log.debug("Could not read %s; scheduling a heal", label_desc_path, exc_info=True)
         descs = None
     if descs is not None:
         return None

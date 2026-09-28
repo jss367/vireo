@@ -13,8 +13,11 @@ and counting its list fields, so a new job type never regresses to JSON.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 MAX_DETAIL_ITEMS = 10
 
@@ -810,6 +813,7 @@ def describe_result(job_type: str, result: Any, config: dict | None = None) -> d
         try:
             summary, details = describer(payload, config)
         except Exception:
+            log.warning("Job summary describer for %s failed; using the generic summary", job_type, exc_info=True)
             summary, details = _generic(payload, config)
         if authored:
             # The job wrote its own sentence; keep it, but still surface the

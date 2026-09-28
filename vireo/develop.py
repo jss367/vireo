@@ -595,7 +595,8 @@ def _metadata_nef_compression(metadata):
 def _read_nef_compression_with_exiftool(input_path):
     try:
         from metadata import extract_metadata
-    except Exception:
+    except ImportError:
+        log.debug("metadata module unavailable; cannot read NEFCompression", exc_info=True)
         return None
 
     extracted = extract_metadata([input_path], restricted_tags=["-NEFCompression"])

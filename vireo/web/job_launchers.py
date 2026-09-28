@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sqlite3
 import time
 
 from artifact_flight import ArtifactProducerFailed
@@ -757,8 +758,15 @@ def create_job_launchers_blueprint(
                 recipe = thread_db.get_photo_edit_recipe(photo["id"])
                 if os.path.exists(cache_path):
                     cache_row = None
-                    with contextlib.suppress(Exception):
+                    try:
                         cache_row = thread_db.preview_cache_get(photo["id"], max_size)
+                    except sqlite3.Error:
+                        # Treated as untracked: an edited photo's preview is
+                        # then re-rendered rather than trusted.
+                        log.warning(
+                            "Could not read the preview cache row for photo %s",
+                            photo["id"], exc_info=True,
+                        )
                     if recipe and cache_row is None:
                         with contextlib.suppress(OSError):
                             os.remove(cache_path)
@@ -775,13 +783,18 @@ def create_job_launchers_blueprint(
                         # Adopt untracked unedited files so precompute output is
                         # visible to eviction and /api/preview-cache.
                         # Best-effort: photo may be deleted mid-job (FK error).
-                        with contextlib.suppress(Exception):
+                        try:
                             if cache_row is None:
                                 thread_db.preview_cache_insert(
                                     photo["id"],
                                     max_size,
                                     os.path.getsize(cache_path),
                                 )
+                        except (sqlite3.Error, OSError):
+                            log.debug(
+                                "Could not track existing preview for photo %s",
+                                photo["id"], exc_info=True,
+                            )
                         continue
 
                 if not os.path.exists(cache_path):
@@ -1107,7 +1120,7 @@ def create_job_launchers_blueprint(
                         thread_db.conn.rollback()
                         failed += 1
                         job["errors"].append(f'{photo["filename"]}: {exc}')
-                        log.warning("Offline cache failed for %s: %s", filename, exc)
+                        log.warning("Offline cache failed for %s: %s", filename, exc, exc_info=True)
 
                 ctx.runner.push_event(
                     job["id"],

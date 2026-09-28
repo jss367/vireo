@@ -5,11 +5,14 @@ workspace; ``/api/species/search`` suggests names for hand-tagging from the
 active label sets plus existing species keywords.
 """
 
+import logging
 import os
 
 from db import text_search_match
 from flask import Blueprint, jsonify, request
 from web.request_args import request_bool_arg
+
+log = logging.getLogger(__name__)
 
 
 def create_species_blueprint(get_db):
@@ -59,7 +62,8 @@ def create_species_blueprint(get_db):
                         if len(matches) >= 20:
                             break
             except Exception:
-                pass
+                # One unreadable label set must not break autocomplete.
+                log.warning("Could not read label set %s for species search", labels_file, exc_info=True)
             if len(matches) >= 20:
                 break
 
