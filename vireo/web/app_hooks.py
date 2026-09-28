@@ -14,7 +14,8 @@ used to define inline:
   is refused before it can take a reservation.
 * ``after_request``: action/slow/API logging plus the security headers and
   browser session cookie (``_log_requests``).
-* ``errorhandler(Exception)``: ``_handle_error``.
+* ``errorhandler(Exception)``: ``_handle_error``, which answers a search
+  interrupted by ``claim_search_lane`` with a quiet 409.
 * ``teardown_appcontext``: ``close_request_db`` closes the per-request
   ``Database`` that ``get_request_db`` opened on ``g``.
 * ``teardown_request``: ``_release_workspace_mutation``.
@@ -31,6 +32,7 @@ from urllib.parse import urlsplit
 from db import Database
 from flask import g, jsonify, request
 from jobs import WorkspaceBusyError
+from services import search_lanes
 from web.responses import json_error
 from werkzeug.exceptions import HTTPException
 
@@ -66,6 +68,23 @@ def close_request_db(exc):
     db = g.pop("db", None)
     if db is not None:
         db.conn.close()
+
+
+def claim_search_lane(db):
+    """Let a newer request on this request's search lane cancel it.
+
+    Read routes the page re-issues on every search change call this with
+    their ``Database``. A request without the lane headers is unaffected.
+    """
+    parsed = search_lanes.parse_lane(
+        request.headers.get(search_lanes.LANE_HEADER),
+        request.headers.get(search_lanes.SEQ_HEADER),
+    )
+    if parsed is None:
+        return
+    superseded = search_lanes.SEARCH_LANES.claim(*parsed)
+    g.search_superseded = superseded
+    search_lanes.cancel_when_superseded(db.conn, superseded)
 
 
 def register_app_hooks(app, *, get_db, reservation_exempt_endpoints):
@@ -218,7 +237,10 @@ def register_app_hooks(app, *, get_db, reservation_exempt_endpoints):
                     detail,
                     getattr(g, "request_id", "-"),
                 )
-            elif elapsed > 0.5:
+            elif elapsed > 0.5 and not getattr(g, "search_superseded_response", False):
+                # A superseded read was interrupted on purpose; its elapsed
+                # time is how long the page waited before the next keystroke,
+                # not a real slow request.
                 log.warning(
                     "Slow request: %s %s took %.1fs request_id=%s",
                     request.method,
@@ -272,6 +294,15 @@ def register_app_hooks(app, *, get_db, reservation_exempt_endpoints):
             return json_error(str(e), 409)
         if isinstance(e, HTTPException):
             return e
+        if search_lanes.is_superseded_interrupt(e, g.get("search_superseded")):
+            # The page already sent a newer request for this loader and will
+            # ignore this response; the interrupt is the point, not a fault.
+            log.info("Superseded: %s %s", request.method, request.path)
+            g.search_superseded_response = True
+            return json_error(
+                "A newer request replaced this one", 409,
+                code=search_lanes.SUPERSEDED_CODE,
+            )
         log.exception("Unhandled error: %s %s", request.method, request.path)
         return jsonify({
             "error": "Internal server error",

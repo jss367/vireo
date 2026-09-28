@@ -72,7 +72,10 @@
       if (body.code === 'internal_error' && requestId) {
         message += ' If it keeps happening, report request ID ' + requestId + '.';
       }
-      if ((!options || options.toast !== false) && typeof global.showToast === 'function') {
+      // A superseded read was cancelled because this page already sent a
+      // newer one; the caller ignores it, so the user has nothing to see.
+      if ((!options || options.toast !== false) && body.code !== 'search_superseded' &&
+          typeof global.showToast === 'function') {
         global.showToast(message, 'error');
       }
       var error = new Error(message);
@@ -86,7 +89,22 @@
     return text ? JSON.parse(text) : null;
   }
 
+  // Names this page load, so a newer read cancels only this page's own
+  // superseded reads of the same loader (services/search_lanes.py).
+  var searchLanePage = Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+
+  // Headers that let the server abandon this read once the page sends one
+  // with a higher ``seq`` for ``loader``. Only pass a ``seq`` whose older
+  // values the page would discard anyway.
+  function searchLaneHeaders(loader, seq) {
+    return {
+      'X-Vireo-Search-Lane': searchLanePage + ':' + loader,
+      'X-Vireo-Search-Seq': String(seq),
+    };
+  }
+
   Vireo.api = Vireo.api || {};
+  Vireo.api.searchLaneHeaders = searchLaneHeaders;
   Vireo.api.fetch = browserFetch;
   Vireo.api.json = json;
   Vireo.api.nativeFetch = nativeFetch;

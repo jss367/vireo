@@ -282,6 +282,18 @@ var summaryRenderDecisionGen = 0;
 var calendarDataLoadGen = 0;
 var calendarDataLoadStates = {};
 var calendarRenderDecisionGen = 0;
+// Server-side cancellation lanes for the same two loaders. The sequence
+// advances only when the params change: a reload with unchanged params can
+// still be rendered from an older response, so it must not cancel one.
+var summaryLane = { key: null, seq: 0 };
+var calendarLane = { key: null, seq: 0 };
+function searchLaneSeq(lane, key) {
+  if (lane.key !== key) {
+    lane.key = key;
+    lane.seq++;
+  }
+  return lane.seq;
+}
 // Internal generation counters shared across every caller of the sidebar
 // loaders. Without these, ``refreshBrowseSidebarCounts()`` and the various
 // mutation-triggered ``loadKeywords()``/``loadCollections()`` calls fire
@@ -5247,11 +5259,18 @@ function buildBrowsePageRequest(page, requestPerPage, requestOptions) {
   if (activeCollectionId && dashboardCollectionScope) body.collection_id = activeCollectionId;
   if (focusPhotoId != null) body.focus_photo_id = focusPhotoId;
   if (focusPhotoIds.length) body.focus_photo_ids = focusPhotoIds;
+  // Every caller builds this right after claiming or observing the grid
+  // window, and a response from an older ``loadEpoch`` is always dropped, so
+  // the server may abandon one as soon as a newer epoch's request arrives.
+  var headers = Object.assign(
+    { 'Content-Type': 'application/json' },
+    Vireo.api.searchLaneHeaders('grid', loadEpoch)
+  );
   return {
     url: '/api/photos/query',
     options: {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: headers,
       body: JSON.stringify(body),
     },
     focusPhotoId: focusPhotoId,
@@ -5572,7 +5591,10 @@ async function loadCalendarData() {
   };
 
   try {
-    var data = await safeFetch('/api/photos/calendar?' + params.toString());
+    var data = await safeFetch('/api/photos/calendar?' + params.toString(), {
+      headers: Vireo.api.searchLaneHeaders(
+        'calendar', searchLaneSeq(calendarLane, params.toString())),
+    });
     var state = calendarDataLoadStates[gen];
     if (!state) return data;
     state.status = 'success';
@@ -9961,7 +9983,10 @@ async function loadSummary() {
   };
 
   try {
-    var data = await safeFetch('/api/browse/summary?' + params.toString(), {}, { toast: false });
+    var data = await safeFetch('/api/browse/summary?' + params.toString(), {
+      headers: Vireo.api.searchLaneHeaders(
+        'summary', searchLaneSeq(summaryLane, params.toString())),
+    }, { toast: false });
     var state = summaryLoadStates[gen];
     if (!state) return data;
     state.status = 'success';
