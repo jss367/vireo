@@ -1316,3 +1316,83 @@ def test_check_duplicates_recovery_skipped_for_source_via_symlink(
     done = [e for e in events if e.get("done")]
     assert done[0]["recovered_count"] == 0
     assert _recovered_paths(events) == []
+
+
+def _pair_unrecovered_companions(db, fid, library, count):
+    """RAW rows whose JPEG companions have no stored identity yet."""
+    jpegs = []
+    for i in range(count):
+        jpeg = library / f"PAIR_{i}.jpg"
+        Image.new("RGB", (40, 40), color=(i * 40, 0, 0)).save(str(jpeg))
+        pid = db.add_photo(
+            folder_id=fid, filename=f"PAIR_{i}.nef", extension=".nef",
+            file_size=10, file_mtime=1,
+        )
+        db.conn.execute(
+            "UPDATE photos SET companion_path=? WHERE id=?", (jpeg.name, pid))
+        jpegs.append(jpeg)
+    db.conn.commit()
+    return jpegs
+
+
+def test_catalog_companion_recovery_streams_before_the_duplicate_check(
+        app_and_db, tmp_path, monkeypatch):
+    import import_dedup
+
+    monkeypatch.setattr(import_dedup, "COMPANION_RECOVERY_BATCH_SIZE", 1)
+    app, db, fid = app_and_db
+    library = tmp_path / "library"
+    library.mkdir(exist_ok=True)
+    jpegs = _pair_unrecovered_companions(db, fid, library, 2)
+    card = tmp_path / "card"
+    card.mkdir()
+    on_card = card / jpegs[0].name
+    on_card.write_bytes(jpegs[0].read_bytes())
+
+    resp = app.test_client().post(
+        "/api/import/check-duplicates",
+        json={"paths": [str(on_card)], "verify_by_hash": True},
+    )
+    events = parse_sse_events(resp.data)
+
+    assert [e["catalog_recovery"] for e in events[:2]] == [
+        {"checked": 1, "total": 2}, {"checked": 2, "total": 2},
+    ]
+    assert not any("catalog_recovery" in e for e in events[2:])
+    assert events[-1]["done"] is True
+    assert events[-1]["duplicate_count"] == 1
+
+
+def test_closed_duplicate_check_stops_companion_recovery(
+        app_and_db, tmp_path, monkeypatch):
+    """A superseded preview must stop reading the catalog's files once its
+    client goes away, keeping the batches it finished."""
+    import import_dedup
+
+    monkeypatch.setattr(import_dedup, "COMPANION_RECOVERY_BATCH_SIZE", 1)
+    app, db, fid = app_and_db
+    library = tmp_path / "library"
+    library.mkdir(exist_ok=True)
+    _pair_unrecovered_companions(db, fid, library, 3)
+    hashed = []
+    real_hash = import_dedup.compute_file_hash
+    monkeypatch.setattr(
+        import_dedup, "compute_file_hash",
+        lambda path: hashed.append(path) or real_hash(path),
+    )
+    source = tmp_path / "card.jpg"
+    source.write_bytes(b"card")
+
+    resp = app.test_client().post(
+        "/api/import/check-duplicates",
+        json={"paths": [str(source)]},
+        buffered=False,
+    )
+    body = iter(resp.response)
+    first = next(body)
+    resp.close()
+
+    assert b"catalog_recovery" in first
+    assert len(hashed) == 1
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM companion_identities").fetchone()[0] == 1

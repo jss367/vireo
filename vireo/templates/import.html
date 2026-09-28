@@ -3930,7 +3930,21 @@ async function previewImport(opts) {
           applyCaptureDates(d.capture_dates);
           if (d.duplicates) duplicatePaths.push(...d.duplicates);
           if (d.recovered) recoveredPaths.push(...d.recovered);
-          if (!d.done && requestSeq === importPreviewSeq &&
+          const catalogRecovery = d.catalog_recovery;
+          if (catalogRecovery && requestSeq === importPreviewSeq &&
+              !importPreviewSignatureChanged(requestSignature) &&
+              Number.isFinite(Number(catalogRecovery.checked)) &&
+              Number.isFinite(Number(catalogRecovery.total))) {
+            // The server is fingerprinting JPEGs already in the catalog
+            // (paired with a RAW) before it can compare this card against
+            // them — whole-file reads, slow on a NAS. Say so, with the
+            // count, rather than an idle "checking for duplicates…".
+            summary.textContent = files.length +
+              ' files found — fingerprinting paired JPEGs already in your catalog' +
+              ' so duplicates are recognized… ' +
+              Number(catalogRecovery.checked).toLocaleString() + ' of ' +
+              Number(catalogRecovery.total).toLocaleString();
+          } else if (!d.done && requestSeq === importPreviewSeq &&
               !importPreviewSignatureChanged(requestSignature) &&
               Number.isFinite(Number(d.checked)) &&
               Number.isFinite(Number(d.total))) {
