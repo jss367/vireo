@@ -289,6 +289,7 @@ def enqueue_import_photos(service: ImportService, db: Database, body: dict) -> d
     # every deleted-process retry outright.
     parent_id_raw = body.get("parent_import_job_id")
     parent_config = None
+    parent_resume = None
     parent_allowed_ids = None
     parent_allowed_fingerprints = None
     parent_source_snapshots = None
@@ -308,6 +309,7 @@ def enqueue_import_photos(service: ImportService, db: Database, body: dict) -> d
             parent_allowed_ids,
             parent_allowed_fingerprints,
             parent_source_snapshots,
+            parent_resume,
             parent_err,
         ) = service._validate_parent_import_job(
             parent_id_raw.strip(), db._active_workspace_id, db,
@@ -729,6 +731,17 @@ def enqueue_import_photos(service: ImportService, db: Database, body: dict) -> d
         "workspace_id": active_ws,
         "created_workspace": created_workspace,
         "carry_photo_ids": carry_photo_ids,
+        # Resume of an interrupted parent only (see
+        # ``_validate_parent_import_job``): the paths its landings sit at,
+        # so this run recovers rows the parent's checkpoint missed, and the
+        # photos still owed the tag/GPS pass. Persisted so a resume of
+        # this run, should it be interrupted too, inherits both.
+        "recover_landed_files": (
+            parent_resume["landed_files"] if parent_resume else {}
+        ),
+        "untagged_photo_ids": (
+            parent_resume["untagged_ids"] if parent_resume else []
+        ),
         # Fingerprint sidecar to carry_photo_ids so a retry-of-retry
         # can still verify the inherited scope by stable identity
         # even after the grandparent's job has aged out of history.
@@ -819,6 +832,11 @@ def enqueue_import_photos(service: ImportService, db: Database, body: dict) -> d
         carry_photo_ids = list(
             (job.get("config") or {}).get("carry_photo_ids") or []
         )
+        carried_already = set(carry_photo_ids)
+        carry_photo_ids += [
+            pid for pid in result.get("recovered_photo_ids") or []
+            if pid not in carried_already
+        ]
         thread_db, col_id = service._record_import_collection(
             result, active_ws, chain_photo_ids=carry_photo_ids,
         )
@@ -967,6 +985,21 @@ def enqueue_import_photos(service: ImportService, db: Database, body: dict) -> d
                 f"failed to enqueue processing: {e}"
             )
 
+    def _mark_post_import_step(job, step, result=None):
+        """Record a finished post-import step on the history row now.
+
+        A restart before the runner writes the final result leaves the row
+        marked interrupted; these marks tell a resume which side effects
+        already happened (``_interrupted_parent_resume``) so it doesn't
+        tag, collect or chain the same photos twice. ``result``, once the
+        run is otherwise done, rides along so the row still carries what
+        an ordinary retry needs (``failed`` and the rest).
+        """
+        job["partial_result"] = {
+            **(job.get("partial_result") or {}), **(result or {}), step: True,
+        }
+        runner.flush_partial_result(job)
+
     def work(job):
         from import_job import ImportParams, run_import_job
 
@@ -1005,6 +1038,10 @@ def enqueue_import_photos(service: ImportService, db: Database, body: dict) -> d
             include_paths=include_paths,
             previewed_count=previewed_count,
             checked_count=checked_count,
+            carry_photo_ids=carry_photo_ids,
+            recover_landed_files=(
+                parent_resume["landed_files"] if parent_resume else None
+            ),
         )
         try:
             result = run_import_job(
@@ -1014,16 +1051,62 @@ def enqueue_import_photos(service: ImportService, db: Database, body: dict) -> d
                 result["local_processing"] = True
                 result["final_destination"] = destination
                 result["staging_destination"] = import_destination
+            # An interrupted parent never reached its tag/GPS pass, so a
+            # resume applies it to the photos that parent landed (its
+            # checkpointed ids, inherited untagged ids, and rows this run
+            # recovered by path) along with its own. Every other carried
+            # photo was tagged and located by the run that landed it;
+            # re-resolving GPS for those would overwrite any location the
+            # user has corrected since.
+            carried = set(carry_photo_ids or ())
+            # With duplicate skipping off, the parent's landings come back
+            # as this run's adoptions; they are tagged only if owed.
+            parent_landings = set(result.get("parent_landing_ids") or [])
+            tag_photo_ids = [
+                pid for pid in result.get("photo_ids") or []
+                if pid not in parent_landings
+            ]
+            seen = set(tag_photo_ids)
+            owed = [
+                pid for pid in (parent_resume or {}).get("untagged_ids", [])
+                if pid in carried
+            ]
+            if parent_resume and not parent_resume["tags_applied"]:
+                owed += sorted(parent_landings)
+            for pid in owed:
+                if pid not in seen:
+                    seen.add(pid)
+                    tag_photo_ids.append(pid)
             service._apply_import_tags(
-                active_ws, result.get("photo_ids") or [], import_tags,
+                active_ws, tag_photo_ids, import_tags,
                 location_from_gps, result, job=job, runner=runner,
             )
+            tag_errors = bool((result.get("tagging") or {}).get("errors"))
+            # A pass Stop cut short, or one with failed tags or locations,
+            # still owes work; leave it unmarked so a resume replays it.
+            if not result.get("cancelled") and not tag_errors:
+                _mark_post_import_step(job, "tags_applied")
             # Atomically honor a pending pause/cancel before collection
             # publication and child-job handoff. The shared runner gate
             # rejects new requests once this final phase begins.
             if not runner.begin_uncancellable(job["id"]):
                 result["cancelled"] = True
-            _chain_after_import(job, result)
+            # Skip re-chaining when this run is a tag-only resume of a
+            # parent whose chain already ran (see
+            # ``_interrupted_parent_resume``): the collection and
+            # processing child are already there.
+            if not (parent_resume and parent_resume.get("chain_already_ran")):
+                _chain_after_import(job, result)
+            else:
+                result["after_import_skipped"] = (
+                    "chain already ran on the interrupted parent"
+                )
+            # A cancelled run skipped the chain (and may owe tags), so it
+            # stays resumable; a chain that ran with owed tag work also
+            # stays resumable — the mark is a promise both post-import
+            # steps landed.
+            if not result.get("cancelled") and not tag_errors:
+                _mark_post_import_step(job, "chained", result)
             return result
         finally:
             # run_import_job can flip destination folders from

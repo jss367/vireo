@@ -770,6 +770,46 @@
     });
   }
 
+  // An import a Vireo restart cut short. Resumable only when its
+  // checkpoint recorded which photos it had already landed
+  // (``photo_ids``, even if empty): a resume must carry those into the
+  // after-import processing, and an older interrupted row without the
+  // list would silently leave them unprocessed.
+  function isResumableImport(job) {
+    var result = job && job.result;
+    if (!(job && job.type === 'import' && job.status === 'failed' &&
+        result && result.interrupted && Array.isArray(result.photo_ids))) {
+      return false;
+    }
+    // An import whose chain ran AND whose tag pass was marked applied
+    // finished everything but the final write; resuming would collect
+    // and process its photos twice.
+    if (result.chained && result.tags_applied) return false;
+    // Chain ran but tag/GPS work is still owed (a Stop cut the pass
+    // short, or an error left tags unmarked). The resume replays only
+    // the tag pass and skips re-chaining server-side.
+    return true;
+  }
+
+  function importResumeHint(job) {
+    var landed = job.result.photo_ids.length;
+    // Files are recorded as landed before they're cataloged, so the
+    // checkpointed photo ids can lag them. Count photos only when the ids
+    // cover every landed file (a RAW+JPEG pair is two files, one photo).
+    var landedFiles = Object.keys(job.result.landed_files || {}).length;
+    if (!landed && !landedFiles) {
+      return 'Same source and destination. Nothing was imported before it stopped.';
+    }
+    var hint = landedFiles > landed
+      ? 'Same source and destination. Files it had already imported won\'t be copied again'
+      : 'Same source and destination. The ' + landed.toLocaleString() +
+        ' photo' + (landed === 1 ? '' : 's') + ' already imported won\'t be copied again';
+    if (jobConfig(job).after_import != null) {
+      hint += '; they\'re processed with the rest';
+    }
+    return hint + '.';
+  }
+
   function importRetryBody(job) {
     var cfg = jobConfig(job);
     if (!job || job.type !== 'import' || cfg.mode === 'in_place' ||
@@ -812,8 +852,13 @@
     // growing rather than reset to only the last retry's landed files.
     var parentCarry = Array.isArray(cfg.carry_photo_ids)
       ? cfg.carry_photo_ids : [];
-    var parentImported = Array.isArray(job.result && job.result.photo_ids)
-      ? job.result.photo_ids : [];
+    // Everything the parent carried (its own carry list plus photos a
+    // resume recovered from an interrupted run) stays in scope too.
+    var parentImported = [];
+    ['photo_ids', 'carried_photo_ids', 'recovered_photo_ids'].forEach(function(key) {
+      var ids = job.result && job.result[key];
+      if (Array.isArray(ids)) parentImported = parentImported.concat(ids);
+    });
     var carry = [];
     var carrySeen = {};
     parentCarry.concat(parentImported).forEach(function(pid) {
@@ -943,7 +988,8 @@
     html += renderSourceCleanup(job);
 
     var failedImportCount = job.result && Number(job.result.failed || 0);
-    if (!isLive && failedImportCount > 0 && importRetryBody(job)) {
+    var resumableImport = isResumableImport(job);
+    if (!isLive && (failedImportCount > 0 || resumableImport) && importRetryBody(job)) {
       var retryInFlight = hasActiveRetryFor(job.id);
       html += '<div style="padding:10px 0 2px;font-size:12px;color:var(--text-muted);">';
       if (retryInFlight) {
@@ -956,6 +1002,10 @@
           'title="A retry for this import is already running">' +
           'Retry in progress…</button>';
         html += '<span style="margin-left:8px;">Retry already launched for this job; wait for it to finish before starting another.</span>';
+      } else if (resumableImport) {
+        html += '<button class="btn-retry" data-retry-import-job="' +
+          escapeAttr(job.id) + '" data-import-resume>Resume import</button>';
+        html += '<span style="margin-left:8px;">' + esc(importResumeHint(job)) + '</span>';
       } else {
         html += '<button class="btn-retry" data-retry-import-job="' +
           escapeAttr(job.id) + '">Retry ' + failedImportCount + ' failed file' +
@@ -1635,8 +1685,14 @@
       // below can restore it exactly — dropping to a generic "Retry
       // failed files" would silently hide the real failed-file count.
       var retryOriginalLabel = retryImportBtn.textContent;
+      // Resume keeps the parent's ``skip_duplicates`` like any retry:
+      // with it off, the collision walk still adopts each file the parent
+      // already landed (byte-identical at its destination path) instead
+      // of copying it again, and files the parent never reached are
+      // copied as the user asked.
+      var isResume = retryImportBtn.hasAttribute('data-import-resume');
       retryImportBtn.disabled = true;
-      retryImportBtn.textContent = 'Starting retry…';
+      retryImportBtn.textContent = isResume ? 'Resuming…' : 'Starting retry…';
       fetch('/api/jobs/import-photos', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -1650,7 +1706,9 @@
         });
       }).then(function(data) {
         if (typeof showToast === 'function') {
-          showToast('Import retry started. Successful files will be skipped.', 'info');
+          showToast(isResume
+            ? 'Import resumed. Files already imported will be skipped.'
+            : 'Import retry started. Successful files will be skipped.', 'info');
         }
         selectedJobId = data.job_id;
         selectedSource = 'active';

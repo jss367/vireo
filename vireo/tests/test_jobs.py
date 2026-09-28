@@ -1644,6 +1644,209 @@ def test_running_job_has_history_row_and_checkpoint_records_work(tmp_path):
     assert runner.shutdown(timeout=5)
 
 
+def test_checkpoint_persists_partial_result_until_the_real_result(tmp_path):
+    """A worker's ``partial_result`` is what a crash must not lose: the
+    checkpoint writes it as the row's result (rewriting it only when the
+    worker publishes a new one), the startup sweep keeps it on the
+    interrupted row, and it never rides along in API snapshots.
+    """
+    import json
+
+    from db import Database
+    from jobs import INTERRUPTED_BY_RESTART, JobRunner
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    runner = JobRunner(db=db)
+    published = threading.Event()
+    republish = threading.Event()
+    republished = threading.Event()
+    release = threading.Event()
+
+    def work(job):
+        job["partial_result"] = {"photo_ids": [1, 2]}
+        published.set()
+        republish.wait(timeout=5)
+        job["partial_result"] = {"photo_ids": [1, 2, 3]}
+        republished.set()
+        release.wait(timeout=5)
+        return {"photo_ids": [1, 2, 3], "ok": True}
+
+    job_id = runner.start("import", work)
+    assert published.wait(timeout=5)
+    assert "partial_result" not in runner.get(job_id)
+    assert all("partial_result" not in j for j in runner.list_jobs())
+
+    assert runner.checkpoint_live_jobs() == 1
+    row = _history_row(db, job_id)
+    assert json.loads(row["result"]) == {"photo_ids": [1, 2]}
+
+    # An unchanged partial is not rewritten; the row keeps the last copy.
+    db.conn.execute(
+        "UPDATE job_history SET result = '{\"marker\": 1}' WHERE id = ?",
+        (job_id,),
+    )
+    db.conn.commit()
+    assert runner.checkpoint_live_jobs() == 1
+    assert json.loads(_history_row(db, job_id)["result"]) == {"marker": 1}
+
+    republish.set()
+    assert republished.wait(timeout=5)
+    assert runner.checkpoint_live_jobs() == 1
+    assert json.loads(_history_row(db, job_id)["result"]) == {
+        "photo_ids": [1, 2, 3],
+    }
+
+    # Simulate the crash: a fresh runner's startup sweep keeps the partial.
+    second_db = Database(db_path)
+    try:
+        JobRunner(db=second_db)
+        swept = json.loads(_history_row(second_db, job_id)["result"])
+        assert swept["photo_ids"] == [1, 2, 3]
+        assert swept["interrupted"] is True
+        assert swept["error"] == INTERRUPTED_BY_RESTART
+    finally:
+        second_db.close()
+
+    # (The first process "survives" in this test; its final write still
+    # lands the real result over the checkpoint.)
+    db.conn.execute(
+        "UPDATE job_history SET status = 'running' WHERE id = ?", (job_id,),
+    )
+    db.conn.commit()
+    release.set()
+    wait_for_job_via_runner(runner, job_id, wait_for_history=True)
+    assert json.loads(_history_row(db, job_id)["result"]) == {
+        "photo_ids": [1, 2, 3], "ok": True,
+    }
+    assert runner.shutdown(timeout=5)
+
+
+def test_checkpoint_snapshot_and_write_serialize_across_callers(tmp_path):
+    """Codex PR #1842 P1 (r4117793982): the timer thread and a worker's
+    synchronous flush both snapshot ``partial_result`` under ``_lock``
+    and then release it before ``_write_checkpoints``. Without the whole
+    snapshot+write serialized, an older snapshot's write can finish AFTER
+    a newer snapshot's write and overwrite the row with stale
+    ``photo_ids``. A crash inside that window leaves the interrupted
+    row missing the latest cataloged photo ids, and Resume then skips
+    their files without carrying them.
+    """
+    import json
+
+    from db import Database
+    from jobs import JobRunner
+
+    db = Database(str(tmp_path / "test.db"))
+    runner = JobRunner(db=db)
+    started = threading.Event()
+    release = threading.Event()
+
+    def work(job):
+        job["partial_result"] = {"photo_ids": [1]}
+        started.set()
+        release.wait(timeout=5)
+        return {"photo_ids": [1, 2], "ok": True}
+
+    job_id = runner.start("import", work)
+    assert started.wait(timeout=5)
+
+    # Simulate a slow, already-in-flight timer checkpoint by grabbing the
+    # write lock ourselves; ``checkpoint_live_jobs`` from another thread
+    # must not race ahead to snapshot or write while the earlier caller
+    # still holds it.
+    entered = threading.Event()
+    result_holder = {}
+
+    def concurrent_checkpoint():
+        entered.set()
+        result_holder["written"] = runner.checkpoint_live_jobs()
+
+    with runner._checkpoint_write_lock:
+        # The second caller starts trying to take the write lock while
+        # the first (this thread) still holds it.
+        t = threading.Thread(target=concurrent_checkpoint)
+        t.start()
+        assert entered.wait(timeout=5)
+        # Give the thread a chance to reach the lock acquisition; if it
+        # blocks correctly it stays parked past this sleep.
+        time.sleep(0.05)
+        assert t.is_alive(), (
+            "second checkpoint_live_jobs must block on the write lock"
+        )
+        # A fresh scope publishes AFTER the second caller was already
+        # queued: with the serialization fix, its snapshot happens only
+        # after we release the lock, so it captures the new scope. Set
+        # the job's live entry directly to avoid touching the worker.
+        with runner._lock:
+            runner._jobs[job_id]["partial_result"] = {"photo_ids": [1, 2, 3]}
+    t.join(timeout=5)
+    assert not t.is_alive()
+
+    # The second (only) checkpoint saw the newer scope and persisted it.
+    assert result_holder["written"] == 1
+    assert json.loads(_history_row(db, job_id)["result"]) == {
+        "photo_ids": [1, 2, 3],
+    }
+
+    release.set()
+    wait_for_job_via_runner(runner, job_id, wait_for_history=True)
+    assert runner.shutdown(timeout=5)
+
+
+def test_flush_partial_result_is_on_the_row_before_it_returns(tmp_path):
+    import json
+
+    from db import Database
+    from jobs import JobRunner
+
+    db = Database(str(tmp_path / "test.db"))
+    runner = JobRunner(db=db)
+    flushed = []
+
+    def work(job):
+        job["partial_result"] = {"landed_files": {"/a/1.jpg": [1, 2]}}
+        flushed.append(runner.flush_partial_result(job))
+        flushed.append(json.loads(_history_row(db, job["id"])["result"]))
+        return {"ok": True}
+
+    job_id = runner.start("import", work)
+    wait_for_job_via_runner(runner, job_id, wait_for_history=True)
+    assert flushed == [True, {"landed_files": {"/a/1.jpg": [1, 2]}}]
+    # Without history there is nothing to wait for.
+    assert JobRunner().flush_partial_result({"partial_result": {}}) is True
+    assert runner.shutdown(timeout=5)
+
+
+def test_flush_partial_result_honors_cancel_check_between_attempts(tmp_path):
+    """When SQLite stays write-locked, a Stop pressed by the worker must not
+    have to wait through the whole retry window; the cancel_check callback
+    returns False on the next attempt."""
+    from db import Database
+    from jobs import JobRunner
+
+    db = Database(str(tmp_path / "test.db"))
+    runner = JobRunner(db=db)
+
+    # Simulate a checkpoint that never lands: partial is set but the
+    # internal checkpointed_partial is never updated.
+    def stuck_checkpoint():
+        return 0
+
+    runner.checkpoint_live_jobs = stuck_checkpoint
+    calls = {"n": 0}
+
+    def cancel_after_two():
+        calls["n"] += 1
+        return calls["n"] > 2
+
+    job = {"id": "x", "partial_result": {"a": 1}}
+    assert runner.flush_partial_result(job, cancel_check=cancel_after_two) is False
+    # Cancel_check was polled once per attempt; the third poll ended the wait.
+    assert calls["n"] == 3
+    assert runner.shutdown(timeout=5)
+
+
 def test_ephemeral_job_is_never_checkpointed(tmp_path):
     from db import Database
     from jobs import JobRunner
@@ -1816,6 +2019,18 @@ def test_startup_sweep_keeps_checkpointed_work_on_interrupted_rows(tmp_path):
         queued = rows["pipeline-queued"]
         assert queued["summary"] == f"{INTERRUPTED_BY_RESTART} before it started"
         assert queued["tree"] is None
+        # ``never_started`` distinguishes a queued row the sweep failed
+        # from one that actually began work: _chained_job_exists filters
+        # on it so a parent import whose chained pipeline never picked
+        # up a slot can still resume its processing.
+        assert json.loads(queued["result"])["never_started"] is True
+        # Running rows must not carry the marker: the sweep cannot tell
+        # a job that started but hadn't checkpointed apart from a queued
+        # one by result contents alone, and treating a running-swept row
+        # as "never_started" would silently allow a duplicate processing
+        # run.
+        assert "never_started" not in json.loads(rows["pipeline-crashed"]["result"])
+        assert "never_started" not in json.loads(rows["scan-blind"]["result"])
 
         # The history API hands the parsed progress and tree to the page.
         db.set_active_workspace(1)

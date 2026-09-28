@@ -19,6 +19,7 @@ class FakeRunner:
         self.events = []
         self.step_updates = []
         self.cancelled_ids = set()
+        self.checkpoint_calls = 0
 
     def push_event(self, job_id, event_type, data):
         self.events.append((job_id, event_type, data))
@@ -45,6 +46,17 @@ class FakeRunner:
         # No pause request → return immediately; report cancellation so
         # callers that want cancel-through-pause behavior still see it.
         return job_id in self.cancelled_ids
+
+    def checkpoint_live_jobs(self):
+        # Called synchronously by ``_publish_resume_scope`` so a crash
+        # between a batch commit and the next checkpoint tick can't
+        # leave an older ``photo_ids`` list on the interrupted row.
+        self.checkpoint_calls += 1
+        return 0
+
+    def flush_partial_result(self, job, cancel_check=None):
+        self.checkpoint_calls += 1
+        return True
 
 
 def test_catalog_scan_preservation_pause_publishes_paused_without_cancelling(
@@ -7312,6 +7324,74 @@ def test_result_carries_imported_photo_ids(tmp_path):
     )
     assert rerun_result["photo_ids"] == []
     assert rerun_result["skipped_duplicate"] == 2
+
+
+def test_each_resume_scope_publish_is_flushed_before_the_next_batch(
+    tmp_path, monkeypatch,
+):
+    """Codex PR #1842 P1: ``_publish_resume_scope`` must persist its scope
+    synchronously. If a batch commits, the scope is only staged in memory,
+    and Vireo dies before the runner's 2s checkpoint thread ticks, the
+    interrupted row keeps an older ``photo_ids`` list — a resume with
+    ``skip_duplicates=true`` then skips those files as already imported
+    while omitting them from the carried scope, so their working-copy
+    recovery and requested processing are silently dropped. The publish
+    hands the runner a ``checkpoint_live_jobs`` call so the row is on
+    disk before the loop returns.
+    """
+    import import_job
+    from import_job import ImportParams
+
+    # Force multiple batches so we see the pre-batch publish AND at least
+    # one post-batch publish inside ``run_import_job``.
+    monkeypatch.setattr(import_job, "IMPORT_BATCH_SIZE", 1)
+
+    card = _make_card(tmp_path, [
+        ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+        ("DSC_0002.jpg", datetime(2026, 7, 4, 9, 0, 0), "green"),
+        ("DSC_0003.jpg", datetime(2026, 7, 5, 8, 0, 0), "blue"),
+    ])
+    archive = tmp_path / "archive"
+
+    interleaving = []
+    real_publish = import_job._publish_resume_scope
+
+    def spy_publish(job, db_, state, source_snapshots, runner=None, **kw):
+        # Before the publish: how many syncs the fake runner has seen.
+        before = runner.checkpoint_calls if runner is not None else None
+        published = real_publish(
+            job, db_, state, source_snapshots, runner=runner, **kw)
+        after = runner.checkpoint_calls if runner is not None else None
+        interleaving.append({
+            "before": before,
+            "after": after,
+            "photo_ids": tuple(job["partial_result"]["photo_ids"]),
+        })
+        return published
+
+    monkeypatch.setattr(import_job, "_publish_resume_scope", spy_publish)
+
+    runner = FakeRunner()
+    _run_import(tmp_path, ImportParams(
+        sources=[str(card)], destination=str(archive),
+    ), runner=runner)
+
+    # Discovery can be slow, so the very first publish is an empty scope
+    # from before planning: a restart then still leaves a resumable row.
+    assert interleaving[0]["photo_ids"] == ()
+
+    # One publish before the batch loop and one after each of the three
+    # batches — no publish may complete without a synchronous flush.
+    assert len(interleaving) >= 4, interleaving
+    for entry in interleaving:
+        assert entry["before"] is not None and entry["after"] is not None, entry
+        assert entry["after"] == entry["before"] + 1, entry
+
+    # The scope grows monotonically: each publish sees what the previous
+    # ones already landed, so a resume built from any intermediate
+    # checkpoint carries every prior batch.
+    photo_id_lengths = [len(e["photo_ids"]) for e in interleaving]
+    assert photo_id_lengths == sorted(photo_id_lengths), photo_id_lengths
 
 
 def test_progress_events_carry_live_per_folder_counts(tmp_path):
@@ -14897,3 +14977,177 @@ def test_file_type_import_matches_preview_and_recovers_existing_files(
             assert {c["dest_spec"] for c in calls["rsync"]} == {
                 "me@nas:/volume1/Photography/JPEG/2026/2026-07-03",
             }
+
+
+def test_resume_recovers_a_raw_through_its_recorded_companion(
+        tmp_path, monkeypatch):
+    """Recovery looks rows up by the parent's recorded landing paths, so
+    a RAW whose only recorded landing was its merged-in JPEG companion is
+    still the parent's photo."""
+    from import_job import ImportParams, _ImportRunState, _recover_parent_landings
+
+    _stub_extractor(monkeypatch, lambda src: True)
+    card = tmp_path / "card"
+    card.mkdir()
+    Image.new("RGB", (16, 16), "red").save(str(card / "DSC_0501.jpg"))
+    raw_bytes = (card / "DSC_0501.jpg").read_bytes() + b"RAW-SENSOR-DATA"
+    (card / "DSC_0501.NEF").write_bytes(raw_bytes)
+    archive = tmp_path / "archive"
+    db, _ws_id, result = _run_import(tmp_path, ImportParams(
+        sources=[str(card)], destination=str(archive),
+        vireo_dir=str(tmp_path / "vireo"),
+    ))
+    (raw_row,) = _photo_rows(db)
+    jpeg_path = next(p for p in result["landed_files"] if p.endswith(".jpg"))
+
+    def recovered(landed_files):
+        state = _ImportRunState(log_label="test")
+        _recover_parent_landings(state, ImportParams(
+            sources=[str(card)], destination=str(archive),
+            recover_landed_files=landed_files,
+        ), db)
+        return state.recovered_photo_ids
+
+    jpeg_landing = {jpeg_path: result["landed_files"][jpeg_path]}
+    assert recovered(jpeg_landing) == {raw_row["id"]}
+    # A path the parent never recorded recovers nothing.
+    assert recovered({str(archive / "elsewhere.jpg"): [1, 1, "x"]}) == set()
+    # The RAW's own landing matches by the row's cataloged hash; a
+    # different recorded hash (a replacement rescanned since) does not.
+    raw_path = next(p for p in result["landed_files"] if p.endswith(".NEF"))
+    raw_landing = result["landed_files"][raw_path]
+    assert recovered({raw_path: raw_landing}) == {raw_row["id"]}
+    assert recovered({raw_path: raw_landing[:2] + ["0" * 64]}) == set()
+    # Nor does a recorded path whose file was replaced since.
+    with open(jpeg_path, "ab") as f:
+        f.write(b"replaced")
+    assert recovered(jpeg_landing) == set()
+
+
+def test_landed_files_wait_for_the_database_before_cataloging(tmp_path):
+    """The landings must reach the history row before their batch is
+    cataloged. A flush that can't land yet is waited out (failing the
+    import would replace the row with an error and lose the resume scope);
+    Stop ends the wait and the batch stays uncataloged, booked failed."""
+    from import_job import ImportParams
+
+    card = _make_card(tmp_path, [
+        ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+    ])
+
+    class BusyRunner(FakeRunner):
+        """Lands the two flushes before copying (empty scope, discovered
+        snapshots), then is busy ``busy_for`` times."""
+
+        def __init__(self, busy_for, stop=False):
+            super().__init__()
+            self.busy_for = busy_for
+            self.stop = stop
+
+        def flush_partial_result(self, job, cancel_check=None):
+            self.checkpoint_calls += 1
+            if self.checkpoint_calls > 2 and self.busy_for:
+                self.busy_for -= 1
+                if self.stop:
+                    self.cancelled_ids.add(job["id"])
+                return False
+            return True
+
+    # Busy for a while, then free: the import completes normally.
+    runner = BusyRunner(busy_for=3)
+    db, _ws, result = _run_import(tmp_path, ImportParams(
+        sources=[str(card)], destination=str(tmp_path / "archive"),
+    ), runner=runner)
+    assert result["copied"] == 1 and result["failed"] == 0
+    assert len(_photo_rows(db)) == 1
+
+    # Stopped while waiting: nothing cataloged, the landing booked failed.
+    runner = BusyRunner(busy_for=10, stop=True)
+    db, _ws, result = _run_import(tmp_path / "second", ImportParams(
+        sources=[str(card)], destination=str(tmp_path / "archive2"),
+    ), runner=runner)
+    assert result["cancelled"] is True
+    assert result["failed"] == 1 and result["copied"] == 0
+    assert _photo_rows(db) == []
+    assert "cataloged" in result["unsafe_files"][0]["reason"]
+    assert list((tmp_path / "archive2").rglob("DSC_0001.jpg"))
+
+
+def test_stop_while_waiting_before_planning_skips_the_card_walk(
+        tmp_path, monkeypatch):
+    """Planning has no cancellation probe, so Stop during the first
+    (pre-planning) flush must end the run before it walks the card."""
+    import import_job
+    from import_job import ImportParams
+
+    card = _make_card(tmp_path, [
+        ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+    ])
+    planned = []
+    monkeypatch.setattr(
+        import_job, "_plan_import",
+        lambda *a, **kw: planned.append(True),
+    )
+
+    class StoppedRunner(FakeRunner):
+        def flush_partial_result(self, job, cancel_check=None):
+            self.cancelled_ids.add(job["id"])
+            return False
+
+    _db, _ws, result = _run_import(tmp_path, ImportParams(
+        sources=[str(card)], destination=str(tmp_path / "archive"),
+    ), runner=StoppedRunner())
+    assert planned == []
+    assert result["cancelled"] is True and result["copied"] == 0
+
+
+def test_landing_whose_stat_fails_stays_in_the_record(tmp_path, monkeypatch):
+    """A just-landed file whose stat fails is still recorded (by its
+    verified hash), so a resume can recover its cataloged row."""
+    import import_job
+    from import_job import ImportParams, _ImportRunState, _recover_parent_landings
+
+    card = _make_card(tmp_path, [
+        ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+    ])
+    monkeypatch.setattr(import_job, "_landed_identity", lambda path: None)
+    db, _ws, result = _run_import(tmp_path, ImportParams(
+        sources=[str(card)], destination=str(tmp_path / "archive"),
+    ))
+    (path, identity), = result["landed_files"].items()
+    assert identity[:2] == [-1, -1] and identity[2]
+
+    state = _ImportRunState(log_label="test")
+    _recover_parent_landings(state, ImportParams(
+        sources=[str(card)], destination=str(tmp_path / "archive"),
+        recover_landed_files=result["landed_files"],
+    ), db)
+    assert state.recovered_photo_ids == {r["id"] for r in _photo_rows(db)}
+
+
+def test_companion_recorded_without_stat_matches_by_current_hash(tmp_path):
+    """A merged JPEG companion recorded without a stat is matched by
+    hashing the file; replaced bytes don't match."""
+    from import_job import _is_parent_landing
+    from scanner import compute_file_hash
+
+    jpeg = tmp_path / "DSC_0001.jpg"
+    jpeg.write_bytes(b"companion bytes")
+    landed = {str(jpeg): [-1, -1, compute_file_hash(str(jpeg))]}
+    assert _is_parent_landing(str(tmp_path), "DSC_0001.jpg", None, landed)
+    jpeg.write_bytes(b"replaced bytes!")
+    assert not _is_parent_landing(str(tmp_path), "DSC_0001.jpg", None, landed)
+
+
+def test_rejected_landing_leaves_the_resume_record():
+    from import_job import _ImportRunState, _LandedFile, _reclassify_landed_failed
+
+    state = _ImportRunState(log_label="test")
+    state.landed_files["/arch/a.jpg"] = [1, 2, "h"]
+    state.copied = 1
+    entry = _LandedFile(
+        dest_path="/arch/a.jpg", verified_hash="h", source_path="/card/a.jpg",
+        origin="copied", src_size=1, src_mtime_ns=2,
+    )
+    _reclassify_landed_failed(state, "2026", entry, "hash mismatch", True)
+    assert state.landed_files == {}

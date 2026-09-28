@@ -572,6 +572,17 @@ class ImportParams:
     # it; ``None`` falls back to the default location downstream. See PR
     # #1107 review.
     thumb_cache_dir: str | None = None
+    # Photo IDs a recovery retry carries from its parent import (already
+    # validated against the parent's scope). The run finishes their
+    # working copies, which an interrupted parent may never have reached.
+    carry_photo_ids: list | None = None
+    # Set only when resuming an interrupted import: the files the
+    # interrupted run (and any interrupted run it resumed) recorded as
+    # landed before cataloging them, ``{dest_path: [size, mtime_ns]}``. A
+    # photo row whose file is still that landing is that run's, whether or
+    # not its checkpoint got to record the photo id. See
+    # ``_recover_parent_landings``.
+    recover_landed_files: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -620,6 +631,16 @@ class _ImportRunState:
     folder_counts: dict = field(default_factory=dict)
     discovery_errors: list = field(default_factory=list)
     imported_photo_ids: set = field(default_factory=set)
+    # Fingerprints of ``imported_photo_ids`` captured so far for the
+    # resume scope (see ``_publish_resume_scope``).
+    resume_fingerprints: dict = field(default_factory=dict)
+    # Rows an interrupted parent landed (see ``_recover_parent_landings``).
+    recovered_photo_ids: set = field(default_factory=set)
+    # Files this run landed, ``{dest_path: [size, mtime_ns]}``, recorded
+    # (and flushed to the history row) before each batch is cataloged, so
+    # a resume can tell this run's rows from anyone else's. See
+    # ``_record_landed_files``.
+    landed_files: dict = field(default_factory=dict)
     linked_dup_dirs: set = field(default_factory=set)
     run_dest_folders: dict = field(default_factory=dict)
     run_verified_hashes: dict = field(default_factory=dict)
@@ -917,6 +938,9 @@ def _reclassify_landed_failed(state, rel, entry, reason,
     elif origin == "skipped_duplicate":
         state.skipped_duplicate -= 1
         _counts(state, rel)["skipped_duplicate"] -= 1
+    # A rejected landing is not this run's; keep it out of what a resume
+    # may recover (see ``_record_landed_files``).
+    state.landed_files.pop(os.path.normpath(dest_path), None)
     _fail(state, rel, dest_path, reason)
 
 
@@ -2135,6 +2159,177 @@ def _extract_deferred_working_copies(state, params, runner, job, db):
             state.cancelled = True
 
 
+def _landed_identity(path):
+    """``[size, mtime_ns]`` of the file at ``path``, or None if unreadable."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return [st.st_size, st.st_mtime_ns]
+
+
+def _is_parent_landing(folder, name, file_hash, landed):
+    """Whether ``folder/name`` still holds bytes the parent landed.
+
+    ``landed`` maps a recorded path to ``[size, mtime_ns, hash]``. A
+    cataloged hash (the row's own file) must equal the verified hash the
+    parent recorded, which catches a replacement that was rescanned;
+    without one (a merged companion, or a row not yet hash-stamped) the
+    file must still have the recorded size and mtime.
+    """
+    if not name:
+        return False
+    path = os.path.join(folder, name)
+    identity = landed.get(path)
+    if identity is None:
+        return False
+    recorded_hash = identity[2] if len(identity) > 2 else None
+    if file_hash and recorded_hash:
+        return file_hash == recorded_hash
+    if list(identity[:2]) == [-1, -1]:
+        # Recorded without a stat (see ``_record_landed_files``) and no
+        # cataloged hash to compare (a merged companion): read the bytes.
+        try:
+            return bool(recorded_hash) and compute_file_hash(path) == recorded_hash
+        except OSError:
+            return False
+    return _landed_identity(path) == list(identity[:2])
+
+
+def _record_landed_files(job, db, state, batch_st, source_snapshots, runner):
+    """Record this batch's landed files before cataloging it.
+
+    Recorded first, so an interrupted row never lacks a landing whose photo
+    row exists: a resume finds every row this run cataloged, even ones its
+    checkpointed ``photo_ids`` missed (``_recover_parent_landings``). Size,
+    mtime and the verified hash pin each path to the bytes this run put
+    there.
+    """
+    for landed in batch_st.landed:
+        path = os.path.normpath(landed.dest_path)
+        # A stat that fails right now (a network archive hiccup) must not
+        # drop the landing from the record; the verified hash alone still
+        # lets a resume match the cataloged row.
+        identity = _landed_identity(path) or [-1, -1]
+        state.landed_files[path] = identity + [landed.verified_hash]
+    return _publish_resume_scope(
+        job, db, state, source_snapshots, runner=runner, require_flush=True,
+    )
+
+
+def _publish_resume_scope(job, db, state, source_snapshots, runner=None,
+                          require_flush=False):
+    """Publish what a Resume needs if Vireo dies before this run finishes.
+
+    The runner checkpoints ``partial_result`` onto the job's history row
+    and the startup sweep keeps it on the interrupted row, so a recovery
+    retry can carry the photos this run already landed (with the same
+    identity and source checks a finished run's result offers). Each
+    publish is a fresh dict, and when ``runner`` is passed we flush the
+    checkpoint synchronously: without it the 2s checkpoint thread is the
+    only path to disk, and a crash between a batch commit and its next
+    tick would keep an older ``photo_ids`` list on the interrupted row —
+    a resume with ``skip_duplicates=true`` would then skip those files
+    as already imported while omitting them from the carried scope, so
+    their working-copy recovery and requested processing would silently
+    be dropped.
+    """
+    fresh = state.imported_photo_ids.difference(
+        int(pid) for pid in state.resume_fingerprints
+    )
+    if fresh:
+        state.resume_fingerprints.update(
+            _capture_photo_fingerprints(db, fresh),
+        )
+    job["partial_result"] = {
+        "photo_ids": sorted(state.imported_photo_ids),
+        "photo_fingerprints": dict(state.resume_fingerprints),
+        "source_snapshots": source_snapshots,
+        "landed_files": dict(state.landed_files),
+    }
+    if runner is not None and require_flush:
+        # The landed files must be on the history row before the batch is
+        # cataloged, or a crash right after the catalog commit leaves them
+        # out of a resume. Failing the import instead would replace the
+        # row's result with an error and lose the scope earlier batches
+        # recorded, so wait for the database; Stop ends the wait (the
+        # caller then leaves the batch uncataloged).
+        def cancel_check():
+            return runner.is_cancelled(job["id"])
+        waiting = False
+        while not runner.flush_partial_result(job, cancel_check=cancel_check):
+            if runner.is_cancelled(job["id"]):
+                return False
+            if not waiting:
+                waiting = True
+                log.warning(
+                    "Import %s: waiting for the database to record import "
+                    "progress before cataloging", job.get("id"),
+                )
+                runner.update_step(
+                    job["id"], "import",
+                    current_file="Waiting for the database to record progress",
+                )
+        return True
+    elif runner is not None:
+        # Best-effort synchronous flush. ``checkpoint_live_jobs`` swallows
+        # transient ``OperationalError`` on its own — a checkpoint that
+        # can't grab the lock right now will still be retried by the 2s
+        # timer thread, so the failure mode degrades to the pre-fix
+        # window rather than losing the batch.
+        runner.checkpoint_live_jobs()
+    return True
+
+
+def _recover_parent_landings(state, params, db):
+    """Find the catalog rows an interrupted parent import landed.
+
+    A resume skips (or, with duplicate skipping off, adopts) the parent's
+    landed files. The parent's checkpointed ``photo_ids`` can lag its
+    catalog commits (a kill between a batch's commit and the next
+    checkpoint), but it recorded every landed file before cataloging it,
+    so look the rows up by those paths: a photo whose own file or
+    companion (a JPEG merged into its RAW) still holds the parent's bytes
+    (``_is_parent_landing``) is the parent's. Rows other imports put
+    elsewhere never match, and neither does a file replaced since.
+    """
+    landed = params.recover_landed_files or {}
+    folders = {os.path.dirname(path) for path in landed}
+    for folder in folders:
+        rows = db.conn.execute(
+            """SELECT p.id, p.filename, p.companion_path, p.file_hash
+               FROM photos p JOIN folders f ON f.id = p.folder_id
+               WHERE f.path = ?""",
+            (folder,),
+        ).fetchall()
+        for row in rows:
+            if (_is_parent_landing(folder, row["filename"], row["file_hash"], landed)
+                    or _is_parent_landing(folder, row["companion_path"], None, landed)):
+                state.recovered_photo_ids.add(row["id"])
+
+
+def _add_carried_working_copy_folders(state, params, db):
+    """Put the folders of carried photos still lacking a working copy into
+    the deferred extraction scope. A parent interrupted before (or during)
+    its working-copy pass left them without one, and this run skips their
+    files as already imported, so nothing else would extract them.
+    """
+    carried = set(params.carry_photo_ids or ()) | state.recovered_photo_ids
+    if not params.vireo_dir or not carried:
+        return
+    for chunk in _chunks(sorted(carried)):
+        placeholders = ",".join("?" for _ in chunk)
+        rows = db.conn.execute(
+            f"""SELECT DISTINCT f.path AS path
+                FROM photos p
+                JOIN folders f ON f.id = p.folder_id
+                WHERE p.id IN ({placeholders})
+                  AND p.working_copy_path IS NULL""",
+            list(chunk),
+        ).fetchall()
+        state.wc_dest_folders.update(row["path"] for row in rows)
+
+
 def _make_stop_check(runner, job):
     """Build the nonblocking stop probe shared by both import paths.
 
@@ -2676,14 +2871,34 @@ def _finalize_import(job, runner, db, state, params, *,
         # the local path. Without this the remote import always missed
         # after-import processing. See PR #1113 review.
         "photo_ids": sorted(state.imported_photo_ids),
+        # Photos an interrupted parent landed that its carry list lacked
+        # (``_recover_parent_landings``); the caller carries them too, into
+        # tags, the collection and processing.
+        "recovered_photo_ids": sorted(
+            state.recovered_photo_ids
+            - state.imported_photo_ids
+            - set(params.carry_photo_ids or ()),
+        ),
+        # See ``_record_landed_files``; a resume of a later interruption
+        # in this retry chain inherits them through its parent's config.
+        "landed_files": dict(state.landed_files),
+        # Every row found at the interrupted parent's recorded landings,
+        # including ones this run adopted into ``photo_ids`` (duplicate
+        # skipping off); the caller uses it to tag only what is owed.
+        "parent_landing_ids": sorted(state.recovered_photo_ids),
         # Stable-identity map so a recovery retry can verify each carried
         # ID still points at the same file. Without this the retry
         # authorizes any current photo row that happens to share an ID
         # with something the parent landed — an especially real risk
         # after users delete recent imports (SQLite reuses the freed
-        # IDs on the next insert).
+        # IDs on the next insert). Includes ``recovered_photo_ids``
+        # (rows a resume recovered by path from the interrupted
+        # parent): a subsequent retry inherits those ids too, and
+        # ``_validate_parent_import_job`` needs an expected fingerprint
+        # for each — otherwise the ``expected is None`` path accepts an
+        # unrelated row whose id SQLite reused after a delete.
         "photo_fingerprints": _capture_photo_fingerprints(
-            db, state.imported_photo_ids,
+            db, state.imported_photo_ids | state.recovered_photo_ids,
         ),
         # Per-source signature over the discovered file set so a
         # recovery retry can detect a source whose contents changed
@@ -4450,6 +4665,20 @@ def run_import_job(job, runner, db_path, workspace_id, params):
     # transpositions survive a positional unpack and the parity test).
     # ``plan.files``/``plan.timestamps`` are consumed inside the planner;
     # the loop below works from ``batches``.
+    # Discovery can take minutes on a large card. Publish an empty scope
+    # first, so a restart during it still leaves a resumable row.
+    if not _publish_resume_scope(
+        job, db, state, None, runner=runner, require_flush=True,
+    ):
+        # Stopped while waiting for the database; planning has no
+        # cancellation probe, so don't start it.
+        state.cancelled = True
+        return _finalize_import(
+            job, runner, db, state, params,
+            discovered=0, include_paths=None, source_snapshots={},
+            deselected=0, vanished_paths=set(), appeared=0,
+            remote_unverified=False,
+        )
     plan = _plan_import(db, params, _emit, state)
     discovered = plan.discovered
     source_snapshots = plan.source_snapshots
@@ -4460,6 +4689,19 @@ def run_import_job(job, runner, db_path, workspace_id, params):
     appeared = plan.appeared
     checker = plan.checker
     batches = plan.batches
+    # The source snapshots gate a resume's drift check (a different card
+    # at the same path), so they must be on the row before any copy.
+    if not _publish_resume_scope(
+        job, db, state, source_snapshots, runner=runner, require_flush=True,
+    ):
+        state.cancelled = True
+        return _finalize_import(
+            job, runner, db, state, params,
+            discovered=discovered, include_paths=include_paths,
+            source_snapshots=source_snapshots, deselected=deselected,
+            vanished_paths=vanished_paths, appeared=appeared,
+            remote_unverified=False,
+        )
 
     # --- Ledger -----------------------------------------------------
     # Every discovered file ends in exactly one terminal bucket on
@@ -4705,6 +4947,24 @@ def run_import_job(job, runner, db_path, workspace_id, params):
         # leaves ``dest_read_cancelled`` False, so partially-landed
         # batches keep cataloging like before. See PR #1423 review
         # (Codex P2 r3716433824, r3716433830).
+        if (
+            batch_st.landed and not batch_st.dest_read_cancelled
+            and not _record_landed_files(
+                job, db, state, batch_st, source_snapshots, runner,
+            )
+        ):
+            # Stopped while waiting to record the landings. Never catalog
+            # them unrecorded: book them failed (the bytes are in the
+            # destination, and a retry adopts them) and skip the catalog.
+            state.cancelled = True
+            for entry in batch_st.landed:
+                _reclassify_landed_failed(
+                    state, rel, entry,
+                    "import stopped before this file could be cataloged; "
+                    "it is in the destination, and a retry catalogs it",
+                    attests_bytes,
+                )
+            batch_st.landed = []
         if batch_st.landed and not batch_st.dest_read_cancelled:
             pre_scan_hashes = _catalog_scan_and_prescan(
                 state, batch_st, db, params, scan, destination, rel,
@@ -4770,9 +5030,27 @@ def run_import_job(job, runner, db_path, workspace_id, params):
         _link_twins_and_emit(
             state, batch_st, db, workspace_id, _emit, rel, queued,
         )
+        # A rejected landing is removed from ``state.landed_files`` in
+        # memory, but its pre-catalog identity is already on the history
+        # row (``_record_landed_files`` above required a flush). If this
+        # end-of-batch publish is only best-effort, a crash or transient
+        # checkpoint failure between now and the next required flush
+        # would leave the rejected entry on disk — recovery could then
+        # match its unchanged bad bytes by size/mtime (a merged JPEG
+        # companion has no cataloged hash to compare) and fold the RAW
+        # row into the resumed tag/GPS and processing scopes. Wait for
+        # the removal to land before continuing.
+        need_durable = bool(batch_st.reclassified_landed_paths)
+        if not _publish_resume_scope(
+            job, db, state, source_snapshots, runner=runner,
+            require_flush=need_durable,
+        ) and need_durable:
+            state.cancelled = True
         if state.cancelled:
             break
 
+    _recover_parent_landings(state, params, db)
+    _add_carried_working_copy_folders(state, params, db)
     _extract_deferred_working_copies(state, params, runner, job, db)
 
     # ``remote_unverified`` is the honesty gate — only a transport that

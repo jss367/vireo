@@ -667,8 +667,14 @@ class ImportService:
         retry is allowed to inherit.
 
         Returns ``(parent_config, allowed_ids, allowed_fingerprints,
-        parent_source_snapshots, None)`` on success or ``(None, None,
-        None, None, error_response)`` when the parent can't be used.
+        parent_source_snapshots, parent_resume, None)`` on success or
+        ``(None, None, None, None, None, error_response)`` when the parent
+        can't be used. ``parent_resume`` is None unless a Vireo restart
+        interrupted the parent; then it holds what only that parent's own
+        records can say: ``landed_files`` (every file the parent, or an
+        interrupted run it resumed, recorded as landed before cataloging,
+        with its size and mtime) and ``untagged_ids`` (photos the parent landed or
+        inherited as untagged, whose tag/GPS pass it never reached).
         ``parent_config`` is the parent job's persisted config dict (it
         also carries ``root_import_job_id`` when the parent is itself
         a retry, so the caller can persist a single root pointer
@@ -714,7 +720,7 @@ class ImportService:
                 (parent_id,),
             ).fetchone()
             if row is None:
-                return None, None, None, None, ImportFailure(
+                return None, None, None, None, None, ImportFailure(
                     "parent_import_job_id not found — the original import "
                     "may have aged out of history; start a new import",
                     404,
@@ -731,19 +737,19 @@ class ImportService:
             except (json.JSONDecodeError, TypeError):
                 parent_result = {}
         if parent_type != "import":
-            return None, None, None, None, ImportFailure(
+            return None, None, None, None, None, ImportFailure(
                 "parent_import_job_id must reference an import job "
                 f"(got type {parent_type!r})"
             )
         if parent_status not in {"completed", "failed", "cancelled"}:
-            return None, None, None, None, ImportFailure(
+            return None, None, None, None, None, ImportFailure(
                 "parent_import_job_id is still active "
                 f"(status {parent_status!r}); wait for the original import "
                 "to finish before retrying",
                 409,
             )
         if parent_workspace != active_ws:
-            return None, None, None, None, ImportFailure(
+            return None, None, None, None, None, ImportFailure(
                 "parent_import_job_id belongs to a different workspace "
                 "than the active one; switch workspaces or start a new "
                 "import instead of retrying"
@@ -752,6 +758,7 @@ class ImportService:
         for source in (
             parent_result.get("photo_ids") or [],
             parent_result.get("carried_photo_ids") or [],
+            parent_result.get("recovered_photo_ids") or [],
             parent_config.get("carry_photo_ids") or [],
         ):
             for pid in source:
@@ -789,13 +796,114 @@ class ImportService:
         parent_source_snapshots = parent_result.get("source_snapshots")
         if not isinstance(parent_source_snapshots, dict):
             parent_source_snapshots = None
+        parent_resume = self._interrupted_parent_resume(
+            parent_config, parent_result,
+        )
+        if (
+            parent_resume is not None
+            and not parent_resume.get("chain_already_ran")
+            and self._chained_job_exists(db, parent_id)
+        ):
+            # The restart landed after the parent handed its photos to
+            # processing but before its ``chained`` mark reached the row.
+            # Resuming would collect and process them a second time.
+            # (A resume that DOES know the chain ran — ``chain_already_ran``
+            # from the parent's own ``chained`` mark — is fine: it replays
+            # only the owed tag pass and skips re-chaining below.)
+            return None, None, None, None, None, ImportFailure(
+                "This import had already started processing its photos "
+                "before Vireo restarted, so there is nothing to resume. "
+                "Check the Jobs page for that processing run.",
+                409,
+            )
         return (
             parent_config,
             allowed_ids,
             allowed_fingerprints,
             parent_source_snapshots,
+            parent_resume,
             None,
         )
+
+    def _chained_job_exists(self, db, parent_id):
+        """Whether any job records ``parent_id`` as the import it was
+        chained from (the after-import processing run). ``enqueue_pipeline``
+        persists the queued row, so this survives a restart.
+
+        Skips history rows the startup sweep marked ``never_started``: if
+        both pipeline slots were occupied when the parent import checkpointed
+        its chain-enqueue, the child stayed ``queued`` and never picked up a
+        slot before a restart. ``JobRunner._startup_sweep`` fails such rows
+        as "before it started"; treating them as proof that processing began
+        would strand the parent's photos with no way to resume them.
+        """
+        for job in self.get_runner().list_jobs():
+            if (job.get("config") or {}).get("chained_from") == parent_id:
+                return True
+        return db.conn.execute(
+            "SELECT 1 FROM job_history "
+            "WHERE json_extract(config, '$.chained_from') = ? "
+            "  AND COALESCE(json_extract(result, '$.never_started'), 0) = 0 "
+            "LIMIT 1",
+            (parent_id,),
+        ).fetchone() is not None
+
+    @staticmethod
+    def _interrupted_parent_resume(parent_config, parent_result):
+        """What a resume inherits from an interrupted parent (see
+        ``_validate_parent_import_job``); None for any other parent."""
+        if not parent_result.get("interrupted"):
+            return None
+        tags_applied = bool(parent_result.get("tags_applied"))
+        chain_already_ran = bool(parent_result.get("chained"))
+        # Both post-import steps ran — nothing left to resume; the row
+        # only missed the final write. A ``chained`` mark without
+        # ``tags_applied`` means a Stop cut the tag pass short or an
+        # error left tags/GPS owed after the chain enqueued; that stays
+        # resumable as a tag-only replay (the chain isn't re-run).
+        if chain_already_ran and tags_applied:
+            return None
+
+        def ids(values):
+            return [
+                pid for pid in values or []
+                if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0
+            ]
+
+        def files(values):
+            if not isinstance(values, dict):
+                return {}
+            return {
+                path: list(identity) for path, identity in values.items()
+                if isinstance(path, str) and path
+                and isinstance(identity, list) and len(identity) == 3
+                and all(isinstance(v, int) for v in identity[:2])
+                and isinstance(identity[2], str)
+            }
+
+        return {
+            "landed_files": {
+                **files(parent_config.get("recover_landed_files")),
+                **files(parent_result.get("landed_files")),
+            },
+            # Its tag/GPS pass covered everything it owed once it ran.
+            "tags_applied": tags_applied,
+            # The chain already ran (collection created, processing
+            # child enqueued) — the resume must not re-chain, only
+            # replay the owed tag pass.
+            "chain_already_ran": chain_already_ran,
+            # The parent's own landings, minus photos it only carried (a
+            # retry with duplicate skipping off adopts those into its
+            # photo_ids, but their own import already tagged them), plus
+            # what it inherited as untagged.
+            "untagged_ids": [] if tags_applied else sorted(
+                (
+                    set(ids(parent_result.get("photo_ids")))
+                    - set(ids(parent_config.get("carry_photo_ids")))
+                )
+                | set(ids(parent_config.get("untagged_photo_ids")))
+            ),
+        }
 
     def _validate_after_import(self, value, db, *, allow_missing=False):
         """Return an admission failure for a bad after_import spec, else None.
