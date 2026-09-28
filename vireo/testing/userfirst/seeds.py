@@ -28,25 +28,33 @@ def _make_source_jpeg(folder_path, filename, photo_id):
     /photos/<id>/full and /photos/<id>/original can serve it instead
     of returning 500 on cache miss.
 
+    A RAW (.nef etc.) can't be synthesized, so it is seeded the way a
+    RAW+JPEG shot lands: placeholder RAW bytes libraw cannot decode (like a
+    Nikon HE* file) beside a real companion JPEG, which previews fall back
+    to. Returns the companion's filename for the caller to record, or None.
+
     Skips when folder_path is the synthetic /test/photos fallback used
     in headless CI, where the directory isn't writable.
     """
     from PIL import Image
 
     if not folder_path or folder_path.startswith("/test/"):
-        return
-    if not filename.lower().endswith((".jpg", ".jpeg")):
-        # RAW formats (.nef etc.) — load_image needs a different
-        # decoder, so leave them missing rather than write a fake .nef.
-        return
+        return None
     os.makedirs(folder_path, exist_ok=True)
-    path = os.path.join(folder_path, filename)
-    if os.path.exists(path):
-        return
-    # A unique-ish color per photo so the lightbox Next/Prev visibly
-    # advances even though pixels aren't meaningful.
-    color = ((photo_id * 37) % 255, (photo_id * 53) % 255, (photo_id * 89) % 255)
-    Image.new("RGB", (640, 480), color=color).save(path, "JPEG", quality=70)
+    companion = None
+    if not filename.lower().endswith((".jpg", ".jpeg")):
+        raw_path = os.path.join(folder_path, filename)
+        if not os.path.exists(raw_path):
+            with open(raw_path, "wb") as f:
+                f.write(b"placeholder RAW bytes")
+        companion = os.path.splitext(filename)[0] + ".jpg"
+    path = os.path.join(folder_path, companion or filename)
+    if not os.path.exists(path):
+        # A unique-ish color per photo so the lightbox Next/Prev visibly
+        # advances even though pixels aren't meaningful.
+        color = ((photo_id * 37) % 255, (photo_id * 53) % 255, (photo_id * 89) % 255)
+        Image.new("RGB", (640, 480), color=color).save(path, "JPEG", quality=70)
+    return companion
 
 
 def browse_seed(db_path, thumb_dir, photos_root):
@@ -101,7 +109,12 @@ def browse_seed(db_path, thumb_dir, photos_root):
             timestamp=ts,
         )
         photos.append(pid)
-        _make_source_jpeg(folder_paths[folder_id], fname, pid)
+        companion = _make_source_jpeg(folder_paths[folder_id], fname, pid)
+        if companion:
+            db.conn.execute(
+                "UPDATE photos SET companion_path = ? WHERE id = ?", (companion, pid),
+            )
+            db.conn.commit()
         if rating:
             db.update_photo_rating(pid, rating)
         if flag:
