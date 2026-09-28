@@ -39,17 +39,32 @@ _WIN_ERROR_MODE_LOCK = threading.Lock()
 
 
 def _application_version():
+    # Best-effort probe: package metadata, then pyproject.toml, then "0.0.0".
+    # `package_version("vireo")` normally raises `PackageNotFoundError` when
+    # the distribution is missing, but installed metadata that is present yet
+    # unreadable (e.g. a non-UTF-8 or truncated `METADATA` file) can surface
+    # `UnicodeDecodeError`, `LookupError`, or other parser errors, and this
+    # probe backs both `/api/version` and `main()`'s `runtime.json` write —
+    # neither should abort over a malformed sidecar. Fall back on any
+    # exception rather than narrowing the raisable set.
     try:
         return package_version("vireo")
     except PackageNotFoundError:
-        import tomllib
+        pass
+    except Exception:
+        log.warning(
+            "Reading installed 'vireo' package metadata failed; "
+            "falling back to pyproject.toml",
+            exc_info=True,
+        )
+    import tomllib
 
-        pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
-        try:
-            with pyproject.open("rb") as handle:
-                return tomllib.load(handle)["project"]["version"]
-        except (OSError, KeyError, TypeError, ValueError):
-            return "0.0.0"
+    pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
+    try:
+        with pyproject.open("rb") as handle:
+            return tomllib.load(handle)["project"]["version"]
+    except (OSError, KeyError, TypeError, ValueError):
+        return "0.0.0"
 
 
 def create_system_blueprint(

@@ -672,6 +672,42 @@ def test_job_result_ok_false_persists_failed_with_error_count(tmp_path):
     assert row["summary"] == "Move failed — rsync timed out"
 
 
+def test_job_result_errors_total_reaches_persisted_error_count(tmp_path):
+    """A work function may cap its ``errors`` list and report the full count
+    in ``errors_total`` (the Lightroom importer does this at 50). The
+    persisted ``error_count`` must reflect the total, not just the capped
+    slice — otherwise the Jobs page would report exactly 50 errors for a
+    run that actually had hundreds.
+    """
+    from db import Database
+    from jobs import JobRunner
+
+    db = Database(str(tmp_path / "test.db"))
+    runner = JobRunner(db=db)
+
+    def work(job):
+        return {
+            "imported": 0,
+            "failed": 200,
+            # Runner de-dupes on str(), so keep the sample entries unique.
+            "errors": [f"file_{i}.jpg: boom" for i in range(50)],
+            "errors_total": 200,
+            "ok": False,
+        }
+
+    job_id = runner.start("import", work)
+    wait_for_job_via_runner(runner, job_id, wait_for_history=True)
+    row = db.conn.execute(
+        "SELECT status, error_count FROM job_history WHERE id = ?",
+        (job_id,),
+    ).fetchone()
+    assert row is not None
+    assert row["status"] == "failed"
+    assert row["error_count"] == 200, (
+        f"expected error_count=200 (from errors_total), got {row['error_count']}"
+    )
+
+
 def test_failed_job_history_preserves_structured_result(tmp_path):
     """When a work function stashes a structured result on job['result']
     before raising, _persist_job must preserve that structure in history

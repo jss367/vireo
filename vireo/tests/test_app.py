@@ -26783,3 +26783,25 @@ def test_batch_accept_on_all_bare_name_reuses_unlinked_same_name_keyword(app_and
         "SELECT name FROM keywords WHERE name LIKE 'California Towhee%'"
     ).fetchall()
     assert [r["name"] for r in duplicates] == ["California Towhee"]
+
+
+def test_application_version_falls_back_on_malformed_metadata(monkeypatch):
+    """``_application_version`` backs both ``/api/version`` and ``main()``'s
+    ``runtime.json`` write. Installed distribution metadata that is present
+    but unreadable — a non-UTF-8 or truncated ``METADATA`` file — can raise
+    an exception other than ``PackageNotFoundError`` from
+    ``importlib.metadata.version``; the probe must still fall back to
+    ``pyproject.toml`` rather than propagate and abort startup.
+    """
+    from web import system as web_system
+
+    def _raise_unicode(name):
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+    monkeypatch.setattr(web_system, "package_version", _raise_unicode)
+
+    # pyproject.toml ships with the repo, so the fallback is deterministic
+    # here — the exact value doesn't matter, only that it isn't "0.0.0" and
+    # the probe doesn't raise.
+    version = web_system._application_version()
+    assert version and version != "0.0.0"

@@ -1410,6 +1410,21 @@ class JobRunner:
         tree_json = json.dumps(job.get("steps", []))
         summary = self._build_summary(job, result_data)
 
+        # A result dict may report ``errors_total`` when its ``errors`` list
+        # is capped (e.g. the importer caps its per-file failures at 50). The
+        # capped list is what the runner folded into ``job["errors"]``, so
+        # ``len(job["errors"])`` under-reports the real failure count. Prefer
+        # ``errors_total`` when it is larger so the persisted ``error_count``
+        # and the Jobs-page badge reflect the true total.
+        persisted_error_count = len(job["errors"])
+        if isinstance(job.get("result"), dict):
+            try:
+                total = int(job["result"].get("errors_total") or 0)
+            except (TypeError, ValueError):
+                total = 0
+            if total > persisted_error_count:
+                persisted_error_count = total
+
         params = (
             job["id"],
             job["type"],
@@ -1418,7 +1433,7 @@ class JobRunner:
             job["finished_at"],
             round(duration, 1),
             json.dumps(result_data),
-            len(job["errors"]),
+            persisted_error_count,
             json.dumps(job["config"]),
             job.get("workspace_id"),
             tree_json,
