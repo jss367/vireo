@@ -289,6 +289,7 @@ def enqueue_import_photos(service: ImportService, db: Database, body: dict) -> d
     # every deleted-process retry outright.
     parent_id_raw = body.get("parent_import_job_id")
     parent_config = None
+    parent_interrupted = False
     parent_allowed_ids = None
     parent_allowed_fingerprints = None
     parent_source_snapshots = None
@@ -308,6 +309,7 @@ def enqueue_import_photos(service: ImportService, db: Database, body: dict) -> d
             parent_allowed_ids,
             parent_allowed_fingerprints,
             parent_source_snapshots,
+            parent_interrupted,
             parent_err,
         ) = service._validate_parent_import_job(
             parent_id_raw.strip(), db._active_workspace_id, db,
@@ -1016,26 +1018,21 @@ def enqueue_import_photos(service: ImportService, db: Database, body: dict) -> d
                 result["final_destination"] = destination
                 result["staging_destination"] = import_destination
             # A resume's carried photos never reached the parent's own
-            # post-``run_import_job`` tag/GPS pass (the parent died
+            # post-``run_import_job`` tag/GPS pass (a restart killed it
             # first), and this run skips their files as already
             # imported, so ``result["photo_ids"]`` alone would leave
-            # every photo landed before the restart silently missing
-            # the requested tags and GPS-derived location. Fold in the
-            # carried scope so the tag apply covers every photo the
-            # user asked to be tagged. Tag insertion is already
-            # idempotent (existing ``photo_keywords`` rows are skipped)
-            # and GPS resolution rewrites each photo's location from
-            # its own EXIF, so passing already-tagged/located carried
-            # photos from an ordinary failed-file retry is a no-op.
-            carried = carry_photo_ids or []
-            fresh = result.get("photo_ids") or []
-            seen = set()
-            tag_photo_ids = []
-            for pid in list(fresh) + list(carried):
-                if pid in seen:
-                    continue
-                seen.add(pid)
-                tag_photo_ids.append(pid)
+            # every photo landed before the restart missing the
+            # requested tags and GPS-derived location. Only an
+            # interrupted parent skipped that pass: an ordinary
+            # failed-file parent already tagged and located its photos,
+            # and re-resolving GPS for them here would overwrite any
+            # location the user has corrected since.
+            tag_photo_ids = list(result.get("photo_ids") or [])
+            if parent_interrupted and carry_photo_ids:
+                seen = set(tag_photo_ids)
+                tag_photo_ids += [
+                    pid for pid in carry_photo_ids if pid not in seen
+                ]
             service._apply_import_tags(
                 active_ws, tag_photo_ids, import_tags,
                 location_from_gps, result, job=job, runner=runner,

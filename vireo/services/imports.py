@@ -666,8 +666,11 @@ class ImportService:
         retry is allowed to inherit.
 
         Returns ``(parent_config, allowed_ids, allowed_fingerprints,
-        parent_source_snapshots, None)`` on success or ``(None, None,
-        None, None, error_response)`` when the parent can't be used.
+        parent_source_snapshots, parent_interrupted, None)`` on success
+        or ``(None, None, None, None, False, error_response)`` when the
+        parent can't be used. ``parent_interrupted`` says a Vireo restart
+        killed the parent before its post-copy steps (tags, GPS
+        locations) ran for the photos it had landed.
         ``parent_config`` is the parent job's persisted config dict (it
         also carries ``root_import_job_id`` when the parent is itself
         a retry, so the caller can persist a single root pointer
@@ -713,7 +716,7 @@ class ImportService:
                 (parent_id,),
             ).fetchone()
             if row is None:
-                return None, None, None, None, ImportFailure(
+                return None, None, None, None, False, ImportFailure(
                     "parent_import_job_id not found — the original import "
                     "may have aged out of history; start a new import",
                     404,
@@ -730,19 +733,19 @@ class ImportService:
             except (json.JSONDecodeError, TypeError):
                 parent_result = {}
         if parent_type != "import":
-            return None, None, None, None, ImportFailure(
+            return None, None, None, None, False, ImportFailure(
                 "parent_import_job_id must reference an import job "
                 f"(got type {parent_type!r})"
             )
         if parent_status not in {"completed", "failed", "cancelled"}:
-            return None, None, None, None, ImportFailure(
+            return None, None, None, None, False, ImportFailure(
                 "parent_import_job_id is still active "
                 f"(status {parent_status!r}); wait for the original import "
                 "to finish before retrying",
                 409,
             )
         if parent_workspace != active_ws:
-            return None, None, None, None, ImportFailure(
+            return None, None, None, None, False, ImportFailure(
                 "parent_import_job_id belongs to a different workspace "
                 "than the active one; switch workspaces or start a new "
                 "import instead of retrying"
@@ -793,6 +796,7 @@ class ImportService:
             allowed_ids,
             allowed_fingerprints,
             parent_source_snapshots,
+            bool(parent_result.get("interrupted")),
             None,
         )
 

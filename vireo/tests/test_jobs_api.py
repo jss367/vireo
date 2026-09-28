@@ -11416,6 +11416,55 @@ def test_interrupted_import_resume_tags_the_carried_photos(
         assert current_kw == keyword_id
 
 
+def test_failed_file_retry_leaves_carried_photos_tags_alone(
+    app_and_db, tmp_path,
+):
+    """Only an interrupted parent skipped its tag/GPS pass. An ordinary
+    retry's carried photos were already tagged and located by their
+    parent, so the retry must not re-apply to them: re-resolving GPS
+    would overwrite a location the user corrected in between.
+    """
+    app, db = app_and_db
+    card = _chain_card(tmp_path)
+    tag_name = "Kenya trip"
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/import-photos", json={
+            "sources": [str(card)],
+            "destination": str(tmp_path / "arch"),
+            "tags": [tag_name],
+        })
+        assert resp.status_code == 200, resp.get_json()
+        parent_id = resp.get_json()["job_id"]
+        seed_ids = wait_for_job_via_client(client, parent_id)["result"]["photo_ids"]
+        assert seed_ids
+        # Stand-in for the user editing these photos after the import:
+        # a retry that re-applied the parent's tags would bring them back.
+        db.conn.execute(
+            "DELETE FROM photo_keywords WHERE photo_id IN (%s)"
+            % ",".join("?" * len(seed_ids)),
+            seed_ids,
+        )
+        db.conn.commit()
+
+        resp = client.post("/api/jobs/import-photos", json={
+            "sources": [str(card)],
+            "destination": str(tmp_path / "arch"),
+            "tags": [tag_name],
+            "skip_duplicates": True,
+            "parent_import_job_id": parent_id,
+            "carry_photo_ids": seed_ids,
+        })
+        assert resp.status_code == 200, resp.get_json()
+        retry = wait_for_job_via_client(client, resp.get_json()["job_id"])
+        assert sorted(retry["result"]["carried_photo_ids"]) == sorted(seed_ids)
+        tagged = db.conn.execute(
+            "SELECT COUNT(*) FROM photo_keywords WHERE photo_id IN (%s)"
+            % ",".join("?" * len(seed_ids)),
+            seed_ids,
+        ).fetchone()[0]
+        assert tagged == 0
+
+
 def test_import_pauses_chained_classification_when_labels_are_missing(
     app_and_db, tmp_path, monkeypatch,
 ):
