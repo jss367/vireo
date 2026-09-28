@@ -11694,6 +11694,41 @@ def test_tag_pass_cut_short_is_not_marked_applied(
         assert "tags_applied" not in marks
 
 
+def test_tag_pass_with_failures_is_not_marked_applied(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """Failed tags or locations are still owed, so no ``tags_applied``."""
+    from services.imports import ImportService
+
+    def failing_tag_pass(self, workspace_id, photo_ids, tags,
+                         location_from_gps, result, **kw):
+        result["tagging"] = {"errors": ["Kenya trip: database is locked"]}
+
+    monkeypatch.setattr(ImportService, "_apply_import_tags", failing_tag_pass)
+    app, _db = app_and_db
+    card = _chain_card(tmp_path)
+    with app.test_client() as client:
+        job_id = _post_import(client, card, tmp_path / "arch")
+        wait_for_job_via_client(client, job_id)
+        with app._job_runner._lock:
+            marks = app._job_runner._jobs[job_id]["partial_result"]
+        assert "tags_applied" not in marks
+
+
+def test_interrupted_parent_owes_tags_only_for_its_own_landings():
+    """A retry with duplicate skipping off adopts its carried files, so
+    they show up in its ``photo_ids``; if it's interrupted, those were
+    tagged by their own import and aren't owed again. Ids it inherited
+    as untagged still are."""
+    from services.imports import ImportService
+
+    resume = ImportService._interrupted_parent_resume(
+        {"carry_photo_ids": [1, 2], "untagged_photo_ids": [2]},
+        {"interrupted": True, "photo_ids": [1, 2, 3]},
+    )
+    assert resume["untagged_ids"] == [2, 3]
+
+
 def test_resume_skips_post_import_steps_its_parent_finished(
     app_and_db, tmp_path,
 ):

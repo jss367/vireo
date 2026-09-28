@@ -15070,3 +15070,31 @@ def test_landed_files_wait_for_the_database_before_cataloging(tmp_path):
     assert _photo_rows(db) == []
     assert "cataloged" in result["unsafe_files"][0]["reason"]
     assert list((tmp_path / "archive2").rglob("DSC_0001.jpg"))
+
+
+def test_stop_while_waiting_before_planning_skips_the_card_walk(
+        tmp_path, monkeypatch):
+    """Planning has no cancellation probe, so Stop during the first
+    (pre-planning) flush must end the run before it walks the card."""
+    import import_job
+    from import_job import ImportParams
+
+    card = _make_card(tmp_path, [
+        ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+    ])
+    planned = []
+    monkeypatch.setattr(
+        import_job, "_plan_import",
+        lambda *a, **kw: planned.append(True),
+    )
+
+    class StoppedRunner(FakeRunner):
+        def flush_partial_result(self, job):
+            self.cancelled_ids.add(job["id"])
+            return False
+
+    _db, _ws, result = _run_import(tmp_path, ImportParams(
+        sources=[str(card)], destination=str(tmp_path / "archive"),
+    ), runner=StoppedRunner())
+    assert planned == []
+    assert result["cancelled"] is True and result["copied"] == 0

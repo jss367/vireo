@@ -1081,9 +1081,11 @@ def enqueue_import_photos(service: ImportService, db: Database, body: dict) -> d
                 active_ws, tag_photo_ids, import_tags,
                 location_from_gps, result, job=job, runner=runner,
             )
-            # A pass Stop cut short still owes the rest; leave it unmarked
-            # so a resume replays it.
-            if not result.get("cancelled"):
+            # A pass Stop cut short, or one with failed tags or locations,
+            # still owes work; leave it unmarked so a resume replays it.
+            if not result.get("cancelled") and not (
+                (result.get("tagging") or {}).get("errors")
+            ):
                 _mark_post_import_step(job, "tags_applied")
             # Atomically honor a pending pause/cancel before collection
             # publication and child-job handoff. The shared runner gate

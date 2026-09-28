@@ -4652,7 +4652,18 @@ def run_import_job(job, runner, db_path, workspace_id, params):
     # the loop below works from ``batches``.
     # Discovery can take minutes on a large card. Publish an empty scope
     # first, so a restart during it still leaves a resumable row.
-    _publish_resume_scope(job, db, state, None, runner=runner, require_flush=True)
+    if not _publish_resume_scope(
+        job, db, state, None, runner=runner, require_flush=True,
+    ):
+        # Stopped while waiting for the database; planning has no
+        # cancellation probe, so don't start it.
+        state.cancelled = True
+        return _finalize_import(
+            job, runner, db, state, params,
+            discovered=0, include_paths=None, source_snapshots={},
+            deselected=0, vanished_paths=set(), appeared=0,
+            remote_unverified=False,
+        )
     plan = _plan_import(db, params, _emit, state)
     discovered = plan.discovered
     source_snapshots = plan.source_snapshots

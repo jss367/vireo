@@ -866,10 +866,17 @@ class ImportService:
             },
             # Its tag/GPS pass covered everything it owed once it ran.
             "tags_applied": tags_applied,
-            "untagged_ids": [] if tags_applied else sorted(set(
-                ids(parent_result.get("photo_ids"))
-                + ids(parent_config.get("untagged_photo_ids"))
-            )),
+            # The parent's own landings, minus photos it only carried (a
+            # retry with duplicate skipping off adopts those into its
+            # photo_ids, but their own import already tagged them), plus
+            # what it inherited as untagged.
+            "untagged_ids": [] if tags_applied else sorted(
+                (
+                    set(ids(parent_result.get("photo_ids")))
+                    - set(ids(parent_config.get("carry_photo_ids")))
+                )
+                | set(ids(parent_config.get("untagged_photo_ids")))
+            ),
         }
 
     def _validate_after_import(self, value, db, *, allow_missing=False):
