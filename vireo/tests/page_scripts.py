@@ -9,7 +9,8 @@ import re
 from pathlib import Path
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
-_STATIC_SCRIPT_RE = re.compile(r'<script src="/static/([\w.-]+\.js)"></script>')
+# Paths may include a subdirectory: Browse's scripts live in static/browse/.
+_STATIC_SCRIPT_RE = re.compile(r'<script src="/static/([\w./-]+\.js)"></script>')
 
 
 def page_with_scripts(client, path):

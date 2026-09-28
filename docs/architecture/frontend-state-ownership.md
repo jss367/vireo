@@ -10,8 +10,8 @@ listeners or starting requests. No build tool or framework is required.
 | `VireoBrowseCompare` in `static/vireo-browse-compare.js` | Selection snapshot, pair navigation, zoom and pan, request generations, original-image probes, Escape token and interaction listeners | `open(ids)`, `findPhoto(id)`, `fetch`, `showToast`, and the browser window/Keymap |
 | `VireoWorkspaceSwitcher` in `static/vireo-workspace-switcher.js` | Workspace menu visibility, active identity, request generation, dismissal timer, workspace creation dialog | `fetch`, `navigate(path)`, `clearWorkspaceCursors()`, and the browser window |
 
-`browse.js` owns the live browse selection and photo cache. Its Compare entry
-point passes the current selection to `open(ids)`, which copies the array.
+Browse's page scripts (`static/browse/*.js`) own the live browse selection and
+photo cache. Their Compare entry point passes the current selection to `open(ids)`, which copies the array.
 Compare never reads or changes the page's selection globals. Closing it invalidates
 pending results, detaches listeners and image callbacks, clears dragging, and
 balances its Escape token and scroll lock. Reopening installs one set of listeners.
@@ -24,7 +24,8 @@ still render without waiting for the active-workspace request.
 
 The navbar's `safeFetch` helper is defined in a later script. The switcher receives
 a forwarding callback; the initial workspace name loads at `DOMContentLoaded`.
-Browse loads its Compare factory before `browse.js`, after the shared helpers.
+Browse loads its Compare factory before its `browse/*.js` scripts, after the
+shared helpers.
 
 `tests/e2e/test_frontend_controllers.py` loads complete modules against real browser
 DOMs with controlled asynchronous dependencies. It covers stale responses,

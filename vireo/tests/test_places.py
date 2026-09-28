@@ -228,12 +228,20 @@ def test_reverse_geocode_parses_response(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "page_source",
-    ["static/browse.js", "templates/keywords.html", "templates/location_review.html"],
+    "page_sources",
+    [
+        # Browse reads the preference in config.js and loads Maps in location.js.
+        ("static/browse/config.js", "static/browse/location.js"),
+        ("templates/keywords.html",),
+        ("templates/location_review.html",),
+    ],
 )
-def test_google_maps_javascript_loaders_honor_english_preference(page_source):
+def test_google_maps_javascript_loaders_honor_english_preference(page_sources):
     """All browser Places flows should conditionally request English."""
-    source = (Path(__file__).parent.parent / page_source).read_text(encoding="utf-8")
+    source = "\n".join(
+        (Path(__file__).parent.parent / page_source).read_text(encoding="utf-8")
+        for page_source in page_sources
+    )
 
     assert "google_maps_prefer_english" in source
     assert "&language=en" in source
