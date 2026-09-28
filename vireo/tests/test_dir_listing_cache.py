@@ -131,6 +131,56 @@ def test_the_cache_is_bounded():
     assert cache.lookup("/lib/c", _st(1)) is not None
 
 
+def test_clear_drops_a_store_from_a_pass_started_before_it():
+    """A pass whose ``scandir`` was already in flight when the user hit
+    "Check again" must not repopulate the cache with what is now a stale
+    listing: :meth:`clear` bumps a generation counter, and a :meth:`store`
+    tagged with an older generation is refused."""
+    cache = DirListingCache()
+    st = _st(5_000 * 10**9)
+
+    gen = cache.snapshot_generation()
+    cache.clear()
+    cache.store(
+        "/lib/a", st, 10_000.0,
+        [("stale.jpg", False, False)], generation=gen,
+    )
+    assert cache.lookup("/lib/a", st) is None
+
+    fresh_gen = cache.snapshot_generation()
+    cache.store(
+        "/lib/a", st, 10_000.0,
+        [("fresh.jpg", False, False)], generation=fresh_gen,
+    )
+    listing = cache.lookup("/lib/a", st)
+    assert listing is not None and listing.names == ("fresh.jpg",)
+
+
+def test_clear_also_drops_a_racy_store_from_an_earlier_pass():
+    """The racy-window branch of :meth:`store` deletes the entry rather than
+    writing one, but the same generation guard applies: a stale pass must
+    not evict a listing recorded after :meth:`clear` bumped the generation."""
+    cache = DirListingCache(racy_seconds=10)
+    fresh_st = _st(int(9_995 * 10**9))
+    stale_st = _st(int(9_999 * 10**9))
+
+    gen = cache.snapshot_generation()
+    cache.clear()
+    # A fresh pass writes a good listing at the current generation.
+    cache.store(
+        "/lib/a", fresh_st, 10_006.0,
+        [("fresh.jpg", False, False)], generation=cache.snapshot_generation(),
+    )
+    assert cache.lookup("/lib/a", fresh_st) is not None
+    # A stale pass finishes with a racy read; without the guard this would
+    # evict the fresh listing above.
+    cache.store(
+        "/lib/a", stale_st, 10_000.0,
+        [("stale.jpg", False, False)], generation=gen,
+    )
+    assert cache.lookup("/lib/a", fresh_st) is not None
+
+
 # --- read_directory / ListingPass --------------------------------------------
 
 
@@ -168,6 +218,35 @@ def test_a_recheck_reads_every_folder_and_refreshes_the_cache(tmp_path, scandir_
     later = ListingPass(cache)
     read_directory(str(tmp_path), later)
     assert later.unchanged == 1
+
+
+def test_a_pass_in_flight_when_the_cache_is_cleared_does_not_repopulate_it(
+    tmp_path, monkeypatch,
+):
+    """A recheck's :meth:`clear` fires while an automatic pass is still
+    reading its directory; the pass then calls :meth:`store` with the
+    listing it captured before the clear. The generation the pass snapshotted
+    at :meth:`ListingPass.begin` no longer matches, so :meth:`store` drops the
+    write — a subsequent reuse-enabled pass reads the folder fresh instead of
+    inheriting a stale listing."""
+    (tmp_path / "a.jpg").write_bytes(b"x")
+    _age(tmp_path)
+    cache = DirListingCache()
+
+    in_flight = ListingPass(cache)
+    token, listing = in_flight.begin(str(tmp_path))
+    assert listing is None
+    entries = [("a.jpg", False, False)]
+
+    cache.clear()  # user hit "Check again" mid-scan
+
+    in_flight.finish(str(tmp_path), token, entries)
+    assert cache.lookup(str(tmp_path), token[0]) is None
+
+    later = ListingPass(cache)
+    fresh = read_directory(str(tmp_path), later)
+    assert fresh.names == ("a.jpg",)
+    assert (later.read, later.unchanged) == (1, 0)
 
 
 # --- safe_scan_walk ----------------------------------------------------------
