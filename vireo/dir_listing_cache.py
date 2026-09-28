@@ -1,13 +1,17 @@
 """Directory listings reused while a directory's modification time holds.
 
 Adding, removing or renaming an entry changes its parent directory's
-modification time, so a directory whose ``st_mtime_ns`` (and inode) match the
-last time we listed it still holds exactly the names we saw then. The
-new-images walk and the automatic missing-originals scan both re-read every
-library folder on a timer; on an SMB share a cold listing runs at a few
-hundred entries a second while a directory ``stat`` costs tens of
-milliseconds, so re-listing only the directories that changed turns a
-many-minute pass into seconds.
+modification time, so a directory whose ``st_mtime_ns``, inode and device
+match the last time we listed it still holds exactly the names we saw then.
+Inodes are only unique within a device, so ``st_dev`` is part of the
+identity too: a NAS or removable drive remounted at the same path can
+otherwise present the same ``st_ino`` and ``st_mtime_ns`` as the previous
+volume while holding different files. The new-images walk and the
+automatic missing-originals scan both re-read every library folder on a
+timer; on an SMB share a cold listing runs at a few hundred entries a
+second while a directory ``stat`` costs tens of milliseconds, so
+re-listing only the directories that changed turns a many-minute pass
+into seconds.
 
 A cached listing holds raw entries (name, is-directory without following
 symlinks, is-symlink) and no policy: each consumer applies its own filters
@@ -92,6 +96,7 @@ class CachedEntry:
 class _Stored(NamedTuple):
     mtime_ns: int
     ino: int
+    dev: int
     listed_at: float  # monotonic
     listing: DirListing
 
@@ -124,6 +129,7 @@ class DirListingCache:
             if (
                 stored.mtime_ns != st.st_mtime_ns
                 or stored.ino != st.st_ino
+                or stored.dev != st.st_dev
                 or self._monotonic() - stored.listed_at > self._max_age_seconds
             ):
                 del self._entries[key]
@@ -141,7 +147,7 @@ class DirListingCache:
                 self._entries.pop(key, None)
             return
         stored = _Stored(
-            st.st_mtime_ns, st.st_ino, self._monotonic(),
+            st.st_mtime_ns, st.st_ino, st.st_dev, self._monotonic(),
             DirListing.from_entries(entries),
         )
         with self._lock:

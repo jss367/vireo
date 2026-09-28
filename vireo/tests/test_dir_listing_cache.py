@@ -65,8 +65,8 @@ def scandir_calls(monkeypatch):
     return calls
 
 
-def _st(mtime_ns, ino=1):
-    return SimpleNamespace(st_mtime_ns=mtime_ns, st_ino=ino)
+def _st(mtime_ns, ino=1, dev=1):
+    return SimpleNamespace(st_mtime_ns=mtime_ns, st_ino=ino, st_dev=dev)
 
 
 # --- DirListingCache ---------------------------------------------------------
@@ -88,6 +88,16 @@ def test_a_replaced_folder_with_the_same_mtime_is_read_again():
     cache = DirListingCache()
     cache.store("/lib/a", _st(5_000 * 10**9, ino=7), 10_000.0, [("x.jpg", False, False)])
     assert cache.lookup("/lib/a", _st(5_000 * 10**9, ino=8)) is None
+
+
+def test_a_remounted_volume_at_the_same_path_is_read_again():
+    """Inodes are only unique within a device: a NAS or removable drive
+    remounted at the same path can present the same ``st_ino`` and
+    ``st_mtime_ns`` as the previous volume while listing different files, so
+    the device id is part of the cached folder's identity."""
+    cache = DirListingCache()
+    cache.store("/lib/a", _st(5_000 * 10**9, ino=7, dev=1), 10_000.0, [("x.jpg", False, False)])
+    assert cache.lookup("/lib/a", _st(5_000 * 10**9, ino=7, dev=2)) is None
 
 
 def test_a_folder_changed_moments_before_the_read_is_not_trusted():
