@@ -57,7 +57,7 @@ async function main() {
 main().catch(err => { console.error(err); process.exitCode = 1; });
 
 async function testAsyncModalOwnership() {
-  const navbar = 'vireo/templates/_navbar.html';
+  const navbar = 'vireo/static/navbar-lightbox.js';
   const elements = new Map();
   function element(id) {
     if (!elements.has(id)) elements.set(id, {value: '', style: {}, textContent: '', classList: {remove() {}}});

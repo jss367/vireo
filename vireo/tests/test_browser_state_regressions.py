@@ -38,6 +38,13 @@ def test_rendered_page_scripts_parse(app_and_db, node, route, tmp_path):
         def handle_starttag(self, tag, attrs):
             if tag == "script":
                 self.in_script = True
+                src = dict(attrs).get("src") or ""
+                # The navbar's and pages' own scripts are served from
+                # /static; parse them as part of the page they run in.
+                if src.startswith("/static/"):
+                    self.scripts.append(
+                        (static_dir / src[len("/static/"):]).read_text(encoding="utf-8")
+                    )
 
         def handle_endtag(self, tag):
             if tag == "script":
@@ -47,6 +54,7 @@ def test_rendered_page_scripts_parse(app_and_db, node, route, tmp_path):
             if self.in_script:
                 self.scripts.append(data)
 
+    static_dir = Path(__file__).resolve().parents[1] / "static"
     parser = Scripts()
     parser.feed(response.get_data(as_text=True))
     assert parser.scripts

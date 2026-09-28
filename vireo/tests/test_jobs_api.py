@@ -6,6 +6,7 @@ import threading
 import time
 
 import pytest
+from page_scripts import page_with_scripts
 from PIL import Image
 from wait import wait_for_job_via_client, wait_for_job_via_runner
 
@@ -736,8 +737,7 @@ def test_navbar_has_jobs_link(app_and_db):
     """Navbar on any page includes a link to /jobs."""
     app, _ = app_and_db
     client = app.test_client()
-    resp = client.get('/browse')
-    assert b'href="/jobs"' in resp.data
+    assert 'href="/jobs"' in page_with_scripts(client, '/browse')
 
 
 def test_bottom_panel_has_compact_jobs(app_and_db):

@@ -128,7 +128,7 @@ def create_pages_blueprint(get_db):
         Templates are kept strictly Jinja-free (see
         ``test_templates_jinja_free_except_includes``), so platform-aware
         wording is injected here as ``window.*`` globals. This script is loaded
-        first in ``_navbar.html``, before any inline page script runs.
+        first in ``_navbar.html``, before any navbar or page script runs.
         """
         from move import rsync_install_guidance
 

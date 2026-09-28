@@ -1,6 +1,6 @@
 """Guards that the WebGL live-preview shader matches the server tone pipeline.
 
-The live preview in ``_navbar.html`` (``VireoToneGL``) is a GLSL transcription
+The live preview in ``navbar-lightbox.js`` (``VireoToneGL``) is a GLSL transcription
 of :mod:`tone`. This test mirrors that GLSL arithmetic in numpy and asserts it
 reproduces ``tone.apply_adjustments`` for a neutral source with the complete
 recipe. Quick adjustments use that same source across saves and re-edits;
@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import tone
 
 NAVBAR = os.path.join(
-    os.path.dirname(__file__), '..', 'templates', '_navbar.html'
+    os.path.dirname(__file__), '..', 'static', 'navbar-lightbox.js'
 )
 
 KNEE = 0.85  # must equal VireoToneGL KNEE and tone.HIGHLIGHT_KNEE
@@ -33,7 +33,7 @@ def test_shader_knee_constant_matches_tone():
     # The local KNEE used by _shader_mirror must equal the server constant...
     assert KNEE == tone.HIGHLIGHT_KNEE
     # ...and the literal baked into the actual shader must match too, so the
-    # template can't silently drift away from tone.HIGHLIGHT_KNEE.
+    # shader source can't silently drift away from tone.HIGHLIGHT_KNEE.
     with open(NAVBAR, encoding='utf-8') as f:
         src = f.read()
     match = re.search(r'var\s+KNEE\s*=\s*([0-9.]+)\s*;', src)
