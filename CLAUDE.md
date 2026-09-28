@@ -25,8 +25,8 @@ python vireo/app.py --db ~/.vireo/vireo.db --port 8080
 ## Tests
 
 ```bash
-# All tests (from repo root)
-python -m pytest tests/ vireo/tests/ -q
+# All tests (from repo root) — rarely needed locally, see below
+python -m pytest tests/ vireo/tests/ -n 4 -q
 
 # Workspace tests only
 python -m pytest tests/test_workspaces.py -v
@@ -34,6 +34,8 @@ python -m pytest tests/test_workspaces.py -v
 # DB tests only
 python -m pytest vireo/tests/test_db.py -v
 ```
+
+**Local runs share one machine — cap the workers.** Several agents often run tests at the same time on a 64 GB Mac, and each xdist worker grows to ~3 GB over a full-suite run. Never pass `-n auto` locally (it starts 16 workers): use `-n 4` at most. Run the impact-selected subset below, not the full suite; `main` runs the full suite after merge, and the `ci-full-suite` label runs it on a PR. Five concurrent `-n auto` full-suite runs once pushed the machine into ~49 GB of swap, and every run stalled.
 
 Tests use temp databases. `vireo/tests/test_app.py` isolates config via `cfg.CONFIG_PATH = str(tmp_path / "config.json")` to avoid polluting `~/.vireo/config.json`.
 
@@ -43,7 +45,7 @@ The full unit suite is ~7.5k tests. `scripts/select_tests.py` maps `git diff` on
 
 ```bash
 python scripts/select_tests.py fetch-map            # newest map from the "Full tests" workflow (needs gh)
-python scripts/select_tests.py --run -- -n auto -q   # run the selection
+python scripts/select_tests.py --run -- -n 4 -q      # run the selection
 python scripts/select_tests.py --explain             # just print what would run and why
 ```
 
@@ -159,7 +161,7 @@ Each workspace scopes predictions, collections, pending changes, and visible fol
 
 1. Create a worktree and feature branch for the task.
 2. Do all implementation work in the worktree.
-3. Run tests before finishing. Preferred: `python scripts/select_tests.py --run -- -n auto -q` (after `fetch-map`), which runs exactly what your diff can affect. Fallback when no map is available: `python -m pytest tests/test_workspaces.py vireo/tests/test_db.py vireo/tests/test_app.py vireo/tests/test_photos_api.py vireo/tests/test_edits_api.py vireo/tests/test_jobs_api.py vireo/tests/test_darktable_api.py vireo/tests/test_config.py -v`
+3. Run tests before finishing. Preferred: `python scripts/select_tests.py --run -- -n 4 -q` (after `fetch-map`), which runs exactly what your diff can affect. Fallback when no map is available: `python -m pytest tests/test_workspaces.py vireo/tests/test_db.py vireo/tests/test_app.py vireo/tests/test_photos_api.py vireo/tests/test_edits_api.py vireo/tests/test_jobs_api.py vireo/tests/test_darktable_api.py vireo/tests/test_config.py -v`
 4. **Create a PR** using `gh pr create`. Include what changed and test results in the PR description.
 5. When review feedback arrives, push fixes to the **same branch**. The review bot re-reviews automatically on push.
 6. Squash-merge when approved.
