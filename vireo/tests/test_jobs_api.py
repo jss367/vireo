@@ -11520,6 +11520,14 @@ def test_resume_recovers_landings_its_parent_checkpoint_missed(
             p["id"] for p in db.get_collection_photos(
                 result["collection_id"], per_page=999999)
         ) == landed
+        # Codex PR #1842 P2: every recovered id gets an expected
+        # fingerprint on the result too. Without this a later retry
+        # would land in the ``expected is None`` branch of
+        # ``_validate_parent_import_job`` and accept an unrelated row
+        # whose id SQLite reused after a delete.
+        fingerprints = result.get("photo_fingerprints") or {}
+        for pid in missed:
+            assert str(pid) in fingerprints, (pid, fingerprints)
 
         # A later retry of this resume may carry the recovered photos:
         # the resume isn't interrupted, so it can't recover them again.

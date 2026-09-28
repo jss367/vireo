@@ -2822,9 +2822,14 @@ def _finalize_import(job, runner, db, state, params, *,
         # authorizes any current photo row that happens to share an ID
         # with something the parent landed — an especially real risk
         # after users delete recent imports (SQLite reuses the freed
-        # IDs on the next insert).
+        # IDs on the next insert). Includes ``recovered_photo_ids``
+        # (rows a resume recovered by path from the interrupted
+        # parent): a subsequent retry inherits those ids too, and
+        # ``_validate_parent_import_job`` needs an expected fingerprint
+        # for each — otherwise the ``expected is None`` path accepts an
+        # unrelated row whose id SQLite reused after a delete.
         "photo_fingerprints": _capture_photo_fingerprints(
-            db, state.imported_photo_ids,
+            db, state.imported_photo_ids | state.recovered_photo_ids,
         ),
         # Per-source signature over the discovered file set so a
         # recovery retry can detect a source whose contents changed
