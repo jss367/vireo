@@ -11666,6 +11666,34 @@ def test_resume_of_an_interrupted_retry_leaves_inherited_tags_alone(
         assert tagged == 0
 
 
+def test_tag_pass_cut_short_is_not_marked_applied(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """Stop during the tag/GPS pass leaves work owed, so the import must
+    not mark ``tags_applied``: a resume after a restart would skip it."""
+    from services.imports import ImportService
+
+    def stopped_tag_pass(self, workspace_id, photo_ids, tags,
+                         location_from_gps, result, **kw):
+        result["cancelled"] = True
+
+    monkeypatch.setattr(ImportService, "_apply_import_tags", stopped_tag_pass)
+    app, _db = app_and_db
+    card = _chain_card(tmp_path)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/import-photos", json={
+            "sources": [str(card)],
+            "destination": str(tmp_path / "arch"),
+            "tags": ["Kenya trip"],
+        })
+        assert resp.status_code == 200, resp.get_json()
+        job_id = resp.get_json()["job_id"]
+        wait_for_job_via_client(client, job_id)
+        with app._job_runner._lock:
+            marks = app._job_runner._jobs[job_id]["partial_result"]
+        assert "tags_applied" not in marks
+
+
 def test_resume_skips_post_import_steps_its_parent_finished(
     app_and_db, tmp_path,
 ):
