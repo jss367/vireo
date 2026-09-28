@@ -1892,6 +1892,18 @@ def test_startup_sweep_keeps_checkpointed_work_on_interrupted_rows(tmp_path):
         queued = rows["pipeline-queued"]
         assert queued["summary"] == f"{INTERRUPTED_BY_RESTART} before it started"
         assert queued["tree"] is None
+        # ``never_started`` distinguishes a queued row the sweep failed
+        # from one that actually began work: _chained_job_exists filters
+        # on it so a parent import whose chained pipeline never picked
+        # up a slot can still resume its processing.
+        assert json.loads(queued["result"])["never_started"] is True
+        # Running rows must not carry the marker: the sweep cannot tell
+        # a job that started but hadn't checkpointed apart from a queued
+        # one by result contents alone, and treating a running-swept row
+        # as "never_started" would silently allow a duplicate processing
+        # run.
+        assert "never_started" not in json.loads(rows["pipeline-crashed"]["result"])
+        assert "never_started" not in json.loads(rows["scan-blind"]["result"])
 
         # The history API hands the parsed progress and tree to the page.
         db.set_active_workspace(1)

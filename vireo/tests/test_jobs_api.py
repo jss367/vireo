@@ -11814,6 +11814,60 @@ def test_resume_refuses_a_parent_that_already_chained_processing(
         assert "nothing to resume" in resp.get_json()["error"]
 
 
+def test_resume_allows_a_parent_whose_chained_pipeline_never_started(
+    app_and_db, tmp_path,
+):
+    """When both pipeline slots were occupied at chain-enqueue time, the
+    child pipeline sat queued in ``job_history`` until a Vireo restart.
+    ``JobRunner._startup_sweep`` fails such rows with a ``never_started``
+    marker; the parent's processing never ran, so Resume must still
+    offer to run it. Refusing would strand the processing permanently.
+    """
+    app, db = app_and_db
+    quick_look_id = next(
+        pr["id"] for pr in db.get_saved_processes()
+        if pr["name"] == "Quick look")
+    card = _chain_card(tmp_path)
+    with app.test_client() as client:
+        parent_id = _post_import(client, card, tmp_path / "arch", quick_look_id)
+        parent = wait_for_job_via_client(client, parent_id)["result"]
+        # Let the chained pipeline actually finish before we replay a
+        # crash on the parent alone — otherwise the runner would race
+        # with our sweep replay below.
+        wait_for_job_via_client(client, parent["process_job_id"])
+        _interrupt_import_row(app, db, parent_id, {
+            "landed_files": parent["landed_files"],
+            "photo_ids": parent["photo_ids"],
+            "photo_fingerprints": parent["photo_fingerprints"],
+            "source_snapshots": parent["source_snapshots"],
+            "tags_applied": True,
+        })
+        # Replay the sweep marker _startup_sweep writes for a chained
+        # pipeline that was queued when Vireo crashed: same status,
+        # same ``chained_from``, same ``never_started`` on the result.
+        db.conn.execute(
+            "INSERT INTO job_history "
+            "(id, type, status, config, result, workspace_id) "
+            "VALUES (?, 'pipeline', 'failed', ?, ?, ?)",
+            (
+                f"never-started-{parent_id}",
+                json.dumps({"chained_from": parent_id}),
+                json.dumps({
+                    "error": "Interrupted by Vireo restart",
+                    "interrupted": True,
+                    "never_started": True,
+                    "last_progress_at": None,
+                }),
+                db._active_workspace_id,
+            ),
+        )
+        db.conn.commit()
+        resp = client.post(
+            "/api/jobs/import-photos", json=_resume_body(client, parent_id),
+        )
+        assert resp.status_code == 200, resp.get_json()
+
+
 def test_resume_with_duplicate_skipping_off_adopts_the_parents_landings(
     app_and_db, tmp_path,
 ):

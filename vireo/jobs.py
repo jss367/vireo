@@ -434,6 +434,13 @@ class JobRunner:
                 "interrupted": True,
                 "last_progress_at": last_progress_at,
             })
+            if was_queued:
+                # Durable marker so callers can distinguish a queued row
+                # the sweep failed from one that actually started (e.g.
+                # a chained pipeline swept before any slot promoted it,
+                # which _chained_job_exists must not treat as proof the
+                # import handed its photos to processing).
+                result["never_started"] = True
             db.conn.execute(
                 "UPDATE job_history "
                 "SET status='failed', finished_at=?, result=?, error_count=?, "

@@ -822,13 +822,23 @@ class ImportService:
     def _chained_job_exists(self, db, parent_id):
         """Whether any job records ``parent_id`` as the import it was
         chained from (the after-import processing run). ``enqueue_pipeline``
-        persists the queued row, so this survives a restart."""
+        persists the queued row, so this survives a restart.
+
+        Skips history rows the startup sweep marked ``never_started``: if
+        both pipeline slots were occupied when the parent import checkpointed
+        its chain-enqueue, the child stayed ``queued`` and never picked up a
+        slot before a restart. ``JobRunner._startup_sweep`` fails such rows
+        as "before it started"; treating them as proof that processing began
+        would strand the parent's photos with no way to resume them.
+        """
         for job in self.get_runner().list_jobs():
             if (job.get("config") or {}).get("chained_from") == parent_id:
                 return True
         return db.conn.execute(
             "SELECT 1 FROM job_history "
-            "WHERE json_extract(config, '$.chained_from') = ? LIMIT 1",
+            "WHERE json_extract(config, '$.chained_from') = ? "
+            "  AND COALESCE(json_extract(result, '$.never_started'), 0) = 0 "
+            "LIMIT 1",
             (parent_id,),
         ).fetchone() is not None
 
