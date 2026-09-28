@@ -1556,6 +1556,8 @@ def test_load_taxonomy_cli_refuses_newer_db(tmp_path, monkeypatch, capsys):
         raise AssertionError("--load-taxonomy touched the DB before ensure_schema")
 
     monkeypatch.setattr("db.Database", _boom)
+    # main() would otherwise attach a handler for the real ~/.vireo/vireo.log.
+    monkeypatch.setattr(vireo_app, "_setup_file_logging", lambda: None)
 
     with pytest.raises(SystemExit) as excinfo:
         vireo_app.main()
