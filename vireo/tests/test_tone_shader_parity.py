@@ -1,6 +1,6 @@
 """Guards that the WebGL live-preview shader matches the server tone pipeline.
 
-The live preview in ``navbar-lightbox.js`` (``VireoToneGL``) is a GLSL transcription
+The live preview in ``lightbox/edits.js`` (``VireoToneGL``) is a GLSL transcription
 of :mod:`tone`. This test mirrors that GLSL arithmetic in numpy and asserts it
 reproduces ``tone.apply_adjustments`` for a neutral source with the complete
 recipe. Quick adjustments use that same source across saves and re-edits;
@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import tone
 
 NAVBAR = os.path.join(
-    os.path.dirname(__file__), '..', 'static', 'navbar-lightbox.js'
+    os.path.dirname(__file__), '..', 'static', 'lightbox', 'edits.js'
 )
 
 KNEE = 0.85  # must equal VireoToneGL KNEE and tone.HIGHLIGHT_KNEE

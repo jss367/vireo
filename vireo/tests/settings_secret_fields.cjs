@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
 
-const settings = 'vireo/templates/settings.html';
+const settings = 'vireo/static/settings.js';
 // Windows checkouts get CRLF line endings; the extractors below match on \n.
 const src = fs.readFileSync(settings, 'utf8').replace(/\r\n/g, '\n');
 function fn(name) {

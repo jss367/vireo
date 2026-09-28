@@ -9,7 +9,7 @@ function fn(file, name) {
   return found[0];
 }
 const browse = ['vireo/static/browse/loading.js', 'vireo/static/browse/selection.js'];
-const review = 'vireo/templates/pipeline_review.html';
+const review = 'vireo/static/pipeline-review.js';
 async function main() {
   let complete;
   const ctx = vm.createContext({
@@ -57,7 +57,7 @@ async function main() {
 main().catch(err => { console.error(err); process.exitCode = 1; });
 
 async function testAsyncModalOwnership() {
-  const navbar = 'vireo/static/navbar-lightbox.js';
+  const navbar = 'vireo/static/lightbox/inat.js';
   const elements = new Map();
   function element(id) {
     if (!elements.has(id)) elements.set(id, {value: '', style: {}, textContent: '', classList: {remove() {}}});

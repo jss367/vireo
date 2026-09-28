@@ -13,6 +13,7 @@ import threading
 
 import card_cleanup
 import pytest
+from page_scripts import page_with_scripts
 from scanner import compute_file_hash as _sha
 from wait import wait_for_job_via_client
 
@@ -714,7 +715,7 @@ def test_import_page_links_to_card_cleanup_instead_of_hosting_it(app_and_db):
     app, _ = app_and_db
     resp = app.test_client().get("/import")
     assert resp.status_code == 200
-    body = resp.get_data(as_text=True)
+    body = page_with_scripts(app.test_client(), "/import")
     assert "card-cleanup-section" not in body
     # The entry point stays: it now navigates to the dedicated page.
     assert "btnFreeUpCardSpace" in body

@@ -24,7 +24,7 @@ def test_selection_and_review_state(node):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-@pytest.mark.parametrize("route", ["/browse", "/pipeline", "/pipeline/review", "/settings"])
+@pytest.mark.parametrize("route", ["/browse", "/pipeline", "/pipeline/review", "/settings", "/import"])
 def test_rendered_page_scripts_parse(app_and_db, node, route, tmp_path):
     app, _ = app_and_db
     response = app.test_client().get(route)

@@ -1,0 +1,4720 @@
+loadModels();
+loadTaxonomy();
+loadSystemInfo();
+loadConfig();
+loadWsOverrides();
+loadScanRoots();
+loadVersion();
+loadThemePicker();
+loadAllSettings();
+loadComputationCacheStatus();
+loadLocationWriteStatus();
+
+var SETTINGS_FIND_STATE = {
+  marks: [],
+  activeIndex: -1,
+  observer: null,
+  refreshTimer: null,
+};
+
+setupSettingsFind();
+
+function setupSettingsFind() {
+  var input = document.getElementById('settingsFindInput');
+  if (!input) return;
+  input.addEventListener('input', function() {
+    refreshSettingsFind(this.value, 0);
+  });
+  input.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      moveSettingsFind(e.shiftKey ? -1 : 1);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      closeSettingsFind();
+    }
+  });
+  document.addEventListener('keydown', function(e) {
+    var key = (e.key || '').toLowerCase();
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && key === 'f') {
+      e.preventDefault();
+      openSettingsFind();
+    } else if (key === 'escape' && isSettingsFindOpen()) {
+      e.preventDefault();
+      closeSettingsFind();
+    }
+  }, true);
+}
+
+function isSettingsFindOpen() {
+  var panel = document.getElementById('settingsFindPanel');
+  return !!panel && panel.classList.contains('open');
+}
+
+function openSettingsFind() {
+  var panel = document.getElementById('settingsFindPanel');
+  var input = document.getElementById('settingsFindInput');
+  if (!panel || !input) return;
+  panel.classList.add('open');
+  input.focus();
+  input.select();
+  refreshSettingsFind(input.value, SETTINGS_FIND_STATE.activeIndex >= 0 ? SETTINGS_FIND_STATE.activeIndex : 0);
+}
+
+function closeSettingsFind() {
+  var panel = document.getElementById('settingsFindPanel');
+  var input = document.getElementById('settingsFindInput');
+  if (panel) panel.classList.remove('open');
+  if (input) input.value = '';
+  disconnectSettingsFindObserver();
+  clearTimeout(SETTINGS_FIND_STATE.refreshTimer);
+  SETTINGS_FIND_STATE.refreshTimer = null;
+  clearSettingsFindMarks();
+  updateSettingsFindStatus();
+}
+
+function getSettingsFindRoot() {
+  return document.querySelector('.content');
+}
+
+function disconnectSettingsFindObserver() {
+  if (SETTINGS_FIND_STATE.observer) {
+    SETTINGS_FIND_STATE.observer.disconnect();
+    SETTINGS_FIND_STATE.observer = null;
+  }
+}
+
+function connectSettingsFindObserver() {
+  var root = getSettingsFindRoot();
+  var input = document.getElementById('settingsFindInput');
+  if (!root || !input || !input.value.trim()) return;
+  SETTINGS_FIND_STATE.observer = new MutationObserver(function() {
+    clearTimeout(SETTINGS_FIND_STATE.refreshTimer);
+    SETTINGS_FIND_STATE.refreshTimer = setTimeout(function() {
+      refreshSettingsFind(input.value, SETTINGS_FIND_STATE.activeIndex);
+    }, 100);
+  });
+  SETTINGS_FIND_STATE.observer.observe(root, { childList: true, subtree: true, characterData: true });
+}
+
+function clearSettingsFindMarks() {
+  disconnectSettingsFindObserver();
+  document.querySelectorAll('mark.settings-find-mark').forEach(function(mark) {
+    var parent = mark.parentNode;
+    if (!parent) return;
+    parent.replaceChild(document.createTextNode(mark.textContent), mark);
+    parent.normalize();
+  });
+  SETTINGS_FIND_STATE.marks = [];
+  SETTINGS_FIND_STATE.activeIndex = -1;
+}
+
+function shouldSkipSettingsFindTextNode(node) {
+  if (!node.nodeValue || !node.nodeValue.trim()) return true;
+  var el = node.parentElement;
+  if (!el) return true;
+  if (el.closest('.settings-find-panel')) return true;
+  if (el.closest('script, style, noscript, textarea, input, select, option, mark.settings-find-mark')) return true;
+  return isSettingsFindTextHidden(el);
+}
+
+function isSettingsFindTextHidden(el) {
+  var root = getSettingsFindRoot();
+  var current = el;
+  while (current && current !== root) {
+    if (
+      !current.classList.contains('collapsible-body') &&
+      current.id !== 'advancedContent'
+    ) {
+      var style = window.getComputedStyle(current);
+      if (style.display === 'none' || style.visibility === 'hidden') return true;
+    }
+    if (current.hasAttribute('hidden') || current.getAttribute('aria-hidden') === 'true') return true;
+    current = current.parentElement;
+  }
+  return false;
+}
+
+function refreshSettingsFind(query, preferredIndex) {
+  var root = getSettingsFindRoot();
+  if (!root) return;
+  disconnectSettingsFindObserver();
+  clearSettingsFindMarks();
+  var q = (query || '').trim();
+  if (!q) {
+    updateSettingsFindStatus();
+    return;
+  }
+
+  var qLower = q.toLowerCase();
+  var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode: function(node) {
+      if (shouldSkipSettingsFindTextNode(node)) return NodeFilter.FILTER_REJECT;
+      return node.nodeValue.toLowerCase().indexOf(qLower) !== -1
+        ? NodeFilter.FILTER_ACCEPT
+        : NodeFilter.FILTER_REJECT;
+    }
+  });
+  var nodes = [];
+  var current;
+  while ((current = walker.nextNode())) nodes.push(current);
+
+  nodes.forEach(function(node) {
+    var text = node.nodeValue;
+    var lower = text.toLowerCase();
+    var frag = document.createDocumentFragment();
+    var pos = 0;
+    var idx = lower.indexOf(qLower, pos);
+    while (idx !== -1) {
+      if (idx > pos) frag.appendChild(document.createTextNode(text.slice(pos, idx)));
+      var mark = document.createElement('mark');
+      mark.className = 'settings-find-mark';
+      mark.textContent = text.slice(idx, idx + q.length);
+      frag.appendChild(mark);
+      SETTINGS_FIND_STATE.marks.push(mark);
+      pos = idx + q.length;
+      idx = lower.indexOf(qLower, pos);
+    }
+    if (pos < text.length) frag.appendChild(document.createTextNode(text.slice(pos)));
+    node.parentNode.replaceChild(frag, node);
+  });
+
+  if (SETTINGS_FIND_STATE.marks.length) {
+    setSettingsFindActive(Math.max(0, Math.min(preferredIndex || 0, SETTINGS_FIND_STATE.marks.length - 1)));
+  } else {
+    SETTINGS_FIND_STATE.activeIndex = -1;
+    updateSettingsFindStatus();
+  }
+  connectSettingsFindObserver();
+}
+
+function setSettingsFindActive(index) {
+  var marks = SETTINGS_FIND_STATE.marks;
+  marks.forEach(function(mark) { mark.classList.remove('active'); });
+  if (!marks.length) {
+    SETTINGS_FIND_STATE.activeIndex = -1;
+    updateSettingsFindStatus();
+    return;
+  }
+  SETTINGS_FIND_STATE.activeIndex = ((index % marks.length) + marks.length) % marks.length;
+  var active = marks[SETTINGS_FIND_STATE.activeIndex];
+  active.classList.add('active');
+  revealSettingsFindMatch(active);
+  updateSettingsFindStatus();
+}
+
+function revealSettingsFindMatch(mark) {
+  var body = mark.closest('.collapsible-body');
+  while (body) {
+    body.classList.add('open');
+    var header = body.previousElementSibling;
+    if (header && header.classList.contains('collapsible-header')) header.classList.add('open');
+    body = body.parentElement ? body.parentElement.closest('.collapsible-body') : null;
+  }
+  var advanced = mark.closest('#advancedContent');
+  if (advanced) {
+    advanced.style.display = '';
+    var advancedTitle = advanced.previousElementSibling;
+    var icon = advancedTitle ? advancedTitle.querySelector('span') : null;
+    if (icon) icon.textContent = '\u25BC';
+  }
+  mark.scrollIntoView({ block: 'center', inline: 'nearest' });
+}
+
+function moveSettingsFind(delta) {
+  var input = document.getElementById('settingsFindInput');
+  if (!isSettingsFindOpen()) openSettingsFind();
+  if (!SETTINGS_FIND_STATE.marks.length && input && input.value.trim()) {
+    refreshSettingsFind(input.value, 0);
+  }
+  if (!SETTINGS_FIND_STATE.marks.length) return;
+  setSettingsFindActive(SETTINGS_FIND_STATE.activeIndex + delta);
+}
+
+function updateSettingsFindStatus() {
+  var status = document.getElementById('settingsFindStatus');
+  if (!status) return;
+  var total = SETTINGS_FIND_STATE.marks.length;
+  if (!total) {
+    status.textContent = '0 results';
+  } else {
+    status.textContent = (SETTINGS_FIND_STATE.activeIndex + 1) + ' of ' + total;
+  }
+}
+
+function toggleSection(header) {
+  header.classList.toggle('open');
+  var body = header.nextElementSibling;
+  body.classList.toggle('open');
+}
+
+/* ---------- Initial load readiness ----------
+ * The curated forms are populated asynchronously from /api/config and
+ * /api/workspaces/active/config. Tests (and any code that interacts with
+ * form fields on load) need a way to know both have finished, otherwise
+ * they can edit a field before loadConfig() overwrites it, or trigger
+ * saveWsConfig() before _wsOverridesLoaded flips on and get a silent
+ * no-op. The body's data-settings-ready attribute flips to "true" after
+ * both initial loads have settled (success OR handled failure). */
+var _settingsInitialLoads = { config: false, ws: false };
+function _markSettingsInitialLoad(kind) {
+  _settingsInitialLoads[kind] = true;
+  if (_settingsInitialLoads.config && _settingsInitialLoads.ws) {
+    document.body.setAttribute('data-settings-ready', 'true');
+  }
+}
+
+/* ---------- Workspace Config Overrides ---------- */
+var _wsOverridesLoaded = false;
+async function loadWsOverrides() {
+  try {
+    var ws = await safeFetch('/api/workspaces/active', {}, { toast: false });
+    if (ws && ws.name) {
+      document.querySelectorAll('.ws-override-name').forEach(function(el) { el.textContent = ws.name; });
+    }
+    var overrides = await safeFetch('/api/workspaces/active/config', {}, { toast: false });
+    ['classification_threshold', 'grouping_window_seconds', 'similarity_threshold', 'detector_confidence'].forEach(function(key) {
+      _applyWsOverrideField(key, overrides);
+    });
+    _wsOverridesLoaded = true;
+  } catch(e) {
+    _markSettingsInitialLoad('ws');
+    return false;
+  }
+  _markSettingsInitialLoad('ws');
+  return true;
+}
+
+// Show one override row exactly as the server has it.
+function _applyWsOverrideField(key, overrides) {
+  var checkbox = document.getElementById('wsOverride_' + key);
+  var input = document.getElementById('wsVal_' + key);
+  var ctrl = document.getElementById('wsOverrideCtrl_' + key);
+  if (!checkbox || !input || !ctrl) return;
+  if (overrides[key] !== undefined) {
+    checkbox.checked = true;
+    ctrl.style.display = 'flex';
+    if (key === 'classification_threshold' || key === 'similarity_threshold' || key === 'detector_confidence') {
+      input.value = Math.round(overrides[key] * 100);
+    } else {
+      input.value = overrides[key];
+    }
+    updateWsLabel(key);
+  } else {
+    // Sync removal too — when re-called after a schema-row reset, an
+    // override may have been deleted server-side. Leaving the checkbox
+    // checked would cause the next saveWsConfig to re-add it.
+    checkbox.checked = false;
+    ctrl.style.display = 'none';
+  }
+}
+
+function updateWsLabel(key) {
+  var input = document.getElementById('wsVal_' + key);
+  if (!input) return;
+  if (key === 'classification_threshold') {
+    document.getElementById('wsThresholdVal').textContent = input.value + '%';
+  } else if (key === 'similarity_threshold') {
+    document.getElementById('wsSimilarityVal').textContent = input.value + '%';
+  } else if (key === 'detector_confidence') {
+    document.getElementById('wsDetectorConfVal').textContent = (parseInt(input.value) / 100).toFixed(2);
+  }
+}
+
+function toggleWsOverride(key) {
+  var checkbox = document.getElementById('wsOverride_' + key);
+  var input = document.getElementById('wsVal_' + key);
+  var ctrl = document.getElementById('wsOverrideCtrl_' + key);
+  if (!checkbox || !input || !ctrl) return;
+  ctrl.style.display = checkbox.checked ? 'flex' : 'none';
+  if (checkbox.checked && !input.value) {
+    if (key === 'classification_threshold') input.value = 40;
+    else if (key === 'grouping_window_seconds') input.value = 10;
+    else if (key === 'similarity_threshold') input.value = 85;
+    else if (key === 'detector_confidence') input.value = 20;
+    updateWsLabel(key);
+  }
+  saveWsConfig();
+}
+
+var _wsSaveTimer = null;
+function saveWsConfig() {
+  // If the initial load failed, every checkbox shows unchecked even though the
+  // server may have overrides. Saving now would send null for every key and
+  // wipe persisted state we never displayed. Bail out instead.
+  if (!_wsOverridesLoaded) return;
+  clearTimeout(_wsSaveTimer);
+  var gen = _nextSaveGen();
+  _saveStatusMark('workspace', 'pending', gen);
+  _wsSaveTimer = setTimeout(function() {
+    _serializedSave('workspace', function() { return _postWsOverrides(gen); });
+  }, 500);
+}
+
+async function _postWsOverrides(gen) {
+    // Runs only once any earlier override POST has settled; reads the form
+    // now so the snapshot reflects every edit made while waiting.
+    var overrides = {};
+    var needsResync = false;
+    var invalidKeys = [];
+    ['classification_threshold', 'grouping_window_seconds', 'similarity_threshold', 'detector_confidence'].forEach(function(key) {
+      var checkbox = document.getElementById('wsOverride_' + key);
+      var input = document.getElementById('wsVal_' + key);
+      if (!checkbox || !input) return;
+      if (checkbox.checked) {
+        var parsed = parseInt(input.value, 10);
+        if (isNaN(parsed)) {
+          // Cleared/invalid number field: JSON.stringify turns NaN into
+          // null, which the backend reads as "delete this override" while
+          // the checkbox stays checked — the UI would claim an override
+          // that no longer exists. Omit the key instead (the backend
+          // preserves omitted keys) and resync the input from the server
+          // afterwards so it shows the value that is actually in effect.
+          needsResync = true;
+          invalidKeys.push(key);
+          return;
+        }
+        if (key === 'classification_threshold' || key === 'similarity_threshold' || key === 'detector_confidence') {
+          overrides[key] = parsed / 100;
+        } else {
+          overrides[key] = parsed;
+        }
+      } else {
+        // Explicit null tells the backend to clear this override.
+        // Without this, omitted keys are preserved and unchecking has no effect.
+        overrides[key] = null;
+      }
+    });
+    _saveStatusMark('workspace', 'inflight', gen);
+    try {
+      await safeFetch('/api/workspaces/active/config', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(overrides)
+      });
+    } catch(e) {
+      _saveStatusMark('workspace', 'error', gen);
+      return;
+    }
+    if (needsResync) {
+      // An omitted (blank/invalid) field was NOT saved. Don't claim
+      // "Saved" until the form shows what is actually in effect: restore
+      // the field from the server first, and tell the user their entry
+      // was dropped. If the resync itself fails, the form still shows an
+      // unsaved value, so report that as a failed save rather than a
+      // false confirmation.
+      var current;
+      try {
+        current = await safeFetch('/api/workspaces/active/config', {}, { toast: false });
+      } catch (e) {
+        _saveStatusMark('workspace', 'error', gen);
+        return;
+      }
+      // Only the omitted fields are restored, and only if no newer
+      // override edit was queued while the GET was in flight: that edit's
+      // save reads the form when its turn comes, so overwriting fields
+      // here would post the server's old value over the user's newer one.
+      if (_saveStatus.pending.workspace === undefined) {
+        invalidKeys.forEach(function(key) { _applyWsOverrideField(key, current); });
+        if (typeof showToast === 'function') {
+          showToast(
+            'Blank or invalid override for ' + invalidKeys.join(', ') +
+            ' was not saved; showing the value currently in effect.',
+            'warning'
+          );
+        }
+      }
+    }
+    _saveStatusMark('workspace', 'ok', gen);
+}
+
+// ---------- Autosave status ----------
+// The curated forms on this page (global config and workspace overrides)
+// autosave on every change. Each save path reports its lifecycle here so
+// the pill at the top-right answers "did my edit persist?" honestly:
+//   pending  — a debounced write is queued but not yet sent
+//   inflight — the POST is on the wire
+//   ok       — the server accepted it
+//   error    — the server rejected it or the network failed
+// Paths are tracked separately so a failed config save is not masked by a
+// later successful workspace-override save (they persist to different
+// places; only a retry of the SAME path clears its failure).
+//
+// Every save carries a monotonically increasing generation token so that
+// the completion of an OLDER request cannot clear pending/inflight state
+// belonging to a NEWER edit. Without this, editing a second field while a
+// POST for the first is in flight would show "Saved" as soon as the first
+// completes — during the second edit's debounce window or even while its
+// request was already running.
+var _saveStatus = { pending: {}, inflight: {}, lastResult: {}, lastSavedAt: null };
+var _saveStatusFlashTimer = null;
+var _saveGenCounter = 0;
+
+function _nextSaveGen() { return ++_saveGenCounter; }
+
+// Saves for the same path are serialized: the next POST starts only after
+// the previous one has settled. Generation tokens order the UI
+// bookkeeping, but they cannot order what the server sees — two
+// overlapping requests can reach the backend out of order, and the older
+// full-form snapshot could land last and silently revert the newer edit
+// while the pill says "Saved". With one request in flight per path, the
+// server applies snapshots in the order they were sent, and each snapshot
+// is read from the form at send time so a queued save always carries the
+// latest values.
+var _saveChains = {};
+var _saveChainEpochs = {};
+var _autosaveSuspended = false;
+var _editedWhileSuspended = false;
+function _serializedSave(path, doSave) {
+  var epoch = _saveChainEpochs[path] || 0;
+  var prev = _saveChains[path] || Promise.resolve();
+  var run = prev.catch(function() {}).then(function() {
+    // A save queued behind an in-flight POST reads the form only when its
+    // turn comes. If the chain was cancelled meanwhile (settings import
+    // replaced the config), that stale snapshot must not be posted.
+    if ((_saveChainEpochs[path] || 0) !== epoch) {
+      throw new Error('autosave cancelled');
+    }
+    return doSave();
+  });
+  _saveChains[path] = run;
+  return run;
+}
+// Drop every save queued for a path that has not started yet, and wait
+// for the one in flight (if any) to settle. Used before replacing the
+// whole config so no pre-import snapshot can land after the import.
+function _cancelQueuedSaves(path) {
+  _saveChainEpochs[path] = (_saveChainEpochs[path] || 0) + 1;
+  var chain = _saveChains[path] || Promise.resolve();
+  _saveStatusMark(path, 'cancel');
+  return chain.catch(function() {});
+}
+
+function _saveStatusMark(path, phase, gen) {
+  if (phase === 'pending') {
+    // Debounced writes are singleton per path (clearTimeout drops any
+    // older timer), so overwrite rather than accumulate — otherwise a
+    // superseded pending gen would linger forever.
+    _saveStatus.pending[path] = gen;
+  } else if (phase === 'inflight') {
+    // Every POST sends the full current form snapshot, so a request at
+    // least as new as the queued write already carries its edits. This
+    // matters for direct _saveConfigNow() callers (the NAS wizard clears
+    // the debounce timer and flushes with a freshly minted gen): without
+    // the <= the superseded pending gen would never clear and the pill
+    // would read "Saving…" forever.
+    if (_saveStatus.pending[path] !== undefined && _saveStatus.pending[path] <= gen) {
+      delete _saveStatus.pending[path];
+    }
+    if (!_saveStatus.inflight[path]) _saveStatus.inflight[path] = {};
+    _saveStatus.inflight[path][gen] = true;
+  } else if (phase === 'ok' || phase === 'error') {
+    if (_saveStatus.inflight[path]) {
+      delete _saveStatus.inflight[path][gen];
+      if (Object.keys(_saveStatus.inflight[path]).length === 0) {
+        delete _saveStatus.inflight[path];
+      }
+    }
+    // Only let the LATEST completion define the visible outcome. An older
+    // 'ok' arriving after a newer 'error' must not overwrite the failure,
+    // and vice versa. Ties (same gen) update in call order.
+    var prev = _saveStatus.lastResult[path];
+    if (!prev || gen >= prev.gen) {
+      _saveStatus.lastResult[path] = { gen: gen, phase: phase };
+    }
+    if (phase === 'ok') _saveStatus.lastSavedAt = new Date();
+  } else if (phase === 'cancel') {
+    // A queued write was dropped on purpose (settings import replaces the
+    // whole config). Nothing was persisted, so don't claim a save happened.
+    delete _saveStatus.pending[path];
+  }
+  _renderSaveStatus();
+}
+
+function _renderSaveStatus() {
+  var el = document.getElementById('settingsSaveStatus');
+  if (!el) return;
+  var busy = Object.keys(_saveStatus.pending).length > 0 ||
+             Object.keys(_saveStatus.inflight).length > 0;
+  var failed = Object.keys(_saveStatus.lastResult).some(function(p) {
+    return _saveStatus.lastResult[p].phase === 'error';
+  });
+  clearTimeout(_saveStatusFlashTimer);
+  el.classList.remove('flash');
+  if (busy) {
+    el.setAttribute('data-state', 'saving');
+    el.textContent = 'Saving\u2026';
+    el.title = 'Your change is being written to disk.';
+  } else if (failed) {
+    el.setAttribute('data-state', 'error');
+    el.textContent = 'Save failed \u2014 changes not saved';
+    el.title = 'The last save was rejected. Edit the field again to retry.';
+  } else if (_saveStatus.lastSavedAt) {
+    var t = _saveStatus.lastSavedAt.toLocaleTimeString([], {
+      hour: '2-digit', minute: '2-digit', second: '2-digit'
+    });
+    el.setAttribute('data-state', 'saved');
+    el.textContent = 'Saved \u2713 ' + t;
+    el.title = 'All changes on this page are saved automatically. Last saved at ' + t + '.';
+    el.classList.add('flash');
+    _saveStatusFlashTimer = setTimeout(function() { el.classList.remove('flash'); }, 2000);
+  } else {
+    el.removeAttribute('data-state');
+    el.textContent = '';
+    el.title = '';
+  }
+}
+
+var _saveTimer = null;
+
+// ---------- External Editors list ----------
+// Source-of-truth for the editor list in settings UI. Populated by
+// loadConfig() and read back on save via collectExternalEditors().
+var _editorsState = [];
+
+function renderExternalEditors() {
+  var container = document.getElementById('cfgExternalEditorsList');
+  if (!container) return;
+  container.innerHTML = '';
+  if (_editorsState.length === 0) {
+    var empty = document.createElement('div');
+    empty.style.cssText = 'color:var(--text-dim);font-size:12px;font-style:italic;';
+    empty.textContent = 'No editors configured. Photos will open in your OS default app.';
+    container.appendChild(empty);
+    return;
+  }
+  _editorsState.forEach(function(ed, i) {
+    var row = document.createElement('div');
+    row.style.cssText = 'display:flex;align-items:center;gap:6px;';
+    var inputCss = 'background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 10px;font-size:12px;';
+
+    var nameInput = document.createElement('input');
+    nameInput.type = 'text';
+    nameInput.placeholder = 'Display name (e.g. Lightroom)';
+    nameInput.value = ed.name || '';
+    nameInput.style.cssText = inputCss + 'width:160px;';
+    nameInput.addEventListener('input', function() {
+      _editorsState[i].name = nameInput.value;
+      saveConfig();
+    });
+
+    var pathInput = document.createElement('input');
+    pathInput.type = 'text';
+    pathInput.placeholder = window.VIREO_EDITOR_PATH_PLACEHOLDER || '/usr/bin/darktable';
+    pathInput.value = ed.path || '';
+    pathInput.style.cssText = inputCss + 'flex:1;min-width:240px;font-family:monospace;';
+    pathInput.addEventListener('input', function() {
+      _editorsState[i].path = pathInput.value;
+      saveConfig();
+    });
+
+    var removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.textContent = '×';
+    removeBtn.title = 'Remove';
+    removeBtn.style.cssText = 'background:var(--bg-tertiary);color:var(--text-dim);border:1px solid var(--border-secondary);border-radius:4px;width:28px;height:28px;font-size:16px;cursor:pointer;line-height:1;';
+    removeBtn.addEventListener('click', function() {
+      _editorsState.splice(i, 1);
+      renderExternalEditors();
+      saveConfig();
+    });
+
+    row.appendChild(nameInput);
+    row.appendChild(pathInput);
+    row.appendChild(removeBtn);
+    container.appendChild(row);
+  });
+}
+
+function addExternalEditor() {
+  _editorsState.push({ name: '', path: '' });
+  renderExternalEditors();
+  // Defer save until the user has typed something. Empty entries get filtered
+  // out by collectExternalEditors() anyway, but a save here would just be
+  // a no-op write that triggers extra disk churn.
+}
+
+// ---- Quick filters (filter-bar button row) ---------------------------------
+// Stored entries are {id, label, group, rules}; `rules` is an ordinary filter
+// rule node, the same JSON the filter bar's rule builder and saved collections
+// use. vireo/filter_shortcuts.py validates and normalizes whatever we save.
+var FILTER_SHORTCUT_DEFAULTS = [];   // built-ins, from /api/filters/shortcuts
+// Mirrors filter_shortcuts.MAX_SHORTCUTS: the server refuses a longer list,
+// so the form stops here rather than showing a row that never saves.
+var MAX_FILTER_SHORTCUTS = 24;
+// Mirrors filter_shortcuts.MAX_LABEL_LEN. Normalization truncates a longer
+// label, so the form has to stop at the same place — otherwise the row keeps
+// showing text the filter bar will never render.
+var MAX_SHORTCUT_LABEL = 40;
+var _filterShortcutsState = [];
+var _filterFieldSpecs = null;      // key -> spec from /api/filters/fields
+var _shortcutLabelEdited = false;  // stop auto-filling once the user types
+
+// Ops the add-form can build a single value for. `between` needs two inputs
+// and `under` a folder picker; both stay in the filter bar's own rule builder.
+var SHORTCUT_FORM_OPS = ['is', 'is not', 'contains', 'not_contains', 'starts_with',
+                         'ends_with', '>=', '<=', '>', '<', 'recent'];
+
+function shortcutFieldOptions(spec) {
+  return (spec.ops || []).filter(function(op) { return SHORTCUT_FORM_OPS.indexOf(op) >= 0; });
+}
+
+function loadFilterShortcuts(list) {
+  _filterShortcutsState = (Array.isArray(list) ? list : []).filter(function(entry) {
+    return entry && typeof entry === 'object' && entry.rules;
+  }).map(function(entry) {
+    return {
+      id: typeof entry.id === 'string' ? entry.id : '',
+      label: typeof entry.label === 'string' ? entry.label : '',
+      group: typeof entry.group === 'string' ? entry.group : '',
+      rules: entry.rules,
+    };
+  });
+  renderFilterShortcuts();
+  if (_filterFieldSpecs) return;
+  safeFetch('/api/filters/fields', {}, { toast: false }).then(function(data) {
+    _filterFieldSpecs = {};
+    ((data && data.fields) || []).forEach(function(f) { _filterFieldSpecs[f.key] = f; });
+    buildShortcutFieldSelect();
+    renderFilterShortcuts();
+  }).catch(function() { /* Descriptions fall back to the raw field name. */ });
+  // The built-ins come from the same place the filter bar reads them, so
+  // "restore" can never drift from what the bar ships with.
+  safeFetch('/api/filters/shortcuts', {}, { toast: false }).then(function(data) {
+    FILTER_SHORTCUT_DEFAULTS = (data && data.defaults) || [];
+  }).catch(function() { /* Restore stays unavailable; the list still edits. */ });
+}
+
+// Stable text for a rule node so two expressions can be compared. The
+// server refuses two buttons that apply the same rule (neither could own the
+// chip), so the form has to notice before the save fails.
+function canonicalRule(node) {
+  if (Array.isArray(node)) return '[' + node.map(canonicalRule).join(',') + ']';
+  if (node && typeof node === 'object') {
+    return '{' + Object.keys(node).sort().map(function(k) {
+      return JSON.stringify(k) + ':' + canonicalRule(node[k]);
+    }).join(',') + '}';
+  }
+  return JSON.stringify(node);
+}
+
+function shortcutWithSameRule(rules) {
+  var key = canonicalRule(rules);
+  return _filterShortcutsState.find(function(entry) {
+    return canonicalRule(entry.rules) === key;
+  }) || null;
+}
+
+function describeShortcutRules(rules) {
+  if (window.VireoFilter && _filterFieldSpecs) {
+    try { return VireoFilter.describeRule(rules, _filterFieldSpecs); }
+    catch (e) { /* fall through to the raw shape below */ }
+  }
+  if (rules && rules.field) return rules.field + ' ' + rules.op + ' ' + rules.value;
+  return 'Saved filter expression';
+}
+
+// Which other buttons this one combines with (OR), so a row says so rather
+// than leaving the behavior to be discovered in the grid. Mirrors how the bar
+// merges: enum values merge by field wherever they sit, "missing X" buttons
+// merge with the others in their group.
+function shortcutKind(entry) {
+  var rules = entry && entry.rules;
+  var spec = rules && rules.field && _filterFieldSpecs ? _filterFieldSpecs[rules.field] : null;
+  if (!spec || rules.op !== 'is' || Array.isArray(rules.value)) return 'rules';
+  if (spec.type === 'enum') return 'enum';
+  if (spec.type === 'boolean' && !rules.value) return 'missing';
+  return 'rules';
+}
+
+// Some fields exist only on one page (review-only prediction fields, say),
+// so a button built on them is hidden elsewhere. Name those pages in the row
+// rather than leaving the user to wonder where their button went.
+function shortcutPageScope(entry) {
+  var rules = entry && entry.rules;
+  if (!rules || !_filterFieldSpecs) return '';
+  var fields = rules.field ? [rules.field] : [];
+  if (!fields.length && Array.isArray(rules.rules)) {
+    fields = rules.rules.map(function(r) { return r && r.field; }).filter(Boolean);
+  }
+  var pages = null;
+  fields.forEach(function(key) {
+    var spec = _filterFieldSpecs[key];
+    if (!spec || !Array.isArray(spec.pages)) return;
+    pages = (pages || []).concat(spec.pages);
+  });
+  if (!pages) return '';
+  var unique = pages.filter(function(p, i) { return pages.indexOf(p) === i; });
+  return unique.length ? unique.join(', ') : 'no page';
+}
+
+function shortcutGroupPeers(entry) {
+  var kind = shortcutKind(entry);
+  if (kind === 'rules') return [];
+  return _filterShortcutsState.filter(function(other) {
+    if (other === entry || shortcutKind(other) !== kind) return false;
+    return kind === 'enum'
+      ? other.rules.field === entry.rules.field
+      : Boolean(entry.group) && other.group === entry.group;
+  });
+}
+
+function renderFilterShortcuts() {
+  var container = document.getElementById('cfgFilterShortcutsList');
+  if (!container) return;
+  var counter = document.getElementById('cfgShortcutCount');
+  if (counter) {
+    counter.textContent = _filterShortcutsState.length + ' of ' +
+      MAX_FILTER_SHORTCUTS + ' quick filters';
+  }
+  container.innerHTML = '';
+  if (!_filterShortcutsState.length) {
+    var empty = document.createElement('div');
+    empty.style.cssText = 'color:var(--text-dim);font-size:12px;font-style:italic;';
+    empty.textContent = 'No quick filters — the filter bar shows the search box and Filters button only.';
+    container.appendChild(empty);
+    return;
+  }
+  _filterShortcutsState.forEach(function(entry, i) {
+    var row = document.createElement('div');
+    row.setAttribute('data-shortcut-row', entry.id || '');
+    row.style.cssText = 'display:flex;align-items:center;gap:8px;background:var(--bg-secondary);border:1px solid var(--border-secondary);border-radius:6px;padding:6px 8px;';
+
+    var labelInput = document.createElement('input');
+    labelInput.type = 'text';
+    labelInput.value = entry.label || '';
+    labelInput.placeholder = 'Button text';
+    labelInput.maxLength = MAX_SHORTCUT_LABEL;
+    labelInput.setAttribute('aria-label', 'Button text');
+    labelInput.style.cssText = 'background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:5px 8px;font-size:12px;width:190px;';
+    labelInput.addEventListener('input', function() {
+      _filterShortcutsState[i].label = labelInput.value;
+      // An empty label is not stored as empty — normalization swaps in the
+      // rule's own wording — so hold the write until blur resolves what the
+      // button will actually say.
+      if (labelInput.value.trim()) saveConfig();
+    });
+    labelInput.addEventListener('blur', function() {
+      if (labelInput.value.trim()) return;
+      labelInput.value = describeShortcutRules(_filterShortcutsState[i].rules)
+        .slice(0, MAX_SHORTCUT_LABEL);
+      _filterShortcutsState[i].label = labelInput.value;
+      saveConfig();
+    });
+    row.appendChild(labelInput);
+
+    var desc = document.createElement('div');
+    desc.style.cssText = 'flex:1;min-width:0;font-size:12px;color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+    var peers = shortcutGroupPeers(entry);
+    desc.textContent = describeShortcutRules(entry.rules);
+    var only = shortcutPageScope(entry);
+    if (only) {
+      var scope = document.createElement('span');
+      scope.style.cssText = 'color:var(--text-faint);';
+      scope.textContent = ' · only on ' + only;
+      desc.appendChild(scope);
+    }
+    if (peers.length) {
+      var tag = document.createElement('span');
+      tag.style.cssText = 'color:var(--text-faint);';
+      tag.textContent = ' · OR-grouped with ' + peers.map(function(p) {
+        return '“' + (p.label || p.id) + '”';
+      }).join(', ');
+      desc.appendChild(tag);
+    }
+    // The row truncates; the tooltip carries the whole sentence.
+    desc.title = desc.textContent;
+    row.appendChild(desc);
+
+    [['↑', -1, 'Move up'], ['↓', 1, 'Move down']].forEach(function(spec) {
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = spec[0];
+      btn.title = spec[2];
+      btn.disabled = (spec[1] < 0 && i === 0) || (spec[1] > 0 && i === _filterShortcutsState.length - 1);
+      btn.style.cssText = 'background:var(--bg-tertiary);color:var(--text-dim);border:1px solid var(--border-secondary);border-radius:4px;width:26px;height:26px;font-size:12px;cursor:pointer;line-height:1;' +
+        (btn.disabled ? 'opacity:.4;cursor:default;' : '');
+      btn.addEventListener('click', function() {
+        if (btn.disabled) return;
+        var target = i + spec[1];
+        var moved = _filterShortcutsState.splice(i, 1)[0];
+        _filterShortcutsState.splice(target, 0, moved);
+        renderFilterShortcuts();
+        saveConfig();
+      });
+      row.appendChild(btn);
+    });
+
+    var removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.textContent = '×';
+    removeBtn.title = 'Remove this button';
+    removeBtn.style.cssText = 'background:var(--bg-tertiary);color:var(--text-dim);border:1px solid var(--border-secondary);border-radius:4px;width:26px;height:26px;font-size:15px;cursor:pointer;line-height:1;';
+    removeBtn.addEventListener('click', function() {
+      _filterShortcutsState.splice(i, 1);
+      renderFilterShortcuts();
+      saveConfig();
+    });
+    row.appendChild(removeBtn);
+    container.appendChild(row);
+  });
+}
+
+function buildShortcutFieldSelect() {
+  var select = document.getElementById('cfgShortcutField');
+  if (!select || !_filterFieldSpecs) return;
+  var byCategory = {};
+  Object.keys(_filterFieldSpecs).forEach(function(key) {
+    var spec = _filterFieldSpecs[key];
+    // Fields the add-form cannot build a complete value for are left to the
+    // filter bar's own rule builder rather than offered half-working here.
+    if (spec.type === 'folder' || !shortcutFieldOptions(spec).length) return;
+    // `pages: []` marks an internal deep-link predicate (its values are
+    // encoded tokens, not text a person types). No page offers it in its own
+    // field picker, so a button built on it could only ever fail.
+    if (Array.isArray(spec.pages) && !spec.pages.length) return;
+    (byCategory[spec.category] = byCategory[spec.category] || []).push(key);
+  });
+  select.innerHTML = '';
+  Object.keys(byCategory).forEach(function(category) {
+    var group = document.createElement('optgroup');
+    group.label = category;
+    byCategory[category].forEach(function(key) {
+      var option = document.createElement('option');
+      option.value = key;
+      option.textContent = _filterFieldSpecs[key].label;
+      group.appendChild(option);
+    });
+    select.appendChild(group);
+  });
+  select.value = 'rating';
+  if (!select.value) select.value = select.options.length ? select.options[0].value : '';
+  select.onchange = function() { buildShortcutOpSelect(); };
+  buildShortcutOpSelect();
+}
+
+function buildShortcutOpSelect() {
+  var spec = _filterFieldSpecs && _filterFieldSpecs[document.getElementById('cfgShortcutField').value];
+  var opSelect = document.getElementById('cfgShortcutOp');
+  if (!spec || !opSelect) return;
+  var labels = (window.VireoFilter && VireoFilter.opLabels) ? VireoFilter.opLabels() : {};
+  opSelect.innerHTML = '';
+  shortcutFieldOptions(spec).forEach(function(op) {
+    var option = document.createElement('option');
+    option.value = op;
+    option.textContent = labels[op] || op;
+    opSelect.appendChild(option);
+  });
+  opSelect.onchange = function() { buildShortcutValueInput(); };
+  buildShortcutValueInput();
+}
+
+function buildShortcutValueInput() {
+  var spec = _filterFieldSpecs && _filterFieldSpecs[document.getElementById('cfgShortcutField').value];
+  var op = document.getElementById('cfgShortcutOp').value;
+  var host = document.getElementById('cfgShortcutValue');
+  if (!spec || !host) return;
+  var inputCss = 'background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 8px;font-size:12px;';
+  host.innerHTML = '';
+  var addSelect = function(values, labels) {
+    var select = document.createElement('select');
+    select.style.cssText = inputCss;
+    select.setAttribute('aria-label', 'Value');
+    values.forEach(function(value) {
+      var option = document.createElement('option');
+      option.value = String(value);
+      option.textContent = (labels && labels[value] != null) ? labels[value] : String(value);
+      select.appendChild(option);
+    });
+    host.appendChild(select);
+    return select;
+  };
+  if (op === 'recent') {
+    var n = document.createElement('input');
+    n.type = 'number';
+    n.min = '1';
+    n.value = '30';
+    n.style.cssText = inputCss + 'width:70px;';
+    n.setAttribute('aria-label', 'How many');
+    host.appendChild(n);
+    addSelect(['days', 'weeks', 'months', 'years']);
+  } else if (spec.type === 'boolean') {
+    addSelect([1, 0], {1: 'Yes', 0: 'No'});
+  } else if (spec.type === 'enum' && spec.values && spec.values.length) {
+    addSelect(spec.values, spec.labels);
+  } else if (spec.type === 'rating') {
+    // Default to a star count that actually narrows: "at least 0" is every
+    // photo, which is not a filter anyone means to save.
+    addSelect([0, 1, 2, 3, 4, 5]).value = '3';
+  } else if (spec.type === 'number') {
+    var num = document.createElement('input');
+    num.type = 'number';
+    num.value = '0';
+    num.style.cssText = inputCss + 'width:110px;';
+    num.setAttribute('aria-label', 'Value');
+    host.appendChild(num);
+  } else if (spec.type === 'date') {
+    var date = document.createElement('input');
+    date.type = 'date';
+    date.value = new Date().toISOString().slice(0, 10);
+    date.style.cssText = inputCss;
+    date.setAttribute('aria-label', 'Date');
+    host.appendChild(date);
+  } else {
+    var text = document.createElement('input');
+    text.type = 'text';
+    text.placeholder = 'Value';
+    text.style.cssText = inputCss + 'width:160px;';
+    text.setAttribute('aria-label', 'Value');
+    host.appendChild(text);
+  }
+  host.querySelectorAll('input, select').forEach(function(el) {
+    el.addEventListener('input', refreshShortcutPreview);
+    el.addEventListener('change', refreshShortcutPreview);
+  });
+  refreshShortcutPreview();
+}
+
+// The rule the add-form currently describes, or null if it is incomplete.
+function readShortcutForm() {
+  var field = document.getElementById('cfgShortcutField').value;
+  var spec = _filterFieldSpecs && _filterFieldSpecs[field];
+  var op = document.getElementById('cfgShortcutOp').value;
+  if (!spec || !op) return null;
+  var controls = document.getElementById('cfgShortcutValue').querySelectorAll('input, select');
+  var value;
+  if (op === 'recent') {
+    var n = parseInt(controls[0].value, 10);
+    if (!n || n < 1) return null;
+    value = {n: n, unit: controls[1].value};
+  } else if (spec.type === 'boolean' || spec.type === 'rating' || spec.type === 'number') {
+    value = Number(controls[0].value);
+    if (isNaN(value)) return null;
+  } else {
+    value = controls[0].value;
+    if (!String(value).trim()) return null;
+  }
+  return {field: field, op: op, value: value};
+}
+
+function refreshShortcutPreview() {
+  var preview = document.getElementById('cfgShortcutPreview');
+  var rule = readShortcutForm();
+  if (!preview) return;
+  preview.textContent = rule ? describeShortcutRules(rule) : 'Pick a field and a value.';
+  var labelInput = document.getElementById('cfgShortcutLabel');
+  if (rule && labelInput && !_shortcutLabelEdited) {
+    // maxlength only constrains typing, so clamp the derived text too.
+    labelInput.value = describeShortcutRules(rule).slice(0, MAX_SHORTCUT_LABEL);
+  }
+}
+
+function addFilterShortcut() {
+  if (_filterShortcutsState.length >= MAX_FILTER_SHORTCUTS) {
+    showToast('The filter bar holds ' + MAX_FILTER_SHORTCUTS +
+              ' quick filters — remove one first.', 'error');
+    return;
+  }
+  var rule = readShortcutForm();
+  if (!rule) {
+    showToast('Pick a field and fill in a value first.', 'error');
+    return;
+  }
+  var twin = shortcutWithSameRule(rule);
+  if (twin) {
+    showToast('“' + (twin.label || twin.id) + '” already applies this rule — ' +
+              'rename that button instead.', 'error');
+    return;
+  }
+  var labelInput = document.getElementById('cfgShortcutLabel');
+  var label = ((labelInput.value || '').trim() ||
+               describeShortcutRules(rule)).slice(0, MAX_SHORTCUT_LABEL);
+  var id = 'sc_' + Math.random().toString(36).slice(2, 10);
+  _filterShortcutsState.push({id: id, label: label, group: '', rules: rule});
+  _shortcutLabelEdited = false;
+  labelInput.value = '';
+  renderFilterShortcuts();
+  refreshShortcutPreview();
+  saveConfig();
+}
+
+function restoreDefaultFilterShortcuts() {
+  // Additive on purpose: bring back the built-ins that were removed without
+  // discarding anything the user built.
+  var have = {};
+  _filterShortcutsState.forEach(function(entry) { have[entry.id] = true; });
+  if (!FILTER_SHORTCUT_DEFAULTS.length) {
+    showToast('Could not read the built-in quick filters — reload the page.', 'error');
+    return;
+  }
+  var restored = 0;
+  var skipped = 0;
+  FILTER_SHORTCUT_DEFAULTS.forEach(function(entry) {
+    if (have[entry.id]) return;
+    // A button of your own already applying this rule counts as restored —
+    // adding the built-in beside it would be a rejected duplicate.
+    if (shortcutWithSameRule(entry.rules)) return;
+    if (_filterShortcutsState.length >= MAX_FILTER_SHORTCUTS) { skipped += 1; return; }
+    _filterShortcutsState.push(JSON.parse(JSON.stringify(entry)));
+    restored += 1;
+  });
+  if (skipped) {
+    showToast('Restored ' + restored + ' — no room for ' + skipped +
+              ' more at ' + MAX_FILTER_SHORTCUTS + ' quick filters.', 'info');
+  }
+  if (!restored) {
+    showToast('Every built-in quick filter is already in the list.', 'info');
+    return;
+  }
+  renderFilterShortcuts();
+  saveConfig();
+}
+
+function collectFilterShortcuts() {
+  return _filterShortcutsState
+    .filter(function(entry) { return entry && entry.rules; })
+    .map(function(entry) {
+      return {
+        id: entry.id || '',
+        label: typeof entry.label === 'string' ? entry.label.trim() : '',
+        group: entry.group || '',
+        rules: entry.rules,
+      };
+    });
+}
+
+function collectExternalEditors() {
+  // Drop entries with empty paths; default the display name to the basename
+  // of the path when the user didn't fill one in. Mirrors what the backend
+  // does in cfg.get_editors() so what's shown matches what's used.
+  // Defense-in-depth: loadConfig() already coerces _editorsState entries to
+  // strings, but if any later code path stored a non-string (or a future edit
+  // skips that load step), calling .trim() directly here would TypeError and
+  // block every settings autosave until the malformed entry is repaired.
+  var asStr = function(v) { return typeof v === 'string' ? v.trim() : ''; };
+  return _editorsState
+    .map(function(e) { return { name: asStr(e && e.name), path: asStr(e && e.path) }; })
+    .filter(function(e) { return e.path.length > 0; })
+    .map(function(e) {
+      if (!e.name) {
+        var parts = e.path.replace(/\/+$/, '').split('/');
+        e.name = parts[parts.length - 1] || 'Editor';
+      }
+      return e;
+    });
+}
+
+// ---------- Remote targets (SSH) list ----------
+// Source-of-truth for the remote-target editor. Populated by loadConfig()
+// and read back on save via collectRemoteTargets().
+var _remoteTargetsState = [];
+
+function _genTargetId() {
+  if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+  return 'rt-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e9).toString(36);
+}
+
+var _rtInputCss = 'background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 10px;font-size:12px;';
+
+var _rtFolderInput = null;
+var _rtFolderBrowser = new VireoFolderBrowser({
+  overlayId: 'folderBrowser',
+  modes: {
+    local: {
+      title: function() { return 'Choose ' + _rtFolderInput.getAttribute('aria-label'); },
+      startPath: function() { return _rtFolderInput.value.trim(); },
+      onSelect: function(path) { _rtSelectFolder(_rtFolderInput, path); },
+    },
+  },
+});
+
+function _rtSelectFolder(input, path) {
+  // A target may have been removed while a native dialog was open.
+  if (!input || !input.isConnected || !path) return;
+  input.value = path;
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+async function _rtBrowseFolder(input, button) {
+  button.disabled = true;
+  try {
+    if (typeof isTauri === 'function' && isTauri()) {
+      var path = await pickDirectory('Choose ' + input.getAttribute('aria-label'), {
+        defaultPath: input.value.trim() || undefined,
+      });
+      _rtSelectFolder(input, Array.isArray(path) ? path[0] : path);
+      return;
+    }
+    _rtFolderInput = input;
+    _rtFolderBrowser.open('local');
+  } catch (e) {
+    showToast('Could not open folder picker: ' + e.message, 'error');
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function _rtField(label, value, placeholder, onInput, opts) {
+  opts = opts || {};
+  var wrap = document.createElement('div');
+  wrap.style.cssText = 'display:flex;flex-direction:column;gap:3px;min-width:0;'
+    + (opts.flex ? ('flex:' + opts.flex + ';') : '') + (opts.width ? ('width:' + opts.width + ';') : '');
+  var lab = document.createElement('label');
+  lab.textContent = label;
+  lab.style.cssText = 'font-size:11px;color:var(--text-dim);';
+  var inp = document.createElement('input');
+  inp.type = opts.type || 'text';
+  inp.value = (value == null ? '' : value);
+  inp.placeholder = placeholder || '';
+  inp.setAttribute('aria-label', label);
+  inp.title = inp.value;
+  inp.style.cssText = _rtInputCss + (opts.mono ? 'font-family:monospace;' : '');
+  inp.addEventListener('input', function() { inp.title = inp.value; onInput(inp.value); });
+  wrap.appendChild(lab);
+  if (opts.folder) {
+    wrap.style.flexBasis = '100%';
+    var row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:6px;';
+    inp.style.flex = '1';
+    inp.style.minWidth = '0';
+    var browse = document.createElement('button');
+    browse.type = 'button';
+    browse.className = 'btn-sm';
+    browse.textContent = 'Browse…';
+    browse.setAttribute('aria-label', 'Browse for ' + label);
+    browse.onclick = function() { _rtBrowseFolder(inp, browse); };
+    row.append(inp, browse);
+    wrap.appendChild(row);
+  } else {
+    wrap.appendChild(inp);
+  }
+  return wrap;
+}
+
+function renderRemoteTargets() {
+  var container = document.getElementById('cfgRemoteTargetsList');
+  if (!container) return;
+  container.replaceChildren();
+  if (_remoteTargetsState.length === 0) {
+    var empty = document.createElement('div');
+    empty.style.cssText = 'color:var(--text-dim);font-size:12px;font-style:italic;';
+    empty.textContent = 'No remote targets configured.';
+    container.appendChild(empty);
+    return;
+  }
+  _remoteTargetsState.forEach(function(t, i) {
+    var card = document.createElement('div');
+    card.style.cssText = 'border:1px solid var(--border-secondary);border-radius:6px;padding:10px;display:flex;flex-direction:column;gap:8px;background:var(--bg-secondary);';
+
+    var save = function(field) {
+      return function(v) { t[field] = v; saveConfig(); };
+    };
+
+    var r1 = document.createElement('div');
+    r1.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;';
+    r1.appendChild(_rtField('Name', t.name, 'My NAS', save('name'), {flex: '2'}));
+    r1.appendChild(_rtField('User', t.user, 'admin', save('user'), {flex: '1'}));
+    r1.appendChild(_rtField('Host', t.host, 'synology-nas', save('host'), {flex: '2', mono: true}));
+    r1.appendChild(_rtField('Port', t.port, '22', save('port'), {width: '70px'}));
+    card.appendChild(r1);
+
+    var r2 = document.createElement('div');
+    r2.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;';
+    r2.appendChild(_rtField('Remote path (NAS side)', t.remote_path, '/volume1/Photography', save('remote_path'), {flex: '1', mono: true}));
+    r2.appendChild(_rtField('Local mount path', t.mount_path, '/Volumes/Photography', save('mount_path'), {flex: '1', mono: true, folder: true}));
+    r2.appendChild(_rtField('Local archive root (chained moves)', t.local_archive_root,
+      '/Users/you/Photos', save('local_archive_root'), {flex: '1', mono: true, folder: true}));
+    card.appendChild(r2);
+
+    var r3 = document.createElement('div');
+    r3.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;';
+    r3.appendChild(_rtField('SSH key (optional)', t.ssh_key, 'default key if blank', save('ssh_key'), {flex: '2', mono: true}));
+    r3.appendChild(_rtField('Bandwidth limit KB/s (0 = none)', t.bwlimit_kbps, '0', save('bwlimit_kbps'), {width: '160px'}));
+    card.appendChild(r3);
+
+    var r4 = document.createElement('div');
+    r4.style.cssText = 'display:flex;align-items:center;gap:10px;';
+    var testBtn = document.createElement('button');
+    testBtn.type = 'button';
+    testBtn.textContent = 'Test connection';
+    testBtn.style.cssText = 'background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;';
+    var statusEl = document.createElement('span');
+    statusEl.style.cssText = 'font-size:12px;color:var(--text-dim);flex:1;';
+    testBtn.addEventListener('click', function() { testRemoteTarget(i, testBtn, statusEl); });
+
+    var removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.textContent = 'Remove';
+    removeBtn.style.cssText = 'background:var(--bg-tertiary);color:var(--text-dim);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;';
+    removeBtn.addEventListener('click', function() {
+      _remoteTargetsState.splice(i, 1);
+      renderRemoteTargets();
+      saveConfig();
+    });
+
+    r4.appendChild(testBtn);
+    r4.appendChild(statusEl);
+    r4.appendChild(removeBtn);
+    card.appendChild(r4);
+    container.appendChild(card);
+  });
+}
+
+function addRemoteTarget() {
+  _remoteTargetsState.push({
+    id: _genTargetId(), name: '', host: '', user: '', port: 22,
+    ssh_key: '', remote_path: '', mount_path: '', bwlimit_kbps: 0,
+    local_archive_root: '',
+  });
+  renderRemoteTargets();
+  // Defer save until fields are filled — _coerce_remote_target drops empty
+  // entries server-side anyway, so an empty save would be a no-op write.
+}
+
+function collectRemoteTargets() {
+  // Mirror config._coerce_remote_target: drop entries missing host/user/
+  // remote_path; coerce numeric fields. Keep ids stable across edits.
+  var asStr = function(v) { return typeof v === 'string' ? v.trim() : (v == null ? '' : String(v).trim()); };
+  var asInt = function(v, d) { var n = parseInt(v, 10); return isNaN(n) ? d : n; };
+  return _remoteTargetsState
+    .map(function(t) {
+      return {
+        id: t.id || _genTargetId(),
+        name: asStr(t.name), host: asStr(t.host), user: asStr(t.user),
+        port: asInt(t.port, 22), ssh_key: asStr(t.ssh_key),
+        remote_path: asStr(t.remote_path), mount_path: asStr(t.mount_path),
+        local_archive_root: asStr(t.local_archive_root),
+        bwlimit_kbps: Math.max(0, asInt(t.bwlimit_kbps, 0)),
+      };
+    })
+    .filter(function(t) { return t.host && t.user && t.remote_path; });
+}
+
+async function testRemoteTarget(i, btn, statusEl) {
+  var t = _remoteTargetsState[i];
+  btn.disabled = true;
+  var orig = btn.textContent;
+  btn.textContent = 'Testing…';
+  statusEl.textContent = 'Connecting…';
+  statusEl.style.color = 'var(--text-dim)';
+  try {
+    var res = await safeFetch('/api/remote-targets/test', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(t),
+    }, { toast: false });
+    // A missing local archive root is not a connection failure, but a bare
+    // green "Connection OK" would hide the one misconfiguration the Import
+    // page can't name later (issue #1377): render it as a warning and offer
+    // the one-line fix inline, since the folder is the user's own staging
+    // area and creating it is always safe.
+    var archiveRootInvalid = !!(res.ok && res.archive_root_invalid);
+    var archiveRootOffline = !!(res.ok && res.archive_root_volume_offline);
+    var archiveRootMissing = !!(res.ok && !archiveRootInvalid && !archiveRootOffline
+      && res.archive_root && res.archive_root_present === false);
+    var archiveRootProblem = archiveRootInvalid || archiveRootOffline || archiveRootMissing;
+    statusEl.textContent = (res.ok && !archiveRootProblem ? '✓ ' : '⚠ ') + (res.message || '')
+      + (res.mount_path && !res.mount_present
+          ? ' (mount path not currently present — fine if the NAS just isn’t mounted right now.)' : '');
+    statusEl.style.color = res.ok && !archiveRootProblem ? 'var(--success, #4caf50)' : 'var(--warning)';
+    appendRsyncInstallCommands(statusEl, res.rsync_install_commands);
+    // Only a missing-but-valid root can be fixed by creating it; an invalid
+    // one needs the path changed, and an unreachable volume needs
+    // reconnecting (creating a folder on it would hang or fail).
+    if (archiveRootMissing) {
+      statusEl.appendChild(document.createTextNode(' '));
+      var mk = document.createElement('button');
+      mk.type = 'button';
+      mk.textContent = 'Create folder';
+      mk.style.cssText = 'background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border-secondary);border-radius:4px;padding:2px 8px;font-size:11px;cursor:pointer;';
+      mk.onclick = async function() {
+        mk.disabled = true;
+        try {
+          await safeFetch('/api/browse/mkdir', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ path: res.archive_root }),
+          }, { toast: false });
+          // Re-run the test so the status reflects the folder now existing.
+          await testRemoteTarget(i, btn, statusEl);
+        } catch (e) {
+          statusEl.textContent = '⚠ Could not create ' + res.archive_root + ': '
+            + (e && e.message ? e.message : 'unknown error');
+          statusEl.style.color = 'var(--warning)';
+        }
+      };
+      statusEl.appendChild(mk);
+    }
+  } catch (e) {
+    statusEl.textContent = '⚠ ' + (e && e.message ? e.message : 'Test failed.');
+    statusEl.style.color = 'var(--warning)';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+}
+
+// ---------------------------------------------------------------------
+// NAS setup wizard. Five steps: volume -> ssh -> share -> archive ->
+// review. Every step pre-fills from discovery and lets the user override;
+// the manual card editor above stays the advanced/edit path.
+// ---------------------------------------------------------------------
+
+var _nw = null;   // wizard state; null when closed
+
+function _nwEl(tag, css, text) {
+  var el = document.createElement(tag);
+  if (css) el.style.cssText = css;
+  if (text != null) el.textContent = text;
+  return el;
+}
+
+var _nwBtnCss = 'background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border-secondary);border-radius:4px;padding:5px 11px;font-size:12px;cursor:pointer;';
+var _nwInputCss = _rtInputCss + 'font-family:monospace;';
+var _nwHintCss = 'font-size:12px;color:var(--text-dim);margin:6px 0;';
+var _nwErrCss = 'font-size:12px;color:var(--warning);margin:6px 0;white-space:pre-wrap;';
+var _nwOkCss = 'font-size:12px;color:var(--success, #4caf50);margin:6px 0;';
+
+function openNasWizard() {
+  _nw = { step: 'volume', mounts: [], mount: null, host: '', user: '',
+          port: 22, keyAuthOk: false, pubKeyLine: '', remotePath: '',
+          archiveRoot: '', browsePath: '', remoteBrowsePath: '/' };
+  document.getElementById('nasWizard').style.display = 'flex';
+  nwRender();
+}
+
+function closeNasWizard() {
+  _nw = null;
+  document.getElementById('nasWizard').style.display = 'none';
+}
+
+var _nwSteps = ['volume', 'ssh', 'share', 'archive', 'review'];
+var _nwTitles = {
+  volume: 'Step 1 of 5 — Pick your NAS volume',
+  ssh: 'Step 2 of 5 — Connect over SSH',
+  share: 'Step 3 of 5 — Locate the share on the NAS',
+  archive: 'Step 4 of 5 — Choose a local archive folder',
+  review: 'Step 5 of 5 — Review and test',
+};
+
+function nwBack() {
+  if (!_nw) return;
+  var i = _nwSteps.indexOf(_nw.step);
+  if (i <= 0) { closeNasWizard(); return; }
+  _nw.step = _nwSteps[i - 1];
+  nwRender();
+}
+
+function nwNext() {
+  if (!_nw) return;
+  var i = _nwSteps.indexOf(_nw.step);
+  if (_nw.step === 'review') { nwSave(); return; }
+  if (i < _nwSteps.length - 1) {
+    _nw.step = _nwSteps[i + 1];
+    nwRender();
+  }
+}
+
+function _nwSetNext(enabled, label) {
+  var btn = document.getElementById('nwNext');
+  btn.disabled = !enabled;
+  btn.style.opacity = enabled ? '1' : '0.5';
+  btn.textContent = label || (_nw && _nw.step === 'review' ? 'Save' : 'Next');
+}
+
+function nwRender() {
+  if (!_nw) return;
+  document.getElementById('nwTitle').textContent = _nwTitles[_nw.step];
+  document.getElementById('nwBack').textContent =
+    _nw.step === 'volume' ? 'Cancel' : 'Back';
+  var body = document.getElementById('nwBody');
+  body.replaceChildren();
+  ({ volume: nwVolumeStep, ssh: nwSshStep, share: nwShareStep,
+     archive: nwArchiveStep, review: nwReviewStep })[_nw.step](body);
+}
+
+// --- Step 1: volume ----------------------------------------------------
+
+async function nwVolumeStep(body) {
+  _nwSetNext(false);
+  body.appendChild(_nwEl('div', _nwHintCss, 'Looking for mounted network volumes…'));
+  var res;
+  try {
+    res = await safeFetch('/api/remote-setup/mounts', {}, { toast: false });
+  } catch (e) {
+    body.replaceChildren(_nwEl('div', _nwErrCss, 'Could not list volumes: ' + (e && e.message || e)));
+    return;
+  }
+  if (!_nw || _nw.step !== 'volume') return;
+  _nw.mounts = res.mounts || [];
+  body.replaceChildren();
+  if (res.unsupported_platform) {
+    body.appendChild(_nwEl('div', _nwErrCss,
+      'Automatic volume detection is only available on macOS for now. Use "+ Add manually" instead.'));
+    return;
+  }
+  if (!_nw.mounts.length) {
+    body.appendChild(_nwEl('div', _nwHintCss,
+      'No network volumes are mounted. Connect to your NAS in Finder first (Go → Connect to Server, or ⌘K), then refresh.'));
+    var refresh = _nwEl('button', _nwBtnCss, 'Refresh');
+    refresh.type = 'button';
+    refresh.onclick = function() { nwRender(); };
+    body.appendChild(refresh);
+    return;
+  }
+  body.appendChild(_nwEl('div', _nwHintCss, 'Pick the volume that lives on your NAS:'));
+  _nw.mounts.forEach(function(m, i) {
+    var row = _nwEl('label', 'display:flex;gap:8px;align-items:center;padding:8px;border:1px solid var(--border-secondary);border-radius:6px;margin-bottom:6px;cursor:pointer;');
+    var radio = document.createElement('input');
+    radio.type = 'radio';
+    radio.name = 'nwMount';
+    radio.checked = _nw.mount ? _nw.mount.mount_point === m.mount_point : i === 0;
+    radio.onchange = function() { _nwPickMount(m); };
+    var info = _nwEl('div', 'display:flex;flex-direction:column;gap:2px;');
+    info.appendChild(_nwEl('div', 'font-weight:600;', m.share + ' on ' + (m.display_name || m.host)));
+    info.appendChild(_nwEl('div', 'font-size:11px;color:var(--text-dim);font-family:monospace;',
+      m.mount_point + '  ·  ' + (m.user ? m.user + '@' : '') + m.host));
+    row.appendChild(radio);
+    row.appendChild(info);
+    body.appendChild(row);
+  });
+  _nwPickMount(_nw.mount && _nw.mounts.some(function(m) { return m.mount_point === _nw.mount.mount_point; })
+    ? _nw.mount : _nw.mounts[0]);
+}
+
+function _nwPickMount(m) {
+  _nw.mount = m;
+  // Pin SSH ops to the mount's verified network address — a stale or spoofed
+  // PTR record could otherwise steer the password prompt at install-key time
+  // to a different machine. `display_name` in the picker still surfaces the
+  // friendly name; users can override the host in step 2 if they need to.
+  _nw.host = m.host;
+  _nw.user = m.user || _nw.user;
+  _nwSetNext(true);
+}
+
+// --- Step 2: ssh ---------------------------------------------------------
+
+function _nwLooksSynology() {
+  var probe = ((_nw.mount && _nw.mount.display_name) || '') + ' ' + _nw.host;
+  return /synology|diskstation|dsm/i.test(probe);
+}
+
+function nwSshStep(body) {
+  _nwSetNext(false);
+  var fields = _nwEl('div', 'display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;');
+  var mk = function(label, value, width, oninput) {
+    var wrap = _nwEl('div', 'display:flex;flex-direction:column;gap:3px;' + (width ? 'width:' + width + ';' : 'flex:1;'));
+    wrap.appendChild(_nwEl('label', 'font-size:11px;color:var(--text-dim);', label));
+    var inp = document.createElement('input');
+    inp.value = value;
+    inp.style.cssText = _nwInputCss;
+    inp.addEventListener('input', function() { oninput(inp.value); });
+    wrap.appendChild(inp);
+    return wrap;
+  };
+  fields.appendChild(mk('User', _nw.user, null, function(v) { _nw.user = v.trim(); }));
+  fields.appendChild(mk('Host', _nw.host, null, function(v) { _nw.host = v.trim(); }));
+  fields.appendChild(mk('Port', String(_nw.port), '70px', function(v) { _nw.port = parseInt(v, 10) || 22; }));
+  body.appendChild(fields);
+  var status = _nwEl('div', '');
+  body.appendChild(status);
+  var recheck = _nwEl('button', _nwBtnCss, 'Check again');
+  recheck.type = 'button';
+  recheck.onclick = function() { _nwRunSshCheck(status, recheck); };
+  body.appendChild(recheck);
+  _nwRunSshCheck(status, recheck);
+}
+
+async function _nwRunSshCheck(status, recheck) {
+  status.replaceChildren(_nwEl('div', _nwHintCss, 'Checking SSH on ' + _nw.host + '…'));
+  var res;
+  try {
+    res = await safeFetch('/api/remote-setup/ssh-check', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ host: _nw.host, user: _nw.user, port: _nw.port }),
+    }, { toast: false });
+  } catch (e) {
+    status.replaceChildren(_nwEl('div', _nwErrCss, (e && e.message) || 'Check failed.'));
+    return;
+  }
+  if (!_nw || _nw.step !== 'ssh') return;
+  _nw.pubKeyLine = res.pub_key_line || '';
+  status.replaceChildren();
+  if (res.ssh_missing) {
+    status.appendChild(_nwEl('div', _nwErrCss,
+      'No OpenSSH client was found on this computer. Set its path under Settings → Paths, then check again.'));
+    return;
+  }
+  if (!res.port_open) {
+    status.appendChild(_nwEl('div', _nwErrCss,
+      'SSH is not reachable on ' + _nw.host + ':' + _nw.port + '.\n' +
+      (_nwLooksSynology()
+        ? 'On a Synology NAS: Control Panel → Terminal & SNMP → Enable SSH service, then check again.'
+        : 'Enable the SSH service on your NAS (check its admin console), then check again.')));
+    return;
+  }
+  if (res.key_auth_ok) {
+    _nw.keyAuthOk = true;
+    status.appendChild(_nwEl('div', _nwOkCss, '✓ This Mac is already authorized on ' + _nw.host + '.'));
+    _nwSetNext(true);
+    return;
+  }
+  // Password form. Used once server-side to authorize this Mac's key —
+  // never stored, never logged.
+  status.appendChild(_nwEl('div', _nwHintCss,
+    'Enter the NAS password for "' + _nw.user + '" once. Vireo uses it to authorize this Mac’s key on the NAS, then never needs it again — it is not stored or logged.'));
+  var row = _nwEl('div', 'display:flex;gap:8px;align-items:center;margin:6px 0;');
+  var pw = document.createElement('input');
+  pw.type = 'password';
+  pw.placeholder = 'NAS password';
+  pw.style.cssText = _nwInputCss + 'flex:1;';
+  var submit = _nwEl('button', _nwBtnCss, 'Authorize');
+  submit.type = 'button';
+  var msg = _nwEl('div', _nwErrCss, '');
+  submit.onclick = async function() {
+    if (!pw.value) return;
+    submit.disabled = true;
+    msg.textContent = 'Authorizing…';
+    msg.style.cssText = _nwHintCss;
+    try {
+      var r = await safeFetch('/api/remote-setup/install-key', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ host: _nw.host, user: _nw.user,
+                               port: _nw.port, password: pw.value }),
+      }, { toast: false });
+      if (r.ok && r.key_auth_ok) {
+        _nw.keyAuthOk = true;
+        status.replaceChildren(_nwEl('div', _nwOkCss,
+          '✓ Authorized. ' + (r.fingerprint ? 'Key: ' + r.fingerprint : '')));
+        _nwSetNext(true);
+        return;
+      }
+      msg.style.cssText = _nwErrCss;
+      msg.textContent = {
+        wrong_password: 'That password was not accepted — try again.',
+        password_auth_disabled: 'The NAS refuses password logins over SSH. Use the Terminal option below, or enable password authentication on the NAS.',
+        host_key: 'The NAS’s host key changed since a previous connection — fix ~/.ssh/known_hosts and retry.',
+        timeout: 'The NAS did not respond in time — try again.',
+      }[r.error] || ('Setup failed: ' + (r.detail || r.error || 'unknown error'));
+      if (r.error === 'wrong_password') pw.value = '';
+    } catch (e) {
+      msg.style.cssText = _nwErrCss;
+      msg.textContent = (e && e.message) || 'Setup failed.';
+    } finally {
+      submit.disabled = false;
+    }
+  };
+  pw.addEventListener('keydown', function(ev) { if (ev.key === 'Enter') submit.onclick(); });
+  row.appendChild(pw);
+  row.appendChild(submit);
+  status.appendChild(row);
+  status.appendChild(msg);
+
+  var details = document.createElement('details');
+  details.style.cssText = 'margin-top:10px;font-size:12px;color:var(--text-dim);';
+  var summary = document.createElement('summary');
+  summary.textContent = 'Prefer to do this yourself in Terminal?';
+  summary.style.cursor = 'pointer';
+  details.appendChild(summary);
+  var cmd = 'ssh' + (_nw.port !== 22 ? ' -p ' + _nw.port : '') + ' ' +
+    _nw.user + '@' + _nw.host +
+    ' "umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; ' +
+    "grep -qxF '" + _nw.pubKeyLine + "' ~/.ssh/authorized_keys || " +
+    "echo '" + _nw.pubKeyLine + "' >> ~/.ssh/authorized_keys\"";
+  var pre = _nwEl('pre', 'background:var(--bg-input);border:1px solid var(--border-secondary);border-radius:4px;padding:8px;font-size:11px;white-space:pre-wrap;word-break:break-all;user-select:all;', cmd);
+  details.appendChild(_nwEl('div', _nwHintCss, 'Run this in Terminal (it asks for the NAS password), then click Verify:'));
+  details.appendChild(pre);
+  var verify = _nwEl('button', _nwBtnCss, 'Verify');
+  verify.type = 'button';
+  verify.onclick = function() { _nwRunSshCheck(status, recheck); };
+  details.appendChild(verify);
+  status.appendChild(details);
+}
+
+// --- Step 3: share -------------------------------------------------------
+
+async function nwShareStep(body) {
+  _nwSetNext(false);
+  body.appendChild(_nwEl('div', _nwHintCss,
+    'Verifying where "' + _nw.mount.share + '" lives on the NAS… (Vireo drops a marker file on the mounted volume and finds it over SSH — proof, not a guess.)'));
+  var res;
+  try {
+    res = await safeFetch('/api/remote-setup/locate-share', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ mount_path: _nw.mount.mount_point,
+                             share: _nw.mount.share, host: _nw.host,
+                             user: _nw.user, port: _nw.port }),
+    }, { toast: false });
+  } catch (e) {
+    if (!_nw || _nw.step !== 'share') return;
+    body.replaceChildren(_nwEl('div', _nwErrCss, (e && e.message) || 'Verification failed.'));
+    _nwShareFallback(body);
+    return;
+  }
+  if (!_nw || _nw.step !== 'share') return;
+  body.replaceChildren();
+  if (res.remote_path) {
+    _nw.remotePath = res.remote_path;
+    body.appendChild(_nwEl('div', _nwOkCss,
+      '✓ Verified: ' + _nw.mount.mount_point + ' is ' + res.remote_path + ' on the NAS.'));
+    _nwSetNext(true);
+    return;
+  }
+  body.appendChild(_nwEl('div', _nwErrCss,
+    'Could not find the share automatically. Browse the NAS filesystem or type the path:'));
+  _nwShareFallback(body);
+}
+
+function _nwShareFallback(body) {
+  var list = _nwEl('div', 'border:1px solid var(--border-secondary);border-radius:6px;max-height:180px;overflow-y:auto;margin:6px 0;');
+  var pathLabel = _nwEl('div', 'font-family:monospace;font-size:12px;margin:6px 0;', '');
+  var manual = document.createElement('input');
+  manual.placeholder = '/volume1/' + _nw.mount.share;
+  manual.style.cssText = _nwInputCss + 'width:100%;margin-top:6px;';
+  manual.addEventListener('input', function() {
+    _nw.remotePath = manual.value.trim();
+    _nwSetNext(!!_nw.remotePath && _nw.remotePath.startsWith('/'));
+  });
+  var load = async function(path) {
+    _nw.remoteBrowsePath = path;
+    pathLabel.textContent = path;
+    list.replaceChildren(_nwEl('div', _nwHintCss + 'padding:8px;', 'Loading…'));
+    var res;
+    try {
+      res = await safeFetch('/api/remote-setup/list-remote-dirs', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ path: path, host: _nw.host, user: _nw.user, port: _nw.port }),
+      }, { toast: false });
+    } catch (e) {
+      list.replaceChildren(_nwEl('div', _nwErrCss + 'padding:8px;', 'Listing failed.'));
+      return;
+    }
+    list.replaceChildren();
+    if (path !== '/') {
+      var up = _nwEl('div', 'padding:6px 10px;cursor:pointer;font-family:monospace;', '← up');
+      up.onclick = function() { load(path.replace(/\/[^/]+$/, '') || '/'); };
+      list.appendChild(up);
+    }
+    (res.dirs || []).forEach(function(name) {
+      var row = _nwEl('div', 'padding:6px 10px;cursor:pointer;font-family:monospace;border-top:1px solid var(--border-secondary);', name + '/');
+      row.onclick = function() {
+        var next = (path === '/' ? '' : path) + '/' + name;
+        manual.value = next;
+        _nw.remotePath = next;
+        _nwSetNext(true);
+        load(next);
+      };
+      list.appendChild(row);
+    });
+    if (!(res.dirs || []).length) {
+      list.appendChild(_nwEl('div', _nwHintCss + 'padding:8px;', '(no subfolders)'));
+    }
+  };
+  body.appendChild(pathLabel);
+  body.appendChild(list);
+  body.appendChild(_nwEl('div', _nwHintCss, 'Selected NAS path (click a folder above or type it):'));
+  body.appendChild(manual);
+  load(_nw.remoteBrowsePath || '/');
+}
+
+// --- Step 4: archive root ------------------------------------------------
+
+async function nwArchiveStep(body) {
+  _nwSetNext(false);
+  body.appendChild(_nwEl('div', _nwHintCss,
+    'Pick a folder on this Mac. Photos you import here are processed locally (fast), then moved to the NAS automatically.'));
+  var home;
+  try {
+    home = (await safeFetch('/api/browse', {}, { toast: false })).path;
+  } catch (e) { home = ''; }
+  if (!_nw || _nw.step !== 'archive') return;
+  var suggestion = home ? home + '/Pictures/Vireo Archive' : '';
+  var chosen = _nwEl('div', 'font-family:monospace;font-size:12px;margin:6px 0;', '');
+  var freeLine = _nwEl('div', _nwHintCss, '');
+  var err = _nwEl('div', _nwErrCss, '');
+  var setChosen = async function(p) {
+    // Filesystem-aware containment: the same check _coerce_remote_target
+    // performs at save time. A purely-lexical prefix compare on the client
+    // (which we used to do here) misses symlink aliases — e.g. ~/Archive
+    // that points at /Volumes/Photography — and the save-time validator
+    // would then silently blank local_archive_root, leaving the wizard's
+    // target unable to offer the chained move. Fail here instead so the
+    // user gets an actionable error while still in step 4.
+    err.textContent = '';
+    _nwSetNext(false);
+    try {
+      var chk = await safeFetch('/api/remote-setup/check-archive-root', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({path: p, mount_path: _nw.mount.mount_point}),
+      }, { toast: false });
+      if (chk && chk.inside_mount) {
+        err.textContent = 'That folder resolves inside the NAS mount (symlink or alias). Pick a folder on this Mac instead.';
+        return;
+      }
+    } catch (e) {
+      // Endpoint unavailable (e.g. offline test harness) — fall back to a
+      // lexical check so this step still gates the obvious case.
+      var norm = function(x) { return String(x || '').replace(/\/+$/, '').toLowerCase(); };
+      var inMount = norm(p) === norm(_nw.mount.mount_point) ||
+        norm(p).indexOf(norm(_nw.mount.mount_point) + '/') === 0;
+      if (inMount) {
+        err.textContent = 'The archive folder must be on this Mac, not on the NAS volume itself.';
+        return;
+      }
+    }
+    err.textContent = '';
+    _nw.archiveRoot = p;
+    chosen.textContent = 'Archive folder: ' + p;
+    _nwSetNext(true);
+    try {
+      var df = await safeFetch('/api/remote-setup/disk-free?path=' +
+        encodeURIComponent(p), {}, { toast: false });
+      freeLine.textContent = (df.free_bytes / (1024 * 1024 * 1024)).toFixed(0) +
+        ' GB free on this volume. Staged photos live here until each move to the NAS completes.';
+    } catch (e) { freeLine.textContent = ''; }
+  };
+  if (suggestion) {
+    var sugRow = _nwEl('div', 'display:flex;gap:8px;align-items:center;margin:6px 0;');
+    sugRow.appendChild(_nwEl('span', 'font-family:monospace;font-size:12px;', suggestion));
+    var mk = _nwEl('button', _nwBtnCss, 'Create & use');
+    mk.type = 'button';
+    mk.onclick = async function() {
+      try {
+        await safeFetch('/api/browse/mkdir', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ path: suggestion }),
+        }, { toast: false });
+        setChosen(suggestion);
+      } catch (e) {
+        err.textContent = (e && e.message) || 'Could not create the folder.';
+      }
+    };
+    sugRow.appendChild(mk);
+    body.appendChild(sugRow);
+  }
+  body.appendChild(_nwEl('div', _nwHintCss, 'Or pick an existing folder:'));
+  var list = _nwEl('div', 'border:1px solid var(--border-secondary);border-radius:6px;max-height:160px;overflow-y:auto;margin:6px 0;');
+  var pathLabel = _nwEl('div', 'font-family:monospace;font-size:12px;margin:4px 0;', '');
+  var browse = async function(path) {
+    _nw.browsePath = path;
+    pathLabel.textContent = path;
+    list.replaceChildren(_nwEl('div', _nwHintCss + 'padding:8px;', 'Loading…'));
+    var res;
+    try {
+      res = await safeFetch('/api/browse?path=' + encodeURIComponent(path), {}, { toast: false });
+    } catch (e) {
+      list.replaceChildren(_nwEl('div', _nwErrCss + 'padding:8px;', 'Listing failed.'));
+      return;
+    }
+    list.replaceChildren();
+    var parent = path.replace(/\/[^/]+$/, '') || '/';
+    if (parent !== path) {
+      var up = _nwEl('div', 'padding:6px 10px;cursor:pointer;font-family:monospace;', '← up');
+      up.onclick = function() { browse(parent); };
+      list.appendChild(up);
+    }
+    (res.dirs || []).forEach(function(d) {
+      var row = _nwEl('div', 'padding:6px 10px;cursor:pointer;font-family:monospace;border-top:1px solid var(--border-secondary);', d.name + '/');
+      row.onclick = function() { browse(d.path); };
+      list.appendChild(row);
+    });
+    var useBtn = _nwEl('button', _nwBtnCss + 'margin:8px;', 'Use this folder');
+    useBtn.type = 'button';
+    useBtn.onclick = function() { setChosen(path); };
+    list.appendChild(useBtn);
+  };
+  body.appendChild(pathLabel);
+  body.appendChild(list);
+  body.appendChild(chosen);
+  body.appendChild(freeLine);
+  body.appendChild(err);
+  browse(_nw.browsePath || home || '/');
+  if (_nw.archiveRoot) setChosen(_nw.archiveRoot);
+}
+
+// --- Step 5: review + test ------------------------------------------------
+
+function _nwAssembledTarget() {
+  return {
+    id: _genTargetId(),
+    name: (_nw.mount && (_nw.mount.display_name || _nw.mount.share)) || _nw.host,
+    host: _nw.host, user: _nw.user, port: _nw.port,
+    ssh_key: _nw.keyPath || '',   // the wizard-managed key, from ssh-check
+    remote_path: _nw.remotePath,
+    mount_path: _nw.mount ? _nw.mount.mount_point : '',
+    local_archive_root: _nw.archiveRoot,
+    bwlimit_kbps: 0,
+  };
+}
+
+async function nwReviewStep(body) {
+  _nwSetNext(false, 'Save');
+  // The server knows the real key path; ask it rather than guessing "~".
+  var keyPath = '';
+  try {
+    var chk = await safeFetch('/api/remote-setup/ssh-check', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ host: _nw.host, user: _nw.user, port: _nw.port }),
+    }, { toast: false });
+    keyPath = chk.key_path || '';
+  } catch (e) { /* key path shown blank; save still works via default */ }
+  if (!_nw || _nw.step !== 'review') return;
+  _nw.keyPath = keyPath;
+  var t = _nwAssembledTarget();
+  var rows = [
+    ['Name', t.name], ['SSH', t.user + '@' + t.host + (t.port !== 22 ? ':' + t.port : '')],
+    ['NAS path', t.remote_path], ['Mounted at', t.mount_path],
+    ['Local archive', t.local_archive_root], ['SSH key', t.ssh_key || '(default)'],
+  ];
+  var table = _nwEl('div', 'display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:12px;margin-bottom:10px;');
+  rows.forEach(function(r) {
+    table.appendChild(_nwEl('div', 'color:var(--text-dim);', r[0]));
+    table.appendChild(_nwEl('div', 'font-family:monospace;word-break:break-all;', r[1]));
+  });
+  body.appendChild(table);
+  var status = _nwEl('div', _nwHintCss, 'Testing the connection…');
+  body.appendChild(status);
+  try {
+    var res = await safeFetch('/api/remote-targets/test', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(t),
+    }, { toast: false });
+    if (!_nw || _nw.step !== 'review') return;
+    status.style.cssText = res.ok ? _nwOkCss : _nwErrCss;
+    status.textContent = (res.ok ? '✓ ' : '⚠ ') + (res.message || '');
+    appendRsyncInstallCommands(status, res.rsync_install_commands);
+    if (res.ok) _nwSetNext(true, 'Save');
+  } catch (e) {
+    if (!_nw || _nw.step !== 'review') return;
+    status.style.cssText = _nwErrCss;
+    status.textContent = '⚠ ' + ((e && e.message) || 'Test failed.');
+  }
+}
+
+async function nwSave() {
+  var t = _nwAssembledTarget();
+  _remoteTargetsState.push(t);
+  renderRemoteTargets();
+  // The debounced saveConfig used by inline handlers only SCHEDULES a POST
+  // 500 ms out; if the user reloads or closes the tab in that window the
+  // target is lost. This is an explicit Save action, so flush immediately
+  // and keep the modal up until the write lands.
+  clearTimeout(_saveTimer);
+  _nwSetNext(false, 'Saving…');
+  document.getElementById('nwBack').disabled = true;
+  try {
+    await _saveConfigNow();
+  } catch (e) {
+    // Roll back the optimistic push so the row disappears when we show the
+    // error — the target didn't actually make it to disk.
+    var idx = _remoteTargetsState.indexOf(t);
+    if (idx >= 0) _remoteTargetsState.splice(idx, 1);
+    renderRemoteTargets();
+    var body = document.getElementById('nwBody');
+    if (body) body.appendChild(_nwEl('div', _nwErrCss,
+      '⚠ Could not save: ' + ((e && e.message) || e)));
+    _nwSetNext(true, 'Save');
+    document.getElementById('nwBack').disabled = false;
+    return;
+  }
+  closeNasWizard();
+  var listEl = document.getElementById('cfgRemoteTargetsList');
+  if (listEl) listEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+if (location.hash === '#nas-setup') {
+  // Deep link from the Import page's "Move to NAS unavailable" hint.
+  setTimeout(openNasWizard, 0);
+}
+
+async function loadConfig() {
+  try {
+    var cfg = await safeFetch('/api/config', {}, { toast: false });
+    var pct = Math.round((cfg.classification_threshold != null ? cfg.classification_threshold : 0.4) * 100);
+    document.getElementById('cfgThreshold').value = pct;
+    document.getElementById('cfgThresholdVal').textContent = pct + '%';
+    document.getElementById('cfgGroupingWindow').value = cfg.grouping_window_seconds != null ? cfg.grouping_window_seconds : 10;
+    var simPct = Math.round((cfg.similarity_threshold != null ? cfg.similarity_threshold : 0.85) * 100);
+    document.getElementById('cfgSimilarity').value = simPct;
+    document.getElementById('cfgSimilarityVal').textContent = simPct + '%';
+    document.getElementById('cfgHfToken').value = cfg.hf_token || '';
+    document.getElementById('cfgInatToken').value = cfg.inat_token || '';
+    if (cfg.inat_token) validateInatToken();
+    document.getElementById('cfgGoogleMapsApiKey').value = cfg.google_maps_api_key || '';
+    _rememberSavedSecrets(_readSecretFields());
+    document.getElementById('cfgGoogleMapsPreferEnglish').checked = cfg.google_maps_prefer_english !== false;
+    document.getElementById('cfgKeywordCase').value = cfg.keyword_case || 'auto';
+    document.getElementById('cfgMaxEditHistory').value = cfg.max_edit_history != null ? cfg.max_edit_history : 1000;
+    // Load editor list. Synthesize from the legacy single string if the user
+    // hasn't migrated yet — saving from the new UI completes the migration.
+    // Defend against malformed entries (non-string path/name from hand-edited
+    // config.json or any non-validating /api/config writer) so we don't crash
+    // the settings page on load.
+    var rawList = Array.isArray(cfg.external_editors) ? cfg.external_editors : [];
+    _editorsState = [];
+    rawList.forEach(function(e) {
+      if (!e || typeof e !== 'object') return;
+      var path = typeof e.path === 'string' ? e.path : '';
+      var name = typeof e.name === 'string' ? e.name : '';
+      _editorsState.push({ name: name, path: path });
+    });
+    if (_editorsState.length === 0 && typeof cfg.external_editor === 'string'
+        && cfg.external_editor.trim()) {
+      _editorsState = [{ name: 'Editor', path: cfg.external_editor.trim() }];
+    }
+    renderExternalEditors();
+    // Remote (SSH) move targets. Coerce defensively against a hand-edited
+    // config.json so a malformed entry can't crash the settings page.
+    var rawTargets = Array.isArray(cfg.remote_targets) ? cfg.remote_targets : [];
+    _remoteTargetsState = [];
+    rawTargets.forEach(function(t) {
+      if (!t || typeof t !== 'object') return;
+      // Adding a target field? Also update the row builder, addRemoteTarget,
+      // and collectRemoteTargets — a miss HERE silently erases the field on
+      // the next save after a page reload.
+      _remoteTargetsState.push({
+        id: typeof t.id === 'string' && t.id ? t.id : _genTargetId(),
+        name: typeof t.name === 'string' ? t.name : '',
+        host: typeof t.host === 'string' ? t.host : '',
+        user: typeof t.user === 'string' ? t.user : '',
+        port: t.port == null ? 22 : t.port,
+        ssh_key: typeof t.ssh_key === 'string' ? t.ssh_key : '',
+        remote_path: typeof t.remote_path === 'string' ? t.remote_path : '',
+        mount_path: typeof t.mount_path === 'string' ? t.mount_path : '',
+        local_archive_root: typeof t.local_archive_root === 'string' ? t.local_archive_root : '',
+        bwlimit_kbps: t.bwlimit_kbps == null ? 0 : t.bwlimit_kbps,
+      });
+    });
+    renderRemoteTargets();
+    document.getElementById('cfgDarktableBin').value = cfg.darktable_bin || '';
+    document.getElementById('cfgDarktableStyle').value = cfg.darktable_style || '';
+    document.getElementById('cfgDarktableFormat').value = cfg.darktable_output_format || 'jpg';
+    document.getElementById('cfgDarktableOutputDir').value = cfg.darktable_output_dir || '';
+    document.getElementById('cfgDarktableAutoConvertDng').checked = cfg.darktable_auto_convert_dng === true;
+    document.getElementById('cfgDngConverterBin').value = cfg.dng_converter_bin || '';
+    loadDarktableStatus();
+    // Load display settings
+    document.getElementById('cfgPhotosPerPage').value = cfg.photos_per_page != null ? cfg.photos_per_page : 50;
+    var bt = cfg.browse_thumb_default != null ? cfg.browse_thumb_default : 220;
+    document.getElementById('cfgBrowseThumbDefault').value = bt;
+    document.getElementById('cfgBrowseThumbVal').textContent = bt + 'px';
+    document.getElementById('cfgOpenInBrowser').checked = cfg.open_in_browser === true;
+    // Load browse card fields
+    loadCardFieldCheckboxes(cfg.browse_card_fields || ["filename", "location_status", "rating", "flag", "sharpness"]);
+    // Load the filter bar's quick-filter buttons
+    loadFilterShortcuts(cfg.filter_shortcuts);
+    // Load detection settings
+    var dc = Math.round((cfg.detector_confidence != null ? cfg.detector_confidence : 0.20) * 100);
+    document.getElementById('cfgDetectorConf').value = dc;
+    document.getElementById('cfgDetectorConfVal').textContent = (dc / 100).toFixed(2);
+    var dp = Math.round((cfg.detection_padding != null ? cfg.detection_padding : 0.20) * 100);
+    document.getElementById('cfgDetectionPadding').value = dp;
+    document.getElementById('cfgDetectionPaddingVal').textContent = (dp / 100).toFixed(2);
+    document.getElementById('cfgTopK').value = cfg.top_k_predictions != null ? cfg.top_k_predictions : 5;
+    var rd = Math.round((cfg.redundancy_threshold != null ? cfg.redundancy_threshold : 0.88) * 100);
+    document.getElementById('cfgRedundancy').value = rd;
+    document.getElementById('cfgRedundancyVal').textContent = (rd / 100).toFixed(2);
+    document.getElementById('cfgCullTimeWindow').value = cfg.cull_time_window != null ? cfg.cull_time_window : 60;
+    var cph = cfg.cull_phash_threshold != null ? cfg.cull_phash_threshold : 19;
+    document.getElementById('cfgCullPhash').value = cph;
+    document.getElementById('cfgCullPhashVal').textContent = cph;
+    // Load pipeline settings
+    var p = VireoPipelineConfig.pipelineFromConfig(cfg);
+    var wf = VireoPipelineConfig.percent(p.w_focus, 'w_focus');
+    document.getElementById('cfgWFocus').value = wf;
+    document.getElementById('cfgWFocusVal').textContent = wf + '%';
+    var we = VireoPipelineConfig.percent(p.w_exposure, 'w_exposure');
+    document.getElementById('cfgWExposure').value = we;
+    document.getElementById('cfgWExposureVal').textContent = we + '%';
+    var wc = VireoPipelineConfig.percent(p.w_composition, 'w_composition');
+    document.getElementById('cfgWComposition').value = wc;
+    document.getElementById('cfgWCompositionVal').textContent = wc + '%';
+    var wa = VireoPipelineConfig.percent(p.w_area, 'w_area');
+    document.getElementById('cfgWArea').value = wa;
+    document.getElementById('cfgWAreaVal').textContent = wa + '%';
+    var wn = VireoPipelineConfig.percent(p.w_noise, 'w_noise');
+    document.getElementById('cfgWNoise').value = wn;
+    document.getElementById('cfgWNoiseVal').textContent = wn + '%';
+    var rc = VireoPipelineConfig.percent(p.reject_crop_complete, 'reject_crop_complete');
+    document.getElementById('cfgRejectCrop').value = rc;
+    document.getElementById('cfgRejectCropVal').textContent = rc + '%';
+    var rf = VireoPipelineConfig.percent(p.reject_focus, 'reject_focus');
+    document.getElementById('cfgRejectFocus').value = rf;
+    document.getElementById('cfgRejectFocusVal').textContent = rf + '%';
+    var rcl = VireoPipelineConfig.percent(p.reject_clip_high, 'reject_clip_high');
+    document.getElementById('cfgRejectClip').value = rcl;
+    document.getElementById('cfgRejectClipVal').textContent = rcl + '%';
+    var rco = VireoPipelineConfig.percent(p.reject_composite, 'reject_composite');
+    document.getElementById('cfgRejectComposite').value = rco;
+    document.getElementById('cfgRejectCompositeVal').textContent = rco + '%';
+
+    // Miss detection tunables
+    document.getElementById('cfgMissEnabled').checked = p.miss_enabled !== false;
+    var mdc = VireoPipelineConfig.percent(p.miss_det_confidence, 'miss_det_confidence');
+    document.getElementById('cfgMissDetConf').value = mdc;
+    document.getElementById('cfgMissDetConfVal').textContent = mdc + '%';
+    var mbm = Math.round(VireoPipelineConfig.asNumber(p.miss_bbox_area_min, 'miss_bbox_area_min') * 1000);
+    document.getElementById('cfgMissBboxMin').value = mbm;
+    document.getElementById('cfgMissBboxMinVal').textContent = (mbm / 1000).toFixed(3);
+    var mor = VireoPipelineConfig.percent(p.miss_oof_ratio, 'miss_oof_ratio');
+    document.getElementById('cfgMissOofRatio').value = mor;
+    document.getElementById('cfgMissOofRatioVal').textContent = (mor / 100).toFixed(2);
+
+    // Eye-focus detection tunables
+    document.getElementById('cfgEyeDetectEnabled').checked =
+      p.eye_detect_enabled === true;  // default false
+    var ecg = VireoPipelineConfig.percent(p.eye_classifier_conf_gate, 'eye_classifier_conf_gate');
+    document.getElementById('cfgEyeClassifierConfGate').value = ecg;
+    document.getElementById('cfgEyeClassifierConfGateVal').textContent = ecg + '%';
+    var edg = VireoPipelineConfig.percent(p.eye_detection_conf_gate, 'eye_detection_conf_gate');
+    document.getElementById('cfgEyeDetectionConfGate').value = edg;
+    document.getElementById('cfgEyeDetectionConfGateVal').textContent = edg + '%';
+    var ewk = VireoPipelineConfig.percent(p.eye_window_k, 'eye_window_k');
+    document.getElementById('cfgEyeWindowK').value = ewk;
+    document.getElementById('cfgEyeWindowKVal').textContent = (ewk / 100).toFixed(2);
+    var rejectEye = VireoPipelineConfig.percent(p.reject_eye_focus, 'reject_eye_focus');
+    document.getElementById('cfgRejectEyeFocus').value = rejectEye;
+    document.getElementById('cfgRejectEyeFocusVal').textContent = rejectEye + '%';
+    var btg = VireoPipelineConfig.asNumber(p.burst_time_gap, 'burst_time_gap');
+    document.getElementById('cfgBurstTimeGap').value = btg;
+    document.getElementById('cfgBurstTimeGapVal').textContent = btg + 's';
+    var bemb = VireoPipelineConfig.embeddingThresholdToDistancePercent(
+      p.burst_embedding_threshold
+    );
+    document.getElementById('cfgBurstEmb').value = bemb;
+    document.getElementById('cfgBurstEmbVal').textContent = bemb + '%';
+    var bl = VireoPipelineConfig.percent(p.burst_lambda, 'burst_lambda');
+    document.getElementById('cfgBurstLambda').value = bl;
+    document.getElementById('cfgBurstLambdaVal').textContent = bl + '%';
+    document.getElementById('cfgBurstMaxKeep').value = VireoPipelineConfig.asNumber(p.burst_max_keep, 'burst_max_keep');
+    var el = VireoPipelineConfig.percent(p.encounter_lambda, 'encounter_lambda');
+    document.getElementById('cfgEncLambda').value = el;
+    document.getElementById('cfgEncLambdaVal').textContent = el + '%';
+    document.getElementById('cfgEncMaxKeep').value = VireoPipelineConfig.asNumber(p.encounter_max_keep, 'encounter_max_keep');
+    document.getElementById('cfgWTime').value = VireoPipelineConfig.percent(p.w_time, 'w_time');
+    document.getElementById('cfgWSubj').value = VireoPipelineConfig.percent(p.w_subj, 'w_subj');
+    document.getElementById('cfgWGlobal').value = VireoPipelineConfig.percent(p.w_global, 'w_global');
+    document.getElementById('cfgWSpecies').value = VireoPipelineConfig.percent(p.w_species, 'w_species');
+    document.getElementById('cfgWMeta').value = VireoPipelineConfig.percent(p.w_meta, 'w_meta');
+    document.getElementById('cfgHardCutTime').value = VireoPipelineConfig.asNumber(p.hard_cut_time, 'hard_cut_time');
+    var hcs = VireoPipelineConfig.percent(p.hard_cut_score, 'hard_cut_score');
+    document.getElementById('cfgHardCutScore').value = hcs;
+    document.getElementById('cfgHardCutScoreVal').textContent = hcs + '%';
+    var scs = VireoPipelineConfig.percent(p.soft_cut_score, 'soft_cut_score');
+    document.getElementById('cfgSoftCutScore').value = scs;
+    document.getElementById('cfgSoftCutScoreVal').textContent = scs + '%';
+    var ms = VireoPipelineConfig.percent(p.merge_score, 'merge_score');
+    document.getElementById('cfgMergeScore').value = ms;
+    document.getElementById('cfgMergeScoreVal').textContent = ms + '%';
+    document.getElementById('cfgMergeMaxGap').value = VireoPipelineConfig.asNumber(p.merge_max_gap, 'merge_max_gap');
+  } catch(e) {
+    console.warn('Could not load settings config:', e);
+    var fallbackDistance = VireoPipelineConfig.buildSliderDefaults()
+      .grouping.burst_embedding_distance;
+    document.getElementById('cfgBurstEmb').value = fallbackDistance;
+    document.getElementById('cfgBurstEmbVal').textContent = fallbackDistance + '%';
+    _markSettingsInitialLoad('config');
+    return false;
+  }
+  _markSettingsInitialLoad('config');
+  return true;
+}
+
+var CARD_FIELD_OPTIONS = [
+  { id: 'filename', label: 'Filename', desc: 'Photo filename' },
+  { id: 'location_status', label: 'Coordinate source', desc: 'EXIF GPS, assigned map location, or no coordinates' },
+  { id: 'rating', label: 'Rating', desc: 'Star rating' },
+  { id: 'flag', label: 'Flag', desc: 'Flagged / rejected indicator' },
+  { id: 'color_label', label: 'Color label dot', desc: 'Color-label dot with its description on hover (the card is tinted regardless)' },
+  { id: 'sharpness', label: 'Sharpness', desc: 'Sharpness score' },
+  { id: 'species', label: 'Species', desc: 'Species identification badges' },
+  { id: 'dimensions', label: 'Dimensions', desc: 'Image width \u00d7 height' },
+  { id: 'file_size', label: 'File size', desc: 'e.g. "4.2 MB"' },
+  { id: 'capture_date', label: 'Capture date & time', desc: 'Date and time photo was taken (to the minute)' },
+  { id: 'extension', label: 'Extension', desc: 'File type (JPG, RAW, etc.)' },
+  { id: 'quality_score', label: 'Quality score', desc: 'Pipeline quality score' },
+  { id: 'prediction_confidence', label: 'Prediction confidence', desc: 'Score of the strongest current species prediction' },
+];
+
+function loadCardFieldCheckboxes(activeFields) {
+  var container = document.getElementById('cfgCardFieldsContainer');
+  container.innerHTML = '';
+  CARD_FIELD_OPTIONS.forEach(function(opt) {
+    var checked = activeFields.indexOf(opt.id) !== -1 ? ' checked' : '';
+    container.innerHTML += '<label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-primary);cursor:pointer;">' +
+      '<input type="checkbox" id="cfgCardField_' + opt.id + '" value="' + opt.id + '"' + checked +
+      ' onchange="saveConfig()" style="accent-color:var(--accent);">' +
+      '<span>' + opt.label + '</span>' +
+      '<span style="color:var(--text-dim);font-size:11px;">' + opt.desc + '</span>' +
+    '</label>';
+  });
+}
+
+function getSelectedCardFields() {
+  var fields = [];
+  CARD_FIELD_OPTIONS.forEach(function(opt) {
+    var cb = document.getElementById('cfgCardField_' + opt.id);
+    if (cb && cb.checked) fields.push(opt.id);
+  });
+  return fields;
+}
+
+function _saveConfigNow(gen) {
+    // Direct callers (NAS wizard, etc.) don't hand us a generation, so mint
+    // one here. Threading a fresh gen through inflight/ok/error keeps the
+    // autosave pill honest when this call overlaps a debounced write.
+    if (gen === undefined) gen = _nextSaveGen();
+    // Settings import is replacing the whole config; a direct flush would
+    // post the pre-import form over it. Refuse so the caller reports a
+    // failed save instead of the import being silently overwritten.
+    if (_autosaveSuspended) {
+      return Promise.reject(new Error('Settings import in progress; try again in a moment.'));
+    }
+    return _serializedSave('config', function() { return _postConfigSnapshot(gen); });
+}
+
+// The secret fields and the value each one held when the page loaded it or
+// last saved it. Every autosave posts the whole form, so sending these
+// unconditionally let any save (a photos-per-page change in another tab)
+// write back the token the page loaded with, over one saved since, and
+// cancel an in-flight iNat token validation. Only a field the user changed
+// here is sent; the server keeps the stored value for an absent key.
+var _SECRET_FIELDS = {
+  hf_token: 'cfgHfToken',
+  inat_token: 'cfgInatToken',
+  google_maps_api_key: 'cfgGoogleMapsApiKey',
+};
+var _savedSecrets = {};
+
+function _readSecretFields() {
+  var values = {};
+  Object.keys(_SECRET_FIELDS).forEach(function(key) {
+    values[key] = document.getElementById(_SECRET_FIELDS[key]).value.trim();
+  });
+  return values;
+}
+
+function _editedSecrets() {
+  var current = _readSecretFields();
+  var edited = {};
+  Object.keys(current).forEach(function(key) {
+    if (current[key] !== _savedSecrets[key]) edited[key] = current[key];
+  });
+  return edited;
+}
+
+function _rememberSavedSecrets(values) {
+  Object.keys(values).forEach(function(key) { _savedSecrets[key] = values[key]; });
+}
+
+async function _postConfigSnapshot(gen) {
+    // Runs only once any earlier config POST has settled; reads the form
+    // now so the snapshot reflects every edit made while waiting.
+    var threshold = parseInt(document.getElementById('cfgThreshold').value, 10) / 100;
+    var grouping = parseInt(document.getElementById('cfgGroupingWindow').value, 10);
+    if (isNaN(grouping)) grouping = 10;
+    var similarity = parseInt(document.getElementById('cfgSimilarity').value, 10) / 100;
+    var secrets = _editedSecrets();
+    var keywordCase = document.getElementById('cfgKeywordCase').value;
+    var maxEditHistory = parseInt(document.getElementById('cfgMaxEditHistory').value, 10);
+    if (isNaN(maxEditHistory)) maxEditHistory = 1000;
+    _saveStatusMark('config', 'inflight', gen);
+    try {
+      await safeFetch('/api/config', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(Object.assign({}, secrets, {
+          classification_threshold: threshold,
+          grouping_window_seconds: grouping,
+          similarity_threshold: similarity,
+          keyword_case: keywordCase,
+          max_edit_history: maxEditHistory,
+          google_maps_prefer_english: document.getElementById('cfgGoogleMapsPreferEnglish').checked,
+          external_editors: collectExternalEditors(),
+          remote_targets: collectRemoteTargets(),
+          // Always clear the legacy single-editor field when we save the new
+          // list. Otherwise a user who once had `external_editor` set and now
+          // removes every editor from the list can't get back to OS-default
+          // behavior — `cfg.get_editors()` falls back to the legacy field
+          // whenever the new list is empty, so the old value keeps haunting
+          // them. Saving from the new UI is the migration completion step.
+          external_editor: '',
+          darktable_bin: document.getElementById('cfgDarktableBin').value.trim(),
+          darktable_style: document.getElementById('cfgDarktableStyle').value.trim(),
+          darktable_output_format: document.getElementById('cfgDarktableFormat').value,
+          darktable_output_dir: document.getElementById('cfgDarktableOutputDir').value.trim(),
+          darktable_auto_convert_dng: document.getElementById('cfgDarktableAutoConvertDng').checked,
+          dng_converter_bin: document.getElementById('cfgDngConverterBin').value.trim(),
+          photos_per_page: parseInt(document.getElementById('cfgPhotosPerPage').value, 10) || 50,
+          browse_thumb_default: parseInt(document.getElementById('cfgBrowseThumbDefault').value, 10) || 220,
+          open_in_browser: document.getElementById('cfgOpenInBrowser').checked,
+          browse_card_fields: getSelectedCardFields(),
+          filter_shortcuts: collectFilterShortcuts(),
+          detector_confidence: parseInt(document.getElementById('cfgDetectorConf').value, 10) / 100,
+          detection_padding: parseInt(document.getElementById('cfgDetectionPadding').value, 10) / 100,
+          top_k_predictions: parseInt(document.getElementById('cfgTopK').value, 10) || 5,
+          redundancy_threshold: parseInt(document.getElementById('cfgRedundancy').value, 10) / 100,
+          cull_time_window: parseInt(document.getElementById('cfgCullTimeWindow').value, 10) || 60,
+          cull_phash_threshold: parseInt(document.getElementById('cfgCullPhash').value, 10) || 19,
+          pipeline: {
+            w_focus: parseInt(document.getElementById('cfgWFocus').value, 10) / 100,
+            w_exposure: parseInt(document.getElementById('cfgWExposure').value, 10) / 100,
+            w_composition: parseInt(document.getElementById('cfgWComposition').value, 10) / 100,
+            w_area: parseInt(document.getElementById('cfgWArea').value, 10) / 100,
+            w_noise: parseInt(document.getElementById('cfgWNoise').value, 10) / 100,
+            reject_crop_complete: parseInt(document.getElementById('cfgRejectCrop').value, 10) / 100,
+            reject_focus: parseInt(document.getElementById('cfgRejectFocus').value, 10) / 100,
+            reject_clip_high: parseInt(document.getElementById('cfgRejectClip').value, 10) / 100,
+            reject_composite: parseInt(document.getElementById('cfgRejectComposite').value, 10) / 100,
+            miss_enabled: document.getElementById('cfgMissEnabled').checked,
+            // Keep paired thresholds consistent: the UI exposes one slider
+            // per pair, but classify_miss reads the sibling value (burst
+            // vs singleton) independently. If we only save one side, the
+            // other falls back to defaults, which can break the paired
+            // relationship when the user picks a value below the paired
+            // default. Derive the paired value from the same slider using
+            // the default ratio. Burst context and singleton context
+            // move in opposite numeric directions because they describe
+            // different kinds of evidence:
+            //   - det_conf: siblings confirm a subject, so a burst is
+            //     forgiving of low confidence (lower threshold). Default
+            //     det_conf=0.20 / det_conf_burst=0.12 -> burst = 0.60 * singleton.
+            //   - bbox_min: siblings showing a larger subject make a tiny
+            //     bbox look like lost framing, so a burst flags more
+            //     aggressively (higher threshold). Default bbox_min=0.005 /
+            //     bbox_min_singleton=0.002 → singleton = 0.40 * burst.
+            ...(function() {
+              var det = parseInt(document.getElementById('cfgMissDetConf').value, 10) / 100;
+              var bbox = parseInt(document.getElementById('cfgMissBboxMin').value, 10) / 1000;
+              return {
+                miss_det_confidence: det,
+                miss_det_confidence_burst: +(det * 0.60).toFixed(4),
+                miss_bbox_area_min: bbox,
+                miss_bbox_area_min_singleton: +(bbox * 0.40).toFixed(5),
+              };
+            })(),
+            miss_oof_ratio: parseInt(document.getElementById('cfgMissOofRatio').value, 10) / 100,
+            eye_detect_enabled: document.getElementById('cfgEyeDetectEnabled').checked,
+            eye_classifier_conf_gate: parseInt(document.getElementById('cfgEyeClassifierConfGate').value, 10) / 100,
+            eye_detection_conf_gate: parseInt(document.getElementById('cfgEyeDetectionConfGate').value, 10) / 100,
+            eye_window_k: parseInt(document.getElementById('cfgEyeWindowK').value, 10) / 100,
+            reject_eye_focus: parseInt(document.getElementById('cfgRejectEyeFocus').value, 10) / 100,
+            burst_time_gap: parseInt(document.getElementById('cfgBurstTimeGap').value, 10) || 3,
+            burst_embedding_threshold: VireoPipelineConfig.embeddingDistancePercentToThreshold(
+              parseInt(document.getElementById('cfgBurstEmb').value, 10)
+            ),
+            burst_lambda: parseInt(document.getElementById('cfgBurstLambda').value, 10) / 100,
+            burst_max_keep: parseInt(document.getElementById('cfgBurstMaxKeep').value, 10) || 3,
+            encounter_lambda: parseInt(document.getElementById('cfgEncLambda').value, 10) / 100,
+            encounter_max_keep: parseInt(document.getElementById('cfgEncMaxKeep').value, 10) || 5,
+            w_time: parseInt(document.getElementById('cfgWTime').value, 10) / 100,
+            w_subj: parseInt(document.getElementById('cfgWSubj').value, 10) / 100,
+            w_global: parseInt(document.getElementById('cfgWGlobal').value, 10) / 100,
+            w_species: parseInt(document.getElementById('cfgWSpecies').value, 10) / 100,
+            w_meta: parseInt(document.getElementById('cfgWMeta').value, 10) / 100,
+            hard_cut_time: parseInt(document.getElementById('cfgHardCutTime').value, 10) || 180,
+            hard_cut_score: parseInt(document.getElementById('cfgHardCutScore').value, 10) / 100,
+            soft_cut_score: parseInt(document.getElementById('cfgSoftCutScore').value, 10) / 100,
+            merge_score: parseInt(document.getElementById('cfgMergeScore').value, 10) / 100,
+            merge_max_gap: parseInt(document.getElementById('cfgMergeMaxGap').value, 10) || 60,
+          },
+        })),
+      });
+    } catch (e) {
+      _saveStatusMark('config', 'error', gen);
+      throw e;
+    }
+    _rememberSavedSecrets(secrets);
+    _saveStatusMark('config', 'ok', gen);
+    if (typeof loadPreviewCacheStatus === 'function') loadPreviewCacheStatus();
+    // Drop the cached editor list so the next "Open in Editor" action
+    // sees changes to the editors list without a page reload.
+    if (typeof window.invalidateEditorsCache === 'function') {
+      window.invalidateEditorsCache();
+    }
+}
+
+function saveConfig() {
+  // Debounced fire-and-forget for the settings-page inline handlers. The
+  // outcome is reported through the autosave pill (_saveStatusMark) and the
+  // network layer toasts on failure; the next change re-tries. Callers that
+  // need to KNOW the write landed (e.g. the NAS wizard, before it tears down
+  // its modal) must call _saveConfigNow() directly and await it.
+  if (_autosaveSuspended) {
+    // Settings import is replacing the config. Remember that an edit was
+    // made so it can be saved if the import does not go through.
+    _editedWhileSuspended = true;
+    return;
+  }
+  clearTimeout(_saveTimer);
+  var gen = _nextSaveGen();
+  _saveStatusMark('config', 'pending', gen);
+  _saveTimer = setTimeout(function() {
+    _saveConfigNow(gen).catch(function() {});
+  }, 500);
+}
+
+function resetPipelineDefaults() {
+  var p = VireoPipelineConfig.defaultPipeline();
+  function setPercent(id, key) {
+    setValue(id, VireoPipelineConfig.percent(p[key], key), '%');
+  }
+  function setValue(id, val, suffix) {
+    document.getElementById(id).value = val;
+    var span = document.getElementById(id + 'Val');
+    if (span) span.textContent = val + suffix;
+  }
+  setPercent('cfgWFocus', 'w_focus');
+  setPercent('cfgWExposure', 'w_exposure');
+  setPercent('cfgWComposition', 'w_composition');
+  setPercent('cfgWArea', 'w_area');
+  setPercent('cfgWNoise', 'w_noise');
+  setPercent('cfgRejectCrop', 'reject_crop_complete');
+  setPercent('cfgRejectFocus', 'reject_focus');
+  setPercent('cfgRejectClip', 'reject_clip_high');
+  setPercent('cfgRejectComposite', 'reject_composite');
+  setPercent('cfgEyeClassifierConfGate', 'eye_classifier_conf_gate');
+  setPercent('cfgEyeDetectionConfGate', 'eye_detection_conf_gate');
+  setPercent('cfgRejectEyeFocus', 'reject_eye_focus');
+  setValue('cfgBurstTimeGap', p.burst_time_gap, 's');
+  setValue(
+    'cfgBurstEmb',
+    VireoPipelineConfig.embeddingThresholdToDistancePercent(
+      p.burst_embedding_threshold
+    ),
+    '%'
+  );
+  setPercent('cfgBurstLambda', 'burst_lambda');
+  setPercent('cfgEncLambda', 'encounter_lambda');
+  setPercent('cfgHardCutScore', 'hard_cut_score');
+  setPercent('cfgSoftCutScore', 'soft_cut_score');
+  setPercent('cfgMergeScore', 'merge_score');
+  var eyeWindow = VireoPipelineConfig.percent(p.eye_window_k, 'eye_window_k');
+  document.getElementById('cfgEyeWindowK').value = eyeWindow;
+  document.getElementById('cfgEyeWindowKVal').textContent =
+    (eyeWindow / 100).toFixed(2);
+  document.getElementById('cfgEyeDetectEnabled').checked = p.eye_detect_enabled === true;
+  document.getElementById('cfgMissEnabled').checked = p.miss_enabled !== false;
+  setPercent('cfgMissDetConf', 'miss_det_confidence');
+  var bboxMin = Math.round(
+    VireoPipelineConfig.asNumber(p.miss_bbox_area_min, 'miss_bbox_area_min') * 1000
+  );
+  document.getElementById('cfgMissBboxMin').value = bboxMin;
+  document.getElementById('cfgMissBboxMinVal').textContent =
+    (bboxMin / 1000).toFixed(3);
+  var missOofRatio = VireoPipelineConfig.percent(p.miss_oof_ratio, 'miss_oof_ratio');
+  document.getElementById('cfgMissOofRatio').value = missOofRatio;
+  document.getElementById('cfgMissOofRatioVal').textContent =
+    (missOofRatio / 100).toFixed(2);
+  document.getElementById('cfgBurstMaxKeep').value = p.burst_max_keep;
+  document.getElementById('cfgEncMaxKeep').value = p.encounter_max_keep;
+  document.getElementById('cfgWTime').value =
+    VireoPipelineConfig.percent(p.w_time, 'w_time');
+  document.getElementById('cfgWSubj').value =
+    VireoPipelineConfig.percent(p.w_subj, 'w_subj');
+  document.getElementById('cfgWGlobal').value =
+    VireoPipelineConfig.percent(p.w_global, 'w_global');
+  document.getElementById('cfgWSpecies').value =
+    VireoPipelineConfig.percent(p.w_species, 'w_species');
+  document.getElementById('cfgWMeta').value =
+    VireoPipelineConfig.percent(p.w_meta, 'w_meta');
+  document.getElementById('cfgHardCutTime').value = p.hard_cut_time;
+  document.getElementById('cfgMergeMaxGap').value = p.merge_max_gap;
+  saveConfig();
+}
+
+function toggleInatTokenVisibility() {
+  var inp = document.getElementById('cfgInatToken');
+  inp.type = inp.type === 'password' ? 'text' : 'password';
+}
+
+function toggleGoogleMapsKeyVisibility() {
+  var inp = document.getElementById('cfgGoogleMapsApiKey');
+  inp.type = inp.type === 'password' ? 'text' : 'password';
+}
+
+async function validateInatToken() {
+  var token = document.getElementById('cfgInatToken').value.trim();
+  var status = document.getElementById('inatTokenStatus');
+  if (!token) { status.innerHTML = ''; return; }
+  status.innerHTML = '<span style="color:var(--text-dim);">Validating...</span>';
+  try {
+    var data = await safeFetch('/api/inat/validate-token', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({token: token}),
+    }, { toast: false });
+    if (data.error) {
+      status.innerHTML = '<span style="color:var(--danger);">&#10007; Invalid or expired token</span>';
+    } else {
+      status.innerHTML = '<span style="color:var(--accent);">&#10003; Logged in as <strong>' + escapeHtml(data.login) + '</strong></span>';
+    }
+  } catch(e) {
+    status.innerHTML = '<span style="color:var(--danger);">&#10007; ' + escapeHtml(e.message) + '</span>';
+  }
+}
+
+// Platform must describe the Flask host (which will run the installer), not
+// the browser device (which could be a phone or a different desktop on the
+// LAN). /api/darktable/install/available carries the host's sys.platform;
+// window._dtAsset caches it once we have looked, and installPlatform() falls
+// back to the browser as a last resort so the panel is never blank before
+// the first API round-trip.
+function darktableInstallPlatform() {
+  var asset = window._dtAsset || {};
+  if (typeof asset.platform === 'string' && asset.platform) return asset.platform;
+  var ua = navigator.userAgent || '';
+  if (/Windows/.test(ua)) return 'win32';
+  if (/Mac/.test(ua)) return 'darwin';
+  if (/Linux/.test(ua) && !/Android/.test(ua)) return 'linux';
+  return '';
+}
+
+function darktableIsLinux() {
+  return darktableInstallPlatform() === 'linux';
+}
+
+function darktableIsWindows() {
+  return darktableInstallPlatform() === 'win32';
+}
+
+async function loadLocationWriteStatus() {
+  var el = document.getElementById('locationWriteStatus');
+  if (!el) return;
+  try {
+    var data = await safeFetch('/api/sync/location-writes', {}, { toast: false });
+    var photos = data.photos_with_location || 0;
+    var queued = data.already_queued || 0;
+    var writes = [];
+    if (data.location_sync_enabled) writes.push('GPS coordinates');
+    if (data.location_keyword_sync_enabled) writes.push('location keywords');
+    var parts = [];
+    parts.push(photos.toLocaleString() + (photos === 1 ? ' photo in this workspace has' : ' photos in this workspace have') + ' an assigned place.');
+    if (queued) {
+      parts.push(queued.toLocaleString() + ' of them ' + (queued === 1 ? 'is' : 'are') + ' already waiting in the sync queue.');
+    }
+    if (writes.length) {
+      parts.push('A sync now writes ' + writes.join(' and ') + ' into their sidecars.');
+    } else {
+      parts.push('Both location writes are turned off, so a sync would only remove location GPS and keywords Vireo wrote earlier.');
+    }
+    el.textContent = parts.join(' ');
+  } catch (err) {
+    el.textContent = 'Could not read location counts: ' + (err && err.message || String(err));
+  }
+}
+
+async function queueLocationWrites() {
+  var btn = document.getElementById('locationWriteQueueBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Queueing...'; }
+  try {
+    var data = await safeFetch('/api/sync/location-writes', { method: 'POST' });
+    if (typeof showToast === 'function') {
+      showToast(
+        data.queued
+          ? 'Queued ' + data.queued.toLocaleString() + ' location change' + (data.queued === 1 ? '' : 's') +
+            '. Open the sync panel to review them.'
+          : 'Nothing new to queue \u2014 every located photo already has a location change waiting.',
+        data.queued ? 'success' : 'info',
+      );
+    }
+    await loadLocationWriteStatus();
+    if (typeof checkPendingSync === 'function') checkPendingSync();
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Queue location writes'; }
+  }
+}
+
+async function loadDarktableStatus() {
+  try {
+    var data = await safeFetch('/api/darktable/status', {}, { toast: false });
+    var el = document.getElementById('darktableStatus');
+    var needsGetOption = false;
+    if (data.available) {
+      el.innerHTML = '<span style="color:var(--accent);font-size:13px;">&#10003; darktable-cli found</span>' +
+        '<span style="color:var(--text-dim);font-size:12px;margin-left:8px;">' + escapeHtml(data.bin) + '</span>';
+    } else {
+      el.innerHTML = '<span style="color:var(--danger);font-size:13px;">&#10007; darktable-cli not found</span>' +
+        '<span style="color:var(--text-dim);font-size:12px;margin-left:8px;">Install darktable or set the path below</span>' +
+        '<div id="darktableGet" style="margin-top:6px;"></div>' +
+        '<div id="darktableProgress" style="display:none;margin-top:8px;">' +
+        '  <div style="background:var(--bg-tertiary);border-radius:3px;height:6px;overflow:hidden;">' +
+        '    <div id="dtProgressFill" style="background:var(--accent);height:100%;width:0%;"></div>' +
+        '  </div>' +
+        '  <div id="dtProgressText" style="font-size:12px;color:var(--text-dim);margin-top:4px;"></div>' +
+        '</div>';
+      // The user's OWN configured path is the highest-priority probe and the
+      // one they are most likely asking about. find_darktable falls through
+      // silently when darktable_bin points at a path that no longer exists
+      // (develop.py), and checked_paths deliberately does not include it — so
+      // say it explicitly, or the panel never answers the actual question.
+      if (data.configured_bin) {
+        el.innerHTML += '<div style="color:var(--danger);font-size:12px;margin-top:6px;">' +
+          'Configured path not found: ' + escapeHtml(data.configured_bin) + '</div>';
+      }
+      // Say where we looked, so a bare ✗ can explain itself.
+      // 'Checked:' not 'Checked PATH and:' — element 0 of checked_paths is
+      // already "$PATH (darktable-cli)" (Task 2 composes it in), so the older
+      // prefix named PATH twice and implied the rest were additional to it.
+      // Task 2 also guarantees the list is never empty, so no else branch.
+      if (data.checked_paths && data.checked_paths.length) {
+        el.innerHTML += '<div style="font-size:11px;color:var(--text-ghost);margin-top:6px;">' +
+          'Checked: ' + data.checked_paths.map(escapeHtml).join(', ') + '</div>';
+      }
+      needsGetOption = true;
+    }
+    if (data.auto_convert_dng) {
+      if (data.dng_available) {
+        el.innerHTML += '<div style="color:var(--accent);font-size:13px;margin-top:4px;">&#10003; Adobe DNG Converter found' +
+          '<span style="color:var(--text-dim);font-size:12px;margin-left:8px;">' + escapeHtml(data.dng_bin) + '</span></div>';
+      } else {
+        el.innerHTML += '<div style="color:var(--danger);font-size:13px;margin-top:4px;">&#10007; Adobe DNG Converter not found' +
+          '<span style="color:var(--text-dim);font-size:12px;margin-left:8px;">Install it or set the path below &mdash; ' +
+          '<a href="https://helpx.adobe.com/camera-raw/digital-negative.html" target="_blank" rel="noopener" ' +
+          'style="color:var(--accent);">Get it from Adobe &#8599;</a></span></div>';
+      }
+    }
+    // MUST run after the DNG block. That block does `el.innerHTML +=`, which
+    // re-parses the subtree and detaches any node captured earlier — so
+    // rendering the button before it would write into a dead node and the
+    // button would never appear. darktable_auto_convert_dng defaults to true
+    // (config.py:66), so this is the default path, not an edge case.
+    if (needsGetOption) await renderDarktableGetOption();
+  } catch(e) {}
+}
+
+// The button must say what it actually does. On macOS/Windows we hand off to
+// the OS installer and the user finishes the job, so it says "Download
+// installer" — never "Install darktable".
+async function renderDarktableGetOption() {
+  var host = document.getElementById('darktableGet');
+  if (!host) return;
+  var info;
+  try {
+    info = await safeFetch('/api/darktable/install/available', {}, { toast: false });
+  } catch(e) {
+    info = { available: false, reason: 'Could not check for a darktable release.' };
+  }
+  // Publish _dtAsset before any darktableIsLinux()/darktableIsWindows() call
+  // so those helpers see the server-derived platform for the Flask host
+  // rather than falling back to navigator.userAgent.
+  window._dtAsset = info;
+
+  if (!info.available) {
+    // Never a dead button: a plain link, plus the reason verbatim. "GitHub
+    // was unreachable" and "no build exists for your platform" are different
+    // facts the user acts on differently, so do not collapse them.
+    host.innerHTML = '<a href="https://www.darktable.org/install/" target="_blank" rel="noopener" ' +
+      'style="color:var(--accent);font-size:13px;">Get darktable &#8599;</a>' +
+      '<span style="color:var(--text-ghost);font-size:11px;margin-left:8px;">' +
+      escapeHtml(info.reason || '') + '</span>';
+    return;
+  }
+
+  var label = darktableIsLinux() ? 'Download and set up' : 'Download installer';
+  host.innerHTML = '<button class="btn" onclick="downloadDarktable()">' + label + '</button>' +
+    '<span style="color:var(--text-dim);font-size:12px;margin-left:8px;">' +
+    'darktable ' + escapeHtml(info.version) + ' &mdash; ' + escapeHtml(info.name) + ', ' +
+    Math.round(info.size / 1048576) + ' MB, from github.com/darktable-org</span>';
+}
+
+async function downloadDarktable() {
+  var a = window._dtAsset || {};
+  var isLinux = darktableIsLinux();
+  var isWindows = darktableIsWindows();
+  var what = isLinux
+    ? 'Vireo will download it and set the darktable-cli path for you.'
+    : 'Vireo will download the installer and open it. You finish the install.';
+  // Warn about SmartScreen BEFORE the download starts, not after: the server
+  // calls os.startfile() from hand_off() before the SSE 'complete' event
+  // fires, so an onComplete-only warning arrives after the unknown-publisher
+  // prompt has already surfaced — defeating the warning at the exact moment
+  // the user has to decide whether to proceed. Same idea for Gatekeeper on
+  // macOS: naming the expected dialog turns "is this malware?" into
+  // "this is the OS check I was warned about".
+  var osWarning = '';
+  if (isWindows) {
+    osWarning = '\n\nWindows may show a SmartScreen "unknown publisher" ' +
+                'warning after the download finishes — darktable does not ' +
+                'sign its installer. Click "More info" then "Run anyway".';
+  } else if (!isLinux) {
+    osWarning = '\n\nmacOS may show a Gatekeeper warning — darktable does ' +
+                'not notarize its macOS builds. Drag darktable to the ' +
+                'Applications folder from the DMG the installer opens.';
+  }
+  // Name the exact artifact before any bytes move: version, filename, size,
+  // source host.
+  if (!confirm('Download darktable ' + a.version + '?\n\n' +
+               a.name + ' (' + Math.round(a.size / 1048576) + ' MB)\n' +
+               'From: github.com/darktable-org/darktable\n\n' + what +
+               osWarning)) return;
+
+  // Hiding the button is a UX guard against double-clicks; the server also has
+  // a singleton guard (a second POST joins the running job instead of starting
+  // another worker on the same .partial) so a rapid double click still lands
+  // on one download rather than an error.
+  document.getElementById('darktableGet').style.display = 'none';
+  var wrap = document.getElementById('darktableProgress');
+  var fill = document.getElementById('dtProgressFill');
+  var text = document.getElementById('dtProgressText');
+  wrap.style.display = 'block';
+  text.textContent = 'Starting...';
+
+  // The route 400s on insufficient disk space, an unusable download directory,
+  // or a release it can no longer resolve. Without this guard the panel sits on
+  // "Starting..." forever with the button hidden. safeFetch throws an Error
+  // carrying the route's specific message — render it inline, not just in the
+  // toast that scrolls away.
+  //
+  // expected_* pin the download to the exact artifact this dialog confirmed.
+  // /install/available caches for 10 minutes; a new release published in that
+  // window would otherwise mean the server downloads a different artifact from
+  // the one just OK'd — same button click, different bytes.  The server
+  // returns code=darktable_asset_changed when the fresh resolution disagrees
+  // so the panel can re-check and re-prompt with the new identity.
+  var resp;
+  try {
+    resp = await safeFetch('/api/jobs/download-darktable', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        expected_version: a.version,
+        expected_name: a.name,
+        expected_digest: a.digest || null,
+        // Size is the fallback identity for a digestless release: if GitHub
+        // deletes and re-uploads the asset under the same tag+filename
+        // during the availability cache's TTL, name+version still match but
+        // the bytes differ. Without this the server would accept the swap
+        // for any release that publishes no digest.
+        expected_size: (typeof a.size === 'number') ? a.size : null,
+      }),
+    });
+  } catch(e) {
+    fill.style.width = '0%';
+    if (e && e.code === 'darktable_asset_changed') {
+      // Do not just show a red error — the user's intent was still to
+      // download darktable, and the fresh version is what they should decide
+      // on now. Re-render the panel so it fetches the new availability info,
+      // then explain in-panel why they were bounced back.
+      text.innerHTML = escapeHtml(e.message || 'The darktable release changed since this dialog opened.') +
+        '<br><button class="btn" style="margin-top:6px;" onclick="loadDarktableStatus()">Re-check</button>';
+      return;
+    }
+    text.innerHTML = '<span style="color:var(--danger);">' +
+      escapeHtml(e.message || 'Could not start the download.') + '</span>';
+    document.getElementById('darktableGet').style.display = '';
+    return;
+  }
+
+  safeEventSource('/api/jobs/' + resp.job_id + '/stream', {
+    // NOTE from Task 4: p.current can move BACKWARDS. When a server ignores
+    // Range, the retry truncates the .partial and restarts from 0, so the bar
+    // must tolerate a decreasing current rather than assuming monotonicity.
+    // That is honest — the bytes really were discarded — so do not clamp it.
+    onProgress: function(p) {
+      if (p.total) {
+        fill.style.width = Math.round((p.current / p.total) * 100) + '%';
+        text.textContent = p.phase + ': ' +
+          Math.round(p.current / 1048576) + ' of ' + Math.round(p.total / 1048576) + ' MB';
+      } else {
+        text.textContent = p.phase + (p.current_file ? ': ' + p.current_file : '');
+      }
+    },
+    onComplete: function(r) {
+      // Verified against jobs.py: the `complete` SSE event carries the job
+      // ENVELOPE — {job_id, job_type, status, phase, result, duration, errors,
+      // failure} — so the job's return value is r.result, not r.
+      //
+      // Job FAILURES arrive here with status !== 'completed' — not via
+      // onError, which only fires on EventSource connection loss and is
+      // called with no arguments. A digest mismatch lands here; rendering it
+      // as a success with an empty message would be exactly the black box
+      // CORE_PHILOSOPHY.md forbids. Same shape downloadModel() reads below.
+      if (r && r.status === 'cancelled') {
+        // jobs.py sets status 'cancelled' with empty errors and no failure,
+        // so this must be handled before the failure branch or a
+        // user-initiated cancel would read as "Download failed".
+        // A cancelled download keeps its .partial and a re-run RESUMES it
+        // (Task 4). Do not imply the bytes were thrown away.
+        fill.style.width = '0%';
+        text.innerHTML = 'Download cancelled &mdash; partial progress kept, retrying will resume.' +
+          '<br><button class="btn" style="margin-top:6px;" onclick="loadDarktableStatus()">Try again</button>';
+        return;
+      }
+      if (!r || r.status !== 'completed') {
+        var why = (r && r.failure && r.failure.message) ||
+                  ((r && r.errors) || []).join(', ') || 'Download failed';
+        fill.style.width = '0%';
+        text.innerHTML = '<span style="color:var(--danger);">' + escapeHtml(why) + '</span>' +
+          '<br><button class="btn" style="margin-top:6px;" onclick="loadDarktableStatus()">Try again</button>';
+        return;
+      }
+      fill.style.width = '100%';
+      var res = r.result || {};
+      var lines = [];
+      // verify_digest's ok=True does NOT always mean "verified" — the
+      // no-digest-published case also returns True and the string says so.
+      // Pass the string through; never synthesize "Verified ✓" from a boolean.
+      if (res.verified) lines.push(res.verified);
+      if (res.config_written) {
+        // No silent config mutation: say it, and make the field show it.
+        lines.push('Installed to ' + res.bin_path + ' and set the darktable-cli path in Settings.');
+      } else if (res.downloaded_to) {
+        lines.push('Downloaded to ' + res.downloaded_to + ' — opening the installer. ' +
+                   (darktableIsWindows()
+                     ? 'Windows may warn about an unknown publisher: darktable does not sign ' +
+                       'its installer. Click through the installer, then click Re-check.'
+                     : 'Drag darktable to Applications, then click Re-check.'));
+      }
+      // Only warn about Gatekeeper if the file really is quarantined.
+      if (res.quarantined) {
+        lines.push('macOS quarantined this download. darktable does not notarize its ' +
+                   'macOS builds, so you may see "damaged". To clear it, run: ' +
+                   'xattr -d com.apple.quarantine ' + res.downloaded_to);
+      }
+      if (res.config_written && res.bin_path) {
+        var binInput = document.getElementById('cfgDarktableBin');
+        if (binInput) binInput.value = res.bin_path;
+      }
+      text.innerHTML = lines.map(escapeHtml).join('<br>') +
+        '<br><button class="btn" style="margin-top:6px;" onclick="loadDarktableStatus()">Re-check</button>';
+    },
+    // safeEventSource calls onError with NO arguments (_navbar.html:10242),
+    // and only for connection loss. Do not try to read an error off it.
+    onError: function() {
+      text.innerHTML = '<span style="color:var(--danger);">Lost connection to the ' +
+        'download job. It may still be running.</span>' +
+        '<br><button class="btn" style="margin-top:6px;" onclick="loadDarktableStatus()">Re-check</button>';
+    }
+  });
+}
+
+async function loadSystemInfo() {
+  try {
+    var d = await safeFetch('/api/system/info', {}, { toast: false });
+    document.getElementById('deviceName').textContent = d.device;
+    document.getElementById('deviceDetail').textContent = d.device_detail;
+    document.getElementById('onnxrtVersion').textContent = d.onnxruntime_version || 'Not installed';
+    document.getElementById('onnxrtProviders').textContent = (d.onnxruntime_providers || []).join(', ');
+    var mdStatus = document.getElementById('megadetectorStatus');
+    var mdDetail = document.getElementById('megadetectorDetail');
+    if (d.megadetector === 'installed') {
+      mdStatus.textContent = 'Installed';
+      mdStatus.style.color = 'var(--accent)';
+      mdDetail.textContent = d.megadetector_detail;
+    } else if (d.megadetector === 'weights_missing') {
+      mdStatus.textContent = 'Not ready';
+      mdStatus.style.color = 'var(--warning)';
+      mdDetail.textContent = d.megadetector_detail;
+    } else if (d.megadetector === 'unavailable' || d.megadetector === 'not installed') {
+      mdStatus.textContent = 'Not installed';
+      mdStatus.style.color = 'var(--warning)';
+      mdDetail.textContent = 'Subject detection disabled — ' + d.megadetector_detail;
+    } else {
+      mdStatus.textContent = 'Error';
+      mdStatus.style.color = 'var(--danger)';
+      mdDetail.textContent = d.megadetector_detail;
+    }
+    renderPlatformReadiness(d.platform_support || null);
+  } catch(e) {}
+  loadExiftoolStatus();
+  loadPipelineModels();
+}
+
+function renderPlatformReadiness(support) {
+  if (!support) return;
+  var row = document.getElementById('windowsSupportRow');
+  if (support.platform === 'win32') {
+    row.style.display = '';
+    var status = document.getElementById('windowsSupportStatus');
+    var detail = document.getElementById('windowsSupportDetail');
+    var supported = support.support_tier === 'supported';
+    status.textContent = supported ? 'Supported' : 'Unsupported Windows version';
+    status.style.color = supported ? 'var(--accent)' : 'var(--danger)';
+    var bits = ['Windows ' + (support.windows_release || '11'), support.architecture || 'x64', 'CPU inference supported'];
+    if (support.webview2_version) bits.push('WebView2 ' + support.webview2_version);
+    if (support.long_paths && !support.long_paths.enabled) {
+      bits.push('Long paths need Windows policy');
+      status.textContent = 'Action needed';
+      status.style.color = 'var(--danger)';
+    }
+    detail.textContent = bits.join(' · ');
+  }
+
+  var deps = support.dependencies || {};
+  var names = {
+    exiftool: 'ExifTool', darktable: 'Darktable', dng_converter: 'Adobe DNG Converter',
+    lightroom: 'Lightroom Classic', openssh: 'OpenSSH Client', rsync: 'GNU rsync',
+    remote_transfer: 'Remote transfers'
+  };
+  var keys = Object.keys(names).filter(function(key) { return deps[key]; });
+  if (!keys.length) return;
+  document.getElementById('dependencyReadiness').style.display = '';
+  document.getElementById('dependencyReadinessRows').innerHTML = keys.map(function(key) {
+    var dep = deps[key];
+    var ready = dep.state === 'ready';
+    var color = ready ? 'var(--accent)' : (dep.required ? 'var(--danger)' : 'var(--warning)');
+    var label = ready ? 'Ready' : (dep.state === 'misconfigured' ? 'Needs repair' : 'Unavailable');
+    var detail = ready ? (dep.path || dep.hint || '') : (dep.hint || dep.path || '');
+    return '<div class="setting-row"><div class="setting-label">' + escapeHtml(names[key]) +
+      '<small data-dependency="' + key + '">' + escapeHtml(detail) + '</small></div><span class="setting-value" style="color:' +
+      color + ';">' + label + '</span></div>';
+  }).join('');
+  keys.forEach(function(key) {
+    if (deps[key].state !== 'ready') {
+      appendRsyncInstallCommands(
+        document.querySelector('[data-dependency="' + key + '"]'), deps[key].install_commands);
+    }
+  });
+}
+
+// exiftool is the metadata backbone for every scan; a missing binary
+// degrades scans silently, so report its presence next to the other
+// external dependencies.
+async function loadExiftoolStatus() {
+  var statusEl = document.getElementById('exiftoolStatus');
+  var detailEl = document.getElementById('exiftoolDetail');
+  if (!statusEl) return;
+  try {
+    var d = await safeFetch('/api/exiftool/status', {}, { toast: false });
+    if (d && d.available) {
+      statusEl.textContent = d.version ? 'Installed (v' + d.version + ')' : 'Installed';
+      statusEl.style.color = 'var(--accent)';
+      detailEl.textContent = d.path || 'Reads capture date, GPS, and camera info during scans.';
+    } else {
+      /* A populated path with available=false means the binary resolved
+         on PATH but the -ver probe failed — a broken install, not a
+         missing one. Surface that distinction so the user knows whether
+         to install or to repair. */
+      var broken = !!(d && d.path);
+      statusEl.textContent = broken ? 'Installed but broken' : 'Not installed';
+      statusEl.style.color = 'var(--danger)';
+      detailEl.textContent = 'Scans won’t record dates, GPS, or camera info — ' +
+        ((d && d.hint) ||
+         (broken ? 'reinstall ExifTool' : 'install ExifTool')) +
+        ', then restart Vireo.';
+    }
+  } catch(e) {}
+}
+
+async function loadPipelineModels() {
+  var container = document.getElementById('pipelineModelsContainer');
+  if (!container) return;
+  try {
+    var data = await safeFetch('/api/models/pipeline', {}, { toast: false });
+    var html = '<table style="width:100%;border-collapse:collapse;">';
+    html += '<tr style="border-bottom:1px solid var(--border-primary);font-size:11px;color:var(--text-dim);">';
+    html += '<td style="padding:6px 8px;">Model</td><td>Role</td><td>Status</td><td>Size</td><td></td></tr>';
+    data.models.forEach(function(m) {
+      var statusColor = 'var(--text-dim)';
+      var statusText = m.status;
+      if (m.status === 'downloaded') { statusColor = 'var(--accent)'; statusText = 'Downloaded'; }
+      else if (m.status === 'corrupt' || m.status === 'incomplete') { statusColor = 'var(--danger)'; statusText = m.status.charAt(0).toUpperCase() + m.status.slice(1); }
+      else if (m.status === 'repo cached') { statusColor = 'var(--warning)'; statusText = 'Repo only'; }
+      else { statusColor = 'var(--warning)'; statusText = 'Not downloaded'; }
+
+      html += '<tr style="border-bottom:1px solid var(--border-primary);">';
+      html += '<td style="padding:8px;"><strong>' + m.name + '</strong><br><span style="color:var(--text-dim);font-size:11px;">' + m.description + '</span></td>';
+      html += '<td style="padding:8px;color:var(--text-dim);">' + m.role + '</td>';
+      html += '<td style="padding:8px;color:' + statusColor + ';">' + statusText + '</td>';
+      html += '<td style="padding:8px;color:var(--text-dim);">' + (m.size || m.size_estimate) + '</td>';
+      html += '<td style="padding:8px;text-align:right;">';
+      if (m.status === 'downloaded') {
+        html += '<button class="btn-sm btn-danger" onclick="deletePipelineModel(\'' + m.id + '\',\'' + m.name + '\')">Delete</button>';
+      } else if (m.status === 'corrupt' || m.status === 'incomplete') {
+        html += '<button class="btn-sm btn-danger" onclick="deletePipelineModel(\'' + m.id + '\',\'' + m.name + '\')">Delete</button> ';
+        html += '<button class="btn-sm" onclick="downloadPipelineModel(\'' + m.id + '\',this)">Re-download</button>';
+      } else {
+        html += '<button class="btn-sm" onclick="downloadPipelineModel(\'' + m.id + '\',this)">Download</button>';
+      }
+      html += '</td></tr>';
+    });
+    html += '</table>';
+    container.innerHTML = html;
+  } catch(e) {
+    container.textContent = 'Error loading models: ' + e;
+  }
+}
+
+async function downloadPipelineModel(modelId, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = 'Downloading...'; }
+  try {
+    var data = await safeFetch('/api/models/pipeline/download', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({model_id: modelId}),
+    }, { toast: false });
+    if (data.job_id) {
+      safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+        onProgress: function(p) {
+          if (btn) btn.textContent = p.phase || 'Downloading...';
+        },
+        onComplete: function(result) {
+          if (result.status === 'completed') {
+            if (btn) { btn.textContent = 'Done!'; btn.style.color = 'var(--accent)'; }
+          } else {
+            if (btn) { btn.textContent = 'Failed'; btn.style.color = 'var(--danger)'; btn.disabled = false; }
+          }
+          setTimeout(loadPipelineModels, 500);
+        },
+        onError: function() {
+          if (btn) { btn.textContent = 'Error'; btn.style.color = 'var(--danger)'; btn.disabled = false; }
+        }
+      });
+    }
+  } catch(e) {
+    if (btn) { btn.textContent = 'Error'; btn.style.color = 'var(--danger)'; btn.disabled = false; }
+  }
+}
+
+async function deletePipelineModel(modelId, modelName) {
+  if (!confirm('Delete ' + modelName + ' weights?')) return;
+  try {
+    await safeFetch('/api/models/pipeline/delete', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({model_id: modelId}),
+    });
+    loadPipelineModels();
+  } catch(e) {}
+}
+
+/* ---------- Labels ---------- */
+var selectedPlaceId = null;
+var selectedPlaceName = '';
+var searchTimer = null;
+
+loadLabels();
+loadTaxonGroups();
+loadObservationFilters();
+
+async function loadLabels() {
+  try {
+    var data = await safeFetch('/api/labels', {}, { toast: false });
+    var labels = data.labels || [];
+    var active = data.active || [];
+    var activePaths = new Set(active.map(function(a) { return a.labels_file; }));
+
+    if (labels.length === 0) {
+      document.getElementById('labelsContent').innerHTML = '<span style="color:var(--text-faint);font-size:13px;">No species lists downloaded yet. Use the form below to download one.</span>';
+      return;
+    }
+
+    var html = '';
+    labels.forEach(function(l) {
+      var isActive = activePaths.has(l.labels_file);
+      var groups = (l.taxon_groups || []).map(function(g) { return g.charAt(0).toUpperCase() + g.slice(1); }).join(', ');
+
+      html += '<div style="padding:8px 0;border-bottom:1px solid var(--border-subtle);display:flex;align-items:center;gap:8px;">';
+      html += '<label style="display:flex;align-items:center;gap:8px;flex:1;cursor:pointer;">';
+      html += '<input type="checkbox" class="label-active-cb" value="' + escapeAttr(l.labels_file) + '"' +
+              (isActive ? ' checked' : '') + ' onchange="updateActiveLabels()" style="accent-color:var(--accent);">';
+      html += '<div>';
+      html += '<span style="font-size:13px;color:var(--text-primary);font-weight:600;">' + escapeHtml(l.name) + '</span>';
+      // The count a run receives, not the count on disk: they differ when
+      // names are shared between species, and the warning below says so.
+      var usable = (l.usable_count !== undefined && l.usable_count !== null)
+        ? l.usable_count : (l.species_count || 0);
+      html += '<div style="font-size:11px;color:var(--text-dim);">' + usable + ' species &middot; ' + groups + '</div>';
+      if (l.ambiguous_count) {
+        html += '<div style="font-size:11px;color:var(--warning,#d08700);margin-top:2px;">' +
+                l.ambiguous_count + ' name' + (l.ambiguous_count > 1 ? 's' : '') +
+                ' shared by several species and skipped when classifying &middot; ' +
+                'download this list again to split them by scientific name</div>';
+      }
+      html += '</div>';
+      html += '</label>';
+      html += '<button data-label-path="' + escapeAttr(l.labels_file) + '" data-label-name="' + escapeAttr(l.name) + '" onclick="deleteLabelSet(this.dataset.labelPath,this.dataset.labelName)" ' +
+              'style="background:none;color:var(--danger);border:1px solid var(--danger);border-radius:4px;padding:3px 10px;font-size:11px;cursor:pointer;white-space:nowrap;" ' +
+              'title="Delete this label set">Delete</button>';
+      html += '</div>';
+    });
+
+    // Summary line
+    var totalSpecies = active.reduce(function(sum, a) {
+      return sum + ((a.usable_count !== undefined && a.usable_count !== null)
+        ? a.usable_count : (a.species_count || 0));
+    }, 0);
+    if (active.length > 0) {
+      html += '<div style="padding:8px 0;font-size:12px;color:var(--accent);">' +
+              active.length + ' label set' + (active.length > 1 ? 's' : '') + ' active &middot; ~' +
+              totalSpecies.toLocaleString() + ' species</div>';
+    }
+
+    document.getElementById('labelsContent').innerHTML = html;
+  } catch(e) {
+    document.getElementById('labelsContent').innerHTML = '<span style="color:var(--danger);font-size:13px;">Failed to load</span>';
+  }
+}
+
+async function updateActiveLabels() {
+  var paths = [];
+  document.querySelectorAll('.label-active-cb:checked').forEach(function(cb) {
+    paths.push(cb.value);
+  });
+  try {
+    await safeFetch('/api/labels/active', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({labels_files: paths}),
+    });
+  } catch(e) {}
+  loadLabels();
+}
+
+async function deleteLabelSet(labelsFile, name) {
+  if (!confirm('Delete label set "' + name + '"?')) return;
+  try {
+    await safeFetch('/api/labels', {
+      method: 'DELETE',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({labels_file: labelsFile}),
+    });
+  } catch(e) {}
+  loadLabels();
+}
+
+async function loadTaxonGroups() {
+  try {
+    var groups = await safeFetch('/api/labels/taxon-groups', {}, { toast: false });
+    var html = '';
+    groups.forEach(function(g, i) {
+      var checked = (g.key === 'birds') ? ' checked' : '';
+      html += '<label style="font-size:12px;color:var(--text-secondary);display:flex;align-items:center;gap:4px;cursor:pointer;">' +
+        '<input type="checkbox" class="taxon-cb" value="' + g.key + '"' + checked + ' style="accent-color:var(--accent);"> ' +
+        g.name + '</label>';
+    });
+    document.getElementById('taxonCheckboxes').innerHTML = html;
+  } catch(e) {}
+}
+
+async function loadObservationFilters() {
+  try {
+    var filters = await safeFetch('/api/labels/observation-filters', {}, { toast: false });
+    var html = '';
+    filters.forEach(function(f) {
+      var checked = (f.key === 'research') ? ' checked' : '';
+      html += '<label style="font-size:12px;color:var(--text-secondary);display:flex;align-items:center;gap:4px;cursor:pointer;">' +
+        '<input type="radio" name="obs-filter" value="' + f.key + '"' + checked + ' style="accent-color:var(--accent);"> ' +
+        f.name + ' <span style="color:var(--text-faint);">— ' + f.description + '</span></label>';
+    });
+    document.getElementById('observationFilterRadios').innerHTML = html;
+  } catch(e) {}
+}
+
+function searchPlacesDebounced() {
+  // Clear selection if user is typing something new
+  if (selectedPlaceId) {
+    selectedPlaceId = null;
+    selectedPlaceName = '';
+    document.getElementById('fetchLabelsBtn').disabled = true;
+    document.getElementById('placeSearch').style.borderColor = 'var(--border-secondary)';
+  }
+  if (searchTimer) clearTimeout(searchTimer);
+  searchTimer = setTimeout(searchPlaces, 300);
+}
+
+async function searchPlaces() {
+  var q = document.getElementById('placeSearch').value.trim();
+  var dropdown = document.getElementById('placeDropdown');
+  if (q.length < 2) {
+    dropdown.innerHTML = '';
+    return;
+  }
+  try {
+    var places = await safeFetch('/api/labels/search-places?q=' + encodeURIComponent(q), {}, { toast: false });
+    if (places.length === 0) {
+      dropdown.innerHTML = '<div style="padding:8px 10px;font-size:12px;color:var(--text-dim);">No places found</div>';
+      return;
+    }
+    var html = '';
+    places.slice(0, 8).forEach(function(p) {
+      var dn = p.display_name || p.name || '';
+      html += '<div style="padding:8px 10px;font-size:13px;color:var(--text-secondary);cursor:pointer;border-bottom:1px solid var(--border-secondary);" ' +
+        'onmouseover="this.style.background=\'var(--bg-tertiary)\'" onmouseout="this.style.background=\'\'" ' +
+        'data-place-id="' + p.id + '" data-place-name="' + escapeAttr(dn) + '" ' +
+        'onclick="selectPlace(this.dataset.placeId, this.dataset.placeName)">' +
+        escapeHtml(dn) + '</div>';
+    });
+    dropdown.innerHTML = html;
+  } catch(e) {
+    dropdown.innerHTML = '<div style="padding:8px 10px;font-size:12px;color:var(--danger);">Error: ' + escapeHtml(String(e.message || e)) + '</div>';
+  }
+}
+
+function selectPlace(id, name) {
+  selectedPlaceId = parseInt(id);
+  selectedPlaceName = name;
+  document.getElementById('placeDropdown').innerHTML = '';
+  document.getElementById('placeSearch').value = name;
+  document.getElementById('placeSearch').style.borderColor = 'var(--accent)';
+  document.getElementById('fetchLabelsBtn').disabled = false;
+}
+
+async function fetchLabels() {
+  if (!selectedPlaceId) return;
+  var groups = [];
+  document.querySelectorAll('.taxon-cb:checked').forEach(function(cb) {
+    groups.push(cb.value);
+  });
+  if (groups.length === 0) { alert('Select at least one taxon group'); return; }
+
+  var btn = document.getElementById('fetchLabelsBtn');
+  var status = document.getElementById('fetchLabelsStatus');
+  btn.disabled = true;
+  status.textContent = 'Starting download...';
+
+  try {
+    var data = await safeFetch('/api/jobs/fetch-labels', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        place_id: selectedPlaceId,
+        place_name: selectedPlaceName,
+        taxon_groups: groups,
+        observation_filter: (document.querySelector('input[name="obs-filter"]:checked') || {}).value || 'research',
+      }),
+    }, { toast: false });
+    status.textContent = 'Fetching species...';
+
+    var progressDiv = document.getElementById('fetchLabelsProgress');
+    var progressFill = document.getElementById('fetchLabelsFill');
+    progressDiv.style.display = '';
+
+    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+      onProgress: function(p) {
+        if (p.current_file) status.textContent = p.current_file;
+        if (p.total > 0 && p.current > 0) {
+          progressFill.style.width = Math.round((p.current / p.total) * 100) + '%';
+        }
+      },
+      onComplete: function(result) {
+        if (result.status === 'completed' && result.result) {
+          status.textContent = 'Done! ' + result.result.species_count + ' species downloaded.';
+          status.style.color = 'var(--accent)';
+          progressFill.style.width = '100%';
+          var precompute = result.result.embedding_precompute;
+          if (precompute) {
+            startBackgroundEmbeddingPrecompute(precompute, {
+              status: status,
+              progressDiv: progressDiv,
+              progressFill: progressFill
+            });
+          }
+        } else {
+          status.textContent = 'Failed: ' + (result.errors || []).join(', ');
+          status.style.color = 'var(--danger)';
+        }
+        btn.disabled = false;
+        loadLabels();
+        loadEmbeddingMatrix();
+        if (!(result.status === 'completed' && result.result && result.result.embedding_precompute)) {
+          setTimeout(function() { progressDiv.style.display = 'none'; }, 3000);
+        }
+      },
+      onError: function() {
+        status.textContent = 'Connection lost';
+        btn.disabled = false;
+      }
+    });
+  } catch(e) {
+    status.textContent = 'Error: ' + e.message;
+    btn.disabled = false;
+  }
+}
+
+async function startBackgroundEmbeddingPrecompute(precompute, opts) {
+  if (!precompute || !precompute.model_id || !precompute.labels_file) return;
+  opts = opts || {};
+  var status = opts.status;
+  var progressDiv = opts.progressDiv;
+  var progressFill = opts.progressFill;
+  var modelName = precompute.model_name || 'active model';
+  if (status) {
+    status.textContent = 'Pre-computing embeddings for ' + modelName + ' in background...';
+    status.style.color = 'var(--text-dim)';
+  }
+  if (progressDiv) progressDiv.style.display = '';
+  if (progressFill) progressFill.style.width = '0%';
+
+  try {
+    var data = await safeFetch('/api/jobs/precompute-embeddings', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        model_id: precompute.model_id,
+        labels_file: precompute.labels_file
+      }),
+    }, { toast: false });
+
+    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+      onProgress: function(p) {
+        if (status && p.current_file) {
+          status.textContent = p.current_file.replace(/^Computing embeddings/, 'Pre-computing embeddings');
+        }
+        if (progressFill && p.total > 0) {
+          progressFill.style.width = Math.round((p.current / p.total) * 100) + '%';
+        }
+      },
+      onComplete: function(result) {
+        if (result.status === 'completed') {
+          if (status) {
+            status.textContent = 'Embeddings cached for ' + modelName + '.';
+            status.style.color = 'var(--accent)';
+          }
+          if (progressFill) progressFill.style.width = '100%';
+        } else if (status) {
+          var detail = (
+            (result.errors && result.errors[0]) ||
+            (result.failure && result.failure.message) ||
+            'Unknown error'
+          );
+          // Keep the actionable explanation while hiding the usually long
+          // ONNXRuntime diagnostic that follows it. The complete exception
+          // remains available in Jobs and Logs.
+          detail = detail.split(' Underlying error:')[0];
+          status.textContent = 'Species list downloaded, but embedding precompute failed: ' + detail;
+          status.style.color = 'var(--warning)';
+        }
+        loadEmbeddingMatrix();
+        if (progressDiv) setTimeout(function() { progressDiv.style.display = 'none'; }, 3000);
+      },
+      onError: function() {
+        if (status) {
+          status.textContent = 'Species list downloaded; embedding precompute is still listed in Jobs.';
+          status.style.color = 'var(--warning)';
+        }
+      }
+    });
+  } catch(e) {
+    if (status) {
+      status.textContent = 'Species list downloaded; embedding precompute did not start: ' + e.message;
+      status.style.color = 'var(--warning)';
+    }
+    if (progressDiv) setTimeout(function() { progressDiv.style.display = 'none'; }, 3000);
+  }
+}
+
+/* ---------- Models ---------- */
+var _modelsById = {};
+async function loadModels() {
+  try {
+    var data = await safeFetch('/api/models', {}, { toast: false });
+    var models = data.models || [];
+    var activeId = data.active_id;
+
+    _modelsById = {};
+    models.forEach(function(m) { _modelsById[m.id] = m; });
+
+    if (models.length === 0) {
+      document.getElementById('modelsContent').innerHTML = '<span style="color:var(--text-ghost);font-size:13px;">No models available.</span>';
+      return;
+    }
+
+    var html = '';
+    models.forEach(function(m) {
+      var isActive = m.id === activeId;
+      var state = m.state || (m.downloaded ? 'ok' : 'missing');
+      var missingOptional = m.missing_optional_files || [];
+      // Unverified installs also expose missing_optional_files in
+      // get_models() because they count as "downloaded", so gate on both
+      // 'ok' and 'unverified' — otherwise the Retry-verification button
+      // is the only action offered and it can't fetch optional artifacts
+      // (see downloadModel vs verifyAllModels below).
+      var hasMissingOptional = (state === 'ok' || state === 'unverified') && missingOptional.length > 0;
+      var statusColor, statusText;
+      if (state === 'ok' && hasMissingOptional) {
+        statusColor = 'var(--warning)'; statusText = 'Downloaded — optional files available';
+      } else if (state === 'ok') {
+        statusColor = 'var(--accent)'; statusText = 'Downloaded';
+      } else if (state === 'incomplete') {
+        statusColor = 'var(--warning)'; statusText = 'Incomplete — repair available';
+      } else if (state === 'unverified' && hasMissingOptional) {
+        statusColor = 'var(--warning)'; statusText = 'Unverified — optional files available';
+      } else if (state === 'unverified') {
+        statusColor = 'var(--warning)'; statusText = 'Unverified — could not reach HuggingFace';
+      } else {
+        statusColor = 'var(--text-faint)'; statusText = 'Not downloaded';
+      }
+      var activeTag = isActive ? ' <span style="color:var(--accent);font-size:10px;font-weight:600;">ACTIVE</span>' : '';
+
+      html += '<div style="padding:10px 0;border-bottom:1px solid var(--border-subtle);">';
+      html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">';
+      html += '<span style="font-size:14px;color:var(--text-primary);font-weight:600;">' + escapeHtml(m.name) + '</span>';
+      html += '<span style="font-size:11px;color:var(--text-faint);">' + escapeHtml(m.architecture || m.model_str) + '</span>';
+      if (m.parameters) html += '<span style="font-size:11px;color:var(--text-faint);">' + escapeHtml(m.parameters) + ' params</span>';
+      if (m.size_mb) html += '<span style="font-size:11px;color:var(--text-faint);">' + (m.size_mb >= 1000 ? (m.size_mb / 1000).toFixed(1) + ' GB' : m.size_mb + ' MB') + '</span>';
+      html += activeTag;
+      html += '</div>';
+      html += '<div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">' + escapeHtml(m.description || '') + '</div>';
+      if (state === 'incomplete') {
+        html += '<div style="font-size:11px;color:var(--warning);margin-bottom:6px;">Model files are missing or truncated. Click Repair to finish the download — already-downloaded files will not be re-fetched.</div>';
+      } else if (state === 'unverified' && hasMissingOptional) {
+        var reason = m.verify_skipped_reason ? ' (' + escapeHtml(m.verify_skipped_reason) + ')' : '';
+        var missingList = missingOptional.map(escapeHtml).join(', ');
+        html += '<div style="font-size:11px;color:var(--warning);margin-bottom:6px;">Files are present but SHA256 could not be checked against HuggingFace' + reason + ', and optional files are not installed: ' + missingList + '. Click Repair to fetch them and re-verify — Retry verification alone only re-checks hashes and cannot download the optional artifacts.</div>';
+      } else if (state === 'unverified') {
+        var reason = m.verify_skipped_reason ? ' (' + escapeHtml(m.verify_skipped_reason) + ')' : '';
+        html += '<div style="font-size:11px;color:var(--warning);margin-bottom:6px;">Files are present but SHA256 could not be checked against HuggingFace' + reason + '. The model should work; click Retry verification once the network is reachable.</div>';
+      } else if (hasMissingOptional) {
+        var missingList = missingOptional.map(escapeHtml).join(', ');
+        // Be specific about what Repair can actually do for each artifact.
+        // label_descriptions.json has a second source (the upstream model
+        // config), so Repair fixes it now even when our ONNX repo doesn't
+        // carry it yet. The others really do have to land on HuggingFace
+        // first, and saying otherwise would promise a no-op.
+        var optionalHint = missingOptional.indexOf('label_descriptions.json') !== -1
+          ? 'Common names fall back to taxonomy lookups, so some species show their scientific name; click Repair to fetch the mapping — Vireo derives it from the upstream model config if HuggingFace does not carry it yet.'
+          : 'The model works for label-list classification without them; click Repair to fetch them once available on HuggingFace (e.g. to enable Tree of Life mode).';
+        html += '<div style="font-size:11px;color:var(--warning);margin-bottom:6px;">Optional files not installed: ' + missingList + '. ' + optionalHint + '</div>';
+      }
+      html += '<div style="display:flex;align-items:center;gap:8px;">';
+      html += '<span style="font-size:11px;color:' + statusColor + ';">' + statusText + '</span>';
+
+      if ((state === 'ok' || state === 'unverified') && m.weights_path) {
+        html += '<span style="font-size:11px;color:var(--text-invisible);">' + escapeHtml(m.weights_path) + '</span>';
+      }
+
+      html += '<span style="margin-left:auto;display:flex;gap:6px;">';
+      if (state === 'incomplete' && m.source !== 'custom') {
+        html += '<button data-model-id="' + escapeAttr(m.id) + '" onclick="downloadModel(this.dataset.modelId)" style="background:var(--warning);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;font-weight:600;">Repair</button>';
+      } else if (state === 'unverified' && hasMissingOptional && m.source !== 'custom') {
+        // Missing optionals need download_model (Repair); retry-verification
+        // alone would leave them absent. Offer both so the user can pick a
+        // lighter re-check once they've handled the optional artifacts.
+        html += '<button data-model-id="' + escapeAttr(m.id) + '" onclick="downloadModel(this.dataset.modelId)" style="background:var(--warning);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;font-weight:600;">Repair</button>';
+        html += '<button onclick="verifyAllModels()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;">Retry verification</button>';
+      } else if (state === 'unverified' && m.source !== 'custom') {
+        html += '<button onclick="verifyAllModels()" style="background:var(--warning);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;font-weight:600;">Retry verification</button>';
+      } else if (hasMissingOptional && m.source !== 'custom') {
+        html += '<button data-model-id="' + escapeAttr(m.id) + '" onclick="downloadModel(this.dataset.modelId)" style="background:var(--warning);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;font-weight:600;">Repair</button>';
+      } else if (state === 'missing' && m.source !== 'custom') {
+        html += '<button data-model-id="' + escapeAttr(m.id) + '" onclick="downloadModel(this.dataset.modelId)" style="background:var(--accent);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;">Download</button>';
+      }
+      if (!isActive && (state === 'ok' || state === 'unverified')) {
+        html += '<button data-model-id="' + escapeAttr(m.id) + '" onclick="setActiveModel(this.dataset.modelId)" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;">Use This</button>';
+      }
+      if (state !== 'missing' || m.source === 'custom') {
+        html += '<button data-model-id="' + escapeAttr(m.id) + '" onclick="removeModel(this.dataset.modelId)" style="background:none;color:var(--danger);border:1px solid var(--danger);border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;">Remove</button>';
+      }
+      html += '</span>';
+      html += '</div>';
+      // Progress bar (hidden until download starts)
+      html += '<div id="modelProgress-' + escapeAttr(m.id) + '" style="display:none;margin-top:6px;">';
+      html += '<div style="height:4px;background:var(--bg-tertiary);border-radius:2px;overflow:hidden;margin-bottom:4px;"><div id="modelProgressFill-' + escapeAttr(m.id) + '" style="height:100%;background:var(--accent);border-radius:2px;width:0%;transition:width 0.3s;"></div></div>';
+      html += '<div id="modelProgressText-' + escapeAttr(m.id) + '" style="font-size:11px;color:var(--text-dim);"></div>';
+      html += '</div>';
+      html += '</div>';
+    });
+    document.getElementById('modelsContent').innerHTML = html;
+  } catch(e) {
+    document.getElementById('modelsContent').innerHTML = '<span style="color:var(--danger);font-size:13px;">Failed to load models</span>';
+  }
+}
+
+async function downloadModel(modelId) {
+  try {
+    var data = await safeFetch('/api/jobs/download-model', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({model_id: modelId}),
+    }, { toast: false });
+
+    // Show inline progress
+    var progressDiv = document.getElementById('modelProgress-' + modelId);
+    var progressFill = document.getElementById('modelProgressFill-' + modelId);
+    var progressText = document.getElementById('modelProgressText-' + modelId);
+    if (progressDiv) progressDiv.style.display = '';
+
+    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+      onProgress: function(p) {
+        if (progressFill && p.total > 0 && p.current > 0) {
+          var pct = Math.round((p.current / p.total) * 100);
+          progressFill.style.width = pct + '%';
+        }
+        if (progressText && p.current_file) {
+          progressText.textContent = p.current_file;
+        }
+      },
+      onComplete: function(result) {
+        if (result.status === 'completed') {
+          if (progressText) progressText.textContent = 'Download complete!';
+          if (progressFill) progressFill.style.width = '100%';
+        } else {
+          if (progressText) {
+            progressText.textContent = 'Failed: ' + (result.errors || []).join(', ');
+            progressText.style.color = 'var(--danger)';
+          }
+        }
+        setTimeout(loadModels, 1000);
+      },
+      onError: function() {
+        if (progressText) {
+          progressText.textContent = 'Connection lost';
+          progressText.style.color = 'var(--danger)';
+        }
+      }
+    });
+  } catch(e) {}
+}
+
+async function verifyAllModels() {
+  var btn = document.getElementById('verifyAllBtn');
+  var status = document.getElementById('verifyAllStatus');
+  btn.disabled = true;
+  status.textContent = 'Starting...';
+  status.style.color = 'var(--text-dim)';
+  try {
+    var data = await safeFetch('/api/jobs/verify-all-models', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({}),
+    }, { toast: false });
+    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+      onProgress: function(p) {
+        if (p.current_file) status.textContent = p.current_file;
+      },
+      onComplete: function(result) {
+        btn.disabled = false;
+        // A run where a model failed verification ends "failed" but still
+        // carries the per-model result; show it rather than a bare failure.
+        if ((result.status === 'completed' || result.status === 'failed') && result.result) {
+          var ok = (result.result.ok || []).length;
+          var failed = (result.result.failed || []);
+          if (failed.length > 0) {
+            status.textContent = ok + ' ok, ' + failed.length + ' failed: ' + failed.join(', ');
+            status.style.color = 'var(--danger)';
+          } else {
+            status.textContent = 'All ' + ok + ' models verified';
+            status.style.color = 'var(--accent)';
+          }
+        } else {
+          status.textContent = 'Verification failed';
+          status.style.color = 'var(--danger)';
+        }
+        loadModels();
+      },
+      onError: function() {
+        btn.disabled = false;
+        status.textContent = 'Connection lost';
+        status.style.color = 'var(--danger)';
+      }
+    });
+  } catch(e) {
+    btn.disabled = false;
+    status.textContent = 'Error: ' + e.message;
+    status.style.color = 'var(--danger)';
+  }
+}
+
+async function removeModel(modelId) {
+  if (!confirm('Remove this model? Weights Vireo downloaded are deleted from disk; weights in your own folders are left in place.')) return;
+  try {
+    var result = await safeFetch('/api/models/' + encodeURIComponent(modelId), {
+      method: 'DELETE',
+    });
+    if (result && result.kept_path) {
+      showToast('Model removed from Vireo. Its weights were left in place at ' + result.kept_path, 'success');
+    }
+  } catch(e) {}
+  loadModels();
+}
+
+async function setActiveModel(modelId) {
+  var m = _modelsById[modelId];
+  if (m && !m.downloaded) {
+    var sizeStr = m.size_mb ? (m.size_mb >= 1000 ? (m.size_mb / 1000).toFixed(1) + ' GB' : m.size_mb + ' MB') : '';
+    showToast('Model not downloaded — downloading' + (sizeStr ? ' (~' + sizeStr + ')' : '') + '...', 'success');
+    try {
+      var data = await safeFetch('/api/jobs/download-model', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({model_id: modelId}),
+      }, { toast: false });
+
+      var progressDiv = document.getElementById('modelProgress-' + modelId);
+      var progressFill = document.getElementById('modelProgressFill-' + modelId);
+      var progressText = document.getElementById('modelProgressText-' + modelId);
+      if (progressDiv) progressDiv.style.display = '';
+
+      safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+        onProgress: function(p) {
+          if (progressFill && p.total > 0 && p.current > 0) {
+            var pct = Math.round((p.current / p.total) * 100);
+            progressFill.style.width = pct + '%';
+          }
+          if (progressText && p.current_file) {
+            progressText.textContent = p.current_file;
+          }
+        },
+        onComplete: function(result) {
+          if (result.status === 'completed') {
+            if (progressText) progressText.textContent = 'Download complete!';
+            if (progressFill) progressFill.style.width = '100%';
+            // Now set as active
+            safeFetch('/api/models/active', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({model_id: modelId}),
+            }).catch(function(){});
+            setTimeout(loadModels, 1000);
+          } else {
+            if (progressText) {
+              progressText.textContent = 'Failed: ' + (result.errors || []).join(', ');
+              progressText.style.color = 'var(--danger)';
+            }
+            setTimeout(loadModels, 1000);
+          }
+        },
+        onError: function() {
+          if (progressText) {
+            progressText.textContent = 'Connection lost';
+            progressText.style.color = 'var(--danger)';
+          }
+        }
+      });
+    } catch(e) {}
+    return;
+  }
+  try {
+    await safeFetch('/api/models/active', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({model_id: modelId}),
+    });
+  } catch(e) {}
+  loadModels();
+}
+
+async function addHfModel() {
+  var repoId = document.getElementById('hfRepoId').value.trim();
+  if (!repoId) return;
+  // Clean up input — handle full URLs or repo IDs
+  repoId = repoId.replace('https://huggingface.co/', '').replace(/\/$/, '');
+
+  var status = document.getElementById('modelActionStatus');
+  status.textContent = 'Starting download from HuggingFace...';
+  status.style.color = 'var(--text-dim)';
+
+  try {
+    var data = await safeFetch('/api/jobs/download-hf-model', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({repo_id: repoId}),
+    }, { toast: false });
+    status.textContent = 'Downloading...';
+
+    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+      onProgress: function(p) {
+        if (p.current_file) status.textContent = p.current_file;
+      },
+      onComplete: function(result) {
+        if (result.status === 'completed') {
+          status.textContent = 'Downloaded! Model ready to use.';
+          status.style.color = 'var(--accent)';
+          document.getElementById('hfRepoId').value = '';
+        } else {
+          status.textContent = 'Failed: ' + (result.errors || []).join(', ');
+          status.style.color = 'var(--danger)';
+        }
+        loadModels();
+      },
+      onError: function() {
+        status.textContent = 'Connection lost';
+      }
+    });
+  } catch(e) {
+    status.textContent = 'Error: ' + e.message;
+    status.style.color = 'var(--danger)';
+  }
+}
+
+async function addCustomModel() {
+  var name = document.getElementById('customModelName').value.trim();
+  var path = document.getElementById('customModelPath').value.trim();
+  if (!name || !path) return;
+  try {
+    await safeFetch('/api/models/custom', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name: name, weights_path: path}),
+    });
+    document.getElementById('customModelName').value = '';
+    document.getElementById('customModelPath').value = '';
+  } catch(e) {}
+  loadModels();
+}
+
+/* ---------- Taxonomy ---------- */
+async function loadTaxonomy() {
+  try {
+    var d = await safeFetch('/api/taxonomy/info', {}, { toast: false });
+    var html = '';
+    if (d.available) {
+      html += '<div style="display:flex;align-items:center;gap:12px;">';
+      html += '<div>';
+      html += '<div style="font-size:14px;color:var(--text-primary);">iNaturalist Taxonomy</div>';
+      html += '<div style="font-size:12px;color:var(--text-dim);">~' + (d.taxa_count || 0).toLocaleString() + ' taxa';
+      if (d.last_updated) html += ' &middot; Updated ' + d.last_updated;
+      if (d.file_size) html += ' &middot; ' + formatBytes(d.file_size);
+      html += '</div></div>';
+      html += '<button onclick="downloadTaxonomy()" style="margin-left:auto;background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;">Re-download</button>';
+      html += '</div>';
+    } else {
+      html += '<div style="margin-bottom:8px;">';
+      html += '<div style="font-size:13px;color:var(--text-dim);">No taxonomy downloaded.</div>';
+      html += '<div style="font-size:12px;color:var(--text-dim);margin-top:4px;">The taxonomy adds taxonomic hierarchy to predictions (order, family, genus), enables filtering by group (e.g. Raptors, Waterfowl), and auto-types existing and newly-synced keywords as species. Classification works without it — if you don\'t need these features, you can skip this.</div>';
+      html += '</div>';
+      html += '<button onclick="downloadTaxonomy()" style="background:var(--accent);color:var(--accent-text);border:none;border-radius:4px;padding:8px 20px;font-size:13px;cursor:pointer;">Download iNaturalist Taxonomy</button>';
+    }
+    document.getElementById('taxonomyContent').innerHTML = html;
+  } catch(e) {
+    document.getElementById('taxonomyContent').innerHTML = '<span style="color:var(--danger);font-size:13px;">Failed to load</span>';
+  }
+}
+
+async function downloadTaxonomy() {
+  try {
+    var data = await safeFetch('/api/jobs/download-taxonomy', { method: 'POST' }, { toast: false });
+    document.getElementById('taxonomyContent').innerHTML = '<span style="color:var(--text-dim);font-size:13px;">Downloading... (check Jobs panel for progress)</span>';
+    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+      onComplete: function() {
+        loadTaxonomy();
+      }
+    });
+  } catch(e) {}
+}
+
+/* ---------- Dashboard ---------- */
+
+function formatBytes(b) {
+  if (b == null || b === 0) return '0';
+  if (b < 1024) return b + ' B';
+  if (b < 1024 * 1024) return Math.round(b / 1024) + ' KB';
+  if (b < 1024 * 1024 * 1024) return (b / (1024 * 1024)).toFixed(1) + ' MB';
+  return (b / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
+}
+
+/* ---------- Embedding Matrix ---------- */
+async function loadEmbeddingMatrix() {
+  var matrixEl = document.getElementById('matrixContent');
+  if (!matrixEl) return;
+  try {
+    var data = await safeFetch('/api/embedding-matrix', {}, { toast: false });
+    var models = data.models || [];
+    var matrix = data.matrix || [];
+
+    if (models.length === 0 || matrix.length === 0) {
+      matrixEl.innerHTML =
+        '<span style="color:var(--text-faint);font-size:13px;">Download a model and a species list to see the embedding matrix.</span>';
+      return;
+    }
+
+    var html = '<table style="width:100%;border-collapse:collapse;font-size:12px;margin-top:8px;">';
+    html += '<thead><tr><th style="text-align:left;padding:6px 10px;color:var(--text-faint);font-weight:500;border-bottom:1px solid var(--border-primary);">Labels</th>';
+    models.forEach(function(m) {
+      html += '<th style="text-align:center;padding:6px 10px;color:var(--text-faint);font-weight:500;border-bottom:1px solid var(--border-primary);">' + escapeHtml(m.name) + '</th>';
+    });
+    html += '</tr></thead><tbody>';
+
+    matrix.forEach(function(row) {
+      html += '<tr>';
+      html += '<td style="padding:6px 10px;border-bottom:1px solid var(--border-subtle);color:var(--text-secondary);">';
+      html += escapeHtml(row.labels_name) + ' <span style="color:var(--text-ghost);">(' + row.species_count + ')</span>';
+      if (row.unusable) {
+        html += '<div style="font-size:11px;color:var(--warning,#d08700);">no usable species' +
+                (row.skipped ? ' — all ' + row.skipped + ' names are shared by several species' : '') +
+                '; download the list again above</div>';
+      }
+      html += '</td>';
+      models.forEach(function(m) {
+        var cell = row.models[m.id];
+        html += '<td style="text-align:center;padding:6px 10px;border-bottom:1px solid var(--border-subtle);">';
+        if (row.unusable) {
+          html += '<span style="color:var(--text-faint);">—</span>';
+        } else if (cell && cell.cached) {
+          html += '<span style="color:var(--accent);">cached</span>';
+        } else {
+          html += '<button data-model-id="' + escapeAttr(m.id) + '" data-label-path="' + escapeAttr(row.labels_file) + '" onclick="precomputeEmbeddings(this.dataset.modelId,this.dataset.labelPath)" ' +
+            'style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:3px 10px;font-size:11px;cursor:pointer;">Compute</button>';
+        }
+        html += '</td>';
+      });
+      html += '</tr>';
+    });
+    html += '</tbody></table>';
+    matrixEl.innerHTML = html;
+  } catch(e) {
+    matrixEl.innerHTML = '<span style="color:var(--danger);font-size:13px;">Failed to load</span>';
+  }
+}
+
+async function precomputeEmbeddings(modelId, labelsFile) {
+  try {
+    var data = await safeFetch('/api/jobs/precompute-embeddings', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({model_id: modelId, labels_file: labelsFile}),
+    });
+    // Watch for completion and refresh matrix
+    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+      onComplete: function() {
+        loadEmbeddingMatrix();
+      }
+    });
+  } catch(e) {}
+}
+
+/* ---------- Preview Cache ---------- */
+async function loadPreviewCacheStatus() {
+  var statusEl = document.getElementById('previewCacheStatus');
+  var warnEl = document.getElementById('previewCacheWarning');
+  if (!statusEl) return;
+  try {
+    var d = await safeFetch('/api/preview-cache', {}, { toast: false });
+    var usedMb = (d.total_size / 1024 / 1024).toFixed(1);
+    var quotaMb = Math.round(d.quota_bytes / 1024 / 1024);
+    var fileWord = d.count === 1 ? 'file' : 'files';
+    statusEl.textContent = 'Current: ' + usedMb + ' / ' + quotaMb + ' MB (' + d.count + ' ' + fileWord + ')';
+    if (warnEl) {
+      var rec = d.recommended_mb || 0;
+      // Quota=0 means "disabled" — that's a deliberate user choice, not a warning case.
+      if (rec > 0 && quotaMb > 0 && quotaMb < rec) {
+        warnEl.textContent = 'Cache is smaller than your library — previews will regenerate from RAW on every pipeline run. Recommended: ' + rec.toLocaleString() + ' MB.';
+        warnEl.style.display = 'block';
+      } else {
+        warnEl.style.display = 'none';
+      }
+    }
+  } catch(e) {
+    statusEl.textContent = 'Failed to load';
+    if (warnEl) warnEl.style.display = 'none';
+  }
+}
+
+async function clearPreviewCache() {
+  if (!confirm('Clear all cached preview images? They will regenerate on demand from the originals.')) return;
+  var btn = document.getElementById('clearPreviewCacheBtn');
+  if (btn) btn.disabled = true;
+  try {
+    await safeFetch('/api/preview-cache/clear', { method: 'POST' });
+  } catch(e) {}
+  if (btn) btn.disabled = false;
+  loadPreviewCacheStatus();
+}
+
+/* ---------- Detection Cache ---------- */
+async function loadDetectionCacheStats() {
+  var el = document.getElementById('detectionCacheStats');
+  if (!el) return;
+  try {
+    var d = await safeFetch('/api/detection-cache/stats', {}, { toast: false });
+    var pc = d.photo_count || 0;
+    var mc = d.model_count || 0;
+    var photoWord = pc === 1 ? 'photo' : 'photos';
+    var modelWord = mc === 1 ? 'model' : 'models';
+    el.textContent = pc + ' ' + photoWord + ' \u00D7 ' + mc + ' ' + modelWord + ' cached';
+  } catch(e) {
+    el.textContent = 'Failed to load';
+  }
+}
+
+/* ---------- Portable Computation Cache ---------- */
+async function loadComputationCacheStatus() {
+  var el = document.getElementById('computationCacheStatus');
+  if (!el) return;
+  try {
+    var data = await safeFetch('/api/computation-cache', {}, { toast: false });
+    var exportable = data.exportable || {};
+    var runs = (exportable.detector_runs || 0) + (exportable.classifier_runs || 0);
+    var stored = data.object_count || 0;
+    el.textContent = runs.toLocaleString() + ' exportable runs; ' +
+      stored.toLocaleString() + ' imported/local objects (' + formatBytes(data.total_bytes || 0) + ')';
+  } catch (e) {
+    el.textContent = 'Status unavailable';
+  }
+}
+
+function selectedComputationCacheTypes() {
+  var types = [];
+  if (document.getElementById('cacheExportDetections').checked) types.push('detection');
+  if (document.getElementById('cacheExportClassifications').checked) types.push('classification');
+  return types;
+}
+
+function exportComputationCache() {
+  var types = selectedComputationCacheTypes();
+  if (!types.length) {
+    alert('Select at least one result type to export.');
+    return;
+  }
+  var action = document.getElementById('computationCacheAction');
+  action.textContent = 'Preparing download…';
+  window.location.href = '/api/computation-cache/export?types=' + encodeURIComponent(types.join(','));
+  window.setTimeout(function() {
+    action.textContent = 'Download requested. Legacy results without a portable runtime identity are skipped.';
+  }, 500);
+}
+
+async function importComputationCache(file) {
+  if (!file) return;
+  var button = document.getElementById('computationCacheImportBtn');
+  var action = document.getElementById('computationCacheAction');
+  button.disabled = true;
+  action.style.color = 'var(--text-dim)';
+  action.textContent = 'Validating and applying ' + file.name + '…';
+  var form = new FormData();
+  form.append('file', file, file.name);
+  try {
+    var response = await fetch('/api/computation-cache/import', {
+      method: 'POST',
+      body: form,
+    });
+    var data = await response.json().catch(function() { return {}; });
+    if (!response.ok) throw new Error(data.error || response.statusText || 'Import failed');
+    action.style.color = 'var(--accent)';
+    action.textContent = 'Imported ' + (data.added || 0).toLocaleString() +
+      ' new objects; applied ' + (data.detector_runs_applied || 0).toLocaleString() +
+      ' detector and ' + (data.classifier_runs_applied || 0).toLocaleString() +
+      ' classifier runs to ' + (data.matched_photos || 0).toLocaleString() + ' matching photos.';
+    if (data.pinned_older_runtime) {
+      action.textContent += ' ' + data.pinned_older_runtime.toLocaleString() +
+        ' reviewed older results were preserved.';
+    }
+    if (data.unknown_runtime) {
+      action.textContent += ' ' + data.unknown_runtime.toLocaleString() +
+        ' detection object(s) came from a runtime this install does not' +
+        ' recognize and were kept in the local store until matching' +
+        ' weights are installed.';
+    }
+    if (data.classifier_deferred_pending_detection) {
+      action.textContent += ' ' +
+        data.classifier_deferred_pending_detection.toLocaleString() +
+        ' classification object(s) are waiting for a matching detector run' +
+        ' — re-run classification after detection to apply them.';
+    }
+    await loadComputationCacheStatus();
+  } catch (error) {
+    action.style.color = 'var(--danger)';
+    action.textContent = error && error.message ? error.message : 'Import failed';
+  } finally {
+    button.disabled = false;
+  }
+}
+
+/* ---------- Embedding Cache ---------- */
+async function loadEmbeddingCache() {
+  try {
+    var d = await safeFetch('/api/embedding-cache', {}, { toast: false });
+    document.getElementById('embeddingCacheSize').textContent = formatBytes(d.total_size);
+    var entries = d.entries || [];
+    var count = entries.filter(entry => !entry.label_count).length;
+    var labels = entries.reduce((sum, entry) => sum + (entry.label_count || 0), 0);
+    var parts = [];
+    if (count) parts.push(count + ' cached label ' + (count === 1 ? 'set' : 'sets'));
+    if (labels) parts.push(labels.toLocaleString() + ' reusable species labels');
+    document.getElementById('embeddingCacheCount').textContent = parts.join(' · ') || 'empty';
+    document.getElementById('clearCacheBtn').style.display = entries.length > 0 ? '' : 'none';
+  } catch(e) {}
+}
+
+async function clearEmbeddingCache() {
+  if (!confirm('Clear all cached label embeddings? The next classification run will recompute them (slow on CPU).')) return;
+  try {
+    await safeFetch('/api/embedding-cache', { method: 'DELETE' });
+  } catch(e) {}
+  loadEmbeddingCache();
+}
+
+/* ---------- Scan Roots ---------- */
+async function loadScanRoots() {
+  try {
+    var cfg = await safeFetch('/api/config', {}, { toast: false });
+    var roots = cfg.scan_roots || [];
+    if (roots.length === 0) {
+      document.getElementById('scanRootsContent').innerHTML = '<span style="color:var(--text-faint);font-size:13px;">No directories scanned yet. Scan a folder on the Import page to save it here.</span>';
+      return;
+    }
+    var html = '';
+    roots.forEach(function(r, i) {
+      html += '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border-subtle);">';
+      html += '<span style="font-size:13px;color:var(--text-secondary);flex:1;font-family:monospace;">' + escapeHtml(r) + '</span>';
+      html += '<button onclick="removeScanRoot(' + i + ')" style="background:none;border:none;color:var(--text-faint);font-size:14px;cursor:pointer;padding:2px 6px;" title="Remove">&times;</button>';
+      html += '</div>';
+    });
+    document.getElementById('scanRootsContent').innerHTML = html;
+  } catch(e) {
+    document.getElementById('scanRootsContent').innerHTML = '<span style="color:var(--danger);font-size:13px;">Failed to load</span>';
+  }
+}
+
+async function removeScanRoot(index) {
+  try {
+    var cfg = await safeFetch('/api/config', {}, { toast: false });
+    var roots = cfg.scan_roots || [];
+    roots.splice(index, 1);
+    await safeFetch('/api/config', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ scan_roots: roots }),
+    });
+  } catch(e) {}
+  loadScanRoots();
+}
+
+async function cleanKeywords() {
+  var status = document.getElementById('cleanKeywordsStatus');
+  status.textContent = 'Checking...';
+  status.style.color = '';
+  try {
+    var dupes = await safeFetch('/api/keywords/duplicates', {}, { toast: false });
+    if (dupes.length === 0) {
+      status.textContent = 'No duplicates found';
+      status.style.color = 'var(--text-dim)';
+      return;
+    }
+
+    // Build confirmation message
+    var msg = dupes.length + ' duplicate group(s) found:\n\n';
+    dupes.forEach(function(d) {
+      var variants = d.variants.map(function(v) {
+        return '"' + v.name + '" (' + v.photo_count + ' photos)';
+      });
+      msg += '  ' + variants.join(' + ') + '  \u2192  keep "' + d.keep + '"\n';
+    });
+    msg += '\nMerge all duplicates?';
+
+    if (!confirm(msg)) {
+      status.textContent = 'Cancelled';
+      status.style.color = 'var(--text-dim)';
+      return;
+    }
+
+    var data = await safeFetch('/api/keywords/clean', {method: 'POST'}, { toast: false });
+    status.textContent = 'Merged ' + data.merged + ' duplicate(s)';
+    status.style.color = 'var(--accent)';
+  } catch(e) {
+    status.textContent = 'Error: ' + e.message;
+    status.style.color = 'var(--danger)';
+  }
+}
+
+/* ---------- Version ---------- */
+async function loadVersion() {
+  try {
+    var d = await safeFetch('/api/version', {}, { toast: false });
+    var cv = document.getElementById('currentVersion');
+    if (cv) cv.textContent = d.version;
+  } catch(e) {}
+}
+
+/* ---------- Theme Picker ---------- */
+function loadThemePicker() {
+  var themes = window.getThemeList ? window.getThemeList() : [];
+  var current = document.documentElement.getAttribute('data-theme') || 'vireo-dark';
+  var picker = document.getElementById('themePicker');
+  if (!picker || themes.length === 0) return;
+
+  var html = '';
+  themes.forEach(function(t) {
+    var isActive = t.id === current;
+    var borderColor = isActive ? 'var(--accent)' : 'var(--border-secondary)';
+    var bg = isActive ? 'var(--bg-tertiary)' : 'var(--bg-input)';
+    html += '<button onclick="setTheme(\'' + t.id + '\'); loadThemePicker();" ' +
+      'style="background:' + bg + ';color:var(--text-primary);border:2px solid ' + borderColor + ';' +
+      'border-radius:6px;padding:8px 14px;font-size:12px;cursor:pointer;min-width:100px;text-align:center;">' +
+      '<span style="font-size:18px;display:block;margin-bottom:2px;">' + t.icon + '</span>' +
+      t.name +
+    '</button>';
+  });
+  picker.innerHTML = html;
+}
+
+/* ---------- Native file picker ---------- */
+(function() {
+  if (typeof isTauri === 'function' && isTauri()) {
+    document.querySelectorAll('.tauri-only').forEach(function(el) {
+      el.style.display = '';
+    });
+  }
+})();
+
+async function browseForDarktable() {
+  var path = await pickFile({ title: 'Select darktable-cli binary' });
+  if (path) {
+    document.getElementById('cfgDarktableBin').value = path;
+    saveConfig();
+  }
+}
+
+async function browseForDngConverter() {
+  var path = await pickFile({ title: 'Select Adobe DNG Converter binary' });
+  if (path) {
+    document.getElementById('cfgDngConverterBin').value = path;
+    saveConfig();
+    loadDarktableStatus();
+  }
+}
+
+async function browseForOutputDir() {
+  var path = await pickDirectory('Select output directory');
+  if (path) {
+    document.getElementById('cfgDarktableOutputDir').value = path;
+    saveConfig();
+  }
+}
+
+async function browseForWeights() {
+  var path = await pickFile({ title: 'Select model weights file' });
+  if (path) {
+    document.getElementById('customModelPath').value = path;
+  }
+}
+
+/* ---------- Auto-Update (Tauri only) ---------- */
+/* Updater disabled — no update commands registered. Section stays hidden. */
+
+async function doCheckForUpdate() {
+  var btn = document.getElementById('checkUpdateBtn');
+  var status = document.getElementById('updateStatus');
+  var panel = document.getElementById('updateAvailable');
+  btn.disabled = true;
+  status.textContent = 'Checking...';
+  panel.style.display = 'none';
+
+  var result = await checkForAppUpdate();
+  btn.disabled = false;
+  if (!result) {
+    status.textContent = 'Could not reach update server.';
+    return;
+  }
+  if (!result.available) {
+    status.textContent = 'You are on the latest version.';
+    return;
+  }
+  status.textContent = '';
+  document.getElementById('updateVersion').textContent = result.version || '?';
+  document.getElementById('updateNotes').textContent = result.notes || '';
+  panel.style.display = '';
+}
+
+async function doInstallUpdate() {
+  var btn = document.getElementById('installUpdateBtn');
+  var status = document.getElementById('installStatus');
+  btn.disabled = true;
+  status.textContent = 'Downloading and installing...';
+
+  var ok = await downloadAndInstallUpdate();
+  if (ok) {
+    status.textContent = 'Installed! Restarting...';
+    setTimeout(function() { relaunchApp(); }, 1000);
+  } else {
+    btn.disabled = false;
+    status.textContent = 'Install failed. Check logs for details.';
+  }
+}
+
+// --- All settings (schema-rendered, editable) ------------------------------
+
+var ALL_SETTINGS_CACHE = { schema: null, categories: null, values: null };
+// Keyed by `<key>|<scope>` so a quick edit to the same key in a different
+// scope tab can't clear the pending write of the first scope's edit.
+var ALL_SETTINGS_DEBOUNCE = {};
+var ALL_SETTINGS_SCOPE = 'global';  // 'global' | 'workspace'
+
+function setSettingsScope(scope) {
+  if (scope !== 'global' && scope !== 'workspace') return;
+  if (ALL_SETTINGS_SCOPE === scope) return;
+  ALL_SETTINGS_SCOPE = scope;
+  document.querySelectorAll('.scope-tab').forEach(function(b) {
+    b.classList.toggle('active', b.dataset.scope === scope);
+  });
+  renderAllSettings(document.getElementById('allSettingsCategories'));
+  filterAllSettings();
+}
+
+async function loadAllSettings() {
+  var container = document.getElementById('allSettingsCategories');
+  try {
+    var [schemaRes, valuesRes] = await Promise.all([
+      fetch('/api/settings/schema'),
+      fetch('/api/settings/values'),
+    ]);
+    if (!schemaRes.ok || !valuesRes.ok) throw new Error('HTTP error');
+    var schemaData = await schemaRes.json();
+    var values = await valuesRes.json();
+    ALL_SETTINGS_CACHE.schema = schemaData.schema;
+    ALL_SETTINGS_CACHE.categories = schemaData.categories;
+    ALL_SETTINGS_CACHE.values = values;
+    renderAllSettings(container);
+    filterAllSettings();
+  } catch (err) {
+    container.innerHTML = '<span style="color:var(--danger);font-size:13px;">Failed to load settings: '
+      + escapeHtml(err && err.message || String(err)) + '</span>';
+  }
+}
+
+async function refreshAllSettingsValues() {
+  var r = await fetch('/api/settings/values');
+  if (!r.ok) return;
+  ALL_SETTINGS_CACHE.values = await r.json();
+}
+
+function renderAllSettings(container) {
+  var schema = ALL_SETTINGS_CACHE.schema;
+  var categories = ALL_SETTINGS_CACHE.categories;
+  var values = ALL_SETTINGS_CACHE.values;
+  if (!schema || !categories || !values) return;
+
+  var byCategory = {};
+  categories.forEach(function(c) { byCategory[c] = []; });
+  Object.keys(schema).sort().forEach(function(key) {
+    var cat = schema[key].category || 'Other';
+    if (!byCategory[cat]) byCategory[cat] = [];
+    byCategory[cat].push(key);
+  });
+
+  var parts = [];
+  categories.forEach(function(cat) {
+    var keys = byCategory[cat];
+    if (!keys || !keys.length) return;
+    parts.push('<div class="setting-category" data-category="' + escapeAttr(cat) + '" style="margin-top:14px;">');
+    parts.push('<div style="font-size:13px;font-weight:600;color:var(--text-secondary);margin-bottom:6px;border-bottom:1px solid var(--border-primary);padding-bottom:4px;">'
+      + escapeHtml(cat) + '</div>');
+    keys.forEach(function(key) {
+      parts.push(renderSettingRow(key));
+    });
+    parts.push('</div>');
+  });
+  container.innerHTML = parts.join('');
+}
+
+function _settingControlSelector(el) {
+  if (!el || !el.getAttribute) return null;
+  var inputKey = el.getAttribute('data-input-key');
+  if (inputKey) return '[data-input-key="' + cssEscape(inputKey) + '"]';
+  var listKey = el.getAttribute('data-list-key');
+  var listItem = el.getAttribute('data-list-item');
+  if (listKey && listItem != null) {
+    return '[data-list-key="' + cssEscape(listKey) + '"][data-list-item="' + cssEscape(listItem) + '"]';
+  }
+  return null;
+}
+
+function rerenderSettingRow(key) {
+  var row = document.querySelector('#allSettingsCategories .setting-row-card[data-key="' + cssEscape(key) + '"]');
+  if (!row) return;
+  // A save lands asynchronously, and the user may be back in this row's
+  // field. Replacing the row would swallow the keystrokes typed since, so
+  // leave a row that is being edited alone; its own change event saves it
+  // and re-renders then. Otherwise keep focus where it was.
+  var active = document.activeElement;
+  var focusSelector = (active && row.contains(active)) ? _settingControlSelector(active) : null;
+  if (focusSelector && active.dataset && active.dataset.dirty) return;
+  var tmp = document.createElement('div');
+  tmp.innerHTML = renderSettingRow(key);
+  var fresh = tmp.firstElementChild;
+  if (!fresh) return;
+  row.replaceWith(fresh);
+  if (focusSelector) {
+    var target = fresh.querySelector(focusSelector);
+    if (target) {
+      target.focus();
+      try {
+        var end = String(target.value || '').length;
+        target.setSelectionRange(end, end);
+      } catch (e) {}  // number / checkbox inputs have no selection range
+    }
+  }
+}
+
+function cssEscape(s) {
+  if (window.CSS && window.CSS.escape) return window.CSS.escape(s);
+  return String(s).replace(/[^a-zA-Z0-9_-]/g, '\\$&');
+}
+
+function renderSettingRow(key) {
+  var spec = ALL_SETTINGS_CACHE.schema[key];
+  var values = ALL_SETTINGS_CACHE.values;
+  var hasWs = Object.prototype.hasOwnProperty.call(values.workspace, key);
+  var hasGlobal = Object.prototype.hasOwnProperty.call(values['global'], key);
+  var globalOnly = (spec.scope === 'global');
+  var workspaceTab = (ALL_SETTINGS_SCOPE === 'workspace');
+
+  var dotClass, dotTitle;
+  if (workspaceTab) {
+    if (hasWs) {
+      dotClass = 'dot-workspace';
+      dotTitle = 'Set for this workspace';
+    } else if (globalOnly) {
+      dotClass = hasGlobal ? 'dot-global' : 'dot-default';
+      dotTitle = hasGlobal ? 'Global setting (not workspace-overridable)' : 'Global default';
+    } else {
+      dotClass = 'dot-default';
+      dotTitle = hasGlobal ? 'Inheriting global value' : 'Using default';
+    }
+  } else if (hasGlobal) {
+    dotClass = 'dot-global';
+    dotTitle = 'Set globally';
+  } else {
+    dotClass = 'dot-default';
+    dotTitle = 'Using default';
+  }
+
+  // Effective value for the widget on this tab.
+  var rowValue;
+  if (workspaceTab) {
+    if (hasWs) rowValue = values.workspace[key];
+    else if (hasGlobal) rowValue = values['global'][key];
+    else rowValue = values['default'][key];
+  } else {
+    rowValue = hasGlobal ? values['global'][key] : values['default'][key];
+  }
+
+  var defaultVal = values['default'][key];
+  var widget;
+  if (workspaceTab && globalOnly) {
+    widget = '<span style="font-size:11px;color:var(--text-ghost);font-style:italic;">'
+           + 'Global only — switch to Global tab</span>';
+  } else {
+    widget = renderSettingWidget(key, spec, rowValue);
+  }
+
+  var hasOverride = workspaceTab ? hasWs : hasGlobal;
+  var resetBtn = '';
+  if (hasOverride) {
+    var resetTitle = workspaceTab
+      ? 'Remove workspace override (inherit global / default)'
+      : 'Reset to default: ' + formatSettingValue(defaultVal, spec, true);
+    resetBtn = '<button type="button" onclick="resetSchemaSetting(\'' + escapeAttr(key) + '\')" '
+             +    'title="' + escapeAttr(resetTitle) + '" '
+             +    'style="background:transparent;border:1px solid var(--border-secondary);color:var(--text-dim);border-radius:4px;padding:2px 8px;font-size:11px;cursor:pointer;flex-shrink:0;">'
+             +  'Reset</button>';
+  }
+
+  var meta = escapeHtml(key);
+  if (workspaceTab && hasWs) {
+    var inheritedVal = hasGlobal ? values['global'][key] : defaultVal;
+    var inheritLabel = hasGlobal ? 'inherits global' : 'inherits default';
+    meta += ' · ' + inheritLabel + ': ' + escapeHtml(formatSettingValue(inheritedVal, spec, true));
+  } else if (!workspaceTab && hasGlobal) {
+    meta += ' · default: ' + escapeHtml(formatSettingValue(defaultVal, spec, true));
+  }
+  var search = key + ' ' + spec.label + ' ' + spec.desc + ' ' + spec.category;
+  return '<div class="setting-row-card" data-search="' + escapeAttr(search) + '" data-key="' + escapeAttr(key) + '" '
+       +    'style="display:flex;align-items:flex-start;gap:10px;padding:10px 0;border-bottom:1px solid var(--border-primary);">'
+       +   '<span class="provenance-dot ' + dotClass + '" title="' + escapeAttr(dotTitle) + '"></span>'
+       +   '<div style="flex:1;min-width:0;">'
+       +     '<div style="display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap;">'
+       +       '<div style="font-size:13px;color:var(--text-primary);font-weight:500;flex:1;min-width:140px;">' + escapeHtml(spec.label) + '</div>'
+       +       '<div style="display:flex;align-items:center;gap:8px;flex-shrink:0;">'
+       +         widget
+       +         resetBtn
+       +       '</div>'
+       +     '</div>'
+       +     '<div style="font-size:11px;color:var(--text-dim);margin-top:2px;">' + escapeHtml(spec.desc) + '</div>'
+       +     '<div style="display:flex;justify-content:space-between;gap:8px;margin-top:2px;">'
+       +       '<div style="font-size:11px;color:var(--text-ghost);font-family:monospace;">' + meta + '</div>'
+       +       '<div class="setting-row-status" style="font-size:11px;color:var(--text-dim);min-height:14px;"></div>'
+       +     '</div>'
+       +   '</div>'
+       + '</div>';
+}
+
+function renderSettingWidget(key, spec, effective) {
+  var inputStyle = 'background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:3px 8px;font-size:12px;';
+  var keyAttr = 'data-input-key="' + escapeAttr(key) + '"';
+  if (spec.type === 'bool') {
+    return '<input type="checkbox" ' + keyAttr + ' '
+         +     (effective ? 'checked ' : '')
+         +     'onchange="onSchemaInputChange(this, true)" '
+         +     'style="accent-color:var(--accent);transform:scale(1.1);">';
+  }
+  if (spec.type === 'enum') {
+    var opts = (spec.enum || []).map(function(opt) {
+      var label = (spec.enum_labels && spec.enum_labels[opt]) ? spec.enum_labels[opt] : opt;
+      var sel = (opt === effective) ? ' selected' : '';
+      return '<option value="' + escapeAttr(opt) + '"' + sel + '>' + escapeHtml(label) + '</option>';
+    }).join('');
+    if (spec.nullable) {
+      // Prepend the null option (value="" — the settings PATCH endpoint
+      // treats "" as null when spec.nullable is true) so users can pick
+      // "unset" as a first-class choice even after a non-null default has
+      // been assigned globally.
+      var nullLabel = spec.null_label || '(unset)';
+      var nullSel = (effective == null) ? ' selected' : '';
+      opts = '<option value=""' + nullSel + '>' + escapeHtml(nullLabel) + '</option>' + opts;
+    }
+    return '<select ' + keyAttr + ' onchange="onSchemaInputChange(this, true)" '
+         +    'style="' + inputStyle + 'min-width:120px;">'
+         +   opts + '</select>';
+  }
+  // Typed fields (number, secret, text) save on `change` (blur or Enter), not
+  // per keystroke: a debounced save while typing wrote partial values such as
+  // half a path to config, and for the working-copy limit raised the
+  // "remove ~X GB" confirm after the first digit. `dirty` marks a field with
+  // unsaved typing so rerenderSettingRow won't replace it mid-edit.
+  if (spec.type === 'int' || spec.type === 'float') {
+    var step = spec.step != null ? spec.step : (spec.type === 'int' ? 1 : 0.01);
+    var min = spec.min != null ? ' min="' + spec.min + '"' : '';
+    var max = spec.max != null ? ' max="' + spec.max + '"' : '';
+    var val = (effective != null) ? effective : '';
+    return '<input type="number" ' + keyAttr + ' value="' + escapeAttr(String(val)) + '" '
+         +     'step="' + step + '"' + min + max + ' '
+         +     'oninput="this.dataset.dirty = \'1\'" '
+         +     'onchange="delete this.dataset.dirty; onSchemaInputChange(this, true)" '
+     +     'onblur="delete this.dataset.dirty" '
+         +     'style="' + inputStyle + 'width:100px;text-align:right;">';
+  }
+  if (spec.type === 'secret') {
+    var sval = (effective != null) ? String(effective) : '';
+    return '<input type="password" ' + keyAttr + ' value="' + escapeAttr(sval) + '" '
+         +     'placeholder="(unset)" autocomplete="off" '
+         +     'oninput="this.dataset.dirty = \'1\'" '
+         +     'onchange="delete this.dataset.dirty; onSchemaInputChange(this, true)" '
+     +     'onblur="delete this.dataset.dirty" '
+         +     'style="' + inputStyle + 'width:200px;font-family:monospace;">';
+  }
+  if (spec.type === 'list_string') {
+    if (Array.isArray(spec.items_enum)) {
+      var current = Array.isArray(effective) ? effective : [];
+      var checks = spec.items_enum.map(function(item) {
+        var checked = current.indexOf(item) !== -1 ? ' checked' : '';
+        return '<label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--text-secondary);cursor:pointer;">'
+             +   '<input type="checkbox" data-list-item="' + escapeAttr(item) + '" data-list-key="' + escapeAttr(key) + '"' + checked
+             +     ' onchange="onSchemaListChange(\'' + escapeAttr(key) + '\')" style="accent-color:var(--accent);">'
+             +   escapeHtml(item)
+             + '</label>';
+      }).join(' ');
+      return '<div style="display:flex;flex-wrap:wrap;gap:6px;max-width:380px;justify-content:flex-end;">' + checks + '</div>';
+    }
+    // Read-only fallback for list_string without items_enum (e.g. scan_roots).
+    var asText = (Array.isArray(effective) && effective.length) ? effective.join(', ') : '(empty)';
+    return '<span style="font-size:12px;color:var(--text-secondary);font-family:monospace;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block;" title="' + escapeAttr(asText) + '">'
+         +   escapeHtml(asText)
+         + '</span>'
+         + '<span style="font-size:10px;color:var(--text-ghost);margin-left:6px;">(edit above)</span>';
+  }
+  // string / path / fallback
+  var tval = (effective != null) ? String(effective) : '';
+  return '<input type="text" ' + keyAttr + ' value="' + escapeAttr(tval) + '" '
+       +     'placeholder="(empty)" '
+       +     'oninput="this.dataset.dirty = \'1\'" '
+         +     'onchange="delete this.dataset.dirty; onSchemaInputChange(this, true)" '
+     +     'onblur="delete this.dataset.dirty" '
+       +     'style="' + inputStyle + 'width:240px;font-family:monospace;">';
+}
+
+function onSchemaInputChange(el, immediate) {
+  var key = el.getAttribute('data-input-key');
+  if (!key) return;
+  var spec = ALL_SETTINGS_CACHE.schema[key];
+  var raw;
+  if (spec.type === 'bool') {
+    raw = el.checked;
+  } else if (spec.type === 'int' || spec.type === 'float') {
+    raw = el.value;     // server coerces strings to numbers
+  } else {
+    raw = el.value;
+  }
+  scheduleSchemaSave(key, raw, immediate);
+}
+
+function onSchemaListChange(key) {
+  var checked = [];
+  document.querySelectorAll('input[type="checkbox"][data-list-key="' + cssEscape(key) + '"]:checked').forEach(function(cb) {
+    checked.push(cb.getAttribute('data-list-item'));
+  });
+  scheduleSchemaSave(key, checked, true);
+}
+
+function scheduleSchemaSave(key, value, immediate) {
+  // Capture the scope at edit time so a tab switch during the debounce window
+  // doesn't redirect the pending write to the wrong layer.
+  var scope = ALL_SETTINGS_SCOPE;
+  var token = key + '|' + scope;
+  if (ALL_SETTINGS_DEBOUNCE[token]) {
+    clearTimeout(ALL_SETTINGS_DEBOUNCE[token]);
+  }
+  var delay = immediate ? 0 : 300;
+  ALL_SETTINGS_DEBOUNCE[token] = setTimeout(function() {
+    ALL_SETTINGS_DEBOUNCE[token] = null;
+    saveSchemaSetting(key, value, scope);
+  }, delay);
+}
+
+function _settingsScopeBaseFor(scope) {
+  return (scope === 'workspace') ? '/api/settings/workspace' : '/api/settings/global';
+}
+
+function confirmWorkingCopyQuotaReduction(data) {
+  var quotaMb = Number(data.requested_working_copy_quota_mb);
+  var usageBytes = Number(data.current_working_copy_usage_bytes);
+  var quotaBytes = Number.isFinite(quotaMb) ? quotaMb * 1024 * 1024 : 0;
+  var removalBytes = Number.isFinite(usageBytes)
+    ? Math.max(0, usageBytes - quotaBytes)
+    : null;
+  var detail = removalBytes > 0
+    ? 'This will remove approximately ' + formatBytes(removalBytes) +
+      ' of the oldest generated working copies.'
+    : 'If current usage exceeds the new limit, Vireo will remove the oldest generated working copies.';
+  return confirm(
+    'Lower the working-copy storage limit to ' + formatBytes(quotaBytes) + '?\n\n' +
+    detail + '\n\nYour original photos will not be deleted.'
+  );
+}
+
+async function saveSchemaSetting(key, value, scope, confirmedEviction) {
+  if (!scope) scope = ALL_SETTINGS_SCOPE;
+  setRowStatus(key, 'Saving…', false);
+  try {
+    var payload = { key: key, value: value };
+    if (confirmedEviction) payload._confirm_working_copy_eviction = true;
+    var resp = await fetch(_settingsScopeBaseFor(scope), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!resp.ok) {
+      var err = await resp.json().catch(function() { return { error: resp.statusText }; });
+      if (
+        resp.status === 409 && !confirmedEviction &&
+        err.code === 'working_copy_eviction_confirmation_required'
+      ) {
+        if (confirmWorkingCopyQuotaReduction(err)) {
+          return saveSchemaSetting(key, value, scope, true);
+        }
+        await refreshAllSettingsValues();
+        rerenderSettingRow(key);
+        setRowStatus(key, 'Not changed', false);
+        return;
+      }
+      setRowStatus(key, err.error || 'Save failed', true);
+      return;
+    }
+    await refreshAllSettingsValues();
+    rerenderSettingRow(key);
+    // The curated forms above this panel post full snapshots from their own
+    // inputs. Repopulate those inputs from the server so a later curated
+    // edit doesn't overwrite the value we just saved with a stale snapshot —
+    // both the global form (`saveConfig`) and the workspace-overrides form
+    // (`saveWsConfig`, which sends `null` for unchecked rows and would clear
+    // a freshly-saved override).
+    if (scope === 'global') await loadConfig();
+    else if (scope === 'workspace') await loadWsOverrides();
+    setRowStatus(key, '✓ Saved', false);
+    setTimeout(function() { setRowStatus(key, '', false); }, 1500);
+  } catch (err) {
+    setRowStatus(key, 'Network error', true);
+  }
+}
+
+async function resetSchemaSetting(key, confirmedEviction) {
+  setRowStatus(key, 'Resetting…', false);
+  try {
+    var scope = ALL_SETTINGS_SCOPE;
+    // Cancel any pending debounced autosave for this key+scope. Without
+    // this, a still-queued PATCH from a recent edit would fire 300ms after
+    // the DELETE and re-create the override, making Reset appear to "not
+    // stick" depending on click timing.
+    var token = key + '|' + scope;
+    if (ALL_SETTINGS_DEBOUNCE[token]) {
+      clearTimeout(ALL_SETTINGS_DEBOUNCE[token]);
+      ALL_SETTINGS_DEBOUNCE[token] = null;
+    }
+    var resp = await fetch(_settingsScopeBaseFor(scope) + '/' + encodeURIComponent(key), {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(confirmedEviction
+        ? { _confirm_working_copy_eviction: true }
+        : {}),
+    });
+    if (!resp.ok) {
+      var err = await resp.json().catch(function() { return { error: resp.statusText }; });
+      if (
+        resp.status === 409 && !confirmedEviction &&
+        err.code === 'working_copy_eviction_confirmation_required'
+      ) {
+        if (confirmWorkingCopyQuotaReduction(err)) {
+          return resetSchemaSetting(key, true);
+        }
+        await refreshAllSettingsValues();
+        rerenderSettingRow(key);
+        setRowStatus(key, 'Not changed', false);
+        return;
+      }
+      setRowStatus(key, err.error || 'Reset failed', true);
+      return;
+    }
+    await refreshAllSettingsValues();
+    rerenderSettingRow(key);
+    if (scope === 'global') await loadConfig();
+    else if (scope === 'workspace') await loadWsOverrides();
+  } catch (err) {
+    setRowStatus(key, 'Network error', true);
+  }
+}
+
+function setRowStatus(key, msg, isError) {
+  var row = document.querySelector('#allSettingsCategories .setting-row-card[data-key="' + cssEscape(key) + '"]');
+  if (!row) return;
+  var status = row.querySelector('.setting-row-status');
+  if (!status) return;
+  status.textContent = msg;
+  status.style.color = isError ? 'var(--danger)' : 'var(--text-dim)';
+}
+
+function formatSettingValue(v, spec, mask) {
+  if (v === undefined || v === null) return '';
+  if (spec.type === 'bool') return v ? 'true' : 'false';
+  if (spec.type === 'secret') {
+    if (!v) return '(unset)';
+    return mask ? '••••••••' : String(v);
+  }
+  if (spec.type === 'enum') {
+    if (spec.enum_labels && spec.enum_labels[v]) return spec.enum_labels[v];
+    return String(v);
+  }
+  if (spec.type === 'list_string') {
+    if (!Array.isArray(v) || v.length === 0) return '(empty)';
+    return v.join(', ');
+  }
+  if (spec.type === 'string' || spec.type === 'path') {
+    if (v === '') return '(empty)';
+    return String(v);
+  }
+  return String(v);
+}
+
+async function importSettingsFile(file) {
+  if (!file) return;
+  if (!confirm('Replace your global Vireo config with "' + file.name + '"?\n\nWorkspace overrides are not affected.')) {
+    return;
+  }
+  var text;
+  try {
+    text = await file.text();
+  } catch (err) {
+    alert('Could not read file: ' + (err && err.message || err));
+    return;
+  }
+  // Cancel any queued debounced autosaves first — a PATCH or a curated
+  // /api/config / /api/workspaces/active/config snapshot save that fires
+  // mid-import would clobber part of the just-restored config.
+  Object.keys(ALL_SETTINGS_DEBOUNCE).forEach(function(token) {
+    if (ALL_SETTINGS_DEBOUNCE[token]) {
+      clearTimeout(ALL_SETTINGS_DEBOUNCE[token]);
+      ALL_SETTINGS_DEBOUNCE[token] = null;
+    }
+  });
+  // Only the global config chain is cancelled: the import replaces global
+  // config and leaves workspace overrides alone, so an override save may
+  // keep going and must not be dropped (the override form is not reloaded
+  // afterwards, and a dropped edit would stay on screen unsaved).
+  //
+  // A curated config save whose debounce already fired may be queued
+  // behind an in-flight POST; it would read the pre-import form when its
+  // turn came and post that snapshot over the imported config. Drop queued
+  // saves, wait for the in-flight one to settle, and keep autosave off
+  // until the form has been reloaded from the imported config. Remember
+  // whether an edit was dropped so it can be re-queued if the import does
+  // not go through (the form would otherwise show an unsaved value).
+  var hadPendingConfigSave = _saveStatus.pending.config !== undefined;
+  if (typeof _saveTimer !== 'undefined' && _saveTimer) {
+    clearTimeout(_saveTimer);
+    _saveTimer = null;
+  }
+  _autosaveSuspended = true;
+  await _cancelQueuedSaves('config');
+  var imported = false;
+  var formReloaded = false;
+  var confirmedEviction = false;
+  try {
+    while (true) {
+      var resp = await fetch('/api/settings/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          json: text,
+          _confirm_working_copy_eviction: confirmedEviction,
+        }),
+      });
+      var data = await resp.json().catch(function() { return {}; });
+      if (
+        resp.status === 409 && !confirmedEviction &&
+        data.code === 'working_copy_eviction_confirmation_required'
+      ) {
+        if (!confirmWorkingCopyQuotaReduction(data)) return;
+        confirmedEviction = true;
+        continue;
+      }
+      if (!resp.ok) {
+        var msg = data.error || resp.statusText || 'Import failed';
+        if (data.errors) {
+          msg += '\n\nFailed keys:\n' + Object.keys(data.errors).map(function(k) {
+            return '  ' + k + ': ' + data.errors[k];
+          }).join('\n');
+        }
+        alert(msg);
+        return;
+      }
+      break;
+    }
+    // The server has committed the import at this point; everything below
+    // is UI refresh. Flag it now so a refresh failure can't be mistaken
+    // for an aborted import (which would re-post the stale form over it).
+    imported = true;
+    // The import is a successful write of the whole global config, so a
+    // failure left over from an earlier autosave no longer describes what
+    // is on disk.
+    _saveStatusMark('config', 'ok', _nextSaveGen());
+    await refreshAllSettingsValues();
+    renderAllSettings(document.getElementById('allSettingsCategories'));
+    filterAllSettings();
+    // Curated form posts its own snapshot — repull so a later edit doesn't
+    // overwrite imported global values with stale form state.
+    // loadConfig() swallows fetch failures (it has to on first paint), so
+    // check its result rather than assume the form now matches disk.
+    formReloaded = await loadConfig();
+    if (!formReloaded) return;
+    alert('Settings imported. Workspace overrides preserved.');
+  } catch (err) {
+    alert('Network error: ' + (err && err.message || err));
+  } finally {
+    if (imported && !formReloaded) {
+      // The config on disk is the imported one but the form could not be
+      // refreshed from it. Re-enabling autosave here would let the next
+      // ordinary edit post the stale form over the import, so keep it off
+      // and reload the page, which rebuilds the form from disk.
+      alert('Settings imported, but the page could not refresh. Reloading.');
+      location.reload();
+    } else {
+      _autosaveSuspended = false;
+      // The import did not replace the config, so the edit we dropped (or
+      // one made while the import was running) is still the user's intent
+      // and still on screen: save it after all.
+      if (!imported && (hadPendingConfigSave || _editedWhileSuspended)) saveConfig();
+    }
+    _editedWhileSuspended = false;
+  }
+}
+
+function filterAllSettings() {
+  var q = (document.getElementById('allSettingsSearch').value || '').trim();
+  var searchOptions = VireoTextSearch.readOptions('allSettings');
+  var rows = document.querySelectorAll('#allSettingsCategories .setting-row-card');
+  rows.forEach(function(row) {
+    row.style.display = (!q || VireoTextSearch.matchesFields(
+      row.getAttribute('data-search') || '',
+      q,
+      searchOptions
+    )) ? '' : 'none';
+  });
+  document.querySelectorAll('#allSettingsCategories .setting-category').forEach(function(cat) {
+    var anyVisible = false;
+    cat.querySelectorAll('.setting-row-card').forEach(function(r) {
+      if (r.style.display !== 'none') anyVisible = true;
+    });
+    cat.style.display = anyVisible ? '' : 'none';
+  });
+}
