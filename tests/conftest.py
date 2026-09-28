@@ -1,4 +1,5 @@
 import os
+import shutil
 import sys
 
 import pytest
@@ -16,6 +17,29 @@ def _disable_startup_backfill_timers(monkeypatch):
     monkeypatch.setenv("VIREO_DISABLE_STARTUP_BACKFILL_TIMERS", "1")
     monkeypatch.setenv("VIREO_DISABLE_BROWSER_AUTH", "1")
     monkeypatch.setenv("VIREO_REQUIRE_EXIFTOOL_FOR_IMPORT", "0")
+
+
+_REAL_DISK_USAGE = shutil.disk_usage
+
+
+@pytest.fixture(autouse=True)
+def _ample_free_disk(monkeypatch):
+    """Report ample free space unless a test fakes its own.
+
+    Work Locally, managed imports and staging refuse to start without room
+    for the copy plus a reserve of up to tens of GB, measured with
+    ``shutil.disk_usage``. Left real, every such test failed whenever the
+    machine running it was low on space (145 of them below ~20 GB free). A
+    test about low-space handling patches ``disk_usage`` itself, which
+    overrides this.
+    """
+    def disk_usage(path):
+        real = _REAL_DISK_USAGE(path)  # still raises for a missing path
+        total = max(real.total, 4 * 1024**4)
+        free = max(real.free, total // 2)
+        return type(real)(total, total - free, free)
+
+    monkeypatch.setattr(shutil, "disk_usage", disk_usage)
 
 
 @pytest.fixture(autouse=True)

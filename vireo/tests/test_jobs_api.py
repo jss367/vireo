@@ -11333,7 +11333,13 @@ def test_interrupted_import_resume_tags_the_carried_photos(
         })
         assert resp.status_code == 200, resp.get_json()
         parent_id = resp.get_json()["job_id"]
-        parent = wait_for_job_via_client(client, parent_id)
+        # The job reads as finished before its thread writes the final
+        # history row; wait for that write to land, or _persist_job can
+        # commit the completed result AFTER the sweep replays the crash,
+        # reverting the row so the resume sees a completed parent and
+        # never tags the carried photos (`_interrupted_parent_resume`
+        # returns None; owed stays empty).
+        parent = wait_for_job_via_client(client, parent_id, wait_for_history=True)
         final = parent["result"]
         assert final["photo_ids"]
 
