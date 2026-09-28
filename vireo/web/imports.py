@@ -1025,8 +1025,12 @@ def create_imports_blueprint(
             # during which the page showed nothing, a superseded preview
             # could not be stopped (no yield, so no disconnect), and every
             # re-run started the whole hash over. The request's own DB is
-            # closed once the view returns, so the stream opens its own.
-            with Database(db_path) as index_db:
+            # closed once the view returns, so the stream opens its own --
+            # without re-running the schema pass, which app startup already
+            # did (the request connection skips it the same way).
+            with Database(
+                db_path, initialize_schema=(db_path == ":memory:"),
+            ) as index_db:
                 for checked, missing in recover_companion_identities(index_db):
                     yield f"data: {json.dumps({'catalog_recovery': {'checked': checked, 'total': missing}})}\n\n"
                 checker = DuplicateChecker(
