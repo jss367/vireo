@@ -127,6 +127,66 @@ def test_superseded_browse_read_answers_quietly(app_and_db, monkeypatch, caplog,
     assert send({}).status_code == 200
 
 
+def test_superseded_response_skips_slow_request_warning(app_and_db, monkeypatch, caplog):
+    """A pause of more than 0.5s before the next keystroke leaves the older
+    calendar or summary GET running past the slow-request threshold. When it
+    is interrupted, the after-hook must not add a misleading WARNING on top of
+    the quiet INFO the error handler already logged."""
+    import web.app_hooks as app_hooks
+    app, _ = app_and_db
+    lanes = SearchLanes()
+    monkeypatch.setattr(search_lanes, "SEARCH_LANES", lanes)
+    monkeypatch.setattr(search_lanes, "PROGRESS_INSTRUCTIONS", 1)
+    # Advance every clock read by 10s so elapsed is well past 0.5s without
+    # actually sleeping. Only ``_start_timer`` and ``_log_requests`` call
+    # ``time.time`` through this module reference.
+    tick = [0.0]
+
+    def fake_time():
+        tick[0] += 10.0
+        return tick[0]
+
+    monkeypatch.setattr(app_hooks.time, "time", fake_time)
+    client = app.test_client()
+    lane = "page:calendar"
+    lanes.claim(lane, 2)
+    with caplog.at_level(logging.WARNING):
+        stale = client.get(
+            "/api/photos/calendar?year=2024",
+            headers={"X-Vireo-Search-Lane": lane, "X-Vireo-Search-Seq": "1"},
+        )
+    assert stale.status_code == 409, stale.get_json()
+    assert stale.get_json()["code"] == "search_superseded"
+    slow_warnings = [
+        r for r in caplog.records
+        if r.levelno >= logging.WARNING and "Slow request" in r.getMessage()
+    ]
+    assert not slow_warnings, [r.getMessage() for r in slow_warnings]
+
+
+def test_slow_non_superseded_request_still_warns(app_and_db, monkeypatch, caplog):
+    """The warning suppression is scoped to superseded responses only; an
+    ordinary slow GET must still produce the WARNING that operators rely on."""
+    import web.app_hooks as app_hooks
+    app, _ = app_and_db
+    tick = [0.0]
+
+    def fake_time():
+        tick[0] += 10.0
+        return tick[0]
+
+    monkeypatch.setattr(app_hooks.time, "time", fake_time)
+    client = app.test_client()
+    with caplog.at_level(logging.WARNING):
+        resp = client.get("/api/browse/summary")
+    assert resp.status_code == 200
+    slow_warnings = [
+        r for r in caplog.records
+        if r.levelno >= logging.WARNING and "Slow request" in r.getMessage()
+    ]
+    assert slow_warnings, [r.getMessage() for r in caplog.records]
+
+
 def test_summary_route_claims_its_lane(app_and_db, monkeypatch):
     """Each opted-in route installs the handler on its own request DB."""
     app, _ = app_and_db

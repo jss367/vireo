@@ -237,7 +237,10 @@ def register_app_hooks(app, *, get_db, reservation_exempt_endpoints):
                     detail,
                     getattr(g, "request_id", "-"),
                 )
-            elif elapsed > 0.5:
+            elif elapsed > 0.5 and not getattr(g, "search_superseded_response", False):
+                # A superseded read was interrupted on purpose; its elapsed
+                # time is how long the page waited before the next keystroke,
+                # not a real slow request.
                 log.warning(
                     "Slow request: %s %s took %.1fs request_id=%s",
                     request.method,
@@ -295,6 +298,7 @@ def register_app_hooks(app, *, get_db, reservation_exempt_endpoints):
             # The page already sent a newer request for this loader and will
             # ignore this response; the interrupt is the point, not a fault.
             log.info("Superseded: %s %s", request.method, request.path)
+            g.search_superseded_response = True
             return json_error(
                 "A newer request replaced this one", 409,
                 code=search_lanes.SUPERSEDED_CODE,
