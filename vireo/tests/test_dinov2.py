@@ -1030,18 +1030,14 @@ def test_ensure_dinov2_weights_rolls_back_sidecar_if_graph_replace_fails(
 
     _install_fake_hf(monkeypatch, fake_hf_hub_download)
 
-    # Make the graph replace (second os.replace call) blow up while the
-    # sidecar replace (first call) succeeds.
+    # Make the graph promote blow up while the sidecar backup and promote
+    # succeed. The lock never clears: replace_file retries a transient
+    # Windows lock, so a lock that lifts after one attempt would (rightly)
+    # be absorbed there and never reach the rollback under test.
     real_replace = os.replace
-    calls = {"n": 0}
 
     def flaky_replace(src, dst):
-        calls["n"] += 1
-        # Call sequence inside the try block:
-        #   1. backup old sidecar   → allow
-        #   2. promote new sidecar  → allow
-        #   3. promote new graph    → BOOM (simulate Windows lock)
-        if calls["n"] == 3:
+        if os.fspath(dst) == str(model_path):
             raise PermissionError("simulated file-lock on model.onnx")
         return real_replace(src, dst)
 
