@@ -813,11 +813,12 @@ function formatDuration(seconds) {
   var _jobPollTimer = null;
   var _navJobPollTimer = null;
 
-  // Job polls pause while the window is hidden, except while a job is
-  // running: the dock/taskbar progress is read from a minimized window.
+  // Job polls pause while the window is hidden, except while a job is live:
+  // the dock/taskbar progress is read from a minimized window. (``active``
+  // also carries jobs that finished within the last hour.)
   function startJobPoll(intervalMs) {
     return Vireo.pollWhileVisible(pollJobs, intervalMs, {
-      runWhileHidden: function() { return activeJobs.length > 0; },
+      runWhileHidden: function() { return activeJobs.some(isLiveJob); },
     });
   }
   function stopJobPoll(poll) {
