@@ -2155,6 +2155,18 @@ def _extract_deferred_working_copies(state, params, runner, job, db):
             state.cancelled = True
 
 
+class ResumeCheckpointFailed(RuntimeError):
+    """The required resume checkpoint flush could not reach disk.
+
+    Raised before a batch is cataloged when the history row cannot be
+    updated with this batch's landed files. Aborting here — rather than
+    cataloging with a stale resume scope — keeps a crash after the
+    catalog commit from silently dropping the batch out of a resume: the
+    physical files stay on disk uncataloged and a subsequent retry
+    picks them up through the ordinary adoption path.
+    """
+
+
 def _landed_identity(path):
     """``[size, mtime_ns]`` of the file at ``path``, or None if unreadable."""
     try:
@@ -2220,6 +2232,12 @@ def _publish_resume_scope(job, db, state, source_snapshots, runner=None,
     as already imported while omitting them from the carried scope, so
     their working-copy recovery and requested processing would silently
     be dropped.
+
+    When ``require_flush`` is True and the runner cannot land the write
+    (SQLite write-locked through the retry window), raises
+    ``ResumeCheckpointFailed`` instead of returning: cataloging the
+    batch on top of a stale row would reintroduce the very window this
+    call exists to close.
     """
     fresh = state.imported_photo_ids.difference(
         int(pid) for pid in state.resume_fingerprints
@@ -2235,12 +2253,15 @@ def _publish_resume_scope(job, db, state, source_snapshots, runner=None,
         "landed_files": dict(state.landed_files),
     }
     if runner is not None and require_flush:
-        # The landed paths must be on disk before the batch is cataloged.
+        # The landed files must be on disk before the batch is cataloged.
         if not runner.flush_partial_result(job):
-            log.warning(
-                "Import %s: could not record landed paths before cataloging; "
-                "a crash now could leave this batch out of a resume",
+            log.error(
+                "Import %s: could not record landed files before cataloging; "
+                "aborting the batch so a resume can adopt these files later",
                 job.get("id"),
+            )
+            raise ResumeCheckpointFailed(
+                "resume checkpoint could not be flushed before catalog commit"
             )
     elif runner is not None:
         # Best-effort synchronous flush. ``checkpoint_live_jobs`` swallows
