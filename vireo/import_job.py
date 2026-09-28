@@ -2196,9 +2196,11 @@ def _record_landed_files(job, db, state, batch_st, source_snapshots, runner):
     """
     for landed in batch_st.landed:
         path = os.path.normpath(landed.dest_path)
-        identity = _landed_identity(path)
-        if identity is not None:
-            state.landed_files[path] = identity + [landed.verified_hash]
+        # A stat that fails right now (a network archive hiccup) must not
+        # drop the landing from the record; the verified hash alone still
+        # lets a resume match the cataloged row.
+        identity = _landed_identity(path) or [-1, -1]
+        state.landed_files[path] = identity + [landed.verified_hash]
     return _publish_resume_scope(
         job, db, state, source_snapshots, runner=runner, require_flush=True,
     )

@@ -15098,3 +15098,27 @@ def test_stop_while_waiting_before_planning_skips_the_card_walk(
     ), runner=StoppedRunner())
     assert planned == []
     assert result["cancelled"] is True and result["copied"] == 0
+
+
+def test_landing_whose_stat_fails_stays_in_the_record(tmp_path, monkeypatch):
+    """A just-landed file whose stat fails is still recorded (by its
+    verified hash), so a resume can recover its cataloged row."""
+    import import_job
+    from import_job import ImportParams, _ImportRunState, _recover_parent_landings
+
+    card = _make_card(tmp_path, [
+        ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+    ])
+    monkeypatch.setattr(import_job, "_landed_identity", lambda path: None)
+    db, _ws, result = _run_import(tmp_path, ImportParams(
+        sources=[str(card)], destination=str(tmp_path / "archive"),
+    ))
+    (path, identity), = result["landed_files"].items()
+    assert identity[:2] == [-1, -1] and identity[2]
+
+    state = _ImportRunState(log_label="test")
+    _recover_parent_landings(state, ImportParams(
+        sources=[str(card)], destination=str(tmp_path / "archive"),
+        recover_landed_files=result["landed_files"],
+    ), db)
+    assert state.recovered_photo_ids == {r["id"] for r in _photo_rows(db)}
