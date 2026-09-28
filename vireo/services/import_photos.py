@@ -985,6 +985,19 @@ def enqueue_import_photos(service: ImportService, db: Database, body: dict) -> d
                 f"failed to enqueue processing: {e}"
             )
 
+    def _mark_post_import_step(job, step):
+        """Record a finished post-import step on the history row now.
+
+        A restart before the runner writes the final result leaves the row
+        marked interrupted; these marks tell a resume which side effects
+        already happened (``_interrupted_parent_resume``) so it doesn't
+        tag, collect or chain the same photos twice.
+        """
+        job["partial_result"] = {
+            **(job.get("partial_result") or {}), step: True,
+        }
+        runner.flush_partial_result(job)
+
     def work(job):
         from import_job import ImportParams, run_import_job
 
@@ -1046,10 +1059,13 @@ def enqueue_import_photos(service: ImportService, db: Database, body: dict) -> d
             carried = set(carry_photo_ids or ())
             tag_photo_ids = list(result.get("photo_ids") or [])
             seen = set(tag_photo_ids)
-            for pid in [
+            owed = [
                 pid for pid in (parent_resume or {}).get("untagged_ids", [])
                 if pid in carried
-            ] + list(result.get("recovered_photo_ids") or []):
+            ]
+            if parent_resume and not parent_resume["tags_applied"]:
+                owed += list(result.get("recovered_photo_ids") or [])
+            for pid in owed:
                 if pid not in seen:
                     seen.add(pid)
                     tag_photo_ids.append(pid)
@@ -1057,12 +1073,14 @@ def enqueue_import_photos(service: ImportService, db: Database, body: dict) -> d
                 active_ws, tag_photo_ids, import_tags,
                 location_from_gps, result, job=job, runner=runner,
             )
+            _mark_post_import_step(job, "tags_applied")
             # Atomically honor a pending pause/cancel before collection
             # publication and child-job handoff. The shared runner gate
             # rejects new requests once this final phase begins.
             if not runner.begin_uncancellable(job["id"]):
                 result["cancelled"] = True
             _chain_after_import(job, result)
+            _mark_post_import_step(job, "chained")
             return result
         finally:
             # run_import_job can flip destination folders from

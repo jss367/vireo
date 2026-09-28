@@ -725,6 +725,7 @@ def test_jobs_page_returns_200(app_and_db):
     # resume recovered from its interrupted parent.
     assert b"['photo_ids', 'carried_photo_ids', 'recovered_photo_ids']" in resp.data
     assert b'result.interrupted && Array.isArray(result.photo_ids)' in resp.data
+    assert b'!result.chained' in resp.data
     # Resume must force ``skip_duplicates=true`` — a parent import
     # configured with ``skip_duplicates=false`` would otherwise carry
     # that false through ``importRetryBody`` and the collision resolver
@@ -11643,6 +11644,55 @@ def test_resume_of_an_interrupted_retry_leaves_inherited_tags_alone(
             "SELECT COUNT(*) FROM photo_keywords WHERE photo_id IN (%s)"
             % ",".join("?" * len(inherited)),
             inherited,
+        ).fetchone()[0]
+        assert tagged == 0
+
+
+def test_resume_skips_post_import_steps_its_parent_finished(
+    app_and_db, tmp_path,
+):
+    """The import marks each post-import step on its checkpoint as it
+    finishes. A parent that applied its tags before the restart must not
+    have them re-applied (the user may have edited them since)."""
+    app, db = app_and_db
+    card = _chain_card(tmp_path)
+    tag_name = "Kenya trip"
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/import-photos", json={
+            "sources": [str(card)],
+            "destination": str(tmp_path / "arch"),
+            "tags": [tag_name],
+        })
+        assert resp.status_code == 200, resp.get_json()
+        parent_id = resp.get_json()["job_id"]
+        parent = wait_for_job_via_client(client, parent_id)["result"]
+        own = parent["photo_ids"]
+        with app._job_runner._lock:
+            marks = app._job_runner._jobs[parent_id]["partial_result"]
+        assert marks["tags_applied"] is True and marks["chained"] is True
+
+        _interrupt_import_row(app, db, parent_id, {
+            "landed_files": parent["landed_files"],
+            "photo_ids": own,
+            "photo_fingerprints": parent["photo_fingerprints"],
+            "source_snapshots": parent["source_snapshots"],
+            "tags_applied": True,
+        })
+        db.conn.execute(
+            "DELETE FROM photo_keywords WHERE photo_id IN (%s)"
+            % ",".join("?" * len(own)),
+            own,
+        )
+        db.conn.commit()
+        resp = client.post(
+            "/api/jobs/import-photos", json=_resume_body(client, parent_id),
+        )
+        assert resp.status_code == 200, resp.get_json()
+        wait_for_job_via_client(client, resp.get_json()["job_id"])
+        tagged = db.conn.execute(
+            "SELECT COUNT(*) FROM photo_keywords WHERE photo_id IN (%s)"
+            % ",".join("?" * len(own)),
+            own,
         ).fetchone()[0]
         assert tagged == 0
 

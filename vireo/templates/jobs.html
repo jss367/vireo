@@ -777,8 +777,12 @@
   // list would silently leave them unprocessed.
   function isResumableImport(job) {
     var result = job && job.result;
+    // An import whose after-import chain ran before the restart finished
+    // everything but the final write; resuming would collect and process
+    // its photos twice.
     return !!(job && job.type === 'import' && job.status === 'failed' &&
-      result && result.interrupted && Array.isArray(result.photo_ids));
+      result && result.interrupted && Array.isArray(result.photo_ids) &&
+      !result.chained);
   }
 
   function importResumeHint(job) {

@@ -808,8 +808,11 @@ class ImportService:
     def _interrupted_parent_resume(parent_config, parent_result):
         """What a resume inherits from an interrupted parent (see
         ``_validate_parent_import_job``); None for any other parent."""
-        if not parent_result.get("interrupted"):
+        # A parent that finished its after-import chain before the restart
+        # has nothing left to resume; its row only missed the final write.
+        if not parent_result.get("interrupted") or parent_result.get("chained"):
             return None
+        tags_applied = bool(parent_result.get("tags_applied"))
 
         def ids(values):
             return [
@@ -832,7 +835,9 @@ class ImportService:
                 **files(parent_config.get("recover_landed_files")),
                 **files(parent_result.get("landed_files")),
             },
-            "untagged_ids": sorted(set(
+            # Its tag/GPS pass covered everything it owed once it ran.
+            "tags_applied": tags_applied,
+            "untagged_ids": [] if tags_applied else sorted(set(
                 ids(parent_result.get("photo_ids"))
                 + ids(parent_config.get("untagged_photo_ids"))
             )),
