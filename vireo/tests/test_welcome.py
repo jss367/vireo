@@ -1,6 +1,8 @@
 import os
 import sys
 
+from page_scripts import page_with_scripts
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
@@ -310,7 +312,7 @@ def test_settings_embedding_precompute_failure_shows_job_error(app_and_db):
     client = app.test_client()
     resp = client.get("/settings")
     assert resp.status_code == 200
-    html = resp.get_data(as_text=True)
+    html = page_with_scripts(client, "/settings")
     assert "(result.errors && result.errors[0])" in html
     assert "result.failure && result.failure.message" in html
     assert (

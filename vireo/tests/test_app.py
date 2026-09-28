@@ -17117,7 +17117,7 @@ def test_collection_pickers_disable_degraded_collections(app_and_db):
     app, _db = app_and_db
     client = app.test_client()
     for route in ("/review", "/cull", "/id-conflicts", "/pipeline/review", "/browse"):
-        html = client.get(route).get_data(as_text=True)
+        html = _page_with_scripts(client, route)
         assert "count_error" in html, (
             f"{route} does not check count_error on its collection picker"
         )
