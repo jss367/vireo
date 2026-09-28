@@ -985,16 +985,18 @@ def enqueue_import_photos(service: ImportService, db: Database, body: dict) -> d
                 f"failed to enqueue processing: {e}"
             )
 
-    def _mark_post_import_step(job, step):
+    def _mark_post_import_step(job, step, result=None):
         """Record a finished post-import step on the history row now.
 
         A restart before the runner writes the final result leaves the row
         marked interrupted; these marks tell a resume which side effects
         already happened (``_interrupted_parent_resume``) so it doesn't
-        tag, collect or chain the same photos twice.
+        tag, collect or chain the same photos twice. ``result``, once the
+        run is otherwise done, rides along so the row still carries what
+        an ordinary retry needs (``failed`` and the rest).
         """
         job["partial_result"] = {
-            **(job.get("partial_result") or {}), step: True,
+            **(job.get("partial_result") or {}), **(result or {}), step: True,
         }
         runner.flush_partial_result(job)
 
@@ -1080,7 +1082,7 @@ def enqueue_import_photos(service: ImportService, db: Database, body: dict) -> d
             if not runner.begin_uncancellable(job["id"]):
                 result["cancelled"] = True
             _chain_after_import(job, result)
-            _mark_post_import_step(job, "chained")
+            _mark_post_import_step(job, "chained", result)
             return result
         finally:
             # run_import_job can flip destination folders from

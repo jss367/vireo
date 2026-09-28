@@ -795,14 +795,42 @@ class ImportService:
         parent_source_snapshots = parent_result.get("source_snapshots")
         if not isinstance(parent_source_snapshots, dict):
             parent_source_snapshots = None
+        parent_resume = self._interrupted_parent_resume(
+            parent_config, parent_result,
+        )
+        if parent_resume is not None and self._chained_job_exists(
+            db, parent_id,
+        ):
+            # The restart landed after the parent handed its photos to
+            # processing but before its ``chained`` mark reached the row.
+            # Resuming would collect and process them a second time.
+            return None, None, None, None, None, ImportFailure(
+                "This import had already started processing its photos "
+                "before Vireo restarted, so there is nothing to resume. "
+                "Check the Jobs page for that processing run.",
+                409,
+            )
         return (
             parent_config,
             allowed_ids,
             allowed_fingerprints,
             parent_source_snapshots,
-            self._interrupted_parent_resume(parent_config, parent_result),
+            parent_resume,
             None,
         )
+
+    def _chained_job_exists(self, db, parent_id):
+        """Whether any job records ``parent_id`` as the import it was
+        chained from (the after-import processing run). ``enqueue_pipeline``
+        persists the queued row, so this survives a restart."""
+        for job in self.get_runner().list_jobs():
+            if (job.get("config") or {}).get("chained_from") == parent_id:
+                return True
+        return db.conn.execute(
+            "SELECT 1 FROM job_history "
+            "WHERE json_extract(config, '$.chained_from') = ? LIMIT 1",
+            (parent_id,),
+        ).fetchone() is not None
 
     @staticmethod
     def _interrupted_parent_resume(parent_config, parent_result):

@@ -7374,6 +7374,10 @@ def test_each_resume_scope_publish_is_flushed_before_the_next_batch(
         sources=[str(card)], destination=str(archive),
     ), runner=runner)
 
+    # Discovery can be slow, so the very first publish is an empty scope
+    # from before planning: a restart then still leaves a resumable row.
+    assert interleaving[0]["photo_ids"] == ()
+
     # One publish before the batch loop and one after each of the three
     # batches — no publish may complete without a synchronous flush.
     assert len(interleaving) >= 4, interleaving

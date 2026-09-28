@@ -4620,6 +4620,9 @@ def run_import_job(job, runner, db_path, workspace_id, params):
     # transpositions survive a positional unpack and the parity test).
     # ``plan.files``/``plan.timestamps`` are consumed inside the planner;
     # the loop below works from ``batches``.
+    # Discovery can take minutes on a large card. Publish an empty scope
+    # first, so a restart during it still leaves a resumable row.
+    _publish_resume_scope(job, db, state, None, runner=runner, require_flush=True)
     plan = _plan_import(db, params, _emit, state)
     discovered = plan.discovered
     source_snapshots = plan.source_snapshots

@@ -11217,15 +11217,6 @@ def test_interrupted_import_resumes_with_the_photos_it_landed(
         assert partial["photo_fingerprints"] == final["photo_fingerprints"]
         assert partial["source_snapshots"] == final["source_snapshots"]
 
-        # Replay the crash: the row holds the checkpoint, the process is
-        # gone, and the next start's sweep marks it interrupted.
-        with runner._lock:
-            runner._jobs.pop(parent_id)
-        db.conn.execute(
-            "UPDATE job_history SET status = 'running', result = ? "
-            "WHERE id = ?",
-            (json.dumps(partial), parent_id),
-        )
         # The interrupted run never reached its working-copy pass.
         seed_ids = partial["photo_ids"]
         db.conn.execute(
@@ -11234,8 +11225,9 @@ def test_interrupted_import_resumes_with_the_photos_it_landed(
             seed_ids,
         )
         db.conn.commit()
-        runner._startup_sweep(db)
-        db.conn.commit()
+        # Replay the crash: the row holds the checkpoint, the process is
+        # gone, and the next start's sweep marks it interrupted.
+        _interrupt_import_row(app, db, parent_id, partial)
         row = next(
             h for h in client.get("/api/jobs/history").get_json()
             if h["id"] == parent_id
@@ -11420,12 +11412,26 @@ def test_interrupted_import_resume_tags_the_carried_photos(
         assert current_kw == keyword_id
 
 
-def _interrupt_import_row(app, db, job_id, result):
+def _interrupt_import_row(app, db, job_id, result, *, chained=False):
     """Replay a crash: the history row holds ``result`` as its last
-    checkpoint, the process is gone, and the next start sweeps it."""
+    checkpoint, the process is gone, and the next start sweeps it. Unless
+    ``chained``, the crash came before the import chained its processing
+    run, so that run never existed."""
     runner = app._job_runner
     with runner._lock:
         runner._jobs.pop(job_id, None)
+        if not chained:
+            for other_id in [
+                jid for jid, j in runner._jobs.items()
+                if (j.get("config") or {}).get("chained_from") == job_id
+            ]:
+                runner._jobs.pop(other_id)
+    if not chained:
+        db.conn.execute(
+            "DELETE FROM job_history "
+            "WHERE json_extract(config, '$.chained_from') = ?",
+            (job_id,),
+        )
     db.conn.execute(
         "UPDATE job_history SET status = 'running', result = ? WHERE id = ?",
         (json.dumps(result), job_id),
@@ -11670,6 +11676,10 @@ def test_resume_skips_post_import_steps_its_parent_finished(
         with app._job_runner._lock:
             marks = app._job_runner._jobs[parent_id]["partial_result"]
         assert marks["tags_applied"] is True and marks["chained"] is True
+        # Chained carries the final result, so a row the restart caught
+        # right after it still offers an ordinary retry of failed files.
+        assert marks["failed"] == parent["failed"]
+        assert marks["photo_ids"] == parent["photo_ids"]
 
         _interrupt_import_row(app, db, parent_id, {
             "landed_files": parent["landed_files"],
@@ -11695,6 +11705,36 @@ def test_resume_skips_post_import_steps_its_parent_finished(
             own,
         ).fetchone()[0]
         assert tagged == 0
+
+
+def test_resume_refuses_a_parent_that_already_chained_processing(
+    app_and_db, tmp_path,
+):
+    """A restart after the import queued its processing run, but before
+    its ``chained`` mark reached the row, must not resume: the queued run
+    records ``chained_from``, and resuming would process the photos
+    twice."""
+    app, db = app_and_db
+    quick_look_id = next(
+        pr["id"] for pr in db.get_saved_processes()
+        if pr["name"] == "Quick look")
+    card = _chain_card(tmp_path)
+    with app.test_client() as client:
+        parent_id = _post_import(client, card, tmp_path / "arch", quick_look_id)
+        parent = wait_for_job_via_client(client, parent_id)["result"]
+        wait_for_job_via_client(client, parent["process_job_id"])
+        _interrupt_import_row(app, db, parent_id, {
+            "landed_files": parent["landed_files"],
+            "photo_ids": parent["photo_ids"],
+            "photo_fingerprints": parent["photo_fingerprints"],
+            "source_snapshots": parent["source_snapshots"],
+            "tags_applied": True,
+        }, chained=True)
+        resp = client.post(
+            "/api/jobs/import-photos", json=_resume_body(client, parent_id),
+        )
+        assert resp.status_code == 409, resp.get_json()
+        assert "nothing to resume" in resp.get_json()["error"]
 
 
 def test_failed_file_retry_leaves_carried_photos_tags_alone(
