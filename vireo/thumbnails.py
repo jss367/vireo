@@ -7,6 +7,7 @@ import tempfile
 from datetime import UTC, datetime
 
 from camera_denoise import cache_matches, cache_save_options
+from file_replace import replace_file
 from image_loader import (
     RAW_DECODE_LINEAR,
     RAW_EXTENSIONS,
@@ -326,7 +327,7 @@ def generate_thumbnail(
     os.close(fd)
     try:
         img.save(tmp_path, "JPEG", quality=quality, **cache_save_options(camera_metadata, recipe))
-        os.replace(tmp_path, thumb_path)
+        replace_file(tmp_path, thumb_path)
     except Exception:
         with contextlib.suppress(OSError):
             os.unlink(tmp_path)

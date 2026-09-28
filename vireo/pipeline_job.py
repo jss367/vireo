@@ -26,6 +26,7 @@ import uuid
 from functools import partial
 
 from db import Database, commit_with_retry
+from file_replace import replace_file
 from job_contract import progress_event
 from pipeline_locks import (
     acquire_workspace_regroup,
@@ -160,7 +161,7 @@ class _StagedMaskFile:
     def install(self):
         """Atomically publish the new generation at its unique path."""
         _fsync_mask_file(self.staged_path)
-        os.replace(self.staged_path, self.final_path)
+        replace_file(self.staged_path, self.final_path)
         self.installed = True
         _fsync_mask_directory(os.path.dirname(self.final_path))
 

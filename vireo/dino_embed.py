@@ -13,6 +13,7 @@ import threading
 
 import numpy as np
 import onnx_runtime
+from file_replace import replace_file
 
 log = logging.getLogger(__name__)
 
@@ -188,16 +189,16 @@ def ensure_dinov2_weights(variant="vit-b14", progress_callback=None):
             # old-graph mismatch on disk that the noop check would
             # short-circuit on the next run.
             if had_prior_sidecar:
-                os.replace(data_path, data_backup_path)
+                replace_file(data_path, data_backup_path)
             try:
-                os.replace(tmp_data_path, data_path)
-                os.replace(tmp_path, model_path)
+                replace_file(tmp_data_path, data_path)
+                replace_file(tmp_path, model_path)
             except Exception:
                 with contextlib.suppress(OSError):
                     os.unlink(data_path)
                 if had_prior_sidecar:
                     with contextlib.suppress(OSError):
-                        os.replace(data_backup_path, data_path)
+                        replace_file(data_backup_path, data_path)
                 raise
             else:
                 if had_prior_sidecar:

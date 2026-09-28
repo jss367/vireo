@@ -14,7 +14,7 @@ import tempfile
 import threading
 
 import model_verify
-from config import _replace_with_windows_retry
+from file_replace import replace_file
 
 log = logging.getLogger(__name__)
 
@@ -239,7 +239,7 @@ def _atomic_write_bytes(dest, raw_bytes):
             f.write(raw_bytes)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp_path, dest)
+        replace_file(tmp_path, dest)
     except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(tmp_path)
@@ -367,7 +367,7 @@ def _save_config(config):
             f.flush()
             os.fsync(f.fileno())
         with _FILE_IO_LOCK:
-            _replace_with_windows_retry(tmp_path, CONFIG_PATH)
+            replace_file(tmp_path, CONFIG_PATH)
     except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(tmp_path)
@@ -984,7 +984,7 @@ def _hf_download_with_retry(repo_id, filename, local_dir,
                     # same file never share one staging inode.
                     with _staged_sibling(dest_path) as tmp_path:
                         shutil.copy2(cached_path, tmp_path)
-                        os.replace(tmp_path, dest_path)
+                        replace_file(tmp_path, dest_path)
                 else:
                     # Weights: copy straight into place so a download
                     # never needs 2x the model size on disk. A failed
@@ -1679,7 +1679,7 @@ def ensure_timm_label_descriptions(model_dir, model_str, progress_callback=None)
             # existence at `target` would suppress every later repair.
             if label_descriptions_usable(scratch_target):
                 try:
-                    os.replace(scratch_target, target)
+                    replace_file(scratch_target, target)
                 except OSError as e:
                     log.warning(
                         "Could not publish healed label_descriptions.json "
@@ -1729,7 +1729,7 @@ def ensure_timm_label_descriptions(model_dir, model_str, progress_callback=None)
                 # the empty/partial target this path exists to prevent.
                 f.flush()
                 os.fsync(f.fileno())
-            os.replace(tmp_target, target)
+            replace_file(tmp_target, target)
     except OSError as e:
         # Losing the publish race is not a failure to heal. On Windows two
         # os.replace calls onto one destination serialize and the loser

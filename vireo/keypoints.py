@@ -19,6 +19,7 @@ import threading
 
 import numpy as np
 import onnx_runtime
+from file_replace import replace_file
 
 log = logging.getLogger(__name__)
 
@@ -122,7 +123,7 @@ def ensure_keypoint_weights(model_name, progress_callback=None):
                 # model dir so the inference code can find it consistently.
                 tmp = final_path + ".download"
                 shutil.copy2(cached, tmp)
-                os.replace(tmp, final_path)
+                replace_file(tmp, final_path)
         except Exception as e:
             raise RuntimeError(
                 f"Failed to download {model_name} weights: {e}. "

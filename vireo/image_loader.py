@@ -39,6 +39,7 @@ import threading
 from collections import OrderedDict
 from pathlib import Path
 
+from file_replace import replace_file
 from PIL import Image, ImageOps
 
 log = logging.getLogger(__name__)
@@ -845,7 +846,7 @@ def extract_working_copy(
         img.save(tmp_path, "JPEG", quality=quality)
         guard = publication_guard() if publication_guard else contextlib.nullcontext()
         with guard:
-            os.replace(tmp_path, output_path)
+            replace_file(tmp_path, output_path)
             if on_publish is not None:
                 try:
                     on_publish(output_path)

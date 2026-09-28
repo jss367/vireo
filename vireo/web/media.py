@@ -35,6 +35,7 @@ from artifact_flight import (
 )
 from camera_denoise import cache_matches as _camera_cache_matches
 from camera_denoise import render_cache_fields as _camera_render_cache_fields
+from file_replace import replace_file
 from flask import (
     Blueprint,
     Response,
@@ -2644,7 +2645,7 @@ def create_media_blueprint(
             try:
                 img.save(tmp_path, format="JPEG", quality=quality)
                 with preparation_publication():
-                    os.replace(tmp_path, cache_path)
+                    replace_file(tmp_path, cache_path)
                     _peg_render_mtime_to_source(cache_path, photo)
             except Exception:
                 with contextlib.suppress(OSError):
@@ -2856,7 +2857,7 @@ def create_media_blueprint(
             """
             try:
                 with preparation_publication():
-                    os.replace(tmp_path, wc_abs)
+                    replace_file(tmp_path, wc_abs)
                     if primary_is_raw:
                         # The display cache-hit check compares against
                         # ``max(mtime(image_path), mtime(companion))``.
@@ -3046,7 +3047,7 @@ def create_media_blueprint(
             )
             os.close(fd)
             try:
-                os.replace(tmp_path, transient_path)
+                replace_file(tmp_path, transient_path)
             except OSError:
                 log.exception(
                     "Failed to relocate rendition %s to transient path %s",
@@ -3309,7 +3310,7 @@ def create_media_blueprint(
         try:
             img.save(tmp_path, format="JPEG", quality=quality)
             with preparation_publication():
-                os.replace(tmp_path, cache_path)
+                replace_file(tmp_path, cache_path)
                 if primary_is_raw:
                     # The unedited RAW display cache-hit check compares
                     # against ``max(mtime(image_path), mtime(companion))``.

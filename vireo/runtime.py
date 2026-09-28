@@ -19,6 +19,8 @@ import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
 
+from file_replace import replace_file
+
 try:
     import fcntl  # POSIX
     _HAS_FCNTL = True
@@ -98,7 +100,7 @@ def write_runtime_json(
             view = view[n:]
     finally:
         os.close(fd)
-    os.replace(tmp, path)
+    replace_file(tmp, path)
 
 
 def read_runtime_json() -> dict | None:

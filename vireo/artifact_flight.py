@@ -16,6 +16,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TypeVar
 
+from file_replace import replace_file
+
 T = TypeVar("T")
 
 
@@ -122,7 +124,7 @@ def atomic_write_bytes(data: bytes, destination: str) -> None:
         # Flush the completed bytes before the name becomes visible.  The
         # directory fsync below is available on POSIX; os.replace remains the
         # atomic visibility boundary on every supported platform.
-        os.replace(temporary, destination)
+        replace_file(temporary, destination)
         if os.name != "nt":
             # Some mounted filesystems reject directory fsync even though the
             # atomic rename itself succeeded. Treat the extra durability flush

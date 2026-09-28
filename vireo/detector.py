@@ -8,6 +8,7 @@ import os
 import threading
 
 import numpy as np
+from file_replace import replace_file
 from resource_ledger import ResourceWaitCancelled
 
 log = logging.getLogger(__name__)
@@ -101,7 +102,7 @@ def ensure_megadetector_weights(progress_callback=None):
             # threads only ever observe either the old (missing) state or a
             # fully written weights file — never a partial copy.
             shutil.copy2(cached_path, tmp_path)
-            os.replace(tmp_path, MEGADETECTOR_ONNX_PATH)
+            replace_file(tmp_path, MEGADETECTOR_ONNX_PATH)
         except Exception as e:
             import contextlib
 

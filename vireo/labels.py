@@ -14,6 +14,7 @@ import urllib.request
 from collections import OrderedDict
 
 import certifi
+from file_replace import replace_file
 
 log = logging.getLogger(__name__)
 
@@ -608,7 +609,7 @@ def _atomic_write_text(path, text):
         # which cannot represent U+02BB at all.
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
-        os.replace(tmp_path, path)
+        replace_file(tmp_path, path)
     except Exception:
         with contextlib.suppress(OSError):
             os.unlink(tmp_path)

@@ -24,6 +24,7 @@ import config as cfg
 from best_batch import best_batch_scope, build_best_batch_response
 from camera_denoise import render_cache_fields as _camera_render_cache_fields
 from db import Database
+from file_replace import replace_file
 from flask import Blueprint, after_this_request, jsonify, request
 from highlights_payload import photo_highlight_entries
 from photo_payload import (
@@ -1833,7 +1834,7 @@ def create_photos_blueprint(
                 os.close(fd)
                 fd = None
                 rendered.save(tmp_path, format="JPEG", quality=quality)
-                os.replace(tmp_path, out_path)
+                replace_file(tmp_path, out_path)
                 with open(meta_path, "w", encoding="utf-8") as f:
                     json.dump(expected_meta, f, sort_keys=True)
             except Exception:

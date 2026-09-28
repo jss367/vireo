@@ -18,6 +18,7 @@ from contextlib import suppress
 from pathlib import Path
 
 from export import export_photos, sanitize_filename
+from file_replace import replace_file
 from metadata import _exiftool_command, find_exiftool
 from proc import no_window_kwargs
 
@@ -246,7 +247,7 @@ def export_inat_photo(
                 staged_path,
                 stat.S_IMODE(os.stat(rendered_path).st_mode),
             )
-            os.replace(staged_path, final_path)
+            replace_file(staged_path, final_path)
             staged_path = None
         except OSError as exc:
             for cleanup_path in (staged_path, final_path):

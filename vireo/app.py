@@ -27,6 +27,7 @@ from db import (
     Database,
     IncompatibleDatabaseError,
 )
+from file_replace import replace_file
 from flask import (
     Flask,
 )
@@ -539,7 +540,7 @@ def _move_to_volume_trash(filepath):
             # ``os.replace`` (not ``os.rename``) so the O_EXCL placeholder we
             # just reserved is overwritten. POSIX rename replaces silently,
             # but Windows rename raises when the destination exists.
-            os.replace(filepath, reserved)
+            replace_file(filepath, reserved)
         except OSError:
             # A network filesystem can commit a rename but lose the success
             # response. Never unlink ``reserved`` unless it is still the exact
