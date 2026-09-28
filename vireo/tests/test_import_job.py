@@ -19,6 +19,7 @@ class FakeRunner:
         self.events = []
         self.step_updates = []
         self.cancelled_ids = set()
+        self.checkpoint_calls = 0
 
     def push_event(self, job_id, event_type, data):
         self.events.append((job_id, event_type, data))
@@ -45,6 +46,13 @@ class FakeRunner:
         # No pause request → return immediately; report cancellation so
         # callers that want cancel-through-pause behavior still see it.
         return job_id in self.cancelled_ids
+
+    def checkpoint_live_jobs(self):
+        # Called synchronously by ``_publish_resume_scope`` so a crash
+        # between a batch commit and the next checkpoint tick can't
+        # leave an older ``photo_ids`` list on the interrupted row.
+        self.checkpoint_calls += 1
+        return 0
 
 
 def test_catalog_scan_preservation_pause_publishes_paused_without_cancelling(
@@ -7312,6 +7320,68 @@ def test_result_carries_imported_photo_ids(tmp_path):
     )
     assert rerun_result["photo_ids"] == []
     assert rerun_result["skipped_duplicate"] == 2
+
+
+def test_each_resume_scope_publish_is_flushed_before_the_next_batch(
+    tmp_path, monkeypatch,
+):
+    """Codex PR #1842 P1: ``_publish_resume_scope`` must persist its scope
+    synchronously. If a batch commits, the scope is only staged in memory,
+    and Vireo dies before the runner's 2s checkpoint thread ticks, the
+    interrupted row keeps an older ``photo_ids`` list — a resume with
+    ``skip_duplicates=true`` then skips those files as already imported
+    while omitting them from the carried scope, so their working-copy
+    recovery and requested processing are silently dropped. The publish
+    hands the runner a ``checkpoint_live_jobs`` call so the row is on
+    disk before the loop returns.
+    """
+    import import_job
+    from import_job import ImportParams
+
+    # Force multiple batches so we see the pre-batch publish AND at least
+    # one post-batch publish inside ``run_import_job``.
+    monkeypatch.setattr(import_job, "IMPORT_BATCH_SIZE", 1)
+
+    card = _make_card(tmp_path, [
+        ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+        ("DSC_0002.jpg", datetime(2026, 7, 4, 9, 0, 0), "green"),
+        ("DSC_0003.jpg", datetime(2026, 7, 5, 8, 0, 0), "blue"),
+    ])
+    archive = tmp_path / "archive"
+
+    interleaving = []
+    real_publish = import_job._publish_resume_scope
+
+    def spy_publish(job, db_, state, source_snapshots, runner=None):
+        # Before the publish: how many syncs the fake runner has seen.
+        before = runner.checkpoint_calls if runner is not None else None
+        real_publish(job, db_, state, source_snapshots, runner=runner)
+        after = runner.checkpoint_calls if runner is not None else None
+        interleaving.append({
+            "before": before,
+            "after": after,
+            "photo_ids": tuple(job["partial_result"]["photo_ids"]),
+        })
+
+    monkeypatch.setattr(import_job, "_publish_resume_scope", spy_publish)
+
+    runner = FakeRunner()
+    _run_import(tmp_path, ImportParams(
+        sources=[str(card)], destination=str(archive),
+    ), runner=runner)
+
+    # One publish before the batch loop and one after each of the three
+    # batches — no publish may complete without a synchronous flush.
+    assert len(interleaving) >= 4, interleaving
+    for entry in interleaving:
+        assert entry["before"] is not None and entry["after"] is not None, entry
+        assert entry["after"] == entry["before"] + 1, entry
+
+    # The scope grows monotonically: each publish sees what the previous
+    # ones already landed, so a resume built from any intermediate
+    # checkpoint carries every prior batch.
+    photo_id_lengths = [len(e["photo_ids"]) for e in interleaving]
+    assert photo_id_lengths == sorted(photo_id_lengths), photo_id_lengths
 
 
 def test_progress_events_carry_live_per_folder_counts(tmp_path):

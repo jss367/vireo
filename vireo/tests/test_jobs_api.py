@@ -11187,8 +11187,8 @@ def test_interrupted_import_resumes_with_the_photos_it_landed(
     partials = {}
     real_publish = import_job._publish_resume_scope
 
-    def recording_publish(job, db_, state, source_snapshots):
-        real_publish(job, db_, state, source_snapshots)
+    def recording_publish(job, db_, state, source_snapshots, runner=None):
+        real_publish(job, db_, state, source_snapshots, runner=runner)
         partials[job["id"]] = job["partial_result"]
 
     monkeypatch.setattr(import_job, "_publish_resume_scope", recording_publish)

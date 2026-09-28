@@ -2141,15 +2141,21 @@ def _extract_deferred_working_copies(state, params, runner, job, db):
             state.cancelled = True
 
 
-def _publish_resume_scope(job, db, state, source_snapshots):
+def _publish_resume_scope(job, db, state, source_snapshots, runner=None):
     """Publish what a Resume needs if Vireo dies before this run finishes.
 
     The runner checkpoints ``partial_result`` onto the job's history row
     and the startup sweep keeps it on the interrupted row, so a recovery
     retry can carry the photos this run already landed (with the same
     identity and source checks a finished run's result offers). Each
-    publish is a fresh dict: the checkpoint thread serializes it outside
-    the worker.
+    publish is a fresh dict, and when ``runner`` is passed we flush the
+    checkpoint synchronously: without it the 2s checkpoint thread is the
+    only path to disk, and a crash between a batch commit and its next
+    tick would keep an older ``photo_ids`` list on the interrupted row —
+    a resume with ``skip_duplicates=true`` would then skip those files
+    as already imported while omitting them from the carried scope, so
+    their working-copy recovery and requested processing would silently
+    be dropped.
     """
     fresh = state.imported_photo_ids.difference(
         int(pid) for pid in state.resume_fingerprints
@@ -2163,6 +2169,13 @@ def _publish_resume_scope(job, db, state, source_snapshots):
         "photo_fingerprints": dict(state.resume_fingerprints),
         "source_snapshots": source_snapshots,
     }
+    if runner is not None:
+        # Best-effort synchronous flush. ``checkpoint_live_jobs`` swallows
+        # transient ``OperationalError`` on its own — a checkpoint that
+        # can't grab the lock right now will still be retried by the 2s
+        # timer thread, so the failure mode degrades to the pre-fix
+        # window rather than losing the batch.
+        runner.checkpoint_live_jobs()
 
 
 def _add_carried_working_copy_folders(state, params, db):
@@ -4511,7 +4524,7 @@ def run_import_job(job, runner, db_path, workspace_id, params):
     appeared = plan.appeared
     checker = plan.checker
     batches = plan.batches
-    _publish_resume_scope(job, db, state, source_snapshots)
+    _publish_resume_scope(job, db, state, source_snapshots, runner=runner)
 
     # --- Ledger -----------------------------------------------------
     # Every discovered file ends in exactly one terminal bucket on
@@ -4822,7 +4835,7 @@ def run_import_job(job, runner, db_path, workspace_id, params):
         _link_twins_and_emit(
             state, batch_st, db, workspace_id, _emit, rel, queued,
         )
-        _publish_resume_scope(job, db, state, source_snapshots)
+        _publish_resume_scope(job, db, state, source_snapshots, runner=runner)
         if state.cancelled:
             break
 
