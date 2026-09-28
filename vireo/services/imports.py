@@ -854,8 +854,9 @@ class ImportService:
             return {
                 path: list(identity) for path, identity in values.items()
                 if isinstance(path, str) and path
-                and isinstance(identity, list) and len(identity) == 2
-                and all(isinstance(v, int) for v in identity)
+                and isinstance(identity, list) and len(identity) == 3
+                and all(isinstance(v, int) for v in identity[:2])
+                and isinstance(identity[2], str)
             }
 
         return {

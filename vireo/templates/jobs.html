@@ -1679,20 +1679,12 @@
       // below can restore it exactly — dropping to a generic "Retry
       // failed files" would silently hide the real failed-file count.
       var retryOriginalLabel = retryImportBtn.textContent;
+      // Resume keeps the parent's ``skip_duplicates`` like any retry:
+      // with it off, the collision walk still adopts each file the parent
+      // already landed (byte-identical at its destination path) instead
+      // of copying it again, and files the parent never reached are
+      // copied as the user asked.
       var isResume = retryImportBtn.hasAttribute('data-import-resume');
-      // Resume must always let the metadata-first duplicate gate skip
-      // the parent's already-landed files. ``importRetryBody`` inherits
-      // the parent's ``skip_duplicates`` so a failed-file retry with the
-      // user's explicit ``skip_duplicates=false`` doesn't silently skip
-      // its own retargeted files as duplicates of some unrelated
-      // catalog row (see the rationale in ``importRetryBody``). For
-      // Resume the interrupted parent's landed files ARE the source
-      // files, so preserving false would send the collision resolver
-      // down the suffixed-copy path — duplicating catalog rows and
-      // running the after-import process over both the carried
-      // originals and the new copies, despite the button hint
-      // promising the imported files won't be copied again.
-      if (isResume) retryBody.skip_duplicates = true;
       retryImportBtn.disabled = true;
       retryImportBtn.textContent = isResume ? 'Resuming…' : 'Starting retry…';
       fetch('/api/jobs/import-photos', {

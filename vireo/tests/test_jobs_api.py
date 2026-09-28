@@ -732,7 +732,9 @@ def test_jobs_page_returns_200(app_and_db):
     # would suffix-copy every previously-landed file, duplicating
     # catalog rows and chaining after-import over both the carried
     # originals and the new copies.
-    assert b'if (isResume) retryBody.skip_duplicates = true;' in resp.data
+    # Resume keeps the parent's duplicate setting (the collision walk
+    # adopts the parent's landings either way).
+    assert b'retryBody.skip_duplicates = true' not in resp.data
     # Import-in-place's overall counter pauses during discovery/metadata.
     # The jobs page must not turn that pause into a growing ETA or keep
     # rendering the previous source's filenames under the new phase.
@@ -11419,13 +11421,19 @@ def _interrupt_import_row(app, db, job_id, result, *, chained=False):
     run, so that run never existed."""
     runner = app._job_runner
     with runner._lock:
+        chained_ids = [
+            jid for jid, j in runner._jobs.items()
+            if (j.get("config") or {}).get("chained_from") == job_id
+        ]
+    # Let each chained run land its final history row first, or it could
+    # write it back after the delete below.
+    for other_id in chained_ids:
+        wait_for_job_via_runner(runner, other_id, wait_for_history=True)
+    with runner._lock:
         runner._jobs.pop(job_id, None)
         if not chained:
-            for other_id in [
-                jid for jid, j in runner._jobs.items()
-                if (j.get("config") or {}).get("chained_from") == job_id
-            ]:
-                runner._jobs.pop(other_id)
+            for other_id in chained_ids:
+                runner._jobs.pop(other_id, None)
     if not chained:
         db.conn.execute(
             "DELETE FROM job_history "
@@ -11735,6 +11743,73 @@ def test_resume_refuses_a_parent_that_already_chained_processing(
         )
         assert resp.status_code == 409, resp.get_json()
         assert "nothing to resume" in resp.get_json()["error"]
+
+
+def test_resume_with_duplicate_skipping_off_adopts_the_parents_landings(
+    app_and_db, tmp_path,
+):
+    """Resume keeps the parent's ``skip_duplicates=False``. The parent's
+    files are adopted where they landed (no second copy), photos it
+    tagged are not tagged again, and processing still covers them."""
+    app, db = app_and_db
+    card = _chain_card(tmp_path, n=3)
+    for i, color in enumerate(("red", "green", "blue")):
+        path = card / f"DSC_{i:04d}.jpg"
+        stat = path.stat()
+        Image.new("RGB", (16, 16), color).save(str(path))
+        os.utime(str(path), (stat.st_atime, stat.st_mtime))
+    archive = tmp_path / "arch"
+    tag_name = "Kenya trip"
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/import-photos", json={
+            "sources": [str(card)],
+            "destination": str(archive),
+            "skip_duplicates": False,
+            "tags": [tag_name],
+        })
+        assert resp.status_code == 200, resp.get_json()
+        parent_id = resp.get_json()["job_id"]
+        parent = wait_for_job_via_client(client, parent_id)["result"]
+        landed = sorted(parent["photo_ids"])
+        _interrupt_import_row(app, db, parent_id, {
+            "landed_files": parent["landed_files"],
+            "photo_ids": landed[:1],
+            "photo_fingerprints": {
+                str(landed[0]): parent["photo_fingerprints"][str(landed[0])],
+            },
+            "source_snapshots": parent["source_snapshots"],
+            "tags_applied": True,
+        })
+        db.conn.execute(
+            "DELETE FROM photo_keywords WHERE photo_id IN (%s)"
+            % ",".join("?" * len(landed)),
+            landed,
+        )
+        db.conn.commit()
+        body = _resume_body(client, parent_id)
+        body["skip_duplicates"] = False
+        resp = client.post("/api/jobs/import-photos", json=body)
+        assert resp.status_code == 200, resp.get_json()
+        result = wait_for_job_via_client(
+            client, resp.get_json()["job_id"])["result"]
+
+        assert result["copied"] == 0
+        assert sorted(result["parent_landing_ids"]) == landed
+        files = sorted(
+            name for _root, _dirs, names in os.walk(archive)
+            for name in names if not name.startswith(".")
+        )
+        assert files == ["DSC_0000.jpg", "DSC_0001.jpg", "DSC_0002.jpg"]
+        assert db.conn.execute(
+            "SELECT COUNT(*) FROM photos p JOIN folders f ON f.id = p.folder_id "
+            "WHERE f.path LIKE ?", (str(archive) + "%",),
+        ).fetchone()[0] == 3
+        tagged = db.conn.execute(
+            "SELECT COUNT(*) FROM photo_keywords WHERE photo_id IN (%s)"
+            % ",".join("?" * len(landed)),
+            landed,
+        ).fetchone()[0]
+        assert tagged == 0
 
 
 def test_failed_file_retry_leaves_carried_photos_tags_alone(

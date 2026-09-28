@@ -15009,7 +15009,13 @@ def test_resume_recovers_a_raw_through_its_recorded_companion(
     jpeg_landing = {jpeg_path: result["landed_files"][jpeg_path]}
     assert recovered(jpeg_landing) == {raw_row["id"]}
     # A path the parent never recorded recovers nothing.
-    assert recovered({str(archive / "elsewhere.jpg"): [1, 1]}) == set()
+    assert recovered({str(archive / "elsewhere.jpg"): [1, 1, "x"]}) == set()
+    # The RAW's own landing matches by the row's cataloged hash; a
+    # different recorded hash (a replacement rescanned since) does not.
+    raw_path = next(p for p in result["landed_files"] if p.endswith(".NEF"))
+    raw_landing = result["landed_files"][raw_path]
+    assert recovered({raw_path: raw_landing}) == {raw_row["id"]}
+    assert recovered({raw_path: raw_landing[:2] + ["0" * 64]}) == set()
     # Nor does a recorded path whose file was replaced since.
     with open(jpeg_path, "ab") as f:
         f.write(b"replaced")

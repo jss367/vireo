@@ -1059,14 +1059,20 @@ def enqueue_import_photos(service: ImportService, db: Database, body: dict) -> d
             # re-resolving GPS for those would overwrite any location the
             # user has corrected since.
             carried = set(carry_photo_ids or ())
-            tag_photo_ids = list(result.get("photo_ids") or [])
+            # With duplicate skipping off, the parent's landings come back
+            # as this run's adoptions; they are tagged only if owed.
+            parent_landings = set(result.get("parent_landing_ids") or [])
+            tag_photo_ids = [
+                pid for pid in result.get("photo_ids") or []
+                if pid not in parent_landings
+            ]
             seen = set(tag_photo_ids)
             owed = [
                 pid for pid in (parent_resume or {}).get("untagged_ids", [])
                 if pid in carried
             ]
             if parent_resume and not parent_resume["tags_applied"]:
-                owed += list(result.get("recovered_photo_ids") or [])
+                owed += sorted(parent_landings)
             for pid in owed:
                 if pid not in seen:
                     seen.add(pid)

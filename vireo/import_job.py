@@ -2164,19 +2164,41 @@ def _landed_identity(path):
     return [st.st_size, st.st_mtime_ns]
 
 
+def _is_parent_landing(folder, name, file_hash, landed):
+    """Whether ``folder/name`` still holds bytes the parent landed.
+
+    ``landed`` maps a recorded path to ``[size, mtime_ns, hash]``. A
+    cataloged hash (the row's own file) must equal the verified hash the
+    parent recorded, which catches a replacement that was rescanned;
+    without one (a merged companion, or a row not yet hash-stamped) the
+    file must still have the recorded size and mtime.
+    """
+    if not name:
+        return False
+    path = os.path.join(folder, name)
+    identity = landed.get(path)
+    if identity is None:
+        return False
+    recorded_hash = identity[2] if len(identity) > 2 else None
+    if file_hash and recorded_hash:
+        return file_hash == recorded_hash
+    return _landed_identity(path) == list(identity[:2])
+
+
 def _record_landed_files(job, db, state, batch_st, source_snapshots, runner):
     """Record this batch's landed files before cataloging it.
 
     Recorded first, so an interrupted row never lacks a landing whose photo
     row exists: a resume finds every row this run cataloged, even ones its
-    checkpointed ``photo_ids`` missed (``_recover_parent_landings``). Size
-    and mtime pin each path to the bytes this run put there.
+    checkpointed ``photo_ids`` missed (``_recover_parent_landings``). Size,
+    mtime and the verified hash pin each path to the bytes this run put
+    there.
     """
     for landed in batch_st.landed:
         path = os.path.normpath(landed.dest_path)
         identity = _landed_identity(path)
         if identity is not None:
-            state.landed_files[path] = identity
+            state.landed_files[path] = identity + [landed.verified_hash]
     _publish_resume_scope(
         job, db, state, source_snapshots, runner=runner, require_flush=True,
     )
@@ -2232,38 +2254,27 @@ def _publish_resume_scope(job, db, state, source_snapshots, runner=None,
 def _recover_parent_landings(state, params, db):
     """Find the catalog rows an interrupted parent import landed.
 
-    A resume skips the parent's landed files as duplicates. The parent's
-    checkpointed ``photo_ids`` can lag its catalog commits (a kill between
-    a batch's commit and the next checkpoint), but it recorded every
-    landed file before cataloging it, so look the rows up by those paths:
-    a photo whose own file or companion (a JPEG merged into its RAW) is
-    still the parent's landing (same size and mtime) is the parent's.
-    Rows other imports put elsewhere never match, and a file replaced at
-    a recorded path since no longer does.
+    A resume skips (or, with duplicate skipping off, adopts) the parent's
+    landed files. The parent's checkpointed ``photo_ids`` can lag its
+    catalog commits (a kill between a batch's commit and the next
+    checkpoint), but it recorded every landed file before cataloging it,
+    so look the rows up by those paths: a photo whose own file or
+    companion (a JPEG merged into its RAW) still holds the parent's bytes
+    (``_is_parent_landing``) is the parent's. Rows other imports put
+    elsewhere never match, and neither does a file replaced since.
     """
     landed = params.recover_landed_files or {}
-    by_folder = {}
-    for path in landed:
-        by_folder.setdefault(os.path.dirname(path), set()).add(
-            os.path.basename(path),
-        )
-
-    def still_landed(folder, name):
-        if not name or name not in by_folder[folder]:
-            return False
-        path = os.path.join(folder, name)
-        return _landed_identity(path) == list(landed[path])
-
-    for folder in by_folder:
+    folders = {os.path.dirname(path) for path in landed}
+    for folder in folders:
         rows = db.conn.execute(
-            """SELECT p.id, p.filename, p.companion_path
+            """SELECT p.id, p.filename, p.companion_path, p.file_hash
                FROM photos p JOIN folders f ON f.id = p.folder_id
                WHERE f.path = ?""",
             (folder,),
         ).fetchall()
         for row in rows:
-            if (still_landed(folder, row["filename"])
-                    or still_landed(folder, row["companion_path"])):
+            if (_is_parent_landing(folder, row["filename"], row["file_hash"], landed)
+                    or _is_parent_landing(folder, row["companion_path"], None, landed)):
                 state.recovered_photo_ids.add(row["id"])
 
 
@@ -2841,6 +2852,10 @@ def _finalize_import(job, runner, db, state, params, *,
         # See ``_record_landed_files``; a resume of a later interruption
         # in this retry chain inherits them through its parent's config.
         "landed_files": dict(state.landed_files),
+        # Every row found at the interrupted parent's recorded landings,
+        # including ones this run adopted into ``photo_ids`` (duplicate
+        # skipping off); the caller uses it to tag only what is owed.
+        "parent_landing_ids": sorted(state.recovered_photo_ids),
         # Stable-identity map so a recovery retry can verify each carried
         # ID still points at the same file. Without this the retry
         # authorizes any current photo row that happens to share an ID
