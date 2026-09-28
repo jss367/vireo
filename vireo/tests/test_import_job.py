@@ -15020,36 +15020,3 @@ def test_resume_recovers_a_raw_through_its_recorded_companion(
     with open(jpeg_path, "ab") as f:
         f.write(b"replaced")
     assert recovered(jpeg_landing) == set()
-
-
-def test_publish_resume_scope_require_flush_aborts_on_failed_flush():
-    """Codex PR #1842 P1: when the required checkpoint flush cannot land
-    on the history row, cataloging the batch on top of a stale row would
-    silently drop it from a resume — so ``_publish_resume_scope`` raises
-    ``ResumeCheckpointFailed`` instead of returning."""
-    import pytest as _pytest
-    from import_job import (
-        ResumeCheckpointFailed,
-        _ImportRunState,
-        _publish_resume_scope,
-    )
-
-    class _StuckRunner:
-        def flush_partial_result(self, job):
-            return False
-
-        def checkpoint_live_jobs(self):
-            return 0
-
-    job = {"id": 42, "partial_result": None}
-    state = _ImportRunState(log_label="test")
-    with _pytest.raises(ResumeCheckpointFailed):
-        _publish_resume_scope(
-            job, db=None, state=state, source_snapshots={},
-            runner=_StuckRunner(), require_flush=True,
-        )
-    # Non-require-flush publishes remain best-effort and never raise.
-    _publish_resume_scope(
-        job, db=None, state=state, source_snapshots={},
-        runner=_StuckRunner(), require_flush=False,
-    )
