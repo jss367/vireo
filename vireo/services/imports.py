@@ -670,9 +670,9 @@ class ImportService:
         ``(None, None, None, None, None, error_response)`` when the parent
         can't be used. ``parent_resume`` is None unless a Vireo restart
         interrupted the parent; then it holds what only that parent's own
-        records can say: ``landed_paths`` (every destination path the
-        parent, or an interrupted run it resumed, recorded before
-        cataloging) and ``untagged_ids`` (photos the parent landed or
+        records can say: ``landed_files`` (every file the parent, or an
+        interrupted run it resumed, recorded as landed before cataloging,
+        with its size and mtime) and ``untagged_ids`` (photos the parent landed or
         inherited as untagged, whose tag/GPS pass it never reached).
         ``parent_config`` is the parent job's persisted config dict (it
         also carries ``root_import_job_id`` when the parent is itself
@@ -817,14 +817,21 @@ class ImportService:
                 if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0
             ]
 
-        def paths(values):
-            return [p for p in values or [] if isinstance(p, str) and p]
+        def files(values):
+            if not isinstance(values, dict):
+                return {}
+            return {
+                path: list(identity) for path, identity in values.items()
+                if isinstance(path, str) and path
+                and isinstance(identity, list) and len(identity) == 2
+                and all(isinstance(v, int) for v in identity)
+            }
 
         return {
-            "landed_paths": sorted(set(
-                paths(parent_result.get("landed_paths"))
-                + paths(parent_config.get("recover_landed_paths"))
-            )),
+            "landed_files": {
+                **files(parent_config.get("recover_landed_files")),
+                **files(parent_result.get("landed_files")),
+            },
             "untagged_ids": sorted(set(
                 ids(parent_result.get("photo_ids"))
                 + ids(parent_config.get("untagged_photo_ids"))

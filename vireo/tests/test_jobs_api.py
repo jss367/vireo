@@ -11494,9 +11494,9 @@ def test_resume_recovers_landings_its_parent_checkpoint_missed(
         # The checkpoint recorded only the first two ids before the kill,
         # but every landed path (paths are recorded before cataloging).
         recorded, missed = landed[:2], landed[2:]
-        assert final["landed_paths"] == _photo_paths(db, landed)
+        assert sorted(final["landed_files"]) == _photo_paths(db, landed)
         _interrupt_import_row(app, db, parent_id, {
-            "landed_paths": final["landed_paths"],
+            "landed_files": final["landed_files"],
             "photo_ids": recorded,
             "photo_fingerprints": {
                 str(pid): final["photo_fingerprints"][str(pid)]
@@ -11568,7 +11568,7 @@ def test_resume_recovers_only_its_parents_own_landings(
 
         # The parent's checkpoint lost every id but kept its paths.
         _interrupt_import_row(app, db, parent_id, {
-            "landed_paths": parent["landed_paths"],
+            "landed_files": parent["landed_files"],
             "photo_ids": [],
             "photo_fingerprints": {},
             "source_snapshots": parent["source_snapshots"],
@@ -11619,7 +11619,7 @@ def test_resume_of_an_interrupted_retry_leaves_inherited_tags_alone(
         retry_id = resp.get_json()["job_id"]
         retry = wait_for_job_via_client(client, retry_id)["result"]
         _interrupt_import_row(app, db, retry_id, {
-            "landed_paths": [],
+            "landed_files": {},
             "photo_ids": [],
             "photo_fingerprints": {},
             "source_snapshots": retry["source_snapshots"],

@@ -736,8 +736,8 @@ def enqueue_import_photos(service: ImportService, db: Database, body: dict) -> d
         # so this run recovers rows the parent's checkpoint missed, and the
         # photos still owed the tag/GPS pass. Persisted so a resume of
         # this run, should it be interrupted too, inherits both.
-        "recover_landed_paths": (
-            parent_resume["landed_paths"] if parent_resume else []
+        "recover_landed_files": (
+            parent_resume["landed_files"] if parent_resume else {}
         ),
         "untagged_photo_ids": (
             parent_resume["untagged_ids"] if parent_resume else []
@@ -1024,9 +1024,8 @@ def enqueue_import_photos(service: ImportService, db: Database, body: dict) -> d
             previewed_count=previewed_count,
             checked_count=checked_count,
             carry_photo_ids=carry_photo_ids,
-            recover_landed_paths=(
-                frozenset(parent_resume["landed_paths"])
-                if parent_resume else None
+            recover_landed_files=(
+                parent_resume["landed_files"] if parent_resume else None
             ),
         )
         try:

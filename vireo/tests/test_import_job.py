@@ -14992,19 +14992,21 @@ def test_resume_recovers_a_raw_through_its_recorded_companion(
         vireo_dir=str(tmp_path / "vireo"),
     ))
     (raw_row,) = _photo_rows(db)
-    jpeg_path = next(p for p in result["landed_paths"] if p.endswith(".jpg"))
+    jpeg_path = next(p for p in result["landed_files"] if p.endswith(".jpg"))
 
-    state = _ImportRunState(log_label="test")
-    _recover_parent_landings(state, ImportParams(
-        sources=[str(card)], destination=str(archive),
-        recover_landed_paths=frozenset({jpeg_path}),
-    ), db)
-    assert state.recovered_photo_ids == {raw_row["id"]}
+    def recovered(landed_files):
+        state = _ImportRunState(log_label="test")
+        _recover_parent_landings(state, ImportParams(
+            sources=[str(card)], destination=str(archive),
+            recover_landed_files=landed_files,
+        ), db)
+        return state.recovered_photo_ids
 
+    jpeg_landing = {jpeg_path: result["landed_files"][jpeg_path]}
+    assert recovered(jpeg_landing) == {raw_row["id"]}
     # A path the parent never recorded recovers nothing.
-    state = _ImportRunState(log_label="test")
-    _recover_parent_landings(state, ImportParams(
-        sources=[str(card)], destination=str(archive),
-        recover_landed_paths=frozenset({str(archive / "elsewhere.jpg")}),
-    ), db)
-    assert state.recovered_photo_ids == set()
+    assert recovered({str(archive / "elsewhere.jpg"): [1, 1]}) == set()
+    # Nor does a recorded path whose file was replaced since.
+    with open(jpeg_path, "ab") as f:
+        f.write(b"replaced")
+    assert recovered(jpeg_landing) == set()

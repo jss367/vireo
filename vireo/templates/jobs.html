@@ -783,11 +783,17 @@
 
   function importResumeHint(job) {
     var landed = job.result.photo_ids.length;
-    if (!landed) {
+    // Files are recorded as landed before they're cataloged, so the
+    // checkpointed photo ids can lag them. Count photos only when the ids
+    // cover every landed file (a RAW+JPEG pair is two files, one photo).
+    var landedFiles = Object.keys(job.result.landed_files || {}).length;
+    if (!landed && !landedFiles) {
       return 'Same source and destination. Nothing was imported before it stopped.';
     }
-    var hint = 'Same source and destination. The ' + landed.toLocaleString() +
-      ' photo' + (landed === 1 ? '' : 's') + ' already imported won\'t be copied again';
+    var hint = landedFiles > landed
+      ? 'Same source and destination. Files it had already imported won\'t be copied again'
+      : 'Same source and destination. The ' + landed.toLocaleString() +
+        ' photo' + (landed === 1 ? '' : 's') + ' already imported won\'t be copied again';
     if (jobConfig(job).after_import != null) {
       hint += '; they\'re processed with the rest';
     }

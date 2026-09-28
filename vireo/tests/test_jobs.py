@@ -1707,14 +1707,14 @@ def test_flush_partial_result_is_on_the_row_before_it_returns(tmp_path):
     flushed = []
 
     def work(job):
-        job["partial_result"] = {"landed_paths": ["/a/1.jpg"]}
+        job["partial_result"] = {"landed_files": {"/a/1.jpg": [1, 2]}}
         flushed.append(runner.flush_partial_result(job))
         flushed.append(json.loads(_history_row(db, job["id"])["result"]))
         return {"ok": True}
 
     job_id = runner.start("import", work)
     wait_for_job_via_runner(runner, job_id, wait_for_history=True)
-    assert flushed == [True, {"landed_paths": ["/a/1.jpg"]}]
+    assert flushed == [True, {"landed_files": {"/a/1.jpg": [1, 2]}}]
     # Without history there is nothing to wait for.
     assert JobRunner().flush_partial_result({"partial_result": {}}) is True
     assert runner.shutdown(timeout=5)
