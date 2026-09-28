@@ -15143,7 +15143,9 @@ def test_rejected_landing_leaves_the_resume_record():
     from import_job import _ImportRunState, _LandedFile, _reclassify_landed_failed
 
     state = _ImportRunState(log_label="test")
-    state.landed_files["/arch/a.jpg"] = [1, 2, "h"]
+    # Keyed the way _record_landed_files writes it (normpath: "\\arch\\a.jpg"
+    # on Windows).
+    state.landed_files[os.path.normpath("/arch/a.jpg")] = [1, 2, "h"]
     state.copied = 1
     entry = _LandedFile(
         dest_path="/arch/a.jpg", verified_hash="h", source_path="/card/a.jpg",
