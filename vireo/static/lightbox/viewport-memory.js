@@ -60,8 +60,8 @@ function _lbCaptureEyeTrackingAnchor() {
       ? { offsetX: _lbEyeTrackScreenAnchor.offsetX, offsetY: _lbEyeTrackScreenAnchor.offsetY }
       : null;
   }
-  var photo = _lbPhotoData(_lightboxCurrentId);
-  var point = _lbPhotoEyePoint(_lightboxCurrentId, photo);
+  var photo = _lbPhotoData(vireoLightboxSession.requestedPhotoId());
+  var point = _lbPhotoEyePoint(vireoLightboxSession.requestedPhotoId(), photo);
   var overlaysAvailable = _lbSourceOverlaysAvailable();
   var metrics = _lbUpdateLayoutMetrics();
   var state = point && overlaysAvailable ? _lbViewportStateFromCurrent() : null;
@@ -89,14 +89,14 @@ function _lbCaptureEyeTrackingAnchor() {
 function _lbTryApplyPendingEyeTrack(photo) {
   var pending = _lbPendingEyeTrack;
   if (!pending || !_lbTrackEyeEnabled) return false;
-  if (String(pending.photoId) !== String(_lightboxCurrentId)) return false;
-  photo = photo || _lbPhotoData(_lightboxCurrentId);
+  if (String(pending.photoId) !== String(vireoLightboxSession.requestedPhotoId())) return false;
+  photo = photo || _lbPhotoData(vireoLightboxSession.requestedPhotoId());
   // A missing object means the detail request has not resolved yet. Keep the
   // alignment armed so its callback can apply it after the image is laid out.
   // Navigation lists on some pages contain only {id, filename}; those are
   // also "unknown", not evidence that the destination lacks an eye.
   if (!photo || !Object.prototype.hasOwnProperty.call(photo, 'eye_x')) return false;
-  var point = _lbPhotoEyePoint(_lightboxCurrentId, photo);
+  var point = _lbPhotoEyePoint(vireoLightboxSession.requestedPhotoId(), photo);
   var metrics = _lbUpdateLayoutMetrics();
   if (!point || !_lbSourceOverlaysAvailable()) {
     _lbPendingEyeTrack = null;
@@ -132,7 +132,7 @@ function _lbTryApplyPendingEyeTrack(photo) {
     offsetX: Number(pending.offsetX) || 0,
     offsetY: Number(pending.offsetY) || 0,
   };
-  _lbSaveViewportState(_lightboxCurrentId);
+  _lbSaveViewportState(vireoLightboxSession.requestedPhotoId());
   _lbApplyTrackEyeState();
   return true;
 }
@@ -140,12 +140,12 @@ function _lbTryApplyPendingEyeTrack(photo) {
 function _lbSaveViewportState(photoId) {
   if (photoId == null) return null;
   // Mid-navigation the DOM transform still belongs to the outgoing photo but
-  // _lightboxCurrentId has already advanced to the incoming id. Reading from
+  // vireoLightboxSession.requestedPhotoId() has already advanced to the incoming id. Reading from
   // the DOM here would misattribute the frozen bitmap to the incoming photo
   // and stomp its intended inspection point. Prefer the pending restore
   // state (what handleInitialImageLoad is about to apply), and otherwise
   // leave any previously saved state alone.
-  if (_lbVisualTransitionPending && String(photoId) === String(_lightboxCurrentId)) {
+  if (_lbVisualTransitionPending && String(photoId) === String(vireoLightboxSession.requestedPhotoId())) {
     var pending = _lbPendingViewportState;
     if (pending) {
       var pendingClone = _lbCloneViewportState(pending);

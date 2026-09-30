@@ -1,14 +1,26 @@
+var vireoLightboxSession = VireoLightboxSession.create({
+  photos: function() { return _lightboxPhotoList; },
+  photoData: function(id) { return _lbPhotoDataByPhoto[String(id)]; },
+  view: function() {
+    return {
+      currentSrcKey: _lbCurrentSrcKey, fullUsesOriginal: _lbFullUsesOriginal,
+      originalUnavailable: _lbOriginalUnavailable, zoom: _lbZoom,
+      desiredSrcKey: _lbDesiredSrcKey, nativeZoom: _lbNativeZoom,
+      photoW: _lbPhotoW, photoH: _lbPhotoH,
+      visualTransitionPending: _lbVisualTransitionPending
+    };
+  },
+  sourceUrl: function(id, key, speculative) { return _lbSrcUrl(id, key, speculative); },
+  sourceRank: function(key) { return _lbSrcRank(key); },
+  fullPreviewLimit: function() { return _lbFullPreviewLimit(); },
+  pickSourceKey: function(zoom) { return _lbPickSourceKey(zoom); },
+  rememberEditRecipe: function(id, recipe) { _lbRememberEditRecipe(id, recipe); },
+  rememberRenderKey: function(id, key) { window.vireoRememberPhotoRenderKey(id, key); }
+});
+
 var _lightboxPhotoList = [];  // list of {id, filename} for arrow navigation
-var _lightboxCurrentId = null;
 var _lbReadOnly = false;
 var _lbReadOnlyMessage = 'This lightbox is read-only';
-// `_lightboxCurrentId` advances immediately when navigation targets a new
-// photo; the visible bitmap is deliberately held on the previous frame until
-// the replacement finishes decoding. `_lightboxCommittedId` tracks that
-// visible identity — the photo the user is actually looking at — and is what
-// `lightbox:closed` reports so a close mid-navigation reconciles Browse to
-// the photo that was on screen, not the one that was still loading.
-var _lightboxCommittedId = null;
 
 var _lbZoom = 1.0;          // current zoom (1.0 = fit)
 var _lbPanX = 0;            // pan translation in CSS pixels
@@ -29,7 +41,6 @@ var _lbOriginalUnavailable = false;  // true after /original fails; fall back to
 var _lbFullUsesOriginal = null; // metadata-backed: preview_max_size=0 makes /full redirect to /original
 var _lbCurrentWildlifeExcluded = false;
 var _lbFlagEditSeq = 0;      // increments for local flag writes so stale metadata fetches cannot overwrite the chip
-var _lbOpenSeq = 0;          // increments for every lightbox open so old metadata fetches cannot reapply after reopen
 var _lbFlagPendingWrites = 0;
 var _lbFlagPendingByPhoto = {};  // count of in-flight flag writes PER photo; lightbox:flagchanged is emitted once a photo's count hits 0 so listeners see its settled flag, not a guessed per-write one
 var _lbConfirmedFlags = {};   // last server-confirmed flag per photo, isolated from optimistic page helpers
@@ -41,17 +52,6 @@ var _lbPendingEyeTrack = null; // destination alignment waiting for image metada
 var _lbEyeTrackScreenAnchor = null; // eye offset from viewport center in CSS pixels
 var _lbVisualTransitionPending = false; // keep the outgoing bitmap/transform frozen until the incoming image is decoded
 var _lbDeferredOverlayApply = null; // detections/eye render withheld while _lbVisualTransitionPending; drained when the transition clears
-var _lbAdjacentPreloads = {}; // bounded navigation window, keyed by photo id + source URL
-var _lbAdjacentPreloadTimer = null;
-var _lbAdjacentPreloadRetry = {};
-var _lbLastNavDelta = 1;
-var _lbOriginalPreloadTimer = null; // short dwell before warming the current photo's 100% source
-var _lbOriginalPreload = null; // retained decoded original for an instant first 100% click
-var _lbOriginalPreloadWaiting = null; // dwell completed; waiting for the shared slot
-var _lbSpeculativeInFlight = null; // oldest outstanding request (including pruned entries)
-var _lbSpeculativeLoads = new Set();
-var _lbPreloadConcurrency = 3;
-var _lbPreloadBudgetBytes = 128 * 1024 * 1024;
 var _lbPreviewLoading = false;
 var _lbProgressiveTargetKey = null;
 var _lbSessionFullUsesOriginal = null;
@@ -109,7 +109,7 @@ function _lbApplyReadOnlyState() {
     var editHint = _lbReadOnly
       ? _lbReadOnlyMessage
       : (typeof window.getLightboxBrowseDisabledHint === 'function'
-        ? window.getLightboxBrowseDisabledHint(_lightboxCurrentId, true)
+        ? window.getLightboxBrowseDisabledHint(vireoLightboxSession.requestedPhotoId(), true)
         : null);
     editButton.disabled = !!editHint;
     editButton.title = editHint || 'Edit photo';

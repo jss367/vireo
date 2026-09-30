@@ -97,18 +97,18 @@
     panel.hidden = true;
     try {
       const result = await safeFetch('/api/photos/' + photoId + '/subjects', {}, {toast: false});
-      if (seq !== generation || _lightboxCurrentId !== photoId) return;
+      if (seq !== generation || vireoLightboxSession.requestedPhotoId() !== photoId) return;
       data = result;
       render();
     } catch (error) {
-      if (seq !== generation || _lightboxCurrentId !== photoId) return;
+      if (seq !== generation || vireoLightboxSession.requestedPhotoId() !== photoId) return;
       panel.hidden = false;
       list.replaceChildren(); details.replaceChildren();
       status.textContent = 'Could not load subjects: ' + error.message;
     }
   }
   async function choose(detectionId) {
-    if (!data || busy || data.photo_id !== _lightboxCurrentId) return;
+    if (!data || busy || data.photo_id !== vireoLightboxSession.requestedPhotoId()) return;
     // Choosing a primary — including "Choose automatically" — reaches
     // sync_primary, which clears mask, embedding and eye state; block
     // it in a scoped Pipeline Review lightbox (Codex r4056621185).
@@ -121,7 +121,7 @@
       const result = await safeFetch('/api/photos/' + photoId + '/primary-subject', {
         method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({detection_id: detectionId})
       }, {toast: false});
-      if (seq !== generation || _lightboxCurrentId !== photoId) return;
+      if (seq !== generation || vireoLightboxSession.requestedPhotoId() !== photoId) return;
       if (data.primary_detection_id !== result.primary_detection_id) {
         const photo = _lbPhotoDataByPhoto[String(photoId)];
         if (photo) {
@@ -139,16 +139,16 @@
       // belongs to no active lightbox subject panel; surfacing its error
       // would blame the newly-open photo. Match the success-path
       // stale-request checks.
-      if (seq !== generation || _lightboxCurrentId !== photoId) return;
+      if (seq !== generation || vireoLightboxSession.requestedPhotoId() !== photoId) return;
       showToast(error.message || 'Could not change primary subject', 'error');
     } finally {
       busy = false;
-      if (data?.photo_id === _lightboxCurrentId) render();
+      if (data?.photo_id === vireoLightboxSession.requestedPhotoId()) render();
     }
   }
   async function useSuggestion(kind) {
     const subject = primary();
-    if (!subject?.analysis || busy || _lbEditWritePending || data.photo_id !== _lightboxCurrentId) return;
+    if (!subject?.analysis || busy || _lbEditWritePending || data.photo_id !== vireoLightboxSession.requestedPhotoId()) return;
     // Guard against a rogue click before render() runs after the read-only
     // state flips (Codex r4056563011). _lbGuardReadOnly surfaces the same
     // read-only toast every other edit-recipe writer uses.
@@ -161,11 +161,11 @@
     try {
       _lbFlushPendingAdjustmentSave();
       await _lbWaitForAdjustmentSaveIdle(photoId);
-      if (_lightboxCurrentId !== photoId || generation !== seq) return;
+      if (vireoLightboxSession.requestedPhotoId() !== photoId || generation !== seq) return;
       // Fetch the latest recipe so another editor's changes aren't replaced
       // by the lightbox's initially loaded snapshot.
       const current = await safeFetch('/api/photos/' + photoId + '/edit-recipe', {}, {toast: false});
-      if (_lightboxCurrentId !== photoId || generation !== seq) return;
+      if (vireoLightboxSession.requestedPhotoId() !== photoId || generation !== seq) return;
       const recipe = current.recipe || {};
       if (kind === 'crop') {
         if (recipe.straighten) throw new Error('Reset straightening before applying a suggested crop.');
@@ -182,18 +182,18 @@
       _lbRememberEditRecipe(photoId, result.recipe);
       _vireoBumpRenderVersion(photoId);
       if (typeof window.vireoRefreshPhotoRenders === 'function') window.vireoRefreshPhotoRenders([photoId]);
-      if (_lightboxCurrentId === photoId) _lbReloadCurrentRenderAfterEdit(photoId);
+      if (vireoLightboxSession.requestedPhotoId() === photoId) _lbReloadCurrentRenderAfterEdit(photoId);
     } catch (error) {
-      if (seq !== generation || _lightboxCurrentId !== photoId) return;
+      if (seq !== generation || vireoLightboxSession.requestedPhotoId() !== photoId) return;
       showToast(error.message || 'Could not apply suggestion', 'error');
     } finally {
       busy = false;
       _lbSetEditBusy(false);
-      if (data?.photo_id === _lightboxCurrentId) render();
+      if (data?.photo_id === vireoLightboxSession.requestedPhotoId()) render();
     }
   }
   analyzeButton.onclick = async () => {
-    if (!data || busy || data.photo_id !== _lightboxCurrentId) return;
+    if (!data || busy || data.photo_id !== vireoLightboxSession.requestedPhotoId()) return;
     // Analyze subjects enqueues a job that writes detection_subjects and
     // can flip the primary via sync_primary (clearing mask, embedding
     // and eye state), so it must be blocked in read-only lightboxes
@@ -205,14 +205,14 @@
     status.textContent = 'Analyzing retained subjects…';
     try {
       const job = await safeFetch('/api/photos/' + photoId + '/subjects/analyze', {method: 'POST'}, {toast: false});
-      while (generation === seq && _lightboxCurrentId === photoId) {
+      while (generation === seq && vireoLightboxSession.requestedPhotoId() === photoId) {
         const progress = await safeFetch('/api/jobs/' + job.job_id, {}, {toast: false});
         if (progress.status === 'completed') { await load(photoId); break; }
         if (progress.status === 'failed' || progress.status === 'cancelled') throw new Error(progress.error || 'Subject analysis did not complete');
         await new Promise(resolve => setTimeout(resolve, 500));
       }
     } catch (error) {
-      if (seq !== generation || _lightboxCurrentId !== photoId) return;
+      if (seq !== generation || vireoLightboxSession.requestedPhotoId() !== photoId) return;
       showToast(error.message || 'Could not analyze subjects', 'error');
     } finally {
       busy = false;

@@ -283,7 +283,7 @@ def test_failed_jpeg_switch_reloads_raw_edit_saved_during_switch(
       const input = document.getElementById('lbAdjExposure');
       input.value = '2';
       onLightboxAdjustmentInput(input);
-      vireoTogglePairSource(_lightboxCurrentId);
+      vireoTogglePairSource(vireoLightboxSession.requestedPhotoId());
     }""")
     expect(source).to_contain_text('Loading JPEG')
     _wait_saved(page)
@@ -293,7 +293,7 @@ def test_failed_jpeg_switch_reloads_raw_edit_saved_during_switch(
     assert held_jpeg
     assert live_server['db'].get_photo_edit_recipe(photo_id)['adjustments']['exposure'] == 2
     expected_url = page.evaluate("""oldUrl => vireoRenderedUrl(
-      _vireoBaseRenderedUrl(oldUrl), _lightboxCurrentId
+      _vireoBaseRenderedUrl(oldUrl), vireoLightboxSession.requestedPhotoId()
     )""", old_url)
     assert expected_url != old_url
     with page.expect_request(lambda request: request.url.endswith(expected_url)):

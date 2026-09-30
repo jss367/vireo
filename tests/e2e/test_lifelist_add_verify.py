@@ -195,7 +195,7 @@ def test_lightbox_panel_hides_after_current_photo_rejected(live_server, page):
     expect(panel.locator("button", has_text="Set Representative")).to_be_visible()
 
     # Reject via the same code path the lightbox flag chips call.
-    page.evaluate("() => _lbApplyFlag(_lightboxCurrentId, 'rejected')")
+    page.evaluate("() => _lbApplyFlag(vireoLightboxSession.requestedPhotoId(), 'rejected')")
 
     # After the flag write settles and the listener refetches, the panel
     # should hide (backend returns empty life_list for rejected photos).
@@ -232,7 +232,7 @@ def test_life_list_pick_badge_and_live_promotion(live_server, page):
         }""",
         hawk2,
     )
-    page.wait_for_function("(pid) => window._lightboxCurrentId === pid", arg=hawk2)
+    page.wait_for_function("(pid) => vireoLightboxSession.requestedPhotoId() === pid", arg=hawk2)
     with page.expect_response(
         lambda response: f"/api/photos/{hawk2}/flag" in response.url
         and response.status == 200
@@ -419,7 +419,7 @@ def test_life_list_lightbox_continues_across_page_boundary(live_server, page):
         """(oldId) => {
           const entry = currentData.species.find(e => e.species === 'Red-tailed Hawk');
           return entry && entry.photos.length === 102 && !entry.has_more
-            && window._lightboxCurrentId !== oldId;
+            && vireoLightboxSession.requestedPhotoId() !== oldId;
         }""",
         arg=initial_last_id,
     )

@@ -33,7 +33,8 @@ def _open_window(page, live_server, count=30):
     page.evaluate(
         """count => {
           // Isolate navigation from the separate idle-time 1:1 warmup.
-          _lbScheduleOriginalPreload = function() {};
+          window.scheduleOriginalWarmup = vireoLightboxSession.scheduleOriginal;
+          vireoLightboxSession = Object.freeze({...vireoLightboxSession, scheduleOriginal() {}});
           const list = Array.from({length: count}, (_, i) => ({
             id: 100 + i, filename: `photo-${i}.jpg`, width: 6000, height: 4000,
             edit_recipe: null
@@ -41,7 +42,7 @@ def _open_window(page, live_server, count=30):
           openLightbox(115, 'photo-15.jpg', list);
         }""", count,
     )
-    page.wait_for_function("_lightboxCommittedId === 115 && !_lbVisualTransitionPending && _lbNativeZoom")
+    page.wait_for_function("vireoLightboxSession.displayedPhotoId() === 115 && !_lbVisualTransitionPending && _lbNativeZoom")
 
 
 def test_large_window_retains_eight_ahead_four_behind_within_budget(live_server, page):
@@ -49,18 +50,18 @@ def test_large_window_retains_eight_ahead_four_behind_within_budget(live_server,
     _open_window(page, live_server)
     expected = [111, 112, 113, 114, *range(116, 124)]
     page.wait_for_function(
-        """ids => ids.every(id => Object.values(_lbAdjacentPreloads).some(
+        """ids => ids.every(id => vireoLightboxSession.preloadStatus().adjacent.some(
           entry => entry.photoId === id && entry.status === 'decoded'
         ))""", arg=expected,
     )
-    assert page.evaluate("_lbPreloadBytes()") <= 128 * 1024 * 1024
-    assert page.evaluate("Object.values(_lbAdjacentPreloads).map(entry => entry.photoId).sort((a,b) => a-b)") == expected
+    assert page.evaluate("vireoLightboxSession.preloadStatus().bytes") <= 128 * 1024 * 1024
+    assert page.evaluate("vireoLightboxSession.preloadStatus().adjacent.map(entry => entry.photoId).sort((a,b) => a-b)") == expected
     page.evaluate("lightboxNav(-1)")
-    page.wait_for_function("_lightboxCommittedId === 114 && !_lbVisualTransitionPending")
+    page.wait_for_function("vireoLightboxSession.displayedPhotoId() === 114 && !_lbVisualTransitionPending")
     assert "prefetch=1" in page.locator("#lightboxImg").get_attribute("src")
     page.keyboard.press("Escape")
-    page.wait_for_function("_lbSpeculativeLoads.size === 0")
-    assert page.evaluate("_lbPreloadBytes()") == 0
+    page.wait_for_function("vireoLightboxSession.preloadStatus().activeCount === 0")
+    assert page.evaluate("vireoLightboxSession.preloadStatus().bytes") == 0
 
 
 def test_slow_preload_does_not_block_other_cached_neighbors(live_server, page):
@@ -75,12 +76,12 @@ def test_slow_preload_does_not_block_other_cached_neighbors(live_server, page):
     page.route("**/photos/*/full*", serve)
     _open_window(page, live_server)
     page.wait_for_function(
-        """Object.values(_lbAdjacentPreloads).some(entry => entry.photoId === 117 && entry.status === 'decoded')"""
+        """vireoLightboxSession.preloadStatus().adjacent.some(entry => entry.photoId === 117 && entry.status === 'decoded')"""
     )
     assert len(held) == 1
-    assert page.evaluate("_lbSpeculativeLoads.size") <= 3
+    assert page.evaluate("vireoLightboxSession.preloadStatus().activeCount") <= 3
     page.evaluate("lightboxNav(2)")
-    page.wait_for_function("_lightboxCommittedId === 117 && !_lbVisualTransitionPending")
+    page.wait_for_function("vireoLightboxSession.displayedPhotoId() === 117 && !_lbVisualTransitionPending")
     held[0].fulfill(body=_jpeg(), content_type="image/jpeg")
 
 
@@ -89,9 +90,9 @@ def test_actual_decode_sizes_cannot_leave_cache_over_budget(live_server, page):
     page.route("**/photos/*/full*", lambda route: route.fulfill(body=_jpeg(3840, 2560), content_type="image/jpeg"))
     page.route("**/photos/*/preview?*", lambda route: route.fulfill(body=_jpeg(3840, 2560), content_type="image/jpeg"))
     _open_window(page, live_server)
-    page.wait_for_function("Object.values(_lbAdjacentPreloads).filter(e => e.status === 'decoded').length >= 2")
-    page.wait_for_function("_lbSpeculativeLoads.size === 0 && _lbPreloadBytes() <= _lbPreloadBudgetBytes")
-    assert page.evaluate("Object.values(_lbAdjacentPreloads).filter(e => e.status === 'decoded').length") <= 3
+    page.wait_for_function("vireoLightboxSession.preloadStatus().adjacent.filter(e => e.status === 'decoded').length >= 2")
+    page.wait_for_function("vireoLightboxSession.preloadStatus().activeCount === 0 && vireoLightboxSession.preloadStatus().bytes <= vireoLightboxSession.preloadStatus().budgetBytes")
+    assert page.evaluate("vireoLightboxSession.preloadStatus().adjacent.filter(e => e.status === 'decoded').length") <= 3
 
 
 @pytest.mark.parametrize("one_to_one", [False, True])
@@ -108,7 +109,7 @@ def test_ready_preview_commits_before_sharp_image_without_moving_view(live_serve
     page.route("**/photos/*/full*", lambda route: route.fulfill(body=_jpeg(), content_type="image/jpeg"))
     page.route("**/photos/*/original*", serve_original)
     _open_window(page, live_server)
-    page.wait_for_function("Object.values(_lbAdjacentPreloads).some(e => e.photoId === 116 && e.status === 'decoded')")
+    page.wait_for_function("vireoLightboxSession.preloadStatus().adjacent.some(e => e.photoId === 116 && e.status === 'decoded')")
     before = page.evaluate(
         """oneToOne => {
           _lbApplyViewportState({zoom: _lbNativeZoom * 1.2, oneToOne, centerX: 0.4, centerY: 0.6});
@@ -117,7 +118,7 @@ def test_ready_preview_commits_before_sharp_image_without_moving_view(live_serve
     )
     page.wait_for_function("_lbCurrentSrcKey === 'original' && !_lbPreviewLoading")
     page.evaluate("lightboxNav(1)")
-    page.wait_for_function("_lightboxCommittedId === 116 && !_lbVisualTransitionPending")
+    page.wait_for_function("vireoLightboxSession.displayedPhotoId() === 116 && !_lbVisualTransitionPending")
     expect(page.locator("#lightboxPreviewStatus")).to_be_visible()
     assert page.evaluate("document.getElementById('lightboxImg').naturalWidth") == 1920
     assert page.evaluate("_lbCurrentSrcKey") == "full"
@@ -152,7 +153,7 @@ def test_restored_zoom_requests_only_required_resolution(live_server, page, need
     page.evaluate(
         """needed => {
           // Exercise initial selection without a ready fallback obscuring it.
-          _lbClearAdjacentPreloads();
+          vireoLightboxSession.clearAdjacent();
           const wrap = document.getElementById('lightboxWrap');
           const fit = Math.min(1, wrap.clientWidth / 6000, wrap.clientHeight / 4000);
           openLightbox(116, 'photo-16.jpg', _lightboxPhotoList, {
@@ -160,7 +161,7 @@ def test_restored_zoom_requests_only_required_resolution(live_server, page, need
           });
         }""", needed,
     )
-    page.wait_for_function("_lightboxCommittedId === 116 && !_lbVisualTransitionPending")
+    page.wait_for_function("vireoLightboxSession.displayedPhotoId() === 116 && !_lbVisualTransitionPending")
     target = "/original" if key == "original" else f"size={key}"
     visible_requests = [url for url in requested if "/116/" in url and "prefetch=1" not in url]
     assert visible_requests and target in visible_requests[0]
@@ -182,18 +183,18 @@ def test_late_sharp_image_cannot_replace_newer_photo_or_reopen_viewer(live_serve
     page.route("**/photos/*/full*", lambda route: route.fulfill(body=_jpeg(), content_type="image/jpeg"))
     page.route("**/photos/*/original*", serve)
     _open_window(page, live_server)
-    page.wait_for_function("Object.values(_lbAdjacentPreloads).some(e => e.photoId === 116 && e.status === 'decoded')")
+    page.wait_for_function("vireoLightboxSession.preloadStatus().adjacent.some(e => e.photoId === 116 && e.status === 'decoded')")
     page.evaluate("_lbApplyViewportState({zoom: _lbNativeZoom, oneToOne: true, centerX: 0.4, centerY: 0.6})")
     page.wait_for_function("_lbCurrentSrcKey === 'original' && !_lbPreviewLoading")
     page.evaluate("lightboxNav(1)")
-    page.wait_for_function("_lightboxCommittedId === 116 && _lbPreviewLoading")
+    page.wait_for_function("vireoLightboxSession.displayedPhotoId() === 116 && _lbPreviewLoading")
     page.wait_for_timeout(200)
     assert held
     if action == "close":
         page.keyboard.press("Escape")
     else:
         page.evaluate("openLightbox(117, 'photo-17.jpg', _lightboxPhotoList, {fallbackViewportState: {zoom: 1}})")
-        page.wait_for_function("_lightboxCommittedId === 117 && !_lbVisualTransitionPending")
+        page.wait_for_function("vireoLightboxSession.displayedPhotoId() === 117 && !_lbVisualTransitionPending")
     release = True
     for route in held:
         route.fulfill(body=_jpeg(6000, 4000, "#a22"), content_type="image/jpeg")
@@ -201,9 +202,9 @@ def test_late_sharp_image_cannot_replace_newer_photo_or_reopen_viewer(live_serve
     assert page.evaluate("_lbPreviewLoading") is False
     if action == "close":
         expect(page.locator("#lightboxOverlay")).not_to_have_class("lightbox-overlay active")
-        assert page.evaluate("_lightboxCurrentId") is None
+        assert page.evaluate("vireoLightboxSession.requestedPhotoId()") is None
     else:
-        assert page.evaluate("_lightboxCommittedId") == 117
+        assert page.evaluate("vireoLightboxSession.displayedPhotoId()") == 117
         assert "/117/" in page.locator("#lightboxImg").get_attribute("src")
         assert page.evaluate("document.getElementById('lightboxImg').naturalWidth") == 1920
 
@@ -221,15 +222,15 @@ def test_originals_larger_than_budget_are_not_preloaded(live_server, page):
     page.evaluate(
         """() => {
           _lightboxPhotoList.forEach(photo => {photo.width = 9000; photo.height = 6000;});
-          _lbPrimeAdjacentPhotos('original');
+          vireoLightboxSession.scheduleAdjacent('original');
         }"""
     )
-    page.wait_for_function("Object.values(_lbAdjacentPreloads).filter(e => e.status === 'decoded').length === 12")
-    page.wait_for_function("_lbSpeculativeLoads.size === 0")
-    page.evaluate("_lbPrimeAdjacentPhotos('original')")
+    page.wait_for_function("vireoLightboxSession.preloadStatus().adjacent.filter(e => e.status === 'decoded').length === 12")
+    page.wait_for_function("vireoLightboxSession.preloadStatus().activeCount === 0")
+    page.evaluate("vireoLightboxSession.scheduleAdjacent('original')")
     page.wait_for_timeout(200)
     assert original_requests == []
-    assert page.evaluate("_lbPreloadBytes()") <= 128 * 1024 * 1024
+    assert page.evaluate("vireoLightboxSession.preloadStatus().bytes") <= 128 * 1024 * 1024
 
 
 def test_busy_generation_retries_fill_window_without_parallel_producers(live_server, page):
@@ -251,24 +252,24 @@ def test_busy_generation_retries_fill_window_without_parallel_producers(live_ser
     _open_window(page, live_server)
     # Keep the server's single expensive producer busy while the other two
     # client slots discover cold previews and receive non-cacheable declines.
-    page.wait_for_function("Object.keys(_lbAdjacentPreloadRetry).length === 11")
+    page.wait_for_function("vireoLightboxSession.preloadStatus().retryCount === 11")
     assert len(pending) == 1
     assert len(declined) == 11
     for completed in range(1, 13):
         route = pending.pop()
         route.fulfill(body=_jpeg(), content_type="image/jpeg")
         page.wait_for_function(
-            "count => Object.values(_lbAdjacentPreloads).filter(e => e.status === 'decoded').length === count",
+            "count => vireoLightboxSession.preloadStatus().adjacent.filter(e => e.status === 'decoded').length === count",
             arg=completed,
         )
         if completed < 12:
-            page.wait_for_function("_lbSpeculativeLoads.size === 1")
+            page.wait_for_function("vireoLightboxSession.preloadStatus().activeCount === 1")
             # Let Playwright dispatch that request to the Python route handler.
             page.wait_for_timeout(50)
             assert len(pending) == 1
     assert len(set(generated)) == 12
     assert len(declined) == 11  # Retries run alone and no longer collide.
-    assert page.evaluate("_lbPreloadBytes()") <= 128 * 1024 * 1024
+    assert page.evaluate("vireoLightboxSession.preloadStatus().bytes") <= 128 * 1024 * 1024
 
 
 @pytest.mark.parametrize("needed,tier", [(2300, "2560"), (3200, "3840")])
@@ -298,8 +299,8 @@ def test_failed_initial_sized_preview_falls_back_to_usable_image(live_server, pa
     active = True
     page.evaluate(
         """({needed, mode}) => {
-          _lbClearAdjacentPreloads();
-          _lbScheduleAdjacentPhoto = function() {};
+          vireoLightboxSession.clearAdjacent();
+          vireoLightboxSession = Object.freeze({...vireoLightboxSession, scheduleAdjacent() {}});
           const wrap = document.getElementById('lightboxWrap');
           const fit = Math.min(1, wrap.clientWidth / 6000, wrap.clientHeight / 4000);
           const options = mode === 'restored' ? {
@@ -311,7 +312,7 @@ def test_failed_initial_sized_preview_falls_back_to_usable_image(live_server, pa
     page.wait_for_function(
         """() => {
           const image = document.getElementById('lightboxImg');
-          return _lightboxCommittedId === 116 && !_lbVisualTransitionPending &&
+          return vireoLightboxSession.displayedPhotoId() === 116 && !_lbVisualTransitionPending &&
             image.complete && image.naturalWidth > 0;
         }""",
         timeout=5000,
@@ -357,8 +358,8 @@ def test_small_photo_does_not_lower_workspace_preview_limit(live_server, page, p
     page.wait_for_function("_lbFullLongEdge === 800 && _lbPhotoW === 800")
     page.evaluate(
         """needed => {
-          _lbClearAdjacentPreloads();
-          _lbScheduleAdjacentPhoto = function() {};
+          vireoLightboxSession.clearAdjacent();
+          vireoLightboxSession = Object.freeze({...vireoLightboxSession, scheduleAdjacent() {}});
           const wrap = document.getElementById('lightboxWrap');
           const fit = Math.min(1, wrap.clientWidth / 6000, wrap.clientHeight / 4000);
           const next = _lightboxPhotoList[1];
@@ -367,7 +368,7 @@ def test_small_photo_does_not_lower_workspace_preview_limit(live_server, page, p
           });
         }""", needed,
     )
-    page.wait_for_function("id => _lightboxCommittedId === id && !_lbVisualTransitionPending", arg=ids[1])
+    page.wait_for_function("id => vireoLightboxSession.displayedPhotoId() === id && !_lbVisualTransitionPending", arg=ids[1])
     incoming = [url for url in requested if f"/photos/{ids[1]}/" in url]
     assert incoming and "/full" in incoming[0]
 
@@ -393,8 +394,8 @@ def test_navigation_uses_workspace_limit_before_metadata(live_server, page, prev
     page.locator(".grid-card").first.wait_for(state="visible")
     page.evaluate(
         """id => {
-          _lbScheduleAdjacentPhoto = function() {};
-          _lbScheduleOriginalPreload = function() {};
+          vireoLightboxSession = Object.freeze({...vireoLightboxSession, scheduleAdjacent() {}});
+          vireoLightboxSession = Object.freeze({...vireoLightboxSession, scheduleOriginal() {}});
           openLightbox(id, 'first.jpg', [{id, filename: 'first.jpg', width: 6000, height: 4000}]);
         }""", photo_id,
     )
@@ -405,7 +406,7 @@ def test_navigation_uses_workspace_limit_before_metadata(live_server, page, prev
         """id => openLightbox(id, 'next.jpg', [{id, filename: 'next.jpg', width: 6000, height: 4000}])""",
         photo_id + 1,
     )
-    page.wait_for_function("id => _lightboxCommittedId === id", arg=photo_id + 1)
+    page.wait_for_function("id => vireoLightboxSession.displayedPhotoId() === id", arg=photo_id + 1)
     incoming = [url for url in requested if f"/photos/{photo_id + 1}/" in url]
     assert incoming and "/full" in incoming[0]
     for route in held_metadata:
@@ -429,27 +430,28 @@ def test_failed_original_warmup_releases_budget_for_neighbors(live_server, page)
         """() => {
           window.savedPreloadList = _lightboxPhotoList;
           _lightboxPhotoList = _lightboxPhotoList.filter(p => p.id === 115);
-          _lbClearAdjacentPreloads();
+          vireoLightboxSession.clearAdjacent();
         }"""
     )
-    page.wait_for_function("_lbSpeculativeLoads.size === 0")
+    page.wait_for_function("vireoLightboxSession.preloadStatus().activeCount === 0")
     page.evaluate(
         """() => {
           // Exercise the final attempt after the original warmup's retry.
-          _lbOriginalPreloadWaiting = {photoId: 115, retryCount: 1};
-          _lbStartPendingOriginalPreload();
+          window.scheduleOriginalWarmup(115, 1);
         }"""
     )
-    page.wait_for_function("_lbSpeculativeLoads.size === 0")
+    page.wait_for_function("vireoLightboxSession.preloadStatus().activeCount === 0")
+    page.wait_for_function("vireoLightboxSession.preloadStatus().originalScheduled === false")
+    page.wait_for_function("vireoLightboxSession.preloadStatus().activeCount === 0")
     assert len(failed) == 1
-    assert page.evaluate("_lbPreloadBytes()") == 0
+    assert page.evaluate("vireoLightboxSession.preloadStatus().bytes") == 0
     page.evaluate(
         """() => {
           _lightboxPhotoList = window.savedPreloadList;
-          _lbScheduleAdjacentPhoto('full');
+          vireoLightboxSession.scheduleAdjacent('full');
         }"""
     )
-    page.wait_for_function("Object.values(_lbAdjacentPreloads).filter(e => e.status === 'decoded').length === 12")
+    page.wait_for_function("vireoLightboxSession.preloadStatus().adjacent.filter(e => e.status === 'decoded').length === 12")
 
 
 def _detail_text(page):
@@ -498,10 +500,10 @@ def test_detail_status_stays_quiet_when_the_photo_is_already_there(live_server, 
     page.route("**/photos/*/full*", lambda route: route.fulfill(body=_jpeg(), content_type="image/jpeg"))
     _open_window(page, live_server)
     page.wait_for_function(
-        "Object.values(_lbAdjacentPreloads).some(e => e.photoId === 116 && e.status === 'decoded')"
+        "vireoLightboxSession.preloadStatus().adjacent.some(e => e.photoId === 116 && e.status === 'decoded')"
     )
     page.evaluate("lightboxNav(1)")
-    page.wait_for_function("_lightboxCommittedId === 116 && !_lbVisualTransitionPending")
+    page.wait_for_function("vireoLightboxSession.displayedPhotoId() === 116 && !_lbVisualTransitionPending")
     # Well past the show delay: a decoded neighbour must never flash the chip.
     page.wait_for_timeout(600)
     expect(page.locator("#lightboxPreviewStatus")).to_be_hidden()
@@ -540,8 +542,8 @@ def test_detail_status_reports_an_incoming_photo_that_has_not_decoded(live_serve
     page.evaluate(
         """() => {
           LB_DETAIL_SHOW_DELAY_MS = 0;
-          _lbClearAdjacentPreloads();
-          _lbScheduleAdjacentPhoto = function() {};
+          vireoLightboxSession.clearAdjacent();
+          vireoLightboxSession = Object.freeze({...vireoLightboxSession, scheduleAdjacent() {}});
         }"""
     )
     serving["ready"] = False
@@ -555,7 +557,7 @@ def test_detail_status_reports_an_incoming_photo_that_has_not_decoded(live_serve
     assert held
     for route in held:
         route.fulfill(body=_jpeg(), content_type="image/jpeg")
-    page.wait_for_function("_lightboxCommittedId === 116 && !_lbVisualTransitionPending")
+    page.wait_for_function("vireoLightboxSession.displayedPhotoId() === 116 && !_lbVisualTransitionPending")
 
 
 def _zoom_needing(page, pixels):
@@ -604,7 +606,7 @@ def test_detail_status_restarts_its_quiet_period_for_each_photo(live_server, pag
     page.route("**/photos/*/original*", lambda r: held.append(r))
     _open_window(page, live_server)
     page.wait_for_function(
-        "Object.values(_lbAdjacentPreloads).some(e => e.photoId === 116 && e.status === 'decoded')"
+        "vireoLightboxSession.preloadStatus().adjacent.some(e => e.photoId === 116 && e.status === 'decoded')"
     )
     page.evaluate("LB_DETAIL_SHOW_DELAY_MS = 0;")
     page.evaluate("setLightboxZoomToOneToOne()")
@@ -653,7 +655,7 @@ def test_detail_status_reports_the_very_first_open(live_server, page):
     page.locator(".grid-card").first.wait_for(state="visible")
     page.evaluate(
         """() => {
-          _lbScheduleOriginalPreload = function() {};
+          vireoLightboxSession = Object.freeze({...vireoLightboxSession, scheduleOriginal() {}});
           LB_DETAIL_SHOW_DELAY_MS = 0;
           LB_DETAIL_SETTLED_MS = 30000;
           openLightbox(100, 'photo-0.jpg', [
@@ -672,7 +674,7 @@ def test_detail_status_reports_the_very_first_open(live_server, page):
     assert held
     for r in held:
         r.fulfill(body=_jpeg(), content_type="image/jpeg")
-    page.wait_for_function("_lightboxCommittedId === 100 && !_lbInitialDecodePending")
+    page.wait_for_function("vireoLightboxSession.displayedPhotoId() === 100 && !_lbInitialDecodePending")
     expect(status).to_be_visible()
     assert _detail_text(page) == "Full detail"
 
@@ -701,7 +703,7 @@ def test_detail_status_clears_when_an_edit_reload_takes_over_the_initial_load(li
     page.locator(".grid-card").first.wait_for(state="visible")
     page.evaluate(
         """() => {
-          _lbScheduleOriginalPreload = function() {};
+          vireoLightboxSession = Object.freeze({...vireoLightboxSession, scheduleOriginal() {}});
           LB_DETAIL_SHOW_DELAY_MS = 0;
           openLightbox(100, 'photo-0.jpg', [
             {id: 100, filename: 'photo-0.jpg', width: 6000, height: 4000, edit_recipe: null}
@@ -743,13 +745,13 @@ def test_edit_reload_completes_the_navigation_it_displaced(live_server, page):
     page.evaluate(
         """() => {
           LB_DETAIL_SHOW_DELAY_MS = 0;
-          _lbClearAdjacentPreloads();
-          _lbScheduleAdjacentPhoto = function() {};
+          vireoLightboxSession.clearAdjacent();
+          vireoLightboxSession = Object.freeze({...vireoLightboxSession, scheduleAdjacent() {}});
         }"""
     )
     serving["ready"] = False
     page.evaluate("lightboxNav(1)")
-    page.wait_for_function("_lbVisualTransitionPending && _lightboxCurrentId === 116")
+    page.wait_for_function("_lbVisualTransitionPending && vireoLightboxSession.requestedPhotoId() === 116")
     expect(page.locator("#lightboxPreviewStatus")).to_be_visible()
 
     # A metadata response carrying a changed recipe replaces the initial
@@ -763,7 +765,7 @@ def test_edit_reload_completes_the_navigation_it_displaced(live_server, page):
         route.fulfill(body=_jpeg(), content_type="image/jpeg")
 
     page.wait_for_function("!_lbVisualTransitionPending")
-    assert page.evaluate("_lightboxCommittedId") == 116
+    assert page.evaluate("vireoLightboxSession.displayedPhotoId()") == 116
     assert page.evaluate("_lbInitialDecodePending") is False
     # The action bar is usable again, not left inert by the frozen transition.
     assert page.evaluate(
@@ -787,13 +789,13 @@ def test_failed_edit_reload_commits_identity_before_freeing_controls(live_server
     page.evaluate(
         """() => {
           LB_DETAIL_SHOW_DELAY_MS = 0;
-          _lbClearAdjacentPreloads();
-          _lbScheduleAdjacentPhoto = function() {};
+          vireoLightboxSession.clearAdjacent();
+          vireoLightboxSession = Object.freeze({...vireoLightboxSession, scheduleAdjacent() {}});
         }"""
     )
     serving["ready"] = False
     page.evaluate("lightboxNav(1)")
-    page.wait_for_function("_lbVisualTransitionPending && _lightboxCurrentId === 116")
+    page.wait_for_function("_lbVisualTransitionPending && vireoLightboxSession.requestedPhotoId() === 116")
 
     # The displaced load fails outright: no bitmap will ever arrive for 116.
     page.evaluate("_lbReloadCurrentRenderAfterEdit(116)")
@@ -806,7 +808,7 @@ def test_failed_edit_reload_commits_identity_before_freeing_controls(live_server
     # Freeing the controls without committing the identity would leave the
     # filename, counter and committed id naming 115 while the action bar acts
     # on 116 -- the user flags a photo the lightbox is not showing.
-    assert page.evaluate("_lightboxCommittedId") == 116
+    assert page.evaluate("vireoLightboxSession.displayedPhotoId()") == 116
     assert page.evaluate(
         "document.getElementById('lightboxCounter').textContent"
     ).endswith("photo-16.jpg")
@@ -837,7 +839,7 @@ def test_reopening_the_visible_photo_does_not_arm_a_decode_that_never_ends(live_
           openLightbox(115, 'photo-15.jpg', _lightboxPhotoList);
           return {
             pending: _lbInitialDecodePending,
-            parked: !!_lbPendingInitialLoadCommit,
+            parked: !!vireoLightboxSession.hasInitialLoad(),
             src: document.getElementById('lightboxImg').src,
           };
         }"""
@@ -879,7 +881,7 @@ def test_initial_load_does_not_settle_while_a_sharper_tier_is_still_pending(live
     page.locator(".grid-card").first.wait_for(state="visible")
     page.evaluate(
         """() => {
-          _lbScheduleOriginalPreload = function() {};
+          vireoLightboxSession = Object.freeze({...vireoLightboxSession, scheduleOriginal() {}});
           LB_DETAIL_SHOW_DELAY_MS = 0;
           // A very short settle window makes an accidental settle observable:
           // if the initial load calls _lbMarkDetailSettled it would clear the

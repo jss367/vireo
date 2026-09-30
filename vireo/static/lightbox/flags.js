@@ -86,7 +86,7 @@ window.setLightboxProvisionalFlag = function(photoId, flag, editSeq) {
   _lbFlagEditSeq = Math.max(_lbFlagEditSeq, seq);
   _lbProvisionalFlags[key] = normalized;
   _lbProvisionalFlagSeq[key] = seq;
-  if (_lightboxCurrentId === parseInt(photoId, 10)) {
+  if (vireoLightboxSession.requestedPhotoId() === parseInt(photoId, 10)) {
     _lbSetFlagStatus(normalized);
   }
 };
@@ -101,10 +101,10 @@ window.clearLightboxProvisionalFlags = function(photoIds) {
     delete _lbProvisionalFlagSeq[String(photoId)];
     _lbForgetConfirmedFlag(photoId);
   });
-  if (_lightboxCurrentId != null && (photoIds || []).some(function(photoId) {
-    return parseInt(photoId, 10) === _lightboxCurrentId;
+  if (vireoLightboxSession.requestedPhotoId() != null && (photoIds || []).some(function(photoId) {
+    return parseInt(photoId, 10) === vireoLightboxSession.requestedPhotoId();
   })) {
-    _lbSetFlagStatus(_lbDisplayedFlagFor(_lightboxCurrentId));
+    _lbSetFlagStatus(_lbDisplayedFlagFor(vireoLightboxSession.requestedPhotoId()));
   }
 };
 
@@ -114,7 +114,7 @@ function _lbRecordFlag(photoId, flag) {
   var p = _lightboxPhotoList.find(function(x) { return x.id === photoId; });
   if (p) p.flag = normalized;
   _lbRememberConfirmedFlag(photoId, normalized);
-  if (_lightboxCurrentId === photoId && !_lbVisualTransitionPending) {
+  if (vireoLightboxSession.requestedPhotoId() === photoId && !_lbVisualTransitionPending) {
     _lbSetFlagStatus(_lbDisplayedFlagFor(photoId));
   }
 }
@@ -177,7 +177,7 @@ function _lbApplyFlag(photoId, flag) {
 
     if (provisional) {
       window.setLightboxProvisionalFlag(photoId, normalized, seq);
-      if (_lightboxCurrentId === photoId && (_lbFlagEditSeq === seq || _lbFlagPendingWrites === 0)) {
+      if (vireoLightboxSession.requestedPhotoId() === photoId && (_lbFlagEditSeq === seq || _lbFlagPendingWrites === 0)) {
         _lbSetFlagStatus(_lbDisplayedFlagFor(photoId));
       }
     } else if (landed) {
@@ -189,10 +189,10 @@ function _lbApplyFlag(photoId, flag) {
       // Cache the confirmed flag even if the user has navigated away, so the
       // quiescence emit below reflects what actually landed for this photo.
       _lbCacheFlag(photoId, normalized);
-      if (_lightboxCurrentId === photoId && (_lbFlagEditSeq === seq || _lbFlagPendingWrites === 0)) {
+      if (vireoLightboxSession.requestedPhotoId() === photoId && (_lbFlagEditSeq === seq || _lbFlagPendingWrites === 0)) {
         _lbSetFlagStatus(_lbDisplayedFlagFor(photoId));
       }
-    } else if (_lightboxCurrentId === photoId && _lbFlagEditSeq === seq) {
+    } else if (vireoLightboxSession.requestedPhotoId() === photoId && _lbFlagEditSeq === seq) {
       // Write failed: the prior confirmed flag stands; restore the chip to it.
       _lbSetFlagStatus(_lbConfirmedFlagFor(photoId));
     }

@@ -21,11 +21,11 @@ def _open_lightbox(page, url):
         "document.getElementById('lightboxOverlay').classList.contains('active')",
         timeout=3000,
     )
-    # Wait until `_lightboxCurrentId` is populated (openLightbox assigns it
+    # Wait until `vireoLightboxSession.requestedPhotoId()` is populated (openLightbox assigns it
     # synchronously, but the dblclick → handler chain is async from pytest's
     # point of view).
     page.wait_for_function(
-        "typeof _lightboxCurrentId !== 'undefined' && _lightboxCurrentId !== null",
+        "typeof vireoLightboxSession.requestedPhotoId() !== 'undefined' && vireoLightboxSession.requestedPhotoId() !== null",
         timeout=3000,
     )
 
@@ -86,11 +86,11 @@ def test_lightbox_export_resolves_photo_when_action_is_invoked(live_server, page
     url = live_server["url"]
     _open_lightbox(page, url)
 
-    current_id = page.evaluate("_lightboxCurrentId")
+    current_id = page.evaluate("vireoLightboxSession.requestedPhotoId()")
     page.evaluate(
         """() => {
             selectedPhotos.clear();
-            selectedPhotoId = _lightboxCurrentId;
+            selectedPhotoId = vireoLightboxSession.requestedPhotoId();
             window.__exportRequest = null;
             window.__resolveExport = null;
             window.__rejectPreflight = true;
@@ -118,9 +118,9 @@ def test_lightbox_export_resolves_photo_when_action_is_invoked(live_server, page
     _fire_contextmenu_on_lightbox(page)
     export_photo = page.evaluate(
         """() => {
-            const next = photos.find(photo => photo.id !== _lightboxCurrentId);
-            _lightboxCurrentId = next.id;
-            _lightboxCommittedId = next.id;
+            const next = photos.find(photo => photo.id !== vireoLightboxSession.requestedPhotoId());
+            vireoLightboxSession.begin(next.id);
+            vireoLightboxSession.commit(vireoLightboxSession.capture());
             // Simulate opening a Find Similar result that is not present in
             // Browse's currently loaded page. The lightbox retains its own
             // photo list for metadata-backed export previews.
@@ -217,7 +217,7 @@ def test_lightbox_menu_sets_species_representative(live_server, page):
     _open_lightbox(page, url)
     page.wait_for_function(
         """() => {
-            const id = window._lightboxCurrentId;
+            const id = vireoLightboxSession.requestedPhotoId();
             const data = window._lbPhotoDataByPhoto && window._lbPhotoDataByPhoto[String(id)];
             return data && data.life_list && data.life_list.length > 0;
         }""",
@@ -258,7 +258,7 @@ def test_lightbox_menu_adds_species_highlight(live_server, page):
     _open_lightbox(page, url)
     page.wait_for_function(
         """() => {
-            const id = window._lightboxCurrentId;
+            const id = vireoLightboxSession.requestedPhotoId();
             const data = window._lbPhotoDataByPhoto && window._lbPhotoDataByPhoto[String(id)];
             return data && data.highlight_list && data.highlight_list.length > 0;
         }""",
@@ -584,7 +584,7 @@ def test_lightbox_rating_chip_applies(live_server, page):
     url = live_server["url"]
     _open_lightbox(page, url)
 
-    pid = page.evaluate("_lightboxCurrentId")
+    pid = page.evaluate("vireoLightboxSession.requestedPhotoId()")
     assert pid is not None
 
     _fire_contextmenu_on_lightbox(page)

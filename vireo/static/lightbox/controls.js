@@ -255,7 +255,7 @@ function toggleLightboxZoom(e) {
         // source swap or preload that is already in flight.
         _lbClampPan();
         _lbApplyTransform();
-        _lbSaveViewportState(_lightboxCurrentId);
+        _lbSaveViewportState(vireoLightboxSession.requestedPhotoId());
       }
     }, 100);
   }
@@ -331,22 +331,15 @@ function toggleLightboxZoom(e) {
       _lbSetZoom(1.0, null, null);
       window._lightboxZoomHandled = true;
     } else if (didDrag) {
-      _lbSaveViewportState(_lightboxCurrentId);
+      _lbSaveViewportState(vireoLightboxSession.requestedPhotoId());
     }
   });
 })();
 
 function closeLightbox(e) {
   if (e && e.target && e.target.tagName === 'IMG') return;
-  // Use the last committed (visible) identity, not `_lightboxCurrentId` —
-  // that advances immediately at the start of navigation while the outgoing
-  // bitmap is still on screen, so it names a photo the user never actually
-  // viewed if the incoming /full is still loading when the user closes.
-  var closedPhotoId = _lightboxCommittedId != null
-    ? _lightboxCommittedId
-    : _lightboxCurrentId;
   _lbFlushPendingAdjustmentSave();
-  if (_lightboxCurrentId != null) _lbSaveViewportState(_lightboxCurrentId);
+  if (vireoLightboxSession.requestedPhotoId() != null) _lbSaveViewportState(vireoLightboxSession.requestedPhotoId());
   var wasOpen = !!window._lbEscToken;
   if (wasOpen) { Keymap.popEsc(window._lbEscToken); window._lbEscToken = null; }
   var wrap = document.getElementById('lightboxWrap');
@@ -360,13 +353,9 @@ function closeLightbox(e) {
   _lbClearPendingViewportRestore();
   _lbPendingEyeTrack = null;
   _lbEyeTrackScreenAnchor = null;
-  if (_lbSwapTimer) { clearTimeout(_lbSwapTimer); _lbSwapTimer = null; }
   _lbDesiredSrcKey = null;
   _lbInitialDecodePending = false;
-  _lbClearPendingInitialLoad();
   _lbResetDetailStatus();
-  _lbCancelOriginalPreload();
-  _lbClearAdjacentPreloads();
   _lbClearAdjustmentPreview();
   var adjustPanel = document.getElementById('lightboxAdjustPanel');
   if (adjustPanel) adjustPanel.classList.remove('open');
@@ -376,12 +365,14 @@ function closeLightbox(e) {
   _lbSetZoomPopoverOpen(false);
   _lbApplyTransform();
   document.getElementById('lightboxOverlay').classList.remove('active');
+  // The session returns the bitmap's identity, even if navigation was pending.
+  var closedPhotoId = vireoLightboxSession.close();
   document.getElementById('lightboxImg').src = '';
-  _lightboxCurrentId = null;
+  document.getElementById('lightboxImg').onload = null;
+  document.getElementById('lightboxImg').onerror = null;
   _lbReadOnly = false;
   _lbReadOnlyMessage = 'This lightbox is read-only';
   _lbApplyReadOnlyState();
-  _lightboxCommittedId = null;
   try {
     document.dispatchEvent(new CustomEvent('lightbox:closed', {
       detail: { photoId: closedPhotoId }
@@ -524,9 +515,9 @@ function buildLightboxContextMenu(pid) {
         // The lightbox can navigate while its context menu remains open.
         // Resolve the visible identity now instead of exporting the photo
         // that happened to be current when the menu was built.
-        var exportPid = _lightboxCommittedId != null
-          ? _lightboxCommittedId
-          : _lightboxCurrentId;
+        var exportPid = vireoLightboxSession.displayedPhotoId() != null
+          ? vireoLightboxSession.displayedPhotoId()
+          : vireoLightboxSession.requestedPhotoId();
         if (exportPid != null) window.openPhotoExportModal([exportPid]);
       } });
   }
@@ -582,7 +573,7 @@ function revealLightboxPhoto(pid) {
     e.preventDefault();
     e.stopPropagation();
     if (_lbVisualTransitionPending) return;
-    var pid = _lightboxCurrentId;
+    var pid = vireoLightboxSession.requestedPhotoId();
     if (!pid) return;
     openContextMenu(e, buildLightboxContextMenu(pid));
   });

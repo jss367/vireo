@@ -150,7 +150,7 @@ window.vireoUpdatePairSourceControls = function(photoId) {
       : 'Viewing RAW · Show JPEG');
 
   var lightboxControl = document.getElementById('lightboxSourceControl');
-  if (lightboxControl && String(_lightboxCurrentId) === key) {
+  if (lightboxControl && String(vireoLightboxSession.requestedPhotoId()) === key) {
     lightboxControl.style.display = paired ? '' : 'none';
     lightboxControl.textContent = text;
     lightboxControl.disabled = !!pending;
@@ -186,7 +186,7 @@ function _vireoSetRenderedImageSource(img, url) {
 
 function _vireoPairAnchorImage(photoId) {
   var key = String(photoId);
-  if (String(_lightboxCurrentId) === key) {
+  if (String(vireoLightboxSession.requestedPhotoId()) === key) {
     return document.getElementById('lightboxImg');
   }
   if (String(window._detailPhotoId) === key) {
@@ -198,7 +198,7 @@ function _vireoPairAnchorImage(photoId) {
 function _vireoPairAnchorStillCurrent(anchor, photoId) {
   if (!anchor) return false;
   var key = String(photoId);
-  if (anchor.id === 'lightboxImg') return String(_lightboxCurrentId) === key;
+  if (anchor.id === 'lightboxImg') return String(vireoLightboxSession.requestedPhotoId()) === key;
   if (anchor.id === 'detailImg') return String(window._detailPhotoId) === key;
   if (anchor.hasAttribute('data-thumbnail-src')) {
     // A source probe can finish after the user scrolls away. The queue will
@@ -247,7 +247,7 @@ function _vireoPairSourceImageLoaded(photoId, requested, anchor) {
   var key = String(photoId);
   if (
     !anchor || anchor.id !== 'lightboxImg' ||
-    String(_lightboxCurrentId) !== key
+    String(vireoLightboxSession.requestedPhotoId()) !== key
   ) return;
   _lbFullLongEdge = _lbCurrentSrcKey === 'full'
     ? (Math.max(anchor.naturalWidth || 0, anchor.naturalHeight || 0) || null)
@@ -285,7 +285,7 @@ window.vireoTogglePairSource = function(photoId) {
     ? 'jpeg'
     : 'raw';
   // Commit input made on the RAW before source switching disables controls.
-  if (String(_lightboxCurrentId) === key) _lbFlushPendingAdjustmentSave();
+  if (String(vireoLightboxSession.requestedPhotoId()) === key) _lbFlushPendingAdjustmentSave();
   var anchor = _vireoPairAnchorImage(photoId);
   var oldSrc = anchor ? _vireoRenderedImageSource(anchor) : '';
   var base = oldSrc ? _vireoBaseRenderedUrl(oldSrc) : '/thumbnails/' + key + '.jpg';
@@ -551,8 +551,8 @@ function _lbRecipeHasOrientation(recipe) {
 }
 
 function _lbCurrentRecipeHasOrientation() {
-  if (_lightboxCurrentId == null) return false;
-  return _lbRecipeHasOrientation(_lbEditRecipeByPhoto[String(_lightboxCurrentId)]);
+  if (vireoLightboxSession.requestedPhotoId() == null) return false;
+  return _lbRecipeHasOrientation(_lbEditRecipeByPhoto[String(vireoLightboxSession.requestedPhotoId())]);
 }
 
 window.vireoPhotoHasOrientationEdit = function(photoId) {
@@ -594,7 +594,7 @@ function _lbRememberEditRecipe(photoId, recipe, preserveAdjustmentInput) {
   _lbEditRecipeKnownByPhoto[String(photoId)] = true;
   var p = _lightboxPhotoList.find(function(x) { return x.id === numericId; });
   if (p) p.edit_recipe = currentRecipe;
-  if (_lightboxCurrentId === numericId) {
+  if (vireoLightboxSession.requestedPhotoId() === numericId) {
     _lbCurrentEditRecipe = currentRecipe;
     if (!preserveAdjustmentInput) {
       _lbEditRecipe = _lbCloneRecipe(storedRecipe);
@@ -618,8 +618,8 @@ function _lbMarkEditRecipeWrite(photoId) {
 }
 
 function _lbCurrentEditRecipeClone() {
-  if (_lightboxCurrentId == null) return {};
-  return _lbCloneEditRecipe(_lbEditRecipeByPhoto[String(_lightboxCurrentId)]);
+  if (vireoLightboxSession.requestedPhotoId() == null) return {};
+  return _lbCloneEditRecipe(_lbEditRecipeByPhoto[String(vireoLightboxSession.requestedPhotoId())]);
 }
 
 function _lbNormalizeClientRecipe(recipe) {
@@ -776,7 +776,7 @@ function _lbInverseOrientationRecipe(recipe) {
 function _lbApplyEditButtonState() {
   var recipe = _lbCurrentEditRecipeClone();
   var hasOrientation = _lbRecipeHasOrientation(recipe);
-  var known = _lightboxCurrentId != null && !!_lbEditRecipeKnownByPhoto[String(_lightboxCurrentId)];
+  var known = vireoLightboxSession.requestedPhotoId() != null && !!_lbEditRecipeKnownByPhoto[String(vireoLightboxSession.requestedPhotoId())];
   var ids = [
     'lightboxRotateLeft',
     'lightboxRotateRight',
@@ -787,7 +787,7 @@ function _lbApplyEditButtonState() {
   ids.forEach(function(id) {
     var btn = document.getElementById(id);
     if (!btn) return;
-    btn.disabled = _lbEditWritePending || _lightboxCurrentId == null || !known || (id === 'lightboxResetEdit' && !hasOrientation);
+    btn.disabled = _lbEditWritePending || vireoLightboxSession.requestedPhotoId() == null || !known || (id === 'lightboxResetEdit' && !hasOrientation);
   });
 }
 
@@ -797,9 +797,9 @@ function _lbSetEditBusy(busy) {
 }
 
 function _lbReloadCurrentRenderAfterEdit(photoId) {
-  if (_lightboxCurrentId !== photoId) return;
+  if (vireoLightboxSession.requestedPhotoId() !== photoId) return;
   _lbClearAdjustmentPreview();
-  _lbCancelOriginalPreload();
+  vireoLightboxSession.cancelOriginal();
   var img = document.getElementById('lightboxImg');
   var wrap = document.getElementById('lightboxWrap');
   if (!img) return;
@@ -813,13 +813,10 @@ function _lbReloadCurrentRenderAfterEdit(photoId) {
   _lbPending1To1Anchor = null;
   _lbPendingViewportState = null;
   _lbOriginalUnavailable = false;
-  if (_lbSwapTimer) {
-    clearTimeout(_lbSwapTimer);
-    _lbSwapTimer = null;
-  }
+  vireoLightboxSession.cancelSwap();
   _lbDesiredSrcKey = null;
   _lbProgressiveTargetKey = null;
-  // Cancelling _lbSwapTimer and clearing the desired key makes the old
+  // Cancelling the scheduled swap and clearing the desired key makes the old
   // preloader callbacks return as stale, so nothing else will ever turn this
   // off. Left set, the phase stays 'sharpening' with no request behind it.
   _lbSetPreviewLoading(false);
@@ -833,7 +830,7 @@ function _lbReloadCurrentRenderAfterEdit(photoId) {
   img.onload = function() {
     img.onload = null;
     img.onerror = null;
-    if (_lightboxCurrentId !== photoId) return;
+    if (vireoLightboxSession.requestedPhotoId() !== photoId) return;
     _lbInitialDecodePending = false;
     if (img.naturalWidth) {
       _lbFullLongEdge = Math.max(img.naturalWidth, img.naturalHeight);
@@ -843,21 +840,21 @@ function _lbReloadCurrentRenderAfterEdit(photoId) {
     // Settle the load this reload displaced. It schedules the neighbours and
     // renders the status itself, so only do that work when there was nothing
     // pending (a reload from the adjustments panel, long after the open).
-    if (!_lbFinishInitialLoad()) {
+    if (!vireoLightboxSession.finishInitialLoad()) {
       _lbRenderDetailStatus();
-      _lbScheduleOriginalPreload(photoId);
+      vireoLightboxSession.scheduleOriginal(photoId);
     }
   };
   img.onerror = function() {
     img.onload = null;
     img.onerror = null;
-    if (_lightboxCurrentId !== photoId) return;
+    if (vireoLightboxSession.requestedPhotoId() !== photoId) return;
     _lbInitialDecodePending = false;
     // Nothing is going to render. Hand the displaced load its failure path,
     // which commits the incoming photo's identity before bringing the controls
     // back -- unfreezing without that hands the user live controls against the
     // outgoing photo's filename and counter.
-    if (!_lbAbandonInitialLoad()) _lbRenderDetailStatus();
+    if (!vireoLightboxSession.abandonInitialLoad()) _lbRenderDetailStatus();
     if (typeof showToast === 'function') {
       showToast('Could not reload edited photo', 'error');
     }
@@ -870,13 +867,13 @@ function _lbReloadCurrentRenderAfterEdit(photoId) {
 }
 
 async function lightboxApplyEdit(op) {
-  if (_lightboxCurrentId == null || _lbEditWritePending) return;
-  var photoId = _lightboxCurrentId;
+  if (vireoLightboxSession.requestedPhotoId() == null || _lbEditWritePending) return;
+  var photoId = vireoLightboxSession.requestedPhotoId();
   _lbSetEditBusy(true);
   try {
     _lbFlushPendingAdjustmentSave();
     await _lbWaitForAdjustmentSaveIdle(photoId);
-    if (_lightboxCurrentId !== photoId) return;
+    if (vireoLightboxSession.requestedPhotoId() !== photoId) return;
     var baseRecipe = _lbEditRecipeLoaded ? _lbCloneEditRecipe(_lbEditRecipe) : _lbCurrentEditRecipeClone();
     var nextRecipe = _lbRecipeAfterEditOperation(baseRecipe, op);
     var data;
@@ -897,7 +894,7 @@ async function lightboxApplyEdit(op) {
     if (typeof window.vireoRefreshPhotoRenders === 'function') {
       window.vireoRefreshPhotoRenders([photoId]);
     }
-    if (_lightboxCurrentId === photoId) {
+    if (vireoLightboxSession.requestedPhotoId() === photoId) {
       _lbReloadCurrentRenderAfterEdit(photoId);
       if (typeof showToast === 'function') showToast('Updated photo edit', 'success');
     }
@@ -1048,13 +1045,13 @@ function _lbSetAdjustmentControlsDisabled(disabled) {
 }
 
 function _lbAdjustmentSourceHint() {
-  if (_lightboxCurrentId == null) return '';
-  if (_vireoPairPendingSourceByPhoto[String(_lightboxCurrentId)]) {
+  if (vireoLightboxSession.requestedPhotoId() == null) return '';
+  if (_vireoPairPendingSourceByPhoto[String(vireoLightboxSession.requestedPhotoId())]) {
     return 'Wait for the photo source to finish loading';
   }
   // A developed companion JPEG is displayed as-authored; recipes belong to
   // the primary RAW and may use entirely different image coordinates.
-  return _vireoPairSource(_lightboxCurrentId) === 'jpeg'
+  return _vireoPairSource(vireoLightboxSession.requestedPhotoId()) === 'jpeg'
     ? 'Switch to RAW to use quick adjustments'
     : '';
 }
@@ -1390,7 +1387,7 @@ var VireoToneGL = (function() {
 function _lbAdjustmentPreviewUrl(recipe, neutral) {
   var img = document.getElementById('lightboxImg');
   var size = Math.max(img.naturalWidth, img.naturalHeight) || 1920;
-  return '/photos/' + _lightboxCurrentId + '/edit-preview?size=' + size +
+  return '/photos/' + vireoLightboxSession.requestedPhotoId() + '/edit-preview?size=' + size +
     '&apply_crop=1' + (neutral ? '&analysis=1' : '') +
     '&recipe=' + encodeURIComponent(JSON.stringify(recipe));
 }
@@ -1418,7 +1415,7 @@ function _lbLoadAdjustmentSource() {
 function _lbPreviewNeedsServer(recipe) {
   // RAW controls must run before display encoding; a JPEG WebGL texture has
   // already lost the scene highlight headroom and cannot match saved renders.
-  var photo = _lightboxPhotoList.find(function(p) { return p.id === _lightboxCurrentId; });
+  var photo = _lightboxPhotoList.find(function(p) { return p.id === vireoLightboxSession.requestedPhotoId(); });
   var filename = (photo && photo.filename) || document.getElementById('lightboxFilename').textContent;
   if (/\.(nef|cr2|cr3|arw|raf|dng|rw2|orf)$/i.test(filename || '')) return true;
   // Range adjustments preserve texture using neighboring luminance samples.
@@ -1536,29 +1533,29 @@ function _lbRefreshVisiblePhotoImages(photoId) {
 }
 
 function _lbReloadEditedSource(photoId, seq) {
-  if (_lightboxCurrentId !== photoId) return;
+  if (vireoLightboxSession.requestedPhotoId() !== photoId) return;
   // The source switch owns the visible image until its target has decoded.
   if (_vireoPairPendingSourceByPhoto[String(photoId)]) return;
-  _lbCancelOriginalPreload();
+  vireoLightboxSession.cancelOriginal();
   var img = document.getElementById('lightboxImg');
   if (!img) return;
   var key = _lbCurrentSrcKey || 'full';
   img.addEventListener('load', function onEditedReload() {
     img.removeEventListener('load', onEditedReload);
-    if (_lightboxCurrentId !== photoId || seq !== _lbAdjustSeq) return;
+    if (vireoLightboxSession.requestedPhotoId() !== photoId || seq !== _lbAdjustSeq) return;
     _lbClearAdjustmentPreview();
     _lbRecomputeNativeZoom();
     _lbApplyTransform();
-    if (key === 'full') _lbScheduleOriginalPreload(photoId);
+    if (key === 'full') vireoLightboxSession.scheduleOriginal(photoId);
   });
   img.src = _lbSrcUrl(photoId, key);
 }
 
 function _lbStartAdjustmentRecipeSave(photoId, recipe, inputSeq) {
-  var seq = _lightboxCurrentId === photoId ? ++_lbAdjustSeq : _lbAdjustSeq;
+  var seq = vireoLightboxSession.requestedPhotoId() === photoId ? ++_lbAdjustSeq : _lbAdjustSeq;
   var key = String(photoId);
   _lbAdjustSaveInFlightByPhoto[key] = true;
-  if (_lightboxCurrentId === photoId) _lbSetAdjustmentStatus('Saving...');
+  if (vireoLightboxSession.requestedPhotoId() === photoId) _lbSetAdjustmentStatus('Saving...');
   fetch('/api/photos/' + photoId + '/edit-recipe', {
     method: 'PUT',
     headers: {'Content-Type': 'application/json'},
@@ -1582,7 +1579,7 @@ function _lbStartAdjustmentRecipeSave(photoId, recipe, inputSeq) {
           detail: {photoId: photoId, recipe: data.recipe || null}
         }));
       } catch (_) {}
-      if (_lightboxCurrentId !== photoId || inputSeq !== _lbAdjustmentInputSeqFor(photoId)) return;
+      if (vireoLightboxSession.requestedPhotoId() !== photoId || inputSeq !== _lbAdjustmentInputSeqFor(photoId)) return;
       var activeSeq = ++_lbAdjustSeq;
       _lbEditRecipe = _lbCloneRecipe(data.recipe || {});
       _lbEditRecipeLoaded = true;
@@ -1592,7 +1589,7 @@ function _lbStartAdjustmentRecipeSave(photoId, recipe, inputSeq) {
       _lbSetAdjustmentStatus('Saved');
     })
     .catch(function(err) {
-      if (_lightboxCurrentId !== photoId || seq !== _lbAdjustSeq) return;
+      if (vireoLightboxSession.requestedPhotoId() !== photoId || seq !== _lbAdjustSeq) return;
       _lbSetAdjustmentStatus(err.message || 'Save failed', true);
     })
     .then(function() {
@@ -1606,8 +1603,8 @@ function _lbStartAdjustmentRecipeSave(photoId, recipe, inputSeq) {
 
 function _lbSaveAdjustmentRecipe(values) {
   if (_lbGuardAdjustmentSource()) return false;
-  if (!_lightboxCurrentId || !_lbEditRecipeLoaded) return;
-  var photoId = _lightboxCurrentId;
+  if (!vireoLightboxSession.requestedPhotoId() || !_lbEditRecipeLoaded) return;
+  var photoId = vireoLightboxSession.requestedPhotoId();
   var key = String(photoId);
   var inputSeq = _lbAdjustmentInputSeqFor(photoId);
   var recipe = _lbRecipeWithAdjustments(values);
@@ -1663,7 +1660,7 @@ function onLightboxAdjustmentInput(input) {
   var label = document.getElementById(input.id + 'Value');
   if (label) label.textContent = _lbFormatAdjustmentValue(input.dataset.adjustment, input.value);
   _lbAdjustSeq += 1;
-  _lbBumpAdjustmentInputSeq(_lightboxCurrentId);
+  _lbBumpAdjustmentInputSeq(vireoLightboxSession.requestedPhotoId());
   var values = _lbReadAdjustmentControls();
   _lbEditRecipe = _lbRecipeWithAdjustments(values);
   _lbApplyAdjustmentPreview(values);
@@ -1694,7 +1691,7 @@ function resetLightboxAdjustments() {
   var values = _lbReadAdjustmentControls();
   _lbEditRecipe = _lbRecipeWithAdjustments(values);
   _lbApplyAdjustmentPreview(values);
-  _lbBumpAdjustmentInputSeq(_lightboxCurrentId);
+  _lbBumpAdjustmentInputSeq(vireoLightboxSession.requestedPhotoId());
   if (_lbAdjustSaveTimer) {
     clearTimeout(_lbAdjustSaveTimer);
     _lbAdjustSaveTimer = null;

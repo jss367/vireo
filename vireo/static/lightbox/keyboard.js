@@ -119,8 +119,8 @@ document.addEventListener('keydown', function(e) {
     if (matchesShortcut(e, flagKey)) lbFlag = 'flagged';
     else if (matchesShortcut(e, rejectKey)) lbFlag = 'rejected';
     else if (matchesShortcut(e, unflagKey)) lbFlag = 'none';
-    if (lbFlag !== null && _lightboxCurrentId != null) {
-      var pid = _lightboxCurrentId;
+    if (lbFlag !== null && vireoLightboxSession.requestedPhotoId() != null) {
+      var pid = vireoLightboxSession.requestedPhotoId();
       if (
         typeof window.handleMissesLightboxFlagShortcut === 'function' &&
         window.handleMissesLightboxFlagShortcut(pid, lbFlag) === true
