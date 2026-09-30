@@ -57,9 +57,9 @@ function _lbLayoutDims() {
   // its RAW primary. Use the pixels that actually loaded so the lightbox never
   // stretches the JPEG into the RAW row's catalog dimensions.
   if (
-    _lightboxCurrentId != null &&
-    _vireoPairKnownByPhoto[String(_lightboxCurrentId)] &&
-    _vireoPairSource(_lightboxCurrentId) === 'jpeg' &&
+    vireoLightboxSession.requestedPhotoId() != null &&
+    _vireoPairKnownByPhoto[String(vireoLightboxSession.requestedPhotoId())] &&
+    _vireoPairSource(vireoLightboxSession.requestedPhotoId()) === 'jpeg' &&
     img.naturalWidth && img.naturalHeight
   ) {
     return { w: img.naturalWidth, h: img.naturalHeight };
@@ -132,12 +132,9 @@ function _lbSyncSourceForZoom(targetZoom, preserveSharperSource) {
     // queued downgrade and retain them; this is especially important for the
     // explicit 1:1 stop, where replacing /original with a lower tier adds work
     // and can leave a failed non-original swap stranded.
-    if (_lbSwapTimer) {
-      clearTimeout(_lbSwapTimer);
-      _lbSwapTimer = null;
-    }
+    vireoLightboxSession.cancelSwap();
     _lbDesiredSrcKey = _lbCurrentSrcKey;
-    _lbScheduleAdjacentPhoto(_lbCurrentSrcKey);
+    vireoLightboxSession.scheduleAdjacent(_lbCurrentSrcKey);
     return;
   }
   _lbScheduleSourceSwap(targetZoom);
@@ -166,7 +163,7 @@ function _lbSetZoom(newZoom, anchorClientX, anchorClientY, preserveSharperSource
     wrap.classList.toggle('zoomed', _lbZoom > 1.001);
     _lbApplyTransform();
     _lbSyncSourceForZoom(newZoom, preserveSharperSource);
-    _lbSaveViewportState(_lightboxCurrentId);
+    _lbSaveViewportState(vireoLightboxSession.requestedPhotoId());
     return;
   }
   // Cursor at clientX has image-local coord (clientX - rect.left) / scale.
@@ -202,7 +199,7 @@ function _lbSetZoom(newZoom, anchorClientX, anchorClientY, preserveSharperSource
   wrap.classList.toggle('zoomed', _lbZoom > 1.001);
   _lbApplyTransform();
   _lbSyncSourceForZoom(newZoom, preserveSharperSource);
-  _lbSaveViewportState(_lightboxCurrentId);
+  _lbSaveViewportState(vireoLightboxSession.requestedPhotoId());
 }
 
 function _lbClampPan() {

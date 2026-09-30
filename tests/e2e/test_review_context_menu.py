@@ -172,7 +172,7 @@ def test_review_lightbox_rating_chip_posts_batch(live_server, page):
 
     # Wait for the lightbox to settle on a photo id.
     page.wait_for_function(
-        "typeof _lightboxCurrentId !== 'undefined' && _lightboxCurrentId !== null",
+        "typeof vireoLightboxSession.requestedPhotoId() !== 'undefined' && vireoLightboxSession.requestedPhotoId() !== null",
         timeout=3000,
     )
 

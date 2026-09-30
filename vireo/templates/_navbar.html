@@ -347,7 +347,7 @@
            onclick="event.stopPropagation();"></div>
     </div>
     <div id="lightboxActions" class="lightbox-actions">
-    <button class="lb-action-btn" id="lightboxSourceControl" style="display:none;" onclick="event.stopPropagation(); vireoTogglePairSource(_lightboxCurrentId);" title="Switch between the developed JPEG and RAW source">
+    <button class="lb-action-btn" id="lightboxSourceControl" style="display:none;" onclick="event.stopPropagation(); vireoTogglePairSource(vireoLightboxSession.requestedPhotoId());" title="Switch between the developed JPEG and RAW source">
       Viewing JPEG · Show RAW
     </button>
     <button class="lb-action-btn" id="lightboxViewBtn" aria-haspopup="true" aria-expanded="false" onclick="event.stopPropagation(); toggleLightboxViewMenu();" title="Overlay and interface visibility options">
@@ -552,6 +552,7 @@
   </div>
 </div>
 
+<script src="/static/lightbox/session.js"></script>
 <script src="/static/lightbox/state.js"></script>
 <script src="/static/lightbox/curation.js"></script>
 <script src="/static/lightbox/edits.js"></script>

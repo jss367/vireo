@@ -364,9 +364,9 @@ async function confirmDelete() {
 }
 
 async function lightboxToggleWildlifeExcluded() {
-  if (!_lightboxCurrentId) return;
+  if (!vireoLightboxSession.requestedPhotoId()) return;
   if (_lbGuardReadOnly()) return false;
-  var currentId = _lightboxCurrentId;
+  var currentId = vireoLightboxSession.requestedPhotoId();
   var excluded = !_lbCurrentWildlifeExcluded;
   try {
     if (typeof window.setWildlifeExcludedFor === 'function') {
@@ -396,11 +396,11 @@ function lightboxDelete() {
   var overlay = document.getElementById('lightboxOverlay');
   if (
     _lbVisualTransitionPending ||
-    !_lightboxCurrentId ||
+    !vireoLightboxSession.requestedPhotoId() ||
     !overlay ||
     !overlay.classList.contains('active')
   ) return;
-  var currentId = _lightboxCurrentId;
+  var currentId = vireoLightboxSession.requestedPhotoId();
   var p = _lightboxPhotoList.find(function(x) { return x.id === currentId; });
   var companionCount = (p && p.companion_path) ? 1 : 0;
 

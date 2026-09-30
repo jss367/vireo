@@ -43,8 +43,8 @@ function _lbRefreshEditRecipeCache(updates) {
   if (refreshedPhotoIds.length && typeof window.vireoRefreshPhotoRenders === 'function') {
     window.vireoRefreshPhotoRenders(refreshedPhotoIds);
   }
-  if (_lightboxCurrentId != null && refreshedPhotoIds.indexOf(Number(_lightboxCurrentId)) !== -1) {
-    _lbReloadCurrentRenderAfterEdit(Number(_lightboxCurrentId));
+  if (vireoLightboxSession.requestedPhotoId() != null && refreshedPhotoIds.indexOf(Number(vireoLightboxSession.requestedPhotoId())) !== -1) {
+    _lbReloadCurrentRenderAfterEdit(Number(vireoLightboxSession.requestedPhotoId()));
   }
 }
 
@@ -87,8 +87,8 @@ function openLightbox(photoId, filename, photoList, options) {
   var reopeningVisiblePhoto = !!(
     alreadyOpen &&
     !transitionAlreadyPending &&
-    _lightboxCurrentId != null &&
-    String(_lightboxCurrentId) === String(photoId)
+    vireoLightboxSession.requestedPhotoId() != null &&
+    String(vireoLightboxSession.requestedPhotoId()) === String(photoId)
   );
   options = options || {};
   var nextReadOnly = Object.prototype.hasOwnProperty.call(options, 'readOnly')
@@ -97,12 +97,9 @@ function openLightbox(photoId, filename, photoList, options) {
   var nextReadOnlyMessage = Object.prototype.hasOwnProperty.call(options, 'readOnlyMessage')
     ? options.readOnlyMessage
     : _lbReadOnlyMessage;
-  if (!alreadyOpen) _lbLastNavDelta = 1;
-  _lbCancelOriginalPreload();
-  _lbCancelAdjacentPreloadTimer();
   _lbProgressiveTargetKey = null;
   // Each photo earns its own quiet period. The outgoing photo's swap is dead as
-  // soon as _lbOpenSeq bumps below, so neither its pending tier nor an
+  // soon as the session begins below, so neither its pending tier nor an
   // already-visible chip may carry over -- inheriting them would let a photo
   // that decodes in 100ms still announce Loading and then Full detail.
   _lbResetDetailStatus();
@@ -113,14 +110,13 @@ function openLightbox(photoId, filename, photoList, options) {
   _lbReadOnly = nextReadOnly;
   _lbReadOnlyMessage = nextReadOnlyMessage || 'This lightbox is read-only';
   _lbApplyReadOnlyState();
-  if (alreadyOpen && _lightboxCurrentId != null) {
-    _lbSaveViewportState(_lightboxCurrentId);
+  if (alreadyOpen && vireoLightboxSession.requestedPhotoId() != null) {
+    _lbSaveViewportState(vireoLightboxSession.requestedPhotoId());
   }
   if (alreadyOpen) Keymap.popEsc(window._lbEscToken);
   window._lbEscToken = Keymap.pushEsc(function() { closeLightbox(); });
   if (!alreadyOpen) Keymap.lockBodyScroll();
-  _lbOpenSeq += 1;
-  var openSeq = _lbOpenSeq;
+  var openToken = vireoLightboxSession.begin(photoId);
   var preserveOneToOne = !!options.preserveOneToOne;
   var restoreViewportState = _lbViewportStateForOpen(photoId, fallbackViewportState);
   if (!restoreViewportState && preserveOneToOne) {
@@ -161,7 +157,7 @@ function openLightbox(photoId, filename, photoList, options) {
   // the same img.src again is not guaranteed to emit load/error, so arming the
   // transition lock here could leave every photo control inert indefinitely.
   // Do retain the lock when this call supersedes a transition already in
-  // flight: _lightboxCurrentId then names the incoming photo, not necessarily
+  // flight: vireoLightboxSession.requestedPhotoId() then names the incoming photo, not necessarily
   // the bitmap that is still visible.
   _lbVisualTransitionPending = alreadyOpen && !reopeningVisiblePhoto;
   _lbSetPhotoTransitionPending(_lbVisualTransitionPending);
@@ -171,7 +167,6 @@ function openLightbox(photoId, filename, photoList, options) {
   // and eye marker over the incoming bitmap.
   _lbDeferredOverlayApply = null;
 
-  _lightboxCurrentId = photoId;
   _lbApplyReadOnlyState();
   if (photoList) _lightboxPhotoList = photoList;
   // Remember the photo being viewed so the Edit page (/edit with no id) can
@@ -231,7 +226,7 @@ function openLightbox(photoId, filename, photoList, options) {
     }
     if (!visibleIdentityCommitted) {
       visibleIdentityCommitted = true;
-      _lightboxCommittedId = photoId;
+      vireoLightboxSession.commit(openToken);
       try {
         document.dispatchEvent(new CustomEvent('lightbox:photochanged', {
           detail: { photoId: photoId }
@@ -274,7 +269,7 @@ function openLightbox(photoId, filename, photoList, options) {
   _lbPhotoH = incomingPhoto.height || null;
   _lbPhotoOrientation = _lbMetadataOrientation(incomingPhoto.metadata);
   var initialTarget = _lbInitialSourceKey(incomingPhoto, transitionZoom, restoreWantsOneToOne);
-  var warmInitial = _lbDecodedInitialPreview(photoId, initialTarget);
+  var warmInitial = vireoLightboxSession.decodedPreview(photoId, initialTarget);
   _lbCurrentSrcKey = warmInitial ? warmInitial.sourceKey : initialTarget;
   if (_lbCurrentSrcKey !== initialTarget) _lbProgressiveTargetKey = initialTarget;
   _lbFullLongEdge = null;
@@ -305,7 +300,7 @@ function openLightbox(photoId, filename, photoList, options) {
   _lbRenderAdjustmentControls();
   _lbSetAdjustmentControlsDisabled(true);
   _lbSetAdjustmentStatus('');
-  if (_lbSwapTimer) { clearTimeout(_lbSwapTimer); _lbSwapTimer = null; }
+  vireoLightboxSession.cancelSwap();
   _lbDesiredSrcKey = null;
   if (!_lbVisualTransitionPending) {
     _lbApplyTransform();
@@ -318,7 +313,7 @@ function openLightbox(photoId, filename, photoList, options) {
   fetch('/api/photos/' + photoId)
     .then(function(r) { return r.ok ? r.json() : null; })
     .then(function(data) {
-      if (!data || _lightboxCurrentId !== photoId || _lbOpenSeq !== openSeq) return;
+      if (!data || !vireoLightboxSession.isCurrent(openToken)) return;
       var pairWasKnown = !!_vireoPairKnownByPhoto[String(photoId)];
       if (typeof window.vireoRememberPhotoPair === 'function') {
         window.vireoRememberPhotoPair(data);
@@ -328,17 +323,9 @@ function openLightbox(photoId, filename, photoList, options) {
       }
       if (!pairWasKnown && _vireoPairKnownByPhoto[String(photoId)]) {
         var pairImg = document.getElementById('lightboxImg');
-        var pairLoad = function() {
-          pairImg.removeEventListener('load', pairLoad);
-          pairImg.removeEventListener('error', pairError);
+        vireoLightboxSession.watchImage(pairImg, function() {
           _vireoPairSourceImageLoaded(photoId, 'jpeg', pairImg);
-        };
-        var pairError = function() {
-          pairImg.removeEventListener('load', pairLoad);
-          pairImg.removeEventListener('error', pairError);
-        };
-        pairImg.addEventListener('load', pairLoad);
-        pairImg.addEventListener('error', pairError);
+        });
         _vireoBumpRenderVersion(photoId);
         window.vireoRefreshPhotoRenders([photoId]);
       }
@@ -410,8 +397,8 @@ function openLightbox(photoId, filename, photoList, options) {
         _lbRecomputeNativeZoom();
         if (!_lbTryApplyPendingViewportState()) _lbApplyPendingOneToOneZoom();
         _lbTryApplyPendingEyeTrack(data);
-        _lbScheduleAdjacentPhoto(_lbCurrentSrcKey);
-        if (_lbCurrentSrcKey === 'full') _lbScheduleOriginalPreload(photoId);
+        vireoLightboxSession.scheduleAdjacent(_lbCurrentSrcKey);
+        if (_lbCurrentSrcKey === 'full') vireoLightboxSession.scheduleOriginal(photoId);
       }
       // Detection boxes, the eye marker, and the mask overlay are children of
       // lightboxTransform. While _lbVisualTransitionPending is true the
@@ -438,7 +425,7 @@ function openLightbox(photoId, filename, photoList, options) {
       _lbApplyTrackEyeState();
     })
     .catch(function() {
-      if (_lightboxCurrentId !== photoId || _lbOpenSeq !== openSeq) return;
+      if (!vireoLightboxSession.isCurrent(openToken)) return;
       _lbSetAdjustmentStatus('Could not load recipe', true);
     });
 
@@ -446,12 +433,13 @@ function openLightbox(photoId, filename, photoList, options) {
   // while the transition is pending the metadata callback skips layout updates
   // and _lbSaveViewportState treats the incoming photo as mid-flight. The
   // identity commit comes first on purpose -- releasing the controls while the
-  // filename, counter and _lightboxCommittedId still name the outgoing photo
+  // filename, counter and vireoLightboxSession.displayedPhotoId() still name the outgoing photo
   // would let the user act on a photo the UI is not showing. The outgoing
   // bitmap is dropped for the same reason: leaving it painted under the
   // incoming filename would let a flag or delete land on a photo the user
   // cannot see.
   function abandonInitialLoad() {
+    if (!vireoLightboxSession.isCurrent(openToken)) return;
     commitVisiblePhotoIdentity();
     img.onload = null;
     img.onerror = null;
@@ -473,7 +461,8 @@ function openLightbox(photoId, filename, photoList, options) {
   }
 
   function handleInitialImageLoad() {
-    if (_lbPendingInitialLoadCommit === handleInitialImageLoad) _lbClearPendingInitialLoad();
+    if (!vireoLightboxSession.isCurrent(openToken)) return;
+    vireoLightboxSession.clearInitialLoad(handleInitialImageLoad);
     // The commit below momentarily clears the transition before deciding whether
     // a sharper tier is still needed. Paint once, at the end, so the chip does
     // not blink off and restart its show delay between those two states.
@@ -486,18 +475,18 @@ function openLightbox(photoId, filename, photoList, options) {
     }
   }
   function commitInitialImageLoad() {
+    if (!vireoLightboxSession.isCurrent(openToken)) return;
     img.onload = null;
     img.onerror = null;
-    if (_lightboxCurrentId !== photoId || _lbOpenSeq !== openSeq) return;
     commitVisiblePhotoIdentity();
     // Only record the /full tier size if the currently loaded source is still /full.
     // A quick user zoom can trigger a debounced swap to a higher tier before /full
     // finishes loading, which would otherwise make us record the swapped source's
     // dimensions as the /full threshold.
-    if (_lightboxCurrentId === photoId && _lbCurrentSrcKey === 'full' && img.naturalWidth) {
+    if (vireoLightboxSession.requestedPhotoId() === photoId && _lbCurrentSrcKey === 'full' && img.naturalWidth) {
       _lbFullLongEdge = Math.max(img.naturalWidth, img.naturalHeight);
     }
-    if (_lightboxCurrentId === photoId && _lbCurrentSrcKey === 'original' && !_lbPhotoW && img.naturalWidth) {
+    if (vireoLightboxSession.requestedPhotoId() === photoId && _lbCurrentSrcKey === 'original' && !_lbPhotoW && img.naturalWidth) {
       _lbPhotoW = img.naturalWidth;
       _lbPhotoH = img.naturalHeight;
     }
@@ -533,7 +522,7 @@ function openLightbox(photoId, filename, photoList, options) {
       _lbScheduleSourceSwap(_lbPending1To1 ? (_lbNativeZoom || transitionZoom) : _lbZoom, true);
     } else {
       // No sharper tier is wanted for the current zoom, so what is on screen is
-      // everything this view can show. (_lbScheduleOriginalPreload only warms a
+      // everything this view can show. (vireoLightboxSession.scheduleOriginal only warms a
       // background copy for a later 1:1 -- it does not change these pixels.)
       // A user zoom during the initial /full load (e.g. clicking 1:1) can leave
       // _lbDesiredSrcKey/_lbPreviewLoading describing an upgrade in flight even
@@ -543,12 +532,12 @@ function openLightbox(photoId, filename, photoList, options) {
       // lands, or clear the chip when it fails. Match the phase predicate so
       // the chip stays on 'Sharpening…' until then.
       if (!_lbPreviewLoading && !_lbDetailSharpeningPending()) _lbMarkDetailSettled();
-      _lbScheduleAdjacentPhoto(_lbCurrentSrcKey);
-      if (_lbCurrentSrcKey === 'full') _lbScheduleOriginalPreload(photoId);
+      vireoLightboxSession.scheduleAdjacent(_lbCurrentSrcKey);
+      if (_lbCurrentSrcKey === 'full') vireoLightboxSession.scheduleOriginal(photoId);
     }
   }
   function handleInitialImageError() {
-    if (_lightboxCurrentId !== photoId || _lbOpenSeq !== openSeq) return;
+    if (!vireoLightboxSession.isCurrent(openToken)) return;
     if (_lbProgressiveTargetKey) {
       _lbCurrentSrcKey = _lbProgressiveTargetKey;
       _lbProgressiveTargetKey = null;
@@ -568,7 +557,7 @@ function openLightbox(photoId, filename, photoList, options) {
     if (_lbCurrentSrcKey !== 'original') {
       img.onload = null;
       img.onerror = null;
-      if (_lbPendingInitialLoadCommit === handleInitialImageLoad) _lbClearPendingInitialLoad();
+      vireoLightboxSession.clearInitialLoad(handleInitialImageLoad);
       // No further fallback tier is available.
       abandonInitialLoad();
       return;
@@ -576,12 +565,10 @@ function openLightbox(photoId, filename, photoList, options) {
     _lbOriginalUnavailable = true;
     _lbCurrentSrcKey = 'full';
     _lbDesiredSrcKey = null;
-    img.onload = handleInitialImageLoad;
-    img.onerror = handleInitialImageError;
+    vireoLightboxSession.watchInitialImage(img, handleInitialImageLoad, handleInitialImageError);
     img.src = _lbSrcUrl(photoId, 'full');
   }
-  img.onload = handleInitialImageLoad;
-  img.onerror = handleInitialImageError;
+  vireoLightboxSession.watchInitialImage(img, handleInitialImageLoad, handleInitialImageError);
   var initialSrc = _lbSrcUrl(photoId, _lbCurrentSrcKey);
   // Reopening the photo already on screen at the same source starts no load:
   // the bitmap is decoded and still displayed. Reassigning an identical src is
@@ -595,8 +582,7 @@ function openLightbox(photoId, filename, photoList, options) {
     img.naturalWidth > 0
   );
   if (!reusingVisibleBitmap) {
-    _lbPendingInitialLoadCommit = handleInitialImageLoad;
-    _lbPendingInitialLoadAbandon = abandonInitialLoad;
+    vireoLightboxSession.setInitialLoad(handleInitialImageLoad, abandonInitialLoad);
     _lbInitialDecodePending = true;
   }
   _lbRenderDetailStatus();
@@ -647,7 +633,7 @@ function lightboxNav(delta) {
   // Let the normal boundary event fire so the owning page can fetch the next
   // or previous page instead of swallowing the first navigation attempt.
   if (_lightboxPhotoList.length === 0) return;
-  var idx = _lightboxPhotoList.findIndex(function(p) { return p.id === _lightboxCurrentId; });
+  var idx = _lightboxPhotoList.findIndex(function(p) { return p.id === vireoLightboxSession.requestedPhotoId(); });
   if (idx === -1) return;
   var newIdx = idx + delta;
   if (newIdx < 0 || newIdx >= _lightboxPhotoList.length) {
@@ -655,7 +641,7 @@ function lightboxNav(delta) {
       document.dispatchEvent(new CustomEvent('lightbox:navigationboundary', {
         detail: {
           delta: delta,
-          photoId: _lightboxCurrentId,
+          photoId: vireoLightboxSession.requestedPhotoId(),
           index: idx,
           photoCount: _lightboxPhotoList.length
         }
@@ -663,10 +649,10 @@ function lightboxNav(delta) {
     } catch (_) {}
     return;
   }
-  var currentViewportState = _lbSaveViewportState(_lightboxCurrentId);
+  var currentViewportState = _lbSaveViewportState(vireoLightboxSession.requestedPhotoId());
   var eyeTrackAnchor = _lbCaptureEyeTrackingAnchor();
   var next = _lightboxPhotoList[newIdx];
-  _lbLastNavDelta = delta < 0 ? -1 : 1;
+  vireoLightboxSession.noteDirection(delta);
   openLightbox(next.id, next.filename, _lightboxPhotoList, {
     fallbackViewportState: currentViewportState,
     preserveOneToOne: _lbIsOneToOneZoom(),

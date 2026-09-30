@@ -61,9 +61,9 @@ function _lbOrientationSwapsAxes(orientation) {
 
 function _lbSourceOverlaysAvailable() {
   var pairUsesJpeg = (
-    _lightboxCurrentId != null &&
-    _vireoPairKnownByPhoto[String(_lightboxCurrentId)] &&
-    _vireoPairSource(_lightboxCurrentId) === 'jpeg'
+    vireoLightboxSession.requestedPhotoId() != null &&
+    _vireoPairKnownByPhoto[String(vireoLightboxSession.requestedPhotoId())] &&
+    _vireoPairSource(vireoLightboxSession.requestedPhotoId()) === 'jpeg'
   );
   return !pairUsesJpeg && !_lbRecipeHasGeometricEdit(_lbCurrentEditRecipe);
 }
@@ -181,8 +181,8 @@ function toggleLightboxViewMenu(force) {
 })();
 
 function lightboxSetFlagAction(flag) {
-  if (_lightboxCurrentId == null) return;
-  var pid = _lightboxCurrentId;
+  if (vireoLightboxSession.requestedPhotoId() == null) return;
+  var pid = vireoLightboxSession.requestedPhotoId();
   // Clicking the button for the photo's current state clears it, so the pair
   // covers flag/reject/unflag without a third button. Match against the
   // *displayed* flag (which includes provisional edits, e.g. Group Review
@@ -246,11 +246,11 @@ function _lbPhotoEyePoint(photoId, photo) {
 function _lbApplyTrackEyeState() {
   var input = document.getElementById('lightboxTrackEye');
   if (!input) return;
-  var photo = _lbPhotoData(_lightboxCurrentId);
+  var photo = _lbPhotoData(vireoLightboxSession.requestedPhotoId());
   var eyeKnown = !!(
     photo && Object.prototype.hasOwnProperty.call(photo, 'eye_x')
   );
-  var hasEye = !!_lbPhotoEyePoint(_lightboxCurrentId, photo);
+  var hasEye = !!_lbPhotoEyePoint(vireoLightboxSession.requestedPhotoId(), photo);
   var available = hasEye && _lbSourceOverlaysAvailable();
   input.checked = _lbTrackEyeEnabled;
   var note = document.getElementById('lightboxTrackEyeNote');
@@ -317,7 +317,7 @@ function _lbRenderEyeCrosshair(photo) {
   var point = _lbTransformPointByRecipe(
     Number(photo.eye_x),
     Number(photo.eye_y),
-    _lbEditRecipeByPhoto[String(photo.id || _lightboxCurrentId)]
+    _lbEditRecipeByPhoto[String(photo.id || vireoLightboxSession.requestedPhotoId())]
   );
   var xPct = point.x * 100;
   var yPct = point.y * 100;
@@ -348,7 +348,7 @@ function _lbLoadDetections(photoId) {
     .then(function(detections) {
       if (!detections || detections.length === 0) return;
       // Only render if still viewing the same photo
-      if (_lightboxCurrentId !== photoId) return;
+      if (vireoLightboxSession.requestedPhotoId() !== photoId) return;
       if (!_lbSourceOverlaysAvailable()) {
         container.innerHTML = '';
         _lbApplyBoxesVisibility();
@@ -546,7 +546,7 @@ function _lbLoadMaskVariants(photoId) {
     .then(function(data) {
       // Bail if the user navigated to a different photo while the
       // request was in flight.
-      if (!data || _lightboxCurrentId !== photoId) return;
+      if (!data || vireoLightboxSession.requestedPhotoId() !== photoId) return;
       if (!_lbSourceOverlaysAvailable()) return;
       _lbMaskActiveVariant = data.active || null;
       _lbMaskAvailable = data.variants || [];

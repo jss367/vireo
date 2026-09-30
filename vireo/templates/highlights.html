@@ -1034,8 +1034,8 @@ function lightboxIsOpenOnPhoto(photoId) {
   return !!(
     overlay &&
     overlay.classList.contains('active') &&
-    typeof _lightboxCurrentId !== 'undefined' &&
-    _lightboxCurrentId === photoId
+    typeof vireoLightboxSession !== 'undefined' &&
+    vireoLightboxSession.requestedPhotoId() === photoId
   );
 }
 
