@@ -11,9 +11,15 @@ runs *after* `git tag` protects nothing: the tag is the point of no return, so a
 guard that only checked for the command's existence would still pass while the
 protection it describes had been silently lost.
 """
+import os
 import re
+import shutil
+import subprocess
+import sys
 import tomllib
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).parent.parent
 RELEASE_SH = REPO_ROOT / "scripts" / "release.sh"
@@ -24,6 +30,55 @@ LOCKFILE_SYNC = r"^\s*\(cd src-tauri && cargo update --workspace\)"
 DEPENDENCY_CHECK = r"^\s*\(cd src-tauri && cargo check --locked\)"
 TAG_COMMAND = r'^\s*git tag "'
 PUBLISH_GUARD = r"^if\s+\$PUBLISH\s*;\s*then\s*$"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file-descriptor limits")
+@pytest.mark.parametrize(
+    "soft_limit,hard_limit,expected_limit",
+    [(256, 16384, 4096), (8192, 16384, 8192), (256, 1024, None)],
+)
+def test_release_prepares_inherited_file_limit_before_changing_versions(
+    tmp_path, soft_limit, hard_limit, expected_limit,
+):
+    """Exercise the real preflight; stop at the first would-be version write."""
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    release = scripts / "release.sh"
+    shutil.copyfile(RELEASE_SH, release)
+    (tmp_path / "pyproject.toml").write_text('version = "1.2.3"\n')
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    python_stub = bin_dir / "python"
+    python_stub.write_text(
+        '#!/bin/bash\n'
+        'echo "child soft=$(ulimit -S -n) hard=$(ulimit -H -n) args=$*"\n'
+        'exit 23\n'
+    )
+    python_stub.chmod(0o755)
+
+    result = subprocess.run(
+        [
+            "bash", "-c",
+            'set -e; ulimit -S -n "$1"; ulimit -H -n "$2"; exec bash "$3" patch --publish',
+            "release-test", str(soft_limit), str(hard_limit), str(release),
+        ],
+        env={**os.environ, "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"]},
+        capture_output=True, text=True, timeout=10,
+    )
+
+    if expected_limit is None:
+        assert result.returncode == 1
+        assert "Release requires at least 4096 open files" in result.stderr
+        assert "hard limit is 1024" in result.stderr
+        assert "Current version:" not in result.stdout
+        assert "child soft=" not in result.stdout
+    else:
+        assert result.returncode == 23, result.stderr
+        assert (
+            f"child soft={expected_limit} hard={hard_limit} args=scripts/sync_version.py 1.2.4"
+            in result.stdout
+        )
+    assert (tmp_path / "pyproject.toml").read_text() == 'version = "1.2.3"\n'
 
 
 def _code_lines():
