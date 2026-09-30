@@ -202,16 +202,16 @@ function browseLightboxOwnsLoadedWindow() {
   return (
     typeof window._lightboxPhotoList !== 'undefined' &&
     browseNavigationListIsTopLevel(window._lightboxPhotoList) &&
-    typeof window._lightboxCurrentId !== 'undefined' &&
-    window._lightboxCurrentId != null
+    typeof window.vireoLightboxSession !== 'undefined' &&
+    window.vireoLightboxSession.requestedPhotoId() != null
   );
 }
 
 function refreshBrowseLightboxCounter() {
   if (!browseLightboxOwnsLoadedWindow()) return;
-  var visibleId = window._lightboxCommittedId != null
-    ? window._lightboxCommittedId
-    : window._lightboxCurrentId;
+  var visibleId = window.vireoLightboxSession.displayedPhotoId() != null
+    ? window.vireoLightboxSession.displayedPhotoId()
+    : window.vireoLightboxSession.requestedPhotoId();
   var lightboxPhotos = window._lightboxPhotoList;
   var index = lightboxPhotos.findIndex(function(photo) {
     return photo.id === visibleId;
@@ -227,7 +227,7 @@ function refreshBrowseLightboxCounter() {
 
 function continueBrowseLightboxAcrossBoundary(delta, currentId, session) {
   if (session !== browseLightboxSession) return;
-  if (!browseLightboxOwnsLoadedWindow() || window._lightboxCurrentId !== currentId) return;
+  if (!browseLightboxOwnsLoadedWindow() || window.vireoLightboxSession.requestedPhotoId() !== currentId) return;
   var lightboxPhotos = window._lightboxPhotoList;
   var index = lightboxPhotos.findIndex(function(photo) {
     return photo.id === currentId;
@@ -256,7 +256,7 @@ function continueBrowseLightboxAcrossBoundary(delta, currentId, session) {
   Promise.resolve(request).then(function(loaded) {
     if (loaded !== true) return;
     if (session !== browseLightboxSession) return;
-    if (!browseLightboxOwnsLoadedWindow() || window._lightboxCurrentId !== currentId) return;
+    if (!browseLightboxOwnsLoadedWindow() || window.vireoLightboxSession.requestedPhotoId() !== currentId) return;
     lightboxNav(delta);
   });
 }

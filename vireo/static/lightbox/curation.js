@@ -77,7 +77,7 @@ async function setLifeListPhoto(species, photoId, button) {
       var fresh = await window.safeFetch('/api/photos/' + photoId, {}, { toast: false });
       if (fresh) _lbPhotoDataByPhoto[String(photoId)] = fresh;
     } catch (e) { /* keep the panel usable even if the refresh fails */ }
-    if (_lightboxCurrentId === photoId) _lbRenderLifeListPanel(photoId);
+    if (vireoLightboxSession.requestedPhotoId() === photoId) _lbRenderLifeListPanel(photoId);
     // Let the /life-list page (or any listener) refresh its grid + ribbons.
     document.dispatchEvent(new CustomEvent('lifelist:changed', {
       detail: { species: species, photoId: photoId },
@@ -303,11 +303,11 @@ document.addEventListener('lightbox:photochanged', function(event) {
 // becomes rejected and re-shows it when the flag is cleared again.
 document.addEventListener('lightbox:flagchanged', async function(event) {
   var pid = event.detail ? event.detail.photoId : null;
-  if (pid == null || _lightboxCurrentId !== pid) return;
+  if (pid == null || vireoLightboxSession.requestedPhotoId() !== pid) return;
   try {
     var fresh = await window.safeFetch('/api/photos/' + pid, {}, { toast: false });
     // Guard against a stale fetch clobbering the panel after navigation.
-    if (!fresh || _lightboxCurrentId !== pid) return;
+    if (!fresh || vireoLightboxSession.requestedPhotoId() !== pid) return;
     _lbPhotoDataByPhoto[String(pid)] = fresh;
     _lbRenderLifeListPanel(pid);
   } catch (e) { /* leave the last-rendered panel in place if the refresh fails */ }

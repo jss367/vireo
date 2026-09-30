@@ -686,7 +686,7 @@ def test_lightbox_navigation_follows_visible_filtered_cards(live_server, page):
     page.evaluate("pid => openPipelineLightbox(pid)", visible_ids[0])
     assert page.evaluate("_lightboxPhotoList.map(photo => photo.id)") == visible_ids
     page.keyboard.press("ArrowRight")
-    assert page.evaluate("_lightboxCurrentId") == visible_ids[1]
+    assert page.evaluate("vireoLightboxSession.requestedPhotoId()") == visible_ids[1]
 
     page.evaluate("closeLightbox()")
     page.evaluate(
@@ -709,7 +709,7 @@ def test_native_photo_command_opens_pipeline_lightbox(live_server, page):
         photo_id,
     )
     expect(page.locator("#lightboxOverlay")).to_have_class(re.compile(r"\bactive\b"))
-    assert page.evaluate("_lightboxCurrentId") == photo_id
+    assert page.evaluate("vireoLightboxSession.requestedPhotoId()") == photo_id
 
 
 def test_photo_context_menu_adds_photo_to_existing_collection(live_server, page):
@@ -1408,7 +1408,7 @@ def test_similar_result_lightbox_preserves_scoped_read_only_mode(live_server, pa
     expect(page.locator("#lightboxOverlay")).to_have_class(
         re.compile(r"\bactive\b")
     )
-    assert page.evaluate("_lightboxCurrentId") == result_id
+    assert page.evaluate("vireoLightboxSession.requestedPhotoId()") == result_id
     assert page.evaluate("_lightboxPhotoList.map(photo => photo.id)") == [result_id]
     assert page.evaluate("_lbReadOnly") is True
     expect(page.locator("#lightboxDeleteBtn")).to_be_disabled()
@@ -2083,7 +2083,7 @@ def test_read_only_scope_disables_lightbox_and_native_mutations(live_server, pag
             deleteResult: lightboxDelete(),
             wildlifeResult: await lightboxToggleWildlifeExcluded(),
             nativeWildlifeResult: await nativeMenuSetWildlifeExcluded(true),
-            inatResult: await submitToInat(_lightboxCurrentId),
+            inatResult: await submitToInat(vireoLightboxSession.requestedPhotoId()),
             inatSubmitResult: await inatDoSubmit(),
             adjustmentResult: onLightboxAdjustmentInput(adjustment),
             cropResult: await openCropEditor(),
@@ -2616,7 +2616,7 @@ def test_apply_time_lightbox_read_only_refreshes_over_full_apply_lifecycle(
     expect(page.locator("#lightboxOverlay")).to_have_class(
         re.compile(r"\bactive\b")
     )
-    assert page.evaluate("_lightboxCurrentId") == result_id
+    assert page.evaluate("vireoLightboxSession.requestedPhotoId()") == result_id
     assert page.evaluate("_lbReadOnly") is True
     assert page.evaluate("_lbReadOnlyMessage") == (
         "Group Review is applying changes. Wait for it to finish."

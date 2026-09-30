@@ -834,8 +834,8 @@ function renderSyncPreview() {
   _syncSetPreviewActionsEnabled(
     _syncPreviewComplete && (_syncPreviewData.total_changes || 0) > 0
   );
-  if (_syncLightboxPanelEl && typeof _lightboxCurrentId !== 'undefined') {
-    _syncRenderLightboxPanel(_lightboxCurrentId);
+  if (_syncLightboxPanelEl && typeof vireoLightboxSession !== 'undefined') {
+    _syncRenderLightboxPanel(vireoLightboxSession.requestedPhotoId());
   }
 }
 
@@ -925,7 +925,7 @@ function _syncEnsureLightboxPanel() {
     var changeBtn = e.target.closest('button[data-sync-discard-change]');
     if (changeBtn) {
       var changeId = parseInt(changeBtn.getAttribute('data-sync-discard-change'), 10);
-      if (!isNaN(changeId)) _syncDiscardFromLightbox([changeId], _lightboxCurrentId);
+      if (!isNaN(changeId)) _syncDiscardFromLightbox([changeId], vireoLightboxSession.requestedPhotoId());
     } else {
       var photoBtn = e.target.closest('button[data-sync-discard-photo]');
       if (photoBtn) {

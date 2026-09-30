@@ -239,3 +239,50 @@ def test_workspace_pin_and_rescan_use_controller(live_server, page):
     page.locator("#wsCurrentBtn").click()
     expect(field).to_be_visible()
     assert errors == []
+
+
+def test_lightbox_reopen_rejects_old_metadata_and_image_callbacks(live_server, page):
+    """Same-photo reopen must not revive callbacks from the previous session."""
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.route("**/photos/*/full*", lambda route: route.fulfill(
+        body='<svg xmlns="http://www.w3.org/2000/svg" width="800" height="400"></svg>',
+        content_type="image/svg+xml",
+    ))
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.wait_for(state="visible")
+    page.evaluate('''() => {
+        const photo = photos[0];
+        const realFetch = window.fetch;
+        window.metadataRequests = [];
+        window.fetch = (url, ...args) => {
+            if (url !== '/api/photos/' + photo.id) return realFetch(url, ...args);
+            return new Promise(resolve => metadataRequests.push(data => resolve(
+                new Response(JSON.stringify({...photo, ...data}), {
+                    headers: {'Content-Type': 'application/json'}
+                })
+            )));
+        };
+        openLightbox(photo.id, photo.filename, [photo]);
+        const image = document.getElementById('lightboxImg');
+        const staleImageLoad = image.onload;
+        closeLightbox();
+        openLightbox(photo.id, photo.filename, [photo]);
+        const currentImageLoad = image.onload;
+        staleImageLoad();
+        if (image.onload !== currentImageLoad) throw new Error('Stale callback replaced the current loader');
+        metadataRequests[1]({width: 800, height: 400, keywords: [{name: 'Current metadata'}]});
+    }''')
+    expect(page.locator("#lightboxKeywords")).to_contain_text("Current metadata")
+    page.wait_for_function("!_lbInitialDecodePending && !_lbVisualTransitionPending")
+    page.evaluate('''async () => {
+        metadataRequests[0]({width: 7777, height: 8888, keywords: [{name: 'Stale metadata'}]});
+        await new Promise(resolve => setTimeout(resolve, 0));
+    }''')
+    expect(page.locator("#lightboxKeywords")).not_to_contain_text("Stale metadata")
+    assert page.evaluate("_lbPhotoW") == 800
+    assert page.evaluate("typeof _lightboxCurrentId") == "undefined"
+    assert page.evaluate("typeof _lbAdjacentPreloads") == "undefined"
+    page.evaluate("closeLightbox(); closeLightbox()")
+    assert page.evaluate("vireoLightboxSession.requestedPhotoId()") is None
+    assert errors == []

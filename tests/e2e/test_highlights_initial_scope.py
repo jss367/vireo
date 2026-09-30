@@ -283,7 +283,7 @@ def test_highlights_lightbox_pick_updates_card_without_reload(live_server, page)
         timeout=3000,
     )
     page.wait_for_function(
-        "pid => _lightboxCurrentId === pid",
+        "pid => vireoLightboxSession.requestedPhotoId() === pid",
         arg=first_pid,
         timeout=3000,
     )
@@ -368,7 +368,7 @@ def test_highlights_lightbox_pick_hidden_photo_promotes_to_visible(live_server, 
         hidden_pid,
     )
     page.wait_for_function(
-        "pid => _lightboxCurrentId === pid",
+        "pid => vireoLightboxSession.requestedPhotoId() === pid",
         arg=hidden_pid,
         timeout=3000,
     )
@@ -431,7 +431,7 @@ def test_highlights_lightbox_pick_keeps_curated_highlight_first(live_server, pag
         timeout=3000,
     )
     page.wait_for_function(
-        "pid => _lightboxCurrentId === pid",
+        "pid => vireoLightboxSession.requestedPhotoId() === pid",
         arg=unhighlighted_id,
         timeout=3000,
     )
@@ -508,7 +508,7 @@ def test_highlights_lightbox_pick_applies_backend_score_bonus(live_server, page)
         timeout=3000,
     )
     page.wait_for_function(
-        "pid => _lightboxCurrentId === pid",
+        "pid => vireoLightboxSession.requestedPhotoId() === pid",
         arg=lower_unhighlighted,
         timeout=3000,
     )
@@ -573,7 +573,7 @@ def test_highlights_lightbox_pick_refreshes_bucket_best_timestamp(live_server, p
         timeout=3000,
     )
     page.wait_for_function(
-        "pid => _lightboxCurrentId === pid",
+        "pid => vireoLightboxSession.requestedPhotoId() === pid",
         arg=hawk3_id,
         timeout=3000,
     )
@@ -661,7 +661,7 @@ def test_highlights_lightbox_pick_refetches_paged_bucket(live_server, page):
         timeout=3000,
     )
     page.wait_for_function(
-        "pid => _lightboxCurrentId === pid",
+        "pid => vireoLightboxSession.requestedPhotoId() === pid",
         arg=first_pid,
         timeout=3000,
     )
@@ -762,7 +762,7 @@ def test_highlights_lightbox_pick_preserves_loaded_window(live_server, page):
         timeout=3000,
     )
     page.wait_for_function(
-        "pid => _lightboxCurrentId === pid",
+        "pid => vireoLightboxSession.requestedPhotoId() === pid",
         arg=first_pid,
         timeout=3000,
     )
@@ -909,7 +909,7 @@ def test_highlights_lightbox_repick_after_eviction_restores_photo(live_server, p
         timeout=3000,
     )
     page.wait_for_function(
-        "pid => _lightboxCurrentId === pid",
+        "pid => vireoLightboxSession.requestedPhotoId() === pid",
         arg=low_hawk,
         timeout=3000,
     )
@@ -928,7 +928,7 @@ def test_highlights_lightbox_repick_after_eviction_restores_photo(live_server, p
         timeout=5000,
     )
     assert _bucket_has_photo(low_hawk) is False
-    assert page.evaluate("() => _lightboxCurrentId") == low_hawk
+    assert page.evaluate("() => vireoLightboxSession.requestedPhotoId()") == low_hawk
 
     # Re-pick from the still-open lightbox. Before the fix, the handler
     # would bail because the photo is no longer in any bucket's loaded
@@ -1175,7 +1175,7 @@ def test_highlights_lightbox_reject_advances_and_can_restore(live_server, page):
         timeout=3000,
     )
     page.wait_for_function(
-        "pid => _lightboxCurrentId === pid",
+        "pid => vireoLightboxSession.requestedPhotoId() === pid",
         arg=first_pid,
         timeout=3000,
     )
@@ -1184,7 +1184,7 @@ def test_highlights_lightbox_reject_advances_and_can_restore(live_server, page):
 
     assert _wait_for_flag(db, first_pid, "rejected") == "rejected"
     page.wait_for_function(
-        "pid => _lightboxCurrentId === pid",
+        "pid => vireoLightboxSession.requestedPhotoId() === pid",
         arg=second_pid,
         timeout=3000,
     )
@@ -1240,7 +1240,7 @@ def test_highlights_lightbox_next_preserves_pending_one_to_one_zoom(live_server,
             };
                 lightboxNav(1);
                 return {
-                    currentId: window._lightboxCurrentId,
+                    currentId: vireoLightboxSession.requestedPhotoId(),
                     nextId: next.id,
                     counter: document.getElementById('lightboxCounter').textContent,
                 pending1To1: window._lbPending1To1,

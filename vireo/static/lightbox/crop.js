@@ -205,9 +205,9 @@ function _cropInitEvents() {
 
 async function openCropEditor() {
   if (_lbGuardReadOnly()) return false;
-  if (!_lightboxCurrentId) return;
+  if (!vireoLightboxSession.requestedPhotoId()) return;
   _cropInitEvents();
-  var requestedPhotoId = _lightboxCurrentId;
+  var requestedPhotoId = vireoLightboxSession.requestedPhotoId();
   _cropPhotoId = requestedPhotoId;
   var session = ++_cropSessionSeq;
   var saveBtn = document.getElementById('cropSaveBtn');
@@ -216,9 +216,9 @@ async function openCropEditor() {
   try {
     _lbFlushPendingAdjustmentSave();
     await _lbWaitForAdjustmentSaveIdle(requestedPhotoId);
-    if (_lightboxCurrentId !== requestedPhotoId || !_cropIsActiveSession(requestedPhotoId, session)) return;
+    if (vireoLightboxSession.requestedPhotoId() !== requestedPhotoId || !_cropIsActiveSession(requestedPhotoId, session)) return;
     var data = await safeFetch('/api/photos/' + requestedPhotoId + '/edit-recipe', {}, { toast: false });
-    if (_lightboxCurrentId !== requestedPhotoId || !_cropIsActiveSession(requestedPhotoId, session)) return;
+    if (vireoLightboxSession.requestedPhotoId() !== requestedPhotoId || !_cropIsActiveSession(requestedPhotoId, session)) return;
     _cropRecipe = _cropCloneRecipe(_lbEditRecipeLoaded ? _lbEditRecipe : (data.recipe || {}));
     _cropDefaultCrop(_cropRecipe);
     _cropSyncControls();
@@ -328,7 +328,7 @@ async function saveCropEditor() {
     var p = _lightboxPhotoList.find(function(x) { return x.id === pid; });
     if (_cropIsActiveSession(pid, session)) {
       closeCropEditor();
-      if (_lightboxCurrentId === pid) {
+      if (vireoLightboxSession.requestedPhotoId() === pid) {
         var filename = p ? p.filename : document.getElementById('lightboxFilename').textContent;
         openLightbox(pid, filename, _lightboxPhotoList);
       }
@@ -358,7 +358,7 @@ async function cropClearEdits() {
     var p = _lightboxPhotoList.find(function(x) { return x.id === pid; });
     if (_cropIsActiveSession(pid, session)) {
       closeCropEditor();
-      if (_lightboxCurrentId === pid) {
+      if (vireoLightboxSession.requestedPhotoId() === pid) {
         var filename = p ? p.filename : document.getElementById('lightboxFilename').textContent;
         openLightbox(pid, filename, _lightboxPhotoList);
       }

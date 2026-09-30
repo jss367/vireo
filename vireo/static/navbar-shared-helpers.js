@@ -106,10 +106,10 @@ function nativeMenuActivePhotoIds() {
     if (typeof _lbVisualTransitionPending !== 'undefined' && _lbVisualTransitionPending) {
       return [];
     }
-    if (typeof _lightboxCurrentId === 'undefined' || _lightboxCurrentId == null) {
+    if (typeof vireoLightboxSession === 'undefined' || vireoLightboxSession.requestedPhotoId() == null) {
       return [];
     }
-    return [_lightboxCurrentId];
+    return [vireoLightboxSession.requestedPhotoId()];
   }
   if (
     typeof grmState !== 'undefined' &&
@@ -232,7 +232,7 @@ async function nativeMenuSetFlag(flag) {
   var ids = nativeMenuPhotoIdsForWrite();
   if (!ids) return;
   if (ids.length === 1 && nativeMenuLightboxOpen()) {
-    if (typeof _lbApplyFlag === 'function' && ids[0] === _lightboxCurrentId) {
+    if (typeof _lbApplyFlag === 'function' && ids[0] === vireoLightboxSession.requestedPhotoId()) {
       _lbApplyFlag(ids[0], flag);
       return;
     }
@@ -286,7 +286,7 @@ async function nativeMenuSetWildlifeExcluded(excluded) {
     return false;
   }
   if (!usePageHelper) nativeMenuRefreshWildlifeExcludedState(ids, excluded);
-  if (typeof _lightboxCurrentId !== 'undefined' && ids.indexOf(_lightboxCurrentId) !== -1) {
+  if (typeof vireoLightboxSession !== 'undefined' && ids.indexOf(vireoLightboxSession.requestedPhotoId()) !== -1) {
     _lbCurrentWildlifeExcluded = excluded;
   }
   nativeMenuInfo(excluded ? 'Excluded from wildlife classification' : 'Marked as wildlife');
@@ -518,11 +518,11 @@ window.handleNativeMenuCommand = async function(command) {
         else nativeMenuRoute('/review');
         break;
       case 'review_previous':
-        if (typeof lightboxNav === 'function' && typeof _lightboxCurrentId !== 'undefined' && _lightboxCurrentId != null) lightboxNav(-1);
+        if (typeof lightboxNav === 'function' && typeof vireoLightboxSession !== 'undefined' && vireoLightboxSession.requestedPhotoId() != null) lightboxNav(-1);
         else if (typeof moveBrowseSelection === 'function') moveBrowseSelection(-1, {});
         break;
       case 'review_next':
-        if (typeof lightboxNav === 'function' && typeof _lightboxCurrentId !== 'undefined' && _lightboxCurrentId != null) lightboxNav(1);
+        if (typeof lightboxNav === 'function' && typeof vireoLightboxSession !== 'undefined' && vireoLightboxSession.requestedPhotoId() != null) lightboxNav(1);
         else if (typeof moveBrowseSelection === 'function') moveBrowseSelection(1, {});
         break;
       case 'review_mark_wildlife':
@@ -1225,12 +1225,12 @@ function formatDuration(seconds) {
   }
 
   async function refreshHistoryLightbox() {
-    var photoId = _lightboxCurrentId;
-    var openSeq = _lbOpenSeq;
+    var photoId = vireoLightboxSession.requestedPhotoId();
+    var openToken = vireoLightboxSession.capture();
     if (photoId == null || !document.getElementById('lightboxOverlay').classList.contains('active')) return;
     try {
       var photo = await safeFetch('/api/photos/' + photoId, {}, {toast: false});
-      if (_lightboxCurrentId !== photoId || _lbOpenSeq !== openSeq) return;
+      if (!vireoLightboxSession.isCurrent(openToken)) return;
       _lbPhotoDataByPhoto[String(photoId)] = photo;
       _lbRecordFlag(photoId, photo.flag);
       _lbRenderKeywords(photo.keywords);
@@ -1278,8 +1278,8 @@ function formatDuration(seconds) {
     if (typeof window.vireoRefreshPhotoRenders === 'function') {
       window.vireoRefreshPhotoRenders(photoIds);
     }
-    if (_lightboxCurrentId != null && photoIds.indexOf(Number(_lightboxCurrentId)) !== -1) {
-      _lbReloadCurrentRenderAfterEdit(Number(_lightboxCurrentId));
+    if (vireoLightboxSession.requestedPhotoId() != null && photoIds.indexOf(Number(vireoLightboxSession.requestedPhotoId())) !== -1) {
+      _lbReloadCurrentRenderAfterEdit(Number(vireoLightboxSession.requestedPhotoId()));
     }
   }
 

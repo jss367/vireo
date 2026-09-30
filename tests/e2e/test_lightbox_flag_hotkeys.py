@@ -18,13 +18,13 @@ def _open_lightbox_on_browse(page, url):
         timeout=3000,
     )
     page.wait_for_function(
-        "typeof _lightboxCurrentId !== 'undefined' && _lightboxCurrentId !== null",
+        "typeof vireoLightboxSession.requestedPhotoId() !== 'undefined' && vireoLightboxSession.requestedPhotoId() !== null",
         timeout=3000,
     )
 
 
 def _current_lightbox_id(page):
-    return page.evaluate("_lightboxCurrentId")
+    return page.evaluate("vireoLightboxSession.requestedPhotoId()")
 
 
 def _wait_for_flag(db, photo_id, expected, timeout=3.0):
@@ -113,7 +113,7 @@ def test_lightbox_x_not_overwritten_by_slow_initial_metadata(live_server, page):
         timeout=3000,
     )
     page.wait_for_function(
-        "typeof _lightboxCurrentId !== 'undefined' && _lightboxCurrentId !== null",
+        "typeof vireoLightboxSession.requestedPhotoId() !== 'undefined' && vireoLightboxSession.requestedPhotoId() !== null",
         timeout=3000,
     )
     page.wait_for_function("window.__heldPhotoFetch && window.__heldPhotoFetch.captured")

@@ -715,7 +715,7 @@ document.addEventListener('lightbox:navigationboundary', function(event) {
   if (!entry || !entry.has_more) return;
   var currentId = detail.photoId;
   loadMoreLifeListPhotos(entry).then(function() {
-    if (window._lightboxCurrentId !== currentId) return;
+    if (window.vireoLightboxSession.requestedPhotoId() !== currentId) return;
     var index = entry.photos.findIndex(function(photo) { return photo.id === currentId; });
     var next = entry.photos[index + 1];
     if (next && window.openLightbox) {
