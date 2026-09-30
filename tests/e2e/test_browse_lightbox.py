@@ -8,10 +8,17 @@ import pytest
 from PIL import Image
 from playwright.sync_api import expect
 
+from e2e.viewport_test_support import install_viewport_test_helpers
+
 _PNG_1X1 = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
     "/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
 )
+
+
+@pytest.fixture(autouse=True)
+def _viewport_geometry_helpers(page):
+    install_viewport_test_helpers(page)
 
 
 def _png_bytes(size, color):
@@ -679,7 +686,7 @@ def test_lightbox_track_eye_keeps_eye_at_same_screen_position(
         arg=photo_ids[0],
     )
     page.evaluate(
-        """() => window._lbApplyViewportState({
+        """() => vireoLightboxViewport.applyView({
             zoom: 2,
             centerX: 0.40,
             centerY: 0.50,
@@ -695,8 +702,8 @@ def test_lightbox_track_eye_keeps_eye_at_same_screen_position(
 
     eye_screen_js = """() => {
         const data = window._lbPhotoDataByPhoto[String(vireoLightboxSession.requestedPhotoId())];
-        const metrics = window._lbUpdateLayoutMetrics();
-        const state = window._lbViewportStateFromCurrent();
+        const metrics = vireoLightboxViewport.layoutMetrics();
+        const state = vireoLightboxViewport.currentView();
         const wrap = document.getElementById('lightboxWrap').getBoundingClientRect();
         return {
             x: wrap.left + wrap.width / 2 +
@@ -712,7 +719,7 @@ def test_lightbox_track_eye_keeps_eye_at_same_screen_position(
         """photoId => vireoLightboxSession.requestedPhotoId() === photoId &&
             window._lbPhotoDataByPhoto[String(photoId)] &&
             !window._lbVisualTransitionPending &&
-            window._lbPendingEyeTrack === null""",
+            vireoLightboxViewport.snapshot().pendingEye === null""",
         arg=photo_ids[1],
     )
     after = page.evaluate(eye_screen_js)
@@ -723,7 +730,7 @@ def test_lightbox_track_eye_keeps_eye_at_same_screen_position(
 
 def test_user_pan_zoom_cancels_pending_eye_track(live_server, page):
     """Manual pan/zoom before the metadata callback lands must drop the
-    armed eye alignment, otherwise _lbTryApplyPendingEyeTrack later stomps
+    armed eye alignment, otherwise vireoLightboxViewport.applyPendingEye later stomps
     the user's viewport with the previous photo's eye anchor."""
     page.route(
         "**/photos/*/full",
@@ -736,22 +743,28 @@ def test_user_pan_zoom_cancels_pending_eye_track(live_server, page):
 
     state = page.evaluate(
         """() => {
-            window._lbPendingViewportState = {
-                zoom: 2, centerX: 0.5, centerY: 0.5,
-                oneToOne: false, pending1To1: false,
-            };
-            window._lbPendingEyeTrack = {
-                photoId: 'stale', offsetX: 42, offsetY: 42,
-            };
-            window._lbClearPendingViewportRestore();
+            window._lbTrackEyeEnabled = true;
+            vireoLightboxViewport.beginPhoto(vireoLightboxSession.requestedPhotoId(), {
+                fallbackViewportState: {
+                    zoom: 2, centerX: 0.5, centerY: 0.5,
+                    oneToOne: false, pending1To1: false,
+                },
+                eyeTrackAnchor: {offsetX: 42, offsetY: 42}
+            });
+            const before = vireoLightboxViewport.snapshot();
+            vireoLightboxViewport.cancelRestore();
             return {
-                viewport: window._lbPendingViewportState,
-                eyeTrack: window._lbPendingEyeTrack,
+                before,
+                viewport: vireoLightboxViewport.snapshot().pendingRestore,
+                eyeTrack: vireoLightboxViewport.snapshot().pendingEye,
             };
         }"""
     )
 
-    assert state == {"viewport": None, "eyeTrack": None}
+    assert state["before"]["pendingRestore"] is not None
+    assert state["before"]["pendingEye"] is not None
+    assert state["viewport"] is None
+    assert state["eyeTrack"] is None
 
 
 def test_browse_lightbox_same_photo_reopen_does_not_lock_controls(live_server, page):
@@ -1036,17 +1049,17 @@ def test_browse_lightbox_filename_can_be_selected_without_resetting_zoom(
 
     page.evaluate(
         """() => {
-            window._lbNativeZoom = 2;
-            window._lbSetZoom(2, null, null);
+            setViewportNativeZoomForTest(2);
+            vireoLightboxViewport.setZoom(2, null, null);
         }"""
     )
 
     # A click is part of both double-click and drag-to-select interactions. It
-    # previously reached closeLightbox(), which reset _lbZoom to fit.
+    # previously reached closeLightbox(), which reset vireoLightboxViewport.zoom() to fit.
     filename_display.click()
 
     expect(overlay).to_have_class("lightbox-overlay active")
-    assert page.evaluate("window._lbZoom") == 2
+    assert page.evaluate("vireoLightboxViewport.zoom()") == 2
     assert filename_display.evaluate(
         "el => getComputedStyle(el).userSelect"
     ) == "text"
@@ -1094,9 +1107,8 @@ def test_browse_lightbox_zoom_hud_controls_logarithmic_zoom(live_server, page):
         """() => {
             vireoLightboxSession.cancelOriginal();
             window._lbScheduleSourceSwap = function() {};
-            window._lbRecomputeNativeZoom = function() {};
-            window._lbNativeZoom = 4;
-            window._lbSetZoom(1, null, null);
+            setViewportNativeZoomForTest(4);
+            vireoLightboxViewport.setZoom(1, null, null);
         }"""
     )
     expect(badge).to_be_visible()
@@ -1115,7 +1127,7 @@ def test_browse_lightbox_zoom_hud_controls_logarithmic_zoom(live_server, page):
     page.evaluate(
         """() => {
             window._lbVisualTransitionPending = true;
-            window._lbUpdateZoomControl();
+            vireoLightboxViewport.updateControls();
         }"""
     )
     expect(page.locator(".lb-zoom-stop-fit")).to_be_disabled()
@@ -1123,7 +1135,7 @@ def test_browse_lightbox_zoom_hud_controls_logarithmic_zoom(live_server, page):
     page.evaluate(
         """() => {
             window._lbVisualTransitionPending = false;
-            window._lbUpdateZoomControl();
+            vireoLightboxViewport.updateControls();
         }"""
     )
     expect(page.locator(".lb-zoom-stop-fit")).to_be_enabled()
@@ -1135,29 +1147,29 @@ def test_browse_lightbox_zoom_hud_controls_logarithmic_zoom(live_server, page):
             el.dispatchEvent(new Event('input', {bubbles: true}));
         }"""
     )
-    assert abs(page.evaluate("window._lbZoom") - 4) < 0.01
+    assert abs(page.evaluate("vireoLightboxViewport.zoom()") - 4) < 0.01
     expect(badge).to_have_text("100%")
     expect(slider).to_have_attribute("aria-valuetext", "100%")
 
     page.locator("#lightboxZoomIn").click()
-    assert abs(page.evaluate("window._lbZoom") - 5) < 0.01
+    assert abs(page.evaluate("vireoLightboxViewport.zoom()") - 5) < 0.01
     expect(badge).to_have_text("125%")
 
     page.locator(".lb-zoom-stop-fit").click()
-    assert abs(page.evaluate("window._lbZoom") - 1) < 0.01
+    assert abs(page.evaluate("vireoLightboxViewport.zoom()") - 1) < 0.01
     expect(badge).to_have_text("Fit")
 
     # The labelled 1:1 stop uses the guarded high-resolution path rather than
     # merely enlarging a softer tier. Mark that tier current for this UI test.
     page.evaluate(
         """() => {
-            window._lbNativeZoom = 4;
-            window._lbCurrentSrcKey = window._lbPickSourceKey(window._lbNativeZoom);
-            window._lbSetZoom(2, null, null);
+            setViewportNativeZoomForTest(4);
+            window._lbCurrentSrcKey = window._lbPickSourceKey(vireoLightboxViewport.nativeZoom());
+            vireoLightboxViewport.setZoom(2, null, null);
             document.getElementById('lightboxZoomNativeStop').click();
         }"""
     )
-    assert abs(page.evaluate("window._lbZoom") - 4) < 0.01
+    assert abs(page.evaluate("vireoLightboxViewport.zoom()") - 4) < 0.01
     expect(badge).to_have_text("100%")
     expect(overlay).to_have_class("lightbox-overlay active")
 
@@ -1206,10 +1218,9 @@ def test_browse_lightbox_zoom_hud_keeps_near_fit_native_stop_separate(
         """() => {
             vireoLightboxSession.cancelOriginal();
             window._lbScheduleSourceSwap = function() {};
-            window._lbRecomputeNativeZoom = function() {};
-            window._lbNativeZoom = 1.05;
-            window._lbCurrentSrcKey = window._lbPickSourceKey(window._lbNativeZoom);
-            window._lbSetZoom(1, null, null);
+            setViewportNativeZoomForTest(1.05);
+            window._lbCurrentSrcKey = window._lbPickSourceKey(vireoLightboxViewport.nativeZoom());
+            vireoLightboxViewport.setZoom(1, null, null);
         }"""
     )
     page.locator("#lightboxZoomBadge").click()
@@ -1219,13 +1230,13 @@ def test_browse_lightbox_zoom_hud_keeps_near_fit_native_stop_separate(
     expect(native_stop).to_be_visible()
     assert native_stop.evaluate("el => el.style.left") == "8%"
 
-    page.evaluate("() => window._lbSetZoom(1.05, null, null)")
+    page.evaluate("() => vireoLightboxViewport.setZoom(1.05, null, null)")
     fit_stop.click()
-    assert abs(page.evaluate("window._lbZoom") - 1.0) < 0.001
+    assert abs(page.evaluate("vireoLightboxViewport.zoom()") - 1.0) < 0.001
     expect(page.locator("#lightboxZoomBadge")).to_have_text("Fit")
 
     native_stop.click()
-    assert abs(page.evaluate("window._lbZoom") - 1.05) < 0.01
+    assert abs(page.evaluate("vireoLightboxViewport.zoom()") - 1.05) < 0.01
     expect(page.locator("#lightboxZoomBadge")).to_have_text("100%")
 
 
@@ -1258,10 +1269,10 @@ def test_browse_lightbox_zoom_toggle_returns_to_fit_near_native(live_server, pag
         """() => {
             vireoLightboxSession.cancelOriginal();
             window._lbScheduleSourceSwap = function() {};
-            window._lbNativeZoom = 1.05;
-            window._lbCurrentSrcKey = window._lbPickSourceKey(window._lbNativeZoom);
-            window._lbSetZoom(window._lbNativeZoom, null, null);
-            return window._lbZoom;
+            setViewportNativeZoomForTest(1.05);
+            window._lbCurrentSrcKey = window._lbPickSourceKey(vireoLightboxViewport.nativeZoom());
+            vireoLightboxViewport.setZoom(vireoLightboxViewport.nativeZoom(), null, null);
+            return vireoLightboxViewport.zoom();
         }"""
     )
     assert abs(zoomed - 1.05) < 0.01
@@ -1269,8 +1280,8 @@ def test_browse_lightbox_zoom_toggle_returns_to_fit_near_native(live_server, pag
     page.evaluate("() => window.toggleLightboxZoom()")
     fit_state = page.evaluate(
         """() => ({
-            zoom: window._lbZoom,
-            pending: window._lbPending1To1,
+            zoom: vireoLightboxViewport.zoom(),
+            pending: vireoLightboxViewport.pendingOneToOne(),
         })"""
     )
     assert abs(fit_state["zoom"] - 1.0) < 0.001
@@ -1279,15 +1290,17 @@ def test_browse_lightbox_zoom_toggle_returns_to_fit_near_native(live_server, pag
     # A pending 1:1 upgrade in the same range must also be cancellable via z.
     page.evaluate(
         """() => {
-            window._lbPending1To1 = true;
-            window._lbPending1To1Anchor = { x: 0, y: 0 };
+            vireoLightboxViewport.beginPhoto(vireoLightboxSession.requestedPhotoId(), {
+                fallbackViewportState: {...vireoLightboxViewport.currentView(), oneToOne: true},
+                preserveOneToOne: true
+            });
         }"""
     )
     page.evaluate("() => window.toggleLightboxZoom()")
     cancelled = page.evaluate(
         """() => ({
-            zoom: window._lbZoom,
-            pending: window._lbPending1To1,
+            zoom: vireoLightboxViewport.zoom(),
+            pending: vireoLightboxViewport.pendingOneToOne(),
         })"""
     )
     assert abs(cancelled["zoom"] - 1.0) < 0.001
@@ -1366,30 +1379,29 @@ def test_browse_lightbox_one_to_one_reuses_sharper_current_source(live_server, p
     )
 
     # Simulate the case Codex flagged: /original is already loaded (e.g. from a
-    # previous 1:1 view) but _lbPickSourceKey(_lbNativeZoom) would pick a
+    # previous 1:1 view) but _lbPickSourceKey(vireoLightboxViewport.nativeZoom()) would pick a
     # lower-rank tier. The exact-key comparison would enter the deferred path
     # (badge stuck at 'Loading 1:1'); a rank comparison sees the current
     # source is already sharp enough and applies zoom synchronously.
     result = page.evaluate(
         """() => {
             vireoLightboxSession.cancelOriginal();
-            window._lbNativeZoom = 1.5;
-            window._lbSetZoom(1, null, null);
+            setViewportNativeZoomForTest(1.5);
+            vireoLightboxViewport.setZoom(1, null, null);
             vireoLightboxSession.cancelSwap();
             window._lbCurrentSrcKey = 'original';
             window._lbDesiredSrcKey = 'original';
-            window._lbPending1To1 = false;
-            window._lbPending1To1Anchor = null;
+            vireoLightboxViewport.cancelPendingZoom();
             // Sanity: the picked source key for this zoom must be lower rank
             // than 'original' or the test would trivially pass.
-            const picked = window._lbPickSourceKey(window._lbNativeZoom);
+            const picked = window._lbPickSourceKey(vireoLightboxViewport.nativeZoom());
             const pickedRank = window._lbSrcRank(picked);
             const currentRank = window._lbSrcRank(window._lbCurrentSrcKey);
             window.setLightboxZoomToOneToOne();
             return {
                 pickedLowerThanCurrent: pickedRank < currentRank,
-                zoom: window._lbZoom,
-                pending: window._lbPending1To1,
+                zoom: vireoLightboxViewport.zoom(),
+                pending: vireoLightboxViewport.pendingOneToOne(),
                 badge: document.getElementById('lightboxZoomBadge').textContent,
                 desiredSource: window._lbDesiredSrcKey,
                 swapPending: vireoLightboxSession.hasScheduledSwap(),
@@ -1447,7 +1459,7 @@ def test_browse_lightbox_reserves_space_for_bottom_controls(live_server, page):
                 wrapBottom: wrapRect.bottom,
                 barTop: barRect.top,
                 imageBottom: imageRect.bottom,
-                fitScale: window._lbFitScale,
+                fitScale: vireoLightboxViewport.fitScale(),
             };
         }"""
     )
@@ -1463,7 +1475,7 @@ def test_browse_lightbox_reserves_space_for_bottom_controls(live_server, page):
         """before => {
             const wrap = document.getElementById('lightboxWrap');
             return wrap.clientHeight > before.wrapHeight + 20
-                && window._lbFitScale > before.fitScale;
+                && vireoLightboxViewport.fitScale() > before.fitScale;
         }""",
         arg=visible,
     )
@@ -1501,7 +1513,7 @@ def test_browse_lightbox_conditional_controls_keep_fitted_photo_size_stable(
     before = page.evaluate(
         """() => ({
             wrapHeight: document.getElementById('lightboxWrap').clientHeight,
-            fitScale: window._lbFitScale,
+            fitScale: vireoLightboxViewport.fitScale(),
         })"""
     )
 
@@ -1515,7 +1527,7 @@ def test_browse_lightbox_conditional_controls_keep_fitted_photo_size_stable(
     after_navigation = page.evaluate(
         """() => ({
             wrapHeight: document.getElementById('lightboxWrap').clientHeight,
-            fitScale: window._lbFitScale,
+            fitScale: vireoLightboxViewport.fitScale(),
         })"""
     )
     assert after_navigation["wrapHeight"] == before["wrapHeight"]
@@ -1536,7 +1548,7 @@ def test_browse_lightbox_conditional_controls_keep_fitted_photo_size_stable(
     after = page.evaluate(
         """() => ({
             wrapHeight: document.getElementById('lightboxWrap').clientHeight,
-            fitScale: window._lbFitScale,
+            fitScale: vireoLightboxViewport.fitScale(),
         })"""
     )
     assert after["wrapHeight"] == before["wrapHeight"]
@@ -1947,14 +1959,8 @@ def test_browse_lightbox_arrows_preserve_one_to_one_zoom(live_server, page):
     """Navigating from a 1:1 lightbox view keeps the next photo at 1:1."""
     url = live_server["url"]
 
-    # The pending-1:1 state set on navigation is cleared the instant the next
-    # photo's native zoom is learned — which happens via TWO async paths: the
-    # /api/photos/<id> metadata fetch and the /original image's onload. If
-    # either resolves before the synchronous assertion below, _lbPending1To1
-    # has already flipped to False and the test flakes (it did on the v0.23.0
-    # release build). Hold both for the target photo so the pending state is
-    # deterministic during the assertion window; the second phase then learns
-    # native zoom explicitly and verifies the deferred snap applies.
+    # Hold both metadata and original decoding for the destination so neither
+    # can resolve the pending 1:1 intent before we observe the navigation handoff.
     hold = {"active": False, "held": []}
 
     def _hold_when_active(route):
@@ -1975,21 +1981,16 @@ def test_browse_lightbox_arrows_preserve_one_to_one_zoom(live_server, page):
 
     expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
 
-    # Put photo 1 into a 1:1 view. Crucially set _lbPending1To1 = true rather
-    # than relying on _lbZoom == _lbNativeZoom: lightboxNav() carries the 1:1
-    # intent forward via _lbIsOneToOneZoom(), which returns true immediately when
-    # _lbPending1To1 is set but otherwise depends on _lbNativeZoom. The fixture
-    # photos are seeded without width/height, so photo 1's async /api/photos/1
-    # metadata (width=null) recomputes _lbNativeZoom to null; if that lands after
-    # this force (as it does under CI CPU contention), _lbIsOneToOneZoom() would
-    # be false at Next and the next photo would not inherit the pending 1:1 —
-    # exactly the failure that blocked the v0.24.0 release build. Keying off
-    # pending makes the carry-forward immune to that clobber.
+    # Preserve explicit 1:1 intent even when this fixture has no catalog
+    # dimensions and native zoom cannot yet be derived from its image.
     page.evaluate(
         """() => {
-            window._lbNativeZoom = 2;
-            window._lbZoom = 2;
-            window._lbPending1To1 = true;
+            setViewportNativeZoomForTest(2);
+            vireoLightboxViewport.setZoom(2);
+            vireoLightboxViewport.beginPhoto(vireoLightboxSession.requestedPhotoId(), {
+                fallbackViewportState: {...vireoLightboxViewport.currentView(), oneToOne: true},
+                preserveOneToOne: true
+            });
         }"""
     )
 
@@ -2000,9 +2001,9 @@ def test_browse_lightbox_arrows_preserve_one_to_one_zoom(live_server, page):
     expect(page.locator("#lightboxCounter")).to_contain_text("1 /")
     # Guard that the hold worked: native zoom must still be unknown, so the
     # pending assertion below is genuinely exercising the deferred path.
-    assert page.evaluate("window._lbNativeZoom") is None
-    assert page.evaluate("window._lbZoom > 1.001") is True
-    assert page.evaluate("window._lbPending1To1") is True
+    assert page.evaluate("vireoLightboxViewport.nativeZoom()") is None
+    assert page.evaluate("vireoLightboxViewport.zoom() > 1.001") is True
+    assert page.evaluate("vireoLightboxViewport.pendingOneToOne()") is True
     assert page.evaluate(
         """() => (
             window._lbCurrentSrcKey === 'original' ||
@@ -2010,20 +2011,24 @@ def test_browse_lightbox_arrows_preserve_one_to_one_zoom(live_server, page):
         )"""
     ) is True
 
-    restored = page.evaluate(
-        """() => {
-            window._lbNativeZoom = 2.5;
-            window._lbApplyPendingOneToOneZoom();
-            return Math.abs(window._lbZoom - window._lbNativeZoom) <= Math.max(0.01, window._lbNativeZoom * 0.01);
-        }"""
-    )
-    assert restored
-    assert page.evaluate("window._lbZoom") > 1.001
-
-    # Release the parked requests so context teardown doesn't wait on them.
-    hold["active"] = False
+    # Let the actual metadata and image completions establish 1:1. The loader
+    # owns readiness; a test must not overwrite its derived native zoom.
+    target_id = page.evaluate("vireoLightboxSession.requestedPhotoId()")
     for route in hold["held"]:
-        route.abort()
+        if "/api/photos/" in route.request.url:
+            route.fulfill(json={"id": target_id, "width": 4000, "height": 2000})
+        else:
+            route.fulfill(
+                body='<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000"></svg>',
+                content_type="image/svg+xml",
+            )
+    page.wait_for_function("vireoLightboxViewport.nativeZoom() && !vireoLightboxViewport.pendingOneToOne()")
+    assert page.evaluate(
+        "Math.abs(vireoLightboxViewport.zoom() - vireoLightboxViewport.nativeZoom()) < 0.01"
+    )
+    assert page.evaluate("vireoLightboxViewport.zoom()") > 1.001
+
+
 
 
 def test_browse_lightbox_predecodes_adjacent_photo_for_current_source_tier(
@@ -2192,7 +2197,7 @@ def test_browse_lightbox_pauses_fit_warmups_during_source_upgrade(live_server, p
             entry => entry.status === 'loading'
         )"""
     )
-    page.evaluate("_lbSetZoom(2)")
+    page.evaluate("vireoLightboxViewport.setZoom(2)")
     page.wait_for_timeout(200)
     assert len(held_original) == 1
     assert page.evaluate("_lbCurrentSrcKey") == "full"
@@ -2258,7 +2263,7 @@ def test_browse_lightbox_resumes_warmups_after_source_failure(
 
     page.locator(".grid-card").nth(1).dblclick()
     page.wait_for_function("_lbFullUsesOriginal === false && _lbFullLongEdge !== null")
-    page.evaluate("_lbSetZoom(100)")
+    page.evaluate("vireoLightboxViewport.setZoom(100)")
     page.wait_for_function(
         """_lbCurrentSrcKey === 'original' && vireoLightboxSession.preloadStatus().adjacent.some(
             entry => entry.sourceKey === 'original' && entry.status === 'loading'
@@ -2274,7 +2279,7 @@ def test_browse_lightbox_resumes_warmups_after_source_failure(
     target = "/full" if failed_tier == "full" else f"size={failed_tier}"
     with page.expect_request(lambda request: target in request.url and "prefetch=1" not in request.url):
         page.evaluate(
-            "pixels => _lbScheduleSourceSwap(pixels / (_lbPhotoW * _lbFitScale * devicePixelRatio))",
+            "pixels => _lbScheduleSourceSwap(pixels / (_lbPhotoW * vireoLightboxViewport.fitScale() * devicePixelRatio))",
             needed_pixels,
         )
     assert page.evaluate("_lbDesiredSrcKey") == failed_tier
@@ -2293,7 +2298,7 @@ def test_browse_lightbox_resumes_warmups_after_source_failure(
             lambda request: f"size={expected_source}" in request.url and "prefetch=1" not in request.url
         ):
             page.evaluate(
-                "pixels => _lbScheduleSourceSwap(pixels / (_lbPhotoW * _lbFitScale * devicePixelRatio))",
+                "pixels => _lbScheduleSourceSwap(pixels / (_lbPhotoW * vireoLightboxViewport.fitScale() * devicePixelRatio))",
                 next_pixels,
             )
     held_tier[0].fulfill(status=503, body="Transient tier failure")
@@ -2413,7 +2418,7 @@ def test_browse_lightbox_keeps_pruned_request_in_flight_until_response(
     before = set(speculative_requests)
     page.evaluate("window.__retiredWarmup = vireoLightboxSession.preloadStatus().inFlight")
     if action == "zoom":
-        page.evaluate("_lbSetZoom(100)")
+        page.evaluate("vireoLightboxViewport.setZoom(100)")
         page.wait_for_function("_lbCurrentSrcKey === 'original'")
     else:
         if action == "reopen":
@@ -2603,10 +2608,10 @@ def test_browse_lightbox_skips_original_when_full_covers_one_to_one(
     page.route("**/photos/*/original*", serve_original)
     page.goto(f"{live_server['url']}/browse")
     page.locator(".grid-card").first.dblclick()
-    page.wait_for_function("window._lbNativeZoom !== null")
+    page.wait_for_function("vireoLightboxViewport.nativeZoom() !== null")
     page.wait_for_timeout(800)
 
-    assert page.evaluate("window._lbPickSourceKey(window._lbNativeZoom)") == "full"
+    assert page.evaluate("window._lbPickSourceKey(vireoLightboxViewport.nativeZoom())") == "full"
     assert original_requests == []
     assert page.evaluate("vireoLightboxSession.preloadStatus().original") is None
 
@@ -2653,11 +2658,11 @@ def test_browse_lightbox_cancels_original_warmup_when_zoom_leaves_fit(
     selected_key = page.evaluate(
         """() => {
             let zoom = 1.01;
-            while (zoom < window._lbNativeZoom && window._lbPickSourceKey(zoom) === 'full') {
+            while (zoom < vireoLightboxViewport.nativeZoom() && window._lbPickSourceKey(zoom) === 'full') {
                 zoom += 0.05;
             }
             const key = window._lbPickSourceKey(zoom);
-            window._lbSetZoom(zoom);
+            vireoLightboxViewport.setZoom(zoom);
             return key;
         }"""
     )
@@ -2741,29 +2746,29 @@ def test_browse_lightbox_carries_current_viewport_to_previously_seen_photo(
         """() => {
             window._lbPhotoW = 4000;
             window._lbPhotoH = 2000;
-            window._lbRecomputeNativeZoom();
-            window._lbApplyViewportState({
-                zoom: window._lbNativeZoom,
+            vireoLightboxViewport.recomputeNativeZoom();
+            vireoLightboxViewport.applyView({
+                zoom: vireoLightboxViewport.nativeZoom(),
                 centerX: 0.24,
                 centerY: 0.70,
                 oneToOne: true,
             });
-            window._lbSaveViewportState(vireoLightboxSession.requestedPhotoId());
-            return window._lbViewportStateFromCurrent();
+            vireoLightboxViewport.save(vireoLightboxSession.requestedPhotoId());
+            return vireoLightboxViewport.currentView();
         }"""
     )
     assert first_view["oneToOne"] is True
 
     page.locator("[title='Next (→)']").click()
     expect(page.locator("#lightboxCounter")).to_contain_text("2 /")
-    page.wait_for_function("window._lbPendingViewportState === null")
+    page.wait_for_function("vireoLightboxViewport.snapshot().pendingRestore === null")
     carried_view = page.evaluate(
         """() => {
             window._lbPhotoW = 4000;
             window._lbPhotoH = 2000;
-            window._lbRecomputeNativeZoom();
-            window._lbTryApplyPendingViewportState();
-            return window._lbViewportStateFromCurrent();
+            vireoLightboxViewport.recomputeNativeZoom();
+            vireoLightboxViewport.applyPendingRestore();
+            return vireoLightboxViewport.currentView();
         }"""
     )
     assert abs(carried_view["zoom"] - first_view["zoom"]) < 0.05
@@ -2772,9 +2777,9 @@ def test_browse_lightbox_carries_current_viewport_to_previously_seen_photo(
 
     second_view = page.evaluate(
         """() => {
-            window._lbApplyViewportState({zoom: 1, centerX: 0.5, centerY: 0.5});
-            window._lbSaveViewportState(vireoLightboxSession.requestedPhotoId());
-            return window._lbViewportStateFromCurrent();
+            vireoLightboxViewport.applyView({zoom: 1, centerX: 0.5, centerY: 0.5});
+            vireoLightboxViewport.save(vireoLightboxSession.requestedPhotoId());
+            return vireoLightboxViewport.currentView();
         }"""
     )
     page.locator("[title='Previous (←)']").click()
@@ -2783,12 +2788,12 @@ def test_browse_lightbox_carries_current_viewport_to_previously_seen_photo(
         """() => {
             window._lbPhotoW = 4000;
             window._lbPhotoH = 2000;
-            window._lbRecomputeNativeZoom();
-            window._lbTryApplyPendingViewportState();
+            vireoLightboxViewport.recomputeNativeZoom();
+            vireoLightboxViewport.applyPendingRestore();
         }"""
     )
-    page.wait_for_function("window._lbPendingViewportState === null")
-    returned_view = page.evaluate("window._lbViewportStateFromCurrent()")
+    page.wait_for_function("vireoLightboxViewport.snapshot().pendingRestore === null")
+    returned_view = page.evaluate("vireoLightboxViewport.currentView()")
     assert abs(returned_view["zoom"] - second_view["zoom"]) < 0.05
     assert abs(returned_view["centerX"] - second_view["centerX"]) < 0.03
     assert abs(returned_view["centerY"] - second_view["centerY"]) < 0.03
@@ -2849,15 +2854,15 @@ def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
         """() => {
             window._lbPhotoW = 4000;
             window._lbPhotoH = 2000;
-            window._lbRecomputeNativeZoom();
+            vireoLightboxViewport.recomputeNativeZoom();
             window._lbCurrentSrcKey = 'original';
-            window._lbApplyViewportState({
-                zoom: window._lbNativeZoom,
+            vireoLightboxViewport.applyView({
+                zoom: vireoLightboxViewport.nativeZoom(),
                 centerX: 0.24,
                 centerY: 0.70,
                 oneToOne: true,
             });
-            window._lbSaveViewportState(vireoLightboxSession.requestedPhotoId());
+            vireoLightboxViewport.save(vireoLightboxSession.requestedPhotoId());
         }"""
     )
     page.evaluate(
@@ -2870,14 +2875,6 @@ def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
             const externalPanel = document.createElement('div');
             externalPanel.id = 'syncLightboxPanel';
             document.getElementById('lightboxOverlay').appendChild(externalPanel);
-            window.__lightboxTransformCallsWhilePending = 0;
-            window.__originalLightboxApplyTransform = window._lbApplyTransform;
-            window._lbApplyTransform = function() {
-                if (window._lbVisualTransitionPending) {
-                    window.__lightboxTransformCallsWhilePending += 1;
-                }
-                return window.__originalLightboxApplyTransform.apply(this, arguments);
-            };
             // Capture the outgoing bitmap at the actual navigation boundary.
             // A layout refresh queued during lightbox setup may legitimately
             // settle before this key event. Recording the baseline in the
@@ -2891,7 +2888,7 @@ def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
                     cssTransform: transform.style.transform,
                     width: transform.style.width,
                     height: transform.style.height,
-                    viewport: window._lbViewportStateFromCurrent(),
+                    viewport: vireoLightboxViewport.currentView(),
                 };
             }, { capture: true, once: true });
         }"""
@@ -2920,7 +2917,6 @@ def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
         }"""
     )
     page.wait_for_timeout(150)
-    assert page.evaluate("window.__lightboxTransformCallsWhilePending") == 0
 
     # The outgoing bitmap remains visible while the incoming original is
     # loading, so its filename and position must remain visible too.
@@ -2941,7 +2937,7 @@ def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
     interaction_state = page.evaluate(
         """() => {
             const img = document.getElementById('lightboxImg');
-            const beforeZoom = window._lbZoom;
+            const beforeZoom = vireoLightboxViewport.zoom();
             img.dispatchEvent(new WheelEvent('wheel', {
                 bubbles: true, cancelable: true, deltaY: -120,
                 clientX: 400, clientY: 300,
@@ -2956,7 +2952,7 @@ def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
             }));
             return {
                 beforeZoom: beforeZoom,
-                afterZoom: window._lbZoom,
+                afterZoom: vireoLightboxViewport.zoom(),
                 nativePhotoIds: window.nativeMenuActivePhotoIds(),
             };
         }"""
@@ -2982,13 +2978,6 @@ def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
         "width": before["width"],
         "height": before["height"],
     }
-    page.evaluate(
-        """() => {
-            window._lbApplyTransform = window.__originalLightboxApplyTransform;
-            delete window.__originalLightboxApplyTransform;
-        }"""
-    )
-
     held_original.pop("route").fulfill(
         body=next_svg, content_type="image/svg+xml"
     )
@@ -2996,7 +2985,7 @@ def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
         """() => {
             const img = document.getElementById('lightboxImg');
             return window._lbVisualTransitionPending === false
-                && window._lbPendingViewportState === null
+                && vireoLightboxViewport.snapshot().pendingRestore === null
                 && img && img.complete && img.naturalWidth === 3000;
         }"""
     )
@@ -3015,7 +3004,7 @@ def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
         "!document.getElementById('syncLightboxPanel') || "
         "!document.getElementById('syncLightboxPanel').inert"
     )
-    carried = page.evaluate("window._lbViewportStateFromCurrent()")
+    carried = page.evaluate("vireoLightboxViewport.currentView()")
     assert abs(carried["centerX"] - before["viewport"]["centerX"]) < 0.03
     assert abs(carried["centerY"] - before["viewport"]["centerY"]) < 0.03
 
@@ -3072,36 +3061,36 @@ def test_browse_lightbox_resize_deferred_during_transition_reapplies_after_load(
         """() => {
             window._lbPhotoW = 4000;
             window._lbPhotoH = 2000;
-            window._lbRecomputeNativeZoom();
+            vireoLightboxViewport.recomputeNativeZoom();
             window._lbCurrentSrcKey = 'original';
-            window._lbApplyViewportState({
-                zoom: window._lbNativeZoom,
+            vireoLightboxViewport.applyView({
+                zoom: vireoLightboxViewport.nativeZoom(),
                 centerX: 0.24,
                 centerY: 0.70,
                 oneToOne: true,
             });
-            window._lbSaveViewportState(vireoLightboxSession.requestedPhotoId());
+            vireoLightboxViewport.save(vireoLightboxSession.requestedPhotoId());
         }"""
     )
 
     # Instrument the deferred-refresh flush so we can verify it fires once the
-    # transition ends, and instrument _lbSetZoom so we can assert the frozen
-    # outgoing bitmap is never re-selected during the transition.
+    # transition ends. Observe source requests at the host boundary to verify
+    # resize never reselects the frozen outgoing bitmap during the transition.
     page.evaluate(
         """() => {
             window.__flushCalls = 0;
-            window.__originalFlush = window._lbFlushDeferredLightboxLayoutRefresh;
-            window._lbFlushDeferredLightboxLayoutRefresh = function() {
+            window.__originalFlush = vireoLightboxViewport.flushDeferredLayout;
+            vireoLightboxViewport = Object.freeze({...vireoLightboxViewport, flushDeferredLayout: function() {
                 window.__flushCalls += 1;
                 return window.__originalFlush.apply(this, arguments);
-            };
-            window.__setZoomCallsWhilePending = 0;
-            window.__originalSetZoom = window._lbSetZoom;
-            window._lbSetZoom = function() {
+            }});
+            window.__sourceCallsWhilePending = 0;
+            window.__originalSourceSwap = window._lbScheduleSourceSwap;
+            window._lbScheduleSourceSwap = function() {
                 if (window._lbVisualTransitionPending) {
-                    window.__setZoomCallsWhilePending += 1;
+                    window.__sourceCallsWhilePending += 1;
                 }
-                return window.__originalSetZoom.apply(this, arguments);
+                return window.__originalSourceSwap.apply(this, arguments);
             };
         }"""
     )
@@ -3121,9 +3110,9 @@ def test_browse_lightbox_resize_deferred_during_transition_reapplies_after_load(
 
     # Let the debounce timer fire while the transition is still pending. The
     # early return preserves the deferred source-tier intent instead of
-    # calling _lbSetZoom on the frozen outgoing bitmap.
+    # selecting a source for the frozen outgoing bitmap.
     page.wait_for_timeout(200)
-    assert page.evaluate("window.__setZoomCallsWhilePending") == 0
+    assert page.evaluate("window.__sourceCallsWhilePending") == 0
     assert page.evaluate("window.__flushCalls") == 0
 
     # Complete the incoming image load.
@@ -3147,9 +3136,9 @@ def test_browse_lightbox_resize_deferred_during_transition_reapplies_after_load(
     )
     page.evaluate(
         """() => {
-            window._lbSetZoom = window.__originalSetZoom;
-            delete window.__originalSetZoom;
-            window._lbFlushDeferredLightboxLayoutRefresh = window.__originalFlush;
+            window._lbScheduleSourceSwap = window.__originalSourceSwap;
+            delete window.__originalSourceSwap;
+            vireoLightboxViewport = Object.freeze({...vireoLightboxViewport, flushDeferredLayout: window.__originalFlush});
             delete window.__originalFlush;
         }"""
     )
@@ -3209,16 +3198,16 @@ def test_browse_lightbox_mid_transition_save_keeps_navigation_handoff(
         """() => {
             window._lbPhotoW = 4000;
             window._lbPhotoH = 2000;
-            window._lbRecomputeNativeZoom();
+            vireoLightboxViewport.recomputeNativeZoom();
             window._lbCurrentSrcKey = 'original';
-            window._lbApplyViewportState({
-                zoom: window._lbNativeZoom,
+            vireoLightboxViewport.applyView({
+                zoom: vireoLightboxViewport.nativeZoom(),
                 centerX: 0.20,
                 centerY: 0.75,
                 oneToOne: true,
             });
-            window._lbSaveViewportState(vireoLightboxSession.requestedPhotoId());
-            return window._lbViewportStateFromCurrent();
+            vireoLightboxViewport.save(vireoLightboxSession.requestedPhotoId());
+            return vireoLightboxViewport.currentView();
         }"""
     )
 
@@ -3228,13 +3217,13 @@ def test_browse_lightbox_mid_transition_save_keeps_navigation_handoff(
     intended = {"zoom": 2.5, "centerX": 0.80, "centerY": 0.15}
     page.evaluate(
         """([id, state]) => {
-            window._lbViewportByPhotoId[String(id)] = {
+            saveViewportForTest(id, {
                 zoom: state.zoom,
                 centerX: state.centerX,
                 centerY: state.centerY,
                 oneToOne: false,
                 pending1To1: false,
-            };
+            });
         }""",
         [incoming_id, intended],
     )
@@ -3251,14 +3240,14 @@ def test_browse_lightbox_mid_transition_save_keeps_navigation_handoff(
 
     # Simulate the user pressing another arrow / closing the lightbox before
     # the incoming image finishes decoding: openLightbox / lightboxNav /
-    # closeLightbox all call _lbSaveViewportState(vireoLightboxSession.requestedPhotoId()) in this
+    # closeLightbox all call vireoLightboxViewport.save(vireoLightboxSession.requestedPhotoId()) in this
     # state. The DOM transform is still the outgoing bitmap's.
     saved_during_transition = page.evaluate(
         """(id) => {
-            const returned = window._lbSaveViewportState(id);
+            const returned = vireoLightboxViewport.save(id);
             return {
                 returned: returned,
-                stored: window._lbViewportByPhotoId[String(id)],
+                stored: vireoLightboxViewport.savedView(id),
             };
         }""",
         incoming_id,
@@ -3293,7 +3282,7 @@ def test_browse_lightbox_clears_transition_state_when_incoming_image_errors(
     Regression: handleInitialImageError's early-return path (taken when the
     failing tier isn't the /original fallback candidate) previously left
     _lbVisualTransitionPending true indefinitely. That kept the metadata
-    callback skipping layout updates and made _lbSaveViewportState treat the
+    callback skipping layout updates and made vireoLightboxViewport.save treat the
     incoming photo as still mid-transition, freezing the outgoing transform on
     screen until the lightbox was closed or another navigation succeeded.
     """
@@ -3357,7 +3346,7 @@ def test_browse_lightbox_clears_transition_state_when_incoming_image_errors(
     saved = page.evaluate(
         """() => {
             const id = vireoLightboxSession.requestedPhotoId();
-            const returned = window._lbSaveViewportState(id);
+            const returned = vireoLightboxViewport.save(id);
             return {
                 returned: returned,
                 pendingFlag: window._lbVisualTransitionPending,
@@ -3451,15 +3440,15 @@ def test_browse_lightbox_defers_overlays_while_visual_transition_pending(
         """() => {
             window._lbPhotoW = 4000;
             window._lbPhotoH = 2000;
-            window._lbRecomputeNativeZoom();
+            vireoLightboxViewport.recomputeNativeZoom();
             window._lbCurrentSrcKey = 'original';
-            window._lbApplyViewportState({
-                zoom: window._lbNativeZoom,
+            vireoLightboxViewport.applyView({
+                zoom: vireoLightboxViewport.nativeZoom(),
                 centerX: 0.5,
                 centerY: 0.5,
                 oneToOne: true,
             });
-            window._lbSaveViewportState(vireoLightboxSession.requestedPhotoId());
+            vireoLightboxViewport.save(vireoLightboxSession.requestedPhotoId());
         }"""
     )
 
@@ -3536,7 +3525,7 @@ def test_browse_lightbox_pending_high_zoom_survives_native_zoom_race(live_server
     """A saved zoom > 4 is not lost when native zoom is unknown at first apply.
 
     Race: if /api/photos/<id> resolves before the image load event,
-    _lbTryApplyPendingViewportState runs while _lbNativeZoom is null. The
+    vireoLightboxViewport.applyPendingRestore runs while vireoLightboxViewport.nativeZoom() is null. The
     fallback max clamps zoom to 4, so the pending state must be kept (not
     cleared) so a later apply, once native zoom is known, can restore the
     original high zoom.
@@ -3576,8 +3565,8 @@ def test_browse_lightbox_pending_high_zoom_survives_native_zoom_race(live_server
         """() => {
             window._lbPhotoW = 4000;
             window._lbPhotoH = 2000;
-            window._lbRecomputeNativeZoom();
-            const native = window._lbNativeZoom;
+            vireoLightboxViewport.recomputeNativeZoom();
+            const native = vireoLightboxViewport.nativeZoom();
             const target = Math.min(native * 2, native * 4 - 0.5);
             return {native: native, target: target};
         }"""
@@ -3589,16 +3578,18 @@ def test_browse_lightbox_pending_high_zoom_survives_native_zoom_race(live_server
     # state is applied (e.g. API fetch resolved before image load).
     degraded = page.evaluate(
         """(target) => {
-            window._lbNativeZoom = null;
-            window._lbPendingViewportState = {
+            vireoLightboxViewport.invalidateGeometry();
+            vireoLightboxViewport.beginPhoto(vireoLightboxSession.requestedPhotoId(), {
+                fallbackViewportState: {
                 zoom: target, centerX: 0.3, centerY: 0.6,
                 oneToOne: false, pending1To1: false,
-            };
-            const applied = window._lbTryApplyPendingViewportState();
+            }
+            });
+            const applied = vireoLightboxViewport.applyPendingRestore();
             return {
                 applied: applied,
-                zoom: window._lbZoom,
-                stillPending: window._lbPendingViewportState !== null,
+                zoom: vireoLightboxViewport.zoom(),
+                stillPending: vireoLightboxViewport.snapshot().pendingRestore !== null,
             };
         }""",
         setup["target"],
@@ -3615,11 +3606,11 @@ def test_browse_lightbox_pending_high_zoom_survives_native_zoom_race(live_server
         """() => {
             window._lbPhotoW = 4000;
             window._lbPhotoH = 2000;
-            window._lbRecomputeNativeZoom();
-            window._lbTryApplyPendingViewportState();
+            vireoLightboxViewport.recomputeNativeZoom();
+            vireoLightboxViewport.applyPendingRestore();
             return {
-                zoom: window._lbZoom,
-                stillPending: window._lbPendingViewportState !== null,
+                zoom: vireoLightboxViewport.zoom(),
+                stillPending: vireoLightboxViewport.snapshot().pendingRestore !== null,
             };
         }"""
     )
@@ -3630,10 +3621,10 @@ def test_browse_lightbox_pending_high_zoom_survives_native_zoom_race(live_server
 def test_browse_lightbox_manual_zoom_cancels_pending_restore(live_server, page):
     """A manual wheel zoom cancels a still-armed pending viewport restore.
 
-    Regression: _lbPendingViewportState is intentionally kept until native
+    Regression: vireoLightboxViewport.snapshot().pendingRestore is intentionally kept until native
     zoom is known so a high-zoom restore survives the metadata/image-load
     race (see test above). But that same window let a later
-    _lbTryApplyPendingViewportState() (image-load callback) snap the
+    vireoLightboxViewport.applyPendingRestore() (image-load callback) snap the
     viewport back after the user had already zoomed the new photo. A
     user-driven viewport mutation must cancel the pending restore.
     """
@@ -3673,19 +3664,21 @@ def test_browse_lightbox_manual_zoom_cancels_pending_restore(live_server, page):
         """() => {
             window._lbPhotoW = 4000;
             window._lbPhotoH = 2000;
-            window._lbRecomputeNativeZoom();
-            const native = window._lbNativeZoom;
+            vireoLightboxViewport.recomputeNativeZoom();
+            const native = vireoLightboxViewport.nativeZoom();
             const target = Math.min(native * 2, native * 4 - 0.5);
-            window._lbNativeZoom = null;
-            window._lbPendingViewportState = {
+            vireoLightboxViewport.invalidateGeometry();
+            vireoLightboxViewport.beginPhoto(vireoLightboxSession.requestedPhotoId(), {
+                fallbackViewportState: {
                 zoom: target, centerX: 0.3, centerY: 0.6,
                 oneToOne: false, pending1To1: false,
-            };
-            window._lbTryApplyPendingViewportState();
+            }
+            });
+            vireoLightboxViewport.applyPendingRestore();
             return {
                 native: native,
                 target: target,
-                stillPending: window._lbPendingViewportState !== null,
+                stillPending: vireoLightboxViewport.snapshot().pendingRestore !== null,
             };
         }"""
     )
@@ -3699,8 +3692,8 @@ def test_browse_lightbox_manual_zoom_cancels_pending_restore(live_server, page):
 
     after_wheel = page.evaluate(
         """() => ({
-            zoom: window._lbZoom,
-            stillPending: window._lbPendingViewportState !== null,
+            zoom: vireoLightboxViewport.zoom(),
+            stillPending: vireoLightboxViewport.snapshot().pendingRestore !== null,
         })"""
     )
     # The manual wheel zoom must have cancelled the pending restore...
@@ -3714,9 +3707,9 @@ def test_browse_lightbox_manual_zoom_cancels_pending_restore(live_server, page):
         """() => {
             window._lbPhotoW = 4000;
             window._lbPhotoH = 2000;
-            window._lbRecomputeNativeZoom();
-            const applied = window._lbTryApplyPendingViewportState();
-            return {applied: applied, zoom: window._lbZoom};
+            vireoLightboxViewport.recomputeNativeZoom();
+            const applied = vireoLightboxViewport.applyPendingRestore();
+            return {applied: applied, zoom: vireoLightboxViewport.zoom()};
         }"""
     )
     assert retried["applied"] is False
@@ -3739,9 +3732,9 @@ def test_browse_lightbox_one_to_one_nav_falls_back_when_original_fails(live_serv
     expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
     page.evaluate(
         """() => {
-            window._lbNativeZoom = 2;
-            window._lbZoom = 2;
-            window._lbPending1To1 = false;
+            setViewportNativeZoomForTest(2);
+            vireoLightboxViewport.setZoom(2);
+            vireoLightboxViewport.cancelPendingZoom();
         }"""
     )
 
@@ -3814,13 +3807,13 @@ def test_browse_lightbox_restored_pending_one_to_one_waits_for_fallback_after_in
     page.evaluate(
         """() => {
             const p = window.photos[0];
-            window._lbViewportByPhotoId[String(p.id)] = {
+            saveViewportForTest(p.id, {
                 zoom: 1,
                 centerX: 0.5,
                 centerY: 0.5,
                 oneToOne: true,
                 pending1To1: true,
-            };
+            });
             window.openLightbox(p.id, p.filename, window.photos);
         }"""
     )
@@ -3839,13 +3832,13 @@ def test_browse_lightbox_restored_pending_one_to_one_waits_for_fallback_after_in
         page.wait_for_timeout(25)
     assert "route" in held_fallback, page.evaluate(
         """() => ({
-            pending: window._lbPending1To1,
-            zoom: window._lbZoom,
-            nativeZoom: window._lbNativeZoom,
+            pending: vireoLightboxViewport.pendingOneToOne(),
+            zoom: vireoLightboxViewport.zoom(),
+            nativeZoom: vireoLightboxViewport.nativeZoom(),
             currentSource: window._lbCurrentSrcKey,
             desiredSource: window._lbDesiredSrcKey,
             originalUnavailable: window._lbOriginalUnavailable,
-            pendingViewport: window._lbPendingViewportState,
+            pendingViewport: vireoLightboxViewport.snapshot().pendingRestore,
             imgComplete: document.getElementById('lightboxImg')?.complete,
             naturalWidth: document.getElementById('lightboxImg')?.naturalWidth,
         })"""
@@ -3858,8 +3851,8 @@ def test_browse_lightbox_restored_pending_one_to_one_waits_for_fallback_after_in
 
     waiting = page.evaluate(
         """() => ({
-            pending: window._lbPending1To1,
-            zoom: window._lbZoom,
+            pending: vireoLightboxViewport.pendingOneToOne(),
+            zoom: vireoLightboxViewport.zoom(),
             currentSource: window._lbCurrentSrcKey,
             desiredSource: window._lbDesiredSrcKey,
         })"""
@@ -3871,11 +3864,11 @@ def test_browse_lightbox_restored_pending_one_to_one_waits_for_fallback_after_in
 
     if fallback_fails:
         held_fallback.pop("route").abort()
-        page.wait_for_function("window._lbPending1To1 === false", timeout=3000)
+        page.wait_for_function("vireoLightboxViewport.pendingOneToOne() === false", timeout=3000)
         assert page.evaluate("window._lbDesiredSrcKey") == "full"
         assert page.evaluate("window._lbCurrentSrcKey") == "full"
-        assert page.evaluate("window._lbPending1To1Anchor") is None
-        assert abs(page.evaluate("window._lbZoom") - 1) < 0.001
+        assert page.evaluate("vireoLightboxViewport.snapshot().oneToOneAnchor") is None
+        assert abs(page.evaluate("vireoLightboxViewport.zoom()") - 1) < 0.001
         expect(page.locator("#lightboxZoomBadge")).not_to_contain_text("Loading")
         return
 
@@ -3887,10 +3880,10 @@ def test_browse_lightbox_restored_pending_one_to_one_waits_for_fallback_after_in
         """() => {
             const img = document.getElementById('lightboxImg');
             return (window._lbCurrentSrcKey === '2560' || window._lbCurrentSrcKey === '3840')
-                && window._lbPending1To1 === false
+                && vireoLightboxViewport.pendingOneToOne() === false
                 && img && img.complete && img.naturalWidth === 2560
-                && window._lbNativeZoom
-                && Math.abs(window._lbZoom - window._lbNativeZoom) < 0.01;
+                && vireoLightboxViewport.nativeZoom()
+                && Math.abs(vireoLightboxViewport.zoom() - vireoLightboxViewport.nativeZoom()) < 0.01;
         }""",
         timeout=8000,
     )
@@ -3934,8 +3927,8 @@ def test_browse_lightbox_one_to_one_uses_device_pixels_and_natural_layout(live_s
         """() => {
             window._lbPhotoW = 4000;
             window._lbPhotoH = 2000;
-            window._lbRecomputeNativeZoom();
-            return window._lbNativeZoom > 1;
+            vireoLightboxViewport.recomputeNativeZoom();
+            return vireoLightboxViewport.nativeZoom() > 1;
         }"""
     )
 
@@ -3946,10 +3939,10 @@ def test_browse_lightbox_one_to_one_uses_device_pixels_and_natural_layout(live_s
     # to land before sampling layout so the metrics read can't race it.
     page.wait_for_function(
         """() => (
-            window._lbZoom > 1.001 &&
-            window._lbNativeZoom > 1 &&
-            window._lbFitScale > 0 &&
-            !window._lbPending1To1
+            vireoLightboxViewport.zoom() > 1.001 &&
+            vireoLightboxViewport.nativeZoom() > 1 &&
+            vireoLightboxViewport.fitScale() > 0 &&
+            !vireoLightboxViewport.pendingOneToOne()
         )"""
     )
     metrics = page.evaluate(
@@ -3958,9 +3951,9 @@ def test_browse_lightbox_one_to_one_uses_device_pixels_and_natural_layout(live_s
             const rect = t.getBoundingClientRect();
             return {
                 dpr: window.devicePixelRatio,
-                zoom: window._lbZoom,
-                nativeZoom: window._lbNativeZoom,
-                fitScale: window._lbFitScale,
+                zoom: vireoLightboxViewport.zoom(),
+                nativeZoom: vireoLightboxViewport.nativeZoom(),
+                fitScale: vireoLightboxViewport.fitScale(),
                 styleWidth: t.style.width,
                 styleHeight: t.style.height,
                 rectWidth: rect.width,
@@ -3982,7 +3975,7 @@ def test_browse_lightbox_defers_one_to_one_until_original_size_known(live_server
     """Metadata resolving before the held /original must not flash a soft 1:1.
 
     Regression guard for the metadata-before-/original race: learning the true
-    dimensions (and therefore _lbNativeZoom) while /original is still loading
+    dimensions (and therefore vireoLightboxViewport.nativeZoom()) while /original is still loading
     must NOT clear the pending 1:1 and snap on the upscaled /full tier. The
     snap may only happen once the high-resolution source is actually current.
     """
@@ -4037,13 +4030,13 @@ def test_browse_lightbox_defers_one_to_one_until_original_size_known(live_server
             window._lbPhotoH = null;
             window._lbOriginalUnavailable = false;
             window._lbCurrentSrcKey = 'full';
-            window._lbZoom = 1;
-            window._lbRecomputeNativeZoom();
+            vireoLightboxViewport.setZoom(1);
+            vireoLightboxViewport.recomputeNativeZoom();
             window.toggleLightboxZoom();
             return {
-                nativeZoom: window._lbNativeZoom,
-                pending: window._lbPending1To1,
-                zoom: window._lbZoom,
+                nativeZoom: vireoLightboxViewport.nativeZoom(),
+                pending: vireoLightboxViewport.pendingOneToOne(),
+                zoom: vireoLightboxViewport.zoom(),
                 desiredSource: window._lbDesiredSrcKey,
             };
         }"""
@@ -4068,13 +4061,13 @@ def test_browse_lightbox_defers_one_to_one_until_original_size_known(live_server
         """() => {
             window._lbPhotoW = 4000;
             window._lbPhotoH = 2000;
-            window._lbRecomputeNativeZoom();
-            window._lbApplyPendingOneToOneZoom();
+            vireoLightboxViewport.recomputeNativeZoom();
+            vireoLightboxViewport.applyPendingOneToOne();
             return {
-                pending: window._lbPending1To1,
-                zoom: window._lbZoom,
+                pending: vireoLightboxViewport.pendingOneToOne(),
+                zoom: vireoLightboxViewport.zoom(),
                 currentSource: window._lbCurrentSrcKey,
-                nativeZoom: window._lbNativeZoom,
+                nativeZoom: vireoLightboxViewport.nativeZoom(),
             };
         }"""
     )
@@ -4093,9 +4086,9 @@ def test_browse_lightbox_defers_one_to_one_until_original_size_known(live_server
         """() => {
             const img = document.getElementById('lightboxImg');
             return window._lbCurrentSrcKey === 'original'
-                && window._lbPending1To1 === false
+                && vireoLightboxViewport.pendingOneToOne() === false
                 && img && img.complete && img.naturalWidth === 4000
-                && Math.abs(window._lbZoom - window._lbNativeZoom) < 0.01;
+                && Math.abs(vireoLightboxViewport.zoom() - vireoLightboxViewport.nativeZoom()) < 0.01;
         }"""
     )
 
@@ -4152,14 +4145,16 @@ def test_browse_lightbox_pending_one_to_one_guard_schedules_sharper_source(
             window._lbPhotoH = 2000;
             window._lbCurrentSrcKey = 'full';
             window._lbDesiredSrcKey = 'full';
-            window._lbPending1To1 = true;
-            window._lbZoom = 1;
-            window._lbRecomputeNativeZoom();
-            window._lbApplyPendingOneToOneZoom();
+            vireoLightboxViewport.setZoom(1);
+            vireoLightboxViewport.beginPhoto(vireoLightboxSession.requestedPhotoId(), {
+                fallbackViewportState: {zoom: 1, oneToOne: true}
+            });
+            vireoLightboxViewport.recomputeNativeZoom();
+            vireoLightboxViewport.applyPendingOneToOne();
             return {
-                pending: window._lbPending1To1,
-                zoom: window._lbZoom,
-                nativeZoom: window._lbNativeZoom,
+                pending: vireoLightboxViewport.pendingOneToOne(),
+                zoom: vireoLightboxViewport.zoom(),
+                nativeZoom: vireoLightboxViewport.nativeZoom(),
                 currentSource: window._lbCurrentSrcKey,
                 desiredSource: window._lbDesiredSrcKey,
             };
@@ -4185,9 +4180,9 @@ def test_browse_lightbox_pending_one_to_one_guard_schedules_sharper_source(
         """() => {
             const img = document.getElementById('lightboxImg');
             return window._lbCurrentSrcKey === 'original'
-                && window._lbPending1To1 === false
+                && vireoLightboxViewport.pendingOneToOne() === false
                 && img && img.complete && img.naturalWidth === 4000
-                && Math.abs(window._lbZoom - window._lbNativeZoom) < 0.01;
+                && Math.abs(vireoLightboxViewport.zoom() - vireoLightboxViewport.nativeZoom()) < 0.01;
         }"""
     )
 
@@ -4224,7 +4219,7 @@ def test_browse_lightbox_waits_for_original_before_one_to_one_snap(live_server, 
     # The fixture photos are seeded without width/height, so /api/photos/<id>
     # returns width=null. When that async metadata fetch resolves it overwrites
     # the _lbPhotoW=4000 injected below with null (app: `_lbPhotoW = data.width
-    # || null`), which nulls _lbNativeZoom. Depending on whether that lands
+    # || null`), which nulls vireoLightboxViewport.nativeZoom(). Depending on whether that lands
     # before or after the native-zoom reads below, the test either crashed
     # ("None is not defined") or hung waiting for native zoom to settle. Force
     # real dimensions into the metadata response so _lbPhotoW stays 4000 and
@@ -4257,16 +4252,16 @@ def test_browse_lightbox_waits_for_original_before_one_to_one_snap(live_server, 
         """() => {
             window._lbPhotoW = 4000;
             window._lbPhotoH = 2000;
-            window._lbRecomputeNativeZoom();
-            return window._lbNativeZoom > 1;
+            vireoLightboxViewport.recomputeNativeZoom();
+            return vireoLightboxViewport.nativeZoom() > 1;
         }"""
     )
 
     page.keyboard.press("z")
     page.wait_for_function(
-        "window._lbPending1To1 === true && window._lbDesiredSrcKey === 'original'"
+        "vireoLightboxViewport.pendingOneToOne() === true && window._lbDesiredSrcKey === 'original'"
     )
-    assert abs(page.evaluate("window._lbZoom") - 1) < 0.001
+    assert abs(page.evaluate("vireoLightboxViewport.zoom()") - 1) < 0.001
     assert page.evaluate("window._lbCurrentSrcKey") == "full"
     # The deferred swap is scheduled on a debounced timer; under CI CPU
     # contention that timer plus the preloader round-trip can take well over 2s,
@@ -4287,7 +4282,7 @@ def test_browse_lightbox_waits_for_original_before_one_to_one_snap(live_server, 
             const img = document.getElementById('lightboxImg');
             return window._lbCurrentSrcKey === 'original'
                 && img && img.complete && img.naturalWidth === 4000
-                && Math.abs(window._lbZoom - window._lbNativeZoom) < 0.01;
+                && Math.abs(vireoLightboxViewport.zoom() - vireoLightboxViewport.nativeZoom()) < 0.01;
         }"""
     )
 
@@ -4324,7 +4319,7 @@ def test_browse_lightbox_resize_preserves_deferred_one_to_one(live_server, page)
     # The fixture photos are seeded without width/height, so /api/photos/<id>
     # returns width=null. When that async metadata fetch resolves it overwrites
     # the _lbPhotoW=4000 injected below with null (app: `_lbPhotoW = data.width
-    # || null`), which nulls _lbNativeZoom. Depending on whether that lands
+    # || null`), which nulls vireoLightboxViewport.nativeZoom(). Depending on whether that lands
     # before or after the native-zoom reads below, the test either crashed
     # ("None is not defined") or hung waiting for native zoom to settle. Force
     # real dimensions into the metadata response so _lbPhotoW stays 4000 and
@@ -4357,16 +4352,16 @@ def test_browse_lightbox_resize_preserves_deferred_one_to_one(live_server, page)
         """() => {
             window._lbPhotoW = 4000;
             window._lbPhotoH = 2000;
-            window._lbRecomputeNativeZoom();
-            return window._lbNativeZoom > 1;
+            vireoLightboxViewport.recomputeNativeZoom();
+            return vireoLightboxViewport.nativeZoom() > 1;
         }"""
     )
 
     page.keyboard.press("z")
     page.wait_for_function(
-        "window._lbPending1To1 === true && window._lbDesiredSrcKey === 'original'"
+        "vireoLightboxViewport.pendingOneToOne() === true && window._lbDesiredSrcKey === 'original'"
     )
-    assert abs(page.evaluate("window._lbZoom") - 1) < 0.001
+    assert abs(page.evaluate("vireoLightboxViewport.zoom()") - 1) < 0.001
     assert page.evaluate("window._lbCurrentSrcKey") == "full"
 
     # Wait until the deferred swap has actually issued the held /original
@@ -4382,27 +4377,27 @@ def test_browse_lightbox_resize_preserves_deferred_one_to_one(live_server, page)
 
     # Stash the pre-resize native zoom in a page variable rather than reading it
     # into Python and interpolating it back. During the deferred /original swap
-    # _lbNativeZoom can be transiently unset; a Python None then formats into the
+    # vireoLightboxViewport.nativeZoom() can be transiently unset; a Python None then formats into the
     # wait expression as the literal `None`, which throws "None is not defined"
     # in JS. Guard that it is a finite number first, then compare in-page.
     page.wait_for_function(
-        "typeof window._lbNativeZoom === 'number' && isFinite(window._lbNativeZoom)"
+        "typeof vireoLightboxViewport.nativeZoom() === 'number' && isFinite(vireoLightboxViewport.nativeZoom())"
     )
-    page.evaluate("window._lbNativeZoomBaseline = window._lbNativeZoom")
+    page.evaluate("window._lbNativeZoomBaseline = vireoLightboxViewport.nativeZoom()")
 
     # Resize while the high-res source is still loading. The image is 4000px
-    # wide so _lbFitScale (hence _lbNativeZoom) is width-constrained; shrinking
-    # the viewport width forces a deterministic _lbNativeZoom change once the
-    # resize handler runs. The handler recomputes _lbNativeZoom unconditionally
+    # wide so vireoLightboxViewport.fitScale() (hence vireoLightboxViewport.nativeZoom()) is width-constrained; shrinking
+    # the viewport width forces a deterministic vireoLightboxViewport.nativeZoom() change once the
+    # resize handler runs. The handler recomputes vireoLightboxViewport.nativeZoom() unconditionally
     # (before any pending-state logic), so the change below is a fix-independent
     # signal that the debounced handler has actually executed — no fixed sleep.
     page.set_viewport_size({"width": 640, "height": 800})
     page.wait_for_function(
-        "Math.abs(window._lbNativeZoom - window._lbNativeZoomBaseline) > 0.1"
+        "Math.abs(vireoLightboxViewport.nativeZoom() - window._lbNativeZoomBaseline) > 0.1"
     )
 
     # The resize handler has now run while /original is still held. Pre-fix it
-    # cleared _lbPending1To1 and retargeted the swap back to /full, so releasing
+    # cleared vireoLightboxViewport.pendingOneToOne() and retargeted the swap back to /full, so releasing
     # /original below no longer snaps to 1:1 — the deferred zoom request was
     # silently dropped and the snap assertion times out (hard regression).
     original_route = held_original.pop("route")
@@ -4416,9 +4411,9 @@ def test_browse_lightbox_resize_preserves_deferred_one_to_one(live_server, page)
         """() => {
             const img = document.getElementById('lightboxImg');
             return window._lbCurrentSrcKey === 'original'
-                && window._lbPending1To1 === false
+                && vireoLightboxViewport.pendingOneToOne() === false
                 && img && img.complete && img.naturalWidth === 4000
-                && Math.abs(window._lbZoom - window._lbNativeZoom) < 0.01;
+                && Math.abs(vireoLightboxViewport.zoom() - vireoLightboxViewport.nativeZoom()) < 0.01;
         }""",
         timeout=8000,
     )
@@ -4464,15 +4459,15 @@ def test_browse_lightbox_does_not_retry_original_after_unavailable(live_server, 
     choices = page.evaluate(
         """() => {
             window._lbOriginalUnavailable = true;
-            window._lbZoom = 2;
-            window._lbNativeZoom = null;
+            vireoLightboxViewport.setZoom(2);
+            vireoLightboxViewport.invalidateGeometry();
             const unknownDimsChoice = window._lbPickSourceKey();
             window._lbPhotoW = 8000;
             window._lbPhotoH = 4000;
             window._lbFullLongEdge = 1000;
-            window._lbFitScale = 0.1;
-            window._lbNativeZoom = 100;
-            window._lbZoom = 100;
+            setViewportFitScaleForTest(0.1);
+            setViewportNativeZoomForTest(100);
+            vireoLightboxViewport.setZoom(100);
             const largeNeededChoice = window._lbPickSourceKey();
             return { unknownDimsChoice, largeNeededChoice };
         }"""
@@ -4484,8 +4479,8 @@ def test_browse_lightbox_does_not_retry_original_after_unavailable(live_server, 
     page.evaluate(
         """() => {
             window._lbOriginalUnavailable = false;
-            window._lbZoom = 100;
-            window._lbNativeZoom = 100;
+            vireoLightboxViewport.setZoom(100);
+            setViewportNativeZoomForTest(100);
             window._lbFullLongEdge = 1000;
             window._lbScheduleSourceSwap();
         }"""
@@ -4549,8 +4544,8 @@ def test_browse_lightbox_waits_for_fallback_tier_after_original_fails(live_serve
             window._lbPhotoH = null;
             window._lbOriginalUnavailable = false;
             window._lbCurrentSrcKey = 'full';
-            window._lbNativeZoom = null;
-            window._lbZoom = 1;
+            vireoLightboxViewport.invalidateGeometry();
+            vireoLightboxViewport.setZoom(1);
             window.toggleLightboxZoom();
         }"""
     )
@@ -4561,8 +4556,8 @@ def test_browse_lightbox_waits_for_fallback_tier_after_original_fails(live_serve
     assert "route" in held_fallback
     waiting = page.evaluate(
         """() => ({
-            pending: window._lbPending1To1,
-            zoom: window._lbZoom,
+            pending: vireoLightboxViewport.pendingOneToOne(),
+            zoom: vireoLightboxViewport.zoom(),
             currentSource: window._lbCurrentSrcKey,
             desiredSource: window._lbDesiredSrcKey,
         })"""
@@ -4572,25 +4567,16 @@ def test_browse_lightbox_waits_for_fallback_tier_after_original_fails(live_serve
     assert waiting["currentSource"] == "full"
     assert waiting["desiredSource"] == "3840"
 
-    before_resize_transforms = page.evaluate(
-        """() => {
-            window.__lbResizeTransformCount = 0;
-            const originalApplyTransform = window._lbApplyTransform;
-            window._lbApplyTransform = function() {
-                window.__lbResizeTransformCount += 1;
-                return originalApplyTransform.apply(this, arguments);
-            };
-            return window.__lbResizeTransformCount;
-        }"""
-    )
+    before_resize_transform = page.evaluate("document.getElementById('lightboxTransform').style.transform")
     page.set_viewport_size({"width": 760, "height": 800})
     page.wait_for_function(
-        "window.__lbResizeTransformCount > %d" % before_resize_transforms
+        "before => document.getElementById('lightboxTransform').style.transform !== before",
+        arg=before_resize_transform,
     )
     after_resize = page.evaluate(
         """() => ({
-            pending: window._lbPending1To1,
-            zoom: window._lbZoom,
+            pending: vireoLightboxViewport.pendingOneToOne(),
+            zoom: vireoLightboxViewport.zoom(),
             currentSource: window._lbCurrentSrcKey,
             desiredSource: window._lbDesiredSrcKey,
         })"""
@@ -4607,9 +4593,9 @@ def test_browse_lightbox_waits_for_fallback_tier_after_original_fails(live_serve
         """() => {
             const img = document.getElementById('lightboxImg');
             return window._lbCurrentSrcKey === '3840'
-                && window._lbPending1To1 === false
+                && vireoLightboxViewport.pendingOneToOne() === false
                 && img && img.complete && img.naturalWidth === 3840
-                && window._lbZoom > 1;
+                && vireoLightboxViewport.zoom() > 1;
         }"""
     )
 
@@ -4662,8 +4648,8 @@ def test_browse_lightbox_ignores_stale_original_failure_after_nav(live_server, p
                 window._lbPhotoH = 4000;
                 window._lbFullLongEdge = 1000;
                 window._lbOriginalUnavailable = false;
-                window._lbZoom = 100;
-                window._lbNativeZoom = 100;
+                vireoLightboxViewport.setZoom(100);
+                setViewportNativeZoomForTest(100);
                 window._lbCurrentSrcKey = 'full';
                 window._lbScheduleSourceSwap();
             }"""
@@ -4740,13 +4726,13 @@ def test_browse_e_f_g_keyboard_modes(live_server, page):
             window._vireoShortcuts = window._vireoShortcuts || {};
             window._vireoShortcuts.browse = window._vireoShortcuts.browse || {};
             window._vireoShortcuts.browse.zoom = 'f';
-            window._lbNativeZoom = 2;
-            window._lbZoom = 1;
+            setViewportNativeZoomForTest(2);
+            vireoLightboxViewport.setZoom(1);
         }"""
     )
     page.keyboard.press("f")
     assert page.evaluate("window.__fullscreenRequested") is False
-    assert page.evaluate("window._lbZoom > 1 || window._lbPending1To1") is True
+    assert page.evaluate("vireoLightboxViewport.zoom() > 1 || vireoLightboxViewport.pendingOneToOne()") is True
 
     page.evaluate(
         """() => {
@@ -4823,7 +4809,7 @@ def test_browse_lightbox_deferred_one_to_one_survives_original_failure_to_fallba
     )
     # /full is a small upscaled preview (600px); 1:1 genuinely needs a higher
     # tier. With dims unknown the lightbox can't tell the photo is large, so on
-    # /original failure _lbPickSourceKey(_lbNativeZoom) reads the 600px /full
+    # /original failure _lbPickSourceKey(vireoLightboxViewport.nativeZoom()) reads the 600px /full
     # decode (== recorded _lbFullLongEdge) and returns 'full' — the boundary
     # that defeats the tier-rank guard the pre-fix code relied on.
     full_svg = (
@@ -4883,16 +4869,16 @@ def test_browse_lightbox_deferred_one_to_one_survives_original_failure_to_fallba
             vireoLightboxSession.begin(vireoLightboxSession.requestedPhotoId());
             window._lbPhotoW = null;
             window._lbPhotoH = null;
-            window._lbNativeZoom = null;
+            vireoLightboxViewport.invalidateGeometry();
             window._lbOriginalUnavailable = false;
             window._lbCurrentSrcKey = 'full';
             window.toggleLightboxZoom();
         }"""
     )
     page.wait_for_function(
-        "window._lbPending1To1 === true && window._lbDesiredSrcKey === 'original'"
+        "vireoLightboxViewport.pendingOneToOne() === true && window._lbDesiredSrcKey === 'original'"
     )
-    assert abs(page.evaluate("window._lbZoom") - 1) < 0.001
+    assert abs(page.evaluate("vireoLightboxViewport.zoom()") - 1) < 0.001
     assert page.evaluate("window._lbCurrentSrcKey") == "full"
 
     # /original aborts. The fix must keep the deferral pending and retarget the
@@ -4903,16 +4889,16 @@ def test_browse_lightbox_deferred_one_to_one_survives_original_failure_to_fallba
     # the wait fails fast.
     page.wait_for_function(
         """() => window._lbOriginalUnavailable === true
-            && window._lbPending1To1 === true
+            && vireoLightboxViewport.pendingOneToOne() === true
             && window._lbCurrentSrcKey === 'full'
             && (window._lbDesiredSrcKey === '2560' || window._lbDesiredSrcKey === '3840')""",
         timeout=6000,
     )
-    assert abs(page.evaluate("window._lbZoom") - 1) < 0.001
+    assert abs(page.evaluate("vireoLightboxViewport.zoom()") - 1) < 0.001
 
     # The queued state above is intentionally transient in production. Keep
     # the fallback decode parked until after it has been observed so a fast
-    # runner cannot complete the swap and clear _lbPending1To1 first.
+    # runner cannot complete the swap and clear vireoLightboxViewport.pendingOneToOne() first.
     deadline = time.time() + 8
     while "route" not in held_fallback and time.time() < deadline:
         page.wait_for_timeout(25)
@@ -4927,10 +4913,10 @@ def test_browse_lightbox_deferred_one_to_one_survives_original_failure_to_fallba
         """() => {
             const img = document.getElementById('lightboxImg');
             return (window._lbCurrentSrcKey === '2560' || window._lbCurrentSrcKey === '3840')
-                && window._lbPending1To1 === false
+                && vireoLightboxViewport.pendingOneToOne() === false
                 && img && img.complete && img.naturalWidth === 2560
-                && window._lbNativeZoom
-                && Math.abs(window._lbZoom - window._lbNativeZoom) < 0.01;
+                && vireoLightboxViewport.nativeZoom()
+                && Math.abs(vireoLightboxViewport.zoom() - vireoLightboxViewport.nativeZoom()) < 0.01;
         }""",
         timeout=8000,
     )
@@ -4945,7 +4931,7 @@ def test_browse_lightbox_resize_preserves_post_original_failure_fallback(
     Repro: press z with dims unknown -> /original aborts -> the error path
     keeps the deferral pending and queues the sharpest remaining preview tier
     (2560/3840). While that tier is still loading the user resizes. The resize
-    recovery path used to re-derive the swap target from _lbNativeZoom, which —
+    recovery path used to re-derive the swap target from vireoLightboxViewport.nativeZoom(), which —
     because /original is unavailable and the current source is the upscaled
     /full — reflects the /full decode, so it re-picked 'full', canceled the
     in-flight fallback upgrade, and snapped a soft 1:1 on /full. Post-fix the
@@ -5000,8 +4986,8 @@ def test_browse_lightbox_resize_preserves_post_original_failure_fallback(
             window._lbPhotoH = null;
             window._lbOriginalUnavailable = false;
             window._lbCurrentSrcKey = 'full';
-            window._lbNativeZoom = null;
-            window._lbZoom = 1;
+            vireoLightboxViewport.invalidateGeometry();
+            vireoLightboxViewport.setZoom(1);
             window.toggleLightboxZoom();
         }"""
     )
@@ -5014,8 +5000,8 @@ def test_browse_lightbox_resize_preserves_post_original_failure_fallback(
     assert "route" in held_fallback
     waiting = page.evaluate(
         """() => ({
-            pending: window._lbPending1To1,
-            zoom: window._lbZoom,
+            pending: vireoLightboxViewport.pendingOneToOne(),
+            zoom: vireoLightboxViewport.zoom(),
             currentSource: window._lbCurrentSrcKey,
             desiredSource: window._lbDesiredSrcKey,
         })"""
@@ -5027,21 +5013,21 @@ def test_browse_lightbox_resize_preserves_post_original_failure_fallback(
 
     # Stash the pre-resize native zoom in a page variable rather than reading it
     # into Python and interpolating it back. While the fallback tier is loading
-    # _lbNativeZoom can be transiently unset; a Python None then formats into the
+    # vireoLightboxViewport.nativeZoom() can be transiently unset; a Python None then formats into the
     # wait expression as the literal `None`, which throws "None is not defined"
     # in JS. Guard that it is a finite number first, then compare in-page.
     page.wait_for_function(
-        "typeof window._lbNativeZoom === 'number' && isFinite(window._lbNativeZoom)"
+        "typeof vireoLightboxViewport.nativeZoom() === 'number' && isFinite(vireoLightboxViewport.nativeZoom())"
     )
-    page.evaluate("window._lbNativeZoomBaseline = window._lbNativeZoom")
+    page.evaluate("window._lbNativeZoomBaseline = vireoLightboxViewport.nativeZoom()")
 
-    # Resize while the fallback tier is still held. _lbRecomputeNativeZoom runs
+    # Resize while the fallback tier is still held. vireoLightboxViewport.recomputeNativeZoom runs
     # unconditionally at the top of the resize handler (before any pending-state
-    # logic), so a deterministic change in _lbNativeZoom is a fix-independent
+    # logic), so a deterministic change in vireoLightboxViewport.nativeZoom() is a fix-independent
     # signal that the debounced handler actually executed — no fixed sleep.
     page.set_viewport_size({"width": 640, "height": 800})
     page.wait_for_function(
-        "Math.abs(window._lbNativeZoom - window._lbNativeZoomBaseline) > 0.1"
+        "Math.abs(vireoLightboxViewport.nativeZoom() - window._lbNativeZoomBaseline) > 0.1"
     )
 
     # The resize handler has now run while the fallback tier is still loading.
@@ -5049,8 +5035,8 @@ def test_browse_lightbox_resize_preserves_post_original_failure_fallback(
     # the deferred intent and the higher-tier target both survive.
     survived = page.evaluate(
         """() => ({
-            pending: window._lbPending1To1,
-            zoom: window._lbZoom,
+            pending: vireoLightboxViewport.pendingOneToOne(),
+            zoom: vireoLightboxViewport.zoom(),
             currentSource: window._lbCurrentSrcKey,
             desiredSource: window._lbDesiredSrcKey,
         })"""
@@ -5070,10 +5056,10 @@ def test_browse_lightbox_resize_preserves_post_original_failure_fallback(
         """() => {
             const img = document.getElementById('lightboxImg');
             return (window._lbCurrentSrcKey === '2560' || window._lbCurrentSrcKey === '3840')
-                && window._lbPending1To1 === false
+                && vireoLightboxViewport.pendingOneToOne() === false
                 && img && img.complete && img.naturalWidth === 2560
-                && window._lbNativeZoom
-                && Math.abs(window._lbZoom - window._lbNativeZoom) < 0.01;
+                && vireoLightboxViewport.nativeZoom()
+                && Math.abs(vireoLightboxViewport.zoom() - vireoLightboxViewport.nativeZoom()) < 0.01;
         }""",
         timeout=8000,
     )

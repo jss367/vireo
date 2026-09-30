@@ -140,18 +140,15 @@ document.addEventListener('keydown', function(e) {
   // would also fire rate_0 and silently clear the photo's rating.
   if (!editable && !e.ctrlKey && !e.metaKey && !e.altKey) {
     if (e.key === '+' || e.key === '=') {
-      _lbClearPendingViewportRestore();
-      _lbSetZoom(_lbZoom * 1.25, null, null);
+      vireoLightboxViewport.stepZoom(1);
       e.preventDefault();
       e.stopImmediatePropagation();
     } else if (e.key === '-' || e.key === '_') {
-      _lbClearPendingViewportRestore();
-      _lbSetZoom(_lbZoom * 0.8, null, null);
+      vireoLightboxViewport.stepZoom(-1);
       e.preventDefault();
       e.stopImmediatePropagation();
     } else if (e.key === '0') {
-      _lbClearPendingViewportRestore();
-      _lbSetZoom(1.0, null, null);
+      vireoLightboxViewport.fit();
       e.preventDefault();
       e.stopImmediatePropagation();
     }

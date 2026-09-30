@@ -96,7 +96,7 @@ function _lbApplyInfoVisibility() {
 
 function toggleLightboxInfo() {
   _lbInfoVisible = !_lbInfoVisible;
-  if (!_lbInfoVisible) _lbSetZoomPopoverOpen(false);
+  if (!_lbInfoVisible) vireoLightboxViewport.setPopoverOpen(false);
   _lbPersistBool('vireo.lb.infoVisible', _lbInfoVisible);
   _lbApplyInfoVisibility();
 }
@@ -110,7 +110,7 @@ function _lbApplyChromeVisibility() {
 
 function toggleLightboxChrome() {
   _lbChromeVisible = !_lbChromeVisible;
-  if (!_lbChromeVisible) _lbSetZoomPopoverOpen(false);
+  if (!_lbChromeVisible) vireoLightboxViewport.setPopoverOpen(false);
   _lbPersistBool('vireo.lb.chromeVisible', _lbChromeVisible);
   _lbApplyChromeVisibility();
 }
@@ -278,9 +278,8 @@ function _lbApplyTrackEyeState() {
 function toggleLightboxTrackEye() {
   _lbTrackEyeEnabled = !_lbTrackEyeEnabled;
   _lbPersistBool('vireo.lb.trackEye', _lbTrackEyeEnabled);
-  _lbPendingEyeTrack = null;
-  _lbEyeTrackScreenAnchor = null;
-  if (_lbTrackEyeEnabled) _lbCaptureEyeTrackingAnchor();
+  vireoLightboxViewport.clearEyeTracking();
+  if (_lbTrackEyeEnabled) vireoLightboxViewport.captureEyeAnchor();
   _lbApplyTrackEyeState();
 }
 
@@ -583,4 +582,19 @@ function _lbLoadMaskVariants(photoId) {
       _lbOnMaskVariantChange();
     })
     .catch(function() { /* network error → leave control hidden */ });
+}
+
+function _lbFlushDeferredOverlayApply() {
+  // Called from handleInitialImageLoad and the terminal handleInitialImageError
+  // branch, i.e. wherever _lbVisualTransitionPending flips back to false. The
+  // metadata callback stashes the detection/eye render here so overlays don't
+  // paint against the still-frozen outgoing transform. Re-apply the mask
+  // overlay too because _lbApplyMaskVisibility only adds the `show` class when
+  // the transition is clear, so an in-flight mask load could have been gated.
+  var pending = _lbDeferredOverlayApply;
+  _lbDeferredOverlayApply = null;
+  if (typeof pending === 'function') {
+    try { pending(); } catch (_) {}
+  }
+  _lbApplyMaskVisibility();
 }

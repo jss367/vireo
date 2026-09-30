@@ -1,11 +1,37 @@
+var vireoLightboxViewport = VireoLightboxViewport.create({
+  photoId: function() { return vireoLightboxSession.requestedPhotoId(); },
+  photo: function() {
+    var id = vireoLightboxSession.requestedPhotoId();
+    return {
+      width: _lbPhotoW, height: _lbPhotoH, orientation: _lbPhotoOrientation,
+      recipe: _lbCurrentEditRecipe, originalUnavailable: _lbOriginalUnavailable,
+      currentSrcKey: _lbCurrentSrcKey, desiredSrcKey: _lbDesiredSrcKey,
+      transitionPending: _lbVisualTransitionPending, trackEyeEnabled: _lbTrackEyeEnabled,
+      pairKnown: !!_vireoPairKnownByPhoto[String(id)], pairSource: _vireoPairSource(id)
+    };
+  },
+  orientationSwapsAxes: function(orientation) { return _lbOrientationSwapsAxes(orientation); },
+  pickSource: function(zoom) { return _lbPickSourceKey(zoom); },
+  scheduleSource: function(zoom) { _lbScheduleSourceSwap(zoom); },
+  cancelSourceSwap: function() { vireoLightboxSession.cancelSwap(); },
+  keepSource: function(key) { _lbDesiredSrcKey = key; },
+  scheduleAdjacent: function(key) { vireoLightboxSession.scheduleAdjacent(key); },
+  photoData: function(id) { return _lbPhotoData(id); },
+  eyePoint: function(id, photo) { return _lbPhotoEyePoint(id, photo); },
+  overlaysAvailable: function() { return _lbSourceOverlaysAvailable(); },
+  updateEyeControl: function() { _lbApplyTrackEyeState(); },
+  cancelProgressiveLoad: function() { _lbProgressiveTargetKey = null; _lbSetPreviewLoading(false); },
+  handledClick: function() { window._lightboxZoomHandled = true; }
+});
+
 var vireoLightboxSession = VireoLightboxSession.create({
   photos: function() { return _lightboxPhotoList; },
   photoData: function(id) { return _lbPhotoDataByPhoto[String(id)]; },
   view: function() {
     return {
       currentSrcKey: _lbCurrentSrcKey, fullUsesOriginal: _lbFullUsesOriginal,
-      originalUnavailable: _lbOriginalUnavailable, zoom: _lbZoom,
-      desiredSrcKey: _lbDesiredSrcKey, nativeZoom: _lbNativeZoom,
+      originalUnavailable: _lbOriginalUnavailable, zoom: vireoLightboxViewport.zoom(),
+      desiredSrcKey: _lbDesiredSrcKey, nativeZoom: vireoLightboxViewport.nativeZoom(),
       photoW: _lbPhotoW, photoH: _lbPhotoH,
       visualTransitionPending: _lbVisualTransitionPending
     };
@@ -22,11 +48,6 @@ var _lightboxPhotoList = [];  // list of {id, filename} for arrow navigation
 var _lbReadOnly = false;
 var _lbReadOnlyMessage = 'This lightbox is read-only';
 
-var _lbZoom = 1.0;          // current zoom (1.0 = fit)
-var _lbPanX = 0;            // pan translation in CSS pixels
-var _lbPanY = 0;
-var _lbNativeZoom = null;   // zoom value corresponding to 1:1 for current photo
-var _lbFitScale = 1.0;      // natural image scale at zoom=1.0
 var _lbPhotoW = null;       // original photo width (px)
 var _lbPhotoH = null;       // original photo height (px)
 var _lbPhotoOrientation = null; // original EXIF orientation, when API metadata has it
@@ -35,8 +56,6 @@ var _lbCurrentSrcKey = null; // 'full' | '2560' | '3840' | 'original'
 var _lbFullLongEdge = null;  // actual long edge of /full for current photo (may be < 1920 if preview_max_size is configured low)
 // Bootstrap before opening any photo; metadata refreshes the workspace cap later.
 var _lbPreviewMaxSize = window.VIREO_FULL_PREVIEW_MAX_SIZE ?? null; // 0 means original
-var _lbPending1To1 = false;  // true when z/click was pressed with unknown nativeZoom; upgrade to true 1:1 once learned
-var _lbPending1To1Anchor = null; // optional client-space anchor for a deferred 1:1 snap
 var _lbOriginalUnavailable = false;  // true after /original fails; fall back to current decoded source dimensions
 var _lbFullUsesOriginal = null; // metadata-backed: preview_max_size=0 makes /full redirect to /original
 var _lbCurrentWildlifeExcluded = false;
@@ -46,10 +65,6 @@ var _lbFlagPendingByPhoto = {};  // count of in-flight flag writes PER photo; li
 var _lbConfirmedFlags = {};   // last server-confirmed flag per photo, isolated from optimistic page helpers
 var _lbProvisionalFlags = {}; // page-owned staged flags (for example Group Review before Apply)
 var _lbProvisionalFlagSeq = {}; // edit sequence that produced each staged flag
-var _lbViewportByPhotoId = {};  // per-session lightbox viewport cache keyed by photo id
-var _lbPendingViewportState = null;
-var _lbPendingEyeTrack = null; // destination alignment waiting for image metadata/layout
-var _lbEyeTrackScreenAnchor = null; // eye offset from viewport center in CSS pixels
 var _lbVisualTransitionPending = false; // keep the outgoing bitmap/transform frozen until the incoming image is decoded
 var _lbDeferredOverlayApply = null; // detections/eye render withheld while _lbVisualTransitionPending; drained when the transition clears
 var _lbPreviewLoading = false;

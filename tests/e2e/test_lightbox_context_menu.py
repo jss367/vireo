@@ -384,19 +384,19 @@ def test_lightbox_overlay_toggles_persist_and_context_restores(live_server, page
 def test_lightbox_right_click_does_not_toggle_zoom(live_server, page):
     """Right-click must not trip the click-to-zoom / pan handlers.
 
-    The lightbox exposes the current zoom level via `_lbZoom`. A contextmenu
+    The lightbox exposes the current zoom level via `vireoLightboxViewport.zoom()`. A contextmenu
     event must not change zoom state.
     """
     url = live_server["url"]
     _open_lightbox(page, url)
 
     before = page.evaluate(
-        "typeof _lbZoom !== 'undefined' ? _lbZoom : null"
+        "typeof vireoLightboxViewport.zoom() !== 'undefined' ? vireoLightboxViewport.zoom() : null"
     )
     _fire_contextmenu_on_lightbox(page)
     expect(page.locator(".vireo-ctx-menu")).to_be_visible()
     after = page.evaluate(
-        "typeof _lbZoom !== 'undefined' ? _lbZoom : null"
+        "typeof vireoLightboxViewport.zoom() !== 'undefined' ? vireoLightboxViewport.zoom() : null"
     )
     assert before == after
 

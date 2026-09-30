@@ -42,7 +42,7 @@ def _open_window(page, live_server, count=30):
           openLightbox(115, 'photo-15.jpg', list);
         }""", count,
     )
-    page.wait_for_function("vireoLightboxSession.displayedPhotoId() === 115 && !_lbVisualTransitionPending && _lbNativeZoom")
+    page.wait_for_function("vireoLightboxSession.displayedPhotoId() === 115 && !_lbVisualTransitionPending && vireoLightboxViewport.nativeZoom()")
 
 
 def test_large_window_retains_eight_ahead_four_behind_within_budget(live_server, page):
@@ -112,8 +112,8 @@ def test_ready_preview_commits_before_sharp_image_without_moving_view(live_serve
     page.wait_for_function("vireoLightboxSession.preloadStatus().adjacent.some(e => e.photoId === 116 && e.status === 'decoded')")
     before = page.evaluate(
         """oneToOne => {
-          _lbApplyViewportState({zoom: _lbNativeZoom * 1.2, oneToOne, centerX: 0.4, centerY: 0.6});
-          return _lbViewportStateFromCurrent();
+          vireoLightboxViewport.applyView({zoom: vireoLightboxViewport.nativeZoom() * 1.2, oneToOne, centerX: 0.4, centerY: 0.6});
+          return vireoLightboxViewport.currentView();
         }""", one_to_one,
     )
     page.wait_for_function("_lbCurrentSrcKey === 'original' && !_lbPreviewLoading")
@@ -122,7 +122,7 @@ def test_ready_preview_commits_before_sharp_image_without_moving_view(live_serve
     expect(page.locator("#lightboxPreviewStatus")).to_be_visible()
     assert page.evaluate("document.getElementById('lightboxImg').naturalWidth") == 1920
     assert page.evaluate("_lbCurrentSrcKey") == "full"
-    preview = page.evaluate("_lbViewportStateFromCurrent()")
+    preview = page.evaluate("vireoLightboxViewport.currentView()")
     assert abs(preview["centerX"] - before["centerX"]) < 0.005
     assert abs(preview["centerY"] - before["centerY"]) < 0.005
     page.wait_for_function("_lbDesiredSrcKey === 'original'")
@@ -132,7 +132,7 @@ def test_ready_preview_commits_before_sharp_image_without_moving_view(live_serve
     for route in held:
         route.fulfill(body=_jpeg(6000, 4000), content_type="image/jpeg")
     page.wait_for_function("_lbCurrentSrcKey === 'original' && !_lbPreviewLoading")
-    after = page.evaluate("_lbViewportStateFromCurrent()")
+    after = page.evaluate("vireoLightboxViewport.currentView()")
     assert abs(after["centerX"] - preview["centerX"]) < 0.005
     assert abs(after["centerY"] - preview["centerY"]) < 0.005
     assert abs(after["zoom"] - preview["zoom"]) < 0.005
@@ -184,7 +184,7 @@ def test_late_sharp_image_cannot_replace_newer_photo_or_reopen_viewer(live_serve
     page.route("**/photos/*/original*", serve)
     _open_window(page, live_server)
     page.wait_for_function("vireoLightboxSession.preloadStatus().adjacent.some(e => e.photoId === 116 && e.status === 'decoded')")
-    page.evaluate("_lbApplyViewportState({zoom: _lbNativeZoom, oneToOne: true, centerX: 0.4, centerY: 0.6})")
+    page.evaluate("vireoLightboxViewport.applyView({zoom: vireoLightboxViewport.nativeZoom(), oneToOne: true, centerX: 0.4, centerY: 0.6})")
     page.wait_for_function("_lbCurrentSrcKey === 'original' && !_lbPreviewLoading")
     page.evaluate("lightboxNav(1)")
     page.wait_for_function("vireoLightboxSession.displayedPhotoId() === 116 && _lbPreviewLoading")
@@ -520,7 +520,7 @@ def test_detail_status_survives_a_pan_while_sharpening(live_server, page):
 
     # The first drag of a pan clears _lbPreviewLoading, but the swap it cleared
     # is still in flight -- the chip must keep saying so.
-    page.evaluate("_lbClearPendingViewportRestore()")
+    page.evaluate("vireoLightboxViewport.cancelRestore()")
     assert page.evaluate("_lbPreviewLoading") is False
     assert page.evaluate("_lbDesiredSrcKey") == "original"
     expect(status).to_be_visible()
@@ -565,7 +565,7 @@ def _zoom_needing(page, pixels):
         """pixels => {
           const wrap = document.getElementById('lightboxWrap');
           const fit = Math.min(1, wrap.clientWidth / 6000, wrap.clientHeight / 4000);
-          _lbSetZoom(pixels / (6000 * fit * devicePixelRatio));
+          vireoLightboxViewport.setZoom(pixels / (6000 * fit * devicePixelRatio));
         }""", pixels,
     )
 
@@ -950,7 +950,7 @@ def test_detail_status_withholds_full_detail_when_the_original_is_gone(live_serv
     expect(page.locator("#lightboxPreviewStatus")).to_be_hidden()
 
     # And the confirmation stays withheld even with a progress state on screen:
-    # the 3840 fallback is not the 6000px file, and _lbLayoutDims has rebased
+    # the 3840 fallback is not the 6000px file, and vireoLightboxViewport.layoutDims has rebased
     # onto it, so 1:1 is really 1:1 of the preview.
     settled = page.evaluate(
         """() => {
