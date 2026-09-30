@@ -11,6 +11,7 @@ import os
 import time
 
 import pytest
+from playwright.sync_api import expect
 
 
 @pytest.fixture()
@@ -114,6 +115,19 @@ def _finish_from_share_step(page, live_server, nas_env):
     assert target["local_archive_root"].endswith("Vireo Archive")
     assert target["ssh_key"] == nas_env["priv"]
     assert target["bwlimit_kbps"] == 0
+
+
+def test_wizard_deep_link_initializes_settings(nas_env, live_server, page):
+    """The deep link opens the wizard after all page scripts initialize."""
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+
+    page.goto(f"{live_server['url']}/settings#nas-setup")
+
+    expect(page.locator("#nasWizard")).to_be_visible()
+    expect(page.locator("#nwBody").get_by_text("Photography on synology-nas")).to_be_visible()
+    expect(page.locator("body")).to_have_attribute("data-settings-ready", "true")
+    assert not errors
 
 
 def test_wizard_happy_path_with_password(nas_env, live_server, page):
