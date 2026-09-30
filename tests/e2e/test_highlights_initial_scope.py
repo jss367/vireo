@@ -15,9 +15,17 @@ import time
 from urllib.parse import quote
 from urllib.request import urlopen
 
+import pytest
 from playwright.sync_api import expect
 
+from e2e.viewport_test_support import install_viewport_test_helpers
+
 HIGHLIGHTS_NAVIGATION_TIMEOUT_MS = 10_000
+
+
+@pytest.fixture(autouse=True)
+def _viewport_geometry_helpers(page):
+    install_viewport_test_helpers(page)
 
 
 def _goto_highlights(page, base_url):
@@ -1207,12 +1215,21 @@ def test_highlights_lightbox_next_preserves_pending_one_to_one_zoom(live_server,
     data = live_server["data"]
     _seed_quality_scores_and_species(db, data)
 
+    page.route(
+        re.compile(r"/photos/\d+/(full|original|preview)"),
+        lambda route: route.fulfill(
+            body='<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000"></svg>',
+            content_type="image/svg+xml",
+        ),
+    )
     _goto_highlights(page, live_server["url"])
     hawk_section = page.locator("section.bucket").filter(has_text="Red-tailed Hawk")
     expect(hawk_section.locator(".highlights-card").first).to_be_visible(timeout=5000)
     hawk_section.locator(".highlights-card").first.click()
     expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
     expect(page.locator("#lightboxCounter")).to_contain_text("1 /")
+
+    page.wait_for_function("document.getElementById('lightboxImg').naturalWidth === 4000")
 
     # Leave the first photo at a true 1:1 zoom, and pre-seed the *next* photo's
     # cached viewport as un-zoomed (fit). Navigation must override that cache and
@@ -1221,31 +1238,29 @@ def test_highlights_lightbox_next_preserves_pending_one_to_one_zoom(live_server,
     # The 1:1 handoff is established synchronously by lightboxNav -> openLightbox;
     # only the later async /api/photos + image-load callbacks settle it (and, for
     # a real high-res photo, resolve the pending flag into an actual 1:1 zoom).
-    # The seeded photos have no on-disk file or dimensions, so that settling is
-    # degenerate and timing-dependent. Trigger the nav and read the handoff state
-    # in the same synchronous tick — before any async callback runs — so we test
-    # exactly the guarantee (intent carried across navigation) deterministically.
+    # Trigger navigation and read the handoff in the same browser task, before
+    # metadata or image callbacks can settle the destination viewport.
     handoff = page.evaluate(
         """() => {
             const next = window._lightboxPhotoList[1];
-            window._lbNativeZoom = 2;
-            window._lbZoom = 2;
-            window._lbPending1To1 = false;
-            window._lbViewportByPhotoId[String(next.id)] = {
+            setViewportNativeZoomForTest(2);
+            vireoLightboxViewport.setZoom(2);
+            vireoLightboxViewport.cancelPendingZoom();
+            saveViewportForTest(next.id, {
                 zoom: 1,
                 centerX: 0.5,
                 centerY: 0.5,
                 oneToOne: false,
                 pending1To1: false,
-            };
-                lightboxNav(1);
-                return {
-                    currentId: vireoLightboxSession.requestedPhotoId(),
-                    nextId: next.id,
-                    counter: document.getElementById('lightboxCounter').textContent,
-                pending1To1: window._lbPending1To1,
-                zoom: window._lbZoom,
-                srcKey: window._lbCurrentSrcKey,
+            });
+            lightboxNav(1);
+            return {
+                currentId: vireoLightboxSession.requestedPhotoId(),
+                nextId: next.id,
+                counter: document.getElementById('lightboxCounter').textContent,
+                pending1To1: vireoLightboxViewport.pendingOneToOne(),
+                zoom: vireoLightboxViewport.zoom(),
+                targetSrcKey: window._lbProgressiveTargetKey || window._lbCurrentSrcKey,
             };
         }"""
     )
@@ -1254,7 +1269,8 @@ def test_highlights_lightbox_next_preserves_pending_one_to_one_zoom(live_server,
     assert "1 /" in handoff["counter"]
     assert handoff["pending1To1"] is True
     assert handoff["zoom"] > 1.001
-    assert handoff["srcKey"] == "original"
+    # A decoded adjacent preview may appear first while the original loads.
+    assert handoff["targetSrcKey"] == "original"
 
 
 def test_highlights_api_limits_initial_bucket_and_loads_more(live_server):

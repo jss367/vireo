@@ -33,7 +33,7 @@ selection snapshots, close/reopen cleanup, and the real template entry points.
 Existing Compare and workspace-navigation journeys cover ordinary interactions.
 
 Remaining responsibilities include browse query/pagination, selection and
-inspector panels, and the lightbox's viewport/editor state. Further extractions should
+inspector panels, and the lightbox's editor state. Further extractions should
 move state and lifecycle together, inject dependencies, and replace cross-owner
 writes with methods. Avoid introducing a shared mutable state bag or exporting
 private variables just to preserve their old names.
@@ -45,8 +45,8 @@ photo identity, navigation generations, initial-load handoff callbacks, source-s
 timers and image listeners, and the adjacent/original preload cache and queue.
 Its factory is inert and returns frozen methods. `lightbox/state.js` constructs the
 shared instance with callbacks for source URLs, geometry, cached metadata and the
-page's navigation list. Rendering, viewport and editing state stay with their
-existing owners.
+page's navigation list. Viewport state belongs to `VireoLightboxViewport`;
+rendering and editing state stay with their existing owners.
 
 `begin(photoId)` retires the previous photo's pending callbacks and returns an
 opaque request token. Metadata and image completions must check `isCurrent(token)`;
@@ -70,3 +70,31 @@ or move viewport, edit-save, flag or upload ownership into the session.
 `vireo/tests/lightbox_session.cjs` exercises the complete controller with controlled
 images and timers. Browser tests cover real navigation, metadata and image races,
 source fallback, preload budgets, and page integrations.
+
+## Lightbox viewport
+
+`VireoLightboxViewport` in `static/lightbox/viewport.js` owns zoom, pan, fit and
+native scale, deferred 1:1 intent, per-photo saved views and eye-alignment anchors.
+It also owns zoom controls, wheel and drag listeners, its resize timer and the
+wrap's `ResizeObserver`. `lightbox/state.js` injects current photo geometry, source
+selection callbacks and eye metadata. The factory also accepts controlled browser
+dependencies for tests. Source loading still belongs to the session and loader;
+the viewport requests source changes through callbacks rather than changing their
+state directly.
+
+The factory is inert. `beginPhoto(id, options)` copies restoration intent, retires
+dragging and pending resize work, and attaches listeners once. Navigation leaves
+the outgoing bitmap's transform frozen until the loader commits the incoming
+image and applies the pending view. A resize during that transition defers layout
+and source selection until the handoff completes. Closing detaches listeners,
+disconnects the observer and cancels deferred work. Callbacks from an earlier open
+cannot act on a reopened viewport. Saved views survive close/reopen; returned
+views are copies, and diagnostic snapshots are frozen.
+
+Page and template controls call methods on `vireoLightboxViewport`; they do not
+write zoom or restoration variables. `controls.js` retains the existing button
+entry points as thin adapters. The complete-controller browser tests in
+`tests/e2e/test_frontend_controllers.py` cover cursor anchoring, saved-view
+isolation, close/reopen cleanup, navigation/resize deferral and cancellation of
+late eye alignment after manual panning. Existing lightbox journeys cover source
+fallback, native zoom, edits, navigation and page integrations.

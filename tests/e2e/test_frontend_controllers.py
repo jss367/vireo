@@ -286,3 +286,179 @@ def test_lightbox_reopen_rejects_old_metadata_and_image_callbacks(live_server, p
     page.evaluate("closeLightbox(); closeLightbox()")
     assert page.evaluate("vireoLightboxSession.requestedPhotoId()") is None
     assert errors == []
+
+
+def mount_lightbox_viewport(page):
+    page.set_content('''
+        <div id="lightboxWrap" style="position:relative;width:800px;height:600px;overflow:hidden">
+          <div id="lightboxTransform" style="position:absolute;transform-origin:0 0">
+            <img id="lightboxImg" style="width:100%;height:100%"
+                 src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='3200' height='2400'%3E%3C/svg%3E">
+          </div>
+        </div>
+        <span id="lightboxZoomBadge"></span>
+    ''')
+    page.wait_for_function("document.getElementById('lightboxImg').naturalWidth === 3200")
+    page.add_script_tag(path=str(STATIC / "lightbox/viewport.js"))
+    page.evaluate('''() => {
+        window.timers = new Map();
+        window.observers = [];
+        window.listenerCount = 0;
+        window.sourceRequests = [];
+        window.photoId = 1;
+        window.photo = {width: 3200, height: 2400, currentSrcKey: 'original',
+            desiredSrcKey: 'original', trackEyeEnabled: true};
+        let timerSerial = 0;
+        const browser = {
+            devicePixelRatio: 1,
+            document: {
+                getElementById: document.getElementById.bind(document),
+                querySelector: document.querySelector.bind(document),
+                addEventListener(...args) { listenerCount++; document.addEventListener(...args); },
+                removeEventListener(...args) { listenerCount--; document.removeEventListener(...args); }
+            },
+            addEventListener(...args) { listenerCount++; window.addEventListener(...args); },
+            removeEventListener(...args) { listenerCount--; window.removeEventListener(...args); },
+            setTimeout(fn) { timers.set(++timerSerial, fn); return timerSerial; },
+            clearTimeout(id) { timers.delete(id); },
+            ResizeObserver: class {
+                constructor(callback) { this.callback = callback; observers.push(this); }
+                observe() { this.connected = true; }
+                disconnect() { this.connected = false; }
+            }
+        };
+        window.tick = () => {
+            for (const [id, callback] of [...timers]) {
+                if (timers.delete(id)) callback();
+            }
+        };
+        window.viewport = VireoLightboxViewport.create({
+            window: browser, photoId: () => photoId, photo: () => photo,
+            orientationSwapsAxes: () => false,
+            pickSource: zoom => zoom > 1 ? 'original' : 'full',
+            scheduleSource: zoom => {
+                sourceRequests.push(zoom);
+                photo.desiredSrcKey = (zoom ?? viewport.zoom()) > 1 ? 'original' : 'full';
+            },
+            keepSource: key => { photo.desiredSrcKey = key; },
+            cancelSourceSwap() {}, scheduleAdjacent() {}, cancelProgressiveLoad() {},
+            photoData: () => photo, eyePoint: (_, data) => data.eye || null,
+            overlaysAvailable: () => true, updateEyeControl() {}, handledClick() {}
+        });
+    }''')
+    assert page.evaluate("[listenerCount, timers.size, observers.length, sourceRequests.length]") == [0, 0, 0, 0]
+    page.evaluate("viewport.beginPhoto(1); viewport.recomputeNativeZoom()")
+
+
+def test_viewport_preserves_zoom_anchor_and_copies_saved_views(page):
+    mount_lightbox_viewport(page)
+    result = page.evaluate('''() => {
+        const wrap = document.getElementById('lightboxWrap').getBoundingClientRect();
+        const anchor = {x: wrap.left + 250, y: wrap.top + 200};
+        const point = () => {
+            const rect = document.getElementById('lightboxTransform').getBoundingClientRect();
+            const metrics = viewport.layoutMetrics();
+            return [(anchor.x - rect.left) / metrics.scale, (anchor.y - rect.top) / metrics.scale];
+        };
+        const before = point();
+        viewport.setZoom(3, anchor.x, anchor.y);
+        const after = point();
+        const saved = viewport.save(1);
+        saved.zoom = 99;
+        const snapshot = viewport.savedView(1);
+        viewport.close();
+        viewport.beginPhoto(1);
+        viewport.recomputeNativeZoom();
+        viewport.applyPendingRestore();
+        return {before, after, storedZoom: snapshot.zoom, restored: viewport.zoom(),
+            frozen: Object.isFrozen(snapshot), privateState: typeof _lbZoom};
+    }''')
+    assert result["before"] == result["after"]
+    assert result["storedZoom"] == result["restored"] == 3
+    assert result["frozen"] is True
+    assert result["privateState"] == "undefined"
+
+
+def test_viewport_close_retires_drag_timers_and_observers(page):
+    mount_lightbox_viewport(page)
+    page.evaluate('''() => {
+        viewport.setZoom(3);
+        const wrap = document.getElementById('lightboxWrap');
+        wrap.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, button: 0, clientX: 300, clientY: 250}));
+        window.dispatchEvent(new Event('resize'));
+        window.oldResize = [...timers.values()][0];
+        window.oldObserver = observers[0];
+        viewport.close();
+    }''')
+    assert page.evaluate("[listenerCount, timers.size, oldObserver.connected]") == [0, 0, False]
+    page.evaluate('''() => {
+        viewport.beginPhoto(1);
+        viewport.recomputeNativeZoom();
+        sourceRequests.length = 0;
+        oldResize();
+        oldObserver.callback();
+        document.dispatchEvent(new MouseEvent('mousemove', {bubbles: true, clientX: 500, clientY: 450}));
+        document.dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
+    }''')
+    assert page.evaluate("[viewport.zoom(), viewport.snapshot().panX, timers.size, sourceRequests.length]") == [3, 0, 0, 0]
+    assert page.evaluate("listenerCount") == 5
+    page.evaluate("viewport.close(); viewport.close()")
+    assert page.evaluate("[listenerCount, timers.size]") == [0, 0]
+
+
+def test_viewport_navigation_defers_resize_and_preserves_pending_one_to_one(page):
+    mount_lightbox_viewport(page)
+    result = page.evaluate('''() => {
+        viewport.setZoom(3);
+        const handoff = viewport.save(1);
+        window.dispatchEvent(new Event('resize'));
+        const oldResize = [...timers.values()][0];
+        const frozenTransform = document.getElementById('lightboxTransform').style.transform;
+        photoId = 2;
+        photo.transitionPending = true;
+        viewport.beginPhoto(2, {fallbackViewportState: handoff, preserveOneToOne: true});
+        handoff.zoom = 99;
+        oldResize();
+        const during = viewport.save(2);
+        const stayedFrozen = document.getElementById('lightboxTransform').style.transform === frozenTransform;
+        photo.currentSrcKey = 'full';
+        photo.desiredSrcKey = 'original';
+        photo.transitionPending = false;
+        viewport.recomputeNativeZoom();
+        viewport.deferOneToOne(4);
+        viewport.flushDeferredLayout();
+        tick();
+        const pendingAfterResize = viewport.pendingOneToOne();
+        photo.currentSrcKey = 'original';
+        viewport.applyPendingOneToOne();
+        return {during, stayedFrozen, pendingAfterResize, zoom: viewport.zoom(), pending: viewport.pendingOneToOne()};
+    }''')
+    assert result["during"]["zoom"] == 3
+    assert result["stayedFrozen"] is True
+    assert result["pendingAfterResize"] is True
+    assert result["zoom"] == 4
+    assert result["pending"] is False
+
+
+def test_viewport_manual_pan_cancels_late_eye_alignment(page):
+    mount_lightbox_viewport(page)
+    page.evaluate('''() => {
+        viewport.setZoom(3);
+        photoId = 2;
+        viewport.beginPhoto(2, {fallbackViewportState: {zoom: 3, centerX: .5, centerY: .5},
+            eyeTrackAnchor: {offsetX: 40, offsetY: 60}});
+        viewport.recomputeNativeZoom();
+        viewport.applyPendingRestore();
+        const wrap = document.getElementById('lightboxWrap');
+        wrap.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, button: 0, clientX: 300, clientY: 250}));
+        document.dispatchEvent(new MouseEvent('mousemove', {bubbles: true, clientX: 380, clientY: 280}));
+        document.dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
+        photo.eye_x = .4;
+        photo.eye = {x: .4, y: .3};
+        window.beforeLateEye = viewport.currentView();
+        window.appliedLateEye = viewport.applyPendingEye(photo);
+    }''')
+    assert page.evaluate("appliedLateEye") is False
+    assert page.evaluate("viewport.currentView()") == page.evaluate("beforeLateEye")
+    assert page.evaluate("viewport.snapshot().pendingEye") is None
+    assert page.evaluate("viewport.snapshot().eyeAnchor") is None

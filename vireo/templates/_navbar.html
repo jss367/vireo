@@ -285,7 +285,7 @@
   <span class="lightbox-close" onclick="closeLightbox(event)">&times;</span>
   <div id="lightboxPrev" class="lightbox-nav" onclick="event.stopPropagation(); lightboxNav(-1);" style="position:absolute;left:12px;top:50%;transform:translateY(-50%);font-size:36px;color:rgba(255,255,255,0.5);cursor:pointer;padding:16px;user-select:none;z-index:10001;" title="Previous (←)">&#9664;</div>
   <div id="lightboxNext" class="lightbox-nav" onclick="event.stopPropagation(); lightboxNav(1);" style="position:absolute;right:12px;top:50%;transform:translateY(-50%);font-size:36px;color:rgba(255,255,255,0.5);cursor:pointer;padding:16px;user-select:none;z-index:10001;" title="Next (→)">&#9654;</div>
-  <div class="lightbox-img-wrap" id="lightboxWrap" onclick="event.stopPropagation(); if (!_lbVisualTransitionPending && Math.abs(_lbZoom - 1.0) < 0.001 && !window._lightboxZoomHandled) toggleLightboxZoom(event); window._lightboxZoomHandled = false;">
+  <div class="lightbox-img-wrap" id="lightboxWrap" onclick="event.stopPropagation(); if (!_lbVisualTransitionPending && Math.abs(vireoLightboxViewport.zoom() - 1.0) < 0.001 && !window._lightboxZoomHandled) toggleLightboxZoom(event); window._lightboxZoomHandled = false;">
     <div class="lightbox-zoom-control" id="lightboxZoomControl" onclick="event.stopPropagation();">
       <div id="lightboxPreviewStatus" class="lightbox-detail-status" role="status" aria-live="polite" style="display:none;">
         <span class="lb-detail-spinner" aria-hidden="true"></span>
@@ -553,10 +553,10 @@
 </div>
 
 <script src="/static/lightbox/session.js"></script>
+<script src="/static/lightbox/viewport.js"></script>
 <script src="/static/lightbox/state.js"></script>
 <script src="/static/lightbox/curation.js"></script>
 <script src="/static/lightbox/edits.js"></script>
-<script src="/static/lightbox/viewport-memory.js"></script>
 <script src="/static/lightbox/flags.js"></script>
 <script src="/static/lightbox/overlays.js"></script>
 <script src="/static/lightbox/crop.js"></script>
@@ -565,7 +565,6 @@
 <script src="/static/lightbox/delete.js"></script>
 <script src="/static/lightbox/inat.js"></script>
 <script src="/static/lightbox/keyboard.js"></script>
-<script src="/static/lightbox/viewport.js"></script>
 <script src="/static/lightbox/source-loading.js"></script>
 
 <!-- Pipeline Inspector -->

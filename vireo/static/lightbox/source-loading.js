@@ -27,7 +27,7 @@ var _lbDetailFadeTimer = null;
 
 function _lbDetailSharpeningPending() {
   // Derived rather than read off _lbPreviewLoading: the first drag of a pan
-  // calls _lbClearPendingViewportRestore, which drops that flag even though the
+  // calls vireoLightboxViewport.cancelRestore, which drops that flag even though the
   // queued swap keeps running. Panning around while the original loads at 1:1
   // is the pixel-peeping path, so the chip has to survive it.
   if (_lbProgressiveTargetKey) return true;
@@ -116,7 +116,7 @@ function _lbMarkDetailSettled() {
   // Nothing was announced, so there is nothing to confirm.
   if (!_lbDetailStatusShown) return;
   // /original failed for this photo, so the displayed tier may hold fewer pixels
-  // than the file does -- and when it does, _lbLayoutDims rebases onto the
+  // than the file does -- and when it does, vireoLightboxViewport.layoutDims rebases onto the
   // fallback, making 1:1 mean 1:1 of the preview while the zoom badge still
   // reads 100%. Rather than work out whether this particular view loses detail
   // (crop, rotation, JPEG companion, viewport and DPR all change the answer),
@@ -172,13 +172,13 @@ function _lbPickSourceKey(targetZoom) {
   // a proper displayed-long-edge (photo dims missing, or nativeZoom not yet
   // established — the latter happens briefly when API dims arrive before the
   // initial image load completes).
-  var dims = _lbLayoutDims();
-  var zoom = targetZoom != null ? targetZoom : _lbZoom;
-  if (!dims || !_lbNativeZoom) {
+  var dims = vireoLightboxViewport.layoutDims();
+  var zoom = targetZoom != null ? targetZoom : vireoLightboxViewport.zoom();
+  if (!dims || !vireoLightboxViewport.nativeZoom()) {
     return (zoom > 1.001 && !_lbOriginalUnavailable) ? 'original' : 'full';
   }
   var longEdge = Math.max(dims.w, dims.h);
-  var displayedLong = longEdge * _lbFitScale * zoom;
+  var displayedLong = longEdge * vireoLightboxViewport.fitScale() * zoom;
   // DPR consideration: high-DPI screens need more pixels for a crisp display.
   var dpr = window.devicePixelRatio || 1;
   var needed = displayedLong * dpr;
@@ -225,9 +225,9 @@ function _lbScheduleSourceSwap(targetZoom, immediate) {
   var desired = _lbPickSourceKey(targetZoom);
   // Metadata may still be in flight when a warm preview first becomes visible.
   // Keep the initial conservative tier until geometry can refine it.
-  if (_lbProgressiveTargetKey && !_lbNativeZoom) desired = _lbProgressiveTargetKey;
+  if (_lbProgressiveTargetKey && !vireoLightboxViewport.nativeZoom()) desired = _lbProgressiveTargetKey;
   _lbDesiredSrcKey = desired;
-  if (_lbZoom > 1.001 && desired !== 'original') {
+  if (vireoLightboxViewport.zoom() > 1.001 && desired !== 'original') {
     vireoLightboxSession.cancelOriginal();
   }
   if (desired === _lbCurrentSrcKey) {
@@ -279,17 +279,17 @@ function _lbScheduleSourceSwap(targetZoom, immediate) {
           _lbPhotoW = img.naturalWidth;
           _lbPhotoH = img.naturalHeight;
         }
-        _lbRecomputeNativeZoom();
+        vireoLightboxViewport.recomputeNativeZoom();
         // If the user pressed z/click when nativeZoom was unknown, upgrade to
         // true 1:1 now. Route through the shared helper so the stored anchor is
         // honored — completing with a recentered zoom would make a deferred 1:1
         // jump away from the point the user clicked.
-        if (!_lbTryApplyPendingViewportState()) _lbApplyPendingOneToOneZoom();
-        // Track Eye alignment is deferred while _lbPending1To1 is armed so it
+        if (!vireoLightboxViewport.applyPendingRestore()) vireoLightboxViewport.applyPendingOneToOne();
+        // Track Eye alignment is deferred while vireoLightboxViewport.pendingOneToOne() is armed so it
         // cannot cancel the deferred sharp-source fallback. Re-apply now that
         // the source has landed and any pending 1:1 has snapped.
-        _lbTryApplyPendingEyeTrack();
-        _lbApplyTransform();
+        vireoLightboxViewport.applyPendingEye();
+        vireoLightboxViewport.applyTransform();
         vireoLightboxSession.scheduleAdjacent(key);
       });
       img.src = url;
@@ -305,15 +305,15 @@ function _lbScheduleSourceSwap(targetZoom, immediate) {
       // -- clearing the flag while _lbDesiredSrcKey still names the failed tier
       // leaves the spinner up with no request behind it.
       if (key === 'original') {
-        var had1To1Pending = _lbPending1To1;
+        var had1To1Pending = vireoLightboxViewport.pendingOneToOne();
         _lbOriginalUnavailable = true;
         _lbSetPreviewLoading(false);
-        _lbRecomputeNativeZoom();
+        vireoLightboxViewport.recomputeNativeZoom();
         if (had1To1Pending) {
-          _lbDeferPendingOneToOneToPreviewFallback();
+          vireoLightboxViewport.deferOneToOneFallback();
         } else {
-          _lbApplyPendingOneToOneZoom();
-          _lbApplyTransform();
+          vireoLightboxViewport.applyPendingOneToOne();
+          vireoLightboxViewport.applyTransform();
           // /original is gone, so re-pick the best remaining tier rather than
           // staying stuck on the lower current source.
           _lbScheduleSourceSwap();
@@ -323,12 +323,10 @@ function _lbScheduleSourceSwap(targetZoom, immediate) {
         // and resume its neighbors without automatically retrying this tier.
         _lbDesiredSrcKey = _lbCurrentSrcKey;
         _lbSetPreviewLoading(false);
-        if (_lbPending1To1) {
-          _lbPending1To1 = false;
-          _lbPending1To1Anchor = null;
-          _lbPendingViewportState = null;
-          _lbUpdateZoomControl();
-          _lbSaveViewportState(photoId);
+        if (vireoLightboxViewport.pendingOneToOne()) {
+          vireoLightboxViewport.cancelPendingZoom();
+          vireoLightboxViewport.updateControls();
+          vireoLightboxViewport.save(photoId);
         }
         vireoLightboxSession.scheduleAdjacent(_lbCurrentSrcKey);
       }

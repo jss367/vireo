@@ -252,9 +252,9 @@ function _vireoPairSourceImageLoaded(photoId, requested, anchor) {
   _lbFullLongEdge = _lbCurrentSrcKey === 'full'
     ? (Math.max(anchor.naturalWidth || 0, anchor.naturalHeight || 0) || null)
     : null;
-  _lbNativeZoom = null;
-  _lbRecomputeNativeZoom();
-  _lbApplyTransform();
+  vireoLightboxViewport.invalidateGeometry();
+  vireoLightboxViewport.recomputeNativeZoom();
+  vireoLightboxViewport.applyTransform();
   if (requested === 'raw') {
     _lbLoadDetections(photoId);
     _lbRenderEyeCrosshair(_lbPhotoDataByPhoto[key]);
@@ -803,15 +803,9 @@ function _lbReloadCurrentRenderAfterEdit(photoId) {
   var img = document.getElementById('lightboxImg');
   var wrap = document.getElementById('lightboxWrap');
   if (!img) return;
-  _lbZoom = 1.0;
-  _lbPanX = 0;
-  _lbPanY = 0;
-  _lbNativeZoom = null;
+  vireoLightboxViewport.resetForEdit();
   _lbCurrentSrcKey = 'full';
   _lbFullLongEdge = null;
-  _lbPending1To1 = false;
-  _lbPending1To1Anchor = null;
-  _lbPendingViewportState = null;
   _lbOriginalUnavailable = false;
   vireoLightboxSession.cancelSwap();
   _lbDesiredSrcKey = null;
@@ -821,7 +815,7 @@ function _lbReloadCurrentRenderAfterEdit(photoId) {
   // off. Left set, the phase stays 'sharpening' with no request behind it.
   _lbSetPreviewLoading(false);
   if (wrap) wrap.classList.remove('zoomed');
-  _lbApplyTransform();
+  vireoLightboxViewport.applyTransform();
   // Replacing img.onload/onerror orphans handleInitialImageLoad when the
   // metadata fetch beats the initial image, so this reload inherits the job of
   // ending that photo's initial load -- otherwise nothing ever clears the
@@ -835,8 +829,8 @@ function _lbReloadCurrentRenderAfterEdit(photoId) {
     if (img.naturalWidth) {
       _lbFullLongEdge = Math.max(img.naturalWidth, img.naturalHeight);
     }
-    _lbRecomputeNativeZoom();
-    _lbApplyTransform();
+    vireoLightboxViewport.recomputeNativeZoom();
+    vireoLightboxViewport.applyTransform();
     // Settle the load this reload displaced. It schedules the neighbours and
     // renders the status itself, so only do that work when there was nothing
     // pending (a reload from the adjustments panel, long after the open).
@@ -1544,8 +1538,8 @@ function _lbReloadEditedSource(photoId, seq) {
     img.removeEventListener('load', onEditedReload);
     if (vireoLightboxSession.requestedPhotoId() !== photoId || seq !== _lbAdjustSeq) return;
     _lbClearAdjustmentPreview();
-    _lbRecomputeNativeZoom();
-    _lbApplyTransform();
+    vireoLightboxViewport.recomputeNativeZoom();
+    vireoLightboxViewport.applyTransform();
     if (key === 'full') vireoLightboxSession.scheduleOriginal(photoId);
   });
   img.src = _lbSrcUrl(photoId, key);
