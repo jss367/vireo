@@ -21,6 +21,20 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Browser tests can exhaust macOS's default 256-descriptor soft limit. Raise
+# only this process's soft limit; child tests/builds inherit it, and the hard
+# limit and caller's shell remain unchanged. Check before modifying manifests.
+RELEASE_MIN_OPEN_FILES=4096
+RELEASE_OPEN_FILES=$(ulimit -S -n)
+if [[ "$RELEASE_OPEN_FILES" != "unlimited" && "$RELEASE_OPEN_FILES" -lt "$RELEASE_MIN_OPEN_FILES" ]]; then
+    if ! ulimit -S -n "$RELEASE_MIN_OPEN_FILES"; then
+        echo "ERROR: Release requires at least $RELEASE_MIN_OPEN_FILES open files; current soft limit is $RELEASE_OPEN_FILES, hard limit is $(ulimit -H -n)." >&2
+        echo "Raise the system or parent shell limit, then rerun the release command." >&2
+        exit 1
+    fi
+    echo "==> Raised open-file limit from $RELEASE_OPEN_FILES to $RELEASE_MIN_OPEN_FILES."
+fi
+
 # --- Parse args ---
 BUMP="${1:-patch}"
 PUBLISH=false
