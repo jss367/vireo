@@ -531,7 +531,7 @@ def test_process_review_does_not_flag_confirmed_synonym_as_conflict(taxonomy):
     data = {"photos": [{"id": 1, "confirmed_species": "Red-crowned Amazon",
                         "species_top5": [["Red-crowned Parrot", .99, "BioCLIP"]]}]}
     attach_species_identities(data, SpeciesResolver(taxonomy=taxonomy))
-    html = (Path(__file__).parents[1] / "static/pipeline-review.js").read_text(encoding="utf-8")
+    html = (Path(__file__).parents[1] / "static/pipeline-review/species-conflicts.js").read_text(encoding="utf-8")
     start = html.index("var SPECIES_CONFLICT_THRESHOLDS")
     end = html.index("function buildSpeciesConflictEvidence", start)
     source = ("var pipelineResults = " + json.dumps(data) + ";\n" + html[start:end]
@@ -763,7 +763,7 @@ def test_pipeline_serialization_keeps_unresolved_source_keys(db, tmp_path, same_
     assert len(data["encounters"][0]["species_predictions"]) == (1 if same_taxon else 2)
     node = shutil.which("node")
     if node:
-        html = (Path(__file__).parents[1] / "static/pipeline-review.js").read_text(encoding="utf-8")
+        html = (Path(__file__).parents[1] / "static/pipeline-review/species-conflicts.js").read_text(encoding="utf-8")
         source = html[html.index("var SPECIES_CONFLICT_THRESHOLDS"):html.index("function buildSpeciesConflictEvidence")]
         script = ("var pipelineResults = " + json.dumps(data) + ";\n" + source
                   + "\nprocess.stdout.write(JSON.stringify(analyzePhotoSpeciesConflict("
@@ -923,7 +923,7 @@ def test_review_keeps_homonymous_predictions_and_confirmed_tags_distinct(db, tmp
     assert all(p["species_top5"][0][0] == display for p in data["photos"])
     if not same_taxon:
         assert data["species_identities"][display]["key"] not in {"taxon:18976", "taxon:18997"}
-    html = (Path(__file__).parents[1] / "static/pipeline-review.js").read_text(encoding="utf-8")
+    html = (Path(__file__).parents[1] / "static/pipeline-review/species-conflicts.js").read_text(encoding="utf-8")
     source = html[html.index("var SPECIES_CONFLICT_THRESHOLDS"):html.index("function formatSpeciesConfidence")]
     script = ("var pipelineResults = " + json.dumps(data) + ";\n" + source
               + "\nvar photoMap = {}; pipelineResults.photos.forEach(function(p) { photoMap[p.id] = p; });"
@@ -966,7 +966,7 @@ def _confirmed_species_photo(db, tmp_path, entry, name="photo.jpg"):
 
 def _review_conflict(data, expected_species):
     """Run the review page's own conflict analysis over a results payload."""
-    html = (Path(__file__).parents[1] / "static/pipeline-review.js").read_text(encoding="utf-8")
+    html = (Path(__file__).parents[1] / "static/pipeline-review/species-conflicts.js").read_text(encoding="utf-8")
     start = html.index("var SPECIES_CONFLICT_THRESHOLDS")
     source = ("var pipelineResults = " + json.dumps(data) + ";\n"
               + html[start:html.index("function buildSpeciesConflictEvidence", start)]
@@ -1059,8 +1059,9 @@ def test_group_review_modal_reads_the_same_conflict_as_the_card(db, tmp_path):
     # The shared name itself cannot identify either taxon.
     assert data["species_identities"][display]["key"].startswith("name:")
 
-    html = (Path(__file__).parents[1] / "static/pipeline-review.js").read_text(encoding="utf-8")
+    html = (Path(__file__).parents[1] / "static/pipeline-review/species-conflicts.js").read_text(encoding="utf-8")
     helpers = html[html.index("var SPECIES_CONFLICT_THRESHOLDS"):html.index("function buildSpeciesConflictEvidence")]
+    html = (Path(__file__).parents[1] / "static/pipeline-review/metadata.js").read_text(encoding="utf-8")
     modal_start = html.index("var conflictEnc = pipelineResults")
     modal = html[modal_start:html.index("  // Species predictions:", modal_start)]
     script = ("var pipelineResults = " + json.dumps(data) + ";\n"
@@ -1111,7 +1112,7 @@ def test_partially_confirmed_encounter_keeps_a_same_name_taxon_visible(db, tmp_p
     assert encounter["species_confirmed"] is False
     assert data["species_identities"][display]["key"].startswith("name:")
 
-    html = (Path(__file__).parents[1] / "static/pipeline-review.js").read_text(encoding="utf-8")
+    html = (Path(__file__).parents[1] / "static/pipeline-review/species-conflicts.js").read_text(encoding="utf-8")
     source = html[html.index("var SPECIES_CONFLICT_THRESHOLDS"):html.index("function formatSpeciesConfidence")]
     script = ("var pipelineResults = " + json.dumps(data) + ";\n" + source
               + "\nvar photoMap = {}; pipelineResults.photos.forEach(function(p) { photoMap[p.id] = p; });"
