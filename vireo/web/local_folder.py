@@ -15,6 +15,7 @@ from services.local_folder import (
     _path_overlaps_source,
     _resolve_physical,
     affected_workspace_ids,
+    default_local_base,
     discard_folder,
     folder_status,
     local_copy_preflight,
@@ -254,21 +255,42 @@ def create_local_folder_blueprint(
         """Final absolute local paths a stage will write to.
 
         ``destination_bases`` is the caller-chosen base directory per
-        root. ``local_path_for_base`` composes the same per-root
-        destination that ``stage_folder`` will create, so the paths
-        here match what the worker actually writes.
+        root; a root without one gets the managed default base, exactly
+        as ``stage_folder`` does when it receives no ``local_base``.
+        ``local_path_for_base`` composes the same per-root destination
+        that ``stage_folder`` will create, so the paths here match what
+        the worker actually writes. Admission, the preflight and the
+        blocker status all derive their destinations here, so the UI's
+        prediction and the stage POST answer from the same paths.
         """
+        destination_bases = destination_bases or {}
         paths = []
-        for root_id, base in (destination_bases or {}).items():
-            source_path = source_paths.get(root_id)
-            if not source_path or not base:
+        for root_id, source_path in (source_paths or {}).items():
+            if not source_path:
                 continue
+            base = destination_bases.get(root_id) or default_local_base(
+                vireo_dir, root_id
+            )
             paths.append(
                 os.path.abspath(
                     str(local_path_for_base(base, root_id, source_path))
                 )
             )
         return paths
+
+    def _stage_blocking_job(db, root_ids, workspace_id, destination_bases=None):
+        """The job that would make a stage of ``root_ids`` return 409.
+
+        Same inputs as the stage admission: the sources plus the local
+        destinations the stage would write (chosen bases, else defaults).
+        """
+        _root_names, source_paths = _folder_names(db, root_ids)
+        return _busy_job(
+            db, root_ids, workspace_id,
+            extra_stage_paths=_stage_destination_paths(
+                source_paths, destination_bases,
+            ),
+        )
 
     def _job_config_paths(config):
         # Different job types record their on-disk paths under different
@@ -506,15 +528,16 @@ def create_local_folder_blueprint(
         selectable_root_ids = set(root_ids) | set(
             workspace_local_root_ids(db, workspace_id)
         )
+        # Source conflicts prevent opening the dialog. Destination conflicts
+        # are checked by its preflight after the user can choose a safe base.
         folder_blocking_jobs = {}
         for root_id in selectable_root_ids:
             blocking_job = _busy_job(db, [root_id], workspace_id)
             if blocking_job is not None:
                 folder_blocking_jobs[str(root_id)] = _job_payload(blocking_job)
+        overall = _busy_job(db, selectable_root_ids, workspace_id)
         return {
-            "blocking_job": _job_payload(
-                _busy_job(db, selectable_root_ids, workspace_id)
-            ),
+            "blocking_job": _job_payload(overall),
             "folder_blocking_jobs": folder_blocking_jobs,
             "residency_fingerprint": _residency_fingerprint(
                 db, workspace_id, selectable_root_ids
@@ -642,6 +665,15 @@ def create_local_folder_blueprint(
                 return json_error("Folder size calculation was cancelled", 409)
             if destination_error is not None:
                 return destination_error
+            # The stage admission also refuses a job that overlaps the
+            # chosen local destinations; check them here so the dialog
+            # predicts the stage POST instead of enabling a button that
+            # would 409.
+            busy = _stage_blocking_job(
+                db, root_ids, workspace_id, destination_bases,
+            )
+            if busy:
+                return json_error(_busy_job_error(busy), 409)
             try:
                 result = local_copy_preflight(
                     db,

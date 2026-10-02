@@ -405,6 +405,20 @@ def resolve_alias_lexically(path):
     return resolved or normalized
 
 
+def resolve_alias_bounded(path):
+    """Resolve aliases below mounted roots using bounded component probes.
+
+    Unlike lexical resolution this is for physical overlap checks after a
+    reachability gate. None means a component could not be resolved in time.
+    """
+    normalized = os.path.normpath(os.path.abspath(os.path.expanduser(path)))
+    inconclusive = []
+    resolved = _resolve_symlinks_until_mount_shaped(
+        normalized, lambda source: None, inconclusive,
+    )
+    return None if inconclusive else (resolved or normalized)
+
+
 def mount_root_resolution_conclusive(path):
     """True when every mount-shaped prefix of ``path`` could be inspected in
     time (or had a cached answer). Callers that already hold the candidate
