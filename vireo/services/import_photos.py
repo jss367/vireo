@@ -1146,15 +1146,16 @@ class _ImportPhotosJob:
             # ``_interrupted_parent_resume``): the collection and
             # processing child are already there.
             if not (parent_resume and parent_resume.get("chain_already_ran")):
-                self._chain_after_import(job, result)
+                chain_paid = self._chain_after_import(job, result)
             else:
+                chain_paid = True
                 result["after_import_skipped"] = (
                     "chain already ran on the interrupted parent"
                 )
             # Record the chain independently of the tag pass: a tag-only
             # resume must not publish a second collection or processing job.
             # A cancelled run skipped the chain and still owes it.
-            if not result.get("cancelled") and result.get("ok") is not False:
+            if chain_paid and not result.get("cancelled") and result.get("ok") is not False:
                 self._mark_post_import_step(job, "chained", result)
                 result["chained"] = True
             # Both marks land on the final row either way, so a row that
@@ -1274,7 +1275,9 @@ class _ImportPhotosJob:
 
         Every skip is written to the result as ``after_import_skipped``
         so the jobs panel shows exactly why processing did not run.  The
-        collection is independent: every successful import with new
+        Returns whether the requested chain was paid: a failed handoff
+        remains resumable even when importing and tagging succeeded.
+        The collection is independent: every successful import with new
         photos gets one, including the import-only choice.
         """
         service = self.service
@@ -1318,21 +1321,21 @@ class _ImportPhotosJob:
 
         if after_import is None:
             result["after_import_skipped"] = "import-only"
-            return
+            return True
         if not result.get("ok"):
             result["after_import_skipped"] = "import failed"
-            return
+            return False
         if result.get("cancelled"):
             result["after_import_skipped"] = "import cancelled"
-            return
+            return False
         if not chain_scope:
             result["after_import_skipped"] = "no new photos"
-            return
+            return True
         if col_id is None:
             result["after_import_skipped"] = (
                 "failed to create import collection"
             )
-            return
+            return False
         try:
             after_move = None
             if move_target_snapshot is not None and not self.defer_nas_transfer:
@@ -1368,7 +1371,7 @@ class _ImportPhotosJob:
                     # visible either way.
                     service.chain_after_move(
                         job, result, after_move, active_ws)
-                return
+                return False
             result["process_job_id"] = process_job_id
             if after_move is not None:
                 # Surface the planned move on the import's result card so
@@ -1384,6 +1387,7 @@ class _ImportPhotosJob:
                         after_move["skip_note"])
             if model_warning:
                 result["model_warning"] = model_warning
+            return process_job_id is not None
         except Exception as e:
             # The import itself succeeded — record the chaining failure
             # rather than flipping the whole job red, but never
@@ -1393,6 +1397,7 @@ class _ImportPhotosJob:
             result["after_import_skipped"] = (
                 f"failed to enqueue processing: {e}"
             )
+            return False
 
     def _plan_after_move(self, thread_db, chain_scope):
         """Which imported folders must the chained NAS move relocate?

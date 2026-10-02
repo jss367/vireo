@@ -12995,3 +12995,23 @@ def test_failed_import_with_tag_errors_does_not_mark_chain_paid(app_and_db, tmp_
         assert result["chained"] is False
         assert result["tags_applied"] is False
         assert "chained" not in app._job_runner.get(job_id).get("partial_result", {})
+
+
+def test_failed_processing_handoff_does_not_mark_chain_paid(app_and_db, tmp_path, monkeypatch):
+    from services.imports import ImportService
+
+    def failed_handoff(*args, **kwargs):
+        raise RuntimeError("process handoff failed")
+
+    monkeypatch.setattr(ImportService, "enqueue_process_job", failed_handoff)
+    app, db = app_and_db
+    card = _chain_card(tmp_path)
+    with app.test_client() as client:
+        job_id = _post_import(client, card, tmp_path / "archive",
+                              after_import=_process_id(db, "Cull-ready"))
+        result = wait_for_job_via_client(client, job_id)["result"]
+        assert result["ok"] is True
+        assert result["tags_applied"] is True
+        assert result["chained"] is False
+        assert "failed to enqueue processing" in result["after_import_skipped"]
+        assert "chained" not in app._job_runner.get(job_id).get("partial_result", {})
