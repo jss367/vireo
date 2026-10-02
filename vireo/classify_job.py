@@ -1560,6 +1560,322 @@ def _analyze_subjects(photos, folders, db, reclassify, det_conf_threshold,
             log.warning("Subject analysis unavailable for photo %s", photo["id"], exc_info=True)
 
 
+class _DetectSubjectsRun:
+    """Run-wide state of one ``_detect_subjects`` call.
+
+    ``detection_map`` and ``detected`` accumulate across the per-photo
+    ``_detect_batch`` calls; ``det_conf_threshold`` is resolved before the
+    first batch and read back when narrowing to classifier candidates.
+    """
+
+    def __init__(self, photos, folders, runner, job, reclassify, db, vireo_dir):
+        self.photos = photos
+        self.folders = folders
+        self.runner = runner
+        self.job = job
+        self.reclassify = reclassify
+        self.db = db
+        self.vireo_dir = vireo_dir
+        self.total = len(photos)
+        self.already_detected_ids = set()
+
+        # Track photos whose detections this run rewrote (write_detection_batch
+        # in reclassify mode). Declared up here so the except handlers and early
+        # returns can stash whatever was accumulated before the failure. The caller
+        # reads ``job["_detect_processed_ids"]`` to decide which photos to classify
+        # on a post-detect cancel — using ``detection_map.keys()`` alone would miss
+        # empty-scene photos whose retired boxes took their predictions with them.
+        self.processed_for_rebuild: set[int] = set()
+        # Reclassify photos whose redetection failed and whose stored boxes
+        # were put in ``detection_map`` instead. Their detections were never
+        # rewritten, so a post-detect cancel must not rebuild them.
+        self.reused_stored_ids: set[int] = set()
+        self.det_conf_threshold = None
+        # Bound before the ``try`` so a Stop raised during setup (before the
+        # loop assigns them) still reaches the cancel arm with a defined result.
+        self.detection_map = {}
+        self.detected = 0
+
+    def resolve_cached_detector_runs(self):
+        # Resolve cached-detection state before running MegaDetector so we can skip
+        # the weight download entirely when every photo already has a detector_runs
+        # row (including empty-scene rows with box_count=0).
+        reclassify = self.reclassify
+        detector_runtime = None
+        if not reclassify:
+            try:
+                from computation_cache import megadetector_runtime_fingerprint
+
+                detector_runtime = megadetector_runtime_fingerprint()
+            except (OSError, ValueError):
+                detector_runtime = None
+        self.already_detected_ids = (
+            self.db.get_detector_run_photo_ids(
+                "megadetector-v6", runtime_fingerprint=detector_runtime,
+            )
+            if not reclassify and detector_runtime is not None
+            else self.db.get_detector_run_photo_ids("megadetector-v6")
+            if not reclassify
+            else set()
+        )
+        self.job["_detector_runtime_fingerprint"] = detector_runtime
+
+    def reset_job_detect_state(self):
+        job = self.job
+        job["_detect_reused_ids"] = self.reused_stored_ids
+        job["_detect_cancelled"] = False
+        job["_non_animal_photo_ids"] = set()
+
+    def backfill_cached_subject_analysis(self):
+        """Run ``_detect_batch``'s detector-less cached-row pass."""
+        import config as cfg
+        effective_cfg = self.db.get_effective_config(cfg.load())
+        self.det_conf_threshold = effective_cfg.get("detector_confidence", 0.2)
+        _detect_batch(
+            self.photos, self.folders, self.runner, self.job, self.reclassify,
+            self.db,
+            det_conf_threshold=self.det_conf_threshold,
+            already_detected_ids=self.already_detected_ids,
+            vireo_dir=self.vireo_dir,
+        )
+
+    def ensure_detector_weights(self):
+        """Download the MegaDetector weights when a photo needs detection.
+
+        Returns False when a Stop arrived before the download started.
+        """
+        runner, job = self.runner, self.job
+        # Require at least one photo — a no-op reclassify over 0 photos should
+        # not trigger a ~300 MB MegaDetector download.
+        needs_fresh_detection = bool(self.photos) and (
+            self.reclassify or any(
+                p["id"] not in self.already_detected_ids for p in self.photos
+            )
+        )
+        if not needs_fresh_detection:
+            return True
+        from detector import ensure_megadetector_weights
+
+        # Gate the download. The classifier-init phase (run by the
+        # caller before _detect_subjects) has no internal cancel check,
+        # so a cancel during model load would otherwise land here only
+        # to be ignored: hf_hub_download can't be interrupted once it
+        # starts, so the per-photo cancel check below runs too late.
+        if runner.is_cancelled(job["id"]):
+            log.info(
+                "Classify job cancelled before MegaDetector weights download"
+            )
+            return False
+
+        weights_path = ensure_megadetector_weights(
+            progress_callback=self._weights_download_progress,
+        )
+        from computation_cache import megadetector_runtime_fingerprint
+
+        detector_runtime = megadetector_runtime_fingerprint(weights_path)
+        job["_detector_runtime_fingerprint"] = detector_runtime
+        if not self.reclassify:
+            self.already_detected_ids = self.db.get_detector_run_photo_ids(
+                "megadetector-v6", runtime_fingerprint=detector_runtime,
+            )
+        return True
+
+    def _weights_download_progress(self, phase, current, total_steps):
+        self.runner.push_event(
+            self.job["id"],
+            "progress",
+            {
+                "current": current,
+                "total": total_steps,
+                "current_file": "",
+                "phase": f"Step 4/5: {phase}",
+            },
+        )
+
+    def detect_photos(self):
+        """Detect each photo in turn, reporting per-photo progress."""
+        runner, job, db = self.runner, self.job, self.db
+        runner.push_event(
+            job["id"],
+            "progress",
+            {
+                "current": 0,
+                "total": self.total,
+                "current_file": "Loading MegaDetector...",
+                "rate": 0,
+                "phase": "Step 4/5: Detecting subjects",
+            },
+        )
+
+        # Load config once for the entire detection loop. Use the
+        # workspace-effective config so per-workspace overrides apply.
+        import config as cfg
+        effective_cfg = db.get_effective_config(cfg.load())
+        self.det_conf_threshold = effective_cfg.get("detector_confidence", 0.2)
+
+        # Process one photo at a time so we can report per-photo progress
+        self.detection_map = {}
+        self.detected = 0
+        skipped_det = 0
+        start_time = job.get("_start_time", time.time())
+
+        for i, photo in enumerate(self.photos):
+            if runner.is_cancelled(job["id"]):
+                log.info(
+                    "Classify job cancelled during detection (%d/%d)",
+                    i, self.total,
+                )
+                break
+            if self._detect_photo(i, photo, start_time):
+                skipped_det += 1
+
+        log.info(
+            "Detection done: %d animals detected out of %d photos (%d skipped, already detected)",
+            self.detected,
+            self.total,
+            skipped_det,
+        )
+
+    def _detect_photo(self, i, photo, start_time):
+        """Detect one photo; truthy when a cached detector run was reused."""
+        runner, job, reclassify = self.runner, self.job, self.reclassify
+        runner.update_step(
+            job["id"], "detect",
+            progress={"current": i + 1, "total": self.total},
+        )
+        runner.push_event(
+            job["id"],
+            "progress",
+            {
+                "current": i + 1,
+                "total": self.total,
+                "current_file": photo["filename"],
+                "rate": round(
+                    (i + 1) / max(time.time() - start_time, 0.01), 1
+                ),
+                "phase": "Step 4/5: Detecting subjects",
+            },
+        )
+
+        was_cached = (
+            not reclassify
+            and photo["id"] in self.already_detected_ids
+        )
+
+        # No reclassify pre-clear. ``clear_detections`` is global: its
+        # cascade took every classifier model's predictions and every
+        # workspace's review state with it, before this run had written
+        # anything to replace them, so a Stop anywhere after this point
+        # stranded the photo. ``write_detection_batch`` with
+        # ``force_runtime_replace`` replaces this photo's MegaDetector
+        # rows atomically when the new result lands, and a detector
+        # failure (``detect_animals`` returning None) leaves the old
+        # rows untouched. The per-model predictions purge stays in the
+        # classification loop, which only reaches photos it rebuilds.
+        try:
+            batch_map, batch_detected, batch_processed = _detect_batch(
+                [photo], self.folders, runner, job, reclassify, self.db,
+                det_conf_threshold=self.det_conf_threshold,
+                already_detected_ids=self.already_detected_ids,
+                vireo_dir=self.vireo_dir,
+            )
+        except ResourceWaitCancelled as exc:
+            # A Stop during this photo's subject analysis lands after
+            # its detections were committed. Keep that committed result
+            # so the cancel recovery still rebuilds the photo's
+            # predictions instead of stranding its replaced boxes.
+            partial = getattr(exc, "partial_detect_result", None)
+            if partial is not None:
+                batch_map, batch_detected, batch_processed = partial
+                if reclassify:
+                    self.processed_for_rebuild.update(batch_processed)
+                self.detection_map.update(batch_map)
+                self.detected += batch_detected
+            raise
+        if reclassify:
+            self.processed_for_rebuild.update(batch_processed)
+            if photo["id"] not in batch_processed:
+                batch_map = self._with_stored_boxes(photo, batch_map)
+        self.detection_map.update(batch_map)
+        self.detected += batch_detected
+
+        return was_cached and batch_detected
+
+    def _with_stored_boxes(self, photo, batch_map):
+        # Redetection failed for this photo (``detect_animals``
+        # returned None, or ``_detect_batch`` swallowed an
+        # error) and its stored boxes were left untouched.
+        # Classify those boxes rather than letting the photo
+        # fall through to a full-image pass, whose unscoped
+        # predictions clear would wipe the boxes' cached
+        # predictions and the review state hanging off them.
+        stored = _stored_detection_list(
+            self.db, photo["id"], min_conf=self.det_conf_threshold,
+        )
+        if stored:
+            batch_map = {**batch_map, photo["id"]: stored}
+            self.reused_stored_ids.add(photo["id"])
+        return batch_map
+
+    def report_detection_unavailable(self, e):
+        """Record an ImportError/RuntimeError and drop to full-image classification."""
+        runner, job = self.runner, self.job
+        msg = str(e)
+        if "ONNX model not available" in msg or "not found" in msg:
+            log.warning(
+                "MegaDetector weights not available — detection skipped; classifying full images. "
+                "Download the MegaDetector V6 ONNX model from the pipeline models page to enable "
+                "subject detection, cropped classification, and mask extraction."
+            )
+            job["errors"].append(
+                "MegaDetector weights not downloaded — detection skipped. Classification ran on full "
+                "images (less accurate) and no detections were stored, which also prevents the mask "
+                "extraction stage from producing subject masks. Download MegaDetector V6 from the "
+                "pipeline models page to fix."
+            )
+            runner.push_event(
+                job["id"],
+                "progress",
+                {
+                    "current": 0,
+                    "total": self.total,
+                    "current_file": "",
+                    "phase": "Step 4/5: Detection skipped — MegaDetector weights not downloaded",
+                },
+            )
+        else:
+            log.warning("Detection unavailable: %s — classifying full images", e)
+            runner.push_event(
+                job["id"],
+                "progress",
+                {
+                    "current": 0,
+                    "total": self.total,
+                    "current_file": "",
+                    "phase": f"Step 4/5: Detection failed — {msg[:120]}",
+                },
+            )
+            job["errors"].append(f"Detection unavailable: {msg[:200]}")
+        self.detection_map = {}
+        self.detected = 0
+
+    def report_detection_failed(self, e):
+        """Record an unexpected detection failure and drop to full-image classification."""
+        self.runner.push_event(
+            self.job["id"],
+            "progress",
+            {
+                "current": 0,
+                "total": self.total,
+                "current_file": "",
+                "phase": f"Step 4/5: Detection failed — {str(e)[:120]}",
+            },
+        )
+        self.job["errors"].append(f"Detection failed: {str(e)[:200]}")
+        self.detection_map = {}
+        self.detected = 0
+
+
 def _detect_subjects(photos, folders, runner, job, reclassify, db, vireo_dir=None):
     """Run MegaDetector on photos, storing quality metrics.
 
@@ -1598,49 +1914,11 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db, vireo_dir=Non
         {photo_id: [list_of_detection_dicts]} and detected_count is the
         number of photos with at least one classifier candidate.
     """
-    total = len(photos)
-
-    # Resolve cached-detection state before running MegaDetector so we can skip
-    # the weight download entirely when every photo already has a detector_runs
-    # row (including empty-scene rows with box_count=0).
-    detector_runtime = None
-    if not reclassify:
-        try:
-            from computation_cache import megadetector_runtime_fingerprint
-
-            detector_runtime = megadetector_runtime_fingerprint()
-        except (OSError, ValueError):
-            detector_runtime = None
-    already_detected_ids = (
-        db.get_detector_run_photo_ids(
-            "megadetector-v6", runtime_fingerprint=detector_runtime,
-        )
-        if not reclassify and detector_runtime is not None
-        else db.get_detector_run_photo_ids("megadetector-v6")
-        if not reclassify
-        else set()
+    run = _DetectSubjectsRun(
+        photos, folders, runner, job, reclassify, db, vireo_dir,
     )
-    job["_detector_runtime_fingerprint"] = detector_runtime
-
-    # Track photos whose detections this run rewrote (write_detection_batch
-    # in reclassify mode). Declared up here so the except handlers and early
-    # returns can stash whatever was accumulated before the failure. The caller
-    # reads ``job["_detect_processed_ids"]`` to decide which photos to classify
-    # on a post-detect cancel — using ``detection_map.keys()`` alone would miss
-    # empty-scene photos whose retired boxes took their predictions with them.
-    processed_for_rebuild: set[int] = set()
-    # Reclassify photos whose redetection failed and whose stored boxes
-    # were put in ``detection_map`` instead. Their detections were never
-    # rewritten, so a post-detect cancel must not rebuild them.
-    reused_stored_ids: set[int] = set()
-    job["_detect_reused_ids"] = reused_stored_ids
-    job["_detect_cancelled"] = False
-    job["_non_animal_photo_ids"] = set()
-    det_conf_threshold = None
-    # Bound before the ``try`` so a Stop raised during setup (before the
-    # loop assigns them) still reaches the cancel arm with a defined result.
-    detection_map = {}
-    detected = 0
+    run.resolve_cached_detector_runs()
+    run.reset_job_detect_state()
 
     try:
         if detect_animals is None or get_primary_detection is None:
@@ -1651,15 +1929,7 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db, vireo_dir=Non
             # detector-less branch internally by iterating only cached
             # rows, so route through it before signalling the missing
             # detector to the outer handler (Codex r4056724369).
-            import config as cfg
-            effective_cfg = db.get_effective_config(cfg.load())
-            det_conf_threshold = effective_cfg.get("detector_confidence", 0.2)
-            _detect_batch(
-                photos, folders, runner, job, reclassify, db,
-                det_conf_threshold=det_conf_threshold,
-                already_detected_ids=already_detected_ids,
-                vireo_dir=vireo_dir,
-            )
+            run.backfill_cached_subject_analysis()
             raise ImportError(
                 "MegaDetector ONNX model not available — cannot run detection"
             )
@@ -1668,161 +1938,11 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db, vireo_dir=Non
         # degrades to full-image classification like every other detection
         # failure, instead of failing the whole job — which on a reclassify
         # run would strike after predictions/detections were already purged.
-        # Require at least one photo — a no-op reclassify over 0 photos should
-        # not trigger a ~300 MB MegaDetector download.
-        needs_fresh_detection = bool(photos) and (
-            reclassify or any(
-                p["id"] not in already_detected_ids for p in photos
-            )
-        )
-        if needs_fresh_detection:
-            from detector import ensure_megadetector_weights
+        if not run.ensure_detector_weights():
+            job["_detect_processed_ids"] = run.processed_for_rebuild
+            return {}, 0
 
-            def _dl_progress(phase, current, total_steps):
-                runner.push_event(
-                    job["id"],
-                    "progress",
-                    {
-                        "current": current,
-                        "total": total_steps,
-                        "current_file": "",
-                        "phase": f"Step 4/5: {phase}",
-                    },
-                )
-
-            # Gate the download. The classifier-init phase (run by the
-            # caller before _detect_subjects) has no internal cancel check,
-            # so a cancel during model load would otherwise land here only
-            # to be ignored: hf_hub_download can't be interrupted once it
-            # starts, so the per-photo cancel check below runs too late.
-            if runner.is_cancelled(job["id"]):
-                log.info(
-                    "Classify job cancelled before MegaDetector weights download"
-                )
-                job["_detect_processed_ids"] = processed_for_rebuild
-                return {}, 0
-
-            weights_path = ensure_megadetector_weights(progress_callback=_dl_progress)
-            from computation_cache import megadetector_runtime_fingerprint
-
-            detector_runtime = megadetector_runtime_fingerprint(weights_path)
-            job["_detector_runtime_fingerprint"] = detector_runtime
-            if not reclassify:
-                already_detected_ids = db.get_detector_run_photo_ids(
-                    "megadetector-v6", runtime_fingerprint=detector_runtime,
-                )
-
-        runner.push_event(
-            job["id"],
-            "progress",
-            {
-                "current": 0,
-                "total": total,
-                "current_file": "Loading MegaDetector...",
-                "rate": 0,
-                "phase": "Step 4/5: Detecting subjects",
-            },
-        )
-
-        # Load config once for the entire detection loop. Use the
-        # workspace-effective config so per-workspace overrides apply.
-        import config as cfg
-        effective_cfg = db.get_effective_config(cfg.load())
-        det_conf_threshold = effective_cfg.get("detector_confidence", 0.2)
-
-        # Process one photo at a time so we can report per-photo progress
-        detection_map = {}
-        detected = 0
-        skipped_det = 0
-        start_time = job.get("_start_time", time.time())
-
-        for i, photo in enumerate(photos):
-            if runner.is_cancelled(job["id"]):
-                log.info(
-                    "Classify job cancelled during detection (%d/%d)", i, total
-                )
-                break
-            runner.update_step(
-                job["id"], "detect",
-                progress={"current": i + 1, "total": total},
-            )
-            runner.push_event(
-                job["id"],
-                "progress",
-                {
-                    "current": i + 1,
-                    "total": total,
-                    "current_file": photo["filename"],
-                    "rate": round(
-                        (i + 1) / max(time.time() - start_time, 0.01), 1
-                    ),
-                    "phase": "Step 4/5: Detecting subjects",
-                },
-            )
-
-            was_cached = (
-                not reclassify
-                and photo["id"] in already_detected_ids
-            )
-
-            # No reclassify pre-clear. ``clear_detections`` is global: its
-            # cascade took every classifier model's predictions and every
-            # workspace's review state with it, before this run had written
-            # anything to replace them, so a Stop anywhere after this point
-            # stranded the photo. ``write_detection_batch`` with
-            # ``force_runtime_replace`` replaces this photo's MegaDetector
-            # rows atomically when the new result lands, and a detector
-            # failure (``detect_animals`` returning None) leaves the old
-            # rows untouched. The per-model predictions purge stays in the
-            # classification loop, which only reaches photos it rebuilds.
-            try:
-                batch_map, batch_detected, batch_processed = _detect_batch(
-                    [photo], folders, runner, job, reclassify, db,
-                    det_conf_threshold=det_conf_threshold,
-                    already_detected_ids=already_detected_ids,
-                    vireo_dir=vireo_dir,
-                )
-            except ResourceWaitCancelled as exc:
-                # A Stop during this photo's subject analysis lands after
-                # its detections were committed. Keep that committed result
-                # so the cancel recovery still rebuilds the photo's
-                # predictions instead of stranding its replaced boxes.
-                partial = getattr(exc, "partial_detect_result", None)
-                if partial is not None:
-                    batch_map, batch_detected, batch_processed = partial
-                    if reclassify:
-                        processed_for_rebuild.update(batch_processed)
-                    detection_map.update(batch_map)
-                    detected += batch_detected
-                raise
-            if reclassify:
-                processed_for_rebuild.update(batch_processed)
-                if photo["id"] not in batch_processed:
-                    # Redetection failed for this photo (``detect_animals``
-                    # returned None, or ``_detect_batch`` swallowed an
-                    # error) and its stored boxes were left untouched.
-                    # Classify those boxes rather than letting the photo
-                    # fall through to a full-image pass, whose unscoped
-                    # predictions clear would wipe the boxes' cached
-                    # predictions and the review state hanging off them.
-                    stored = _stored_detection_list(
-                        db, photo["id"], min_conf=det_conf_threshold,
-                    )
-                    if stored:
-                        batch_map = {**batch_map, photo["id"]: stored}
-                        reused_stored_ids.add(photo["id"])
-            detection_map.update(batch_map)
-            detected += batch_detected
-
-            if was_cached and batch_detected:
-                skipped_det += 1
-
-        log.info(
-            "Detection done: %d animals detected out of %d photos (%d skipped, already detected)",
-            detected,
-            total,
-            skipped_det,
-        )
+        run.detect_photos()
     except ResourceWaitCancelled:
         # Stop pressed while this photo waited for an inference slot.
         # ``ResourceWaitCancelled`` subclasses ``RuntimeError``, so this arm
@@ -1833,70 +1953,22 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db, vireo_dir=Non
         log.info("Classify job cancelled during detection")
         job["_detect_cancelled"] = True
     except (ImportError, RuntimeError) as e:
-        msg = str(e)
-        if "ONNX model not available" in msg or "not found" in msg:
-            log.warning(
-                "MegaDetector weights not available — detection skipped; classifying full images. "
-                "Download the MegaDetector V6 ONNX model from the pipeline models page to enable "
-                "subject detection, cropped classification, and mask extraction."
-            )
-            job["errors"].append(
-                "MegaDetector weights not downloaded — detection skipped. Classification ran on full "
-                "images (less accurate) and no detections were stored, which also prevents the mask "
-                "extraction stage from producing subject masks. Download MegaDetector V6 from the "
-                "pipeline models page to fix."
-            )
-            runner.push_event(
-                job["id"],
-                "progress",
-                {
-                    "current": 0,
-                    "total": total,
-                    "current_file": "",
-                    "phase": "Step 4/5: Detection skipped — MegaDetector weights not downloaded",
-                },
-            )
-        else:
-            log.warning("Detection unavailable: %s — classifying full images", e)
-            runner.push_event(
-                job["id"],
-                "progress",
-                {
-                    "current": 0,
-                    "total": total,
-                    "current_file": "",
-                    "phase": f"Step 4/5: Detection failed — {msg[:120]}",
-                },
-            )
-            job["errors"].append(f"Detection unavailable: {msg[:200]}")
-        detection_map = {}
-        detected = 0
+        run.report_detection_unavailable(e)
     except Exception as e:
         log.warning(
             "Detection failed (non-fatal) — classifying full images", exc_info=True
         )
-        runner.push_event(
-            job["id"],
-            "progress",
-            {
-                "current": 0,
-                "total": total,
-                "current_file": "",
-                "phase": f"Step 4/5: Detection failed — {str(e)[:120]}",
-            },
-        )
-        job["errors"].append(f"Detection failed: {str(e)[:200]}")
-        detection_map = {}
-        detected = 0
+        run.report_detection_failed(e)
 
+    detection_map, detected = run.detection_map, run.detected
     if detection_map:
         detection_map, non_animal_ids = _classifier_candidates(
-            detection_map, det_conf_threshold,
+            detection_map, run.det_conf_threshold,
         )
         job["_non_animal_photo_ids"] = non_animal_ids
         detected = len(detection_map)
 
-    job["_detect_processed_ids"] = processed_for_rebuild
+    job["_detect_processed_ids"] = run.processed_for_rebuild
     return detection_map, detected
 
 
