@@ -16,6 +16,7 @@ import logging
 import os
 import threading
 from collections import OrderedDict
+from dataclasses import dataclass, field
 
 from flask import Blueprint, jsonify, request
 from keyword_normalization import keyword_match_key
@@ -757,6 +758,280 @@ def _sync_preview_change_creates_sidecar(
     return False
 
 
+def _sync_preview_page_bounds(args):
+    """Parse ``limit``/``offset`` for the progressive sync preview.
+
+    Returns ``(limit, offset, error)``; ``error`` is the message for a 400
+    response, and ``limit`` is ``None`` for the all-at-once response.
+    """
+    raw_limit = args.get("limit")
+    raw_offset = args.get("offset", "0")
+    if raw_limit is None:
+        if raw_offset != "0":
+            return None, None, "offset requires limit"
+        return None, 0, None
+    try:
+        limit = int(raw_limit)
+        offset = int(raw_offset)
+    except (TypeError, ValueError):
+        return None, None, "limit and offset must be integers"
+    if limit < 1 or limit > 200:
+        return None, None, "limit must be between 1 and 200"
+    if offset < 0:
+        return None, None, "offset must be non-negative"
+    return limit, offset, None
+
+
+@dataclass
+class _SyncPreviewPhoto:
+    """What one page photo's enrichment reads besides its pending changes."""
+
+    photo: dict
+    folder_offline: bool
+    metadata: dict
+    assigned_location: dict | None = None
+    location_path: list | None = None
+    keyword_add_values_by_key: dict = field(default_factory=dict)
+
+
+class _SyncPreviewPage:
+    """One page of ``/api/sync/preview``, enriched with the XMP values each
+    pending change will replace.
+
+    ``load_settings()`` and ``load_location_context()`` read what every photo
+    on the page shares; ``enrich_photos()`` then annotates each photo and
+    change in place, and ``attach_edit_recipes()`` adds the render inputs.
+    """
+
+    def __init__(self, db, all_photos, limit, offset):
+        self.db = db
+        # Enrichment below mutates the per-change dicts (``creates_xmp_sidecar``,
+        # ``presentation``, …), so copy the slice before touching it — the
+        # underlying photos/changes lists live inside the cached snapshot and
+        # are re-served across page requests for the same revision.
+        page_slice = (
+            all_photos
+            if limit is None
+            else all_photos[offset:offset + limit]
+        )
+        self.photos = [
+            {
+                "photo_id": photo["photo_id"],
+                "filename": photo["filename"],
+                "folder": photo["folder"],
+                "changes": [dict(change) for change in photo["changes"]],
+            }
+            for photo in page_slice
+        ]
+        self.write_locations = False
+        self.write_location_keywords = False
+        self.sync_flags = False
+        self.assigned_locations = {}
+        self.location_paths = {}
+        self.merge_paths = {}
+        self.resolve_merge_target = None
+        self.folder_accessibility = {}
+
+    def load_settings(self):
+        import config as cfg
+
+        effective_config = self.db.get_effective_config(cfg.load())
+        self.write_locations = bool(
+            effective_config.get("write_assigned_location_to_xmp", False)
+        )
+        self.write_location_keywords = bool(
+            effective_config.get("write_location_keywords_to_xmp", False)
+        )
+        self.sync_flags = bool(effective_config.get("sync_flags_to_xmp", False))
+
+    def load_location_context(self, serialize_photo_locations):
+        db = self.db
+        location_photo_ids = [
+            photo["photo_id"]
+            for photo in self.photos
+            if any(change["type"] == "location" for change in photo["changes"])
+        ]
+        self.assigned_locations = serialize_photo_locations(
+            db, location_photo_ids,
+        )
+        # Read the keyword chain from the same helper ``sync_to_xmp`` writes
+        # from, so the review cannot name one place and the sync write another.
+        self.location_paths = db.get_photo_location_paths(location_photo_ids)
+        from keyword_identity import keyword_paths, resolve_merge_target
+        self.resolve_merge_target = resolve_merge_target
+        self.merge_paths = keyword_paths(db.conn.execute(
+            'SELECT id, name, parent_id FROM keywords'
+        ).fetchall()) if any(
+            change['type'] == 'keyword_merge'
+            for photo in self.photos for change in photo['changes']
+        ) else {}
+
+    def enrich_photos(self):
+        for photo in self.photos:
+            self._resolve_merge_targets(photo)
+            item = self._read_photo_state(photo)
+            self._mark_sidecar_creation(item)
+            self._present_changes(item)
+
+    def _resolve_merge_targets(self, photo):
+        merges = [c for c in photo['changes'] if c['type'] == 'keyword_merge']
+        if merges:
+            tagged_ids = {k['id'] for k in self.db.get_photo_keywords(photo['photo_id'])}
+            for change in merges:
+                target_id = self.resolve_merge_target(self.db, json.loads(change['value']))
+                change['merge_target_path'] = self.merge_paths.get(target_id) if target_id in tagged_ids else None
+
+    def _read_photo_state(self, photo):
+        xmp_path = os.path.join(
+            photo["folder"],
+            os.path.splitext(photo["filename"])[0] + ".xmp",
+        )
+        # Mirror the folder-accessibility guard in ``sync_to_xmp``: if
+        # the photo's folder is offline (a common NAS case), sync
+        # records the photo as ``folder not accessible`` and never
+        # runs any writer, so the review must not present writes
+        # against it either.
+        folder = photo["folder"]
+        if folder not in self.folder_accessibility:
+            self.folder_accessibility[folder] = (
+                not bool(folder) or os.path.isdir(folder)
+            )
+        folder_offline = not self.folder_accessibility[folder]
+        photo["folder_offline"] = folder_offline
+        if folder_offline:
+            # Skip filesystem access entirely — an unreachable XMP path
+            # would just re-derive the same "no sidecar" fallback.
+            metadata = {
+                "status": "folder_offline",
+                "keywords": set(),
+                "hierarchical_keywords": set(),
+                "rating": None,
+                "rating_writable": False,
+                "flag": None,
+                "location": None,
+                "previous_location": None,
+                "location_source": None,
+                "location_keywords": None,
+                "edit_recipe": None,
+            }
+        else:
+            metadata = read_sync_preview_metadata(xmp_path)
+        item = _SyncPreviewPhoto(
+            photo=photo, folder_offline=folder_offline, metadata=metadata,
+        )
+        if (
+            not folder_offline
+            and any(change["type"] == "location" for change in photo["changes"])
+        ):
+            item.assigned_location = self.assigned_locations.get(photo["photo_id"])
+            item.location_path = self.location_paths.get(photo["photo_id"])
+        return item
+
+    def _mark_sidecar_creation(self, item):
+        changes = item.photo["changes"]
+        # Map normalized-key -> original add value so a paired
+        # keyword_remove can display the clean spelling the paired
+        # ``write_sidecar`` will end up writing.
+        keyword_add_values_by_key = item.keyword_add_values_by_key
+        for change in changes:
+            if change["type"] == "keyword_add" and change["value"]:
+                key = keyword_match_key(change["value"])
+                if key:
+                    keyword_add_values_by_key.setdefault(
+                        key, change["value"],
+                    )
+        keyword_add_keys = set(keyword_add_values_by_key.keys())
+        for change in changes:
+            auto_includes_keyword_add = bool(
+                change["type"] in {"keyword_remove", "keyword_remove_flat"}
+                and keyword_match_key(change["value"]) in keyword_add_keys
+            )
+            change["auto_includes_keyword_add"] = (
+                auto_includes_keyword_add
+            )
+            change["paired_keyword_rename"] = bool(
+                change["type"] == "keyword_remove"
+                and auto_includes_keyword_add
+            )
+            # An offline folder never runs any writer, so nothing
+            # creates a sidecar during that sync.
+            change["creates_xmp_sidecar"] = (
+                not item.folder_offline
+                and (
+                    auto_includes_keyword_add
+                    or _sync_preview_change_creates_sidecar(
+                        change,
+                        sync_flags=self.sync_flags,
+                        write_locations=self.write_locations,
+                        assigned_location=item.assigned_location,
+                        write_location_keywords=self.write_location_keywords,
+                        location_path=item.location_path,
+                    )
+                )
+            )
+
+    def _present_changes(self, item):
+        changes = item.photo["changes"]
+        sidecar_will_exist = any(
+            change["creates_xmp_sidecar"] for change in changes
+        )
+        for change in changes:
+            paired_add_value = None
+            if change["type"] == "keyword_remove" and change[
+                "paired_keyword_rename"
+            ]:
+                paired_add_value = item.keyword_add_values_by_key.get(
+                    keyword_match_key(change["value"])
+                )
+            if (
+                change["change_type"] == "rating"
+                and not item.folder_offline
+                and not item.metadata.get("rating_writable")
+            ):
+                change["rating_requires_sidecar"] = True
+                change["presentation_without_sidecar"] = self._presentation(
+                    item, change, paired_add_value, sidecar_will_exist=False,
+                )
+                change["presentation_with_sidecar"] = self._presentation(
+                    item, change, paired_add_value, sidecar_will_exist=True,
+                )
+                change["presentation"] = change[
+                    "presentation_with_sidecar"
+                    if sidecar_will_exist
+                    else "presentation_without_sidecar"
+                ]
+                continue
+            change["presentation"] = self._presentation(
+                item, change, paired_add_value,
+                folder_offline=item.folder_offline,
+            )
+
+    def _presentation(self, item, change, paired_add_value, **kwargs):
+        return _sync_preview_presentation(
+            change,
+            item.metadata,
+            assigned_location=item.assigned_location,
+            write_locations=self.write_locations,
+            location_path=item.location_path,
+            write_location_keywords=self.write_location_keywords,
+            sync_flags=self.sync_flags,
+            paired_keyword_rename=change["paired_keyword_rename"],
+            paired_add_value=paired_add_value,
+            **kwargs,
+        )
+
+    def attach_edit_recipes(self):
+        # The sync dialog needs edit recipes for correctly versioned rendered
+        # thumbnails, but not the species/life-list enrichment performed by
+        # _attach_nested_edit_recipes.
+        recipe_map = self.db.get_photo_edit_recipes(
+            [photo["photo_id"] for photo in self.photos]
+        )
+        for photo in self.photos:
+            photo["edit_recipe"] = recipe_map.get(photo["photo_id"])
+            photo["render_key"] = render_key_for_recipe(photo["edit_recipe"])
+
+
 def create_sync_blueprint(get_db, json_error, get_runner):
     """Build the sync blueprint.
 
@@ -905,23 +1180,9 @@ def create_sync_blueprint(get_db, json_error, get_runner):
                 "XMP sync is in progress. Review will load after it finishes.",
                 409, code="sync_in_progress",
             )
-        raw_limit = request.args.get("limit")
-        raw_offset = request.args.get("offset", "0")
-        if raw_limit is None:
-            if raw_offset != "0":
-                return json_error("offset requires limit")
-            limit = None
-            offset = 0
-        else:
-            try:
-                limit = int(raw_limit)
-                offset = int(raw_offset)
-            except (TypeError, ValueError):
-                return json_error("limit and offset must be integers")
-            if limit < 1 or limit > 200:
-                return json_error("limit must be between 1 and 200")
-            if offset < 0:
-                return json_error("offset must be non-negative")
+        limit, offset, error = _sync_preview_page_bounds(request.args)
+        if error:
+            return json_error(error)
 
         requested_revision = request.args.get("revision")
         snapshot = _sync_preview_get_snapshot(
@@ -952,210 +1213,12 @@ def create_sync_blueprint(get_db, json_error, get_runner):
                 "revision": revision,
             })
 
-        # Enrichment below mutates the per-change dicts (``creates_xmp_sidecar``,
-        # ``presentation``, …), so copy the slice before touching it — the
-        # underlying photos/changes lists live inside the cached snapshot and
-        # are re-served across page requests for the same revision.
-        page_slice = (
-            all_photos
-            if limit is None
-            else all_photos[offset:offset + limit]
-        )
-        page_photos = [
-            {
-                "photo_id": photo["photo_id"],
-                "filename": photo["filename"],
-                "folder": photo["folder"],
-                "changes": [dict(change) for change in photo["changes"]],
-            }
-            for photo in page_slice
-        ]
+        page = _SyncPreviewPage(db, all_photos, limit, offset)
+        page.load_settings()
+        page.load_location_context(_serialize_photo_locations)
+        page.enrich_photos()
 
-        import config as cfg
-
-        effective_config = db.get_effective_config(cfg.load())
-        write_locations = bool(
-            effective_config.get("write_assigned_location_to_xmp", False)
-        )
-        write_location_keywords = bool(
-            effective_config.get("write_location_keywords_to_xmp", False)
-        )
-        sync_flags = bool(effective_config.get("sync_flags_to_xmp", False))
-        location_photo_ids = [
-            photo["photo_id"]
-            for photo in page_photos
-            if any(change["type"] == "location" for change in photo["changes"])
-        ]
-        assigned_locations = _serialize_photo_locations(db, location_photo_ids)
-        # Read the keyword chain from the same helper ``sync_to_xmp`` writes
-        # from, so the review cannot name one place and the sync write another.
-        location_paths = db.get_photo_location_paths(location_photo_ids)
-        from keyword_identity import keyword_paths, resolve_merge_target
-        merge_paths = keyword_paths(db.conn.execute(
-            'SELECT id, name, parent_id FROM keywords'
-        ).fetchall()) if any(
-            change['type'] == 'keyword_merge'
-            for photo in page_photos for change in photo['changes']
-        ) else {}
-        folder_accessibility = {}
-        for photo in page_photos:
-            merges = [c for c in photo['changes'] if c['type'] == 'keyword_merge']
-            if merges:
-                tagged_ids = {k['id'] for k in db.get_photo_keywords(photo['photo_id'])}
-                for change in merges:
-                    target_id = resolve_merge_target(db, json.loads(change['value']))
-                    change['merge_target_path'] = merge_paths.get(target_id) if target_id in tagged_ids else None
-            xmp_path = os.path.join(
-                photo["folder"],
-                os.path.splitext(photo["filename"])[0] + ".xmp",
-            )
-            # Mirror the folder-accessibility guard in ``sync_to_xmp``: if
-            # the photo's folder is offline (a common NAS case), sync
-            # records the photo as ``folder not accessible`` and never
-            # runs any writer, so the review must not present writes
-            # against it either.
-            folder = photo["folder"]
-            if folder not in folder_accessibility:
-                folder_accessibility[folder] = (
-                    not bool(folder) or os.path.isdir(folder)
-                )
-            folder_offline = not folder_accessibility[folder]
-            photo["folder_offline"] = folder_offline
-            if folder_offline:
-                # Skip filesystem access entirely — an unreachable XMP path
-                # would just re-derive the same "no sidecar" fallback.
-                metadata = {
-                    "status": "folder_offline",
-                    "keywords": set(),
-                    "hierarchical_keywords": set(),
-                    "rating": None,
-                    "rating_writable": False,
-                    "flag": None,
-                    "location": None,
-                    "previous_location": None,
-                    "location_source": None,
-                    "location_keywords": None,
-                    "edit_recipe": None,
-                }
-            else:
-                metadata = read_sync_preview_metadata(xmp_path)
-            assigned_location = None
-            location_path = None
-            if (
-                not folder_offline
-                and any(change["type"] == "location" for change in photo["changes"])
-            ):
-                assigned_location = assigned_locations.get(photo["photo_id"])
-                location_path = location_paths.get(photo["photo_id"])
-            # Map normalized-key -> original add value so a paired
-            # keyword_remove can display the clean spelling the paired
-            # ``write_sidecar`` will end up writing.
-            keyword_add_values_by_key = {}
-            for change in photo["changes"]:
-                if change["type"] == "keyword_add" and change["value"]:
-                    key = keyword_match_key(change["value"])
-                    if key:
-                        keyword_add_values_by_key.setdefault(
-                            key, change["value"],
-                        )
-            keyword_add_keys = set(keyword_add_values_by_key.keys())
-            for change in photo["changes"]:
-                auto_includes_keyword_add = bool(
-                    change["type"] in {"keyword_remove", "keyword_remove_flat"}
-                    and keyword_match_key(change["value"]) in keyword_add_keys
-                )
-                change["auto_includes_keyword_add"] = (
-                    auto_includes_keyword_add
-                )
-                change["paired_keyword_rename"] = bool(
-                    change["type"] == "keyword_remove"
-                    and auto_includes_keyword_add
-                )
-                # An offline folder never runs any writer, so nothing
-                # creates a sidecar during that sync.
-                change["creates_xmp_sidecar"] = (
-                    not folder_offline
-                    and (
-                        auto_includes_keyword_add
-                        or _sync_preview_change_creates_sidecar(
-                            change,
-                            sync_flags=sync_flags,
-                            write_locations=write_locations,
-                            assigned_location=assigned_location,
-                            write_location_keywords=write_location_keywords,
-                            location_path=location_path,
-                        )
-                    )
-                )
-
-            sidecar_will_exist = any(
-                change["creates_xmp_sidecar"] for change in photo["changes"]
-            )
-            for change in photo["changes"]:
-                paired_add_value = None
-                if change["type"] == "keyword_remove" and change[
-                    "paired_keyword_rename"
-                ]:
-                    paired_add_value = keyword_add_values_by_key.get(
-                        keyword_match_key(change["value"])
-                    )
-                if (
-                    change["change_type"] == "rating"
-                    and not folder_offline
-                    and not metadata.get("rating_writable")
-                ):
-                    change["rating_requires_sidecar"] = True
-                    change["presentation_without_sidecar"] = (
-                        _sync_preview_presentation(
-                            change,
-                            metadata,
-                            assigned_location=assigned_location,
-                            write_locations=write_locations,
-                            location_path=location_path,
-                            write_location_keywords=write_location_keywords,
-                            sidecar_will_exist=False,
-                            sync_flags=sync_flags,
-                            paired_keyword_rename=change[
-                                "paired_keyword_rename"
-                            ],
-                            paired_add_value=paired_add_value,
-                        )
-                    )
-                    change["presentation_with_sidecar"] = (
-                        _sync_preview_presentation(
-                            change,
-                            metadata,
-                            assigned_location=assigned_location,
-                            write_locations=write_locations,
-                            location_path=location_path,
-                            write_location_keywords=write_location_keywords,
-                            sidecar_will_exist=True,
-                            sync_flags=sync_flags,
-                            paired_keyword_rename=change[
-                                "paired_keyword_rename"
-                            ],
-                            paired_add_value=paired_add_value,
-                        )
-                    )
-                    change["presentation"] = change[
-                        "presentation_with_sidecar"
-                        if sidecar_will_exist
-                        else "presentation_without_sidecar"
-                    ]
-                    continue
-                change["presentation"] = _sync_preview_presentation(
-                    change,
-                    metadata,
-                    assigned_location=assigned_location,
-                    write_locations=write_locations,
-                    location_path=location_path,
-                    write_location_keywords=write_location_keywords,
-                    sync_flags=sync_flags,
-                    paired_keyword_rename=change["paired_keyword_rename"],
-                    paired_add_value=paired_add_value,
-                    folder_offline=folder_offline,
-                )
-
+        page_photos = page.photos
         page_end = offset + len(page_photos)
         has_more = page_end < total_photos
         result = {
@@ -1167,18 +1230,10 @@ def create_sync_blueprint(get_db, json_error, get_runner):
             "next_offset": page_end if has_more else None,
             "has_more": has_more,
             "revision": revision,
-            "location_sync_enabled": write_locations,
-            "location_keyword_sync_enabled": write_location_keywords,
+            "location_sync_enabled": page.write_locations,
+            "location_keyword_sync_enabled": page.write_location_keywords,
         }
-        # The sync dialog needs edit recipes for correctly versioned rendered
-        # thumbnails, but not the species/life-list enrichment performed by
-        # _attach_nested_edit_recipes.
-        recipe_map = db.get_photo_edit_recipes(
-            [photo["photo_id"] for photo in page_photos]
-        )
-        for photo in page_photos:
-            photo["edit_recipe"] = recipe_map.get(photo["photo_id"])
-            photo["render_key"] = render_key_for_recipe(photo["edit_recipe"])
+        page.attach_edit_recipes()
         # A slow sidecar or network-folder read can leave the queue time to
         # change after the snapshot was validated above. Never mark the final
         # page complete from that stale snapshot: the client will restart the
