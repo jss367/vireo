@@ -1,6 +1,7 @@
-"""The rule that stops Resume on an interrupted import once a later run took
-it over, on the server (``import_resume_takeover``) and on the Jobs page
-(``importResumeTakeover`` in templates/jobs.html), which must agree."""
+"""The rule that stops Resume on an interrupted import, and Retry on one
+that failed files, once a later run took it over: on the server
+(``import_resume_takeover``) and on the Jobs page (``importResumeTakeover``
+in templates/jobs.html), which must agree."""
 import json
 import shutil
 import subprocess
@@ -34,8 +35,24 @@ def _row(job_id, started_at, result, *, status="completed",
     }
 
 
+def _failed_parent(**result):
+    """A finished import that failed files: its chain step ran (and marked)
+    but skipped processing, so its button is Retry."""
+    return {
+        "id": PARENT_ID, "type": "import", "status": "failed",
+        "started_at": "2026-09-01T10:00:00",
+        "config": {"sources": ["/card"], "destination": "/arch"},
+        "result": {
+            "ok": False, "failed": 2, "photo_ids": [1, 2],
+            "tags_applied": True, "chained": True, **result,
+        },
+    }
+
+
 DONE = {"ok": True, "photo_ids": [], "tags_applied": True, "chained": True}
 INTERRUPTED = {"interrupted": True, "photo_ids": [3]}
+FAILED_FILES = {"ok": False, "failed": 1, "photo_ids": [],
+                "tags_applied": True, "chained": True}
 
 
 def _scenarios():
@@ -157,6 +174,56 @@ def _scenarios():
             },
             [],
         ),
+        # Retry: a finished import that failed files.
+        "failed import, no retry yet": (_failed_parent(), []),
+        "finished retry": (
+            _failed_parent(), [_row("r", "2026-09-01T11:00:00", DONE)],
+        ),
+        "retry failed files too": (
+            _failed_parent(),
+            [_row("r", "2026-09-01T11:00:00", FAILED_FILES, status="failed")],
+        ),
+        "retry of the retry finished": (
+            _failed_parent(),
+            [
+                _row("r", "2026-09-01T11:00:00", FAILED_FILES,
+                     status="failed"),
+                _row("r2", "2026-09-01T12:00:00", DONE, parent="r"),
+            ],
+        ),
+        "retry interrupted": (
+            _failed_parent(),
+            [_row("r", "2026-09-01T11:00:00", INTERRUPTED, status="failed")],
+        ),
+        "retry crashed before any work": (
+            _failed_parent(),
+            [_row("r", "2026-09-01T11:00:00", {"error": "boom"},
+                  status="failed")],
+        ),
+        "retry cancelled during copy": (
+            _failed_parent(),
+            [_row("r", "2026-09-01T11:00:00",
+                  {"ok": False, "cancelled": True, "failed": 1,
+                   "photo_ids": [], "tags_applied": False, "chained": False},
+                  status="cancelled")],
+        ),
+        "retry cancelled after its tag pass": (
+            _failed_parent(),
+            [_row("r", "2026-09-01T11:00:00",
+                  {"cancelled": True, "photo_ids": [], "tags_applied": True,
+                   "chained": False}, status="cancelled")],
+        ),
+        "finished retry from before marks were kept": (
+            _failed_parent(tags_applied=None, chained=None),
+            [_row("r", "2026-09-01T11:00:00",
+                  {"ok": True, "photo_ids": [], "collection_id": 7})],
+        ),
+        "completed import offers no retry": (
+            {**_failed_parent(), "status": "completed",
+             "result": {"ok": True, "failed": 0, "photo_ids": [1],
+                        "tags_applied": True, "chained": True}},
+            [_row("r", "2026-09-01T11:00:00", DONE)],
+        ),
     }
 
 
@@ -165,39 +232,57 @@ def _server(parent, rows):
     resume = ImportService._interrupted_parent_resume(
         parent["config"], parent["result"], takeover,
     )
+    offers_resume = (
+        takeover["by"] is None and resume is not None
+        and isinstance(parent["result"].get("photo_ids"), list)
+    )
+    failed = parent["result"].get("failed")
     return {
         "tags_applied": takeover["tags_applied"],
         "chained": takeover["chained"],
         "by": takeover["by"],
         "kind": takeover["kind"],
-        "offers_resume": (
-            takeover["by"] is None and resume is not None
-            and isinstance(parent["result"].get("photo_ids"), list)
+        "offers_resume": offers_resume,
+        # The server accepts a Retry of this row unless taken over.
+        "offers_retry": (
+            isinstance(failed, int) and failed > 0
+            and not offers_resume and takeover["by"] is None
         ),
     }
 
 
+# (by, kind, offers Resume, offers Retry)
 EXPECTED = {
-    "no descendants": (None, None, True),
-    "finished resume": ("d", "done", False),
-    "resume interrupted too": ("d", "resume", False),
-    "resume crashed before any work": (None, None, True),
-    "resume cancelled during copy": (None, None, True),
-    "resume cancelled after its tag pass": (None, None, True),
-    "resume failed files": ("d", "retry", False),
-    "resume failed files with tags owed": (None, None, True),
-    "retry of the failed resume finished": ("r", "done", False),
-    "resume of the interrupted resume finished": ("d2", "done", False),
-    "finished resume from before marks were kept": ("d", "done", False),
-    "failed resume from before marks were kept": (None, None, True),
-    "descendant linked only by parent id": ("d", "done", False),
-    "descendant linked only by root id": ("d3", "done", False),
-    "unrelated import": (None, None, True),
-    "never-started row": (None, None, True),
-    "parent chained, resume applied the owed tags": ("d", "done", False),
-    "parent already did both itself": (None, None, False),
-    "newest of two finished resumes": ("d2", "done", False),
-    "parent chained mark discounted when ok is False": (None, None, True),
+    "no descendants": (None, None, True, False),
+    "finished resume": ("d", "done", False, False),
+    "resume interrupted too": ("d", "resume", False, False),
+    "resume crashed before any work": (None, None, True, False),
+    "resume cancelled during copy": (None, None, True, False),
+    "resume cancelled after its tag pass": (None, None, True, False),
+    "resume failed files": ("d", "retry", False, False),
+    "resume failed files with tags owed": (None, None, True, False),
+    "retry of the failed resume finished": ("r", "done", False, False),
+    "resume of the interrupted resume finished": ("d2", "done", False, False),
+    "finished resume from before marks were kept": ("d", "done", False, False),
+    "failed resume from before marks were kept": (None, None, True, False),
+    "descendant linked only by parent id": ("d", "done", False, False),
+    "descendant linked only by root id": ("d3", "done", False, False),
+    "unrelated import": (None, None, True, False),
+    "never-started row": (None, None, True, False),
+    "parent chained, resume applied the owed tags": ("d", "done", False, False),
+    "parent already did both itself": (None, None, False, False),
+    "newest of two finished resumes": ("d2", "done", False, False),
+    "failed import, no retry yet": (None, None, False, True),
+    "finished retry": ("r", "done", False, False),
+    "retry failed files too": ("r", "retry", False, False),
+    "retry of the retry finished": ("r2", "done", False, False),
+    "retry interrupted": ("r", "resume", False, False),
+    "retry crashed before any work": (None, None, False, True),
+    "retry cancelled during copy": (None, None, False, True),
+    "retry cancelled after its tag pass": (None, None, False, True),
+    "finished retry from before marks were kept": ("r", "done", False, False),
+    "completed import offers no retry": (None, None, False, False),
+    "parent chained mark discounted when ok is False": (None, None, True, False),
 }
 
 
@@ -205,7 +290,9 @@ EXPECTED = {
 def test_takeover_rule(name):
     parent, rows = _scenarios()[name]
     got = _server(parent, rows)
-    assert (got["by"], got["kind"], got["offers_resume"]) == EXPECTED[name]
+    assert (
+        got["by"], got["kind"], got["offers_resume"], got["offers_retry"],
+    ) == EXPECTED[name]
 
 
 def test_a_resume_that_paid_the_tags_leaves_only_the_chain_owed():
@@ -266,8 +353,13 @@ def test_jobs_page_agrees_with_the_server(node, tmp_path):
         server = _server(*scenarios[name])
         assert {k: page[k] for k in server} == server, name
         if page["by"]:
-            # The note names where to continue, never a bare "resumed".
-            assert page["note"].startswith("Already resumed by the import started")
+            # The note says what happened and names where to continue.
+            verb = (
+                "resumed" if scenarios[name][0]["result"].get("interrupted")
+                else "retried"
+            )
+            assert page["note"].startswith(
+                f"Already {verb} by the import started"), page["note"]
 
 
 @pytest.mark.parametrize("status", ["completed", "failed"])
