@@ -2591,16 +2591,16 @@ class _PhotoMove:
         src_file = os.path.join(src_dir, photo["filename"])
         stem = os.path.splitext(photo["filename"])[0]
 
-        if _is_same_directory(photo["folder_id"], src_dir, self.dest_folder_id, self.destination):
-            return _PhotoToMove(
-                pid=pid, photo=photo, src_dir=src_dir, src_file=src_file,
-                stem=stem, stem_key=self.stem_key(stem),
-            )
         if not os.path.isfile(src_file):
             log.warning("Move skipped for %s: source file missing", photo["filename"])
             self.errors.append(f"{photo['filename']}: source file missing")
             return None
 
+        if _is_same_directory(photo["folder_id"], src_dir, self.dest_folder_id, self.destination):
+            return _PhotoToMove(
+                pid=pid, photo=photo, src_dir=src_dir, src_file=src_file,
+                stem=stem, stem_key=self.stem_key(stem),
+            )
         item = _PhotoToMove(
             pid=pid, photo=photo, src_dir=src_dir, src_file=src_file,
             stem=stem, stem_key=self.stem_key(stem),

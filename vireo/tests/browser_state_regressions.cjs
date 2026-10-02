@@ -169,3 +169,9 @@ async function testSavedCollectionPreviewScope() {
 
 Promise.all([testAsyncModalOwnership(), testReadinessAndRegroupRaces(), testSavedCollectionPreviewScope()])
   .catch(err => { console.error(err); process.exitCode = 1; });
+
+const noteFilter = vm.createContext({});
+vm.runInContext(fn('vireo/templates/pipeline.html', '_pipelineFailureErrors'), noteFilter);
+const note = '[extract_masks] No detections to mask';
+assert.equal(noteFilter._pipelineFailureErrors({errors: [note], notes: [note]}).length, 0);
+assert.deepEqual(Array.from(noteFilter._pipelineFailureErrors({errors: [note, '[scan] failed'], notes: [note]})), ['[scan] failed']);

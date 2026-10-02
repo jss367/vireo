@@ -2413,6 +2413,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         elapsed = time.time() - job["_start_time"]
         result["duration"] = round(elapsed, 1)
         result["errors"] = list(errors)
+        result["notes"] = list(run.notes)
 
         _raise_if_stages_failed(
             job, result, stages, errors, control.cancellation_requested,
@@ -2426,7 +2427,6 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         # The notes stay in ``errors`` (and ``result["notes"]`` names them)
         # so the Process page and Jobs details keep showing them.
         noted = set(run.notes)
-        result["notes"] = list(run.notes)
         result["ok"] = all(e in noted for e in errors)
         return result
     finally:

@@ -20291,3 +20291,21 @@ def test_source_offline_reason_scopes_inconclusive_resolution_to_mount(monkeypat
     )
     assert scope == "mount"
     assert "/mnt/archive" in reason
+
+
+def test_failed_stage_preserves_benign_notes_on_the_terminal_result(tmp_path, monkeypatch):
+    import pipeline_job as pipeline_mod
+
+    real_raise = pipeline_mod._raise_if_stages_failed
+
+    def fail_another_stage(job, result, stages, errors, cancellation_requested):
+        stages["scan"]["status"] = "failed"
+        errors.append("[scan] genuine failure")
+        result["errors"] = list(errors)
+        return real_raise(job, result, stages, errors, cancellation_requested)
+
+    monkeypatch.setattr(pipeline_mod, "_raise_if_stages_failed", fail_another_stage)
+    job = _run_eye_keypoints_download_failure_through_runner(tmp_path, monkeypatch)
+    assert job["status"] == "failed"
+    assert job["result"]["notes"]
+    assert "[scan] genuine failure" not in job["result"]["notes"]

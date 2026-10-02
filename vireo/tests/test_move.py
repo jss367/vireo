@@ -7192,3 +7192,14 @@ def test_thumbnail_lookup_is_chunked_under_the_sqlite_bind_limit(tmp_path):
         seen.append(len(chunk))
     assert max(seen) <= 999
     assert sum(seen) == 2500
+
+
+def test_missing_original_is_not_counted_already_in_place(move_env):
+    from move import move_photos
+
+    env = move_env
+    (env["src"] / "bird1.jpg").unlink()
+    result = move_photos(env["db"], [env["p1"]], str(env["src"]))
+    assert result["already_in_place"] == 0
+    assert result["moved"] == 0
+    assert any("source file missing" in error for error in result["errors"])

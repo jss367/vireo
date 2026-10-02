@@ -2804,6 +2804,11 @@ function _extractStepOutcome(jobStatus, result, topErrors) {
   };
 }
 
+function _pipelineFailureErrors(result) {
+  var notes = new Set(result.notes || []);
+  return (result.errors || []).filter(function(error) { return !notes.has(error); });
+}
+
 function _onPipelineComplete(result) {
   if (result.status === 'cancelled') {
     var actionStatus = document.getElementById('pipelineActionStatus');
@@ -2827,6 +2832,7 @@ function _onPipelineComplete(result) {
 
   var succeeded = (result.status === 'completed');
   var r = result.result || {};
+  var failureErrors = _pipelineFailureErrors(r);
   var stageResults = r.stages || {};
 
   // Source card — always mark complete
@@ -2952,9 +2958,9 @@ function _onPipelineComplete(result) {
   }
 
   // Show errors if any
-  if (r.errors && r.errors.length > 0) {
+  if (failureErrors.length > 0) {
     var errorStages = {};
-    r.errors.forEach(function(err) {
+    failureErrors.forEach(function(err) {
       var match = err.match(/^\[(\w+)\]/);
       var stage = match ? match[1] : 'unknown';
       // One stage can report several errors. Keep the actionable one rather
@@ -3002,7 +3008,7 @@ function _onPipelineComplete(result) {
   refreshPipelineUI();
 
   // Auto-redirect to review page on success
-  if (succeeded && (!r.errors || r.errors.length === 0)) {
+  if (succeeded && failureErrors.length === 0) {
     window.location.href = '/pipeline/review';
   }
 }
