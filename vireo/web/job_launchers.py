@@ -16,6 +16,8 @@ import logging
 import os
 import sqlite3
 import time
+from dataclasses import dataclass
+from types import SimpleNamespace
 
 from artifact_flight import ArtifactProducerFailed
 from config import read_raw_config_file, settings_write_lock
@@ -1894,422 +1896,16 @@ def create_job_launchers_blueprint(
         )
 
         def work(job):
-            import numpy as np
-            from dino_embed import embed, embed_batch, embedding_to_blob
-            from masking import (
-                crop_completeness,
-                crop_subject,
-                generate_mask,
-                render_proxy,
-                save_mask,
-            )
-            from pipeline_job import (
-                _rollback_failed_mask_photo,
-                _StagedMaskFile,
-            )
-            from pipeline_locks import acquire_photo_mask
-            from quality import compute_all_quality_features
-            from resource_ledger import ResourceWaitCancelled
-            from subjects import primary_order_sql, sync_primary
-
-            thread_db = ctx.thread_db()
-
-            masks_dir = os.path.join(os.path.dirname(db_path), "masks")
-            os.makedirs(masks_dir, exist_ok=True)
-
-            # Get photos that have a real (non full-image) detection. The
-            # legacy `mask_path IS NULL` gate would silently skip every
-            # photo whose stored mask was made by a *different* SAM
-            # variant — leaving photo_masks empty for the configured
-            # variant. The per-photo cache check inside the loop below
-            # against photo_masks(photo_id, sam2_variant) handles
-            # "already cached for this variant" correctly.
-            if collection_id:
-                coll_photos = thread_db.get_collection_photos(
-                    collection_id, per_page=999999
-                )
-                photos = []
-                for p in coll_photos:
-                    dets = [
-                        d for d in thread_db.get_detections(
-                            p["id"], min_conf=min_detector_conf,
-                        )
-                        if d["detector_model"] != "full-image"
-                    ]
-                    if dets:
-                        det = dets[0]
-                        photos.append({
-                            "id": p["id"],
-                            "folder_id": p["folder_id"],
-                            "filename": p["filename"],
-                            "detector_model": det["detector_model"],
-                            "detection_box": json.dumps({
-                                "x": det["box_x"], "y": det["box_y"],
-                                "w": det["box_w"], "h": det["box_h"],
-                            }),
-                            "detection_conf": det["detector_confidence"],
-                            # Full-precision REAL prompt — see pipeline_job
-                            # for the rationale; int() would truncate the
-                            # normalized [0,1] bbox to (0,0,0,0) and break
-                            # cache invalidation on bbox change.
-                            "prompt": (
-                                det["box_x"], det["box_y"],
-                                det["box_w"], det["box_h"],
-                            ),
-                        })
-            else:
-                # All workspace photos with at least one real
-                # (non full-image) detection. Direct SQL keeps this
-                # one round-trip to SQLite per workspace; the per-photo
-                # cache check inside the loop handles "skip when
-                # already masked for this variant".
-                ws_id = thread_db._active_workspace_id
-                rows = thread_db.conn.execute(
-                    f"""SELECT p.id, p.folder_id, p.filename,
-                              d.detector_model,
-                              d.box_x, d.box_y, d.box_w, d.box_h,
-                              d.detector_confidence
-                         FROM photos p
-                         JOIN workspace_folders wf
-                              ON wf.folder_id = p.folder_id
-                         JOIN detections d ON d.photo_id = p.id
-                        WHERE wf.workspace_id = ?
-                          AND d.detector_model != 'full-image'
-                          AND d.detector_confidence >= ?
-                        ORDER BY p.id, {primary_order_sql("d")}""",
-                    (ws_id, min_detector_conf),
-                ).fetchall()
-                seen = set()
-                photos = []
-                for r in rows:
-                    if r["id"] in seen:
-                        continue
-                    seen.add(r["id"])
-                    photos.append({
-                        "id": r["id"],
-                        "folder_id": r["folder_id"],
-                        "filename": r["filename"],
-                        "detector_model": r["detector_model"],
-                        "detection_box": json.dumps({
-                            "x": r["box_x"], "y": r["box_y"],
-                            "w": r["box_w"], "h": r["box_h"],
-                        }),
-                        "detection_conf": r["detector_confidence"],
-                        "prompt": (
-                            r["box_x"], r["box_y"],
-                            r["box_w"], r["box_h"],
-                        ),
-                    })
-
-            folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
-            total = len(photos)
-            masked = 0
-            skipped = 0
-            failed = 0
-            # A source file that never opened is not the same as "SAM found
-            # no subject here", even though both leave the photo unmasked.
-            # Only the second is an answer about the photo; the first means
-            # we never looked. Folding them together let a dropped share
-            # finish this job green while every unmasked photo went on to be
-            # hard-rejected in Process Review as `no_subject_mask`
-            # (Codex #1392 P1). Mirrors extract_masks_stage in pipeline_job.
-            unreadable = 0
-            job["_start_time"] = time.time()
-
-            for i, photo in enumerate(photos):
-                if ctx.runner.is_cancelled(job["id"]):
-                    break
-                photo_id = photo["id"]
-                folder_path = folders.get(photo["folder_id"], "")
-                image_path = os.path.join(folder_path, photo["filename"])
-
-                # Share the same photo-wide critical section as Process jobs.
-                # This standalone route writes the deterministic predecessor
-                # filename, so serializing its full cache-check/write sequence
-                # lets Process safely reclaim that predecessor after commit.
-                photo_mask_lock = acquire_photo_mask(photo_id)
-                while not ctx.runner.is_cancelled(job["id"]):
-                    if not photo_mask_lock.acquire(timeout=0.1):
-                        continue
-                    # A pause can arrive during acquisition. Release before
-                    # parking so another Process job can use this photo.
-                    if (ctx.runner.pause_requested(job["id"])
-                            or ctx.runner.cancellation_requested(job["id"])):
-                        photo_mask_lock.release()
-                        continue
-                    break
-                else:
-                    break
-                mask_file_stage = None
-                try:
-                    # Sync the primary before deciding whether a cached
-                    # mask still applies. A workspace confidence-floor
-                    # change (or another workspace sharing this photo
-                    # writing photo_subject_state with a different floor)
-                    # can promote a new primary since this job was queued;
-                    # sync_primary clears mask_path, active_mask_variant,
-                    # dino_subject_embedding, and eye_*/eye_kp_fingerprint
-                    # when the primary detection actually changed, so the
-                    # subsequent eye stage recomputes for the newly
-                    # published subject instead of retaining the previous
-                    # subject's eye focus (Codex r4056563009).
-                    sync_primary(thread_db, photo_id, min_conf=min_detector_conf)
-                    commit_with_retry(thread_db.conn)
-                    # A user can change primary after this job was queued.
-                    current = [d for d in thread_db.get_detections(photo_id, min_conf=min_detector_conf)
-                               if d["detector_model"] != "full-image"]
-                    if not current:
-                        skipped += 1
-                        continue
-                    selected = current[0]
-                    photo["detector_model"] = selected["detector_model"]
-                    photo["prompt"] = tuple(selected["box_" + k] for k in "xywh")
-                    photo["detection_box"] = {k: selected["box_" + k] for k in "xywh"}
-                    # Cache hit: photo_masks already has a row for
-                    # (photo, configured variant) AND its stored prompt
-                    # + detector still match the current primary
-                    # detection AND the file is on disk AND the photos row
-                    # is already fully consistent for this (sam, dino)
-                    # pair. A subject A→B→A round-trip clears
-                    # dino_subject_embedding via sync_primary while the
-                    # matching photo_masks row for A remains cached; a
-                    # bare cache-hit shortcut would then re-activate the
-                    # mask and skip DINO, leaving dino_subject_embedding
-                    # null even though the job reported the photo
-                    # processed. Mirror the Process pipeline's
-                    # active_mask_variant/dino_embedding_variant guard
-                    # (Codex r4056402007).
-                    existing = thread_db.get_photo_mask(
-                        photo_id, sam2_variant,
-                    )
-                    if existing is not None:
-                        cached_prompt = (
-                            existing["prompt_x"], existing["prompt_y"],
-                            existing["prompt_w"], existing["prompt_h"],
-                        )
-                        if (existing["detector_model"]
-                                == photo["detector_model"]
-                                and cached_prompt == photo["prompt"]
-                                and existing["path"]
-                                and os.path.isfile(existing["path"])):
-                            state = thread_db.conn.execute(
-                                "SELECT active_mask_variant, "
-                                "dino_embedding_variant, quality_input_recipe FROM photos "
-                                "WHERE id = ?",
-                                (photo_id,),
-                            ).fetchone()
-                            if (state is not None
-                                    and state["active_mask_variant"]
-                                    == sam2_variant
-                                    and state["dino_embedding_variant"]
-                                    == dinov2_variant
-                                    and state["quality_input_recipe"] is None):
-                                masked += 1
-                                ctx.runner.push_event(
-                                    job["id"],
-                                    "progress",
-                                    {
-                                        "current": i + 1,
-                                        "total": total,
-                                        "current_file": photo["filename"],
-                                        "rate": round(
-                                            (i + 1) / max(
-                                                time.time() - job["_start_time"], 0.01,
-                                            ),
-                                            1,
-                                        ),
-                                        "phase": "Extracting features (SAM2 + DINOv2)",
-                                    },
-                                )
-                                continue
-                            # Denormalised subject state is stale: fall
-                            # through to the full recompute below, which
-                            # writes set_active_mask_variant +
-                            # update_photo_embeddings atomically.
-
-                    # Load working-resolution proxy
-                    proxy = render_proxy(image_path, longest_edge=proxy_longest_edge)
-                    if proxy is None:
-                        unreadable += 1
-                        continue
-
-                    # Parse detection box
-                    det_box = photo["detection_box"]
-                    if isinstance(det_box, str):
-                        det_box = json.loads(det_box)
-
-                    # Generate mask via SAM2
-                    mask = generate_mask(proxy, det_box, variant=sam2_variant)
-                    if mask is None:
-                        skipped += 1
-                        continue
-
-                    # Compute crop completeness + all quality features
-                    completeness = crop_completeness(mask)
-                    features = compute_all_quality_features(proxy, mask)
-
-                    # Compute DINOv2 embeddings — one batched call when both
-                    # subject and global are needed, since DINOv2 is CPU-only
-                    # for external-data ONNX exports and per-call overhead is
-                    # the bottleneck.
-                    subject_crop = crop_subject(proxy, mask, margin=0.15)
-                    if subject_crop is not None:
-                        embs = embed_batch(
-                            [subject_crop, proxy], variant=dinov2_variant,
-                        )
-                        subj_emb_blob = embedding_to_blob(embs[0])
-                        global_emb_blob = embedding_to_blob(embs[1])
-                    else:
-                        subj_emb_blob = None
-                        global_emb_blob = embedding_to_blob(
-                            embed(proxy, variant=dinov2_variant),
-                        )
-
-                    mask_file_stage = _StagedMaskFile.create(
-                        mask,
-                        masks_dir,
-                        photo_id,
-                        sam2_variant,
-                        save_mask,
-                        previous_path=(
-                            existing["path"] if existing else None
-                        ),
-                    )
-                    mask_path = mask_file_stage.final_path
-
-                    # Per-mask features: pop them out of `features` so
-                    # they land on the photo_masks row and not on the
-                    # photos row directly. set_active_mask_variant
-                    # denormalizes them back into photos for downstream
-                    # readers.
-                    mask_subject_tenengrad = features.pop(
-                        "subject_tenengrad", None,
-                    )
-                    mask_bg_tenengrad = features.pop("bg_tenengrad", None)
-                    # Mask-derived subject_size: fraction of frame
-                    # covered by the boolean mask.
-                    total_pixels = float(mask.size)
-                    if total_pixels > 0:
-                        mask_subject_size = float(
-                            np.count_nonzero(mask) / total_pixels
-                        )
-                    else:
-                        mask_subject_size = None
-
-                    thread_db.upsert_photo_mask(
-                        photo_id=photo_id,
-                        variant=sam2_variant,
-                        path=mask_path,
-                        detector_model=photo["detector_model"],
-                        prompt_x=photo["prompt"][0],
-                        prompt_y=photo["prompt"][1],
-                        prompt_w=photo["prompt"][2],
-                        prompt_h=photo["prompt"][3],
-                        subject_size=mask_subject_size,
-                        subject_tenengrad=mask_subject_tenengrad,
-                        bg_tenengrad=mask_bg_tenengrad,
-                        crop_complete=completeness,
-                        quality_input_recipe=None,
-                        subject_clip_high=features.pop("subject_clip_high", None),
-                        subject_clip_low=features.pop("subject_clip_low", None),
-                        subject_y_median=features.pop("subject_y_median", None),
-                        bg_separation=features.pop("bg_separation", None),
-                        phash_crop=features.pop("phash_crop", None),
-                        noise_estimate=features.pop("noise_estimate", None),
-                        _commit=False,
-                    )
-                    thread_db.set_active_mask_variant(
-                        photo_id, sam2_variant, _commit=False,
-                    )
-                    # Remaining (non-mask) per-photo features still land
-                    # on the photos row. mask_path / crop_complete /
-                    # subject_tenengrad / bg_tenengrad / subject_size
-                    # flow via set_active_mask_variant above and are
-                    # intentionally NOT passed here.
-                    if features:
-                        thread_db.update_photo_pipeline_features(
-                            photo_id, **features, _commit=False,
-                        )
-                    thread_db.update_photo_embeddings(
-                        photo_id,
-                        dino_subject_embedding=subj_emb_blob,
-                        dino_global_embedding=global_emb_blob,
-                        variant=dinov2_variant,
-                        _commit=False,
-                    )
-                    mask_file_stage.install()
-                    commit_with_retry(thread_db.conn)
-                    mask_file_stage.finish()
-                    mask_file_stage = None
-                    masked += 1
-
-                except ResourceWaitCancelled:
-                    # Job cancelled while waiting for the CPU inference
-                    # lease. Bail out of the loop immediately instead of
-                    # marking every remaining photo as a mask failure
-                    # (which would then reopen the source, preprocess it,
-                    # and hit the same cancellation on the next iteration).
-                    log.info(
-                        "extract-masks cancelled while waiting for inference resources",
-                    )
-                    break
-                except Exception:
-                    failed += 1
-                    log.warning(
-                        "Mask extraction failed for photo %s", photo_id, exc_info=True
-                    )
-                    job["errors"].append(
-                        f"Photo {photo_id}: mask extraction failed"
-                    )
-                    try:
-                        _rollback_failed_mask_photo(thread_db, photo_id)
-                    finally:
-                        if mask_file_stage is not None:
-                            mask_file_stage.restore()
-                finally:
-                    photo_mask_lock.release()
-
-                ctx.runner.push_event(
-                    job["id"],
-                    "progress",
-                    {
-                        "current": i + 1,
-                        "total": total,
-                        "current_file": photo["filename"]
-                        # ``photo`` may be a ``sqlite3.Row``, whose ``in``
-                        # tests values, not column names: keep ``.keys()``.
-                        if hasattr(photo, "__getitem__") and "filename" in photo.keys()  # noqa: SIM118
-                        else str(photo_id),
-                        "rate": round(
-                            (i + 1)
-                            / max(time.time() - job["_start_time"], 0.01),
-                            1,
-                        ),
-                        "phase": "Extracting features (SAM2 + DINOv2)",
-                    },
-                )
-
-            # Opt into JobRunner's ok/errors convention when photos went
-            # unmasked. Styling the card honestly isn't enough: the Jobs
-            # page, job history, API clients and the completion event all
-            # read the job status, and "completed" there tells the user their
-            # library was processed when some of it was never opened
-            # (Codex #1392).
-            job_errors = []
-            if unreadable:
-                job_errors.append(
-                    f"{unreadable} of {total} photos could not be read, so "
-                    f"they have no mask and Process Review rejects them as "
-                    f"`no_subject_mask`. Reconnect the source and run Extract "
-                    f"again."
-                )
-            if failed:
-                job_errors.append(
-                    f"{failed} of {total} photos failed mask extraction"
-                )
-            return {"masked": masked, "skipped": skipped, "failed": failed,
-                    "unreadable": unreadable, "total": total,
-                    "ok": not job_errors, "errors": job_errors}
+            return _MaskExtractionRun(
+                ctx,
+                job,
+                db_path,
+                collection_id=collection_id,
+                sam2_variant=sam2_variant,
+                dinov2_variant=dinov2_variant,
+                proxy_longest_edge=proxy_longest_edge,
+                min_detector_conf=min_detector_conf,
+            ).run()
 
         return ctx.start(
             "extract-masks",
@@ -2325,3 +1921,540 @@ def create_job_launchers_blueprint(
         )
 
     return blueprint
+
+
+def _import_mask_extraction_deps():
+    """Import the SAM2 / DINOv2 / quality stack when the job starts."""
+    import numpy as np
+    from dino_embed import embed, embed_batch, embedding_to_blob
+    from masking import (
+        crop_completeness,
+        crop_subject,
+        generate_mask,
+        render_proxy,
+        save_mask,
+    )
+    from pipeline_job import (
+        _rollback_failed_mask_photo,
+        _StagedMaskFile,
+    )
+    from pipeline_locks import acquire_photo_mask
+    from quality import compute_all_quality_features
+    from resource_ledger import ResourceWaitCancelled
+    from subjects import primary_order_sql, sync_primary
+
+    return SimpleNamespace(
+        np=np,
+        embed=embed,
+        embed_batch=embed_batch,
+        embedding_to_blob=embedding_to_blob,
+        crop_completeness=crop_completeness,
+        crop_subject=crop_subject,
+        generate_mask=generate_mask,
+        render_proxy=render_proxy,
+        save_mask=save_mask,
+        rollback_failed_mask_photo=_rollback_failed_mask_photo,
+        StagedMaskFile=_StagedMaskFile,
+        acquire_photo_mask=acquire_photo_mask,
+        compute_all_quality_features=compute_all_quality_features,
+        ResourceWaitCancelled=ResourceWaitCancelled,
+        primary_order_sql=primary_order_sql,
+        sync_primary=sync_primary,
+    )
+
+
+def _mask_candidate(photo, det):
+    """The per-photo record the extract-masks loop works from."""
+    return {
+        "id": photo["id"],
+        "folder_id": photo["folder_id"],
+        "filename": photo["filename"],
+        "detector_model": det["detector_model"],
+        "detection_box": json.dumps({
+            "x": det["box_x"], "y": det["box_y"],
+            "w": det["box_w"], "h": det["box_h"],
+        }),
+        "detection_conf": det["detector_confidence"],
+        # Full-precision REAL prompt — see pipeline_job
+        # for the rationale; int() would truncate the
+        # normalized [0,1] bbox to (0,0,0,0) and break
+        # cache invalidation on bbox change.
+        "prompt": (
+            det["box_x"], det["box_y"],
+            det["box_w"], det["box_h"],
+        ),
+    }
+
+
+@dataclass
+class _MaskPhoto:
+    """One photo's pass through the extract-masks loop."""
+
+    index: int
+    photo: dict
+    photo_id: int
+    image_path: str
+    existing: object = None
+    mask_file_stage: object = None
+
+
+class _MaskExtractionRun:
+    """The ``/api/jobs/extract-masks`` work function and its run-wide state."""
+
+    def __init__(
+        self, ctx, job, db_path, *, collection_id, sam2_variant,
+        dinov2_variant, proxy_longest_edge, min_detector_conf,
+    ):
+        self.ctx = ctx
+        self.job = job
+        self.db_path = db_path
+        self.collection_id = collection_id
+        self.sam2_variant = sam2_variant
+        self.dinov2_variant = dinov2_variant
+        self.proxy_longest_edge = proxy_longest_edge
+        self.min_detector_conf = min_detector_conf
+
+    def run(self):
+        deps = self.deps = _import_mask_extraction_deps()
+        runner = self.ctx.runner
+        job = self.job
+
+        self.thread_db = self.ctx.thread_db()
+
+        self.masks_dir = os.path.join(os.path.dirname(self.db_path), "masks")
+        os.makedirs(self.masks_dir, exist_ok=True)
+
+        # Get photos that have a real (non full-image) detection. The
+        # legacy `mask_path IS NULL` gate would silently skip every
+        # photo whose stored mask was made by a *different* SAM
+        # variant — leaving photo_masks empty for the configured
+        # variant. The per-photo cache check inside the loop below
+        # against photo_masks(photo_id, sam2_variant) handles
+        # "already cached for this variant" correctly.
+        if self.collection_id:
+            photos = self._collection_candidates()
+        else:
+            photos = self._workspace_candidates()
+
+        folders = {f["id"]: f["path"] for f in self.thread_db.get_folder_tree()}
+        self.total = len(photos)
+        self.masked = 0
+        self.skipped = 0
+        self.failed = 0
+        # A source file that never opened is not the same as "SAM found
+        # no subject here", even though both leave the photo unmasked.
+        # Only the second is an answer about the photo; the first means
+        # we never looked. Folding them together let a dropped share
+        # finish this job green while every unmasked photo went on to be
+        # hard-rejected in Process Review as `no_subject_mask`
+        # (Codex #1392 P1). Mirrors extract_masks_stage in pipeline_job.
+        self.unreadable = 0
+        job["_start_time"] = time.time()
+
+        for i, photo in enumerate(photos):
+            if runner.is_cancelled(job["id"]):
+                break
+            photo_id = photo["id"]
+            folder_path = folders.get(photo["folder_id"], "")
+            image_path = os.path.join(folder_path, photo["filename"])
+
+            photo_mask_lock = self._acquire_photo_mask_lock(photo_id)
+            if photo_mask_lock is None:
+                break
+            item = _MaskPhoto(i, photo, photo_id, image_path)
+            try:
+                if not self._extract_locked_photo(item):
+                    continue
+            except deps.ResourceWaitCancelled:
+                # Job cancelled while waiting for the CPU inference
+                # lease. Bail out of the loop immediately instead of
+                # marking every remaining photo as a mask failure
+                # (which would then reopen the source, preprocess it,
+                # and hit the same cancellation on the next iteration).
+                log.info(
+                    "extract-masks cancelled while waiting for inference resources",
+                )
+                break
+            except Exception:
+                self.failed += 1
+                log.warning(
+                    "Mask extraction failed for photo %s", photo_id, exc_info=True
+                )
+                job["errors"].append(
+                    f"Photo {photo_id}: mask extraction failed"
+                )
+                try:
+                    deps.rollback_failed_mask_photo(self.thread_db, photo_id)
+                finally:
+                    if item.mask_file_stage is not None:
+                        item.mask_file_stage.restore()
+            finally:
+                photo_mask_lock.release()
+
+            self._push_progress(
+                i,
+                photo["filename"]
+                # ``photo`` may be a ``sqlite3.Row``, whose ``in``
+                # tests values, not column names: keep ``.keys()``.
+                if hasattr(photo, "__getitem__") and "filename" in photo.keys()  # noqa: SIM118
+                else str(photo_id),
+            )
+
+        return self._result()
+
+    def _collection_candidates(self):
+        thread_db = self.thread_db
+        coll_photos = thread_db.get_collection_photos(
+            self.collection_id, per_page=999999
+        )
+        photos = []
+        for p in coll_photos:
+            dets = [
+                d for d in thread_db.get_detections(
+                    p["id"], min_conf=self.min_detector_conf,
+                )
+                if d["detector_model"] != "full-image"
+            ]
+            if dets:
+                photos.append(_mask_candidate(p, dets[0]))
+        return photos
+
+    def _workspace_candidates(self):
+        """All workspace photos with at least one real (non full-image) detection.
+
+        Direct SQL keeps this one round-trip to SQLite per workspace; the
+        per-photo cache check inside the loop handles "skip when already
+        masked for this variant".
+        """
+        thread_db = self.thread_db
+        ws_id = thread_db._active_workspace_id
+        rows = thread_db.conn.execute(
+            f"""SELECT p.id, p.folder_id, p.filename,
+                      d.detector_model,
+                      d.box_x, d.box_y, d.box_w, d.box_h,
+                      d.detector_confidence
+                 FROM photos p
+                 JOIN workspace_folders wf
+                      ON wf.folder_id = p.folder_id
+                 JOIN detections d ON d.photo_id = p.id
+                WHERE wf.workspace_id = ?
+                  AND d.detector_model != 'full-image'
+                  AND d.detector_confidence >= ?
+                ORDER BY p.id, {self.deps.primary_order_sql("d")}""",
+            (ws_id, self.min_detector_conf),
+        ).fetchall()
+        seen = set()
+        photos = []
+        for r in rows:
+            if r["id"] in seen:
+                continue
+            seen.add(r["id"])
+            photos.append(_mask_candidate(r, r))
+        return photos
+
+    def _acquire_photo_mask_lock(self, photo_id):
+        """Take the photo's mask lock, or return None once the job is cancelled.
+
+        Share the same photo-wide critical section as Process jobs.
+        This standalone route writes the deterministic predecessor
+        filename, so serializing its full cache-check/write sequence
+        lets Process safely reclaim that predecessor after commit.
+        """
+        runner = self.ctx.runner
+        job_id = self.job["id"]
+        photo_mask_lock = self.deps.acquire_photo_mask(photo_id)
+        while not runner.is_cancelled(job_id):
+            if not photo_mask_lock.acquire(timeout=0.1):
+                continue
+            # A pause can arrive during acquisition. Release before
+            # parking so another Process job can use this photo.
+            if (runner.pause_requested(job_id)
+                    or runner.cancellation_requested(job_id)):
+                photo_mask_lock.release()
+                continue
+            return photo_mask_lock
+        return None
+
+    def _extract_locked_photo(self, item):
+        """Mask one photo under its lock.
+
+        Returns False when the photo is finished without the loop's
+        trailing progress event (skipped, unreadable, or a cache hit,
+        which pushes its own).
+        """
+        deps = self.deps
+        photo = item.photo
+        if not self._refresh_primary(item):
+            self.skipped += 1
+            return False
+        if self._reuse_cached_mask(item):
+            return False
+
+        # Load working-resolution proxy
+        proxy = deps.render_proxy(
+            item.image_path, longest_edge=self.proxy_longest_edge,
+        )
+        if proxy is None:
+            self.unreadable += 1
+            return False
+
+        # Parse detection box
+        det_box = photo["detection_box"]
+        if isinstance(det_box, str):
+            det_box = json.loads(det_box)
+
+        # Generate mask via SAM2
+        mask = deps.generate_mask(proxy, det_box, variant=self.sam2_variant)
+        if mask is None:
+            self.skipped += 1
+            return False
+
+        # Compute crop completeness + all quality features
+        completeness = deps.crop_completeness(mask)
+        features = deps.compute_all_quality_features(proxy, mask)
+
+        subj_emb_blob, global_emb_blob = self._embed(proxy, mask)
+        self._store_mask(
+            item, mask, completeness, features, subj_emb_blob, global_emb_blob,
+        )
+        self.masked += 1
+        return True
+
+    def _refresh_primary(self, item):
+        """Re-read the primary detection; False when the photo has none now."""
+        thread_db = self.thread_db
+        photo_id = item.photo_id
+        photo = item.photo
+        # Sync the primary before deciding whether a cached
+        # mask still applies. A workspace confidence-floor
+        # change (or another workspace sharing this photo
+        # writing photo_subject_state with a different floor)
+        # can promote a new primary since this job was queued;
+        # sync_primary clears mask_path, active_mask_variant,
+        # dino_subject_embedding, and eye_*/eye_kp_fingerprint
+        # when the primary detection actually changed, so the
+        # subsequent eye stage recomputes for the newly
+        # published subject instead of retaining the previous
+        # subject's eye focus (Codex r4056563009).
+        self.deps.sync_primary(
+            thread_db, photo_id, min_conf=self.min_detector_conf,
+        )
+        commit_with_retry(thread_db.conn)
+        # A user can change primary after this job was queued.
+        current = [d for d in thread_db.get_detections(photo_id, min_conf=self.min_detector_conf)
+                   if d["detector_model"] != "full-image"]
+        if not current:
+            return False
+        selected = current[0]
+        photo["detector_model"] = selected["detector_model"]
+        photo["prompt"] = tuple(selected["box_" + k] for k in "xywh")
+        photo["detection_box"] = {k: selected["box_" + k] for k in "xywh"}
+        return True
+
+    def _reuse_cached_mask(self, item):
+        """Count a still-valid cached mask as masked; True on a cache hit.
+
+        Cache hit: photo_masks already has a row for
+        (photo, configured variant) AND its stored prompt
+        + detector still match the current primary
+        detection AND the file is on disk AND the photos row
+        is already fully consistent for this (sam, dino)
+        pair. A subject A→B→A round-trip clears
+        dino_subject_embedding via sync_primary while the
+        matching photo_masks row for A remains cached; a
+        bare cache-hit shortcut would then re-activate the
+        mask and skip DINO, leaving dino_subject_embedding
+        null even though the job reported the photo
+        processed. Mirror the Process pipeline's
+        active_mask_variant/dino_embedding_variant guard
+        (Codex r4056402007).
+        """
+        thread_db = self.thread_db
+        photo = item.photo
+        existing = item.existing = thread_db.get_photo_mask(
+            item.photo_id, self.sam2_variant,
+        )
+        if existing is None:
+            return False
+        cached_prompt = (
+            existing["prompt_x"], existing["prompt_y"],
+            existing["prompt_w"], existing["prompt_h"],
+        )
+        if not (existing["detector_model"]
+                == photo["detector_model"]
+                and cached_prompt == photo["prompt"]
+                and existing["path"]
+                and os.path.isfile(existing["path"])):
+            return False
+        state = thread_db.conn.execute(
+            "SELECT active_mask_variant, "
+            "dino_embedding_variant, quality_input_recipe FROM photos "
+            "WHERE id = ?",
+            (item.photo_id,),
+        ).fetchone()
+        if (state is not None
+                and state["active_mask_variant"]
+                == self.sam2_variant
+                and state["dino_embedding_variant"]
+                == self.dinov2_variant
+                and state["quality_input_recipe"] is None):
+            self.masked += 1
+            self._push_progress(item.index, photo["filename"])
+            return True
+        # Denormalised subject state is stale: fall
+        # through to the full recompute below, which
+        # writes set_active_mask_variant +
+        # update_photo_embeddings atomically.
+        return False
+
+    def _embed(self, proxy, mask):
+        """Return the (subject, global) DINOv2 embedding blobs.
+
+        Compute DINOv2 embeddings — one batched call when both
+        subject and global are needed, since DINOv2 is CPU-only
+        for external-data ONNX exports and per-call overhead is
+        the bottleneck.
+        """
+        deps = self.deps
+        subject_crop = deps.crop_subject(proxy, mask, margin=0.15)
+        if subject_crop is not None:
+            embs = deps.embed_batch(
+                [subject_crop, proxy], variant=self.dinov2_variant,
+            )
+            subj_emb_blob = deps.embedding_to_blob(embs[0])
+            global_emb_blob = deps.embedding_to_blob(embs[1])
+        else:
+            subj_emb_blob = None
+            global_emb_blob = deps.embedding_to_blob(
+                deps.embed(proxy, variant=self.dinov2_variant),
+            )
+        return subj_emb_blob, global_emb_blob
+
+    def _store_mask(
+        self, item, mask, completeness, features, subj_emb_blob,
+        global_emb_blob,
+    ):
+        """Stage the mask file, write its rows in one commit, then publish it."""
+        deps = self.deps
+        thread_db = self.thread_db
+        photo_id = item.photo_id
+        photo = item.photo
+        existing = item.existing
+        item.mask_file_stage = deps.StagedMaskFile.create(
+            mask,
+            self.masks_dir,
+            photo_id,
+            self.sam2_variant,
+            deps.save_mask,
+            previous_path=(
+                existing["path"] if existing else None
+            ),
+        )
+        mask_path = item.mask_file_stage.final_path
+
+        # Per-mask features: pop them out of `features` so
+        # they land on the photo_masks row and not on the
+        # photos row directly. set_active_mask_variant
+        # denormalizes them back into photos for downstream
+        # readers.
+        mask_subject_tenengrad = features.pop(
+            "subject_tenengrad", None,
+        )
+        mask_bg_tenengrad = features.pop("bg_tenengrad", None)
+        # Mask-derived subject_size: fraction of frame
+        # covered by the boolean mask.
+        total_pixels = float(mask.size)
+        if total_pixels > 0:
+            mask_subject_size = float(
+                deps.np.count_nonzero(mask) / total_pixels
+            )
+        else:
+            mask_subject_size = None
+
+        thread_db.upsert_photo_mask(
+            photo_id=photo_id,
+            variant=self.sam2_variant,
+            path=mask_path,
+            detector_model=photo["detector_model"],
+            prompt_x=photo["prompt"][0],
+            prompt_y=photo["prompt"][1],
+            prompt_w=photo["prompt"][2],
+            prompt_h=photo["prompt"][3],
+            subject_size=mask_subject_size,
+            subject_tenengrad=mask_subject_tenengrad,
+            bg_tenengrad=mask_bg_tenengrad,
+            crop_complete=completeness,
+            quality_input_recipe=None,
+            subject_clip_high=features.pop("subject_clip_high", None),
+            subject_clip_low=features.pop("subject_clip_low", None),
+            subject_y_median=features.pop("subject_y_median", None),
+            bg_separation=features.pop("bg_separation", None),
+            phash_crop=features.pop("phash_crop", None),
+            noise_estimate=features.pop("noise_estimate", None),
+            _commit=False,
+        )
+        thread_db.set_active_mask_variant(
+            photo_id, self.sam2_variant, _commit=False,
+        )
+        # Remaining (non-mask) per-photo features still land
+        # on the photos row. mask_path / crop_complete /
+        # subject_tenengrad / bg_tenengrad / subject_size
+        # flow via set_active_mask_variant above and are
+        # intentionally NOT passed here.
+        if features:
+            thread_db.update_photo_pipeline_features(
+                photo_id, **features, _commit=False,
+            )
+        thread_db.update_photo_embeddings(
+            photo_id,
+            dino_subject_embedding=subj_emb_blob,
+            dino_global_embedding=global_emb_blob,
+            variant=self.dinov2_variant,
+            _commit=False,
+        )
+        item.mask_file_stage.install()
+        commit_with_retry(thread_db.conn)
+        item.mask_file_stage.finish()
+        item.mask_file_stage = None
+
+    def _push_progress(self, i, current_file):
+        job = self.job
+        self.ctx.runner.push_event(
+            job["id"],
+            "progress",
+            {
+                "current": i + 1,
+                "total": self.total,
+                "current_file": current_file,
+                "rate": round(
+                    (i + 1)
+                    / max(time.time() - job["_start_time"], 0.01),
+                    1,
+                ),
+                "phase": "Extracting features (SAM2 + DINOv2)",
+            },
+        )
+
+    def _result(self):
+        # Opt into JobRunner's ok/errors convention when photos went
+        # unmasked. Styling the card honestly isn't enough: the Jobs
+        # page, job history, API clients and the completion event all
+        # read the job status, and "completed" there tells the user their
+        # library was processed when some of it was never opened
+        # (Codex #1392).
+        unreadable, failed, total = self.unreadable, self.failed, self.total
+        job_errors = []
+        if unreadable:
+            job_errors.append(
+                f"{unreadable} of {total} photos could not be read, so "
+                f"they have no mask and Process Review rejects them as "
+                f"`no_subject_mask`. Reconnect the source and run Extract "
+                f"again."
+            )
+        if failed:
+            job_errors.append(
+                f"{failed} of {total} photos failed mask extraction"
+            )
+        return {"masked": self.masked, "skipped": self.skipped,
+                "failed": failed, "unreadable": unreadable, "total": total,
+                "ok": not job_errors, "errors": job_errors}
