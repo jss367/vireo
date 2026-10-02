@@ -3297,7 +3297,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
     # Both bail-outs below return the same counts shape as a completed
     # scan (all zeros) rather than None, so callers can total up
     # ``indexed`` across roots without special-casing the roots that
-    # never ran. See the summary block at the end of this function.
+    # never ran. See the summary block in ``_ScanRun._log_summary``.
     if is_excluded_scan_path(root_path):
         log.info(
             "Skipping other-app data bundle as scan root: %s", root_path,
@@ -3308,19 +3308,12 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
     original_root = os.path.abspath(root_path)
     root_path = Path(catalog_folder_path(db, original_root))
     if str(root_path) != original_root:
-        def rebase_scan_path(path):
-            path = os.path.abspath(path)
-            try:
-                if os.path.commonpath([original_root, path]) == original_root:
-                    return str(root_path / os.path.relpath(path, original_root))
-            except ValueError:
-                pass
-            return path
-
-        restrict_dirs = None if restrict_dirs is None else [rebase_scan_path(p) for p in restrict_dirs]
-        restrict_files = None if restrict_files is None else [rebase_scan_path(p) for p in restrict_files]
-        skip_paths = None if skip_paths is None else {rebase_scan_path(p) for p in skip_paths}
-        discovered_files = None if discovered_files is None else [Path(rebase_scan_path(p)) for p in discovered_files]
+        restrict_dirs, restrict_files, skip_paths, discovered_files = (
+            _rebase_scan_inputs(
+                original_root, root_path,
+                restrict_dirs, restrict_files, skip_paths, discovered_files,
+            )
+        )
     # A frozen manifest may be any iterable, including a generator. Consume
     # it exactly once so the missing-root guard can distinguish an empty
     # manifest from promised work without exhausting the later work queue.
@@ -3346,8 +3339,142 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         log.warning("Root path does not exist or is not a directory: %s", root)
         return counts
 
-    def _check_cancelled():
-        if cancel_check is None:
+    _ScanRun(
+        root, root_path, db, counts, frozen_files,
+        catalog_folder_path=catalog_folder_path,
+        catalog_folder_aliases=catalog_folder_aliases,
+        progress_callback=progress_callback,
+        incremental=incremental,
+        extract_full_metadata=extract_full_metadata,
+        photo_callback=photo_callback,
+        skip_paths=skip_paths,
+        status_callback=status_callback,
+        status_supports_phase=status_supports_phase,
+        recursive=recursive,
+        restrict_dirs=restrict_dirs,
+        restrict_files=restrict_files,
+        vireo_dir=vireo_dir,
+        thumb_cache_dir=thumb_cache_dir,
+        permission_error_callback=permission_error_callback,
+        cancel_check=cancel_check,
+        pause_check=pause_check,
+        cancel_only_check=cancel_only_check,
+        skip_working_copies=skip_working_copies,
+        repair_missing_metadata=repair_missing_metadata,
+        register_restrict_dirs_as_roots=register_restrict_dirs_as_roots,
+        allow_photo_inserts=allow_photo_inserts,
+    ).run()
+    return counts
+
+
+def _rebase_scan_inputs(original_root, root_path, restrict_dirs,
+                        restrict_files, skip_paths, discovered_files):
+    """Re-express the caller's paths under the cataloged root spelling."""
+    def rebase_scan_path(path):
+        path = os.path.abspath(path)
+        try:
+            if os.path.commonpath([original_root, path]) == original_root:
+                return str(root_path / os.path.relpath(path, original_root))
+        except ValueError:
+            pass
+        return path
+
+    restrict_dirs = None if restrict_dirs is None else [rebase_scan_path(p) for p in restrict_dirs]
+    restrict_files = None if restrict_files is None else [rebase_scan_path(p) for p in restrict_files]
+    skip_paths = None if skip_paths is None else {rebase_scan_path(p) for p in skip_paths}
+    discovered_files = None if discovered_files is None else [Path(rebase_scan_path(p)) for p in discovered_files]
+    return restrict_dirs, restrict_files, skip_paths, discovered_files
+
+
+@dataclass
+class _FileMetadata:
+    """What the main loop reads from one file's ExifTool payload."""
+
+    file_meta: dict
+    width: int | None
+    height: int | None
+    timestamp: str | None
+    burst_id: str | None
+    latitude: float | None
+    longitude: float | None
+
+
+@dataclass
+class _IndexedFile:
+    """One hashed file the main loop is cataloging."""
+
+    image_path: Path
+    folder_id: int
+    file_size: int
+    file_mtime: float
+    file_hash: str | None
+    phash: str | None
+    xmp_path: Path
+    xmp_mtime: float | None
+    meta: _FileMetadata
+    row_already_existed: bool
+    prev_file_hash: str | None
+
+
+class _ScanRun:
+    """One ``scan()`` past its early exits.
+
+    Walks the phases in order — discovery, the incremental pre-pass,
+    batched metadata extraction, parallel hashing feeding the per-file
+    catalog loop, then companion pairing and working copies — sharing the
+    work queue, folder cache and progress tally between them.
+    """
+
+    def __init__(
+        self, root, root_path, db, counts, frozen_files, *,
+        catalog_folder_path, catalog_folder_aliases,
+        progress_callback, incremental, extract_full_metadata,
+        photo_callback, skip_paths, status_callback, status_supports_phase,
+        recursive, restrict_dirs, restrict_files, vireo_dir, thumb_cache_dir,
+        permission_error_callback, cancel_check, pause_check,
+        cancel_only_check, skip_working_copies, repair_missing_metadata,
+        register_restrict_dirs_as_roots, allow_photo_inserts,
+    ):
+        self.root = root
+        self.root_path = root_path
+        self.db = db
+        self.counts = counts
+        self.frozen_files = frozen_files
+        self.catalog_folder_path = catalog_folder_path
+        self.catalog_folder_aliases = catalog_folder_aliases
+        self.progress_callback = progress_callback
+        self.incremental = incremental
+        self.extract_full_metadata = extract_full_metadata
+        self.photo_callback = photo_callback
+        self.skip_paths = skip_paths
+        self.status_callback = status_callback
+        self.status_supports_phase = status_supports_phase
+        self.recursive = recursive
+        self.restrict_dirs = restrict_dirs
+        self.restrict_files = restrict_files
+        self.vireo_dir = vireo_dir
+        self.thumb_cache_dir = thumb_cache_dir
+        self.permission_error_callback = permission_error_callback
+        self.cancel_check = cancel_check
+        self.pause_check = pause_check
+        self.cancel_only_check = cancel_only_check
+        self.skip_working_copies = skip_working_copies
+        self.repair_missing_metadata = repair_missing_metadata
+        self.register_restrict_dirs_as_roots = register_restrict_dirs_as_roots
+        self.allow_photo_inserts = allow_photo_inserts
+
+    def run(self):
+        self._discover_files()
+        self._count_discovered()
+        self._load_catalog_state()
+        self.files_to_process = self._triage_files()
+        self.paths_to_extract = self._extract_metadata()
+        self._index_files()
+        self._finish_catalog()
+        self._log_summary()
+
+    def _check_cancelled(self):
+        if self.cancel_check is None:
             return
         # ``_check_cancelled`` is threaded into ``ResourceLedger.acquire``
         # through ``_claim_worker_count`` as its cancellation probe. On a
@@ -3363,31 +3490,71 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         # When there is no active wait (every non-``ledger.acquire`` call
         # site), the suspend context is a cheap no-op.
         with suspend_resource_wait_timing():
-            cancelled = cancel_check()
+            cancelled = self.cancel_check()
         if cancelled:
             raise ScanCancelled("scan cancelled")
 
-    def _emit_status(message, phase_current=None, phase_total=None, phase_label=None):
-        if not status_callback:
+    def _emit_status(self, message, phase_current=None, phase_total=None, phase_label=None):
+        if not self.status_callback:
             return
         _call_status_callback(
-            status_callback,
+            self.status_callback,
             message,
             phase_current=phase_current,
             phase_total=phase_total,
             phase_label=phase_label,
-            supports_phase=status_supports_phase,
+            supports_phase=self.status_supports_phase,
         )
 
-    # Discover all image files (incremental enumeration for progress reporting)
-    # unless the caller already froze an all-source manifest. Copy the input:
-    # scan sorts its work queue and callers may retain their source mapping.
-    log.info("Discovering files in %s ...", root)
-    _check_cancelled()
-    if frozen_files is None and status_callback:
-        _emit_status("Discovering files...")
-    excluded_frozen = 0
-    if frozen_files is not None:
+    def _skip_file(self, bucket):
+        """Dispose of a file that will not be indexed, under ``bucket``."""
+        self.processed_count += 1
+        self.counts[bucket] += 1
+        if self.progress_callback:
+            self.progress_callback(self.processed_count, self.total)
+
+    # -- discovery ---------------------------------------------------
+
+    def _discover_files(self):
+        # Discover all image files (incremental enumeration for progress reporting)
+        # unless the caller already froze an all-source manifest. Copy the input:
+        # scan sorts its work queue and callers may retain their source mapping.
+        log.info("Discovering files in %s ...", self.root)
+        self._check_cancelled()
+        if self.frozen_files is None and self.status_callback:
+            self._emit_status("Discovering files...")
+        self.excluded_frozen = 0
+        if self.frozen_files is not None:
+            self._filter_frozen_manifest()
+        else:
+            self.image_files = []
+
+        # Tracks restrict_dirs entries that survive the bundle guard, so the
+        # working-copy extraction pass below scopes its SQL query to the same
+        # set the discovery loop actually visited. Without this, a stale folder
+        # row inside an excluded bundle (carried over from before the guard)
+        # would be re-touched by ``_extract_working_copies`` reading
+        # ``folder_path/filename`` — re-tripping the macOS TCC prompt this guard
+        # exists to avoid.
+        self.effective_restrict_dirs = []
+        if self.frozen_files is not None:
+            # The manifest already applied the file filters. Retain only the
+            # directory scope used by the later working-copy extraction pass;
+            # do not enumerate those directories a second time.
+            self.effective_restrict_dirs = [
+                d for d in (self.restrict_dirs or [])
+                if not is_excluded_scan_path(Path(d))
+            ]
+        elif self.restrict_dirs is not None:
+            self._discover_restricted()
+        elif self.recursive:
+            self._discover_recursive()
+        else:
+            self._discover_flat()
+        self.image_files.sort()
+        self._check_cancelled()
+
+    def _filter_frozen_manifest(self):
         # A frozen manifest was captured before any per-source scan began, so
         # a later source can wait minutes behind earlier ones. In that window
         # a nested child dir, mount, or symlink under this source may be
@@ -3398,21 +3565,19 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         # a replacement into ``Photos Library.photoslibrary`` (or a sibling
         # excluded bundle) and re-trip the TCC prompt this guard exists to
         # avoid — or catalog files from a substituted subtree.
-        image_files = []
-        for path in frozen_files:
+        self.image_files = []
+        for path in self.frozen_files:
             candidate = Path(path)
             if is_excluded_scan_path(candidate):
-                excluded_frozen += 1
+                self.excluded_frozen += 1
                 continue
-            image_files.append(candidate)
-        if excluded_frozen:
+            self.image_files.append(candidate)
+        if self.excluded_frozen:
             log.warning(
                 "Frozen manifest for %s: %d path(s) now resolve into an "
                 "excluded app-managed bundle and were skipped",
-                root, excluded_frozen,
+                self.root, self.excluded_frozen,
             )
-    else:
-        image_files = []
 
     # os.walk + onerror, not Path.rglob: rglob silently skips any
     # subdir that raises during enumeration, so a TCC-denied folder
@@ -3433,42 +3598,28 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
     # repaired. Callers that want to continue past denials must pass
     # the callback to acknowledge they've taken responsibility for
     # streaming the denial somewhere actionable.
-    def _on_walk_error(err):
+    def _on_walk_error(self, err):
         if err.errno in (errno.EPERM, errno.EACCES):
-            denied = err.filename or str(root_path)
+            denied = err.filename or str(self.root_path)
             log.warning(
                 "Permission denied enumerating %s — skipping. "
                 "On macOS this usually means TCC (Privacy & Security "
                 "→ Files and Folders / Removable Volumes) needs to "
                 "grant Vireo access.", denied,
             )
-            if permission_error_callback is not None:
-                permission_error_callback(denied)
+            if self.permission_error_callback is not None:
+                self.permission_error_callback(denied)
                 return
             raise err
         else:
             log.warning("os.walk error at %s: %s", err.filename, err)
 
-    # Tracks restrict_dirs entries that survive the bundle guard, so the
-    # working-copy extraction pass below scopes its SQL query to the same
-    # set the discovery loop actually visited. Without this, a stale folder
-    # row inside an excluded bundle (carried over from before the guard)
-    # would be re-touched by ``_extract_working_copies`` reading
-    # ``folder_path/filename`` — re-tripping the macOS TCC prompt this guard
-    # exists to avoid.
-    effective_restrict_dirs = []
-    if frozen_files is not None:
-        # The manifest already applied the file filters. Retain only the
-        # directory scope used by the later working-copy extraction pass;
-        # do not enumerate those directories a second time.
-        effective_restrict_dirs = [
-            d for d in (restrict_dirs or [])
-            if not is_excluded_scan_path(Path(d))
-        ]
-    elif restrict_dirs is not None:
+    def _discover_restricted(self):
         # Only enumerate files in the specified directories (non-recursive).
         # root is still used as the folder hierarchy root for _ensure_folder.
-        restrict_files_set = set(restrict_files) if restrict_files is not None else None
+        restrict_files_set = set(self.restrict_files) if self.restrict_files is not None else None
+        skip_paths = self.skip_paths
+        image_files = self.image_files
         # Heartbeat counter, same interval as the recursive branch below.
         # A restricted dir is not necessarily small — the import job's
         # duplicate-folder link scan points this at archive day-folders
@@ -3477,8 +3628,8 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         # has nothing to show between "Discovering files..." and the
         # finished count.
         checked = 0
-        for d in restrict_dirs:
-            _check_cancelled()
+        for d in self.restrict_dirs:
+            self._check_cancelled()
             dp = Path(d)
             # The outer ``is_excluded_scan_path(root_path)`` guard above only
             # covers ``root``. restrict_dirs entries can independently point
@@ -3494,7 +3645,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                     "Skipping other-app data bundle in restrict_dirs: %s", dp,
                 )
                 continue
-            effective_restrict_dirs.append(d)
+            self.effective_restrict_dirs.append(d)
             if dp.is_dir():
                 # safe_iter_dir mirrors iterdir() but drops excluded
                 # bundle children (direct ``Photos Library.photoslibrary``
@@ -3518,11 +3669,11 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                 # heartbeat below until after that wait — the same silent
                 # hang the heartbeat exists to break (PR #1385 Codex /
                 # CodeRabbit review).
-                for f in safe_iter_dir(str(dp), onerror=_on_walk_error):
-                    _check_cancelled()
+                for f in safe_iter_dir(str(dp), onerror=self._on_walk_error):
+                    self._check_cancelled()
                     checked += 1
-                    if checked % 500 == 0 and status_callback:
-                        _emit_status(
+                    if checked % 500 == 0 and self.status_callback:
+                        self._emit_status(
                             f"Discovering files... ({len(image_files)} found)"
                         )
                     # Filter restricted imports before statting a sibling:
@@ -3535,131 +3686,168 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                                  or str(f) in restrict_files_set)
                             and f.is_file()):
                         image_files.append(f)
-    else:
-        if recursive:
-            checked = 0
-            # safe_scan_walk replaces os.walk + prune_scan_dirs. It excludes
-            # other-app data bundles (e.g. "Photos Library.photoslibrary"
-            # sitting in ~/Pictures) without ever stat-following a symlink
-            # to one — os.walk's classification call follows symlinks and
-            # would re-trip the macOS "access data from other apps" TCC
-            # prompt for a child like ``LibraryAlias -> Photos
-            # Library.photoslibrary`` before prune_scan_dirs could reject it.
-            # Pass cancel_check into safe_scan_walk so it polls between
-            # scandir entries as well: a single very large directory (a
-            # media dump with 1M+ files) can otherwise consume the whole
-            # ``os.scandir`` loop before yielding, leaving the per-yield
-            # ``_check_cancelled()`` below unreachable until the walker
-            # finishes filling its dirs/nondirs lists.
-            for dirpath, _dirnames, filenames in safe_scan_walk(
-                str(root_path), onerror=_on_walk_error, cancel_check=cancel_check,
-            ):
-                _check_cancelled()
-                for name in filenames:
-                    checked += 1
-                    if checked % 100 == 0:
-                        _check_cancelled()
-                    if checked % 500 == 0 and status_callback:
-                        _emit_status(
-                            f"Discovering files... ({len(image_files)} found)"
-                        )
-                    ext = os.path.splitext(name)[1].lower()
-                    if (ext in SUPPORTED_EXTENSIONS
-                            and not name.startswith(".")):
-                        full = os.path.join(dirpath, name)
-                        if skip_paths is not None and full in skip_paths:
-                            continue
-                        # os.walk includes broken symlinks in `filenames`,
-                        # but the pre-pass below calls image_path.stat()
-                        # which would raise FileNotFoundError and abort
-                        # the whole scan. The previous Path.rglob path
-                        # filtered these via is_file(); preserve that.
-                        # os.path.isfile follows symlinks and returns
-                        # False (not raise) for dangling targets.
-                        if not os.path.isfile(full):
-                            continue
-                        image_files.append(Path(full))
-        else:
-            # safe_iter_dir mirrors iterdir() but drops excluded bundle
-            # children before the is_file() filter below would stat
-            # them. A normal root like ~/Pictures can hold ``Photos
-            # Library.photoslibrary`` (or a symlink to one) as a direct
-            # child; a bare iterdir + is_file() would stat that bundle
-            # and re-trip the macOS "access data from other apps" TCC
-            # prompt this guard exists to avoid, even though the
-            # extension filter would have rejected it afterwards.
-            # Permission denials route through _on_walk_error (callback
-            # → empty entries, no callback → re-raise) the same way the
-            # restrict_dirs branch above does.
-            entries = list(safe_iter_dir(str(root_path), onerror=_on_walk_error))
-            for checked, f in enumerate(entries, 1):
+
+    def _discover_recursive(self):
+        skip_paths = self.skip_paths
+        image_files = self.image_files
+        checked = 0
+        # safe_scan_walk replaces os.walk + prune_scan_dirs. It excludes
+        # other-app data bundles (e.g. "Photos Library.photoslibrary"
+        # sitting in ~/Pictures) without ever stat-following a symlink
+        # to one — os.walk's classification call follows symlinks and
+        # would re-trip the macOS "access data from other apps" TCC
+        # prompt for a child like ``LibraryAlias -> Photos
+        # Library.photoslibrary`` before prune_scan_dirs could reject it.
+        # Pass cancel_check into safe_scan_walk so it polls between
+        # scandir entries as well: a single very large directory (a
+        # media dump with 1M+ files) can otherwise consume the whole
+        # ``os.scandir`` loop before yielding, leaving the per-yield
+        # ``_check_cancelled()`` below unreachable until the walker
+        # finishes filling its dirs/nondirs lists.
+        for dirpath, _dirnames, filenames in safe_scan_walk(
+            str(self.root_path), onerror=self._on_walk_error,
+            cancel_check=self.cancel_check,
+        ):
+            self._check_cancelled()
+            for name in filenames:
+                checked += 1
                 if checked % 100 == 0:
-                    _check_cancelled()
-                if checked % 500 == 0 and status_callback:
-                    _emit_status(
+                    self._check_cancelled()
+                if checked % 500 == 0 and self.status_callback:
+                    self._emit_status(
                         f"Discovering files... ({len(image_files)} found)"
                     )
-                if (f.is_file()
-                        and f.suffix.lower() in SUPPORTED_EXTENSIONS
-                        and not f.name.startswith(".")
-                        and (skip_paths is None or str(f) not in skip_paths)):
-                    image_files.append(f)
-    image_files.sort()
-    _check_cancelled()
+                ext = os.path.splitext(name)[1].lower()
+                if (ext in SUPPORTED_EXTENSIONS
+                        and not name.startswith(".")):
+                    full = os.path.join(dirpath, name)
+                    if skip_paths is not None and full in skip_paths:
+                        continue
+                    # os.walk includes broken symlinks in `filenames`,
+                    # but the pre-pass below calls image_path.stat()
+                    # which would raise FileNotFoundError and abort
+                    # the whole scan. The previous Path.rglob path
+                    # filtered these via is_file(); preserve that.
+                    # os.path.isfile follows symlinks and returns
+                    # False (not raise) for dangling targets.
+                    if not os.path.isfile(full):
+                        continue
+                    image_files.append(Path(full))
 
-    # Excluded frozen paths were part of the caller's promised manifest.
-    # Account for them as vanished work so progress still reaches that
-    # frozen denominator and import-in-place surfaces a partial-source
-    # failure instead of silently succeeding on a smaller queue.
-    total = len(image_files) + excluded_frozen
-    counts["discovered"] = total
-    counts["vanished"] = excluded_frozen
-    log.info("Found %d images in %s", total, root)
-    if progress_callback:
-        progress_callback(excluded_frozen, total)
+    def _discover_flat(self):
+        skip_paths = self.skip_paths
+        image_files = self.image_files
+        # safe_iter_dir mirrors iterdir() but drops excluded bundle
+        # children before the is_file() filter below would stat
+        # them. A normal root like ~/Pictures can hold ``Photos
+        # Library.photoslibrary`` (or a symlink to one) as a direct
+        # child; a bare iterdir + is_file() would stat that bundle
+        # and re-trip the macOS "access data from other apps" TCC
+        # prompt this guard exists to avoid, even though the
+        # extension filter would have rejected it afterwards.
+        # Permission denials route through _on_walk_error (callback
+        # → empty entries, no callback → re-raise) the same way the
+        # restrict_dirs branch above does.
+        entries = list(safe_iter_dir(str(self.root_path), onerror=self._on_walk_error))
+        for checked, f in enumerate(entries, 1):
+            if checked % 100 == 0:
+                self._check_cancelled()
+            if checked % 500 == 0 and self.status_callback:
+                self._emit_status(
+                    f"Discovering files... ({len(image_files)} found)"
+                )
+            if (f.is_file()
+                    and f.suffix.lower() in SUPPORTED_EXTENSIONS
+                    and not f.name.startswith(".")
+                    and (skip_paths is None or str(f) not in skip_paths)):
+                image_files.append(f)
 
-    existing_by_path = (
-        _incremental_photo_index(db, image_files) if incremental else {}
-    )
+    def _count_discovered(self):
+        # Excluded frozen paths were part of the caller's promised manifest.
+        # Account for them as vanished work so progress still reaches that
+        # frozen denominator and import-in-place surfaces a partial-source
+        # failure instead of silently succeeding on a smaller queue.
+        self.total = len(self.image_files) + self.excluded_frozen
+        self.counts["discovered"] = self.total
+        self.counts["vanished"] = self.excluded_frozen
+        log.info("Found %d images in %s", self.total, self.root)
+        if self.progress_callback:
+            self.progress_callback(self.excluded_frozen, self.total)
 
-    # Build folder cache: path -> folder_id
-    folder_cache = {}
-    folder_aliases = catalog_folder_aliases(db)
+    # -- catalog state -----------------------------------------------
 
-    # When the scan is restricted to specific subfolders, those subfolders —
-    # not the broad scan root — are the user-facing workspace roots. A
-    # templated copy-import lands files in ``<destination>/<template>/...``
-    # dirs and passes those leaf dirs as ``restrict_dirs`` while keeping the
-    # destination base as ``root`` only for parent-chain creation. Promoting
-    # the base to a workspace root would make the new-images walk treat every
-    # un-imported sibling under it as "new" (e.g. a whole archive of past
-    # shoots sharing the destination). Mark the restricted dirs as roots
-    # instead; the base stays linked but is_root=0. See
-    # ``new_images.mapped_roots``. ``effective_restrict_dirs`` (bundle-filtered)
-    # is the set actually enumerated, so root marking matches what was scanned.
-    _effective_restrict_paths = None
-    _restrict_root_paths = None
-    if restrict_dirs is not None:
-        _effective_restrict_paths = {
-            os.path.normpath(str(d)) for d in effective_restrict_dirs
-        }
-        _restrict_root_paths = (
-            _effective_restrict_paths
-            if register_restrict_dirs_as_roots else set()
+    def _load_catalog_state(self):
+        db = self.db
+        self.existing_by_path = (
+            _incremental_photo_index(db, self.image_files)
+            if self.incremental else {}
         )
 
-    def _ensure_folder(folder_path):
+        # Build folder cache: path -> folder_id
+        self.folder_cache = {}
+        self.folder_aliases = self.catalog_folder_aliases(db)
+
+        # When the scan is restricted to specific subfolders, those subfolders —
+        # not the broad scan root — are the user-facing workspace roots. A
+        # templated copy-import lands files in ``<destination>/<template>/...``
+        # dirs and passes those leaf dirs as ``restrict_dirs`` while keeping the
+        # destination base as ``root`` only for parent-chain creation. Promoting
+        # the base to a workspace root would make the new-images walk treat every
+        # un-imported sibling under it as "new" (e.g. a whole archive of past
+        # shoots sharing the destination). Mark the restricted dirs as roots
+        # instead; the base stays linked but is_root=0. See
+        # ``new_images.mapped_roots``. ``effective_restrict_dirs`` (bundle-filtered)
+        # is the set actually enumerated, so root marking matches what was scanned.
+        self._effective_restrict_paths = None
+        self._restrict_root_paths = None
+        if self.restrict_dirs is not None:
+            self._effective_restrict_paths = {
+                os.path.normpath(str(d)) for d in self.effective_restrict_dirs
+            }
+            self._restrict_root_paths = (
+                self._effective_restrict_paths
+                if self.register_restrict_dirs_as_roots else set()
+            )
+
+        # Track folders whose scan touched them (so we can flag them 'partial'
+        # if anything between the pre-pass and scan completion dies midway) and
+        # the outer scan scope as a fallback. The scope matters when
+        # ``touched_folder_ids`` is empty — e.g. a pre-pass XMP commit that
+        # aborts before the main loop has added any folder, or a successful
+        # no-op incremental scan that processes zero files.
+        self.touched_folder_ids = set()
+        # Photo IDs whose derived caches were invalidated this scan. Collected
+        # so the untracked-preview sweep can run once as a batch instead of
+        # per-photo (avoids O(N × M) directory walks on large rescans).
+        self.invalidated_photo_ids: set[int] = set()
+        # Photo IDs that already own cached derivative files, for the
+        # recycled-rowid check on insert. Snapshotted once (lazily, on the
+        # first insert) for the same batching reason as the sweep above.
+        self.recycled_id_index = RecycledIdIndex(
+            self.thumb_cache_dir or (
+                os.path.join(self.vireo_dir, "thumbnails")
+                if self.vireo_dir else ""
+            ),
+            vireo_dir=self.vireo_dir,
+        )
+        self.scoped_paths = {str(self.root_path)}
+        if self.restrict_dirs is not None:
+            self.scoped_paths.update(str(d) for d in self.restrict_dirs)
+
+    def _ensure_folder(self, folder_path):
         """Ensure a folder and all its parents exist in the DB. Returns folder_id."""
+        db = self.db
+        root_path = self.root_path
         folder_str = str(folder_path)
-        if folder_str in folder_cache:
-            return folder_cache[folder_str]
+        if folder_str in self.folder_cache:
+            return self.folder_cache[folder_str]
 
         parent_id = None
         if folder_path != root_path:
-            parent_id = _ensure_folder(folder_path.parent)
+            parent_id = self._ensure_folder(folder_path.parent)
 
-        if _restrict_root_paths is not None:
-            is_ws_root = os.path.normpath(folder_str) in _restrict_root_paths
+        if self._restrict_root_paths is not None:
+            is_ws_root = os.path.normpath(folder_str) in self._restrict_root_paths
         else:
             is_ws_root = (folder_path == root_path)
 
@@ -3675,16 +3863,18 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         # link. See PR #1107 review (line 1186).
         normalized_folder = os.path.normpath(folder_str)
         is_restrict_target = (
-            _effective_restrict_paths is not None
-            and normalized_folder in _effective_restrict_paths
+            self._effective_restrict_paths is not None
+            and normalized_folder in self._effective_restrict_paths
         )
         link_to_ws = (
-            _effective_restrict_paths is None
-            or (register_restrict_dirs_as_roots and is_restrict_target)
+            self._effective_restrict_paths is None
+            or (self.register_restrict_dirs_as_roots and is_restrict_target)
         )
 
         folder_id = db.add_folder(
-            path=catalog_folder_path(db, folder_str, aliases=folder_aliases),
+            path=self.catalog_folder_path(
+                db, folder_str, aliases=self.folder_aliases,
+            ),
             name=folder_path.name,
             parent_id=parent_id,
             workspace_root=is_ws_root,
@@ -3692,7 +3882,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         )
         if (
             is_restrict_target
-            and not register_restrict_dirs_as_roots
+            and not self.register_restrict_dirs_as_roots
             and db._active_workspace_id is not None
         ):
             # Snapshot imports and metadata repair select exact leaf folders
@@ -3702,34 +3892,10 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             db.add_workspace_folder_exact(
                 db._active_workspace_id, folder_id, is_root=False,
             )
-        folder_cache[folder_str] = folder_id
+        self.folder_cache[folder_str] = folder_id
         return folder_id
 
-    # Track folders whose scan touched them (so we can flag them 'partial'
-    # if anything between the pre-pass and scan completion dies midway) and
-    # the outer scan scope as a fallback. The scope matters when
-    # ``touched_folder_ids`` is empty — e.g. a pre-pass XMP commit that
-    # aborts before the main loop has added any folder, or a successful
-    # no-op incremental scan that processes zero files.
-    touched_folder_ids = set()
-    # Photo IDs whose derived caches were invalidated this scan. Collected
-    # so the untracked-preview sweep can run once as a batch instead of
-    # per-photo (avoids O(N × M) directory walks on large rescans).
-    invalidated_photo_ids: set[int] = set()
-    # Photo IDs that already own cached derivative files, for the
-    # recycled-rowid check on insert. Snapshotted once (lazily, on the
-    # first insert) for the same batching reason as the sweep above.
-    recycled_id_index = RecycledIdIndex(
-        thumb_cache_dir or (
-            os.path.join(vireo_dir, "thumbnails") if vireo_dir else ""
-        ),
-        vireo_dir=vireo_dir,
-    )
-    scoped_paths = {str(root_path)}
-    if restrict_dirs is not None:
-        scoped_paths.update(str(d) for d in restrict_dirs)
-
-    def _update_folder_status(new_status, only_from_partial):
+    def _update_folder_status(self, new_status, only_from_partial):
         """Stamp folders in the scan scope with ``new_status``.
 
         Applies to every folder matched by ``scoped_paths`` (outer roots)
@@ -3738,6 +3904,9 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         already in ``'partial'`` — used on the success path so completed
         scans don't clobber ``'missing'`` or future statuses.
         """
+        db = self.db
+        scoped_paths = self.scoped_paths
+        touched_folder_ids = self.touched_folder_ids
         guard = " AND status = 'partial'" if only_from_partial else ""
         if scoped_paths:
             path_placeholders = ",".join("?" * len(scoped_paths))
@@ -3755,28 +3924,53 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             )
         commit_with_retry(db.conn)
 
-    # First pass: determine which files need full processing (for incremental mode).
-    # Handle XMP-only changes inline; collect files needing metadata extraction.
-    files_to_process = []
-    processed_count = excluded_frozen
-    # ``processed_count`` advances for every file the scan *disposes of*,
-    # including ones it deliberately skips — that is what a progress bar
-    # needs to reach 100%. It is NOT the number of photos indexed, and the
-    # two diverge exactly when something is wrong (a share that unmounts
-    # mid-scan makes every remaining file vanish). Every ``processed_count``
-    # bump below is therefore paired with a bump of exactly one bucket in
-    # ``counts``, so the summary reports what actually landed in the
-    # catalog. Classifying at each site (rather than deriving one bucket by
-    # subtraction) means a disposition added later has to state which
-    # bucket it belongs to instead of silently defaulting to "indexed" —
-    # the invariant check after the loop enforces it.
-    #
-    # The ids behind ``counts["indexed"]``. Needed because the companion
-    # pairing pass below runs against the entire photos table, so its
-    # merges must be intersected with what *this* invocation counted (see
-    # ``_pair_raw_jpeg_companions``).
-    indexed_photo_ids = set()
-    try:
+    # -- pre-pass ----------------------------------------------------
+
+    def _triage_files(self):
+        """Return the files that need full processing."""
+        # First pass: determine which files need full processing (for incremental mode).
+        # Handle XMP-only changes inline; collect files needing metadata extraction.
+        files_to_process = []
+        self.processed_count = self.excluded_frozen
+        # ``processed_count`` advances for every file the scan *disposes of*,
+        # including ones it deliberately skips — that is what a progress bar
+        # needs to reach 100%. It is NOT the number of photos indexed, and the
+        # two diverge exactly when something is wrong (a share that unmounts
+        # mid-scan makes every remaining file vanish). Every ``processed_count``
+        # bump below is therefore paired with a bump of exactly one bucket in
+        # ``counts``, so the summary reports what actually landed in the
+        # catalog. Classifying at each site (rather than deriving one bucket by
+        # subtraction) means a disposition added later has to state which
+        # bucket it belongs to instead of silently defaulting to "indexed" —
+        # the invariant check after the loop enforces it.
+        #
+        # The ids behind ``counts["indexed"]``. Needed because the companion
+        # pairing pass below runs against the entire photos table, so its
+        # merges must be intersected with what *this* invocation counted (see
+        # ``_pair_raw_jpeg_companions``).
+        self.indexed_photo_ids = set()
+        try:
+            self._register_scan_targets()
+            for image_path in self.image_files:
+                self._check_cancelled()
+                if self._needs_processing(image_path):
+                    files_to_process.append(image_path)
+        except BaseException:
+            # Pre-pass died (e.g. non-retryable DB error on an XMP commit).
+            # Route through the same partial-status path as a main-loop failure
+            # so users see the badge and can rescan.
+            try:
+                self.db.conn.rollback()
+            except Exception:
+                log.exception("Rollback after pre-pass failure also failed")
+            try:
+                self._update_folder_status("partial", only_from_partial=False)
+            except Exception:
+                log.exception("Failed to flag folders partial after pre-pass failure")
+            raise
+        return files_to_process
+
+    def _register_scan_targets(self):
         # Eagerly register the explicit scan targets so they end up linked
         # to the active workspace even when zero photos are inserted (e.g.
         # every file is in skip_paths because the photos are already in
@@ -3785,9 +3979,9 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         # workspace_folders link and the folder never became visible in
         # the active workspace. Inside the try so a DB failure here still
         # routes through the partial-status recovery path.
-        _ensure_folder(root_path)
-        if restrict_dirs is not None:
-            for d in restrict_dirs:
+        self._ensure_folder(self.root_path)
+        if self.restrict_dirs is not None:
+            for d in self.restrict_dirs:
                 dp = Path(d)
                 # Same bundle guard as the discovery loop above — never
                 # register or stat a path inside an other-app data bundle,
@@ -3795,173 +3989,163 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                 if is_excluded_scan_path(dp):
                     continue
                 if dp.is_dir():
-                    _ensure_folder(dp)
+                    self._ensure_folder(dp)
 
-        for image_path in image_files:
-            _check_cancelled()
-            try:
-                stat = image_path.stat()
-            except OSError:
-                # File deleted/renamed between discovery and this pass —
-                # skip it instead of aborting the whole scan (the discovery
-                # walk has the same guard for broken symlinks).
-                log.info("File vanished during scan, skipping: %s", image_path)
-                processed_count += 1
-                counts["vanished"] += 1
-                if progress_callback:
-                    progress_callback(processed_count, total)
-                continue
-            file_mtime = stat.st_mtime
-            xmp_path = image_path.with_suffix(".xmp")
-            try:
-                xmp_mtime = xmp_path.stat().st_mtime
-            except OSError:
-                # Covers both "no sidecar" and a sidecar deleted between
-                # exists() and stat() — same outcome either way.
-                xmp_mtime = None
-
-            if incremental:
-                full_path_str = str(image_path)
-                existing = existing_by_path.get(full_path_str)
-                if existing:
-                    # Copies/restores can preserve mtime even when the
-                    # original is replaced. Check size from the same stat
-                    # before reusing metadata, hashes, and derived caches.
-                    file_unchanged = (
-                        existing["file_mtime"] == file_mtime
-                        and existing["file_size"] == stat.st_size
-                    )
-                    xmp_unchanged = existing["xmp_mtime"] == xmp_mtime
-                    # Re-process if ExifTool never ran for this photo (both
-                    # timestamp and exif_data are NULL). Photos with genuinely
-                    # missing timestamps (screenshots, exports) will have
-                    # exif_data set after one extraction attempt.
-                    # Also flag rows where a RAW file has absurdly small
-                    # dimensions (<1000px) — that's the embedded JPEG thumb
-                    # leaking through when ExifTool's File group was missing
-                    # on the original scan.
-                    dims_suspect = (
-                        existing["extension"] in RAW_EXTENSIONS
-                        and existing["width"] is not None
-                        and existing["width"] < 1000
-                    )
-                    metadata_missing = (
-                        not existing["exif_extracted"]
-                        and (
-                            repair_missing_metadata
-                            or existing["timestamp"] is None
-                            or dims_suspect
-                        )
-                    ) or existing["summary_needs_extract"]
-                    existing_file_hash = existing["file_hash"]
-                    hash_needs_repair = (
-                        existing["file_size"] == 0
-                        and existing_file_hash == EMPTY_FILE_SHA256
-                    ) or (
-                        stat.st_size > 0 and existing_file_hash is None
-                    )
-
-                    if (
-                        file_unchanged and xmp_unchanged
-                        and not metadata_missing
-                        and not hash_needs_repair
-                    ):
-                        processed_count += 1
-                        counts["indexed"] += 1
-                        indexed_photo_ids.add(existing["id"])
-                        if photo_callback:
-                            photo_callback(existing["id"], full_path_str)
-                        if progress_callback:
-                            progress_callback(processed_count, total)
-                        continue
-
-                    # XMP changed: re-import keywords
-                    if not xmp_unchanged and xmp_mtime is not None:
-                        _import_keywords_for_photo(db, existing["id"], str(xmp_path))
-                        db.conn.execute(
-                            "UPDATE photos SET xmp_mtime = ? WHERE id = ?",
-                            (xmp_mtime, existing["id"]),
-                        )
-                        commit_with_retry(db.conn)
-                    elif not xmp_unchanged:
-                        # Sidecar deleted: clear the stored mtime so the row
-                        # converges instead of looking "XMP changed" on every
-                        # later scan (this skip path never reaches the main
-                        # loop, so nothing else would ever reset it).
-                        db.conn.execute(
-                            "UPDATE photos SET xmp_mtime = NULL WHERE id = ?",
-                            (existing["id"],),
-                        )
-                        commit_with_retry(db.conn)
-
-                    if (
-                        file_unchanged
-                        and not metadata_missing
-                        and not hash_needs_repair
-                    ):
-                        processed_count += 1
-                        counts["indexed"] += 1
-                        indexed_photo_ids.add(existing["id"])
-                        if photo_callback:
-                            photo_callback(existing["id"], full_path_str)
-                        if progress_callback:
-                            progress_callback(processed_count, total)
-                        continue
-
-            files_to_process.append(image_path)
-    except BaseException:
-        # Pre-pass died (e.g. non-retryable DB error on an XMP commit).
-        # Route through the same partial-status path as a main-loop failure
-        # so users see the badge and can rescan.
+    def _needs_processing(self, image_path):
+        """``False`` when the pre-pass already disposed of ``image_path``."""
         try:
-            db.conn.rollback()
-        except Exception:
-            log.exception("Rollback after pre-pass failure also failed")
+            stat = image_path.stat()
+        except OSError:
+            # File deleted/renamed between discovery and this pass —
+            # skip it instead of aborting the whole scan (the discovery
+            # walk has the same guard for broken symlinks).
+            log.info("File vanished during scan, skipping: %s", image_path)
+            self._skip_file("vanished")
+            return False
+        xmp_path = image_path.with_suffix(".xmp")
         try:
-            _update_folder_status("partial", only_from_partial=False)
-        except Exception:
-            log.exception("Failed to flag folders partial after pre-pass failure")
-        raise
+            xmp_mtime = xmp_path.stat().st_mtime
+        except OSError:
+            # Covers both "no sidecar" and a sidecar deleted between
+            # exists() and stat() — same outcome either way.
+            xmp_mtime = None
 
-    # Batch extract metadata via ExifTool only for files that need processing
-    paths_to_extract = [str(ip) for ip in files_to_process]
-    if paths_to_extract and status_callback:
-        metadata_total = len(paths_to_extract)
-        _emit_status(
-            f"Extracting metadata (0 / {metadata_total} files)...",
-            phase_current=0,
-            phase_total=metadata_total,
-            phase_label="Extracting metadata",
+        if self.incremental:
+            full_path_str = str(image_path)
+            existing = self.existing_by_path.get(full_path_str)
+            if existing and self._reuse_existing_row(
+                existing, full_path_str, stat, xmp_path, xmp_mtime,
+            ):
+                return False
+        return True
+
+    def _reuse_existing_row(self, existing, full_path_str, stat, xmp_path, xmp_mtime):
+        """``True`` when the cataloged row still vouches for the file."""
+        db = self.db
+        file_mtime = stat.st_mtime
+        # Copies/restores can preserve mtime even when the
+        # original is replaced. Check size from the same stat
+        # before reusing metadata, hashes, and derived caches.
+        file_unchanged = (
+            existing["file_mtime"] == file_mtime
+            and existing["file_size"] == stat.st_size
         )
-    _check_cancelled()
+        xmp_unchanged = existing["xmp_mtime"] == xmp_mtime
+        # Re-process if ExifTool never ran for this photo (both
+        # timestamp and exif_data are NULL). Photos with genuinely
+        # missing timestamps (screenshots, exports) will have
+        # exif_data set after one extraction attempt.
+        # Also flag rows where a RAW file has absurdly small
+        # dimensions (<1000px) — that's the embedded JPEG thumb
+        # leaking through when ExifTool's File group was missing
+        # on the original scan.
+        dims_suspect = (
+            existing["extension"] in RAW_EXTENSIONS
+            and existing["width"] is not None
+            and existing["width"] < 1000
+        )
+        metadata_missing = (
+            not existing["exif_extracted"]
+            and (
+                self.repair_missing_metadata
+                or existing["timestamp"] is None
+                or dims_suspect
+            )
+        ) or existing["summary_needs_extract"]
+        existing_file_hash = existing["file_hash"]
+        hash_needs_repair = (
+            existing["file_size"] == 0
+            and existing_file_hash == EMPTY_FILE_SHA256
+        ) or (
+            stat.st_size > 0 and existing_file_hash is None
+        )
 
-    def _metadata_progress(current, total):
-        _emit_status(
+        if (
+            file_unchanged and xmp_unchanged
+            and not metadata_missing
+            and not hash_needs_repair
+        ):
+            self._credit_reused_row(existing["id"], full_path_str)
+            return True
+
+        # XMP changed: re-import keywords
+        if not xmp_unchanged and xmp_mtime is not None:
+            _import_keywords_for_photo(db, existing["id"], str(xmp_path))
+            db.conn.execute(
+                "UPDATE photos SET xmp_mtime = ? WHERE id = ?",
+                (xmp_mtime, existing["id"]),
+            )
+            commit_with_retry(db.conn)
+        elif not xmp_unchanged:
+            # Sidecar deleted: clear the stored mtime so the row
+            # converges instead of looking "XMP changed" on every
+            # later scan (this skip path never reaches the main
+            # loop, so nothing else would ever reset it).
+            db.conn.execute(
+                "UPDATE photos SET xmp_mtime = NULL WHERE id = ?",
+                (existing["id"],),
+            )
+            commit_with_retry(db.conn)
+
+        if (
+            file_unchanged
+            and not metadata_missing
+            and not hash_needs_repair
+        ):
+            self._credit_reused_row(existing["id"], full_path_str)
+            return True
+        return False
+
+    def _credit_reused_row(self, photo_id, full_path_str):
+        self.processed_count += 1
+        self.counts["indexed"] += 1
+        self.indexed_photo_ids.add(photo_id)
+        if self.photo_callback:
+            self.photo_callback(photo_id, full_path_str)
+        if self.progress_callback:
+            self.progress_callback(self.processed_count, self.total)
+
+    # -- metadata ----------------------------------------------------
+
+    def _extract_metadata(self):
+        """Batch-read ExifTool metadata; returns the paths it was asked for."""
+        # Batch extract metadata via ExifTool only for files that need processing
+        paths_to_extract = [str(ip) for ip in self.files_to_process]
+        if paths_to_extract and self.status_callback:
+            metadata_total = len(paths_to_extract)
+            self._emit_status(
+                f"Extracting metadata (0 / {metadata_total} files)...",
+                phase_current=0,
+                phase_total=metadata_total,
+                phase_label="Extracting metadata",
+            )
+        self._check_cancelled()
+
+        self.metadata_map = (
+            extract_metadata(
+                paths_to_extract,
+                progress_callback=self._metadata_progress,
+                checkpoint=self._check_cancelled,
+            )
+            if paths_to_extract else {}
+        )
+        self._check_cancelled()
+        return paths_to_extract
+
+    def _metadata_progress(self, current, total):
+        self._emit_status(
             f"Extracting metadata ({current} / {total} files)...",
             phase_current=current,
             phase_total=total,
             phase_label="Extracting metadata",
         )
 
-    metadata_map = (
-        extract_metadata(
-            paths_to_extract,
-            progress_callback=_metadata_progress,
-            checkpoint=_check_cancelled,
-        )
-        if paths_to_extract else {}
-    )
-    _check_cancelled()
+    # -- hashing -----------------------------------------------------
 
-    # Compute phash + file_hash in parallel across all files that need
-    # processing. These are the two per-file operations that actually read
-    # every byte of the image; everything else in the loop is cheap DB or
-    # dict work. Results stream in order, so workers keep computing the tail
-    # while the main thread commits the head — no O(n) buffer of features.
-    def _pause_pending():
-        return pause_check is not None and pause_check()
+    def _pause_pending(self):
+        return self.pause_check is not None and self.pause_check()
 
-    def _check_cancelled_no_park():
+    def _check_cancelled_no_park(self):
         """Cancel probe safe to call INSIDE ``_claim_worker_count``.
 
         Never parks. When ``cancel_only_check`` was supplied the
@@ -3978,16 +4162,24 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         behavior, and every pipeline caller now wires the non-parking
         probe.
         """
-        if _pause_pending():
+        if self._pause_pending():
             raise _ScanPauseRequested()
-        if cancel_only_check is not None:
-            if cancel_only_check():
+        if self.cancel_only_check is not None:
+            if self.cancel_only_check():
                 raise ScanCancelled("scan cancelled")
             return
-        _check_cancelled()
+        self._check_cancelled()
 
-    def _iter_features():
-        if not files_to_process:
+    def _iter_features(self):
+        """Yield ``(image_path, (phash, file_hash))`` in queue order.
+
+        Computes phash + file_hash in parallel across all files that need
+        processing. These are the two per-file operations that actually read
+        every byte of the image; everything else in the loop is cheap DB or
+        dict work. Results stream in order, so workers keep computing the tail
+        while the main thread commits the head — no O(n) buffer of features.
+        """
+        if not self.files_to_process:
             return
         # Track remaining work outside the ``_claim_worker_count`` context so
         # a pause can drop the lease, park at the caller's pause-aware
@@ -3997,25 +4189,26 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         # replacement scans, CPU inference, and model loads even though the
         # user asked this job to stop competing for resources.
         remaining = deque(
-            zip(files_to_process, paths_to_extract, strict=True),
+            zip(self.files_to_process, self.paths_to_extract, strict=True),
         )
         while remaining:
             # A standalone caller may provide a non-parking cancel probe.
             # Do not repeatedly claim permits and construct a process pool
             # while its independent pause probe remains true.
-            if _pause_pending():
-                _check_cancelled()
-                if _pause_pending():
+            if self._pause_pending():
+                self._check_cancelled()
+                if self._pause_pending():
                     time.sleep(0.05)
                 continue
             with _claim_worker_count(
                 [ip for ip, _ in remaining],
                 cancel_check=(
-                    _check_cancelled if cancel_check is not None else None
+                    self._check_cancelled
+                    if self.cancel_check is not None else None
                 ),
             ) as workers:
-                if status_callback:
-                    _emit_status(
+                if self.status_callback:
+                    self._emit_status(
                         f"Hashing {len(remaining)} files "
                         f"({workers} worker{'s' if workers != 1 else ''})..."
                     )
@@ -4024,122 +4217,9 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                     workers, len(remaining),
                 )
                 if workers > 1:
-                    mp_ctx = multiprocessing.get_context(_SCAN_MP_METHOD)
-                    pool = ProcessPoolExecutor(max_workers=workers, mp_context=mp_ctx)
-                    paused = False
-                    try:
-                        # Bounded in-flight window instead of pool.map(): on Python
-                        # 3.11 Executor.map eagerly submits every input, so on a
-                        # 200k-file scan we would hold 200k queued futures in RAM.
-                        # A few submissions per worker is enough to keep them fed
-                        # while the main thread drains results in order.
-                        #
-                        # Pause is checked BEFORE ``_check_cancelled`` at every
-                        # boundary. The pipeline's ``cancel_check`` parks on a
-                        # pending pause, so calling it first would trap the
-                        # scanner inside the lease context; raising
-                        # ``_ScanPauseRequested`` while the pool is still
-                        # running lets the enclosing frame drain workers and
-                        # release CPU permits before we park.
-                        def _feature_result(fut):
-                            while True:
-                                # ``_check_cancelled_no_park`` raises
-                                # ``_ScanPauseRequested`` on pending pause
-                                # and only calls the parking probe if it
-                                # cannot be avoided (no ``cancel_only_check``
-                                # supplied). Closes the race Codex flagged
-                                # where ``_pause_pending`` returns False,
-                                # Pause fires, and the previously-called
-                                # ``_check_cancelled`` parked while still
-                                # inside the lease and pool.
-                                _check_cancelled_no_park()
-                                try:
-                                    return fut.result(timeout=0.2)
-                                except TimeoutError:
-                                    continue
-
-                        max_in_flight = workers * 4
-                        pending = deque()
-                        while remaining:
-                            _check_cancelled_no_park()
-                            image_path, path_str = remaining[0]
-                            pending.append((
-                                image_path, path_str,
-                                pool.submit(_compute_file_features, path_str),
-                            ))
-                            remaining.popleft()
-                            if len(pending) >= max_in_flight:
-                                done_path, _done_str, done_fut = pending[0]
-                                _check_cancelled_no_park()
-                                result = _feature_result(done_fut)
-                                if _pause_pending():
-                                    raise _ScanPauseRequested()
-                                pending.popleft()
-                                yield done_path, result
-                        while pending:
-                            done_path, _done_str, done_fut = pending[0]
-                            _check_cancelled_no_park()
-                            result = _feature_result(done_fut)
-                            if _pause_pending():
-                                raise _ScanPauseRequested()
-                            pending.popleft()
-                            yield done_path, result
-                    except _ScanPauseRequested:
-                        # Requeue every submitted-but-undrained item so the
-                        # next pass reruns them under a fresh lease. Their
-                        # workers are torn down below.
-                        paused = True
-                        for image_path, path_str, _fut in reversed(pending):
-                            remaining.appendleft((image_path, path_str))
-                        # Terminate now, wait below with the lease still
-                        # held so a replacement scan cannot claim the same
-                        # permits while old workers are still consuming CPU.
-                        for proc in list(getattr(pool, "_processes", {}).values()):
-                            # Best-effort kill of a worker that may already be
-                            # gone; shutdown(wait=True) below reaps the rest.
-                            with contextlib.suppress(Exception):
-                                proc.terminate()
-                        pool.shutdown(wait=True, cancel_futures=True)
-                    except BaseException:
-                        # Actively terminate the worker processes so their CPU
-                        # work stops now, then wait for them to actually exit
-                        # before letting ``_claim_worker_count`` release its
-                        # CPU permits. ``shutdown(wait=False)`` alone would
-                        # unwind the lease while old workers were still
-                        # hashing — a replacement scan or CPU inference could
-                        # then receive the same permits and defeat the
-                        # process-wide budget, and ``JobRunner.shutdown()``
-                        # could report completion while hashing continued.
-                        for proc in list(getattr(pool, "_processes", {}).values()):
-                            # Must not replace the in-flight exception.
-                            with contextlib.suppress(Exception):
-                                proc.terminate()
-                        pool.shutdown(wait=True, cancel_futures=True)
-                        raise
-                    else:
-                        pool.shutdown(wait=True)
+                    paused = yield from self._pool_features(workers, remaining)
                 else:
-                    paused = False
-                    while remaining:
-                        # ``_check_cancelled_no_park`` raises
-                        # ``_ScanPauseRequested`` on pending pause and
-                        # only invokes the parking probe if no
-                        # ``cancel_only_check`` was supplied. Caught and
-                        # translated to ``paused = True`` so this branch
-                        # keeps its "drop the lease, then park outside"
-                        # symmetry with the pool branch above.
-                        try:
-                            _check_cancelled_no_park()
-                        except _ScanPauseRequested:
-                            paused = True
-                            break
-                        image_path, path_str = remaining[0]
-                        result = _compute_file_features(path_str)
-                        if _pause_pending():
-                            paused = True
-                            break
-                        remaining.popleft()
-                        yield image_path, result
+                    paused = yield from self._inline_features(remaining)
             # Lease is released here (``_claim_worker_count`` exited).
             # Park until the caller resumes (or cancels) before rebuilding
             # the pool with the remaining files. ``_check_cancelled`` is
@@ -4147,460 +4227,629 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             # blocks inside it until resume, and raises ``ScanCancelled``
             # if the pause turns into a cancellation.
             if paused:
-                _check_cancelled()
+                self._check_cancelled()
         # The final result is consumed while this generator is suspended.
         # Check once more only after the last lease has unwound so a pause or
         # cancellation arriving during that consumer work cannot strand the
         # pool and its CPU permits.
-        _check_cancelled()
+        self._check_cancelled()
 
-    try:
-        for image_path, (phash, file_hash) in _iter_features():
-            # File stats — first touch of the path in this loop. A file
-            # deleted/renamed between discovery and here must skip, not
-            # abort the scan and flag every folder in scope 'partial'.
+    def _pool_features(self, workers, remaining):
+        """Hash on a process pool; returns ``True`` when a pause stopped it."""
+        mp_ctx = multiprocessing.get_context(_SCAN_MP_METHOD)
+        pool = ProcessPoolExecutor(max_workers=workers, mp_context=mp_ctx)
+        paused = False
+        try:
+            # Bounded in-flight window instead of pool.map(): on Python
+            # 3.11 Executor.map eagerly submits every input, so on a
+            # 200k-file scan we would hold 200k queued futures in RAM.
+            # A few submissions per worker is enough to keep them fed
+            # while the main thread drains results in order.
+            #
+            # Pause is checked BEFORE ``_check_cancelled`` at every
+            # boundary. The pipeline's ``cancel_check`` parks on a
+            # pending pause, so calling it first would trap the
+            # scanner inside the lease context; raising
+            # ``_ScanPauseRequested`` while the pool is still
+            # running lets the enclosing frame drain workers and
+            # release CPU permits before we park.
+            max_in_flight = workers * 4
+            pending = deque()
+            while remaining:
+                self._check_cancelled_no_park()
+                image_path, path_str = remaining[0]
+                pending.append((
+                    image_path, path_str,
+                    pool.submit(_compute_file_features, path_str),
+                ))
+                remaining.popleft()
+                if len(pending) >= max_in_flight:
+                    done_path, _done_str, done_fut = pending[0]
+                    self._check_cancelled_no_park()
+                    result = self._feature_result(done_fut)
+                    if self._pause_pending():
+                        raise _ScanPauseRequested()
+                    pending.popleft()
+                    yield done_path, result
+            while pending:
+                done_path, _done_str, done_fut = pending[0]
+                self._check_cancelled_no_park()
+                result = self._feature_result(done_fut)
+                if self._pause_pending():
+                    raise _ScanPauseRequested()
+                pending.popleft()
+                yield done_path, result
+        except _ScanPauseRequested:
+            # Requeue every submitted-but-undrained item so the
+            # next pass reruns them under a fresh lease. Their
+            # workers are torn down below.
+            paused = True
+            for image_path, path_str, _fut in reversed(pending):
+                remaining.appendleft((image_path, path_str))
+            # Terminate now, wait below with the lease still
+            # held so a replacement scan cannot claim the same
+            # permits while old workers are still consuming CPU.
+            for proc in list(getattr(pool, "_processes", {}).values()):
+                # Best-effort kill of a worker that may already be
+                # gone; shutdown(wait=True) below reaps the rest.
+                with contextlib.suppress(Exception):
+                    proc.terminate()
+            pool.shutdown(wait=True, cancel_futures=True)
+        except BaseException:
+            # Actively terminate the worker processes so their CPU
+            # work stops now, then wait for them to actually exit
+            # before letting ``_claim_worker_count`` release its
+            # CPU permits. ``shutdown(wait=False)`` alone would
+            # unwind the lease while old workers were still
+            # hashing — a replacement scan or CPU inference could
+            # then receive the same permits and defeat the
+            # process-wide budget, and ``JobRunner.shutdown()``
+            # could report completion while hashing continued.
+            for proc in list(getattr(pool, "_processes", {}).values()):
+                # Must not replace the in-flight exception.
+                with contextlib.suppress(Exception):
+                    proc.terminate()
+            pool.shutdown(wait=True, cancel_futures=True)
+            raise
+        else:
+            pool.shutdown(wait=True)
+        return paused
+
+    def _feature_result(self, fut):
+        while True:
+            # ``_check_cancelled_no_park`` raises
+            # ``_ScanPauseRequested`` on pending pause
+            # and only calls the parking probe if it
+            # cannot be avoided (no ``cancel_only_check``
+            # supplied). Closes the race Codex flagged
+            # where ``_pause_pending`` returns False,
+            # Pause fires, and the previously-called
+            # ``_check_cancelled`` parked while still
+            # inside the lease and pool.
+            self._check_cancelled_no_park()
             try:
-                stat = image_path.stat()
-            except OSError:
-                log.info("File vanished during scan, skipping: %s", image_path)
-                processed_count += 1
-                counts["vanished"] += 1
-                if progress_callback:
-                    progress_callback(processed_count, total)
+                return fut.result(timeout=0.2)
+            except TimeoutError:
                 continue
 
-            folder_id = _ensure_folder(image_path.parent)
-            touched_folder_ids.add(folder_id)
-            file_size = stat.st_size
-            file_mtime = stat.st_mtime
-            if file_size == 0 and file_hash == EMPTY_FILE_SHA256:
-                log.warning(
-                    "Empty image file detected; skipping duplicate identity hash: %s",
-                    image_path,
-                )
-                file_hash = None
-            elif file_hash is None and file_size > 0:
-                log.warning(
-                    "Could not read %s to hash it; it will be retried on the next scan",
-                    image_path,
-                )
-
-            # XMP sidecar
-            xmp_path = image_path.with_suffix(".xmp")
+    def _inline_features(self, remaining):
+        """Hash in this process; returns ``True`` when a pause stopped it."""
+        paused = False
+        while remaining:
+            # ``_check_cancelled_no_park`` raises
+            # ``_ScanPauseRequested`` on pending pause and
+            # only invokes the parking probe if no
+            # ``cancel_only_check`` was supplied. Caught and
+            # translated to ``paused = True`` so this branch
+            # keeps its "drop the lease, then park outside"
+            # symmetry with the pool branch above.
             try:
-                xmp_mtime = xmp_path.stat().st_mtime
-            except OSError:
-                xmp_mtime = None
+                self._check_cancelled_no_park()
+            except _ScanPauseRequested:
+                paused = True
+                break
+            image_path, path_str = remaining[0]
+            result = _compute_file_features(path_str)
+            if self._pause_pending():
+                paused = True
+                break
+            remaining.popleft()
+            yield image_path, result
+        return paused
 
-            # Get pre-extracted metadata for this file
-            file_meta = metadata_map.get(str(image_path), {})
-            file_group = file_meta.get("File", {})
-            exif_group = file_meta.get("EXIF", {})
-            composite = file_meta.get("Composite", {})
+    # -- main loop ---------------------------------------------------
 
-            # Dimensions from ExifTool (works for all file types including RAW)
-            width, height = _extract_dimensions(exif_group, file_group, extension=image_path.suffix.lower())
+    def _index_files(self):
+        try:
+            for image_path, (phash, file_hash) in self._iter_features():
+                self._index_file(image_path, phash, file_hash)
+        except BaseException:
+            # Per-file loop died mid-way (DB error, signal, etc). Roll back any
+            # half-applied write so the partial-status UPDATE below runs on a
+            # clean transaction, then flag every folder in scope as 'partial' so
+            # callers can detect and re-scan.
+            try:
+                self.db.conn.rollback()
+            except Exception:
+                log.exception("Rollback after scan failure also failed")
+            try:
+                self._update_folder_status("partial", only_from_partial=False)
+            except Exception:
+                log.exception("Failed to flag folders partial after scan failure")
+            raise
+        else:
+            # Per-file loop completed cleanly. Clear any stale 'partial' flag on
+            # scanned folders so a successful rescan restores full visibility.
+            # Uses both the scan scope (root + restrict_dirs) AND the touched
+            # folder ids: a successful no-op incremental scan has an empty
+            # ``touched_folder_ids`` set but must still clear the badge for the
+            # roots the user asked us to scan; a recursive scan that failed and
+            # then succeeds needs the touched ids to reach touched subfolders.
+            try:
+                self._update_folder_status("ok", only_from_partial=True)
+            except Exception:
+                log.exception("Failed to clear partial flag after scan success")
 
-            # Fallback if ExifTool didn't provide dimensions
-            if width is None or height is None:
-                ext = image_path.suffix.lower()
-                if ext in RAW_EXTENSIONS:
-                    try:
-                        import rawpy
+    def _index_file(self, image_path, phash, file_hash):
+        """Catalog one hashed file: row, metadata, caches, keywords."""
+        db = self.db
+        # File stats — first touch of the path in this loop. A file
+        # deleted/renamed between discovery and here must skip, not
+        # abort the scan and flag every folder in scope 'partial'.
+        try:
+            stat = image_path.stat()
+        except OSError:
+            log.info("File vanished during scan, skipping: %s", image_path)
+            self._skip_file("vanished")
+            return
 
-                        with rawpy.imread(str(image_path)) as raw:
-                            width = raw.sizes.width
-                            height = raw.sizes.height
-                    except Exception:
-                        log.debug("Could not read RAW dimensions from %s", image_path)
-                else:
-                    try:
-                        with Image.open(str(image_path)) as img:
-                            width, height = img.size
-                    except Exception:
-                        log.debug("Could not read dimensions from %s", image_path)
-
-            # Timestamp from ExifTool
-            timestamp = _extract_timestamp(exif_group)
-
-            # Focal length is written via the EXIF summary columns loop
-            # below (see ``EXIF_SUMMARY_COLUMNS``) so a rescan that loses
-            # the tag clears the column instead of leaving a stale value.
-
-            # Burst ID (ImageUniqueID)
-            burst_id = exif_group.get("ImageUniqueID")
-            if burst_id:
-                burst_id = str(burst_id)
-
-            # GPS coordinates — ExifTool with -n gives decimal degrees directly
-            latitude = composite.get("GPSLatitude")
-            if latitude is None:
-                latitude = exif_group.get("GPSLatitude")
-            longitude = composite.get("GPSLongitude")
-            if longitude is None:
-                longitude = exif_group.get("GPSLongitude")
-
-            # Pre-check: capture prior content identity AND whether the
-            # row existed before add_photo touches it. Existing rows take
-            # the content-change invalidation below; brand-new rows take
-            # the cheaper recycled-rowid probe right after the insert, so
-            # a large initial scan doesn't pay for O(N) UPDATE + commit
-            # round-trips it has no reason to make.
-            existing_row = db.conn.execute(
-                "SELECT file_hash, flag FROM photos WHERE folder_id = ? AND filename = ?",
-                (folder_id, image_path.name),
-            ).fetchone()
-            row_already_existed = existing_row is not None
-            prev_file_hash = existing_row["file_hash"] if existing_row else None
-
-            # Process may refresh metadata for cataloged photos, but it must
-            # never admit a filesystem path as a side effect. A row can
-            # disappear between repair-scope resolution and this point; skip
-            # that race rather than recreating it through add_photo().
-            if not allow_photo_inserts and not row_already_existed:
-                log.info(
-                    "Update-only scan skipped uncataloged file: %s", image_path,
-                )
-                processed_count += 1
-                counts["skipped_uncataloged"] += 1
-                if progress_callback:
-                    progress_callback(processed_count, total)
-                continue
-
-            photo_id = db.add_photo(
-                folder_id=folder_id,
-                filename=image_path.name,
-                extension=image_path.suffix.lower(),
-                file_size=file_size,
-                file_mtime=file_mtime,
-                xmp_mtime=xmp_mtime,
-                timestamp=timestamp,
-                width=width,
-                height=height,
+        folder_id = self._ensure_folder(image_path.parent)
+        self.touched_folder_ids.add(folder_id)
+        file_size = stat.st_size
+        file_mtime = stat.st_mtime
+        if file_size == 0 and file_hash == EMPTY_FILE_SHA256:
+            log.warning(
+                "Empty image file detected; skipping duplicate identity hash: %s",
+                image_path,
             )
-            # Credit the photo the moment its row is durable — add_photo
-            # commits before returning. Several fallible steps run below
-            # (cache invalidation, XMP keyword import, duplicate
-            # auto-resolve, photo_callback), and one of them raising must
-            # not leave the sink reporting fewer photos than the catalog
-            # actually holds. ``processed_count`` stays at the end of the
-            # iteration: it drives the progress bar, which should only
-            # advance once the file is genuinely done with.
-            counts["indexed"] += 1
-            indexed_photo_ids.add(photo_id)
-
-            # A brand-new row may have claimed a *recycled* rowid (see
-            # ``purge_cached_files_for_recycled_id``). Cached derivatives
-            # from the id's previous owner would otherwise be served as
-            # this photo's — a wrong-bird Life List card. The index makes
-            # this an O(1) set lookup per insert; only ids that actually
-            # collide do real work.
-            if (
-                not row_already_existed
-                and vireo_dir
-                and purge_cached_files_for_recycled_id(
-                    thumb_cache_dir or os.path.join(vireo_dir, "thumbnails"),
-                    photo_id,
-                    id_index=recycled_id_index,
-                    vireo_dir=vireo_dir,
-                    db=db,
-                    file_mtime=file_mtime,
-                )
-            ):
-                invalidated_photo_ids.add(photo_id)
-
-            # Update metadata columns (also fixes existing photos that were
-            # inserted before ExifTool metadata was available)
-            updates = []
-            update_params = []
-            if timestamp is not None:
-                updates.append("timestamp=?")
-                update_params.append(timestamp)
-            if width is not None:
-                updates.append("width=?")
-                update_params.append(width)
-            if height is not None:
-                updates.append("height=?")
-                update_params.append(height)
-            if latitude is not None:
-                updates.extend(["latitude=?", "longitude=?"])
-                update_params.extend([latitude, longitude])
-            if phash is not None:
-                updates.append("phash=?")
-                update_params.append(phash)
-            if burst_id is not None:
-                updates.append("burst_id=?")
-                update_params.append(burst_id)
-            if file_hash is not None:
-                updates.append("file_hash=?")
-                update_params.append(file_hash)
-                if row_already_existed and prev_file_hash != file_hash:
-                    # The stored baseline is being replaced, so any prior
-                    # integrity verdict applied to bytes that no longer
-                    # exist. Clear the verification markers rather than
-                    # carry them forward — the audit summary must only
-                    # claim "checked" for baselines verify_hashes (or an
-                    # explicit user accept) actually vouched for. A rescan
-                    # that recomputes the same hash leaves coverage intact.
-                    updates.append("hash_checked_at=NULL")
-                    updates.append("hash_status=NULL")
-            elif file_size == 0:
-                updates.append("file_hash=NULL")
-                if row_already_existed and prev_file_hash is not None:
-                    updates.append("hash_checked_at=NULL")
-                    updates.append("hash_status=NULL")
-                # Historical rows where the empty SHA leaked in are repaired
-                # here by clearing file_hash above. We deliberately leave the
-                # ``flag`` column untouched: a 'rejected' value could come
-                # from the user (Browse / culling) just as easily as from
-                # past duplicate auto-resolution, and we have no marker that
-                # distinguishes them. Silently un-rejecting a user's
-                # placeholder would be worse than leaving it as-is; the
-                # duplicates page already flags empty-byte groups for
-                # manual review.
-            if file_meta:
-                # Promoted EXIF summary columns (universal filter fields).
-                # Written whenever ExifTool ran, independent of whether the
-                # full JSON blob is stored below. Absent columns are cleared
-                # to NULL rather than skipped so a rescan of a file whose
-                # metadata lost a field (e.g. sidecar edited, replaced with a
-                # different camera's file) doesn't leave stale values that
-                # /api/photos/query and /api/filters/values keep matching.
-                cols = exif_summary_columns(file_meta)
-                for column in EXIF_SUMMARY_COLUMNS:
-                    updates.append(f"{column}=?")
-                    update_params.append(cols.get(column))
-            if file_meta and extract_full_metadata:
-                updates.append("exif_data=?")
-                update_params.append(json.dumps(file_meta))
-            elif file_meta:
-                # Store minimal marker so we know ExifTool ran (even when
-                # extract_full_metadata is off) — prevents perpetual retry
-                updates.append("exif_data=COALESCE(exif_data, ?)")
-                update_params.append("{}")
-            if row_already_existed:
-                # add_photo is INSERT OR IGNORE, so the fresh stat values it
-                # was passed never reach an existing row. Without these the
-                # incremental pre-pass keeps comparing against the stale
-                # stored mtime and re-processes a changed file on every scan
-                # forever. Only advance file_mtime/file_size when the content
-                # hash succeeded: _compute_file_features hashes every
-                # processed file, so file_hash is None only when the bytes
-                # couldn't be read (transient permission/I-O error). Marking
-                # such a file's mtime current would make the next incremental
-                # scan skip it forever with a stale hash and stale derived
-                # caches; leaving the old mtime in place retries it instead.
-                if file_hash is not None or file_size == 0:
-                    updates.extend(["file_mtime=?", "file_size=?"])
-                    update_params.extend([file_mtime, file_size])
-                # xmp_mtime stays unconditional — the sidecar is a separate
-                # file whose keyword import below runs regardless of image
-                # hash success, and it may be None here: writing NULL is
-                # correct (a deleted sidecar otherwise re-trips the "XMP
-                # changed" check on every scan).
-                updates.append("xmp_mtime=?")
-                update_params.append(xmp_mtime)
-            if updates:
-                update_params.append(photo_id)
-                db.conn.execute(
-                    f"UPDATE photos SET {', '.join(updates)} WHERE id=?",
-                    update_params,
-                )
-                commit_with_retry(db.conn)
-
-            # Content-change self-heal: when the computed hash differs
-            # from what was stored before this scan, derived caches are
-            # stale. Includes the NULL → concrete transition for legacy
-            # rows that predate hash tracking — we can't prove their
-            # caches match current bytes, so safer to flush and
-            # regenerate. Also fires when a file is truncated to zero
-            # bytes: file_hash is None in that branch (empty files don't
-            # carry duplicate identity), so the plain
-            # ``file_hash is not None`` guard would otherwise leave
-            # thumbnails and working copies from the old bytes in place.
-            # The zero-byte clause covers BOTH non-empty → empty and
-            # legacy NULL → empty: a pre-hash row whose file is now
-            # truncated still has thumbnails rendered from its old
-            # non-empty bytes, and before this fix the previous code
-            # path (which stored the concrete empty SHA) would have
-            # invalidated it via the NULL → concrete branch. Skips the
-            # empty → empty repair case (prev was already the empty SHA)
-            # because the bytes didn't actually change. Gated on
-            # ``row_already_existed`` so brand-new inserts
-            # (prev_file_hash is always NULL there) don't trigger
-            # pointless UPDATE + commit round-trips on large initial
-            # scans. Requires explicit vireo_dir; callers must pass it
-            # (scan can't guess because --db and --thumb-dir are
-            # independently configurable).
-            content_identity_changed = (
-                file_hash is not None and prev_file_hash != file_hash
-            ) or (
-                file_size == 0
-                and prev_file_hash != EMPTY_FILE_SHA256
+            file_hash = None
+        elif file_hash is None and file_size > 0:
+            log.warning(
+                "Could not read %s to hash it; it will be retried on the next scan",
+                image_path,
             )
-            if (row_already_existed
-                    and content_identity_changed
-                    and vireo_dir):
-                _invalidate_derived_caches(
-                    db, vireo_dir, photo_id, thumb_cache_dir=thumb_cache_dir,
-                )
-                invalidated_photo_ids.add(photo_id)
-                commit_with_retry(db.conn)
 
-            # Import XMP keywords if sidecar exists — must land BEFORE the
-            # duplicate auto-resolve hook below, so if this row turns out to be
-            # the loser its keywords are visible to apply_duplicate_resolution's
-            # metadata query and get merged onto the winner. Otherwise the
-            # keywords would be stranded on the rejected row.
-            if xmp_path.exists():
-                _import_keywords_for_photo(db, photo_id, str(xmp_path))
-
-            # Trigger duplicate auto-resolve now that file_hash AND XMP keywords
-            # are committed. add_photo was called without the hash, so the hook
-            # there was a no-op — we own firing it here.
-            if file_hash is not None:
-                db.check_and_resolve_duplicates_for_hash(file_hash)
-
-            if photo_callback:
-                photo_callback(photo_id, str(image_path))
-
-            processed_count += 1
-            if progress_callback:
-                progress_callback(processed_count, total)
-    except BaseException:
-        # Per-file loop died mid-way (DB error, signal, etc). Roll back any
-        # half-applied write so the partial-status UPDATE below runs on a
-        # clean transaction, then flag every folder in scope as 'partial' so
-        # callers can detect and re-scan.
+        # XMP sidecar
+        xmp_path = image_path.with_suffix(".xmp")
         try:
-            db.conn.rollback()
-        except Exception:
-            log.exception("Rollback after scan failure also failed")
-        try:
-            _update_folder_status("partial", only_from_partial=False)
-        except Exception:
-            log.exception("Failed to flag folders partial after scan failure")
-        raise
-    else:
-        # Per-file loop completed cleanly. Clear any stale 'partial' flag on
-        # scanned folders so a successful rescan restores full visibility.
-        # Uses both the scan scope (root + restrict_dirs) AND the touched
-        # folder ids: a successful no-op incremental scan has an empty
-        # ``touched_folder_ids`` set but must still clear the badge for the
-        # roots the user asked us to scan; a recursive scan that failed and
-        # then succeeds needs the touched ids to reach touched subfolders.
-        try:
-            _update_folder_status("ok", only_from_partial=True)
-        except Exception:
-            log.exception("Failed to clear partial flag after scan success")
+            xmp_mtime = xmp_path.stat().st_mtime
+        except OSError:
+            xmp_mtime = None
 
-    # Pair raw+JPEG companions: raw is primary, JPEG becomes companion_path.
-    # Wrap post-processing so folder counts are always updated, even on failure.
-    # On exception, roll back any uncommitted partial writes before updating
-    # counts — otherwise update_folder_counts()'s commit would persist
-    # half-applied pairing or working-copy records.
-    try:
-        # A JPEG merged into its RAW's row stops being its own photo, so
-        # discount it: both files were counted on the way in but only the
-        # RAW survives. Applied to the sink immediately (not just the
-        # returned dict) so a caller reading counts after a later failure
-        # in this block still sees the corrected number.
-        _merged_ids = _pair_raw_jpeg_companions(
-            db, vireo_dir=vireo_dir, thumb_cache_dir=thumb_cache_dir,
+        meta = self._read_file_metadata(image_path)
+
+        # Pre-check: capture prior content identity AND whether the
+        # row existed before add_photo touches it. Existing rows take
+        # the content-change invalidation below; brand-new rows take
+        # the cheaper recycled-rowid probe right after the insert, so
+        # a large initial scan doesn't pay for O(N) UPDATE + commit
+        # round-trips it has no reason to make.
+        existing_row = db.conn.execute(
+            "SELECT file_hash, flag FROM photos WHERE folder_id = ? AND filename = ?",
+            (folder_id, image_path.name),
+        ).fetchone()
+        row_already_existed = existing_row is not None
+        prev_file_hash = existing_row["file_hash"] if existing_row else None
+
+        # Process may refresh metadata for cataloged photos, but it must
+        # never admit a filesystem path as a side effect. A row can
+        # disappear between repair-scope resolution and this point; skip
+        # that race rather than recreating it through add_photo().
+        if not self.allow_photo_inserts and not row_already_existed:
+            log.info(
+                "Update-only scan skipped uncataloged file: %s", image_path,
+            )
+            self._skip_file("skipped_uncataloged")
+            return
+
+        item = _IndexedFile(
+            image_path=image_path, folder_id=folder_id,
+            file_size=file_size, file_mtime=file_mtime,
+            file_hash=file_hash, phash=phash,
+            xmp_path=xmp_path, xmp_mtime=xmp_mtime, meta=meta,
+            row_already_existed=row_already_existed,
+            prev_file_hash=prev_file_hash,
         )
-        # Discount only companions THIS scan counted. The pairing pass
-        # queries the whole photos table, so it also cleans up pairs left
-        # pending elsewhere in the catalog (an interrupted earlier scan,
-        # an older build). Debiting a scoped scan for those would make it
-        # undercount, and scanning a root with no new files while one
-        # stale pair was pending would report -1 photos indexed.
-        _mine = _merged_ids & indexed_photo_ids
-        counts["merged_companions"] += len(_mine)
-        counts["indexed"] -= len(_mine)
+        photo_id = self._add_photo(item)
+        self._write_photo_columns(photo_id, item)
+        self._heal_changed_content(photo_id, item)
 
-        # Extract working copies for RAW photos (after pairing so companion is known).
-        # Scope to the folders the caller just scanned so a fresh import doesn't
-        # trigger library-wide backfill for every pre-existing large JPEG.
-        # Match-mode mirrors what scan() actually traversed: restrict_dirs and
-        # non-recursive scans only touch direct children, so the scope uses an
-        # exact-folder match; a recursive walk from `root` matches the subtree.
-        #
-        # Deliberately do NOT forward ``progress_callback`` here: callers
-        # like app.py's import job feed the scan callback into a shared
-        # ``job["progress"]`` slot that gates downstream phase totals
-        # (``scan_count = job["progress"]["total"]``). Emitting working-copy
-        # (current, total) through the same callback would overwrite the
-        # scan total with the working-copy total and visually jump the bar
-        # backward. ``status_callback`` still announces the phase.
-        if vireo_dir and not skip_working_copies:
-            if restrict_dirs is not None:
-                # Use the bundle-filtered list — see ``effective_restrict_dirs``
-                # above. Reusing the raw ``restrict_dirs`` here would let a
-                # stale DB row inside an excluded bundle re-enter the
-                # working-copy extractor, which reads ``folder_path/filename``
-                # and re-trips the macOS TCC prompt the scan loop's guard
-                # already skipped.
-                wc_scope = [(str(d), "exact") for d in effective_restrict_dirs]
-            elif not recursive:
-                wc_scope = [(str(root_path), "exact")]
+        # Import XMP keywords if sidecar exists — must land BEFORE the
+        # duplicate auto-resolve hook below, so if this row turns out to be
+        # the loser its keywords are visible to apply_duplicate_resolution's
+        # metadata query and get merged onto the winner. Otherwise the
+        # keywords would be stranded on the rejected row.
+        if xmp_path.exists():
+            _import_keywords_for_photo(db, photo_id, str(xmp_path))
+
+        # Trigger duplicate auto-resolve now that file_hash AND XMP keywords
+        # are committed. add_photo was called without the hash, so the hook
+        # there was a no-op — we own firing it here.
+        if file_hash is not None:
+            db.check_and_resolve_duplicates_for_hash(file_hash)
+
+        if self.photo_callback:
+            self.photo_callback(photo_id, str(image_path))
+
+        self.processed_count += 1
+        if self.progress_callback:
+            self.progress_callback(self.processed_count, self.total)
+
+    def _read_file_metadata(self, image_path):
+        # Get pre-extracted metadata for this file
+        file_meta = self.metadata_map.get(str(image_path), {})
+        file_group = file_meta.get("File", {})
+        exif_group = file_meta.get("EXIF", {})
+        composite = file_meta.get("Composite", {})
+
+        # Dimensions from ExifTool (works for all file types including RAW)
+        width, height = _extract_dimensions(exif_group, file_group, extension=image_path.suffix.lower())
+
+        # Fallback if ExifTool didn't provide dimensions
+        if width is None or height is None:
+            ext = image_path.suffix.lower()
+            if ext in RAW_EXTENSIONS:
+                try:
+                    import rawpy
+
+                    with rawpy.imread(str(image_path)) as raw:
+                        width = raw.sizes.width
+                        height = raw.sizes.height
+                except Exception:
+                    log.debug("Could not read RAW dimensions from %s", image_path)
             else:
-                wc_scope = [str(root_path)]
-            _extract_working_copies(
-                db, vireo_dir,
-                progress_callback=None,
-                status_callback=status_callback,
-                scope=wc_scope,
-                cancel_check=cancel_check,
-            )
+                try:
+                    with Image.open(str(image_path)) as img:
+                        width, height = img.size
+                except Exception:
+                    log.debug("Could not read dimensions from %s", image_path)
 
-        # Batched untracked-preview sweep. One os.listdir(previews/) for
-        # the whole scan instead of one per invalidated photo — essential
-        # when a rescan touches thousands of content-changed files.
-        if invalidated_photo_ids:
-            _sweep_untracked_previews_for_photos(
-                db, vireo_dir, invalidated_photo_ids,
-            )
-    except BaseException:
-        db.conn.rollback()
-        raise
-    finally:
-        db.update_folder_counts()
+        # Timestamp from ExifTool
+        timestamp = _extract_timestamp(exif_group)
 
-    # Every file the loop disposed of landed in exactly one bucket. If this
-    # ever trips, a new disposition was added without classifying it, and
-    # the summary below would silently over-claim by that many photos —
-    # log it rather than raising, since the scan's real work is committed
-    # and a miscounted summary is no reason to fail the run.
-    vanished_count = counts["vanished"]
-    skipped_uncataloged_count = counts["skipped_uncataloged"]
-    merged_count = counts["merged_companions"]
-    indexed_count = counts["indexed"]
-    accounted = (
-        indexed_count + vanished_count + skipped_uncataloged_count
-        + merged_count
-    )
-    if accounted != processed_count:
-        log.error(
-            "Scan count invariant broken: indexed=%d + vanished=%d + "
-            "skipped=%d + merged=%d != processed=%d (a file disposition is "
-            "unclassified)",
-            indexed_count, vanished_count, skipped_uncataloged_count,
-            merged_count, processed_count,
+        # Focal length is written via the EXIF summary columns loop
+        # below (see ``EXIF_SUMMARY_COLUMNS``) so a rescan that loses
+        # the tag clears the column instead of leaving a stale value.
+
+        # Burst ID (ImageUniqueID)
+        burst_id = exif_group.get("ImageUniqueID")
+        if burst_id:
+            burst_id = str(burst_id)
+
+        # GPS coordinates — ExifTool with -n gives decimal degrees directly
+        latitude = composite.get("GPSLatitude")
+        if latitude is None:
+            latitude = exif_group.get("GPSLatitude")
+        longitude = composite.get("GPSLongitude")
+        if longitude is None:
+            longitude = exif_group.get("GPSLongitude")
+
+        return _FileMetadata(
+            file_meta=file_meta, width=width, height=height,
+            timestamp=timestamp, burst_id=burst_id,
+            latitude=latitude, longitude=longitude,
         )
 
-    # Report what reached the catalog, not what the walk turned up. These
-    # used to be the same number ("Scan complete: %d photos indexed" logged
-    # ``total``), which reads as a success line and stays reassuring
-    # precisely when the scan achieved nothing — an archive share that
-    # dropped mid-scan logged "984 photos indexed" having indexed zero.
-    summary = f"Scan complete: {indexed_count} photos indexed"
-    if merged_count:
-        summary += f", {merged_count} JPEG(s) merged into their RAW"
-    if vanished_count:
-        summary += f", {vanished_count} vanished"
-    if skipped_uncataloged_count:
-        summary += f", {skipped_uncataloged_count} uncataloged (skipped)"
-    if merged_count or vanished_count or skipped_uncataloged_count:
-        summary += f" of {total} discovered"
-    log.info(summary)
-    return counts
+    def _add_photo(self, item):
+        """Insert (or find) the row and credit it; returns the photo id."""
+        vireo_dir = self.vireo_dir
+        photo_id = self.db.add_photo(
+            folder_id=item.folder_id,
+            filename=item.image_path.name,
+            extension=item.image_path.suffix.lower(),
+            file_size=item.file_size,
+            file_mtime=item.file_mtime,
+            xmp_mtime=item.xmp_mtime,
+            timestamp=item.meta.timestamp,
+            width=item.meta.width,
+            height=item.meta.height,
+        )
+        # Credit the photo the moment its row is durable — add_photo
+        # commits before returning. Several fallible steps run below
+        # (cache invalidation, XMP keyword import, duplicate
+        # auto-resolve, photo_callback), and one of them raising must
+        # not leave the sink reporting fewer photos than the catalog
+        # actually holds. ``processed_count`` stays at the end of the
+        # iteration: it drives the progress bar, which should only
+        # advance once the file is genuinely done with.
+        self.counts["indexed"] += 1
+        self.indexed_photo_ids.add(photo_id)
+
+        # A brand-new row may have claimed a *recycled* rowid (see
+        # ``purge_cached_files_for_recycled_id``). Cached derivatives
+        # from the id's previous owner would otherwise be served as
+        # this photo's — a wrong-bird Life List card. The index makes
+        # this an O(1) set lookup per insert; only ids that actually
+        # collide do real work.
+        if (
+            not item.row_already_existed
+            and vireo_dir
+            and purge_cached_files_for_recycled_id(
+                self.thumb_cache_dir or os.path.join(vireo_dir, "thumbnails"),
+                photo_id,
+                id_index=self.recycled_id_index,
+                vireo_dir=vireo_dir,
+                db=self.db,
+                file_mtime=item.file_mtime,
+            )
+        ):
+            self.invalidated_photo_ids.add(photo_id)
+        return photo_id
+
+    def _write_photo_columns(self, photo_id, item):
+        # Update metadata columns (also fixes existing photos that were
+        # inserted before ExifTool metadata was available)
+        meta = item.meta
+        file_meta = meta.file_meta
+        file_hash = item.file_hash
+        file_size = item.file_size
+        row_already_existed = item.row_already_existed
+        prev_file_hash = item.prev_file_hash
+        updates = []
+        update_params = []
+        if meta.timestamp is not None:
+            updates.append("timestamp=?")
+            update_params.append(meta.timestamp)
+        if meta.width is not None:
+            updates.append("width=?")
+            update_params.append(meta.width)
+        if meta.height is not None:
+            updates.append("height=?")
+            update_params.append(meta.height)
+        if meta.latitude is not None:
+            updates.extend(["latitude=?", "longitude=?"])
+            update_params.extend([meta.latitude, meta.longitude])
+        if item.phash is not None:
+            updates.append("phash=?")
+            update_params.append(item.phash)
+        if meta.burst_id is not None:
+            updates.append("burst_id=?")
+            update_params.append(meta.burst_id)
+        if file_hash is not None:
+            updates.append("file_hash=?")
+            update_params.append(file_hash)
+            if row_already_existed and prev_file_hash != file_hash:
+                # The stored baseline is being replaced, so any prior
+                # integrity verdict applied to bytes that no longer
+                # exist. Clear the verification markers rather than
+                # carry them forward — the audit summary must only
+                # claim "checked" for baselines verify_hashes (or an
+                # explicit user accept) actually vouched for. A rescan
+                # that recomputes the same hash leaves coverage intact.
+                updates.append("hash_checked_at=NULL")
+                updates.append("hash_status=NULL")
+        elif file_size == 0:
+            updates.append("file_hash=NULL")
+            if row_already_existed and prev_file_hash is not None:
+                updates.append("hash_checked_at=NULL")
+                updates.append("hash_status=NULL")
+            # Historical rows where the empty SHA leaked in are repaired
+            # here by clearing file_hash above. We deliberately leave the
+            # ``flag`` column untouched: a 'rejected' value could come
+            # from the user (Browse / culling) just as easily as from
+            # past duplicate auto-resolution, and we have no marker that
+            # distinguishes them. Silently un-rejecting a user's
+            # placeholder would be worse than leaving it as-is; the
+            # duplicates page already flags empty-byte groups for
+            # manual review.
+        if file_meta:
+            # Promoted EXIF summary columns (universal filter fields).
+            # Written whenever ExifTool ran, independent of whether the
+            # full JSON blob is stored below. Absent columns are cleared
+            # to NULL rather than skipped so a rescan of a file whose
+            # metadata lost a field (e.g. sidecar edited, replaced with a
+            # different camera's file) doesn't leave stale values that
+            # /api/photos/query and /api/filters/values keep matching.
+            cols = exif_summary_columns(file_meta)
+            for column in EXIF_SUMMARY_COLUMNS:
+                updates.append(f"{column}=?")
+                update_params.append(cols.get(column))
+        if file_meta and self.extract_full_metadata:
+            updates.append("exif_data=?")
+            update_params.append(json.dumps(file_meta))
+        elif file_meta:
+            # Store minimal marker so we know ExifTool ran (even when
+            # extract_full_metadata is off) — prevents perpetual retry
+            updates.append("exif_data=COALESCE(exif_data, ?)")
+            update_params.append("{}")
+        if row_already_existed:
+            # add_photo is INSERT OR IGNORE, so the fresh stat values it
+            # was passed never reach an existing row. Without these the
+            # incremental pre-pass keeps comparing against the stale
+            # stored mtime and re-processes a changed file on every scan
+            # forever. Only advance file_mtime/file_size when the content
+            # hash succeeded: _compute_file_features hashes every
+            # processed file, so file_hash is None only when the bytes
+            # couldn't be read (transient permission/I-O error). Marking
+            # such a file's mtime current would make the next incremental
+            # scan skip it forever with a stale hash and stale derived
+            # caches; leaving the old mtime in place retries it instead.
+            if file_hash is not None or file_size == 0:
+                updates.extend(["file_mtime=?", "file_size=?"])
+                update_params.extend([item.file_mtime, file_size])
+            # xmp_mtime stays unconditional — the sidecar is a separate
+            # file whose keyword import below runs regardless of image
+            # hash success, and it may be None here: writing NULL is
+            # correct (a deleted sidecar otherwise re-trips the "XMP
+            # changed" check on every scan).
+            updates.append("xmp_mtime=?")
+            update_params.append(item.xmp_mtime)
+        if updates:
+            update_params.append(photo_id)
+            self.db.conn.execute(
+                f"UPDATE photos SET {', '.join(updates)} WHERE id=?",
+                update_params,
+            )
+            commit_with_retry(self.db.conn)
+
+    def _heal_changed_content(self, photo_id, item):
+        """Content-change self-heal.
+
+        When the computed hash differs from what was stored before this
+        scan, derived caches are stale. Includes the NULL → concrete
+        transition for legacy rows that predate hash tracking — we can't
+        prove their caches match current bytes, so safer to flush and
+        regenerate. Also fires when a file is truncated to zero bytes:
+        file_hash is None in that branch (empty files don't carry
+        duplicate identity), so the plain ``file_hash is not None`` guard
+        would otherwise leave thumbnails and working copies from the old
+        bytes in place. The zero-byte clause covers BOTH non-empty → empty
+        and legacy NULL → empty: a pre-hash row whose file is now
+        truncated still has thumbnails rendered from its old non-empty
+        bytes, and before this fix the previous code path (which stored
+        the concrete empty SHA) would have invalidated it via the NULL →
+        concrete branch. Skips the empty → empty repair case (prev was
+        already the empty SHA) because the bytes didn't actually change.
+        Gated on ``row_already_existed`` so brand-new inserts
+        (prev_file_hash is always NULL there) don't trigger pointless
+        UPDATE + commit round-trips on large initial scans. Requires
+        explicit vireo_dir; callers must pass it (scan can't guess
+        because --db and --thumb-dir are independently configurable).
+        """
+        file_hash = item.file_hash
+        prev_file_hash = item.prev_file_hash
+        content_identity_changed = (
+            file_hash is not None and prev_file_hash != file_hash
+        ) or (
+            item.file_size == 0
+            and prev_file_hash != EMPTY_FILE_SHA256
+        )
+        if (item.row_already_existed
+                and content_identity_changed
+                and self.vireo_dir):
+            _invalidate_derived_caches(
+                self.db, self.vireo_dir, photo_id,
+                thumb_cache_dir=self.thumb_cache_dir,
+            )
+            self.invalidated_photo_ids.add(photo_id)
+            commit_with_retry(self.db.conn)
+
+    # -- post-processing ---------------------------------------------
+
+    def _finish_catalog(self):
+        db = self.db
+        vireo_dir = self.vireo_dir
+        counts = self.counts
+        # Pair raw+JPEG companions: raw is primary, JPEG becomes companion_path.
+        # Wrap post-processing so folder counts are always updated, even on failure.
+        # On exception, roll back any uncommitted partial writes before updating
+        # counts — otherwise update_folder_counts()'s commit would persist
+        # half-applied pairing or working-copy records.
+        try:
+            # A JPEG merged into its RAW's row stops being its own photo, so
+            # discount it: both files were counted on the way in but only the
+            # RAW survives. Applied to the sink immediately (not just the
+            # returned dict) so a caller reading counts after a later failure
+            # in this block still sees the corrected number.
+            _merged_ids = _pair_raw_jpeg_companions(
+                db, vireo_dir=vireo_dir, thumb_cache_dir=self.thumb_cache_dir,
+            )
+            # Discount only companions THIS scan counted. The pairing pass
+            # queries the whole photos table, so it also cleans up pairs left
+            # pending elsewhere in the catalog (an interrupted earlier scan,
+            # an older build). Debiting a scoped scan for those would make it
+            # undercount, and scanning a root with no new files while one
+            # stale pair was pending would report -1 photos indexed.
+            _mine = _merged_ids & self.indexed_photo_ids
+            counts["merged_companions"] += len(_mine)
+            counts["indexed"] -= len(_mine)
+
+            # Extract working copies for RAW photos (after pairing so companion is known).
+            # Scope to the folders the caller just scanned so a fresh import doesn't
+            # trigger library-wide backfill for every pre-existing large JPEG.
+            # Match-mode mirrors what scan() actually traversed: restrict_dirs and
+            # non-recursive scans only touch direct children, so the scope uses an
+            # exact-folder match; a recursive walk from `root` matches the subtree.
+            #
+            # Deliberately do NOT forward ``progress_callback`` here: callers
+            # like app.py's import job feed the scan callback into a shared
+            # ``job["progress"]`` slot that gates downstream phase totals
+            # (``scan_count = job["progress"]["total"]``). Emitting working-copy
+            # (current, total) through the same callback would overwrite the
+            # scan total with the working-copy total and visually jump the bar
+            # backward. ``status_callback`` still announces the phase.
+            if vireo_dir and not self.skip_working_copies:
+                _extract_working_copies(
+                    db, vireo_dir,
+                    progress_callback=None,
+                    status_callback=self.status_callback,
+                    scope=self._working_copy_scope(),
+                    cancel_check=self.cancel_check,
+                )
+
+            # Batched untracked-preview sweep. One os.listdir(previews/) for
+            # the whole scan instead of one per invalidated photo — essential
+            # when a rescan touches thousands of content-changed files.
+            if self.invalidated_photo_ids:
+                _sweep_untracked_previews_for_photos(
+                    db, vireo_dir, self.invalidated_photo_ids,
+                )
+        except BaseException:
+            db.conn.rollback()
+            raise
+        finally:
+            db.update_folder_counts()
+
+    def _working_copy_scope(self):
+        if self.restrict_dirs is not None:
+            # Use the bundle-filtered list — see ``effective_restrict_dirs``
+            # above. Reusing the raw ``restrict_dirs`` here would let a
+            # stale DB row inside an excluded bundle re-enter the
+            # working-copy extractor, which reads ``folder_path/filename``
+            # and re-trips the macOS TCC prompt the scan loop's guard
+            # already skipped.
+            return [(str(d), "exact") for d in self.effective_restrict_dirs]
+        if not self.recursive:
+            return [(str(self.root_path), "exact")]
+        return [str(self.root_path)]
+
+    def _log_summary(self):
+        counts = self.counts
+        processed_count = self.processed_count
+        # Every file the loop disposed of landed in exactly one bucket. If this
+        # ever trips, a new disposition was added without classifying it, and
+        # the summary below would silently over-claim by that many photos —
+        # log it rather than raising, since the scan's real work is committed
+        # and a miscounted summary is no reason to fail the run.
+        vanished_count = counts["vanished"]
+        skipped_uncataloged_count = counts["skipped_uncataloged"]
+        merged_count = counts["merged_companions"]
+        indexed_count = counts["indexed"]
+        accounted = (
+            indexed_count + vanished_count + skipped_uncataloged_count
+            + merged_count
+        )
+        if accounted != processed_count:
+            log.error(
+                "Scan count invariant broken: indexed=%d + vanished=%d + "
+                "skipped=%d + merged=%d != processed=%d (a file disposition is "
+                "unclassified)",
+                indexed_count, vanished_count, skipped_uncataloged_count,
+                merged_count, processed_count,
+            )
+
+        # Report what reached the catalog, not what the walk turned up. These
+        # used to be the same number ("Scan complete: %d photos indexed" logged
+        # ``total``), which reads as a success line and stays reassuring
+        # precisely when the scan achieved nothing — an archive share that
+        # dropped mid-scan logged "984 photos indexed" having indexed zero.
+        summary = f"Scan complete: {indexed_count} photos indexed"
+        if merged_count:
+            summary += f", {merged_count} JPEG(s) merged into their RAW"
+        if vanished_count:
+            summary += f", {vanished_count} vanished"
+        if skipped_uncataloged_count:
+            summary += f", {skipped_uncataloged_count} uncataloged (skipped)"
+        if merged_count or vanished_count or skipped_uncataloged_count:
+            summary += f" of {self.total} discovered"
+        log.info(summary)
