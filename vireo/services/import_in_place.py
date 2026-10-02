@@ -95,6 +95,7 @@ def enqueue_import_in_place(service: ImportService, db: Database, body: dict) ->
     # omitted branch has to wait until AFTER the workspace switch — see
     # below.
     explicit_after_import = "after_import" in body
+    after_import = None
     if explicit_after_import:
         after_import = body.get("after_import")
         err = service._validate_after_import(after_import, db)
@@ -107,6 +108,41 @@ def enqueue_import_in_place(service: ImportService, db: Database, body: dict) ->
     if workspace_err is not None:
         return workspace_err
 
+    # Everything from here to ``runner.start`` runs inside
+    # ``_admit_into_import_workspace``: a ``new_workspace_name`` request
+    # has already committed the workspace and switched active to it, so
+    # any failure, returned or raised, must undo both. Add new checks
+    # before ``_prepare_import_workspace`` or inside ``_admit_in_place_job``.
+    def admit():
+        return _admit_in_place_job(
+            service, db, body,
+            active_ws=active_ws,
+            created_workspace=created_workspace,
+            explicit_after_import=explicit_after_import,
+            after_import=after_import,
+            sources=sources,
+            snapshot_paths=snapshot_paths,
+            snapshot_paths_by_root=snapshot_paths_by_root,
+            source_snapshot_id=source_snapshot_id,
+            recursive=recursive,
+            import_tags=import_tags,
+            location_from_gps=location_from_gps,
+            conflict_paths=_conflict_paths,
+        )
+
+    return service._admit_into_import_workspace(
+        db, created_workspace, previous_active_ws, admit,
+    )
+
+
+def _admit_in_place_job(
+    service, db, body, *, active_ws, created_workspace,
+    explicit_after_import, after_import, sources, snapshot_paths,
+    snapshot_paths_by_root, source_snapshot_id, recursive, import_tags,
+    location_from_gps, conflict_paths,
+):
+    """The admission steps after the workspace switch; returns a job id or
+    an ``ImportFailure``. ``runner.start`` must stay the last step."""
     # Resolve the omitted-default AFTER the workspace switch. Reading
     # pipeline.default_process_id off the previously-active workspace
     # would leak that workspace's override into a new-workspace import.
@@ -163,24 +199,14 @@ def enqueue_import_in_place(service: ImportService, db: Database, body: dict) ->
     # registration would otherwise see no import job and be admitted,
     # letting the stage rebase paths this import is about to walk.
     with stage_boundary_lock():
-        conflict = _local_copy_conflict(db, runner, _conflict_paths)
+        conflict = _local_copy_conflict(db, runner, conflict_paths)
         if conflict:
-            # A ``new_workspace_name`` request has already committed the
-            # workspace and switched active to it. Roll both back so the
-            # 409 leaves no orphan and no silent active-workspace change.
-            service._rollback_import_workspace(
-                db, created_workspace, previous_active_ws,
-            )
             return ImportFailure(conflict, 409)
-        job_id = runner.start(
+        return runner.start(
             "import-in-place", import_job.work, config=job_config,
             workspace_id=active_ws,
             pausable=snapshot_import_lock is None,
         )
-    response = {"job_id": job_id}
-    if created_workspace is not None:
-        response["workspace"] = created_workspace
-    return response
 
 
 def _default_after_import(service, db):
