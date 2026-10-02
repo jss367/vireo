@@ -2597,7 +2597,7 @@ class _PhotoMove:
             self.errors.append(f"{photo['filename']}: source file missing")
             return None
 
-        if _is_same_directory(photo["folder_id"], src_dir, self.dest_folder_id, self.destination):
+        if self.folder_is_destination(photo["folder_id"], src_dir):
             return _PhotoToMove(
                 pid=pid, photo=photo, src_dir=src_dir, src_file=src_file,
                 stem=stem, stem_key=self.stem_key(stem),
@@ -2612,14 +2612,16 @@ class _PhotoMove:
             return None
         return item
 
-    def is_already_in_place(self, item):
-        """Count photos already in the destination without touching their files."""
-        folder_id = item.photo["folder_id"]
+    def folder_is_destination(self, folder_id, src_dir):
         if folder_id not in self.in_place_folders:
             self.in_place_folders[folder_id] = _is_same_directory(
-                folder_id, item.src_dir, self.dest_folder_id, self.destination,
+                folder_id, src_dir, self.dest_folder_id, self.destination,
             )
-        if self.in_place_folders[folder_id]:
+        return self.in_place_folders[folder_id]
+
+    def is_already_in_place(self, item):
+        """Count photos already in the destination without touching their files."""
+        if self.folder_is_destination(item.photo["folder_id"], item.src_dir):
             self.already_in_place += 1
             return True
         return False

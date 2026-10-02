@@ -7221,3 +7221,18 @@ def test_date_move_reports_photos_already_in_each_destination(tmp_path):
         assert result["moved"] == 0
         assert result["already_in_place"] == 1
         assert result["destinations"][0]["already_in_place"] == 1
+
+
+def test_photo_move_checks_directory_identity_once_per_folder(move_env, monkeypatch):
+    import move
+
+    calls = []
+    original = move._is_same_directory
+    def counted(*args):
+        calls.append(args)
+        return original(*args)
+    monkeypatch.setattr(move, "_is_same_directory", counted)
+    env = move_env
+    result = move.move_photos(env["db"], [env["p1"], env["p2"]], str(env["dst"]))
+    assert result["moved"] == 2
+    assert len(calls) == 1
