@@ -12973,3 +12973,25 @@ def test_file_type_template_mount_check_still_blocks_used_categories(
     })
     assert resp.status_code == 400, resp.get_json()
     assert "mount" in resp.get_json()["error"]
+
+
+def test_failed_import_with_tag_errors_does_not_mark_chain_paid(app_and_db, tmp_path, monkeypatch):
+    import import_job
+    from services.imports import ImportService
+
+    monkeypatch.setattr(import_job, "run_import_job", lambda *a, **k: {
+        "ok": False, "failed": 1, "photo_ids": [], "errors": ["copy failed"],
+    })
+
+    def failed_tags(self, workspace_id, photo_ids, tags, location_from_gps, result, **kw):
+        result["tagging"] = {"errors": ["tag write failed"]}
+
+    monkeypatch.setattr(ImportService, "_apply_import_tags", failed_tags)
+    app, _db = app_and_db
+    card = _chain_card(tmp_path)
+    with app.test_client() as client:
+        job_id = _post_import(client, card, tmp_path / "archive")
+        result = wait_for_job_via_client(client, job_id)["result"]
+        assert result["chained"] is False
+        assert result["tags_applied"] is False
+        assert "chained" not in app._job_runner.get(job_id).get("partial_result", {})

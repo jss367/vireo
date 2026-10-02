@@ -1154,7 +1154,7 @@ class _ImportPhotosJob:
             # Record the chain independently of the tag pass: a tag-only
             # resume must not publish a second collection or processing job.
             # A cancelled run skipped the chain and still owes it.
-            if not result.get("cancelled"):
+            if not result.get("cancelled") and result.get("ok") is not False:
                 self._mark_post_import_step(job, "chained", result)
                 result["chained"] = True
             # Both marks land on the final row either way, so a row that
