@@ -304,7 +304,13 @@ def import_resume_takeover(parent_id, parent_result, rows):
         return max(entries, key=lambda e: e["started_at"])
 
     descendant_landings = {}
+    descendant_fingerprints = {}
     for entry in sorted(descendants, key=lambda e: e["started_at"]):
+        for value in (entry["config"].get("carry_photo_fingerprints"),
+                      entry["result"].get("photo_fingerprints"),
+                      entry["result"].get("carried_photo_fingerprints")):
+            if isinstance(value, dict):
+                descendant_fingerprints.update(value)
         for value in (entry["config"].get("recover_landed_files"),
                       entry["result"].get("landed_files")):
             if isinstance(value, dict):
@@ -323,6 +329,7 @@ def import_resume_takeover(parent_id, parent_result, rows):
         "kind": kind,
         "parent_interrupted": parent_interrupted,
         "descendant_landed_files": descendant_landings,
+        "descendant_photo_fingerprints": descendant_fingerprints,
     }
 
 
@@ -1016,6 +1023,8 @@ class ImportService:
                         "takeover": takeover["kind"],
                     },
                 )
+        if takeover:
+            self._recover_relocated_descendant_landings(db, takeover)
         parent_resume = self._interrupted_parent_resume(
             parent_config, parent_result, takeover,
         )
@@ -1068,6 +1077,29 @@ class ImportService:
             (parent_id,),
         ).fetchone() is not None
 
+    def _recover_relocated_descendant_landings(self, db, takeover):
+        """Keep a moved descendant's scope only when its bytes still match."""
+        expected = {}
+        for key, fingerprint in takeover.get("descendant_photo_fingerprints", {}).items():
+            try:
+                pid = int(key)
+            except (TypeError, ValueError):
+                continue
+            if pid > 0 and isinstance(fingerprint, str):
+                expected[pid] = fingerprint
+        current = self._capture_photo_fingerprints_for_ids(db, list(expected))
+        for pid, fingerprint in current.items():
+            old_parts = expected[pid].rsplit("|s=", 1)
+            new_parts = fingerprint.rsplit("|s=", 1)
+            if len(old_parts) != 2 or len(new_parts) != 2:
+                continue
+            identity = old_parts[1]
+            if identity != new_parts[1] or "|h=" not in identity:
+                continue
+            file_hash = identity.rsplit("|h=", 1)[1]
+            if file_hash:
+                takeover["descendant_landed_files"][new_parts[0]] = [-1, -1, file_hash]
+
     def _import_resume_rows(self, db, parent_id, parent_config, workspace_id):
         """Finished import rows that may descend from ``parent_id``, for
         ``import_resume_takeover``. Every descendant inherits the chain's
@@ -1077,29 +1109,34 @@ class ImportService:
         history while the final row is still being persisted.
         """
         root = parent_config.get("root_import_job_id") or parent_id
+        runner = self.get_runner()
+        terminal_imports = [
+            job for job in (runner.list_jobs() if runner is not None else [])
+            if job.get("type") == "import"
+            and job.get("status") in ("completed", "failed", "cancelled")
+            and job.get("workspace_id") == workspace_id
+        ]
+        runner_seeds = "".join(" UNION SELECT ?" for _ in terminal_imports)
         rows = [
             dict(row) for row in db.conn.execute(
                 "WITH RECURSIVE lineage(id) AS ("
                 " SELECT id FROM job_history WHERE type='import' AND workspace_id IS ?"
                 " AND (id IN (?, ?) OR json_extract(config, '$.root_import_job_id') = ?"
                 " OR json_extract(config, '$.parent_import_job_id') = ?)"
+                + runner_seeds +
                 " UNION SELECT child.id FROM job_history child JOIN lineage"
                 " ON json_extract(child.config, '$.parent_import_job_id') = lineage.id"
                 " WHERE child.type='import' AND child.workspace_id IS ?"
                 ") SELECT id, type, status, started_at, config, result FROM job_history"
                 " WHERE id IN (SELECT id FROM lineage)"
                 " AND status IN ('completed', 'failed', 'cancelled')",
-                (workspace_id, root, parent_id, root, parent_id, workspace_id),
+                (workspace_id, root, parent_id, root, parent_id,
+                 *(job["id"] for job in terminal_imports), workspace_id),
             ).fetchall()
         ]
 
         by_id = {row["id"]: row for row in rows}
-        runner = self.get_runner()
-        for job in runner.list_jobs() if runner is not None else []:
-            if (job.get("type") != "import"
-                    or job.get("status") not in ("completed", "failed", "cancelled")
-                    or job.get("workspace_id") != workspace_id):
-                continue
+        for job in terminal_imports:
             # Include terminal snapshots before following parent links:
             # a mixed-version grandchild can name the legacy child as root.
             by_id[job["id"]] = job

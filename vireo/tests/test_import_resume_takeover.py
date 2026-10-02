@@ -502,7 +502,8 @@ def test_takeover_reads_never_started_descendant_pipeline_history(tmp_path):
         assert takeover["chained"] is False
 
 
-def test_takeover_fetches_transitive_legacy_descendants(tmp_path):
+@pytest.mark.parametrize("unpersisted_child", [False, True])
+def test_takeover_fetches_transitive_legacy_descendants(tmp_path, unpersisted_child):
     from unittest.mock import Mock
 
     from db import Database
@@ -517,7 +518,9 @@ def test_takeover_fetches_transitive_legacy_descendants(tmp_path):
                      {"ok": False, "failed": 1, "photo_ids": [3]}, root=None, status="failed")
         grandchild = _row("grandchild", "2026-09-01T12:00:00", DONE,
                           parent="legacy-child", root="legacy-child")
-        for row in (child, grandchild):
+        child["workspace_id"] = db._active_workspace_id
+        runner.list_jobs.return_value = [child] if unpersisted_child else []
+        for row in ((grandchild,) if unpersisted_child else (child, grandchild)):
             db.conn.execute(
                 "INSERT INTO job_history (id,type,status,started_at,config,result,workspace_id) VALUES (?,?,?,?,?,?,?)",
                 (row["id"], row["type"], row["status"], row["started_at"],
@@ -530,3 +533,23 @@ def test_takeover_fetches_transitive_legacy_descendants(tmp_path):
         rows = service._import_resume_rows(db, PARENT_ID, {}, db._active_workspace_id)
         assert {row["id"] for row in rows} == {"legacy-child", "grandchild"}
         assert import_resume_takeover(PARENT_ID, _parent()["result"], rows)["by"] == "grandchild"
+
+
+@pytest.mark.parametrize("current", [
+    "/nas/child.jpg|s=12|h=original", "/nas/child.jpg|s=12|h=replaced",
+])
+def test_moved_descendant_recovers_only_matching_bytes(current):
+    from unittest.mock import Mock
+
+    service = ImportService(lambda: Mock(), "unused", {},
+                            invalidate_missing_originals=Mock(), enqueue_process_job=Mock(),
+                            chain_after_move=Mock(), bulk_gps_location_payload=Mock())
+    child = _row("d", "2026-09-01T11:00:00", {
+        "ok": True, "tags_applied": True, "chained": False,
+        "photo_ids": [3], "photo_fingerprints": {"3": "/local/child.jpg|s=12|h=original"},
+    })
+    takeover = import_resume_takeover(PARENT_ID, _parent()["result"], [child])
+    service._capture_photo_fingerprints_for_ids = Mock(return_value={3: current})
+    service._recover_relocated_descendant_landings(Mock(), takeover)
+    resume = service._interrupted_parent_resume(_parent()["config"], _parent()["result"], takeover)
+    assert ("/nas/child.jpg" in resume["landed_files"]) == current.endswith("h=original")

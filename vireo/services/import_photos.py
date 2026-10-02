@@ -84,6 +84,24 @@ def enqueue_import_photos(service: ImportService, db: Database, body: dict) -> d
     # letting the stage rebase the destination this import is about to
     # copy into and scan.
     with stage_boundary_lock():
+        # Snapshot validation can outlast a sibling import. Consult terminal
+        # takeover again immediately before admitting this request.
+        parent_id = job_config.get("parent_import_job_id")
+        if parent_id:
+            *_, failure = service._validate_parent_import_job(
+                parent_id, request.active_ws, db,
+            )
+            if failure is not None:
+                service._rollback_import_workspace(
+                    db, request.created_workspace, request.previous_active_ws,
+                )
+                return failure
+        failure = _competing_retry_failure(runner, job_config)
+        if failure is not None:
+            service._rollback_import_workspace(
+                db, request.created_workspace, request.previous_active_ws,
+            )
+            return failure
         conflict = _local_copy_conflict(
             runner, db, request.conflict_paths,
         )

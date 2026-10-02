@@ -13235,3 +13235,31 @@ def test_import_only_collection_failure_leaves_chain_unpaid(app_and_db, tmp_path
         assert result["photo_ids"]
         assert result["chained"] is False
         assert result["collection_error"] == "collection unavailable"
+
+
+def test_resume_rechecks_takeover_after_request_validation(app_and_db, tmp_path, monkeypatch):
+    from services.import_photos import _ImportPhotosRequest
+
+    app, db = app_and_db
+    with app.test_client() as client:
+        parent_id, _ = _interrupted_tagged_import(app, db, client, tmp_path, "trip")
+        body = _resume_body(client, parent_id)
+        original = _ImportPhotosRequest.prepare_workspace
+
+        def finish_descendant(request):
+            failure = original(request)
+            request.db.conn.execute(
+                "INSERT INTO job_history (id,type,status,started_at,config,result,workspace_id) VALUES (?,?,?,?,?,?,?)",
+                ("late-resume", "import", "completed", "2026-09-01T12:00:00",
+                 json.dumps({"parent_import_job_id": parent_id, "root_import_job_id": parent_id}),
+                 json.dumps({"ok": True, "tags_applied": True, "chained": True}), request.active_ws),
+            )
+            request.db.conn.commit()
+            return failure
+
+        monkeypatch.setattr(_ImportPhotosRequest, "prepare_workspace", finish_descendant)
+        jobs_before = len(app._job_runner.list_jobs())
+        response = client.post("/api/jobs/import-photos", json=body)
+        assert response.status_code == 409, response.get_json()
+        assert response.get_json()["taken_over_by_job_id"] == "late-resume"
+        assert len(app._job_runner.list_jobs()) == jobs_before
