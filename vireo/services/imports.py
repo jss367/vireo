@@ -233,9 +233,15 @@ def import_resume_takeover(parent_id, parent_result, rows):
     tags_applied = bool(parent_result.get("tags_applied")) or any(
         e["tags_applied"] for e in descendants
     )
-    chained = bool(parent_result.get("chained")) or any(
-        e["chained"] for e in descendants
-    )
+    # The parent's chain step marks after a failed import too, but then
+    # skips the collection and processing; apply the same ``ok`` filter to
+    # the parent's own mark as to a descendant's (above) so a crash between
+    # that checkpoint and the terminal row can't make the resume believe
+    # the chain already ran and skip processing on recovery.
+    chained = (
+        bool(parent_result.get("chained"))
+        and parent_result.get("ok") is not False
+    ) or any(e["chained"] for e in descendants)
     marked = [e for e in descendants if e["tags_applied"] or e["chained"]]
     # A plain Retry replays no owed tags, so a descendant's Retry is the
     # next step only once the tags are paid.
@@ -1076,7 +1082,13 @@ class ImportService:
         if takeover is None:
             takeover = {
                 "tags_applied": bool(parent_result.get("tags_applied")),
-                "chained": bool(parent_result.get("chained")),
+                # Discount a ``chained`` mark on a failed row (see
+                # ``import_resume_takeover``): the chain step marked but
+                # skipped processing when ``ok`` was False.
+                "chained": (
+                    bool(parent_result.get("chained"))
+                    and parent_result.get("ok") is not False
+                ),
             }
         tags_applied = bool(takeover["tags_applied"])
         chain_already_ran = bool(takeover["chained"])

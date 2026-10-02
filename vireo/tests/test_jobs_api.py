@@ -728,8 +728,11 @@ def test_jobs_page_returns_200(app_and_db):
     assert b'result.interrupted && Array.isArray(result.photo_ids)' in resp.data
     # A parent with both post-import steps done has nothing to resume;
     # a parent whose chain ran but still owes tag/GPS work stays
-    # resumable as a tag-only replay.
-    assert b'result.chained && result.tags_applied' in resp.data
+    # resumable as a tag-only replay. ``ok !== false`` discounts a
+    # ``chained`` mark on a failed row — ``_chain_after_import`` returns
+    # early via its "import failed" branch without actually enqueueing
+    # processing.
+    assert b'result.chained && result.ok !== false && result.tags_applied' in resp.data
     # Resume must force ``skip_duplicates=true`` — a parent import
     # configured with ``skip_duplicates=false`` would otherwise carry
     # that false through ``importRetryBody`` and the collision resolver
