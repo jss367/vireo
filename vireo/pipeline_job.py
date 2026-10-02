@@ -1526,6 +1526,752 @@ def _collapse_scan_roots(paths):
     return kept
 
 
+class _RunControl:
+    """Cancellation and pause participation for one pipeline run."""
+
+    def __init__(self, runner, job):
+        self.runner = runner
+        self.job = job
+        self.abort = threading.Event()
+        self.pause_gate = _PipelinePauseGate(runner, job["id"])
+        self.pause_context = threading.local()
+
+    def cancellation_requested(self):
+        probe = getattr(self.runner, "cancellation_requested", None)
+        if probe is not None:
+            return probe(self.job["id"])
+        return self.runner.is_cancelled(self.job["id"])
+
+    def pause_checkpoint(self):
+        participant = getattr(self.pause_context, "participant", None)
+        if participant is None:
+            return self.cancellation_requested()
+        # checkpoint() performs its own pause test. Suspend around the whole
+        # call so a pause arriving between two separate probes cannot park a
+        # resource waiter while its contention clock is still running. When
+        # there is no pause, this excludes only the negligible probe itself.
+        with suspend_resource_wait_timing():
+            cancelled = self.pause_gate.checkpoint(participant)
+        if cancelled:
+            self.abort.set()
+        return cancelled
+
+    def should_abort(self, abort_event):
+        """Shadow the module-level helper inside this run so the existing safe
+        cancellation boundaries double as pause checkpoints.  Calls made from a
+        library-owned helper thread have no registered participant and remain a
+        non-blocking cancellation probe; the owning pipeline worker parks at its
+        next outer boundary instead."""
+        if self.pause_checkpoint():
+            abort_event.set()
+        # Resolve through the module namespace so tests and diagnostics that
+        # replace the pipeline's abort policy still observe every checkpoint.
+        return globals()["_should_abort"](abort_event)
+
+    def should_abort_without_pause(self, abort_event):
+        """Check cancellation without parking while a shared lock is held."""
+        if self.cancellation_requested():
+            abort_event.set()
+        return globals()["_should_abort"](abort_event)
+
+    def pause_or_cancel_pending(self):
+        """Non-parking pause/cancel probe for ledger waits held under a lock.
+
+        The bound ``_pause_checkpoint`` probe parks on pause, so a resource
+        wait launched from a critical section (e.g. inside
+        ``acquire_photo_mask``) would keep that lock held for the entire
+        pause. Swap this probe in around such critical sections and the
+        ledger raises ``ResourceWaitCancelled`` instead, unwinding out of
+        the lock so the outer stage can park at a safe boundary.
+        """
+        probe = getattr(self.runner, "pause_requested", None)
+        if probe is not None and probe(self.job["id"]):
+            return True
+        return self.cancellation_requested()
+
+    def pipeline_control(self):
+        return PipelineControl(
+            should_abort=self.should_abort,
+            should_abort_without_pause=self.should_abort_without_pause,
+            pause_checkpoint=self.pause_checkpoint,
+            cancellation_requested=self.cancellation_requested,
+            pause_or_cancel_pending=self.pause_or_cancel_pending,
+        )
+
+    def run_pause_participant(self, participant, work_fn, *, pre_registered=False):
+        if not pre_registered:
+            self.pause_gate.register(participant)
+        self.pause_context.participant = participant
+        try:
+            # Context variables do not propagate into Python threads. Bind
+            # each pipeline participant explicitly so scanner/model waits are
+            # attributed to the parent job's diagnostics, and so ledger waits
+            # (including CPU inference on the ``cpu_ml`` lane) wake promptly
+            # on cancellation or park promptly on pause instead of blocking
+            # until the current holder releases. The pure-cancel probe is
+            # bound alongside the pause-aware one so ``acquire_session_cache_lock``
+            # can release on cancel without parking the lock holder inside
+            # ``wait_if_paused`` — that would keep every unpaused peer
+            # waiting on the same DINO/detector/SAM/keypoint model until
+            # Resume.
+            with (
+                bind_resource_owner(self.job["id"]),
+                bind_resource_cancel_check(self.pause_checkpoint),
+                bind_resource_pure_cancel_check(self.cancellation_requested),
+            ):
+                self.pause_checkpoint()
+                return work_fn()
+        finally:
+            self.pause_context.participant = None
+            self.pause_gate.unregister(participant)
+
+    def start_cancel_watcher(self):
+        """Bridge user-initiated cancellation (runner.cancel_job) to the local
+        abort Event so all stages that already honor `abort` stop promptly."""
+        cancel_watcher_stop = threading.Event()
+        cancel_watcher = threading.Thread(
+            target=self._watch_for_cancel, args=(cancel_watcher_stop,),
+            daemon=True,
+        )
+        cancel_watcher.start()
+        return cancel_watcher_stop
+
+    def _watch_for_cancel(self, cancel_watcher_stop):
+        while not cancel_watcher_stop.is_set():
+            # This watcher must never park for Pause: it is not pipeline
+            # work and would otherwise publish ``paused`` before the real
+            # stage workers have reached safe checkpoints.
+            if self.cancellation_requested():
+                self.abort.set()
+                return
+            if cancel_watcher_stop.wait(0.25):
+                return
+
+
+def _effective_cache_dirs(db_path, thumb_cache_dir):
+    """Return the run's (thumbnail cache dir, vireo dir)."""
+    # Effective thumbnail cache directory for every internal call below.
+    # Falls back to the historical ``<db_dir>/thumbnails`` convention when
+    # the caller didn't supply an explicit value — matches prior behavior
+    # for the default ~/.vireo layout.
+    effective_thumb_cache_dir = thumb_cache_dir or os.path.join(
+        os.path.dirname(db_path), "thumbnails",
+    )
+    # vireo_dir must match the Flask serve convention — app.py computes
+    # ``vireo_dir = os.path.dirname(THUMB_CACHE_DIR)`` for
+    # previews/working. When the caller provided thumb_cache_dir
+    # explicitly we derive from its parent; otherwise fall back to the
+    # db_dir (same as the historical layout where everything sits
+    # alongside vireo.db).
+    effective_vireo_dir = (
+        os.path.dirname(thumb_cache_dir)
+        if thumb_cache_dir
+        else os.path.dirname(db_path)
+    )
+    return effective_thumb_cache_dir, effective_vireo_dir
+
+
+def _resolve_archive_destination(params):
+    """Return the run's (final_destination, remote_archive)."""
+    final_destination = params.destination if params.local_processing else None
+    remote_archive = None
+    if params.local_processing and params.remote_target_id:
+        # Prefer the snapshot captured at enqueue time so a settings edit
+        # between click-Start and slot-open cannot redirect the archive to a
+        # different host/mount than the jobs panel is showing. The Settings
+        # fallback is a last resort for callers (mainly tests) that build
+        # PipelineParams by hand without pre-resolving the target.
+        target = params.remote_target_snapshot
+        if not target:
+            import config as _cfg_mod
+
+            target = _cfg_mod.get_remote_target(params.remote_target_id)
+        if not target:
+            raise RuntimeError(
+                f"Remote target '{params.remote_target_id}' not found — it "
+                "may have been removed from Settings after this job was "
+                "queued. Pick a saved remote target and retry."
+            )
+        try:
+            remote_archive = resolve_remote_archive(
+                target, params.remote_subpath,
+            )
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from exc
+        # Everything below that keys off final_destination locally — the
+        # in-flight destination reservation, the tracked-destination
+        # preflight, the staging-root name — cares about where the CATALOG
+        # will point after the archive, which for a remote destination is
+        # the target's local mount path, not the NAS-side path.
+        final_destination = remote_archive["mount_final"]
+    return final_destination, remote_archive
+
+
+def _reserve_archive_destination(job, params, final_destination,
+                                 effective_vireo_dir):
+    """Reserve the archive destination; return whether it was reserved."""
+    if not (params.local_processing and final_destination):
+        return False
+    from local_processing import staging_root
+
+    # Reserve the final destination across the whole process BEFORE any
+    # staging or scanning starts. SLOT_CAP=2 in JobRunner means two
+    # local-processing pipelines can race past the storage stage's
+    # DB-only overlap check; without this reservation the second one
+    # would only fail inside ``move_folder`` after staging and
+    # processing everything. ``release_archive_destination`` runs in
+    # the finally below so retries can re-claim once this run ends.
+    if not try_reserve_archive_destination(final_destination):
+        raise RuntimeError(
+            f"Archive destination {final_destination} is already "
+            "being used by another local-processing pipeline. Wait "
+            "for that job to finish, or pick a different destination."
+        )
+
+    # final_destination (not params.destination, which is None for a
+    # remote archive): the staging root's basename is the leaf the
+    # archive move lands at, and for remote that's the mount-path leaf —
+    # the same last-subpath-segment as the NAS side.
+    params.destination = staging_root(
+        effective_vireo_dir, job["id"], final_destination,
+    )
+    return True
+
+
+def _scope_to_source_snapshot(params, db_path, workspace_id):
+    """Snapshot-scoped pipelines: load the snapshot up front so scan targets
+    are derived from the captured file paths (not a folder the user picked
+    later). Raises if the snapshot has been garbage-collected — the API
+    layer is expected to return 404 before this job ever runs, but we fail
+    loud here to avoid silently running an unbounded scan."""
+    snapshot_paths: list[str] | None = None
+    if params.source_snapshot_id is not None:
+        db_ro = Database(db_path)
+        db_ro.set_active_workspace(workspace_id)
+        snap = db_ro.get_new_images_snapshot(params.source_snapshot_id)
+        if snap is None:
+            raise ValueError(
+                f"snapshot {params.source_snapshot_id} not found"
+            )
+        snapshot_paths = list(snap["file_paths"])
+        # Collapse to the minimal non-overlapping ancestor set: if the
+        # snapshot has files at both /root/a.jpg and /root/sub/b.jpg the
+        # naive derived roots (/root, /root/sub) would make the scanner walk
+        # /root/sub twice — once on its own, once as a descendant of /root.
+        scan_roots = _collapse_scan_roots(
+            [os.path.dirname(p) for p in snapshot_paths]
+        )
+        # Override any source/sources/collection_id the caller passed; the
+        # snapshot is the single source of truth for what to scan.
+        params.sources = scan_roots
+        params.source = None
+        params.collection_id = None
+    return snapshot_paths
+
+
+def _initial_stages():
+    return {
+        "storage": {"status": "pending", "label": "Checking local storage"},
+        "ingest": {"status": "pending", "count": 0, "label": "Importing photos"},
+        "scan": {"status": "pending", "count": 0, "label": "Checking metadata"},
+        "thumbnails": {"status": "pending", "count": 0, "label": "Generating thumbnails"},
+        "previews": {"status": "pending", "count": 0, "label": "Generating previews"},
+        "model_loader": {"status": "pending", "label": "Loading models"},
+        "detect": {"status": "pending", "count": 0, "label": "Detecting subjects"},
+        "classify": {"status": "pending", "count": 0, "cached": 0, "seen": 0, "label": "Classifying species"},
+        "extract_masks": {"status": "pending", "count": 0, "label": "Extracting features"},
+        "eye_keypoints": {"status": "pending", "count": 0, "label": "Detecting eye keypoints"},
+        "regroup": {"status": "pending", "label": "Grouping encounters"},
+        "misses": {"status": "pending", "count": 0, "label": "Flagging missed shots"},
+        "archive": {"status": "pending", "count": 0, "label": "Archiving photos"},
+    }
+
+
+def _effective_model_ids(params):
+    """Normalize model_ids: prefer the explicit list, fall back to the legacy
+    single `model_id`, and finally to `[]` which means "use the active model
+    from config." This is the knob the multi-model fix hangs off of."""
+    if params.model_ids:
+        return list(params.model_ids)
+    elif params.model_id:
+        return [params.model_id]
+    else:
+        return []
+
+
+def _resolve_model_specs(params, effective_model_ids):
+    """Resolve model specs EARLY so per-model `classify:<id>` step_defs can
+    carry the model's display name as their label. Labels are immutable
+    after set_steps, so we cannot defer this to model_loader_stage.
+
+    Resolution failures are captured (not raised) so the job still sets up
+    its step tree and the model_loader stage can surface a clean error.
+    For any id we fail to resolve we still emit a per-model step — labeled
+    with the id — so the user sees exactly which model broke."""
+    resolved_specs: list = []
+    resolution_error: str | None = None
+    if not params.skip_classify:
+        try:
+            from models import get_active_model, get_models
+            if effective_model_ids:
+                by_id = {m["id"]: m for m in get_models()}
+                for mid in effective_model_ids:
+                    spec = by_id.get(mid)
+                    if not spec or not spec.get("downloaded"):
+                        raise RuntimeError(
+                            f"Model '{mid}' not found or not downloaded."
+                        )
+                    resolved_specs.append(spec)
+            else:
+                spec = get_active_model()
+                if not spec:
+                    raise RuntimeError(
+                        "No model available. Download one in Settings."
+                    )
+                resolved_specs.append(spec)
+        except Exception as e:
+            # Reported to the user through the pipeline's model step.
+            log.warning("Could not resolve pipeline models", exc_info=True)
+            resolution_error = str(e)
+    return resolved_specs, resolution_error
+
+
+def _pipeline_step_defs(params, effective_model_ids, resolved_specs,
+                        resolution_error):
+    """Define step tracking for the jobs page."""
+    step_defs = []
+    if params.destination:
+        if params.local_processing:
+            step_defs.append({"id": "storage", "label": "Check local storage"})
+        step_defs.append({"id": "ingest", "label": "Import photos"})
+    step_defs.extend([
+        {"id": "scan", "label": "Check metadata"},
+        {"id": "thumbnails", "label": "Generate thumbnails"},
+        {"id": "previews", "label": "Generate previews"},
+    ])
+    if not params.skip_classify:
+        step_defs.append({"id": "model_loader", "label": "Load models"})
+        step_defs.append({"id": "detect", "label": "Detect subjects"})
+        step_defs.extend(_classify_step_defs(
+            effective_model_ids, resolved_specs, resolution_error,
+        ))
+    if not params.skip_extract_masks:
+        step_defs.append({"id": "extract_masks", "label": "Extract features"})
+        step_defs.append({"id": "eye_keypoints", "label": "Detect eye keypoints"})
+    if not params.skip_regroup:
+        step_defs.append({"id": "regroup", "label": "Group encounters"})
+        step_defs.append({"id": "misses", "label": "Flag missed shots"})
+    elif not params.skip_classify:
+        step_defs.append({"id": "regroup", "label": "Prepare review"})
+    if params.local_processing:
+        step_defs.append({"id": "archive", "label": "Archive to destination"})
+    return step_defs
+
+
+def _classify_step_defs(effective_model_ids, resolved_specs, resolution_error):
+    """One row per model — label = model display name, id = classify:<mid>.
+
+    When resolution partially failed (e.g. 3 ids requested, 2nd not
+    downloaded), resolved_specs is a non-empty prefix of the requested
+    list. Emitting rows from resolved_specs alone would hide the later
+    failed ids — their "failed" update_step calls would then no-op
+    silently. Drive row creation off effective_model_ids whenever
+    resolution reported an error, so every requested model has a visible
+    step the model_loader stage can mark 'failed'."""
+    step_defs = []
+    if resolved_specs and not resolution_error:
+        for spec in resolved_specs:
+            step_defs.append({
+                "id": f"classify:{spec['id']}",
+                "label": f"Classify with {spec['name']}",
+            })
+    elif effective_model_ids:
+        # Partial or total resolution failure: use display names from any
+        # resolved specs we did get, fall back to the raw id otherwise.
+        by_id = {s["id"]: s for s in resolved_specs}
+        for mid in effective_model_ids:
+            spec = by_id.get(mid)
+            label = (
+                f"Classify with {spec['name']}" if spec
+                else f"Classify with {mid}"
+            )
+            step_defs.append({
+                "id": f"classify:{mid}",
+                "label": label,
+            })
+    else:
+        # No ids, no resolved spec (active-model resolution failed).
+        # One placeholder row keeps the step tree consistent.
+        step_defs.append({
+            "id": "classify:__unresolved__",
+            "label": "Classify species",
+        })
+    return step_defs
+
+
+class _StageState:
+    """Containers and helpers shared between one run's stages."""
+
+    def __init__(self, params, control):
+        self.params = params
+        self.control = control
+        self.scan_to_thumb = queue.Queue(maxsize=200)
+        self.collected_photo_ids = []
+        self.collection_ready = threading.Event()
+        self.models_ready = threading.Event()
+        # Set when the model loader fails for a reason other than cancel; the
+        # orchestrator turns it into ``abort`` once the model-free stages have
+        # finished (see model_loader_stage).
+        self.model_loader_failed = threading.Event()
+        self.loaded_models = {}  # populated by model_loader thread
+
+        # Shared state between detect_stage and classify_stage. Written by
+        # detect_stage, consumed by classify_stage. Populated even on early
+        # exit so classify_stage can reason about "detection ran but produced
+        # nothing" vs. "detection never executed".
+        self.detect_state = {
+            "photos": [],        # list of photo dicts for the collection
+            "folders": {},       # {folder_id: path}
+            "detections": {},    # {photo_id: [detection_dict, ...]}
+            "processed_ids": set(),  # photo_ids whose _detect_batch iteration completed
+            "pre_run_det_ids": {},   # snapshot for reclassify purge
+            "total_detected": 0,
+            "ran": False,        # True once detect_stage's body executed (even if no-op)
+        }
+
+        # Photos classify skipped because their folder went offline mid-run
+        # (folder-scoped outage; abort stays clear so healthy folders keep
+        # processing). Downstream source-reading stages (extract_masks,
+        # eye_keypoints) filter these out so they don't walk back into the
+        # missing folder and re-record the same photos as mask/keypoint
+        # failures, obscuring the intended source-offline diagnosis
+        # (Codex #1388 P2 r3664058173). Held on a dict rather than
+        # ``stages["classify"]`` because ``_update_stages`` pushes stage
+        # dicts as JSON to SSE consumers, and a raw ``set`` isn't
+        # JSON-serialisable.
+        self.source_offline_state: dict = {"skipped_photo_ids": set()}
+
+    def put_scan_item(self, item):
+        """Put into the scan/thumbnail queue without defeating Pause.
+
+        Both ordinary photo items and the end sentinel can otherwise block
+        forever on a full queue after the thumbnail worker has parked.
+        """
+        while not self.control.should_abort(self.control.abort):
+            try:
+                self.scan_to_thumb.put(item, timeout=0.5)
+                return True
+            except queue.Full:
+                continue
+        return False
+
+    def filter_excluded(self, photos):
+        """Remove photos excluded by user selection in preview."""
+        if not self.params.exclude_photo_ids:
+            return photos
+        return [p for p in photos if p["id"] not in self.params.exclude_photo_ids]
+
+
+def _wire_scan_stages(run, shared, *, skip_scan, snapshot_paths,
+                      effective_thumb_cache_dir, effective_vireo_dir,
+                      final_destination, remote_archive,
+                      missing_originals_invalidator):
+    """Bind the scan, collection, thumbnail and preview stages to this run."""
+    scanner_stage = partial(
+        scanning.scanner_stage, run=run,
+        _SENTINEL=_SENTINEL,
+        _filter_excluded=shared.filter_excluded,
+        _find_broken_metadata_folders=_find_broken_metadata_folders,
+        _missing_archive_mount_root=_missing_archive_mount_root,
+        _put_scan_item=shared.put_scan_item,
+        collected_photo_ids=shared.collected_photo_ids,
+        effective_thumb_cache_dir=effective_thumb_cache_dir,
+        effective_vireo_dir=effective_vireo_dir,
+        final_destination=final_destination,
+        missing_originals_invalidator=missing_originals_invalidator,
+        remote_archive=remote_archive,
+        skip_scan=skip_scan,
+        snapshot_paths=snapshot_paths,
+    )
+
+    _collection_stage_body = partial(
+        scanning._collection_stage_body, run=run,
+        collected_photo_ids=shared.collected_photo_ids,
+        skip_scan=skip_scan,
+        snapshot_paths=snapshot_paths,
+    )
+
+    collection_stage = partial(
+        scanning.collection_stage, run=run,
+        _collection_stage_body=_collection_stage_body,
+        collection_ready=shared.collection_ready,
+    )
+
+    thumbnail_stage = partial(
+        media.thumbnail_stage, run=run,
+        _RAW_EXTENSIONS=_RAW_EXTENSIONS,
+        _SENTINEL=_SENTINEL,
+        _filter_excluded=shared.filter_excluded,
+        _recipe_render_source=_recipe_render_source,
+        _retry_thumbnail_with_companion=_retry_thumbnail_with_companion,
+        _retry_thumbnail_with_working_copy=_retry_thumbnail_with_working_copy,
+        _thumb_min_source_size_kwargs=_thumb_min_source_size_kwargs,
+        _thumb_raw_decode_kwargs=_thumb_raw_decode_kwargs,
+        effective_thumb_cache_dir=effective_thumb_cache_dir,
+        effective_vireo_dir=effective_vireo_dir,
+        scan_to_thumb=shared.scan_to_thumb,
+        skip_scan=skip_scan,
+    )
+
+    previews_stage = partial(
+        media.previews_stage, run=run,
+        _filter_excluded=shared.filter_excluded,
+        effective_vireo_dir=effective_vireo_dir,
+        skip_scan=skip_scan,
+    )
+    return {
+        "scanner": scanner_stage,
+        "collection": collection_stage,
+        "thumbnail": thumbnail_stage,
+        "previews": previews_stage,
+    }
+
+
+def _wire_model_stages(run, control, shared, *, effective_vireo_dir,
+                       computation_cache_dir, effective_model_ids,
+                       resolved_specs, resolution_error):
+    """Bind the model, detection, classification, feature and grouping
+    stages to this run."""
+    _load_model_bundle = partial(
+        models.load_model_bundle, run=run,
+        _incomplete_model_message=_incomplete_model_message,
+        _looks_like_missing_external_data=_looks_like_missing_external_data,
+        pause_context=control.pause_context,
+    )
+
+    model_loader_stage = partial(
+        models.model_loader_stage, run=run,
+        _filter_excluded=shared.filter_excluded,
+        _load_model_bundle=_load_model_bundle,
+        loaded_models=shared.loaded_models,
+        model_loader_failed=shared.model_loader_failed,
+        models_ready=shared.models_ready,
+        resolution_error=resolution_error,
+        resolved_specs=resolved_specs,
+    )
+
+    detect_stage = partial(
+        detection.detect_stage, run=run,
+        _filter_excluded=shared.filter_excluded,
+        collection_ready=shared.collection_ready,
+        computation_cache_dir=computation_cache_dir,
+        detect_state=shared.detect_state,
+        effective_vireo_dir=effective_vireo_dir,
+        loaded_models=shared.loaded_models,
+        models_ready=shared.models_ready,
+    )
+
+    classify_stage = partial(
+        classification.classify_stage, run=run,
+        _MAX_SOURCE_OFFLINE_PAUSES=_MAX_SOURCE_OFFLINE_PAUSES,
+        _cached_classify_detections=_cached_classify_detections,
+        _classification_eta_progress=_classification_eta_progress,
+        _load_model_bundle=_load_model_bundle,
+        _record_unattempted_cache_hit=_record_unattempted_cache_hit,
+        _release_classifier_cache_handle=_release_classifier_cache_handle,
+        _remove_attempted_cache_hits=_remove_attempted_cache_hits,
+        _source_offline_reason=_source_offline_reason,
+        detect_state=shared.detect_state,
+        effective_model_ids=effective_model_ids,
+        loaded_models=shared.loaded_models,
+        source_offline_state=shared.source_offline_state,
+    )
+
+    extract_masks_stage = partial(
+        features.extract_masks_stage, run=run,
+        _StagedMaskFile=_StagedMaskFile,
+        _extract_masks_early_exit=_extract_masks_early_exit,
+        _filter_excluded=shared.filter_excluded,
+        _preflight_mask_outcomes=_preflight_mask_outcomes,
+        _rollback_failed_mask_photo=_rollback_failed_mask_photo,
+        _source_offline_reason=_source_offline_reason,
+        _still_offline_folder_ids_of=_still_offline_folder_ids_of,
+        source_offline_state=shared.source_offline_state,
+    )
+
+    eye_keypoints_stage = partial(
+        features.eye_keypoints_stage, run=run,
+        _still_offline_folder_ids_of=_still_offline_folder_ids_of,
+        source_offline_state=shared.source_offline_state,
+    )
+
+    regroup_stage = partial(
+        grouping.regroup_stage, run=run,
+    )
+
+    miss_stage = partial(
+        grouping.miss_stage, run=run,
+    )
+    return {
+        "model_loader": model_loader_stage,
+        "detect": detect_stage,
+        "classify": classify_stage,
+        "extract_masks": extract_masks_stage,
+        "eye_keypoints": eye_keypoints_stage,
+        "regroup": regroup_stage,
+        "misses": miss_stage,
+    }
+
+
+def _run_phase_one(control, stage_fns):
+    """Phase 1: scan + thumbnails + model loading (concurrent)."""
+    threads = {}
+
+    phase_one = {
+        "scanner": stage_fns["scanner"],
+        "collection": stage_fns["collection"],
+        "thumbnail": stage_fns["thumbnail"],
+        "model_loader": stage_fns["model_loader"],
+    }
+    # Register the complete phase before starting its first thread.  If the
+    # first worker reaches Pause immediately, it must wait for the other
+    # three rather than declaring the whole pipeline paused on its own.
+    control.pause_gate.register_many(phase_one)
+    for name, stage_fn in phase_one.items():
+        threads[name] = threading.Thread(
+            target=control.run_pause_participant,
+            args=(name, stage_fn),
+            kwargs={"pre_registered": True},
+            daemon=True,
+        )
+
+    for t in threads.values():
+        t.start()
+
+    # Wait for scan-related threads to finish
+    threads["scanner"].join()
+    threads["collection"].join()
+    threads["thumbnail"].join()
+    threads["model_loader"].join()
+
+
+def _run_later_phases(control, shared, stage_fns, workspace_id, archive_stage):
+    """Run every stage after phase one, one pause participant at a time."""
+    # Phase 1.5: previews (needs scan complete, runs before classify).
+    #
+    # This and every later stage are always invoked — even when `abort`
+    # is set — so their step rows reach a terminal status. Gating the
+    # call on abort would leave the runner.set_steps-created rows
+    # persisted as "pending" with no finished_at, forever. Each stage
+    # checks abort internally and marks itself "Skipped".
+    control.run_pause_participant("previews", stage_fns["previews"])
+
+    # A model-loader failure deferred its abort so the model-free stages
+    # above could finish; from here on every stage needs the model (or
+    # its output), so stop them now.
+    if shared.model_loader_failed.is_set():
+        control.abort.set()
+
+    # Phase 2: detect (needs collection; runs MegaDetector once across all
+    # photos so each per-model classify step reuses cached detections
+    # instead of re-running the detector).
+    #
+    # Always invoked — even when `abort` is set by an earlier stage — so
+    # the `detect` step row reaches a terminal status. Skipping the call
+    # would leave the row pending forever on a model-loader failure.
+    # detect_stage handles abort internally and marks itself skipped.
+    control.run_pause_participant("detect", stage_fns["detect"])
+
+    # Phase 3: classify per model (reads cached detections from detect_stage).
+    # Always invoked for the same reason: every `classify:<model_id>` row
+    # must land in a terminal state so the jobs tree finalizes cleanly on
+    # a loader-triggered abort.
+    control.run_pause_participant("classify", stage_fns["classify"])
+
+    # Phase 3: extract-masks (needs classify output)
+    control.run_pause_participant("extract_masks", stage_fns["extract_masks"])
+
+    # Phase 3.5: eye keypoints (needs masks + classifier output). No-op when
+    # SuperAnimal weights are absent — users opt in on the pipeline models
+    # card. Per-photo failures log and continue rather than abort the stage.
+    control.run_pause_participant("eye_keypoints", stage_fns["eye_keypoints"])
+
+    control.run_pause_participant(
+        "regroup_and_misses",
+        partial(
+            _run_regroup_and_misses, control, workspace_id,
+            stage_fns["regroup"], stage_fns["misses"],
+        ),
+    )
+
+    control.run_pause_participant("archive", archive_stage)
+
+
+def _run_regroup_and_misses(control, workspace_id, regroup_stage, miss_stage):
+    """Phases 4 + 5: regroup and miss detection. Held under the
+    per-workspace regroup lock TOGETHER so a concurrent same-workspace
+    pipeline can't slip a regroup_stage in between this run's
+    regroup_stage and its miss_stage — that would leave the persisted
+    miss flags + ``miss_computed_at`` paired with a grouping
+    (burst_id / pipeline_results_ws*.json) the miss computation never
+    saw. Pipelines targeting different workspaces share neither
+    stage's state and don't contend here.
+
+    miss_stage's own gate covers the regroup-failed and abort cases, so
+    both stages can be invoked unconditionally and still reach a
+    terminal step status."""
+    if control.abort.is_set():
+        # Both stages early-return as "Skipped" without touching
+        # grouping state, so the lock isn't needed — and skipping the
+        # calls would leave their step rows pending forever. Staying
+        # outside the lock also keeps an aborted/cancelled run from
+        # blocking behind a concurrent pipeline's regroup.
+        regroup_stage()
+        miss_stage()
+    else:
+        # Pause checkpoints deliberately surround this critical
+        # section rather than living inside either stage: their shared
+        # lock must span regroup + misses atomically, but a paused job
+        # must not retain it and block another pipeline indefinitely.
+        with acquire_workspace_regroup(workspace_id):
+            regroup_stage()
+            miss_stage()
+    control.pause_checkpoint()
+
+
+def _raise_if_stages_failed(job, result, stages, errors, cancellation_requested):
+    """If any stage ended in 'failed' and the job wasn't cancelled, propagate
+    the failure so JobRunner marks the whole job as failed rather than
+    silently recording it as completed. Cancellation takes precedence:
+    a cancelled job stays cancelled even if stages crashed on the way down."""
+    failed_stages = [
+        name for name, s in stages.items() if s.get("status") == "failed"
+    ]
+    if failed_stages and not cancellation_requested():
+        # Stash the structured result on the job BEFORE raising so the
+        # completion event and job_history still carry per-stage details
+        # (stages dict, errors list). Without this, the pipeline UI loses
+        # the "Failed: [stage_name]" mapping on the card that owned the
+        # failure because it reads result.result.stages / .errors.
+        job["result"] = result
+        # Prefer a "[stage] Fatal: …" error from one of the failed stages
+        # rather than blindly using errors[0], which may be a non-fatal
+        # per-photo warning (e.g. "Photo <id>: mask extraction failed")
+        # logged before the stage-level failure. Falling back to errors[0]
+        # when no stage-fatal entry exists keeps backward compatibility for
+        # any edge case where a stage marks itself failed without appending a
+        # Fatal error; the final fallback covers an empty errors list.
+        first_error = next(
+            (e for e in errors if any(e.startswith(f"[{s}] Fatal:") for s in failed_stages)),
+            errors[0] if errors else f"stage '{failed_stages[0]}' failed",
+        )
+        # Record the fatal error for _persist_job so it can store the stage
+        # failure message rather than job["errors"][0], which may be a
+        # non-fatal per-photo warning that was logged before this failure.
+        job["_fatal_error"] = first_error
+        raise RuntimeError(first_error)
+
+
 def run_pipeline_job(job, runner, db_path, workspace_id, params,
                      thumb_cache_dir=None,
                      missing_originals_invalidator=None,
@@ -1571,89 +2317,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
     # instance) is stashed so ``jsonify(job)`` on the /api/jobs/<id> route
     # keeps working — the helpers reconstruct the wrapper on demand.
     job["_computation_cache_dir"] = computation_cache_dir
-    abort = threading.Event()
-    pause_gate = _PipelinePauseGate(runner, job["id"])
-    pause_context = threading.local()
-
-    def _cancellation_requested():
-        probe = getattr(runner, "cancellation_requested", None)
-        if probe is not None:
-            return probe(job["id"])
-        return runner.is_cancelled(job["id"])
-
-    def _pause_checkpoint():
-        participant = getattr(pause_context, "participant", None)
-        if participant is None:
-            return _cancellation_requested()
-        # checkpoint() performs its own pause test. Suspend around the whole
-        # call so a pause arriving between two separate probes cannot park a
-        # resource waiter while its contention clock is still running. When
-        # there is no pause, this excludes only the negligible probe itself.
-        with suspend_resource_wait_timing():
-            cancelled = pause_gate.checkpoint(participant)
-        if cancelled:
-            abort.set()
-        return cancelled
-
-    # Shadow the module-level helper inside this run so the existing safe
-    # cancellation boundaries double as pause checkpoints.  Calls made from a
-    # library-owned helper thread have no registered participant and remain a
-    # non-blocking cancellation probe; the owning pipeline worker parks at its
-    # next outer boundary instead.
-    def _should_abort(abort_event):
-        if _pause_checkpoint():
-            abort_event.set()
-        # Resolve through the module namespace so tests and diagnostics that
-        # replace the pipeline's abort policy still observe every checkpoint.
-        return globals()["_should_abort"](abort_event)
-
-    def _should_abort_without_pause(abort_event):
-        """Check cancellation without parking while a shared lock is held."""
-        if _cancellation_requested():
-            abort_event.set()
-        return globals()["_should_abort"](abort_event)
-
-    def _pause_or_cancel_pending():
-        """Non-parking pause/cancel probe for ledger waits held under a lock.
-
-        The bound ``_pause_checkpoint`` probe parks on pause, so a resource
-        wait launched from a critical section (e.g. inside
-        ``acquire_photo_mask``) would keep that lock held for the entire
-        pause. Swap this probe in around such critical sections and the
-        ledger raises ``ResourceWaitCancelled`` instead, unwinding out of
-        the lock so the outer stage can park at a safe boundary.
-        """
-        probe = getattr(runner, "pause_requested", None)
-        if probe is not None and probe(job["id"]):
-            return True
-        return _cancellation_requested()
-
-    def _run_pause_participant(participant, work_fn, *, pre_registered=False):
-        if not pre_registered:
-            pause_gate.register(participant)
-        pause_context.participant = participant
-        try:
-            # Context variables do not propagate into Python threads. Bind
-            # each pipeline participant explicitly so scanner/model waits are
-            # attributed to the parent job's diagnostics, and so ledger waits
-            # (including CPU inference on the ``cpu_ml`` lane) wake promptly
-            # on cancellation or park promptly on pause instead of blocking
-            # until the current holder releases. The pure-cancel probe is
-            # bound alongside the pause-aware one so ``acquire_session_cache_lock``
-            # can release on cancel without parking the lock holder inside
-            # ``wait_if_paused`` — that would keep every unpaused peer
-            # waiting on the same DINO/detector/SAM/keypoint model until
-            # Resume.
-            with (
-                bind_resource_owner(job["id"]),
-                bind_resource_cancel_check(_pause_checkpoint),
-                bind_resource_pure_cancel_check(_cancellation_requested),
-            ):
-                _pause_checkpoint()
-                return work_fn()
-        finally:
-            pause_context.participant = None
-            pause_gate.unregister(participant)
+    control = _RunControl(runner, job)
 
     errors = job["errors"]  # shared list, append is thread-safe
     if params.destination or params.local_processing or params.remote_target_id:
@@ -1663,294 +2327,30 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             "then run Process on the imported workspace photos."
         )
 
-    # Effective thumbnail cache directory for every internal call below.
-    # Falls back to the historical ``<db_dir>/thumbnails`` convention when
-    # the caller didn't supply an explicit value — matches prior behavior
-    # for the default ~/.vireo layout.
-    effective_thumb_cache_dir = thumb_cache_dir or os.path.join(
-        os.path.dirname(db_path), "thumbnails",
+    effective_thumb_cache_dir, effective_vireo_dir = _effective_cache_dirs(
+        db_path, thumb_cache_dir,
     )
-    # vireo_dir must match the Flask serve convention — app.py computes
-    # ``vireo_dir = os.path.dirname(THUMB_CACHE_DIR)`` for
-    # previews/working. When the caller provided thumb_cache_dir
-    # explicitly we derive from its parent; otherwise fall back to the
-    # db_dir (same as the historical layout where everything sits
-    # alongside vireo.db).
-    effective_vireo_dir = (
-        os.path.dirname(thumb_cache_dir)
-        if thumb_cache_dir
-        else os.path.dirname(db_path)
+    final_destination, remote_archive = _resolve_archive_destination(params)
+    archive_destination_reserved = _reserve_archive_destination(
+        job, params, final_destination, effective_vireo_dir,
     )
-    final_destination = params.destination if params.local_processing else None
-    remote_archive = None
-    if params.local_processing and params.remote_target_id:
-        # Prefer the snapshot captured at enqueue time so a settings edit
-        # between click-Start and slot-open cannot redirect the archive to a
-        # different host/mount than the jobs panel is showing. The Settings
-        # fallback is a last resort for callers (mainly tests) that build
-        # PipelineParams by hand without pre-resolving the target.
-        target = params.remote_target_snapshot
-        if not target:
-            import config as _cfg_mod
-
-            target = _cfg_mod.get_remote_target(params.remote_target_id)
-        if not target:
-            raise RuntimeError(
-                f"Remote target '{params.remote_target_id}' not found — it "
-                "may have been removed from Settings after this job was "
-                "queued. Pick a saved remote target and retry."
-            )
-        try:
-            remote_archive = resolve_remote_archive(
-                target, params.remote_subpath,
-            )
-        except ValueError as exc:
-            raise RuntimeError(str(exc)) from exc
-        # Everything below that keys off final_destination locally — the
-        # in-flight destination reservation, the tracked-destination
-        # preflight, the staging-root name — cares about where the CATALOG
-        # will point after the archive, which for a remote destination is
-        # the target's local mount path, not the NAS-side path.
-        final_destination = remote_archive["mount_final"]
-    archive_destination_reserved = False
-    if params.local_processing and final_destination:
-        from local_processing import staging_root
-
-        # Reserve the final destination across the whole process BEFORE any
-        # staging or scanning starts. SLOT_CAP=2 in JobRunner means two
-        # local-processing pipelines can race past the storage stage's
-        # DB-only overlap check; without this reservation the second one
-        # would only fail inside ``move_folder`` after staging and
-        # processing everything. ``release_archive_destination`` runs in
-        # the finally below so retries can re-claim once this run ends.
-        if not try_reserve_archive_destination(final_destination):
-            raise RuntimeError(
-                f"Archive destination {final_destination} is already "
-                "being used by another local-processing pipeline. Wait "
-                "for that job to finish, or pick a different destination."
-            )
-        archive_destination_reserved = True
-
-        # final_destination (not params.destination, which is None for a
-        # remote archive): the staging root's basename is the leaf the
-        # archive move lands at, and for remote that's the mount-path leaf —
-        # the same last-subpath-segment as the NAS side.
-        params.destination = staging_root(
-            effective_vireo_dir, job["id"], final_destination,
-        )
 
     try:
-        # Snapshot-scoped pipelines: load the snapshot up front so scan targets
-        # are derived from the captured file paths (not a folder the user picked
-        # later). Raises if the snapshot has been garbage-collected — the API
-        # layer is expected to return 404 before this job ever runs, but we fail
-        # loud here to avoid silently running an unbounded scan.
-        snapshot_paths: list[str] | None = None
-        if params.source_snapshot_id is not None:
-            db_ro = Database(db_path)
-            db_ro.set_active_workspace(workspace_id)
-            snap = db_ro.get_new_images_snapshot(params.source_snapshot_id)
-            if snap is None:
-                raise ValueError(
-                    f"snapshot {params.source_snapshot_id} not found"
-                )
-            snapshot_paths = list(snap["file_paths"])
-            # Collapse to the minimal non-overlapping ancestor set: if the
-            # snapshot has files at both /root/a.jpg and /root/sub/b.jpg the
-            # naive derived roots (/root, /root/sub) would make the scanner walk
-            # /root/sub twice — once on its own, once as a descendant of /root.
-            scan_roots = _collapse_scan_roots(
-                [os.path.dirname(p) for p in snapshot_paths]
-            )
-            # Override any source/sources/collection_id the caller passed; the
-            # snapshot is the single source of truth for what to scan.
-            params.sources = scan_roots
-            params.source = None
-            params.collection_id = None
-
-        # Bridge user-initiated cancellation (runner.cancel_job) to the local
-        # abort Event so all stages that already honor `abort` stop promptly.
-        cancel_watcher_stop = threading.Event()
-
-        def _cancel_watcher():
-            while not cancel_watcher_stop.is_set():
-                # This watcher must never park for Pause: it is not pipeline
-                # work and would otherwise publish ``paused`` before the real
-                # stage workers have reached safe checkpoints.
-                if _cancellation_requested():
-                    abort.set()
-                    return
-                if cancel_watcher_stop.wait(0.25):
-                    return
-
-        cancel_watcher = threading.Thread(target=_cancel_watcher, daemon=True)
-        cancel_watcher.start()
-
-        stages = {
-            "storage": {"status": "pending", "label": "Checking local storage"},
-            "ingest": {"status": "pending", "count": 0, "label": "Importing photos"},
-            "scan": {"status": "pending", "count": 0, "label": "Checking metadata"},
-            "thumbnails": {"status": "pending", "count": 0, "label": "Generating thumbnails"},
-            "previews": {"status": "pending", "count": 0, "label": "Generating previews"},
-            "model_loader": {"status": "pending", "label": "Loading models"},
-            "detect": {"status": "pending", "count": 0, "label": "Detecting subjects"},
-            "classify": {"status": "pending", "count": 0, "cached": 0, "seen": 0, "label": "Classifying species"},
-            "extract_masks": {"status": "pending", "count": 0, "label": "Extracting features"},
-            "eye_keypoints": {"status": "pending", "count": 0, "label": "Detecting eye keypoints"},
-            "regroup": {"status": "pending", "label": "Grouping encounters"},
-            "misses": {"status": "pending", "count": 0, "label": "Flagging missed shots"},
-            "archive": {"status": "pending", "count": 0, "label": "Archiving photos"},
-        }
-
-        # Photos classify skipped because their folder went offline mid-run
-        # (folder-scoped outage; abort stays clear so healthy folders keep
-        # processing). Downstream source-reading stages (extract_masks,
-        # eye_keypoints) filter these out so they don't walk back into the
-        # missing folder and re-record the same photos as mask/keypoint
-        # failures, obscuring the intended source-offline diagnosis
-        # (Codex #1388 P2 r3664058173). Held on a dict rather than
-        # ``stages["classify"]`` because ``_update_stages`` pushes stage
-        # dicts as JSON to SSE consumers, and a raw ``set`` isn't
-        # JSON-serialisable.
-        source_offline_state: dict = {"skipped_photo_ids": set()}
-
-        # Normalize model_ids: prefer the explicit list, fall back to the legacy
-        # single `model_id`, and finally to `[]` which means "use the active model
-        # from config." This is the knob the multi-model fix hangs off of.
-        if params.model_ids:
-            effective_model_ids = list(params.model_ids)
-        elif params.model_id:
-            effective_model_ids = [params.model_id]
-        else:
-            effective_model_ids = []
-
-        # Resolve model specs EARLY so per-model `classify:<id>` step_defs can
-        # carry the model's display name as their label. Labels are immutable
-        # after set_steps, so we cannot defer this to model_loader_stage.
-        #
-        # Resolution failures are captured (not raised) so the job still sets up
-        # its step tree and the model_loader stage can surface a clean error.
-        # For any id we fail to resolve we still emit a per-model step — labeled
-        # with the id — so the user sees exactly which model broke.
-        resolved_specs: list = []
-        resolution_error: str | None = None
-        if not params.skip_classify:
-            try:
-                from models import get_active_model, get_models
-                if effective_model_ids:
-                    by_id = {m["id"]: m for m in get_models()}
-                    for mid in effective_model_ids:
-                        spec = by_id.get(mid)
-                        if not spec or not spec.get("downloaded"):
-                            raise RuntimeError(
-                                f"Model '{mid}' not found or not downloaded."
-                            )
-                        resolved_specs.append(spec)
-                else:
-                    spec = get_active_model()
-                    if not spec:
-                        raise RuntimeError(
-                            "No model available. Download one in Settings."
-                        )
-                    resolved_specs.append(spec)
-            except Exception as e:
-                # Reported to the user through the pipeline's model step.
-                log.warning("Could not resolve pipeline models", exc_info=True)
-                resolution_error = str(e)
-
-        # Define step tracking for the jobs page
-        step_defs = []
-        if params.destination:
-            if params.local_processing:
-                step_defs.append({"id": "storage", "label": "Check local storage"})
-            step_defs.append({"id": "ingest", "label": "Import photos"})
-        step_defs.extend([
-            {"id": "scan", "label": "Check metadata"},
-            {"id": "thumbnails", "label": "Generate thumbnails"},
-            {"id": "previews", "label": "Generate previews"},
-        ])
-        if not params.skip_classify:
-            step_defs.append({"id": "model_loader", "label": "Load models"})
-            step_defs.append({"id": "detect", "label": "Detect subjects"})
-            # One row per model — label = model display name, id = classify:<mid>.
-            # When resolution partially failed (e.g. 3 ids requested, 2nd not
-            # downloaded), resolved_specs is a non-empty prefix of the requested
-            # list. Emitting rows from resolved_specs alone would hide the later
-            # failed ids — their "failed" update_step calls would then no-op
-            # silently. Drive row creation off effective_model_ids whenever
-            # resolution reported an error, so every requested model has a visible
-            # step the model_loader stage can mark 'failed'.
-            if resolved_specs and not resolution_error:
-                for spec in resolved_specs:
-                    step_defs.append({
-                        "id": f"classify:{spec['id']}",
-                        "label": f"Classify with {spec['name']}",
-                    })
-            elif effective_model_ids:
-                # Partial or total resolution failure: use display names from any
-                # resolved specs we did get, fall back to the raw id otherwise.
-                by_id = {s["id"]: s for s in resolved_specs}
-                for mid in effective_model_ids:
-                    spec = by_id.get(mid)
-                    label = (
-                        f"Classify with {spec['name']}" if spec
-                        else f"Classify with {mid}"
-                    )
-                    step_defs.append({
-                        "id": f"classify:{mid}",
-                        "label": label,
-                    })
-            else:
-                # No ids, no resolved spec (active-model resolution failed).
-                # One placeholder row keeps the step tree consistent.
-                step_defs.append({
-                    "id": "classify:__unresolved__",
-                    "label": "Classify species",
-                })
-        if not params.skip_extract_masks:
-            step_defs.append({"id": "extract_masks", "label": "Extract features"})
-            step_defs.append({"id": "eye_keypoints", "label": "Detect eye keypoints"})
-        if not params.skip_regroup:
-            step_defs.append({"id": "regroup", "label": "Group encounters"})
-            step_defs.append({"id": "misses", "label": "Flag missed shots"})
-        elif not params.skip_classify:
-            step_defs.append({"id": "regroup", "label": "Prepare review"})
-        if params.local_processing:
-            step_defs.append({"id": "archive", "label": "Archive to destination"})
-        runner.set_steps(job["id"], step_defs)
+        snapshot_paths = _scope_to_source_snapshot(params, db_path, workspace_id)
+        cancel_watcher_stop = control.start_cancel_watcher()
+        stages = _initial_stages()
+        effective_model_ids = _effective_model_ids(params)
+        resolved_specs, resolution_error = _resolve_model_specs(
+            params, effective_model_ids,
+        )
+        runner.set_steps(job["id"], _pipeline_step_defs(
+            params, effective_model_ids, resolved_specs, resolution_error,
+        ))
 
         result = {"stages": {}}
         collection_id = params.collection_id
-        scan_to_thumb = queue.Queue(maxsize=200)
-        collected_photo_ids = []
-        collection_ready = threading.Event()
-        models_ready = threading.Event()
-        # Set when the model loader fails for a reason other than cancel; the
-        # orchestrator turns it into ``abort`` once the model-free stages have
-        # finished (see model_loader_stage).
-        model_loader_failed = threading.Event()
-        loaded_models = {}  # populated by model_loader thread
-
-        def _put_scan_item(item):
-            """Put into the scan/thumbnail queue without defeating Pause.
-
-            Both ordinary photo items and the end sentinel can otherwise block
-            forever on a full queue after the thumbnail worker has parked.
-            """
-            while not _should_abort(abort):
-                try:
-                    scan_to_thumb.put(item, timeout=0.5)
-                    return True
-                except queue.Full:
-                    continue
-            return False
+        shared = _StageState(params, control)
         skip_scan = collection_id is not None
-
-        def _filter_excluded(photos):
-            """Remove photos excluded by user selection in preview."""
-            if not params.exclude_photo_ids:
-                return photos
-            return [p for p in photos if p["id"] not in params.exclude_photo_ids]
 
         # Mark ingest as skipped when not in copy mode so SSE events
         # don't show a perpetually-pending stage.
@@ -1959,20 +2359,6 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         if not params.local_processing:
             stages["storage"]["status"] = "skipped"
             stages["archive"]["status"] = "skipped"
-
-        # Shared state between detect_stage and classify_stage. Written by
-        # detect_stage, consumed by classify_stage. Populated even on early
-        # exit so classify_stage can reason about "detection ran but produced
-        # nothing" vs. "detection never executed".
-        detect_state = {
-            "photos": [],        # list of photo dicts for the collection
-            "folders": {},       # {folder_id: path}
-            "detections": {},    # {photo_id: [detection_dict, ...]}
-            "processed_ids": set(),  # photo_ids whose _detect_batch iteration completed
-            "pre_run_det_ids": {},   # snapshot for reclassify purge
-            "total_detected": 0,
-            "ran": False,        # True once detect_stage's body executed (even if no-op)
-        }
 
         def archive_stage():
             """Retired import/archive path guard.
@@ -1993,250 +2379,34 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
 
         run = PipelineRun(
             job=job, runner=runner, db_path=db_path,
-            workspace_id=workspace_id, params=params, abort=abort,
+            workspace_id=workspace_id, params=params, abort=control.abort,
             stages=stages, result=result, errors=errors,
             collection_id=collection_id, database_factory=Database,
             emit_progress=_emit_progress, update_stages=_update_stages,
-            control=PipelineControl(
-                should_abort=_should_abort,
-                should_abort_without_pause=_should_abort_without_pause,
-                pause_checkpoint=_pause_checkpoint,
-                cancellation_requested=_cancellation_requested,
-                pause_or_cancel_pending=_pause_or_cancel_pending,
-            ),
+            control=control.pipeline_control(),
         )
-
-        scanner_stage = partial(
-            scanning.scanner_stage, run=run,
-            _SENTINEL=_SENTINEL,
-            _filter_excluded=_filter_excluded,
-            _find_broken_metadata_folders=_find_broken_metadata_folders,
-            _missing_archive_mount_root=_missing_archive_mount_root,
-            _put_scan_item=_put_scan_item,
-            collected_photo_ids=collected_photo_ids,
+        stage_fns = _wire_scan_stages(
+            run, shared,
+            skip_scan=skip_scan,
+            snapshot_paths=snapshot_paths,
             effective_thumb_cache_dir=effective_thumb_cache_dir,
             effective_vireo_dir=effective_vireo_dir,
             final_destination=final_destination,
-            missing_originals_invalidator=missing_originals_invalidator,
             remote_archive=remote_archive,
-            skip_scan=skip_scan,
-            snapshot_paths=snapshot_paths,
+            missing_originals_invalidator=missing_originals_invalidator,
         )
-
-        _collection_stage_body = partial(
-            scanning._collection_stage_body, run=run,
-            collected_photo_ids=collected_photo_ids,
-            skip_scan=skip_scan,
-            snapshot_paths=snapshot_paths,
-        )
-
-        collection_stage = partial(
-            scanning.collection_stage, run=run,
-            _collection_stage_body=_collection_stage_body,
-            collection_ready=collection_ready,
-        )
-
-        thumbnail_stage = partial(
-            media.thumbnail_stage, run=run,
-            _RAW_EXTENSIONS=_RAW_EXTENSIONS,
-            _SENTINEL=_SENTINEL,
-            _filter_excluded=_filter_excluded,
-            _recipe_render_source=_recipe_render_source,
-            _retry_thumbnail_with_companion=_retry_thumbnail_with_companion,
-            _retry_thumbnail_with_working_copy=_retry_thumbnail_with_working_copy,
-            _thumb_min_source_size_kwargs=_thumb_min_source_size_kwargs,
-            _thumb_raw_decode_kwargs=_thumb_raw_decode_kwargs,
-            effective_thumb_cache_dir=effective_thumb_cache_dir,
+        stage_fns.update(_wire_model_stages(
+            run, control, shared,
             effective_vireo_dir=effective_vireo_dir,
-            scan_to_thumb=scan_to_thumb,
-            skip_scan=skip_scan,
-        )
-
-        previews_stage = partial(
-            media.previews_stage, run=run,
-            _filter_excluded=_filter_excluded,
-            effective_vireo_dir=effective_vireo_dir,
-            skip_scan=skip_scan,
-        )
-
-        _load_model_bundle = partial(
-            models.load_model_bundle, run=run,
-            _incomplete_model_message=_incomplete_model_message,
-            _looks_like_missing_external_data=_looks_like_missing_external_data,
-            pause_context=pause_context,
-        )
-
-        model_loader_stage = partial(
-            models.model_loader_stage, run=run,
-            _filter_excluded=_filter_excluded,
-            _load_model_bundle=_load_model_bundle,
-            loaded_models=loaded_models,
-            model_loader_failed=model_loader_failed,
-            models_ready=models_ready,
-            resolution_error=resolution_error,
-            resolved_specs=resolved_specs,
-        )
-
-        detect_stage = partial(
-            detection.detect_stage, run=run,
-            _filter_excluded=_filter_excluded,
-            collection_ready=collection_ready,
             computation_cache_dir=computation_cache_dir,
-            detect_state=detect_state,
-            effective_vireo_dir=effective_vireo_dir,
-            loaded_models=loaded_models,
-            models_ready=models_ready,
-        )
-
-        classify_stage = partial(
-            classification.classify_stage, run=run,
-            _MAX_SOURCE_OFFLINE_PAUSES=_MAX_SOURCE_OFFLINE_PAUSES,
-            _cached_classify_detections=_cached_classify_detections,
-            _classification_eta_progress=_classification_eta_progress,
-            _load_model_bundle=_load_model_bundle,
-            _record_unattempted_cache_hit=_record_unattempted_cache_hit,
-            _release_classifier_cache_handle=_release_classifier_cache_handle,
-            _remove_attempted_cache_hits=_remove_attempted_cache_hits,
-            _source_offline_reason=_source_offline_reason,
-            detect_state=detect_state,
             effective_model_ids=effective_model_ids,
-            loaded_models=loaded_models,
-            source_offline_state=source_offline_state,
-        )
-
-        extract_masks_stage = partial(
-            features.extract_masks_stage, run=run,
-            _StagedMaskFile=_StagedMaskFile,
-            _extract_masks_early_exit=_extract_masks_early_exit,
-            _filter_excluded=_filter_excluded,
-            _preflight_mask_outcomes=_preflight_mask_outcomes,
-            _rollback_failed_mask_photo=_rollback_failed_mask_photo,
-            _source_offline_reason=_source_offline_reason,
-            _still_offline_folder_ids_of=_still_offline_folder_ids_of,
-            source_offline_state=source_offline_state,
-        )
-
-        eye_keypoints_stage = partial(
-            features.eye_keypoints_stage, run=run,
-            _still_offline_folder_ids_of=_still_offline_folder_ids_of,
-            source_offline_state=source_offline_state,
-        )
-
-        regroup_stage = partial(
-            grouping.regroup_stage, run=run,
-        )
-
-        miss_stage = partial(
-            grouping.miss_stage, run=run,
-        )
+            resolved_specs=resolved_specs,
+            resolution_error=resolution_error,
+        ))
 
         # --- Launch threads ---
-
-        threads = {}
-
-        # Phase 1: scan + thumbnails + model loading (concurrent)
-        phase_one = {
-            "scanner": scanner_stage,
-            "collection": collection_stage,
-            "thumbnail": thumbnail_stage,
-            "model_loader": model_loader_stage,
-        }
-        # Register the complete phase before starting its first thread.  If the
-        # first worker reaches Pause immediately, it must wait for the other
-        # three rather than declaring the whole pipeline paused on its own.
-        pause_gate.register_many(phase_one)
-        for name, stage_fn in phase_one.items():
-            threads[name] = threading.Thread(
-                target=_run_pause_participant,
-                args=(name, stage_fn),
-                kwargs={"pre_registered": True},
-                daemon=True,
-            )
-
-        for t in threads.values():
-            t.start()
-
-        # Wait for scan-related threads to finish
-        threads["scanner"].join()
-        threads["collection"].join()
-        threads["thumbnail"].join()
-        threads["model_loader"].join()
-
-        # Phase 1.5: previews (needs scan complete, runs before classify).
-        #
-        # This and every later stage are always invoked — even when `abort`
-        # is set — so their step rows reach a terminal status. Gating the
-        # call on abort would leave the runner.set_steps-created rows
-        # persisted as "pending" with no finished_at, forever. Each stage
-        # checks abort internally and marks itself "Skipped".
-        _run_pause_participant("previews", previews_stage)
-
-        # A model-loader failure deferred its abort so the model-free stages
-        # above could finish; from here on every stage needs the model (or
-        # its output), so stop them now.
-        if model_loader_failed.is_set():
-            abort.set()
-
-        # Phase 2: detect (needs collection; runs MegaDetector once across all
-        # photos so each per-model classify step reuses cached detections
-        # instead of re-running the detector).
-        #
-        # Always invoked — even when `abort` is set by an earlier stage — so
-        # the `detect` step row reaches a terminal status. Skipping the call
-        # would leave the row pending forever on a model-loader failure.
-        # detect_stage handles abort internally and marks itself skipped.
-        _run_pause_participant("detect", detect_stage)
-
-        # Phase 3: classify per model (reads cached detections from detect_stage).
-        # Always invoked for the same reason: every `classify:<model_id>` row
-        # must land in a terminal state so the jobs tree finalizes cleanly on
-        # a loader-triggered abort.
-        _run_pause_participant("classify", classify_stage)
-
-        # Phase 3: extract-masks (needs classify output)
-        _run_pause_participant("extract_masks", extract_masks_stage)
-
-        # Phase 3.5: eye keypoints (needs masks + classifier output). No-op when
-        # SuperAnimal weights are absent — users opt in on the pipeline models
-        # card. Per-photo failures log and continue rather than abort the stage.
-        _run_pause_participant("eye_keypoints", eye_keypoints_stage)
-
-        # Phases 4 + 5: regroup and miss detection. Held under the
-        # per-workspace regroup lock TOGETHER so a concurrent same-workspace
-        # pipeline can't slip a regroup_stage in between this run's
-        # regroup_stage and its miss_stage — that would leave the persisted
-        # miss flags + ``miss_computed_at`` paired with a grouping
-        # (burst_id / pipeline_results_ws*.json) the miss computation never
-        # saw. Pipelines targeting different workspaces share neither
-        # stage's state and don't contend here.
-        #
-        # miss_stage's own gate covers the regroup-failed and abort cases, so
-        # both stages can be invoked unconditionally and still reach a
-        # terminal step status.
-        def _run_regroup_and_misses():
-            if abort.is_set():
-                # Both stages early-return as "Skipped" without touching
-                # grouping state, so the lock isn't needed — and skipping the
-                # calls would leave their step rows pending forever. Staying
-                # outside the lock also keeps an aborted/cancelled run from
-                # blocking behind a concurrent pipeline's regroup.
-                regroup_stage()
-                miss_stage()
-            else:
-                # Pause checkpoints deliberately surround this critical
-                # section rather than living inside either stage: their shared
-                # lock must span regroup + misses atomically, but a paused job
-                # must not retain it and block another pipeline indefinitely.
-                with acquire_workspace_regroup(workspace_id):
-                    regroup_stage()
-                    miss_stage()
-            _pause_checkpoint()
-
-        _run_pause_participant(
-            "regroup_and_misses", _run_regroup_and_misses,
-        )
-
-        _run_pause_participant("archive", archive_stage)
+        _run_phase_one(control, stage_fns)
+        _run_later_phases(control, shared, stage_fns, workspace_id, archive_stage)
 
         cancel_watcher_stop.set()
 
@@ -2244,37 +2414,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         result["duration"] = round(elapsed, 1)
         result["errors"] = list(errors)
 
-        # If any stage ended in 'failed' and the job wasn't cancelled, propagate
-        # the failure so JobRunner marks the whole job as failed rather than
-        # silently recording it as completed. Cancellation takes precedence:
-        # a cancelled job stays cancelled even if stages crashed on the way down.
-        failed_stages = [
-            name for name, s in stages.items() if s.get("status") == "failed"
-        ]
-        if failed_stages and not _cancellation_requested():
-            # Stash the structured result on the job BEFORE raising so the
-            # completion event and job_history still carry per-stage details
-            # (stages dict, errors list). Without this, the pipeline UI loses
-            # the "Failed: [stage_name]" mapping on the card that owned the
-            # failure because it reads result.result.stages / .errors.
-            job["result"] = result
-            # Prefer a "[stage] Fatal: …" error from one of the failed stages
-            # rather than blindly using errors[0], which may be a non-fatal
-            # per-photo warning (e.g. "Photo <id>: mask extraction failed")
-            # logged before the stage-level failure. Falling back to errors[0]
-            # when no stage-fatal entry exists keeps backward compatibility for
-            # any edge case where a stage marks itself failed without appending a
-            # Fatal error; the final fallback covers an empty errors list.
-            first_error = next(
-                (e for e in errors if any(e.startswith(f"[{s}] Fatal:") for s in failed_stages)),
-                errors[0] if errors else f"stage '{failed_stages[0]}' failed",
-            )
-            # Record the fatal error for _persist_job so it can store the stage
-            # failure message rather than job["errors"][0], which may be a
-            # non-fatal per-photo warning that was logged before this failure.
-            job["_fatal_error"] = first_error
-            raise RuntimeError(first_error)
-
+        _raise_if_stages_failed(
+            job, result, stages, errors, control.cancellation_requested,
+        )
         return result
     finally:
         if archive_destination_reserved:
