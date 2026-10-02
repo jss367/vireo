@@ -1157,6 +1157,11 @@ class _ImportPhotosJob:
             # steps landed.
             if not result.get("cancelled") and not tag_errors:
                 self._mark_post_import_step(job, "chained", result)
+                result["chained"] = True
+            # Both marks land on the final row either way, so a row that
+            # has neither key predates them (``import_resume_takeover``).
+            result.setdefault("tags_applied", False)
+            result.setdefault("chained", False)
             return result
         finally:
             # run_import_job can flip destination folders from
@@ -1242,6 +1247,7 @@ class _ImportPhotosJob:
         # still owes work; leave it unmarked so a resume replays it.
         if not result.get("cancelled") and not tag_errors:
             self._mark_post_import_step(job, "tags_applied")
+            result["tags_applied"] = True
         return tag_errors
 
     def _mark_post_import_step(self, job, step, result=None):
@@ -1253,6 +1259,11 @@ class _ImportPhotosJob:
         tag, collect or chain the same photos twice. ``result``, once the
         run is otherwise done, rides along so the row still carries what
         an ordinary retry needs (``failed`` and the rest).
+
+        Callers also set the mark on the returned result, so the final row
+        keeps it: once this run is a resume, its marks are how a later
+        Resume of the interrupted import it descends from learns the work
+        was already done (``import_resume_takeover``).
         """
         job["partial_result"] = {
             **(job.get("partial_result") or {}), **(result or {}), step: True,

@@ -791,6 +791,114 @@
     return true;
   }
 
+  // Whether a later run took over an interrupted import's Resume. A
+  // resume marks ``tags_applied`` / ``chained`` on its own row, never on
+  // the parent's, so the parent's row alone still looks resumable after
+  // its resume finished; a second click would re-tag the photos and
+  // process them again. ``rows`` are finished history rows (the page's
+  // ``historyJobs``: a descendant always starts after its parent, so it is
+  // in the same newest-first window). Mirrors ``import_resume_takeover``
+  // in services/imports.py, which the server enforces with a 409; keep the
+  // two equivalent. ``by`` is the descendant to continue from, null while
+  // the parent itself is still the place to resume; ``kind`` is
+  // "done" (nothing left), "resume" (it was interrupted too) or "retry"
+  // (it applied the tags, then failed files).
+  function importResumeTakeover(parent, rows) {
+    var parentResult = parent && parent.result;
+    if (!(parent && parent.type === 'import' && parentResult &&
+        parentResult.interrupted)) {
+      return {tagsApplied: false, chained: false, by: null, byStartedAt: null, kind: null};
+    }
+    var children = {};
+    var candidates = [];
+    (rows || []).forEach(function(row) {
+      if (!row || row.type !== 'import' || row.id === parent.id) return;
+      if (['completed', 'failed', 'cancelled'].indexOf(row.status) < 0) return;
+      var result = (row.result && typeof row.result === 'object') ? row.result : {};
+      if (result.never_started) return;
+      var cfg = jobConfig(row) || {};
+      var entry = {id: row.id, status: row.status,
+                   startedAt: row.started_at || '', result: result,
+                   root: cfg.root_import_job_id};
+      candidates.push(entry);
+      var parentKey = String(cfg.parent_import_job_id);
+      (children[parentKey] = children[parentKey] || []).push(entry);
+    });
+    var found = {};
+    var frontier = [parent.id];
+    candidates.forEach(function(e) {
+      if (e.root === parent.id && !found[e.id]) {
+        found[e.id] = e;
+        frontier.push(e.id);
+      }
+    });
+    while (frontier.length) {
+      (children[String(frontier.pop())] || []).forEach(function(child) {
+        if (!found[child.id]) {
+          found[child.id] = child;
+          frontier.push(child.id);
+        }
+      });
+    }
+    var descendants = Object.keys(found).map(function(id) { return found[id]; });
+    descendants.forEach(function(e) {
+      var r = e.result;
+      var tags, chainStep;
+      if ('tags_applied' in r || 'chained' in r || r.interrupted) {
+        tags = !!r.tags_applied;
+        chainStep = !!r.chained;
+      } else {
+        // Finished before the marks were kept on the final row; only a
+        // run that reached the chain after a clean import has a collection.
+        tags = chainStep = r.collection_id != null;
+      }
+      e.tagsApplied = tags;
+      // After a failed import the chain step marks but skips processing.
+      e.chained = chainStep && r.ok !== false;
+      e.resumable = e.status === 'failed' && !!r.interrupted &&
+        Array.isArray(r.photo_ids) && !(tags && chainStep);
+      e.hasFailedFiles = typeof r.failed === 'number' && r.failed > 0;
+    });
+    var tagsApplied = !!parentResult.tags_applied ||
+      descendants.some(function(e) { return e.tagsApplied; });
+    var chained = !!parentResult.chained ||
+      descendants.some(function(e) { return e.chained; });
+    var marked = descendants.filter(function(e) { return e.tagsApplied || e.chained; });
+    var nextSteps = descendants.filter(function(e) {
+      return e.resumable || (tagsApplied && e.hasFailedFiles);
+    });
+    function newest(entries) {
+      return entries.reduce(function(best, e) {
+        return e.startedAt > best.startedAt ? e : best;
+      });
+    }
+    var by = null;
+    var kind = null;
+    if (marked.length && tagsApplied && chained) {
+      by = newest(marked);
+      kind = 'done';
+    } else if (nextSteps.length) {
+      by = newest(nextSteps);
+      kind = by.resumable ? 'resume' : 'retry';
+    }
+    return {tagsApplied: tagsApplied, chained: chained, by: by ? by.id : null,
+            byStartedAt: by ? by.startedAt : null, kind: kind};
+  }
+
+  function importTakeoverNote(takeover) {
+    var when = takeover.byStartedAt ? new Date(takeover.byStartedAt) : null;
+    var which = when && !isNaN(when.getTime())
+      ? 'the import started ' + when.toLocaleString()
+      : 'a later import';
+    if (takeover.kind === 'done') {
+      return 'Already resumed by ' + which + ', which finished the work this import owed. Nothing is left to resume.';
+    }
+    if (takeover.kind === 'resume') {
+      return 'Already resumed by ' + which + ', which was interrupted too. Resume that import instead; it carries these photos.';
+    }
+    return 'Already resumed by ' + which + ', which had files fail. Retry them from that import instead; it carries these photos.';
+  }
+
   function importResumeHint(job) {
     var landed = job.result.photo_ids.length;
     // Files are recorded as landed before they're cataloged, so the
@@ -988,11 +1096,19 @@
     html += renderSourceCleanup(job);
 
     var failedImportCount = job.result && Number(job.result.failed || 0);
-    var resumableImport = isResumableImport(job);
-    if (!isLive && (failedImportCount > 0 || resumableImport) && importRetryBody(job)) {
+    // Once a resume took over, the server refuses both Resume and Retry on
+    // this row (409), so neither is offered; say where to go instead.
+    var resumeTakeover = importResumeTakeover(job, historyJobs);
+    var resumableImport = isResumableImport(job) && !resumeTakeover.by;
+    if (!isLive && (failedImportCount > 0 || resumableImport || resumeTakeover.by) &&
+        importRetryBody(job)) {
       var retryInFlight = hasActiveRetryFor(job.id);
       html += '<div style="padding:10px 0 2px;font-size:12px;color:var(--text-muted);">';
-      if (retryInFlight) {
+      if (resumeTakeover.by && !retryInFlight) {
+        html += '<span>' + esc(importTakeoverNote(resumeTakeover)) + '</span> ' +
+          '<button class="btn-retry" data-show-job="' + escapeAttr(resumeTakeover.by) +
+          '" style="margin-left:8px;">Show that import</button>';
+      } else if (retryInFlight) {
         // Same failed job, retry already running. A second Start would
         // race the first — same source, same destination, same carry
         // scope — so surface the in-flight status instead of a live
@@ -1654,6 +1770,13 @@
       requestSourceCleanup(cleanId || cleanupButton.getAttribute('data-review-source'), !!cleanId);
       return;
     }
+    var showJobBtn = e.target.closest('[data-show-job]');
+    if (showJobBtn) {
+      var showJobId = showJobBtn.getAttribute('data-show-job');
+      var inActive = activeJobs.some(function(job) { return job.id === showJobId; });
+      selectJob(showJobId, inActive ? 'active' : 'history');
+      return;
+    }
     var retryImportBtn = e.target.closest('[data-retry-import-job]');
     if (retryImportBtn) {
       var retryJobId = retryImportBtn.getAttribute('data-retry-import-job');
@@ -1679,6 +1802,16 @@
             'info',
           );
         }
+        return;
+      }
+      // A resume that finished between renders took this row over; the
+      // server would refuse with a 409, so say so without sending it.
+      var lateTakeover = importResumeTakeover(retryJob, historyJobs);
+      if (lateTakeover.by) {
+        if (typeof showToast === 'function') {
+          showToast(importTakeoverNote(lateTakeover), 'info');
+        }
+        if (selectedJobId === retryJobId) renderHistoryDetail(retryJob);
         return;
       }
       // Preserve the original count-specific label so the error path

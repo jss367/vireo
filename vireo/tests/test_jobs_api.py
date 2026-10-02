@@ -11881,6 +11881,182 @@ def test_resume_allows_a_parent_whose_chained_pipeline_never_started(
         assert resp.status_code == 200, resp.get_json()
 
 
+def _interrupted_tagged_import(app, db, client, tmp_path, tag_name):
+    """Run a tagged import and replay a restart that cut it short before
+    its tag pass; return ``(parent_id, its photo ids)``."""
+    card = _chain_card(tmp_path)
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [str(card)],
+        "destination": str(tmp_path / "arch"),
+        "tags": [tag_name],
+    })
+    assert resp.status_code == 200, resp.get_json()
+    parent_id = resp.get_json()["job_id"]
+    parent = wait_for_job_via_client(client, parent_id)["result"]
+    own = parent["photo_ids"]
+    assert own
+    _interrupt_import_row(app, db, parent_id, {
+        "landed_files": parent["landed_files"],
+        "photo_ids": own,
+        "photo_fingerprints": parent["photo_fingerprints"],
+        "source_snapshots": parent["source_snapshots"],
+    })
+    return parent_id, own
+
+
+def _tagged_count(db, photo_ids):
+    return db.conn.execute(
+        "SELECT COUNT(*) FROM photo_keywords WHERE photo_id IN (%s)"
+        % ",".join("?" * len(photo_ids)),
+        photo_ids,
+    ).fetchone()[0]
+
+
+def test_resume_refuses_a_parent_its_finished_resume_took_over(
+    app_and_db, tmp_path,
+):
+    """Regression for #1842: the interrupted row never changes after its
+    resume finishes (the resume's marks and its processing run's
+    ``chained_from`` name the resume, not the parent), so a second Resume
+    passed validation. It replayed the tag/GPS pass over the parent's
+    photos, overwriting what the user corrected since, and created a
+    second collection and processing run. It must be refused."""
+    app, db = app_and_db
+    tag_name = "Kenya trip"
+    with app.test_client() as client:
+        parent_id, own = _interrupted_tagged_import(
+            app, db, client, tmp_path, tag_name)
+
+        resp = client.post(
+            "/api/jobs/import-photos", json=_resume_body(client, parent_id),
+        )
+        assert resp.status_code == 200, resp.get_json()
+        resume_id = resp.get_json()["job_id"]
+        resumed = wait_for_job_via_client(
+            client, resume_id, wait_for_history=True)["result"]
+        if resumed.get("process_job_id"):
+            wait_for_job_via_client(
+                client, resumed["process_job_id"], wait_for_history=True)
+        assert _tagged_count(db, own) == len(own)
+        # The marks reach the finished row, not just the checkpoint.
+        row = next(
+            h for h in client.get("/api/jobs/history").get_json()
+            if h["id"] == resume_id
+        )
+        assert row["result"]["tags_applied"] is True
+        assert row["result"]["chained"] is True
+
+        # The user removes the tag after the resume.
+        db.conn.execute(
+            "DELETE FROM photo_keywords WHERE photo_id IN (%s)"
+            % ",".join("?" * len(own)),
+            own,
+        )
+        db.conn.commit()
+        collections = db.conn.execute(
+            "SELECT COUNT(*) FROM collections").fetchone()[0]
+        jobs_before = len(app._job_runner.list_jobs())
+
+        resp = client.post(
+            "/api/jobs/import-photos", json=_resume_body(client, parent_id),
+        )
+        assert resp.status_code == 409, resp.get_json()
+        body = resp.get_json()
+        assert body["code"] == "import_already_resumed"
+        assert body["resumed_by_job_id"] == resume_id
+        assert body["resume_takeover"] == "done"
+        assert "already resumed" in body["error"]
+        assert "nothing left to resume" in body["error"]
+        assert len(app._job_runner.list_jobs()) == jobs_before
+        assert db.conn.execute(
+            "SELECT COUNT(*) FROM collections").fetchone()[0] == collections
+        assert _tagged_count(db, own) == 0
+
+
+def test_resume_of_a_parent_whose_resume_was_interrupted_goes_through_it(
+    app_and_db, tmp_path,
+):
+    """When the resume is interrupted too, the way forward is resuming the
+    resume (it inherits the parent's carried, untagged and landed photos).
+    Resuming the original as well would fork the chain, and whichever ran
+    second would redo the other's tags and processing."""
+    app, db = app_and_db
+    tag_name = "Kenya trip"
+    with app.test_client() as client:
+        parent_id, own = _interrupted_tagged_import(
+            app, db, client, tmp_path, tag_name)
+        resp = client.post(
+            "/api/jobs/import-photos", json=_resume_body(client, parent_id),
+        )
+        assert resp.status_code == 200, resp.get_json()
+        resume_id = resp.get_json()["job_id"]
+        resumed = wait_for_job_via_client(client, resume_id)["result"]
+        # A restart cuts the resume short before its tag pass.
+        _interrupt_import_row(app, db, resume_id, {
+            "landed_files": {},
+            "photo_ids": [],
+            "photo_fingerprints": {},
+            "source_snapshots": resumed["source_snapshots"],
+        })
+        db.conn.execute(
+            "DELETE FROM photo_keywords WHERE photo_id IN (%s)"
+            % ",".join("?" * len(own)),
+            own,
+        )
+        db.conn.commit()
+
+        resp = client.post(
+            "/api/jobs/import-photos", json=_resume_body(client, parent_id),
+        )
+        assert resp.status_code == 409, resp.get_json()
+        body = resp.get_json()
+        assert body["resumed_by_job_id"] == resume_id
+        assert body["resume_takeover"] == "resume"
+        assert "Resume that import" in body["error"]
+
+        # The interrupted resume still resumes, and pays the parent's tags.
+        retry_body = _resume_body(client, resume_id)
+        retry_body["carry_photo_ids"] = own
+        resp = client.post("/api/jobs/import-photos", json=retry_body)
+        assert resp.status_code == 200, resp.get_json()
+        wait_for_job_via_client(client, resp.get_json()["job_id"])
+        assert _tagged_count(db, own) == len(own)
+
+
+def test_resume_stays_available_when_the_resume_failed_before_any_work(
+    app_and_db, tmp_path,
+):
+    """A resume that crashed before its tag pass or chain did none of the
+    parent's owed work, and has no Retry or Resume of its own; the parent
+    is still the way forward."""
+    app, db = app_and_db
+    with app.test_client() as client:
+        parent_id, own = _interrupted_tagged_import(
+            app, db, client, tmp_path, "Kenya trip")
+        db.conn.execute(
+            "INSERT INTO job_history "
+            "(id, type, status, started_at, config, result, workspace_id) "
+            "VALUES (?, 'import', 'failed', ?, ?, ?, ?)",
+            (
+                f"crashed-resume-{parent_id}",
+                "2999-01-01T00:00:00",
+                json.dumps({
+                    "parent_import_job_id": parent_id,
+                    "root_import_job_id": parent_id,
+                }),
+                json.dumps({"error": "disk vanished"}),
+                db._active_workspace_id,
+            ),
+        )
+        db.conn.commit()
+        resp = client.post(
+            "/api/jobs/import-photos", json=_resume_body(client, parent_id),
+        )
+        assert resp.status_code == 200, resp.get_json()
+        wait_for_job_via_client(client, resp.get_json()["job_id"])
+        assert _tagged_count(db, own) == len(own)
+
+
 def test_resume_replays_tags_when_chain_ran_but_tags_owed(
     app_and_db, tmp_path, monkeypatch,
 ):

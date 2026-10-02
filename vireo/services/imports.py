@@ -127,6 +127,141 @@ def _strftime_template_can_render(template_component, target):
         return True
 
 
+def _json_dict(value):
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+    return value if isinstance(value, dict) else {}
+
+
+def import_resume_takeover(parent_id, parent_result, rows):
+    """Whether a later run took over an interrupted import's Resume.
+
+    An interrupted import owes two post-import steps: the tag/GPS pass
+    (``tags_applied``) and the chain that records its collection and
+    queues processing (``chained``). A resume does both and marks each on
+    its own row, never on the parent's, so the parent's row alone cannot
+    tell that it was already resumed. This reads the parent's descendants
+    in ``rows`` (finished ``job_history`` import rows): those naming it as
+    ``root_import_job_id`` or reaching it through ``parent_import_job_id``
+    links. Each run's scope is cumulative (carried ids, untagged ids and
+    landed files are inherited), so a descendant's marks discharge the
+    parent's debts too.
+
+    Returns ``{"tags_applied", "chained", "by", "by_started_at", "kind"}``.
+    The marks are the parent's own merged with what its descendants did.
+    ``by`` is the descendant that took the Resume over, or None while the
+    parent is still the place to resume from:
+
+    * ``"done"``: descendants did the owed work, so with the parent's own
+      marks nothing is left. Resuming again would re-tag the photos
+      (overwriting locations corrected since) and process them twice.
+    * ``"resume"`` / ``"retry"``: a descendant is the next step. Either it
+      was itself interrupted with its landed photos recorded (resume it;
+      it carries the parent's scope), or the tags are paid and it failed
+      files, so its own Retry carries the parent's photos to processing.
+      Resuming the parent as well would fork the chain and redo work.
+
+    A descendant that failed or was cancelled before doing any of the work
+    leaves the parent resumable, replaying only the steps still owed.
+    Mirrored by ``importResumeTakeover`` in ``templates/jobs.html``; keep
+    the two equivalent.
+    """
+    parent_result = _json_dict(parent_result)
+    children = {}
+    candidates = []
+    for row in rows or []:
+        if row.get("type") != "import" or row.get("id") == parent_id:
+            continue
+        if row.get("status") not in ("completed", "failed", "cancelled"):
+            continue
+        cfg = _json_dict(row.get("config"))
+        result = _json_dict(row.get("result"))
+        if result.get("never_started"):
+            continue
+        entry = {
+            "id": row.get("id"),
+            "status": row.get("status"),
+            "started_at": row.get("started_at") or "",
+            "result": result,
+            "parent": cfg.get("parent_import_job_id"),
+            "root": cfg.get("root_import_job_id"),
+        }
+        candidates.append(entry)
+        children.setdefault(entry["parent"], []).append(entry)
+    descendants = {e["id"]: e for e in candidates if e["root"] == parent_id}
+    frontier = [parent_id, *descendants]
+    while frontier:
+        for child in children.get(frontier.pop(), []):
+            if child["id"] not in descendants:
+                descendants[child["id"]] = child
+                frontier.append(child["id"])
+    descendants = list(descendants.values())
+
+    for e in descendants:
+        result = e["result"]
+        if (
+            "tags_applied" in result or "chained" in result
+            or result.get("interrupted")
+        ):
+            tags = bool(result.get("tags_applied"))
+            chain_step = bool(result.get("chained"))
+        else:
+            # Finished before the marks were kept on the final row. Only a
+            # run that passed its tag pass and reached the chain after a
+            # clean import records an import collection.
+            tags = chain_step = result.get("collection_id") is not None
+        e["tags_applied"] = tags
+        # The chain step also runs, and marks, after a failed import, but
+        # then skips the collection and processing: that debt moves to the
+        # run's own Retry instead of being paid.
+        e["chained"] = chain_step and result.get("ok") is not False
+        e["resumable"] = (
+            e["status"] == "failed"
+            and bool(result.get("interrupted"))
+            and isinstance(result.get("photo_ids"), list)
+            and not (tags and chain_step)
+        )
+        failed = result.get("failed")
+        e["has_failed_files"] = (
+            isinstance(failed, (int, float)) and not isinstance(failed, bool)
+            and failed > 0
+        )
+
+    tags_applied = bool(parent_result.get("tags_applied")) or any(
+        e["tags_applied"] for e in descendants
+    )
+    chained = bool(parent_result.get("chained")) or any(
+        e["chained"] for e in descendants
+    )
+    marked = [e for e in descendants if e["tags_applied"] or e["chained"]]
+    # A plain Retry replays no owed tags, so a descendant's Retry is the
+    # next step only once the tags are paid.
+    next_steps = [
+        e for e in descendants
+        if e["resumable"] or (tags_applied and e["has_failed_files"])
+    ]
+
+    def newest(entries):
+        return max(entries, key=lambda e: e["started_at"])
+
+    by, kind = None, None
+    if marked and tags_applied and chained:
+        by, kind = newest(marked), "done"
+    elif next_steps:
+        by = newest(next_steps)
+        kind = "resume" if by["resumable"] else "retry"
+    return {
+        "tags_applied": tags_applied,
+        "chained": chained,
+        "by": by["id"] if by else None,
+        "by_started_at": by["started_at"] if by else None,
+        "kind": kind,
+    }
+
+
 class ImportService:
     """Validate and launch in-place and archive imports for one app."""
 
@@ -796,8 +931,25 @@ class ImportService:
         parent_source_snapshots = parent_result.get("source_snapshots")
         if not isinstance(parent_source_snapshots, dict):
             parent_source_snapshots = None
+        takeover = None
+        if parent_result.get("interrupted"):
+            takeover = import_resume_takeover(
+                parent_id, parent_result,
+                self._import_resume_rows(
+                    db, parent_id, parent_config, parent_workspace,
+                ),
+            )
+            if takeover["by"] is not None:
+                return None, None, None, None, None, ImportFailure(
+                    self._resume_takeover_message(takeover), 409,
+                    details={
+                        "code": "import_already_resumed",
+                        "resumed_by_job_id": takeover["by"],
+                        "resume_takeover": takeover["kind"],
+                    },
+                )
         parent_resume = self._interrupted_parent_resume(
-            parent_config, parent_result,
+            parent_config, parent_result, takeover,
         )
         if (
             parent_resume is not None
@@ -849,13 +1001,72 @@ class ImportService:
         ).fetchone() is not None
 
     @staticmethod
-    def _interrupted_parent_resume(parent_config, parent_result):
+    def _import_resume_rows(db, parent_id, parent_config, workspace_id):
+        """Finished import rows that may descend from ``parent_id``, for
+        ``import_resume_takeover``. Every descendant inherits the chain's
+        root, so matching it (or a direct parent link, for retries older
+        than ``root_import_job_id``) finds them all; the walk itself picks
+        out the actual descendants. Reads ``job_history`` only, the same
+        rows the Jobs page decides from.
+        """
+        root = parent_config.get("root_import_job_id") or parent_id
+        return [
+            dict(row) for row in db.conn.execute(
+                "SELECT id, type, status, started_at, config, result "
+                "FROM job_history "
+                "WHERE type = 'import' "
+                "  AND status IN ('completed', 'failed', 'cancelled') "
+                "  AND workspace_id IS ? "
+                "  AND (json_extract(config, '$.root_import_job_id') = ? "
+                "       OR json_extract(config, '$.parent_import_job_id') = ?)",
+                (workspace_id, root, parent_id),
+            ).fetchall()
+        ]
+
+    @staticmethod
+    def _resume_takeover_message(takeover):
+        started = (takeover.get("by_started_at") or "").replace("T", " ")[:16]
+        which = (
+            f"the import started {started} (job {takeover['by']})"
+            if started else f"job {takeover['by']}"
+        )
+        if takeover["kind"] == "done":
+            return (
+                f"This import was already resumed by {which}, which "
+                "finished the work it owed, so there is nothing left to "
+                "resume. Resuming again would tag and process the same "
+                "photos a second time."
+            )
+        if takeover["kind"] == "resume":
+            return (
+                f"This import was already resumed by {which}, and that "
+                "run was interrupted too. Resume that import from the Jobs "
+                "page instead; it carries this import's photos."
+            )
+        return (
+            f"This import was already resumed by {which}, which had "
+            "files fail. Retry its failed files from the Jobs page "
+            "instead; that retry carries this import's photos."
+        )
+
+    @staticmethod
+    def _interrupted_parent_resume(parent_config, parent_result, takeover=None):
         """What a resume inherits from an interrupted parent (see
-        ``_validate_parent_import_job``); None for any other parent."""
+        ``_validate_parent_import_job``); None for any other parent.
+
+        ``takeover`` (from ``import_resume_takeover``) supplies the
+        parent's post-import marks merged with its descendants', so work
+        an earlier resume already did is not replayed.
+        """
         if not parent_result.get("interrupted"):
             return None
-        tags_applied = bool(parent_result.get("tags_applied"))
-        chain_already_ran = bool(parent_result.get("chained"))
+        if takeover is None:
+            takeover = {
+                "tags_applied": bool(parent_result.get("tags_applied")),
+                "chained": bool(parent_result.get("chained")),
+            }
+        tags_applied = bool(takeover["tags_applied"])
+        chain_already_ran = bool(takeover["chained"])
         # Both post-import steps ran — nothing left to resume; the row
         # only missed the final write. A ``chained`` mark without
         # ``tags_applied`` means a Stop cut the tag pass short or an
