@@ -124,7 +124,7 @@ def error_text(err: Any) -> str:
     return str(err)
 
 
-def _list_details(items: Any, heading: str) -> list[str]:
+def _list_details(items: Any, heading: str, formatter=_item_text) -> list[str]:
     """``heading`` line followed by up to MAX_DETAIL_ITEMS entries.
 
     Returns nothing at all when no entry renders as text, so a list of
@@ -134,7 +134,7 @@ def _list_details(items: Any, heading: str) -> list[str]:
         return []
     lines = []
     for item in items[:MAX_DETAIL_ITEMS]:
-        text = _item_text(item)
+        text = formatter(item)
         if text:
             lines.append(text)
     if not lines:
@@ -148,7 +148,7 @@ def _list_details(items: Any, heading: str) -> list[str]:
 def _error_details(result: dict, key: str = "errors") -> list[str]:
     items = result.get(key)
     if isinstance(items, list) and items:
-        return _list_details(items, _n(len(items), "error") + ":")
+        return _list_details(items, _n(len(items), "error") + ":", error_text)
     return []
 
 
@@ -846,7 +846,10 @@ def _generic(result: dict, config: dict) -> tuple[str, list[str]]:
             heading = f"{count:,} {noun}:"
             if count > len(value):
                 heading = f"{count:,} {noun} (showing {len(value):,}):"
-            details += _list_details(value, heading)
+            details += _list_details(
+                value, heading,
+                error_text if key == "errors" or key.endswith("_errors") else _item_text,
+            )
             continue
         if value is None or value == "":
             continue

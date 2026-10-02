@@ -2107,6 +2107,8 @@ def test_structured_errors_keep_distinct_photo_identity(tmp_path):
         job_id = runner.start("inat-export", lambda job: {"ok": False, "errors": errors})
         job = wait_for_job_via_runner(runner, job_id, wait_for_history=True)
         assert len(job["errors"]) == 2
+        assert "bird.jpg: export failed (photo 1)" in job["result_details"]
+        assert "bird.jpg: export failed (photo 2)" in job["result_details"]
         assert job["result"]["errors"] == errors
         row = db.conn.execute("SELECT error_count FROM job_history WHERE id=?", (job_id,)).fetchone()
         assert row["error_count"] == 2
