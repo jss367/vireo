@@ -12,6 +12,8 @@ import logging
 import os
 import threading
 import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
@@ -251,6 +253,414 @@ def _residual_staged_changes(db, photo_ids, undeliverable):
     except Exception:
         log.warning("Could not re-check the sync queue after a NAS transfer", exc_info=True)
         return None
+
+
+@dataclass
+class _RecoverySource:
+    """One source file checked against its planned destination's
+    candidates by ``_DuplicateCheckStream._recovery_candidate``."""
+
+    source_file: Path
+    compute_file_hash: Callable
+    src_hash_cache: list = field(default_factory=list)
+
+    def _src_hash(self):
+        if not self.src_hash_cache:
+            try:
+                self.src_hash_cache.append(self.compute_file_hash(
+                    str(self.source_file)))
+            except OSError:
+                self.src_hash_cache.append(None)
+        return self.src_hash_cache[0]
+
+    def _is_source(self, cand_path):
+        """Reject destination candidates that ARE the source file itself
+        — the run rejects that self-copy overlap (destination is an
+        ancestor of the source AND the folder template renders back onto
+        the source folder, e.g. importing /archive/2026/2026-07-03/IMG.jpg
+        into /archive with %Y/%Y-%m-%d) rather than adopting it, so the
+        preview must not promise "verified & adopted, not re-copied" and
+        subtract it from "to copy" for a file the run will fail. Mirrors
+        import_job's samefile guard with the same normalized-path fallback
+        for paths that can't be stat'd."""
+        try:
+            return (
+                os.path.exists(cand_path)
+                and os.path.samefile(str(self.source_file), cand_path)
+            )
+        except OSError:
+            return (
+                os.path.normpath(str(self.source_file))
+                == os.path.normpath(cand_path)
+            )
+
+    def _bytes_match(self, cand_path):
+        if self._is_source(cand_path):
+            return False
+        sh = self._src_hash()
+        if sh is None:
+            return False
+        try:
+            return self.compute_file_hash(cand_path) == sh
+        except OSError:
+            return False
+
+
+class _DuplicateCheckStream:
+    """One ``/api/import/check-duplicates`` SSE stream.
+
+    ``api_import_check_duplicates`` validates the body, then streams
+    ``generate()``: index the catalog, prepare metadata in bounded chunks,
+    check each path against the duplicate gate and the destination-recovery
+    walk, and finish with the totals. The ``import_dedup``, ``ingest`` and
+    ``scanner`` callables are the ones the view imported at request time.
+    """
+
+    def __init__(
+        self,
+        db_path,
+        paths,
+        *,
+        verify_by_hash,
+        include_capture_dates,
+        skip_duplicates,
+        recovery_base,
+        folder_template,
+        catalog_index,
+        duplicate_checker,
+        recover_companion_identities,
+        source_capture_timestamps,
+        build_destination_path,
+        compute_file_hash,
+    ):
+        self.db_path = db_path
+        self.paths = paths
+        self.verify_by_hash = verify_by_hash
+        self.include_capture_dates = include_capture_dates
+        self.skip_duplicates = skip_duplicates
+        self.recovery_base = recovery_base
+        self.folder_template = folder_template
+        self.catalog_index = catalog_index
+        self.duplicate_checker = duplicate_checker
+        self.recover_companion_identities = recover_companion_identities
+        self.source_capture_timestamps = source_capture_timestamps
+        self.build_destination_path = build_destination_path
+        self.compute_file_hash = compute_file_hash
+
+        # The checker still runs when skip_duplicates=False, but only for
+        # its EXIF-batching side effect (needed by _recovery_candidate in
+        # default mode). check_and_record() is skipped in the generator
+        # below so no library-dedup verdict is produced — matching the
+        # import job, which doesn't create the checker at all in that
+        # mode. It is built inside the stream (see generate()), because
+        # indexing the catalog can first have to hash paired JPEGs on a
+        # network share.
+        self.checker = None
+
+        # str(path) -> capture datetime for recovery planning and day summaries when
+        # verify_by_hash disables the checker's own EXIF batching.
+        self.recovery_times = {}
+
+        # name -> size per planned destination folder, one scandir each —
+        # the destination may be a network mount, so listings are batched
+        # rather than stat'ing per candidate file (count round trips).
+        self.dir_listings = {}
+
+        self.duplicate_count = 0
+        self.recovered_count = 0
+
+    def generate(self):
+        yield from self._index_catalog()
+        total = len(self.paths)
+        yield from self._prepare_metadata(total)
+        yield from self._check_paths(total)
+        yield f"data: {json.dumps({'done': True, 'duplicate_count': self.duplicate_count, 'recovered_count': self.recovered_count, 'checked': total, 'total': total})}\n\n"
+
+    def _index_catalog(self):
+        """Index the catalog before any per-file work. Companion
+        identities the catalog is missing are recovered here, a batch per
+        frame, instead of before the response starts: a catalog with a
+        thousand paired JPEGs on a NAS took minutes to hash, during which
+        the page showed nothing, a superseded preview could not be stopped
+        (no yield, so no disconnect), and every re-run started the whole
+        hash over. The request's own DB is closed once the view returns,
+        so the stream opens its own -- without re-running the schema pass,
+        which app startup already did (the request connection skips it the
+        same way)."""
+        with Database(
+            self.db_path, initialize_schema=(self.db_path == ":memory:"),
+        ) as index_db:
+            for checked, missing in self.recover_companion_identities(index_db):
+                yield f"data: {json.dumps({'catalog_recovery': {'checked': checked, 'total': missing}})}\n\n"
+            self.checker = self.duplicate_checker(
+                self.catalog_index.from_db(index_db, recover_companions=False),
+                verify_by_hash=self.verify_by_hash,
+            )
+
+    def _prepare_metadata(self, total):
+        """Batch the EXIF header reads up front in bounded chunks (no-op
+        in verify_by_hash mode). Intra-run duplicate tracking lives in the
+        checker: identical source files not yet in the DB are reported as
+        duplicates of each other, matching the actual import step.
+        Chunking with a yield between each chunk lets a superseded browser
+        request stop this phase within one chunk's worth of I/O — a single
+        upfront prepare() over tens of thousands of files would otherwise
+        ignore the disconnect entirely until the per-file loop begins."""
+        prep_paths = [Path(p) for p in self.paths]
+        prep_batch = DUPLICATE_CHECK_PREP_BATCH_SIZE
+        for prep_start in range(0, len(prep_paths), prep_batch):
+            chunk = prep_paths[prep_start:prep_start + prep_batch]
+            self.checker.prepare(chunk)
+            if (
+                (self.recovery_base or self.include_capture_dates)
+                and self.verify_by_hash
+            ):
+                # prepare() skipped the EXIF batch (verify mode's
+                # identity is the hash), but recovery planning or day
+                # summaries need capture times — resolve them alongside
+                # the same chunk so both prep paths share the same
+                # cancellation cadence.
+                self.recovery_times.update({
+                    str(f): dt
+                    for f, dt in self.source_capture_timestamps(chunk).items()
+                })
+            # Cheap heartbeat frame the client can render as
+            # "preparing metadata…" and, more importantly, the yield
+            # that lets the WSGI server notice a disconnected client
+            # between chunks instead of after the entire prep phase.
+            prepared = prep_start + len(chunk)
+            frame = {"preparing": prepared, "total": total}
+            if self.include_capture_dates:
+                # Share the metadata reads used for duplicate identity
+                # and recovery planning with the day summary. The
+                # discovery walk need not read these headers separately.
+                dates = {}
+                for source_file in chunk:
+                    timestamp = self._capture_time(source_file)
+                    dates[str(source_file)] = timestamp.date().isoformat() if timestamp else None
+                frame["capture_dates"] = dates
+            yield f"data: {json.dumps(frame)}\n\n"
+
+    def _capture_time(self, source_file):
+        if self.verify_by_hash:
+            return self.recovery_times.get(str(source_file))
+        return self.checker.capture_time(source_file)
+
+    def _check_paths(self, total):
+        batch_duplicates = []
+        batch_recovered = []
+        last_flush = time.monotonic()
+        for checked, path in enumerate(self.paths, 1):
+            # Zero-byte placeholders are non-duplicates (the checker
+            # gives them no identity), and unreadable/missing files
+            # are skipped; both fall through so the batch-yield block
+            # below still runs. A `continue` would swallow any
+            # already-queued `batch_duplicates` whenever such a file
+            # landed on the last path or on a batch boundary, leaving
+            # the UI unable to deselect those known dupes.
+            try:
+                # When skip_duplicates=False, the import run doesn't
+                # consult the library-dedup checker at all — every
+                # source file goes on to the recovery/adopt gate. Skip
+                # check_and_record() here so a cataloged twin that
+                # also sits at the destination is streamed as
+                # ``recovered`` (matching what the run will actually
+                # do) instead of ``duplicates`` (which the client
+                # would then not subtract from the transfer count).
+                if self.skip_duplicates and self.checker.check_and_record(
+                        Path(path)):
+                    batch_duplicates.append(path)
+                    self.duplicate_count += 1
+                elif self._recovery_candidate(path):
+                    # Duplicate gate first, recovery second — same
+                    # order as the import run, so a cataloged twin
+                    # that also sits at the destination stays a
+                    # duplicate here and a skip there.
+                    batch_recovered.append(path)
+                    self.recovered_count += 1
+            except OSError:
+                pass  # Skip unreadable/missing files
+
+            # The yield is both how the client learns progress and how
+            # the WSGI server notices that a superseded browser request
+            # disconnected — cheap checks may finish dozens of files
+            # inside one window (a single event covers them all), while
+            # a slow byte-for-byte hash spends longer than the window on
+            # one file (that file gets its own event and cancellation
+            # stops within the next check). ``checked == total``
+            # guarantees the last progress event always ships so the
+            # client sees ``checked == total`` before ``done``.
+            now = time.monotonic()
+            if (
+                checked == total
+                or now - last_flush
+                >= DUPLICATE_CHECK_FLUSH_INTERVAL_SECONDS
+            ):
+                yield f"data: {json.dumps({'duplicates': batch_duplicates, 'recovered': batch_recovered, 'checked': checked, 'total': total})}\n\n"
+                batch_duplicates = []
+                batch_recovered = []
+                last_flush = now
+
+    def _planned_folder_listing(self, folder):
+        if folder not in self.dir_listings:
+            entries = {}
+            try:
+                with os.scandir(folder) as it:
+                    for entry in it:
+                        try:
+                            # Symlinks are deliberately EXCLUDED, and
+                            # this is a considered trade, not an
+                            # oversight. The import walk follows them
+                            # (os.stat) and adopts a symlink to an
+                            # off-card regular file whose bytes match,
+                            # so excluding them makes the preview
+                            # UNDER-report recovery for that geometry
+                            # — it says "will copy" for a file the run
+                            # adopts. That is the safe direction to be
+                            # wrong in.
+                            #
+                            # Following them was tried (PR 7b) and
+                            # reverted: the walk refuses a candidate
+                            # resolving under ANY source root, while
+                            # this endpoint's ``_is_source`` can only
+                            # compare ``samefile`` against the CURRENT
+                            # source file. A symlink to a *different*
+                            # card file with identical bytes therefore
+                            # slipped through and was reported as
+                            # recovered — an OVER-claim, promising
+                            # "already safe at the destination" for
+                            # bytes that live only on the card. This
+                            # endpoint receives ``paths``, not the
+                            # import's source roots, so it cannot
+                            # reconstruct that guard; doing this right
+                            # needs the shared walk, i.e. the PR 8
+                            # de-mirror. Trading a safe under-report
+                            # for an unsafe over-report is not worth
+                            # it in the meantime.
+                            # Codex review of PR #1450, rounds 4-5.
+                            if entry.is_file(follow_symlinks=False):
+                                entries[entry.name] = entry.stat(
+                                    follow_symlinks=False).st_size
+                        except OSError:
+                            continue
+            except OSError:
+                pass  # missing/unreadable folder -> nothing to adopt
+            self.dir_listings[folder] = entries
+        return self.dir_listings[folder]
+
+    def _planned_folder(self, source_file):
+        """Folder planning mirrors ingest._source_file_timestamps: EXIF
+        capture time falling back to file mtime. In the default mode
+        checker.prepare() already batched the EXIF reads and
+        capture_time() is a cache hit; in verify mode prepare() is a
+        no-op, so the times come from this request's own batch
+        (``_prepare_metadata``) — never resolved lazily one file at a
+        time. None when the template cannot render a folder."""
+        ts = self._capture_time(source_file)
+        if ts is None:
+            with contextlib.suppress(OSError, ValueError,
+                                     OverflowError):
+                ts = datetime.fromtimestamp(
+                    source_file.stat().st_mtime)
+        try:
+            rel_folder = self.build_destination_path(
+                ts, self.folder_template, source_file)
+        except ValueError:
+            return None
+        return (
+            self.recovery_base if rel_folder in ("", ".")
+            else os.path.join(self.recovery_base, rel_folder)
+        )
+
+    def _recovery_candidate(self, path):
+        """True when the planned destination already holds a byte-
+        identical file at the primary name OR at any suffix slot the
+        run would adopt — mirrors ``import_job``'s adopt precondition
+        (size match then byte-verify). A size-matching candidate whose
+        bytes disagree advances the walk the same way a hash mismatch
+        does in the run: otherwise the preview would subtract the
+        file from "to copy" and promise "not re-copied" for a file
+        the run will suffix-copy under a numbered name."""
+        if not self.recovery_base:
+            return False
+        source_file = Path(path)
+        try:
+            size = source_file.stat().st_size
+        except OSError:
+            return False
+        # NOTE: zero-byte sources are NOT special-cased here. They
+        # used to return False on the reasoning that "the duplicate
+        # checker gives them no identity either" — but that conflates
+        # duplicate identity with crash-recovery adoption, which is
+        # what this preview is about. ``_resolve_dest_collision``
+        # adopts an empty candidate for an empty source at every
+        # candidate position on both transports (spec PR 7b flip A;
+        # the local primary-name case predates it), so returning
+        # False here left the preview counting those files as
+        # transfers the run would never perform. The generic path
+        # below gets this right on its own: ``_src_hash`` uses
+        # ``compute_file_hash``, so an empty source hashes to
+        # EMPTY_FILE_SHA256 rather than the checker's None, and it
+        # matches an empty candidate. Non-regular entries (FIFOs,
+        # device nodes) stay excluded because
+        # ``_planned_folder_listing`` only records
+        # ``is_file(follow_symlinks=False)`` entries — which is also
+        # what the run's own S_ISREG guard does. Codex review of
+        # PR #1450.
+        folder = self._planned_folder(source_file)
+        if folder is None:
+            return False
+        listing = self._planned_folder_listing(folder)
+        primary_name = source_file.name
+
+        # Lazy source-hash: only computed once, and only if we hit a
+        # size-matching candidate that needs verifying. A typical
+        # fresh import has no size collisions and skips hashing
+        # entirely.
+        source = _RecoverySource(source_file, self.compute_file_hash)
+
+        primary_size = listing.get(primary_name)
+        primary_path = os.path.join(folder, primary_name)
+        if primary_size == size and source._is_source(primary_path):
+            # Destination candidate at the primary slot IS the
+            # source file. The run fails this file entirely rather
+            # than walking suffixes; report as not recovered instead
+            # of falling through to the suffix walk (which could
+            # find a coincidental byte-identical sibling in the
+            # source folder and wrongly claim adoption).
+            return False
+        if primary_size == size:
+            if source._bytes_match(primary_path):
+                return True
+            # Same size, different bytes at the primary slot: the run
+            # will hash-mismatch and advance to the suffix walk.
+        elif primary_size is None:
+            # No collision on the primary name — the run copies to the
+            # primary slot without walking suffixes.
+            return False
+        return _suffix_slot_recovered(
+            source, folder, listing, primary_name, size)
+
+
+def _suffix_slot_recovered(source, folder, listing, primary_name, size):
+    """Primary slot is taken by a different-sized (or same-sized-
+    different-bytes) file. Mirror import_job's collision walk
+    (``name_1.ext``, ``name_2.ext``, ...): stop at the first free slot
+    (the run would land a fresh copy there — not recovered), or claim
+    recovery at the first byte-identical candidate (the run would adopt
+    it). Size-mismatched slots advance the counter; same-size-different-
+    bytes slots also advance, mirroring the run's hash-mismatch skip."""
+    stem, suffix_ext = os.path.splitext(primary_name)
+    counter = 1
+    while True:
+        candidate = f"{stem}_{counter}{suffix_ext}"
+        cand_size = listing.get(candidate)
+        if cand_size is None:
+            return False
+        if cand_size == size and source._bytes_match(
+                os.path.join(folder, candidate)):
+            return True
+        counter += 1
 
 
 def create_imports_blueprint(
@@ -806,345 +1216,23 @@ def create_imports_blueprint(
                 "folder_template must be a relative path without '..' "
                 "or backslashes", 400)
 
-        # The checker still runs when skip_duplicates=False, but only for
-        # its EXIF-batching side effect (needed by _recovery_candidate in
-        # default mode). check_and_record() is skipped in the generator
-        # below so no library-dedup verdict is produced — matching the
-        # import job, which doesn't create the checker at all in that
-        # mode. It is built inside the stream (see generate()), because
-        # indexing the catalog can first have to hash paired JPEGs on a
-        # network share.
-        checker = None
-
-        # str(path) -> capture datetime for recovery planning and day summaries when
-        # verify_by_hash disables the checker's own EXIF batching.
-        recovery_times = {}
-
-        # name -> size per planned destination folder, one scandir each —
-        # the destination may be a network mount, so listings are batched
-        # rather than stat'ing per candidate file (count round trips).
-        dir_listings = {}
-
-        def _planned_folder_listing(folder):
-            if folder not in dir_listings:
-                entries = {}
-                try:
-                    with os.scandir(folder) as it:
-                        for entry in it:
-                            try:
-                                # Symlinks are deliberately EXCLUDED, and
-                                # this is a considered trade, not an
-                                # oversight. The import walk follows them
-                                # (os.stat) and adopts a symlink to an
-                                # off-card regular file whose bytes match,
-                                # so excluding them makes the preview
-                                # UNDER-report recovery for that geometry
-                                # — it says "will copy" for a file the run
-                                # adopts. That is the safe direction to be
-                                # wrong in.
-                                #
-                                # Following them was tried (PR 7b) and
-                                # reverted: the walk refuses a candidate
-                                # resolving under ANY source root, while
-                                # this endpoint's ``_is_source`` can only
-                                # compare ``samefile`` against the CURRENT
-                                # source file. A symlink to a *different*
-                                # card file with identical bytes therefore
-                                # slipped through and was reported as
-                                # recovered — an OVER-claim, promising
-                                # "already safe at the destination" for
-                                # bytes that live only on the card. This
-                                # endpoint receives ``paths``, not the
-                                # import's source roots, so it cannot
-                                # reconstruct that guard; doing this right
-                                # needs the shared walk, i.e. the PR 8
-                                # de-mirror. Trading a safe under-report
-                                # for an unsafe over-report is not worth
-                                # it in the meantime.
-                                # Codex review of PR #1450, rounds 4-5.
-                                if entry.is_file(follow_symlinks=False):
-                                    entries[entry.name] = entry.stat(
-                                        follow_symlinks=False).st_size
-                            except OSError:
-                                continue
-                except OSError:
-                    pass  # missing/unreadable folder -> nothing to adopt
-                dir_listings[folder] = entries
-            return dir_listings[folder]
-
-        def _recovery_candidate(path):
-            """True when the planned destination already holds a byte-
-            identical file at the primary name OR at any suffix slot the
-            run would adopt — mirrors ``import_job``'s adopt precondition
-            (size match then byte-verify). A size-matching candidate whose
-            bytes disagree advances the walk the same way a hash mismatch
-            does in the run: otherwise the preview would subtract the
-            file from "to copy" and promise "not re-copied" for a file
-            the run will suffix-copy under a numbered name."""
-            if not recovery_base:
-                return False
-            source_file = Path(path)
-            try:
-                size = source_file.stat().st_size
-            except OSError:
-                return False
-            # NOTE: zero-byte sources are NOT special-cased here. They
-            # used to return False on the reasoning that "the duplicate
-            # checker gives them no identity either" — but that conflates
-            # duplicate identity with crash-recovery adoption, which is
-            # what this preview is about. ``_resolve_dest_collision``
-            # adopts an empty candidate for an empty source at every
-            # candidate position on both transports (spec PR 7b flip A;
-            # the local primary-name case predates it), so returning
-            # False here left the preview counting those files as
-            # transfers the run would never perform. The generic path
-            # below gets this right on its own: ``_src_hash`` uses
-            # ``compute_file_hash``, so an empty source hashes to
-            # EMPTY_FILE_SHA256 rather than the checker's None, and it
-            # matches an empty candidate. Non-regular entries (FIFOs,
-            # device nodes) stay excluded because
-            # ``_planned_folder_listing`` only records
-            # ``is_file(follow_symlinks=False)`` entries — which is also
-            # what the run's own S_ISREG guard does. Codex review of
-            # PR #1450.
-            # Folder planning mirrors ingest._source_file_timestamps:
-            # EXIF capture time falling back to file mtime. In the default
-            # mode checker.prepare() already batched the EXIF reads and
-            # capture_time() is a cache hit; in verify mode prepare() is a
-            # no-op, so the times come from this request's own batch
-            # (below) — never resolved lazily one file at a time.
-            if verify_by_hash:
-                ts = recovery_times.get(str(source_file))
-            else:
-                ts = checker.capture_time(source_file)
-            if ts is None:
-                with contextlib.suppress(OSError, ValueError,
-                                         OverflowError):
-                    ts = datetime.fromtimestamp(
-                        source_file.stat().st_mtime)
-            try:
-                rel_folder = build_destination_path(ts, folder_template, source_file)
-            except ValueError:
-                return False
-            folder = (
-                recovery_base if rel_folder in ("", ".")
-                else os.path.join(recovery_base, rel_folder)
-            )
-            listing = _planned_folder_listing(folder)
-            primary_name = source_file.name
-
-            # Lazy source-hash: only computed once, and only if we hit a
-            # size-matching candidate that needs verifying. A typical
-            # fresh import has no size collisions and skips hashing
-            # entirely.
-            src_hash_cache = []
-
-            def _src_hash():
-                if not src_hash_cache:
-                    try:
-                        src_hash_cache.append(compute_file_hash(
-                            str(source_file)))
-                    except OSError:
-                        src_hash_cache.append(None)
-                return src_hash_cache[0]
-
-            def _is_source(cand_path):
-                # Reject destination candidates that ARE the source file
-                # itself — the run rejects that self-copy overlap
-                # (destination is an ancestor of the source AND the
-                # folder template renders back onto the source folder,
-                # e.g. importing /archive/2026/2026-07-03/IMG.jpg into
-                # /archive with %Y/%Y-%m-%d) rather than adopting it, so
-                # the preview must not promise "verified & adopted, not
-                # re-copied" and subtract it from "to copy" for a file
-                # the run will fail. Mirrors import_job's samefile guard
-                # with the same normalized-path fallback for paths that
-                # can't be stat'd.
-                try:
-                    return (
-                        os.path.exists(cand_path)
-                        and os.path.samefile(str(source_file), cand_path)
-                    )
-                except OSError:
-                    return (
-                        os.path.normpath(str(source_file))
-                        == os.path.normpath(cand_path)
-                    )
-
-            def _bytes_match(cand_path):
-                if _is_source(cand_path):
-                    return False
-                sh = _src_hash()
-                if sh is None:
-                    return False
-                try:
-                    return compute_file_hash(cand_path) == sh
-                except OSError:
-                    return False
-
-            primary_size = listing.get(primary_name)
-            primary_path = os.path.join(folder, primary_name)
-            if primary_size == size and _is_source(primary_path):
-                # Destination candidate at the primary slot IS the
-                # source file. The run fails this file entirely rather
-                # than walking suffixes; report as not recovered instead
-                # of falling through to the suffix walk (which could
-                # find a coincidental byte-identical sibling in the
-                # source folder and wrongly claim adoption).
-                return False
-            if primary_size == size:
-                if _bytes_match(primary_path):
-                    return True
-                # Same size, different bytes at the primary slot: the run
-                # will hash-mismatch and advance to the suffix walk.
-            elif primary_size is None:
-                # No collision on the primary name — the run copies to the
-                # primary slot without walking suffixes.
-                return False
-            # Primary slot is taken by a different-sized (or same-sized-
-            # different-bytes) file. Mirror import_job's collision walk
-            # (``name_1.ext``, ``name_2.ext``, ...): stop at the first
-            # free slot (the run would land a fresh copy there — not
-            # recovered), or claim recovery at the first byte-identical
-            # candidate (the run would adopt it). Size-mismatched slots
-            # advance the counter; same-size-different-bytes slots also
-            # advance, mirroring the run's hash-mismatch skip.
-            stem, suffix_ext = os.path.splitext(primary_name)
-            counter = 1
-            while True:
-                candidate = f"{stem}_{counter}{suffix_ext}"
-                cand_size = listing.get(candidate)
-                if cand_size is None:
-                    return False
-                if cand_size == size and _bytes_match(
-                        os.path.join(folder, candidate)):
-                    return True
-                counter += 1
-
-        def generate():
-            nonlocal checker
-            # Index the catalog before any per-file work. Companion
-            # identities the catalog is missing are recovered here, a batch
-            # per frame, instead of before the response starts: a catalog
-            # with a thousand paired JPEGs on a NAS took minutes to hash,
-            # during which the page showed nothing, a superseded preview
-            # could not be stopped (no yield, so no disconnect), and every
-            # re-run started the whole hash over. The request's own DB is
-            # closed once the view returns, so the stream opens its own --
-            # without re-running the schema pass, which app startup already
-            # did (the request connection skips it the same way).
-            with Database(
-                db_path, initialize_schema=(db_path == ":memory:"),
-            ) as index_db:
-                for checked, missing in recover_companion_identities(index_db):
-                    yield f"data: {json.dumps({'catalog_recovery': {'checked': checked, 'total': missing}})}\n\n"
-                checker = DuplicateChecker(
-                    CatalogIndex.from_db(index_db, recover_companions=False),
-                    verify_by_hash=verify_by_hash,
-                )
-            total = len(paths)
-            duplicate_count = 0
-            recovered_count = 0
-            batch_duplicates = []
-            batch_recovered = []
-            # Batch the EXIF header reads up front in bounded chunks (no-op
-            # in verify_by_hash mode). Intra-run duplicate tracking lives in
-            # the checker: identical source files not yet in the DB are
-            # reported as duplicates of each other, matching the actual
-            # import step. Chunking with a yield between each chunk lets a
-            # superseded browser request stop this phase within one chunk's
-            # worth of I/O — a single upfront prepare() over tens of
-            # thousands of files would otherwise ignore the disconnect
-            # entirely until the per-file loop begins.
-            prep_paths = [Path(p) for p in paths]
-            prep_batch = DUPLICATE_CHECK_PREP_BATCH_SIZE
-            for prep_start in range(0, len(prep_paths), prep_batch):
-                chunk = prep_paths[prep_start:prep_start + prep_batch]
-                checker.prepare(chunk)
-                if (recovery_base or include_capture_dates) and verify_by_hash:
-                    # prepare() skipped the EXIF batch (verify mode's
-                    # identity is the hash), but recovery planning or day
-                    # summaries need capture times — resolve them alongside
-                    # the same chunk so both prep paths share the same
-                    # cancellation cadence.
-                    recovery_times.update({
-                        str(f): dt
-                        for f, dt in source_capture_timestamps(chunk).items()
-                    })
-                # Cheap heartbeat frame the client can render as
-                # "preparing metadata…" and, more importantly, the yield
-                # that lets the WSGI server notice a disconnected client
-                # between chunks instead of after the entire prep phase.
-                prepared = prep_start + len(chunk)
-                frame = {"preparing": prepared, "total": total}
-                if include_capture_dates:
-                    # Share the metadata reads used for duplicate identity
-                    # and recovery planning with the day summary. The
-                    # discovery walk need not read these headers separately.
-                    dates = {}
-                    for source_file in chunk:
-                        timestamp = (recovery_times.get(str(source_file))
-                                     if verify_by_hash else checker.capture_time(source_file))
-                        dates[str(source_file)] = timestamp.date().isoformat() if timestamp else None
-                    frame["capture_dates"] = dates
-                yield f"data: {json.dumps(frame)}\n\n"
-
-            last_flush = time.monotonic()
-            for checked, path in enumerate(paths, 1):
-                # Zero-byte placeholders are non-duplicates (the checker
-                # gives them no identity), and unreadable/missing files
-                # are skipped; both fall through so the batch-yield block
-                # below still runs. A `continue` would swallow any
-                # already-queued `batch_duplicates` whenever such a file
-                # landed on the last path or on a batch boundary, leaving
-                # the UI unable to deselect those known dupes.
-                try:
-                    # When skip_duplicates=False, the import run doesn't
-                    # consult the library-dedup checker at all — every
-                    # source file goes on to the recovery/adopt gate. Skip
-                    # check_and_record() here so a cataloged twin that
-                    # also sits at the destination is streamed as
-                    # ``recovered`` (matching what the run will actually
-                    # do) instead of ``duplicates`` (which the client
-                    # would then not subtract from the transfer count).
-                    if skip_duplicates and checker.check_and_record(
-                            Path(path)):
-                        batch_duplicates.append(path)
-                        duplicate_count += 1
-                    elif _recovery_candidate(path):
-                        # Duplicate gate first, recovery second — same
-                        # order as the import run, so a cataloged twin
-                        # that also sits at the destination stays a
-                        # duplicate here and a skip there.
-                        batch_recovered.append(path)
-                        recovered_count += 1
-                except OSError:
-                    pass  # Skip unreadable/missing files
-
-                # The yield is both how the client learns progress and how
-                # the WSGI server notices that a superseded browser request
-                # disconnected — cheap checks may finish dozens of files
-                # inside one window (a single event covers them all), while
-                # a slow byte-for-byte hash spends longer than the window on
-                # one file (that file gets its own event and cancellation
-                # stops within the next check). ``checked == total``
-                # guarantees the last progress event always ships so the
-                # client sees ``checked == total`` before ``done``.
-                now = time.monotonic()
-                if (
-                    checked == total
-                    or now - last_flush
-                    >= DUPLICATE_CHECK_FLUSH_INTERVAL_SECONDS
-                ):
-                    yield f"data: {json.dumps({'duplicates': batch_duplicates, 'recovered': batch_recovered, 'checked': checked, 'total': total})}\n\n"
-                    batch_duplicates = []
-                    batch_recovered = []
-                    last_flush = now
-
-            yield f"data: {json.dumps({'done': True, 'duplicate_count': duplicate_count, 'recovered_count': recovered_count, 'checked': total, 'total': total})}\n\n"
-
+        stream = _DuplicateCheckStream(
+            db_path,
+            paths,
+            verify_by_hash=verify_by_hash,
+            include_capture_dates=include_capture_dates,
+            skip_duplicates=skip_duplicates,
+            recovery_base=recovery_base,
+            folder_template=folder_template,
+            catalog_index=CatalogIndex,
+            duplicate_checker=DuplicateChecker,
+            recover_companion_identities=recover_companion_identities,
+            source_capture_timestamps=source_capture_timestamps,
+            build_destination_path=build_destination_path,
+            compute_file_hash=compute_file_hash,
+        )
         return Response(
-            generate(),
+            stream.generate(),
             mimetype="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
