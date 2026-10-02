@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import dataclass
 
 log = logging.getLogger(__name__)
 
@@ -77,29 +78,7 @@ class PhotoDeletion:
         is deliberately no retry by raw path: the catalog row is what vouches
         for a file, and a client-supplied path has nothing to vouch for it.
         """
-
-        def emit(
-            phase, current=0, total=0, current_file="", detail="", failed=0,
-            stage_failures=None,
-        ):
-            if progress_callback:
-                payload = {
-                    "phase": phase,
-                    "current": current,
-                    "total": total,
-                    "current_file": current_file,
-                    "detail": detail,
-                    "failed": failed,
-                }
-                # ``stage_failures`` lets a single emit attribute failure counts
-                # to specific stages so the frontend does not have to rely on
-                # a specific per-stage emit having arrived first. The disk and
-                # catalog phases each report their own count while Finishing
-                # sends the merged map, so a dropped intermediate event cannot
-                # silently promote a partial stage to green complete.
-                if stage_failures:
-                    payload["stage_failures"] = dict(stage_failures)
-                progress_callback(payload)
+        run = _BatchDeleteRun(self, db, mode, progress_callback)
 
         if not photo_ids:
             raise ValueError("photo_ids required")
@@ -119,157 +98,299 @@ class PhotoDeletion:
             requested_ids.append(raw_id)
         photo_ids = db.filter_photo_ids_in_workspace(requested_ids)
         if not photo_ids:
-            emit("Finishing", 1, 1)
-            return {
-                "ok": True,
-                "deleted": 0,
-                "trashed": 0,
-                "trash_failed": [],
-                "failed_photo_ids": [],
-            }
-
-        def remove_catalog_rows(ids, *, expand_companions, revalidate_identity=None):
-            """Atomically remove resolved catalog rows, then clean caches.
-
-            ``revalidate_identity`` is an optional ``{photo_id: (folder_id,
-            filename, folder_path)}`` map captured at the start of the disk
-            operation. When provided, each row is re-checked inside the delete
-            transaction and skipped if any of those three fields has changed
-            since — a concurrent ``/api/jobs/move-photos`` can commit a new
-            ``folder_id`` while the disk-delete's stale-path
-            ``os.path.isfile`` check is already reporting "gone", and a
-            concurrent ``/api/jobs/move-folder`` can leave ``folder_id`` and
-            ``filename`` unchanged while renaming the underlying
-            ``folders.path``. Deleting by id alone in either case would
-            discard the row for a photo that now lives at a completely
-            different path. Skipped ids are returned as ``skipped_ids`` so
-            the caller can surface them alongside filesystem failures.
-            """
-            result = {
-                "deleted": 0, "ids": [], "files": [], "skipped_ids": [],
-            }
-            skipped_ids = []
-            total = len(ids)
-            prepared = 0
-            emit(
-                "Removing from Vireo", 0, total,
-                detail="Preparing database changes; nothing is committed yet.",
-            )
-            revalidating = bool(revalidate_identity)
-            # BEGIN IMMEDIATE takes the write lock up front so no other writer
-            # (notably move-photos or move-folder) can commit an identity
-            # change between the revalidation SELECT and the DELETE that
-            # follows. Without it, a move committed after the SELECT but
-            # before the DELETE would let us delete a row that no longer
-            # matches the identity we verified.
-            if revalidating:
-                db.conn.execute("BEGIN IMMEDIATE")
-            try:
-                if revalidating:
-                    verified_ids = []
-                    for chunk in self._chunked(ids):
-                        placeholders = ",".join("?" for _ in chunk)
-                        current = {
-                            row["id"]: (
-                                row["folder_id"],
-                                row["filename"],
-                                row["folder_path"],
-                                row["companion_path"],
-                            )
-                            for row in db.conn.execute(
-                                f"SELECT p.id, p.folder_id, p.filename, "
-                                f"p.companion_path, f.path AS folder_path "
-                                f"FROM photos p "
-                                f"JOIN folders f ON f.id = p.folder_id "
-                                f"WHERE p.id IN ({placeholders})",
-                                list(chunk),
-                            )
-                        }
-                        for photo_id in chunk:
-                            expected = revalidate_identity.get(photo_id)
-                            actual = current.get(photo_id)
-                            if actual is None:
-                                # Row already gone — a concurrent delete beat
-                                # us to it. The requested end state already
-                                # holds, so treat it as successfully deleted
-                                # rather than a stale identity we couldn't
-                                # verify. Reporting it in ``failed_photo_ids``
-                                # here would leave the client showing a photo
-                                # that is absent from both catalog and disk
-                                # until reload.
-                                continue
-                            if expected is not None and actual == expected:
-                                verified_ids.append(photo_id)
-                            else:
-                                skipped_ids.append(photo_id)
-                    ids_to_delete = verified_ids
-                else:
-                    ids_to_delete = list(ids)
-
-                for chunk in self._chunked(ids_to_delete):
-                    chunk_result = db.delete_photos(
-                        chunk,
-                        include_companions=expand_companions,
-                        commit=False,
-                    )
-                    result["deleted"] += chunk_result["deleted"]
-                    result["ids"].extend(chunk_result["ids"])
-                    result["files"].extend(chunk_result["files"])
-                    prepared += len(chunk)
-                    emit(
-                        "Removing from Vireo", min(prepared, total), total,
-                        detail=(
-                            "Preparing database changes; nothing is committed yet."
-                        ),
-                    )
-                db.conn.commit()
-            except Exception:
-                db.conn.rollback()
-                raise
-            result["skipped_ids"] = skipped_ids
-
-            emit(
-                "Removed from Vireo", result["deleted"], result["deleted"],
-                detail="Database changes committed.",
-            )
-            emit("Pruning pipeline cache", 0, 1)
-            try:
-                db.prune_pipeline_cache_for_ids(result["ids"])
-            except BaseException as exc:
-                reraise_fatal_cleanup_error(exc)
-                log.exception("Failed to prune pipeline cache after delete")
-            emit("Pruning pipeline cache", 1, 1)
-
-            def cache_progress(current, total_files, filename):
-                emit("Cleaning cached files", current, total_files, filename)
-
-            emit("Cleaning cached files", 0, len(result["files"]))
-            self.cleanup_cached_files_for_deleted_photos(
-                result["files"], progress_callback=cache_progress,
-            )
-            return result
+            run.emit("Finishing", 1, 1)
+            return _catalog_only_result(0)
 
         # Database-only mode has no filesystem prerequisite and retains the
         # original all-or-nothing catalog transaction.
         if mode == "vireo":
-            result = remove_catalog_rows(
+            result = run.remove_catalog_rows(
                 photo_ids, expand_companions=include_companions,
             )
-            emit("Finishing", 1, 1)
-            return {
-                "ok": True,
-                "deleted": result["deleted"],
-                "trashed": 0,
-                "trash_failed": [],
-                "failed_photo_ids": [],
-            }
+            run.emit("Finishing", 1, 1)
+            return _catalog_only_result(result["deleted"])
 
-        # Disk modes resolve paths without changing SQLite. A photo's catalog
-        # row is removed only after its primary file reached the requested end
-        # state. A companion without its own photo row is processed first; if
-        # that fails, its primary is left untouched and its row remains
-        # retryable.
-        resolved = db.resolve_photos_for_delete(
+        return run.delete_from_disk(photo_ids, include_companions)
+
+
+def _catalog_only_result(deleted):
+    """The result of a run that touched no file on disk."""
+    return {
+        "ok": True,
+        "deleted": deleted,
+        "trashed": 0,
+        "trash_failed": [],
+        "failed_photo_ids": [],
+    }
+
+
+@dataclass
+class _DiskTargets:
+    """What a disk-mode delete resolved, before any file is touched."""
+
+    ids: list
+    primary_paths: dict
+    identity: dict
+    extra_companions: dict
+
+
+@dataclass
+class _DiskOutcome:
+    """Which files and photos reached the requested end state on disk."""
+
+    trashed: int
+    companion_success: set
+    companion_failures: list
+    primary_success: set
+    primary_failures: list
+    successful_ids: list
+    failed_ids: list
+
+
+class _BatchDeleteRun:
+    """One ``run_batch_delete`` call: its progress events and disk tally."""
+
+    def __init__(self, deletion, db, mode, progress_callback):
+        self._deletion = deletion
+        self.db = db
+        self.mode = mode
+        self.progress_callback = progress_callback
+        self.disk_phase = None
+        self.disk_total = 0
+        self.disk_paths_finished = 0
+
+    def emit(
+        self, phase, current=0, total=0, current_file="", detail="", failed=0,
+        stage_failures=None,
+    ):
+        if self.progress_callback:
+            payload = {
+                "phase": phase,
+                "current": current,
+                "total": total,
+                "current_file": current_file,
+                "detail": detail,
+                "failed": failed,
+            }
+            # ``stage_failures`` lets a single emit attribute failure counts
+            # to specific stages so the frontend does not have to rely on
+            # a specific per-stage emit having arrived first. The disk and
+            # catalog phases each report their own count while Finishing
+            # sends the merged map, so a dropped intermediate event cannot
+            # silently promote a partial stage to green complete.
+            if stage_failures:
+                payload["stage_failures"] = dict(stage_failures)
+            self.progress_callback(payload)
+
+    def remove_catalog_rows(self, ids, *, expand_companions, revalidate_identity=None):
+        """Atomically remove resolved catalog rows, then clean caches.
+
+        ``revalidate_identity`` is an optional ``{photo_id: (folder_id,
+        filename, folder_path)}`` map captured at the start of the disk
+        operation. When provided, each row is re-checked inside the delete
+        transaction and skipped if any of those three fields has changed
+        since — a concurrent ``/api/jobs/move-photos`` can commit a new
+        ``folder_id`` while the disk-delete's stale-path
+        ``os.path.isfile`` check is already reporting "gone", and a
+        concurrent ``/api/jobs/move-folder`` can leave ``folder_id`` and
+        ``filename`` unchanged while renaming the underlying
+        ``folders.path``. Deleting by id alone in either case would
+        discard the row for a photo that now lives at a completely
+        different path. Skipped ids are returned as ``skipped_ids`` so
+        the caller can surface them alongside filesystem failures.
+        """
+        db = self.db
+        result = {
+            "deleted": 0, "ids": [], "files": [], "skipped_ids": [],
+        }
+        skipped_ids = []
+        total = len(ids)
+        prepared = 0
+        self.emit(
+            "Removing from Vireo", 0, total,
+            detail="Preparing database changes; nothing is committed yet.",
+        )
+        revalidating = bool(revalidate_identity)
+        # BEGIN IMMEDIATE takes the write lock up front so no other writer
+        # (notably move-photos or move-folder) can commit an identity
+        # change between the revalidation SELECT and the DELETE that
+        # follows. Without it, a move committed after the SELECT but
+        # before the DELETE would let us delete a row that no longer
+        # matches the identity we verified.
+        if revalidating:
+            db.conn.execute("BEGIN IMMEDIATE")
+        try:
+            if revalidating:
+                ids_to_delete = self._revalidated_ids(
+                    ids, revalidate_identity, skipped_ids,
+                )
+            else:
+                ids_to_delete = list(ids)
+
+            for chunk in self._deletion._chunked(ids_to_delete):
+                chunk_result = db.delete_photos(
+                    chunk,
+                    include_companions=expand_companions,
+                    commit=False,
+                )
+                result["deleted"] += chunk_result["deleted"]
+                result["ids"].extend(chunk_result["ids"])
+                result["files"].extend(chunk_result["files"])
+                prepared += len(chunk)
+                self.emit(
+                    "Removing from Vireo", min(prepared, total), total,
+                    detail=(
+                        "Preparing database changes; nothing is committed yet."
+                    ),
+                )
+            db.conn.commit()
+        except Exception:
+            db.conn.rollback()
+            raise
+        result["skipped_ids"] = skipped_ids
+
+        self.emit(
+            "Removed from Vireo", result["deleted"], result["deleted"],
+            detail="Database changes committed.",
+        )
+        self._clean_up_after_catalog_removal(result)
+        return result
+
+    def _revalidated_ids(self, ids, revalidate_identity, skipped_ids):
+        """The ids whose row still matches ``revalidate_identity``.
+
+        Runs inside ``remove_catalog_rows``'s write transaction; ids whose
+        identity changed are appended to ``skipped_ids``.
+        """
+        verified_ids = []
+        for chunk in self._deletion._chunked(ids):
+            placeholders = ",".join("?" for _ in chunk)
+            current = {
+                row["id"]: (
+                    row["folder_id"],
+                    row["filename"],
+                    row["folder_path"],
+                    row["companion_path"],
+                )
+                for row in self.db.conn.execute(
+                    f"SELECT p.id, p.folder_id, p.filename, "
+                    f"p.companion_path, f.path AS folder_path "
+                    f"FROM photos p "
+                    f"JOIN folders f ON f.id = p.folder_id "
+                    f"WHERE p.id IN ({placeholders})",
+                    list(chunk),
+                )
+            }
+            for photo_id in chunk:
+                expected = revalidate_identity.get(photo_id)
+                actual = current.get(photo_id)
+                if actual is None:
+                    # Row already gone — a concurrent delete beat
+                    # us to it. The requested end state already
+                    # holds, so treat it as successfully deleted
+                    # rather than a stale identity we couldn't
+                    # verify. Reporting it in ``failed_photo_ids``
+                    # here would leave the client showing a photo
+                    # that is absent from both catalog and disk
+                    # until reload.
+                    continue
+                if expected is not None and actual == expected:
+                    verified_ids.append(photo_id)
+                else:
+                    skipped_ids.append(photo_id)
+        return verified_ids
+
+    def _clean_up_after_catalog_removal(self, result):
+        """Prune the pipeline cache and sweep cached files for removed rows."""
+        self.emit("Pruning pipeline cache", 0, 1)
+        try:
+            self.db.prune_pipeline_cache_for_ids(result["ids"])
+        except BaseException as exc:
+            reraise_fatal_cleanup_error(exc)
+            log.exception("Failed to prune pipeline cache after delete")
+        self.emit("Pruning pipeline cache", 1, 1)
+
+        def cache_progress(current, total_files, filename):
+            self.emit("Cleaning cached files", current, total_files, filename)
+
+        self.emit("Cleaning cached files", 0, len(result["files"]))
+        self._deletion.cleanup_cached_files_for_deleted_photos(
+            result["files"], progress_callback=cache_progress,
+        )
+
+    def delete_from_disk(self, photo_ids, include_companions):
+        """Disk modes: change the files, then remove the rows that made it."""
+        targets = self._resolve_disk_targets(photo_ids, include_companions)
+
+        self.disk_phase = (
+            "Moving files to Trash"
+            if self.mode == "disk" else "Deleting files permanently"
+        )
+        all_disk_paths = list(dict.fromkeys(
+            [
+                path for paths_for_id in targets.extra_companions.values()
+                for path in paths_for_id
+            ]
+            + list(targets.primary_paths.values())
+        ))
+        self.disk_total = len(all_disk_paths)
+        self.emit(self.disk_phase, 0, self.disk_total)
+
+        self.disk_paths_finished = 0
+        outcome = self._change_files(targets)
+        trash_failed = self._filesystem_failures(targets, outcome)
+        failed_ids = outcome.failed_ids
+
+        disk_failed_photos = len(failed_ids)
+        self.emit(
+            self.disk_phase, self.disk_total, self.disk_total,
+            detail=(
+                f"{len(outcome.successful_ids)} photo(s) ready for catalog removal; "
+                f"{disk_failed_photos} retained after filesystem errors."
+            ),
+            failed=disk_failed_photos,
+            stage_failures={"files": disk_failed_photos},
+        )
+        result = self.remove_catalog_rows(
+            outcome.successful_ids,
+            expand_companions=False,
+            revalidate_identity=targets.identity,
+        )
+        # Rows whose identity changed between resolve and catalog-removal
+        # weren't deleted — surface them alongside filesystem failures so
+        # the client keeps them visible and doesn't report them as trashed.
+        skipped_ids = result.get("skipped_ids", []) or []
+        catalog_failed_photos = len(skipped_ids)
+        if skipped_ids:
+            failed_ids = self._retain_moved_photos(
+                skipped_ids, failed_ids, trash_failed, targets, result,
+            )
+        self.emit(
+            "Finishing", 1, 1,
+            failed=len(failed_ids),
+            stage_failures={
+                "files": disk_failed_photos,
+                "catalog": catalog_failed_photos,
+            },
+        )
+        return {
+            "ok": True,
+            "deleted": result["deleted"],
+            "trashed": outcome.trashed,
+            "trash_failed": trash_failed,
+            "failed_photo_ids": failed_ids,
+        }
+
+    def _resolve_disk_targets(self, photo_ids, include_companions):
+        """Resolve each photo's files and identity for a disk-mode delete.
+
+        Disk modes resolve paths without changing SQLite. A photo's catalog
+        row is removed only after its primary file reached the requested end
+        state. A companion without its own photo row is processed first; if
+        that fails, its primary is left untouched and its row remains
+        retryable.
+        """
+        resolved = self.db.resolve_photos_for_delete(
             photo_ids, include_companions=include_companions,
         )
         files = resolved["files"]
@@ -320,132 +441,148 @@ class PhotoDeletion:
                 )
                 if companion not in catalog_primary_paths:
                     extra_companions.setdefault(f["photo_id"], set()).add(companion)
-
-        disk_phase = (
-            "Moving files to Trash"
-            if mode == "disk" else "Deleting files permanently"
+        return _DiskTargets(
+            ids=resolved["ids"],
+            primary_paths=primary_paths,
+            identity=resolved_identity,
+            extra_companions=extra_companions,
         )
-        all_disk_paths = list(dict.fromkeys(
-            [path for paths_for_id in extra_companions.values() for path in paths_for_id]
-            + list(primary_paths.values())
-        ))
-        emit(disk_phase, 0, len(all_disk_paths))
 
-        disk_paths_finished = 0
-
-        def operate(paths_to_change):
-            nonlocal disk_paths_finished
-            if not paths_to_change:
-                return 0, set(), []
-            if mode == "disk":
-                progress_offset = disk_paths_finished
-
-                def trash_progress(current, _total, filename):
-                    emit(
-                        disk_phase, progress_offset + current,
-                        len(all_disk_paths), filename,
-                    )
-
-                result = self._trash_paths(
-                    paths_to_change, progress_callback=trash_progress,
-                )
-                disk_paths_finished += len(paths_to_change)
-                return result
-            successful = set()
-            failures = []
-            removed = 0
-            # Snapshot each parent's st_dev before deletion so a mount that
-            # vanishes mid-batch can be detected even when the mount point
-            # remains visible on the underlying local FS (see
-            # ``_snapshot_parent_device``).
-            parent_devs = {
-                path: self._snapshot_parent_device(path)
-                for path in paths_to_change
-            }
-            for filepath in paths_to_change:
-                if not os.path.isfile(filepath):
-                    # Same live-parent gate as ``_trash_paths`` — a
-                    # disconnected mount also makes ``os.path.isfile``
-                    # return False, and treating that as "already gone"
-                    # would prune the catalog row for a photo that
-                    # reappears when the volume comes back.
-                    if self._path_confirmed_gone(
-                        filepath, parent_devs.get(filepath),
-                    ):
-                        log.warning("File already missing: %s", filepath)
-                        successful.add(filepath)
-                    else:
-                        log.warning(
-                            "Permanent delete preflight: source "
-                            "unreachable for %s", filepath,
-                        )
-                        failures.append({
-                            "path": filepath,
-                            "error": "Source path is unreachable",
-                        })
-                    disk_paths_finished += 1
-                    emit(
-                        disk_phase, disk_paths_finished,
-                        len(all_disk_paths), os.path.basename(filepath),
-                    )
-                    continue
-                try:
-                    os.remove(filepath)
-                    successful.add(filepath)
-                    removed += 1
-                except OSError as exc:
-                    log.warning(
-                        "Permanent delete failed for %s", filepath,
-                        exc_info=True,
-                    )
-                    failures.append({"path": filepath, "error": str(exc)})
-                disk_paths_finished += 1
-                emit(
-                    disk_phase, disk_paths_finished,
-                    len(all_disk_paths), os.path.basename(filepath),
-                )
-            return removed, successful, failures
-
+    def _change_files(self, targets):
+        """Change the companions, then the primaries whose companions made it."""
+        extra_companions = targets.extra_companions
+        primary_paths = targets.primary_paths
         companion_paths = list(dict.fromkeys(
             path for paths_for_id in extra_companions.values()
             for path in paths_for_id
         ))
-        trashed, companion_success, companion_failures = operate(companion_paths)
+        trashed, companion_success, companion_failures = self._operate(
+            companion_paths,
+        )
         eligible_ids = {
-            photo_id for photo_id in resolved["ids"]
+            photo_id for photo_id in targets.ids
             if extra_companions.get(photo_id, set()) <= companion_success
         }
         eligible_primary_paths = [
-            primary_paths[photo_id] for photo_id in resolved["ids"]
+            primary_paths[photo_id] for photo_id in targets.ids
             if photo_id in eligible_ids and photo_id in primary_paths
         ]
-        primary_moved, primary_success, primary_failures = operate(
+        primary_moved, primary_success, primary_failures = self._operate(
             eligible_primary_paths,
         )
         trashed += primary_moved
         successful_ids = [
-            photo_id for photo_id in resolved["ids"]
+            photo_id for photo_id in targets.ids
             if photo_id in eligible_ids
             and primary_paths.get(photo_id) in primary_success
         ]
         successful_id_set = set(successful_ids)
         failed_ids = [
-            photo_id for photo_id in resolved["ids"]
+            photo_id for photo_id in targets.ids
             if photo_id not in successful_id_set
         ]
+        return _DiskOutcome(
+            trashed=trashed,
+            companion_success=companion_success,
+            companion_failures=companion_failures,
+            primary_success=primary_success,
+            primary_failures=primary_failures,
+            successful_ids=successful_ids,
+            failed_ids=failed_ids,
+        )
 
+    def _operate(self, paths_to_change):
+        """Move ``paths_to_change`` to the Trash or delete them permanently."""
+        if not paths_to_change:
+            return 0, set(), []
+        if self.mode == "disk":
+            return self._trash(paths_to_change)
+        return self._delete_permanently(paths_to_change)
+
+    def _trash(self, paths_to_change):
+        progress_offset = self.disk_paths_finished
+
+        def trash_progress(current, _total, filename):
+            self.emit(
+                self.disk_phase, progress_offset + current,
+                self.disk_total, filename,
+            )
+
+        result = self._deletion._trash_paths(
+            paths_to_change, progress_callback=trash_progress,
+        )
+        self.disk_paths_finished += len(paths_to_change)
+        return result
+
+    def _delete_permanently(self, paths_to_change):
+        successful = set()
+        failures = []
+        removed = 0
+        # Snapshot each parent's st_dev before deletion so a mount that
+        # vanishes mid-batch can be detected even when the mount point
+        # remains visible on the underlying local FS (see
+        # ``_snapshot_parent_device``).
+        parent_devs = {
+            path: self._deletion._snapshot_parent_device(path)
+            for path in paths_to_change
+        }
+        for filepath in paths_to_change:
+            if not os.path.isfile(filepath):
+                # Same live-parent gate as ``_trash_paths`` — a
+                # disconnected mount also makes ``os.path.isfile``
+                # return False, and treating that as "already gone"
+                # would prune the catalog row for a photo that
+                # reappears when the volume comes back.
+                if self._deletion._path_confirmed_gone(
+                    filepath, parent_devs.get(filepath),
+                ):
+                    log.warning("File already missing: %s", filepath)
+                    successful.add(filepath)
+                else:
+                    log.warning(
+                        "Permanent delete preflight: source "
+                        "unreachable for %s", filepath,
+                    )
+                    failures.append({
+                        "path": filepath,
+                        "error": "Source path is unreachable",
+                    })
+                self._finish_disk_path(filepath)
+                continue
+            try:
+                os.remove(filepath)
+                successful.add(filepath)
+                removed += 1
+            except OSError as exc:
+                log.warning(
+                    "Permanent delete failed for %s", filepath,
+                    exc_info=True,
+                )
+                failures.append({"path": filepath, "error": str(exc)})
+            self._finish_disk_path(filepath)
+        return removed, successful, failures
+
+    def _finish_disk_path(self, filepath):
+        self.disk_paths_finished += 1
+        self.emit(
+            self.disk_phase, self.disk_paths_finished,
+            self.disk_total, os.path.basename(filepath),
+        )
+
+    def _filesystem_failures(self, targets, outcome):
+        """One ``trash_failed`` entry per file a retained photo still has."""
         failure_by_path = {
             failure["path"]: failure
-            for failure in companion_failures + primary_failures
+            for failure in outcome.companion_failures + outcome.primary_failures
         }
         trash_failed = []
-        for photo_id in failed_ids:
+        for photo_id in outcome.failed_ids:
             failed_paths = [
-                path for path in extra_companions.get(photo_id, set())
-                if path not in companion_success
+                path for path in targets.extra_companions.get(photo_id, set())
+                if path not in outcome.companion_success
             ]
-            primary = primary_paths.get(photo_id)
-            if not failed_paths and primary not in primary_success:
+            primary = targets.primary_paths.get(photo_id)
+            if not failed_paths and primary not in outcome.primary_success:
                 failed_paths.append(primary)
             for filepath in failed_paths:
                 detail = dict(failure_by_path.get(filepath) or {
@@ -454,69 +591,43 @@ class PhotoDeletion:
                 })
                 detail["photo_id"] = photo_id
                 trash_failed.append(detail)
+        return trash_failed
 
-        disk_failed_photos = len(failed_ids)
-        emit(
-            disk_phase, len(all_disk_paths), len(all_disk_paths),
-            detail=(
-                f"{len(successful_ids)} photo(s) ready for catalog removal; "
-                f"{disk_failed_photos} retained after filesystem errors."
-            ),
-            failed=disk_failed_photos,
-            stage_failures={"files": disk_failed_photos},
-        )
-        result = remove_catalog_rows(
-            successful_ids,
-            expand_companions=False,
-            revalidate_identity=resolved_identity,
-        )
-        # Rows whose identity changed between resolve and catalog-removal
-        # weren't deleted — surface them alongside filesystem failures so
-        # the client keeps them visible and doesn't report them as trashed.
-        skipped_ids = result.get("skipped_ids", []) or []
+    def _retain_moved_photos(
+        self, skipped_ids, failed_ids, trash_failed, targets, result,
+    ):
+        """Report the rows the catalog step skipped; return the failed ids.
+
+        Appends one ``trash_failed`` entry per skipped id.
+        """
         catalog_failed_photos = len(skipped_ids)
-        if skipped_ids:
-            already_failed = set(failed_ids)
-            for photo_id in skipped_ids:
-                trash_failed.append({
-                    "photo_id": photo_id,
-                    "path": primary_paths.get(photo_id, ""),
-                    "error": (
-                        "Photo was moved to a new folder during this delete; "
-                        "the catalog row was preserved"
-                    ),
-                })
-            failed_ids = failed_ids + [
-                photo_id for photo_id in skipped_ids
-                if photo_id not in already_failed
-            ]
-            # Re-emit the catalog stage with the retained count so the frontend
-            # transitions it from complete → partial. Without this, the initial
-            # "Removed from Vireo" event marks the stage green and Finishing
-            # later carries a higher failed count that the frontend can't
-            # attribute to any stage.
-            emit(
-                "Removed from Vireo",
-                result["deleted"], result["deleted"] + catalog_failed_photos,
-                detail=(
-                    f"{catalog_failed_photos} photo(s) retained "
-                    "due to concurrent moves."
+        already_failed = set(failed_ids)
+        for photo_id in skipped_ids:
+            trash_failed.append({
+                "photo_id": photo_id,
+                "path": targets.primary_paths.get(photo_id, ""),
+                "error": (
+                    "Photo was moved to a new folder during this delete; "
+                    "the catalog row was preserved"
                 ),
-                failed=catalog_failed_photos,
-                stage_failures={"catalog": catalog_failed_photos},
-            )
-        emit(
-            "Finishing", 1, 1,
-            failed=len(failed_ids),
-            stage_failures={
-                "files": disk_failed_photos,
-                "catalog": catalog_failed_photos,
-            },
+            })
+        failed_ids = failed_ids + [
+            photo_id for photo_id in skipped_ids
+            if photo_id not in already_failed
+        ]
+        # Re-emit the catalog stage with the retained count so the frontend
+        # transitions it from complete → partial. Without this, the initial
+        # "Removed from Vireo" event marks the stage green and Finishing
+        # later carries a higher failed count that the frontend can't
+        # attribute to any stage.
+        self.emit(
+            "Removed from Vireo",
+            result["deleted"], result["deleted"] + catalog_failed_photos,
+            detail=(
+                f"{catalog_failed_photos} photo(s) retained "
+                "due to concurrent moves."
+            ),
+            failed=catalog_failed_photos,
+            stage_failures={"catalog": catalog_failed_photos},
         )
-        return {
-            "ok": True,
-            "deleted": result["deleted"],
-            "trashed": trashed,
-            "trash_failed": trash_failed,
-            "failed_photo_ids": failed_ids,
-        }
+        return failed_ids
