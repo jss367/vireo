@@ -3021,232 +3021,410 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     except ValueError as exc:
         return {"moved": 0, "errors": [str(exc)]}
 
-    # Three destination views:
-    #   transfer_dest — where rsync writes (NAS-side path for remote, local
-    #     path otherwise); also the path used for existence/verify.
-    #   rsync_target  — transfer_dest addressed for rsync (user@host:path
-    #     remote, bare path local).
-    #   catalog_path  — where the catalog points AFTER the move (the local
-    #     mount path for remote, same as transfer_dest local). The local
-    #     destination and catalog coincide; for remote they diverge because
-    #     the NAS path isn't reachable through the local filesystem.
-    if remote:
-        ssh_base = remote.get("ssh_dest_base") or ""
-        # Same hazard as the mount-path check below, on the NAS side: a
-        # relative ssh_dest_base like "Photos" would ship to rsync as
-        # ``user@host:Photos/<folder>`` and resolve under the SSH user's
-        # remote cwd — but the catalog gets repointed to the absolute
-        # mount_dest_base, so a verified copy can live at a different
-        # remote location than the path Vireo records before originals are
-        # deleted. ``_coerce_remote_target`` already drops relative-path
-        # entries at the config boundary; this is the defense-in-depth
-        # check for callers (tests, direct use) that build a remote dict
-        # themselves. POSIX-absolute (startswith "/") because the NAS is
-        # POSIX — os.path.isabs would accept ``C:\foo`` on Windows.
-        if not ssh_base.startswith("/"):
-            return {"moved": 0, "errors": [
-                "Remote target needs an absolute remote (NAS) path before "
-                "moving files — otherwise rsync would write under the SSH "
-                "user's cwd, not where the catalog will point. Set the "
-                "remote path under Settings → Remote targets."
-            ]}
-        mount_base = remote.get("mount_dest_base") or ""
-        # Without an absolute mount path, resolve_folder_dest below would
-        # produce a relative catalog_path like 'Birds' — then after the SSH
-        # copy succeeds and originals are deleted, the catalog row points at
-        # a non-resolving location relative to the server cwd. The
-        # /api/jobs/move-folder route also validates this, but move_folder is
-        # called directly from tests and other code paths; checking here too
-        # means the bug can't slip past whichever caller forgets.
-        if not os.path.isabs(mount_base):
-            return {"moved": 0, "errors": [
-                "Remote target needs an absolute local mount path before "
-                "moving files — otherwise the catalog would point at a "
-                "relative location after the move. Set the mount path under "
-                "Settings → Remote targets."
-            ]}
-        # The NAS side is POSIX, so the SSH dest must be joined with '/' even
-        # when this code runs on Windows; os.path.join would produce a
-        # backslash and rsync would treat it as a single path segment.
-        transfer_dest = posixpath.join(remote["ssh_dest_base"], landing_name)
-        # Join landing_name directly rather than routing it back through
-        # resolve_folder_dest: that helper calls normalize_destination_name,
-        # which would re-trim/reject a value we've already resolved. When the
-        # user didn't request a rename, landing_name is the raw folder_name
-        # (potentially with surrounding whitespace, or POSIX-legal ``:``/``\``
-        # on Linux/macOS filesystems that allow them). Preflight preserves
-        # those characters — the move job must too, or the copy lands at a
-        # different path than preflight showed and the catalog repoints to
-        # yet another (trimmed) path.
-        catalog_path = os.path.join(mount_base, landing_name)
-        rsync_target = rsync_dest_spec(remote, transfer_dest)
-    else:
-        transfer_dest = os.path.join(destination, landing_name)
-        catalog_path = transfer_dest
-        rsync_target = transfer_dest
+    move = _FolderMove(
+        db, folder_id, src_path, landing_name,
+        progress_cb=progress_cb, developed_dir=developed_dir, merge=merge,
+        remote=remote, reject_tracked_ancestor=reject_tracked_ancestor,
+        allow_tracked_merge=allow_tracked_merge,
+        verify_contents=verify_contents, pre_commit_check=pre_commit_check,
+        thumb_cache_dir=thumb_cache_dir,
+    )
+    error = move.resolve_destination_views(destination)
+    if error is not None:
+        return error
 
     # Validation (overlap, tracked-folder, and the per-file content-conflict
     # scan a merge runs) can take a noticeable moment on a large tree, so name
     # the phase before it starts rather than leaving the bar blank.
-    if progress_cb:
-        progress_cb(0, 0, "", "Checking destination")
+    move.progress(0, 0, "", "Checking destination")
+    for check in (move.refuse_source_overlap,
+                  move.resolve_tracked_destination,
+                  move.probe_destination,
+                  move.refuse_content_conflict):
+        error = check()
+        if error is not None:
+            return error
 
-    # Refuse a destination that overlaps the source. Moving a folder into
-    # itself (or into one of its own descendants) would make the post-copy
-    # rmtree(src) delete the only copy of the files. This is especially
-    # dangerous for a merge, where a destination equal to the source passes
-    # verification trivially (every source file is already "there") before the
-    # delete wipes everything. See _destination_overlaps_source for the alias
-    # surface (symlinks, Windows case folding, case-insensitive POSIX).
-    #
-    # The NAS-side transfer_dest can't alias the local source tree for a
-    # remote move — but the LOCAL MOUNT PATH the catalog is repointed to
-    # (catalog_path) absolutely can if the source already lives on the same
-    # mount. e.g. src=/Volumes/Photography/trip with remote mount_path=
-    # /Volumes/Photography would copy a tree onto itself over SSH; the
-    # checksum verify passes (everything is "already there") and then the
-    # rmtree(src) deletes the only copy. So check the local-facing path:
-    # transfer_dest for local moves, catalog_path for remote.
-    overlap_src_check = catalog_path if remote else transfer_dest
-    if _destination_overlaps_source(src_path, overlap_src_check):
-        return {"moved": 0, "errors": [
-            f"Destination overlaps the source folder: {overlap_src_check}"
-        ]}
+    log.info("%s folder %s -> %s",
+             "Merging" if move.dest_exists else "Moving", src_path,
+             move.rsync_target)
 
-    # Refuse moving into — or around — a destination Vireo already tracks as a
-    # folder, regardless of whether that path currently exists on disk. A
-    # correct tracked-tree merge needs recursive folder/photo reconciliation we
-    # don't do here; a partial attempt would leave folders pointing at the
-    # deleted source path, or collide on the folders.path UNIQUE constraint
-    # when the source's children cascade onto a tracked descendant. Match the
-    # destination itself and anything below it. The cases this feature exists
-    # for — resuming an interrupted move, or moving into an untracked folder —
-    # never hit this.
-    #
-    # For remote, check against `catalog_path` (the local mount path the
-    # catalog is repointed to after the move) rather than `transfer_dest` (the
-    # NAS-side path, which isn't in the local catalog). Without this guard, a
-    # remote move into a mount path that overlaps an already-scanned folder
-    # would copy the whole tree over SSH and then hit folders.path UNIQUE on
-    # the post-move db.move_folder_path cascade.
-    #
-    # Comparison goes through _path_equal_or_descends so symlink aliases,
-    # Windows case folding, AND case-only aliases on case-insensitive POSIX
-    # (default macOS APFS) all collapse to the same tracked row — otherwise
-    # a destination reached via any of those would slip past and leave two
-    # folder rows managing the same on-disk tree.
-    #
-    # When ``allow_tracked_merge`` is set (the local-processing archive commit
-    # opts in), a tracked destination is NOT an error: instead we remember the
-    # tracked path in ``merge_into_tracked`` and, after the verified file copy,
-    # reconcile the catalog by folding the staged folder/photo rows into the
-    # existing archive rows rather than calling ``db.move_folder_path`` (which
-    # would collide on folders.path UNIQUE). Default (flag off) behaviour is
-    # byte-for-byte unchanged: both tracked-destination cases refuse the move.
-    overlap_check_path = catalog_path if remote else transfer_dest
-    merge_into_tracked = None
-    # The catalog path the staged tree is reconciled ONTO. Distinct from
-    # ``merge_into_tracked`` (the user-facing "existing archive" label): for an
-    # exact overlap the reconciliation base must be the STORED tracked path, not
-    # ``catalog_path``, because ``catalog_path`` may be an alias (symlink /
-    # case-only fold) of the tracked folder. The files rsync to the same on-disk
-    # location either way, but ``merge_staged_tree_into_archive`` does exact
-    # ``WHERE path = ?`` catalog lookups that only match the row stored under the
-    # tracked path — rebasing onto the alias would miss it and create a second
-    # folder row for the same archive.
-    merge_reconcile_base = None
-    tracked = _tracked_destination_overlap(db, folder_id, overlap_check_path)
-    if tracked:
-        # ``_tracked_destination_overlap`` returns any tracked row at-or-below
-        # ``overlap_check_path``. The opt-in merge only covers the "into an
-        # existing archive" case where the tracked row IS the destination;
-        # a tracked row STRICTLY BELOW the destination is the "wrap a fresh
-        # parent around an existing tracked subtree" case (e.g. /Photos/USA
-        # tracked, destination /Photos). The reconciliation would rebase the
-        # staged tree onto the wrapper path and leave the pre-existing tracked
-        # descendant with unchanged parentage — two overlapping catalog
-        # subtrees managing the same on-disk area. Refuse even when
-        # ``allow_tracked_merge`` is set. Uses the same alias-folding surface
-        # as the overlap probe (symlinks, Windows case-fold, case-insensitive
-        # POSIX) so a case-only alias of the destination still counts as the
-        # tracked row itself, not a wrapping parent.
-        tracked_is_destination = _path_equal_or_descends(
-            overlap_check_path, tracked["path"],
-        )
-        if not allow_tracked_merge or not tracked_is_destination:
-            return {"moved": 0, "errors": [
-                f"Destination overlaps a folder Vireo already manages "
-                f"({tracked['path']}). Merging into or around a tracked folder "
-                f"isn't supported."
-            ]}
-        merge_into_tracked = tracked["path"]
-        # Reconcile onto the STORED tracked path (not the possibly-aliased
-        # ``catalog_path``) so the existing archive rows are found, not
-        # duplicated. See the ``merge_reconcile_base`` note above.
-        merge_reconcile_base = tracked["path"]
-    if reject_tracked_ancestor and merge_into_tracked is None:
-        ancestor = _tracked_destination_ancestor(db, folder_id, overlap_check_path)
-        if ancestor:
-            if not allow_tracked_merge:
+    for phase in (move.ensure_remote_parent,
+                  move.copy_tree,
+                  move.plan_mtime_corrections,
+                  move.verify_copy):
+        error = phase()
+        if error is not None:
+            return error
+
+    move.update_catalog()
+    move.apply_mtime_corrections()
+    move.relocate_developed_dirs()
+    move.remove_originals()
+    move.progress(move.total_files, move.total_files, folder_name, "Done")
+    return move.result()
+
+
+def _fresh_copy_mismatch(src_path, transfer_dest):
+    """Describe how a fresh move's destination differs from its source.
+
+    Fresh move into a destination we created: walk the source and check
+    each file has a same-sized counterpart at the destination. Recount
+    the source here rather than reusing the pre-copy `total_files` — if
+    a file appeared in the source after that upfront count (and rsync
+    didn't pick it up), a stale count could spuriously match a naive
+    dst_count and the rmtree below would delete the never-copied file.
+
+    A whole-tree file count alone is not sufficient: ``_plan_moved_file_mtimes``
+    above stats every catalog photo sequentially and can run for minutes
+    on a network mount, so a destination photo stat'd early in that pass
+    could be truncated or replaced afterwards while the pass keeps working
+    through the rest of the tree. Neither the pass's remaining iterations
+    nor a count-only check would notice, and rmtree(src) would then delete
+    the intact original. Per-file size verification is the last thing
+    that touches the destination before the catalog update, closing the
+    window opened by the planning pass.
+
+    Symlinks are matched structurally: rsync -a (and the shutil fallback)
+    preserves source symlinks as destination symlinks with the same
+    target string; os.path.getsize would follow the link, so lstat sizes
+    and readlink targets are compared instead.
+
+    Returns the mismatch description, or None when the copy is complete.
+    """
+    src_count = 0
+    for root, _dirs, files in os.walk(src_path):
+        rel = os.path.relpath(root, src_path)
+        for fn in files:
+            src_count += 1
+            src_file = os.path.join(root, fn)
+            rel_name = fn if rel == "." else os.path.join(rel, fn)
+            dst_file = os.path.join(transfer_dest, rel_name)
+            if not os.path.lexists(dst_file):
+                return f"'{rel_name}' missing at destination"
+            src_is_link = os.path.islink(src_file)
+            dst_is_link = os.path.islink(dst_file)
+            if src_is_link != dst_is_link:
+                return (
+                    f"'{rel_name}' type mismatch (symlink vs regular file) "
+                    f"at destination")
+            if src_is_link:
+                if os.readlink(src_file) != os.readlink(dst_file):
+                    return (
+                        f"'{rel_name}' symlink target mismatch at destination")
+                continue
+            try:
+                src_size = os.stat(src_file, follow_symlinks=False).st_size
+                dst_size = os.stat(dst_file, follow_symlinks=False).st_size
+            except OSError:
+                return f"'{rel_name}' unreadable at destination"
+            if src_size != dst_size:
+                return (
+                    f"'{rel_name}' size mismatch at destination "
+                    f"(source={src_size}, dest={dst_size})")
+    # Extras at destination — a leftover rsync temp file, or anything
+    # else the source-driven walk above never looked for — would leave
+    # the fresh destination in a state we do not fully understand.
+    # Count both sides after the size check so a mismatch that a
+    # per-source-file walk catches is not attributed to a stray extra.
+    dst_count = sum(1 for _, _, f in os.walk(transfer_dest) for _ in f)
+    if src_count != dst_count:
+        return f"file count mismatch: source={src_count}, dest={dst_count}"
+    return None
+
+
+class _FolderMove:
+    """Run-wide state for one ``move_folder`` call.
+
+    Each pre-commit phase returns the result dict to abort with, or None to
+    continue; ``move_folder`` returns the first one it gets. The post-commit
+    phases never abort.
+    """
+
+    def __init__(self, db, folder_id, src_path, landing_name, *, progress_cb,
+                 developed_dir, merge, remote, reject_tracked_ancestor,
+                 allow_tracked_merge, verify_contents, pre_commit_check,
+                 thumb_cache_dir):
+        self.db = db
+        self.folder_id = folder_id
+        self.src_path = src_path
+        self.landing_name = landing_name
+        self.progress_cb = progress_cb
+        self.developed_dir = developed_dir
+        self.merge = merge
+        self.remote = remote
+        self.reject_tracked_ancestor = reject_tracked_ancestor
+        self.allow_tracked_merge = allow_tracked_merge
+        self.verify_contents = verify_contents
+        self.pre_commit_check = pre_commit_check
+        self.thumb_cache_dir = thumb_cache_dir
+        self.transfer_dest = None
+        self.rsync_target = None
+        self.catalog_path = None
+        self.merge_into_tracked = None
+        self.merge_reconcile_base = None
+        self.dest_exists = False
+        self.total_files = 0
+        self.rsync_bin = None
+        self.mtime_updates = []
+        self.total_photos = 0
+        self.merge_counts = None
+        self.mtimes_refreshed = 0
+        self.cleanup_error = None
+
+    def progress(self, current, total, filename, phase):
+        if self.progress_cb:
+            self.progress_cb(current, total, filename, phase)
+
+    def resolve_destination_views(self, destination):
+        """Resolve the three destination views.
+
+          transfer_dest — where rsync writes (NAS-side path for remote, local
+            path otherwise); also the path used for existence/verify.
+          rsync_target  — transfer_dest addressed for rsync (user@host:path
+            remote, bare path local).
+          catalog_path  — where the catalog points AFTER the move (the local
+            mount path for remote, same as transfer_dest local). The local
+            destination and catalog coincide; for remote they diverge because
+            the NAS path isn't reachable through the local filesystem.
+        """
+        remote = self.remote
+        landing_name = self.landing_name
+        if remote:
+            ssh_base = remote.get("ssh_dest_base") or ""
+            # Same hazard as the mount-path check below, on the NAS side: a
+            # relative ssh_dest_base like "Photos" would ship to rsync as
+            # ``user@host:Photos/<folder>`` and resolve under the SSH user's
+            # remote cwd — but the catalog gets repointed to the absolute
+            # mount_dest_base, so a verified copy can live at a different
+            # remote location than the path Vireo records before originals are
+            # deleted. ``_coerce_remote_target`` already drops relative-path
+            # entries at the config boundary; this is the defense-in-depth
+            # check for callers (tests, direct use) that build a remote dict
+            # themselves. POSIX-absolute (startswith "/") because the NAS is
+            # POSIX — os.path.isabs would accept ``C:\foo`` on Windows.
+            if not ssh_base.startswith("/"):
                 return {"moved": 0, "errors": [
-                    f"Destination is inside a folder Vireo already manages "
-                    f"({ancestor['path']}). Pick an untracked archive destination."
+                    "Remote target needs an absolute remote (NAS) path before "
+                    "moving files — otherwise rsync would write under the SSH "
+                    "user's cwd, not where the catalog will point. Set the "
+                    "remote path under Settings → Remote targets."
                 ]}
-            # Merge into the existing archive root that contains the
-            # destination. The staged tree lands at its own resolved
-            # catalog_path (inside the tracked ancestor); the reconciliation
-            # rebases staged rows onto that path and leaves the ancestor's own
-            # rows untouched. The user-facing "existing archive" base we
-            # report is the managed-archive root (``ancestor["path"]``), not
-            # the staged landing path inside it.
-            #
-            # The reconciliation base is the STORED ancestor's path with the
-            # relative-below-ancestor suffix appended, NOT the user-entered
-            # ``catalog_path`` — those two only agree when the ancestor probe
-            # matched by pure string prefix. When it matched via a symlink,
-            # Windows case-fold, or POSIX case-only alias (catalog stores
-            # ``/Photos``, user selects ``/photos/NewShoot``),
-            # ``catalog_path`` has an alias prefix that ``merge_staged_tree_
-            # into_archive``'s exact ``WHERE path = ?`` parent lookups miss.
-            # That would land the staged root with ``parent_id=NULL`` under an
-            # alias-prefixed path, spawning a parallel row set outside the
-            # managed archive tree. Fold the alias prefix to the stored form
-            # here.
-            merge_into_tracked = ancestor["path"]
-            merge_reconcile_base = _rebase_under_stored_ancestor(
-                catalog_path, ancestor["path"])
+            mount_base = remote.get("mount_dest_base") or ""
+            # Without an absolute mount path, resolve_folder_dest below would
+            # produce a relative catalog_path like 'Birds' — then after the SSH
+            # copy succeeds and originals are deleted, the catalog row points at
+            # a non-resolving location relative to the server cwd. The
+            # /api/jobs/move-folder route also validates this, but move_folder is
+            # called directly from tests and other code paths; checking here too
+            # means the bug can't slip past whichever caller forgets.
+            if not os.path.isabs(mount_base):
+                return {"moved": 0, "errors": [
+                    "Remote target needs an absolute local mount path before "
+                    "moving files — otherwise the catalog would point at a "
+                    "relative location after the move. Set the mount path under "
+                    "Settings → Remote targets."
+                ]}
+            # The NAS side is POSIX, so the SSH dest must be joined with '/' even
+            # when this code runs on Windows; os.path.join would produce a
+            # backslash and rsync would treat it as a single path segment.
+            self.transfer_dest = posixpath.join(remote["ssh_dest_base"], landing_name)
+            # Join landing_name directly rather than routing it back through
+            # resolve_folder_dest: that helper calls normalize_destination_name,
+            # which would re-trim/reject a value we've already resolved. When the
+            # user didn't request a rename, landing_name is the raw folder_name
+            # (potentially with surrounding whitespace, or POSIX-legal ``:``/``\``
+            # on Linux/macOS filesystems that allow them). Preflight preserves
+            # those characters — the move job must too, or the copy lands at a
+            # different path than preflight showed and the catalog repoints to
+            # yet another (trimmed) path.
+            self.catalog_path = os.path.join(mount_base, landing_name)
+            self.rsync_target = rsync_dest_spec(remote, self.transfer_dest)
+        else:
+            self.transfer_dest = os.path.join(destination, landing_name)
+            self.catalog_path = self.transfer_dest
+            self.rsync_target = self.transfer_dest
+        return None
 
-    if remote:
-        probe = _remote_dir_exists(remote, transfer_dest)
-        if probe is None:
-            # Refuse rather than proceed as a fresh transfer: a transient SSH
-            # failure on a real existing destination would otherwise omit
-            # --ignore-existing and let rsync overwrite same-name files before
-            # the post-transfer --checksum verify could preserve the originals.
+    def refuse_source_overlap(self):
+        """Refuse a destination that overlaps the source.
+
+        Moving a folder into itself (or into one of its own descendants) would
+        make the post-copy rmtree(src) delete the only copy of the files. This
+        is especially dangerous for a merge, where a destination equal to the
+        source passes verification trivially (every source file is already
+        "there") before the delete wipes everything. See
+        _destination_overlaps_source for the alias surface (symlinks, Windows
+        case folding, case-insensitive POSIX).
+
+        The NAS-side transfer_dest can't alias the local source tree for a
+        remote move — but the LOCAL MOUNT PATH the catalog is repointed to
+        (catalog_path) absolutely can if the source already lives on the same
+        mount. e.g. src=/Volumes/Photography/trip with remote mount_path=
+        /Volumes/Photography would copy a tree onto itself over SSH; the
+        checksum verify passes (everything is "already there") and then the
+        rmtree(src) deletes the only copy. So check the local-facing path:
+        transfer_dest for local moves, catalog_path for remote.
+        """
+        overlap_src_check = (self.catalog_path if self.remote
+                             else self.transfer_dest)
+        if _destination_overlaps_source(self.src_path, overlap_src_check):
             return {"moved": 0, "errors": [
-                f"Couldn't probe remote destination via SSH: "
-                f"{rsync_dest_spec(remote, transfer_dest)}. "
-                f"Refusing the move so a transient SSH error isn't confused "
-                f"with an absent destination."
+                f"Destination overlaps the source folder: {overlap_src_check}"
             ]}
-        dest_exists = probe
-    else:
-        dest_exists = os.path.exists(transfer_dest)
-    if dest_exists and not merge:
-        return {
-            "moved": 0,
-            "errors": [f"Destination already exists: {transfer_dest}"],
-            "needs_merge": True,
-        }
+        return None
 
-    if dest_exists:
-        # Refuse if any same-name file already at the destination differs in
-        # content. Never overwrite or later delete the user's data over a real
-        # collision — only files that are byte-identical (a genuine resume)
-        # may be treated as already-moved. Both branches enforce the same
-        # contract: a content conflict cancels the move with NOTHING copied
-        # or deleted on either end. Finder ``.DS_Store`` files are ignored on
-        # both sides; see ``FINDER_METADATA_FILES``.
+    def resolve_tracked_destination(self):
+        """Refuse moving into — or around — a destination Vireo already tracks.
+
+        A tracked folder is refused regardless of whether that path currently
+        exists on disk. A correct tracked-tree merge needs recursive
+        folder/photo reconciliation we don't do here; a partial attempt would
+        leave folders pointing at the deleted source path, or collide on the
+        folders.path UNIQUE constraint when the source's children cascade onto
+        a tracked descendant. Match the destination itself and anything below
+        it. The cases this feature exists for — resuming an interrupted move,
+        or moving into an untracked folder — never hit this.
+
+        For remote, check against `catalog_path` (the local mount path the
+        catalog is repointed to after the move) rather than `transfer_dest` (the
+        NAS-side path, which isn't in the local catalog). Without this guard, a
+        remote move into a mount path that overlaps an already-scanned folder
+        would copy the whole tree over SSH and then hit folders.path UNIQUE on
+        the post-move db.move_folder_path cascade.
+
+        Comparison goes through _path_equal_or_descends so symlink aliases,
+        Windows case folding, AND case-only aliases on case-insensitive POSIX
+        (default macOS APFS) all collapse to the same tracked row — otherwise
+        a destination reached via any of those would slip past and leave two
+        folder rows managing the same on-disk tree.
+
+        When ``allow_tracked_merge`` is set (the local-processing archive commit
+        opts in), a tracked destination is NOT an error: instead we remember the
+        tracked path in ``merge_into_tracked`` and, after the verified file copy,
+        reconcile the catalog by folding the staged folder/photo rows into the
+        existing archive rows rather than calling ``db.move_folder_path`` (which
+        would collide on folders.path UNIQUE). Default (flag off) behaviour is
+        byte-for-byte unchanged: both tracked-destination cases refuse the move.
+        """
+        db = self.db
+        overlap_check_path = (self.catalog_path if self.remote
+                              else self.transfer_dest)
+        # ``merge_reconcile_base`` is the catalog path the staged tree is
+        # reconciled ONTO. Distinct from ``merge_into_tracked`` (the user-facing
+        # "existing archive" label): for an exact overlap the reconciliation
+        # base must be the STORED tracked path, not ``catalog_path``, because
+        # ``catalog_path`` may be an alias (symlink / case-only fold) of the
+        # tracked folder. The files rsync to the same on-disk location either
+        # way, but ``merge_staged_tree_into_archive`` does exact
+        # ``WHERE path = ?`` catalog lookups that only match the row stored under
+        # the tracked path — rebasing onto the alias would miss it and create a
+        # second folder row for the same archive.
+        tracked = _tracked_destination_overlap(
+            db, self.folder_id, overlap_check_path)
+        if tracked:
+            # ``_tracked_destination_overlap`` returns any tracked row at-or-below
+            # ``overlap_check_path``. The opt-in merge only covers the "into an
+            # existing archive" case where the tracked row IS the destination;
+            # a tracked row STRICTLY BELOW the destination is the "wrap a fresh
+            # parent around an existing tracked subtree" case (e.g. /Photos/USA
+            # tracked, destination /Photos). The reconciliation would rebase the
+            # staged tree onto the wrapper path and leave the pre-existing tracked
+            # descendant with unchanged parentage — two overlapping catalog
+            # subtrees managing the same on-disk area. Refuse even when
+            # ``allow_tracked_merge`` is set. Uses the same alias-folding surface
+            # as the overlap probe (symlinks, Windows case-fold, case-insensitive
+            # POSIX) so a case-only alias of the destination still counts as the
+            # tracked row itself, not a wrapping parent.
+            tracked_is_destination = _path_equal_or_descends(
+                overlap_check_path, tracked["path"],
+            )
+            if not self.allow_tracked_merge or not tracked_is_destination:
+                return {"moved": 0, "errors": [
+                    f"Destination overlaps a folder Vireo already manages "
+                    f"({tracked['path']}). Merging into or around a tracked folder "
+                    f"isn't supported."
+                ]}
+            self.merge_into_tracked = tracked["path"]
+            # Reconcile onto the STORED tracked path (not the possibly-aliased
+            # ``catalog_path``) so the existing archive rows are found, not
+            # duplicated. See the ``merge_reconcile_base`` note above.
+            self.merge_reconcile_base = tracked["path"]
+        if self.reject_tracked_ancestor and self.merge_into_tracked is None:
+            ancestor = _tracked_destination_ancestor(
+                db, self.folder_id, overlap_check_path)
+            if ancestor:
+                if not self.allow_tracked_merge:
+                    return {"moved": 0, "errors": [
+                        f"Destination is inside a folder Vireo already manages "
+                        f"({ancestor['path']}). Pick an untracked archive destination."
+                    ]}
+                # Merge into the existing archive root that contains the
+                # destination. The staged tree lands at its own resolved
+                # catalog_path (inside the tracked ancestor); the reconciliation
+                # rebases staged rows onto that path and leaves the ancestor's own
+                # rows untouched. The user-facing "existing archive" base we
+                # report is the managed-archive root (``ancestor["path"]``), not
+                # the staged landing path inside it.
+                #
+                # The reconciliation base is the STORED ancestor's path with the
+                # relative-below-ancestor suffix appended, NOT the user-entered
+                # ``catalog_path`` — those two only agree when the ancestor probe
+                # matched by pure string prefix. When it matched via a symlink,
+                # Windows case-fold, or POSIX case-only alias (catalog stores
+                # ``/Photos``, user selects ``/photos/NewShoot``),
+                # ``catalog_path`` has an alias prefix that ``merge_staged_tree_
+                # into_archive``'s exact ``WHERE path = ?`` parent lookups miss.
+                # That would land the staged root with ``parent_id=NULL`` under an
+                # alias-prefixed path, spawning a parallel row set outside the
+                # managed archive tree. Fold the alias prefix to the stored form
+                # here.
+                self.merge_into_tracked = ancestor["path"]
+                self.merge_reconcile_base = _rebase_under_stored_ancestor(
+                    self.catalog_path, ancestor["path"])
+        return None
+
+    def probe_destination(self):
+        remote = self.remote
+        transfer_dest = self.transfer_dest
+        if remote:
+            probe = _remote_dir_exists(remote, transfer_dest)
+            if probe is None:
+                # Refuse rather than proceed as a fresh transfer: a transient SSH
+                # failure on a real existing destination would otherwise omit
+                # --ignore-existing and let rsync overwrite same-name files before
+                # the post-transfer --checksum verify could preserve the originals.
+                return {"moved": 0, "errors": [
+                    f"Couldn't probe remote destination via SSH: "
+                    f"{rsync_dest_spec(remote, transfer_dest)}. "
+                    f"Refusing the move so a transient SSH error isn't confused "
+                    f"with an absent destination."
+                ]}
+            self.dest_exists = probe
+        else:
+            self.dest_exists = os.path.exists(transfer_dest)
+        if self.dest_exists and not self.merge:
+            return {
+                "moved": 0,
+                "errors": [f"Destination already exists: {transfer_dest}"],
+                "needs_merge": True,
+            }
+        return None
+
+    def refuse_content_conflict(self):
+        """Refuse if any same-name file already at the destination differs.
+
+        Never overwrite or later delete the user's data over a real
+        collision — only files that are byte-identical (a genuine resume)
+        may be treated as already-moved. Both branches enforce the same
+        contract: a content conflict cancels the move with NOTHING copied
+        or deleted on either end. Finder ``.DS_Store`` files are ignored on
+        both sides; see ``FINDER_METADATA_FILES``.
+        """
+        if not self.dest_exists:
+            return None
+        src_path = self.src_path
+        remote = self.remote
         if remote:
             # The destination lives on the NAS, so the walk is delegated to
             # rsync over SSH: ``-an --existing --checksum`` inspects only
@@ -3265,7 +3443,7 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
                     "Install it or set the GNU rsync path in Settings."
                 ]}
             conflict = _find_remote_content_conflict(
-                remote_rsync, src_path, rsync_target, remote)
+                remote_rsync, src_path, self.rsync_target, remote)
             if conflict is not None:
                 name, detail = conflict
                 if name == "__ERROR__":
@@ -3280,349 +3458,308 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
                     f"or deleted."
                 ]}
         else:
-            conflict = _find_content_conflict(src_path, transfer_dest)
+            conflict = _find_content_conflict(src_path, self.transfer_dest)
             if conflict is not None:
                 return {"moved": 0, "errors": [
                     f"Conflict: '{conflict}' already exists at the destination "
                     f"with different content. Nothing was copied or deleted."
                 ]}
+        return None
 
-    log.info("%s folder %s -> %s",
-             "Merging" if dest_exists else "Moving", src_path, rsync_target)
+    def ensure_remote_parent(self):
+        """For a fresh remote move, ensure the destination's PARENT directory
+        exists on the NAS.
 
-    # For a fresh remote move, ensure the destination's PARENT directory
-    # exists on the NAS. rsync creates the leaf folder itself but not its
-    # intermediate parents, so a configured subpath like ``USA/2026`` that
-    # has never been written before would fail with ``mkdir ... failed: No
-    # such file or directory`` even though every preceding check passed.
-    # Skip on a merge — if the leaf exists, the parents must too. Skip when
-    # the parent is empty (the bare base "/", or a transfer_dest with no
-    # parent component) since mkdir-p there is meaningless.
-    if remote and not dest_exists:
-        parent_dir = posixpath.dirname(transfer_dest)
-        if parent_dir and parent_dir != "/":
-            ok, detail = _remote_mkdir_p(remote, parent_dir)
-            if not ok:
+        rsync creates the leaf folder itself but not its intermediate parents,
+        so a configured subpath like ``USA/2026`` that has never been written
+        before would fail with ``mkdir ... failed: No such file or directory``
+        even though every preceding check passed. Skip on a merge — if the leaf
+        exists, the parents must too. Skip when the parent is empty (the bare
+        base "/", or a transfer_dest with no parent component) since mkdir-p
+        there is meaningless.
+        """
+        if self.remote and not self.dest_exists:
+            parent_dir = posixpath.dirname(self.transfer_dest)
+            if parent_dir and parent_dir != "/":
+                ok, detail = _remote_mkdir_p(self.remote, parent_dir)
+                if not ok:
+                    return {"moved": 0, "errors": [
+                        f"Couldn't create the remote destination's parent "
+                        f"directory '{parent_dir}' on the NAS: {detail}. "
+                        f"Check permissions or pre-create the subpath."
+                    ]}
+        return None
+
+    def copy_tree(self):
+        src_path = self.src_path
+        remote = self.remote
+        dest_exists = self.dest_exists
+        progress_cb = self.progress_cb
+        # Count source files up front so the copy phase reports against a real
+        # denominator from the first file. This count is the progress denominator
+        # only — the fresh-move verification below deliberately recounts the
+        # source at verify time rather than trusting this pre-copy number.
+        total_files = sum(1 for _, _, files in os.walk(src_path) for _ in files)
+        self.total_files = total_files
+        self.progress(0, total_files, "", "Copying files")
+
+        # Use rsync for a robust copy. A merge/resume uses --ignore-existing so
+        # rsync only creates files absent at the destination and NEVER overwrites
+        # a file already there: this resumes an interrupted move (missing files get
+        # copied, already-copied ones are left alone) while guaranteeing a merge
+        # cannot destroy pre-existing destination data. A local fresh move uses
+        # --checksum for integrity; a remote fresh move skips it (the destination
+        # is empty, and the post-transfer --checksum dry-run verifies integrity).
+        # Any genuine same-name collision (an existing dest file that differs from
+        # the source) is left untouched here and caught by the post-copy
+        # verification below, which then refuses to delete the originals.
+        #
+        # Remote uses --partial-dir (instead of plain --partial) so a stalled or
+        # cancelled transfer leaves the partial in `.rsync-partial/` rather than
+        # at the destination filename. That keeps --ignore-existing honest: only
+        # *complete* dest files are skipped, so the next run resumes the partial
+        # from `.rsync-partial/` instead of treating it as already-moved (which
+        # would then fail the --checksum verify forever, stranding the partial
+        # until the user manually deletes it).
+        # Prefer a discovered GNU rsync for local moves on POSIX. Finder-launched
+        # macOS apps usually inherit a sparse PATH, so a bare ``rsync`` resolves
+        # to Apple's legacy openrsync even when Homebrew GNU rsync is installed.
+        # openrsync has been observed spinning after a transient SMB short read;
+        # GNU rsync exits with a useful error instead. Windows rsync distributions
+        # expect POSIX-style paths and can misread a native ``C:\...`` source as
+        # remote-shell syntax, so retain the prior bare-name behavior there. Keep
+        # the bare-name fallback on POSIX when GNU rsync is unavailable (and the
+        # shutil fallback below when no rsync exists at all).
+        rsync_bin = "rsync"
+        if sys.platform != "win32":
+            rsync_bin = resolve_rsync_bin() or rsync_bin
+        extra_args = None
+        if remote:
+            rsync_bin = remote.get("rsync_bin")
+            if not rsync_bin:
                 return {"moved": 0, "errors": [
-                    f"Couldn't create the remote destination's parent "
-                    f"directory '{parent_dir}' on the NAS: {detail}. "
-                    f"Check permissions or pre-create the subpath."
+                    "No usable GNU rsync binary is available for remote moves. "
+                    "Install it or set the GNU rsync path in Settings."
                 ]}
-
-    # Count source files up front so the copy phase reports against a real
-    # denominator from the first file. This count is the progress denominator
-    # only — the fresh-move verification below deliberately recounts the
-    # source at verify time rather than trusting this pre-copy number.
-    total_files = sum(1 for _, _, files in os.walk(src_path) for _ in files)
-    if progress_cb:
-        progress_cb(0, total_files, "", "Copying files")
-
-    # Use rsync for a robust copy. A merge/resume uses --ignore-existing so
-    # rsync only creates files absent at the destination and NEVER overwrites
-    # a file already there: this resumes an interrupted move (missing files get
-    # copied, already-copied ones are left alone) while guaranteeing a merge
-    # cannot destroy pre-existing destination data. A local fresh move uses
-    # --checksum for integrity; a remote fresh move skips it (the destination
-    # is empty, and the post-transfer --checksum dry-run verifies integrity).
-    # Any genuine same-name collision (an existing dest file that differs from
-    # the source) is left untouched here and caught by the post-copy
-    # verification below, which then refuses to delete the originals.
-    #
-    # Remote uses --partial-dir (instead of plain --partial) so a stalled or
-    # cancelled transfer leaves the partial in `.rsync-partial/` rather than
-    # at the destination filename. That keeps --ignore-existing honest: only
-    # *complete* dest files are skipped, so the next run resumes the partial
-    # from `.rsync-partial/` instead of treating it as already-moved (which
-    # would then fail the --checksum verify forever, stranding the partial
-    # until the user manually deletes it).
-    # Prefer a discovered GNU rsync for local moves on POSIX. Finder-launched
-    # macOS apps usually inherit a sparse PATH, so a bare ``rsync`` resolves
-    # to Apple's legacy openrsync even when Homebrew GNU rsync is installed.
-    # openrsync has been observed spinning after a transient SMB short read;
-    # GNU rsync exits with a useful error instead. Windows rsync distributions
-    # expect POSIX-style paths and can misread a native ``C:\...`` source as
-    # remote-shell syntax, so retain the prior bare-name behavior there. Keep
-    # the bare-name fallback on POSIX when GNU rsync is unavailable (and the
-    # shutil fallback below when no rsync exists at all).
-    rsync_bin = "rsync"
-    if sys.platform != "win32":
-        rsync_bin = resolve_rsync_bin() or rsync_bin
-    extra_args = None
-    if remote:
-        rsync_bin = remote.get("rsync_bin")
-        if not rsync_bin:
-            return {"moved": 0, "errors": [
-                "No usable GNU rsync binary is available for remote moves. "
-                "Install it or set the GNU rsync path in Settings."
-            ]}
-        extra_args = [
-            "-e", _ssh_rsh_string(remote),
-            "--partial-dir=.rsync-partial",
-        ]
-        if remote.get("bwlimit_kbps"):
-            extra_args.append(f"--bwlimit={int(remote['bwlimit_kbps'])}")
-        rsync_flags = ["--ignore-existing"] if dest_exists else []
-    else:
-        rsync_flags = ["--ignore-existing"] if dest_exists else ["--checksum"]
-    # A merge deliberately skips Finder metadata (``.DS_Store``). Without the
-    # exclude, rsync ``--ignore-existing`` would leave a same-name file at the
-    # destination in place -- fine on its own -- but the post-copy verifier
-    # would then compare bytes/size and refuse the delete, so the originals
-    # would be preserved for a difference that is not a photo collision.
-    # Excluding on the copy AND the checks keeps the source's copy in place
-    # until the whole tree is removed after a successful merge; a failed
-    # merge leaves it untouched with the rest of the source.
-    exclude_ctx = (_rsync_finder_metadata_exclude_file(src_path)
-                   if dest_exists else contextlib.nullcontext([]))
-    with exclude_ctx as metadata_excludes:
-        rsync_flags += metadata_excludes
-        try:
-            returncode, stderr, timed_out = _run_rsync_streamed(
-                src_path, rsync_target, rsync_flags, total_files, progress_cb,
-                rsync_bin=rsync_bin, extra_args=extra_args,
-            )
-        except FileNotFoundError:
-            if remote:
-                # No shutil fallback over SSH — the binary path was resolved
-                # before the move started, so this means it vanished. Surface
-                # it plainly.
-                return {"moved": 0, "errors": [
-                    f"GNU rsync not found at '{rsync_bin}'. Install GNU rsync "
-                    f"or set its path in Settings."
-                ]}
-            # Local rsync missing: fall back to shutil. skip_existing mirrors
-            # --ignore-existing for a merge; a fresh move copies everything.
+            extra_args = [
+                "-e", _ssh_rsh_string(remote),
+                "--partial-dir=.rsync-partial",
+            ]
+            if remote.get("bwlimit_kbps"):
+                extra_args.append(f"--bwlimit={int(remote['bwlimit_kbps'])}")
+            rsync_flags = ["--ignore-existing"] if dest_exists else []
+        else:
+            rsync_flags = ["--ignore-existing"] if dest_exists else ["--checksum"]
+        self.rsync_bin = rsync_bin
+        # A merge deliberately skips Finder metadata (``.DS_Store``). Without the
+        # exclude, rsync ``--ignore-existing`` would leave a same-name file at the
+        # destination in place -- fine on its own -- but the post-copy verifier
+        # would then compare bytes/size and refuse the delete, so the originals
+        # would be preserved for a difference that is not a photo collision.
+        # Excluding on the copy AND the checks keeps the source's copy in place
+        # until the whole tree is removed after a successful merge; a failed
+        # merge leaves it untouched with the rest of the source.
+        exclude_ctx = (_rsync_finder_metadata_exclude_file(src_path)
+                       if dest_exists else contextlib.nullcontext([]))
+        with exclude_ctx as metadata_excludes:
+            rsync_flags += metadata_excludes
             try:
-                _copy_tree_with_progress(
-                    src_path, catalog_path, dest_exists, total_files,
-                    progress_cb,
+                returncode, stderr, timed_out = _run_rsync_streamed(
+                    src_path, self.rsync_target, rsync_flags, total_files,
+                    progress_cb, rsync_bin=rsync_bin, extra_args=extra_args,
                 )
-                returncode, stderr, timed_out = 0, "", False
-            except Exception as exc:
-                log.warning("Copy fallback failed for %s", src_path, exc_info=True)
-                # Only remove a destination we created — never one that
-                # pre-existed (a merge target may hold the user's own files).
-                if not dest_exists:
-                    shutil.rmtree(catalog_path, ignore_errors=True)
-                return {"moved": 0, "errors": [f"Copy failed: {exc}"]}
-
-    if timed_out:
-        mins = RSYNC_STALL_TIMEOUT // 60
-        # rsync can emit the real cause (for example, the exact NAS file that
-        # returned a short read) and then wedge instead of exiting.  Do not
-        # throw that diagnostic away in favor of the generic watchdog text.
-        # Bound it because stderr can contain one warning per source file.
-        detail = stderr.strip()
-        if len(detail) > 1000:
-            detail = "…" + detail[-999:]
-        reported = f" rsync reported: {detail}" if detail else ""
-        return {"moved": 0, "errors": [
-            f"rsync stalled — no progress for over {mins} minutes, so the "
-            f"copy was stopped. Originals are untouched; re-run with "
-            f"merge/resume to continue from where it left off.{reported}"
-        ]}
-    if returncode != 0:
-        return {"moved": 0, "errors": [f"rsync failed: {stderr.strip()}"]}
-
-    # Read the destination's timestamps BEFORE verifying, not after.
-    #
-    # This pass stats every catalogued photo on both sides, which on a
-    # network mount is minutes of wall clock. Running it between
-    # verification and the ``rmtree`` below would push those minutes into
-    # the one window where a destination file going missing, or being
-    # replaced, is never noticed before the originals are deleted. Ordering
-    # it ahead of verification means the byte-level check remains the last
-    # thing that touches the destination, exactly as it was before this pass
-    # existed -- so no re-verification is owed, and the expensive one never
-    # runs twice.
-    #
-    # Safe to read this early: rsync has finished, so the destination is
-    # final, and the plan is read-only until it is applied after the cascade.
-    #
-    # Local destinations only. For a remote move ``transfer_dest`` lives on
-    # the far side of an SSH connection and cannot be stat'd, and reaching
-    # the same files back through ``catalog_path`` would walk a mount that
-    # need not even be mounted for the transfer to have succeeded -- for a
-    # rename rsync performed on the remote filesystem, where the timestamp
-    # is preserved anyway.
-    mtime_updates = []
-    if not remote:
-        mtime_updates, problem = _plan_moved_file_mtimes(
-            db, src_path, transfer_dest,
-            progress_cb=progress_cb, total_files=total_files,
-        )
-        if problem is not None:
-            # Verification below would catch this too. Failing here just
-            # spares the user a full byte-for-byte pass over a destination
-            # already known to be incomplete.
-            #
-            # Clean up the same way the fresh-move count check does. A
-            # destination this move created is ours to remove, and leaving a
-            # partial tree behind would turn the documented all-or-nothing
-            # retry into one that demands a merge. A destination that was
-            # already there is never removed -- it may hold the user's own
-            # files.
-            if not dest_exists:
-                shutil.rmtree(transfer_dest, ignore_errors=True)
-            return {"moved": 0, "errors": [
-                f"Verification failed: {problem}. Originals preserved."
-            ]}
-
-    # Verify before deleting originals.
-    if progress_cb:
-        progress_cb(total_files, total_files, "", "Verifying copy")
-    if remote:
-        # The local filesystem can't be walked to confirm a remote copy, so
-        # run a --checksum dry-run over SSH: any file it would still transfer
-        # is missing or differs at the destination. Covers both fresh and
-        # merge moves, and is the safety backstop replacing the local
-        # content-conflict and file-count checks.
-        verify = _remote_verify_complete(rsync_bin, src_path, rsync_target, remote,
-                                         is_merge=dest_exists)
-        if verify is not None:
-            name, detail = verify
-            if name == "__ERROR__":
-                return {"moved": 0, "errors": [
-                    f"Verification could not be completed ({detail}). "
-                    f"Originals preserved."
-                ]}
-            return {"moved": 0, "errors": [
-                f"Verification failed: '{name}' is missing or differs at the "
-                f"destination. Originals preserved."
-            ]}
-    elif dest_exists or verify_contents:
-        # Merge: the destination may legitimately hold extra unrelated
-        # files (and leftover temp files from an interrupted run), so a
-        # count comparison is meaningless. Instead require that every
-        # source file is present at the destination with a matching size.
-        missing = _first_missing_source_file(
-            src_path, transfer_dest,
-            verify_contents=verify_contents, is_merge=dest_exists)
-        if missing is not None:
-            return {"moved": 0, "errors": [
-                f"Verification failed: '{missing}' missing, size mismatch, "
-                f"or symlinked at destination. Originals preserved."
-            ]}
-    else:
-        # Fresh move into a destination we created: walk the source and check
-        # each file has a same-sized counterpart at the destination. Recount
-        # the source here rather than reusing the pre-copy `total_files` — if
-        # a file appeared in the source after that upfront count (and rsync
-        # didn't pick it up), a stale count could spuriously match a naive
-        # dst_count and the rmtree below would delete the never-copied file.
-        #
-        # A whole-tree file count alone is not sufficient: ``_plan_moved_file_mtimes``
-        # above stats every catalog photo sequentially and can run for minutes
-        # on a network mount, so a destination photo stat'd early in that pass
-        # could be truncated or replaced afterwards while the pass keeps working
-        # through the rest of the tree. Neither the pass's remaining iterations
-        # nor a count-only check would notice, and rmtree(src) would then delete
-        # the intact original. Per-file size verification is the last thing
-        # that touches the destination before the catalog update, closing the
-        # window opened by the planning pass.
-        #
-        # Symlinks are matched structurally: rsync -a (and the shutil fallback)
-        # preserves source symlinks as destination symlinks with the same
-        # target string; os.path.getsize would follow the link, so lstat sizes
-        # and readlink targets are compared instead.
-        verify_error = None
-        src_count = 0
-        for root, _dirs, files in os.walk(src_path):
-            rel = os.path.relpath(root, src_path)
-            for fn in files:
-                src_count += 1
-                src_file = os.path.join(root, fn)
-                rel_name = fn if rel == "." else os.path.join(rel, fn)
-                dst_file = os.path.join(transfer_dest, rel_name)
-                if not os.path.lexists(dst_file):
-                    verify_error = f"'{rel_name}' missing at destination"
-                    break
-                src_is_link = os.path.islink(src_file)
-                dst_is_link = os.path.islink(dst_file)
-                if src_is_link != dst_is_link:
-                    verify_error = (
-                        f"'{rel_name}' type mismatch (symlink vs regular file) "
-                        f"at destination")
-                    break
-                if src_is_link:
-                    if os.readlink(src_file) != os.readlink(dst_file):
-                        verify_error = (
-                            f"'{rel_name}' symlink target mismatch at destination")
-                        break
-                    continue
+            except FileNotFoundError:
+                if remote:
+                    # No shutil fallback over SSH — the binary path was resolved
+                    # before the move started, so this means it vanished. Surface
+                    # it plainly.
+                    return {"moved": 0, "errors": [
+                        f"GNU rsync not found at '{rsync_bin}'. Install GNU rsync "
+                        f"or set its path in Settings."
+                    ]}
+                # Local rsync missing: fall back to shutil. skip_existing mirrors
+                # --ignore-existing for a merge; a fresh move copies everything.
                 try:
-                    src_size = os.stat(src_file, follow_symlinks=False).st_size
-                    dst_size = os.stat(dst_file, follow_symlinks=False).st_size
-                except OSError:
-                    verify_error = f"'{rel_name}' unreadable at destination"
-                    break
-                if src_size != dst_size:
-                    verify_error = (
-                        f"'{rel_name}' size mismatch at destination "
-                        f"(source={src_size}, dest={dst_size})")
-                    break
-            if verify_error:
-                break
-        if verify_error is None:
-            # Extras at destination — a leftover rsync temp file, or anything
-            # else the source-driven walk above never looked for — would leave
-            # the fresh destination in a state we do not fully understand.
-            # Count both sides after the size check so a mismatch that a
-            # per-source-file walk catches is not attributed to a stray extra.
-            dst_count = sum(1 for _, _, f in os.walk(transfer_dest) for _ in f)
-            if src_count != dst_count:
-                verify_error = (
-                    f"file count mismatch: source={src_count}, dest={dst_count}")
-        if verify_error is not None:
-            shutil.rmtree(transfer_dest, ignore_errors=True)
+                    _copy_tree_with_progress(
+                        src_path, self.catalog_path, dest_exists, total_files,
+                        progress_cb,
+                    )
+                    returncode, stderr, timed_out = 0, "", False
+                except Exception as exc:
+                    log.warning("Copy fallback failed for %s", src_path, exc_info=True)
+                    # Only remove a destination we created — never one that
+                    # pre-existed (a merge target may hold the user's own files).
+                    if not dest_exists:
+                        shutil.rmtree(self.catalog_path, ignore_errors=True)
+                    return {"moved": 0, "errors": [f"Copy failed: {exc}"]}
+
+        if timed_out:
+            mins = RSYNC_STALL_TIMEOUT // 60
+            # rsync can emit the real cause (for example, the exact NAS file that
+            # returned a short read) and then wedge instead of exiting.  Do not
+            # throw that diagnostic away in favor of the generic watchdog text.
+            # Bound it because stderr can contain one warning per source file.
+            detail = stderr.strip()
+            if len(detail) > 1000:
+                detail = "…" + detail[-999:]
+            reported = f" rsync reported: {detail}" if detail else ""
             return {"moved": 0, "errors": [
-                f"Verification failed: {verify_error}. Originals preserved."
+                f"rsync stalled — no progress for over {mins} minutes, so the "
+                f"copy was stopped. Originals are untouched; re-run with "
+                f"merge/resume to continue from where it left off.{reported}"
             ]}
+        if returncode != 0:
+            return {"moved": 0, "errors": [f"rsync failed: {stderr.strip()}"]}
+        return None
 
-    # Count photos for progress
-    all_photos = db.conn.execute(
-        """SELECT p.id FROM photos p
-           JOIN folders f ON f.id = p.folder_id
-           WHERE f.path = ? OR f.path LIKE ?""",
-        (src_path, src_path + "/%"),
-    ).fetchall()
-    total_photos = len(all_photos)
+    def plan_mtime_corrections(self):
+        """Read the destination's timestamps BEFORE verifying, not after.
 
-    # Update DB first: cascade folder paths (safer — if rmtree fails, the old
-    # folder becomes an orphan on disk rather than the DB pointing to deleted
-    # paths). Unless the caller opted into merging (``merge_into_tracked``), a
-    # merge into an already-tracked destination is refused above, so
-    # catalog_path is never a different existing folder row in the cascade
-    # branch and that cascade (root + all descendants) cannot collide with
-    # folders.path UNIQUE. When merging into a tracked archive we instead
-    # reconcile the staged rows into the existing archive rows below.
-    # For a remote move catalog_path is the local mount path, so the catalog
-    # keeps resolving to the photos whenever the NAS is mounted.
-    if progress_cb:
-        progress_cb(total_files, total_files, "", "Updating catalog")
-    if pre_commit_check:
-        pre_commit_check()
-    merge_counts = None
-    if merge_into_tracked is not None:
-        # Destination is a tracked archive and the caller opted into merging:
-        # fold the staged folder/photo rows into the existing archive rows
-        # instead of a path cascade (which would collide on folders.path).
-        # ``merge_reconcile_base`` is the STORED tracked path for an exact
-        # overlap (so alias/case-fold destinations still match the existing
-        # rows) and ``catalog_path`` for the ancestor case; see where it is set.
-        merge_counts = db.merge_staged_tree_into_archive(
-            folder_id, merge_reconcile_base)
-    else:
-        db.move_folder_path(folder_id, catalog_path, new_name=landing_name)
-    db.update_folder_counts()
+        This pass stats every catalogued photo on both sides, which on a
+        network mount is minutes of wall clock. Running it between
+        verification and the ``rmtree`` below would push those minutes into
+        the one window where a destination file going missing, or being
+        replaced, is never noticed before the originals are deleted. Ordering
+        it ahead of verification means the byte-level check remains the last
+        thing that touches the destination, exactly as it was before this pass
+        existed -- so no re-verification is owed, and the expensive one never
+        runs twice.
 
-    # Only now that the rows live at the destination. Guarded on the values
-    # the plan was built from, so a concurrent scan that committed a fresh
-    # stat of its own meanwhile wins instead of being overwritten from a
-    # stale snapshot -- and an id the merge dropped as an already-present
-    # collision simply matches nothing.
-    mtimes_refreshed = 0
-    if mtime_updates:
+        Safe to read this early: rsync has finished, so the destination is
+        final, and the plan is read-only until it is applied after the cascade.
+
+        Local destinations only. For a remote move ``transfer_dest`` lives on
+        the far side of an SSH connection and cannot be stat'd, and reaching
+        the same files back through ``catalog_path`` would walk a mount that
+        need not even be mounted for the transfer to have succeeded -- for a
+        rename rsync performed on the remote filesystem, where the timestamp
+        is preserved anyway.
+        """
+        if not self.remote:
+            self.mtime_updates, problem = _plan_moved_file_mtimes(
+                self.db, self.src_path, self.transfer_dest,
+                progress_cb=self.progress_cb, total_files=self.total_files,
+            )
+            if problem is not None:
+                # Verification below would catch this too. Failing here just
+                # spares the user a full byte-for-byte pass over a destination
+                # already known to be incomplete.
+                #
+                # Clean up the same way the fresh-move count check does. A
+                # destination this move created is ours to remove, and leaving a
+                # partial tree behind would turn the documented all-or-nothing
+                # retry into one that demands a merge. A destination that was
+                # already there is never removed -- it may hold the user's own
+                # files.
+                if not self.dest_exists:
+                    shutil.rmtree(self.transfer_dest, ignore_errors=True)
+                return {"moved": 0, "errors": [
+                    f"Verification failed: {problem}. Originals preserved."
+                ]}
+        return None
+
+    def verify_copy(self):
+        """Verify before deleting originals."""
+        src_path = self.src_path
+        transfer_dest = self.transfer_dest
+        dest_exists = self.dest_exists
+        self.progress(self.total_files, self.total_files, "", "Verifying copy")
+        if self.remote:
+            # The local filesystem can't be walked to confirm a remote copy, so
+            # run a --checksum dry-run over SSH: any file it would still transfer
+            # is missing or differs at the destination. Covers both fresh and
+            # merge moves, and is the safety backstop replacing the local
+            # content-conflict and file-count checks.
+            verify = _remote_verify_complete(self.rsync_bin, src_path,
+                                             self.rsync_target, self.remote,
+                                             is_merge=dest_exists)
+            if verify is not None:
+                name, detail = verify
+                if name == "__ERROR__":
+                    return {"moved": 0, "errors": [
+                        f"Verification could not be completed ({detail}). "
+                        f"Originals preserved."
+                    ]}
+                return {"moved": 0, "errors": [
+                    f"Verification failed: '{name}' is missing or differs at the "
+                    f"destination. Originals preserved."
+                ]}
+        elif dest_exists or self.verify_contents:
+            # Merge: the destination may legitimately hold extra unrelated
+            # files (and leftover temp files from an interrupted run), so a
+            # count comparison is meaningless. Instead require that every
+            # source file is present at the destination with a matching size.
+            missing = _first_missing_source_file(
+                src_path, transfer_dest,
+                verify_contents=self.verify_contents, is_merge=dest_exists)
+            if missing is not None:
+                return {"moved": 0, "errors": [
+                    f"Verification failed: '{missing}' missing, size mismatch, "
+                    f"or symlinked at destination. Originals preserved."
+                ]}
+        else:
+            verify_error = _fresh_copy_mismatch(src_path, transfer_dest)
+            if verify_error is not None:
+                shutil.rmtree(transfer_dest, ignore_errors=True)
+                return {"moved": 0, "errors": [
+                    f"Verification failed: {verify_error}. Originals preserved."
+                ]}
+        return None
+
+    def update_catalog(self):
+        """Update DB first: cascade folder paths.
+
+        Safer — if rmtree fails, the old folder becomes an orphan on disk
+        rather than the DB pointing to deleted paths. Unless the caller opted
+        into merging (``merge_into_tracked``), a merge into an already-tracked
+        destination is refused above, so catalog_path is never a different
+        existing folder row in the cascade branch and that cascade (root + all
+        descendants) cannot collide with folders.path UNIQUE. When merging into
+        a tracked archive we instead reconcile the staged rows into the
+        existing archive rows below. For a remote move catalog_path is the
+        local mount path, so the catalog keeps resolving to the photos whenever
+        the NAS is mounted.
+        """
+        db = self.db
+        src_path = self.src_path
+        # Count photos for progress
+        all_photos = db.conn.execute(
+            """SELECT p.id FROM photos p
+               JOIN folders f ON f.id = p.folder_id
+               WHERE f.path = ? OR f.path LIKE ?""",
+            (src_path, src_path + "/%"),
+        ).fetchall()
+        self.total_photos = len(all_photos)
+
+        self.progress(self.total_files, self.total_files, "", "Updating catalog")
+        if self.pre_commit_check:
+            self.pre_commit_check()
+        if self.merge_into_tracked is not None:
+            # Destination is a tracked archive and the caller opted into merging:
+            # fold the staged folder/photo rows into the existing archive rows
+            # instead of a path cascade (which would collide on folders.path).
+            # ``merge_reconcile_base`` is the STORED tracked path for an exact
+            # overlap (so alias/case-fold destinations still match the existing
+            # rows) and ``catalog_path`` for the ancestor case; see where it is set.
+            self.merge_counts = db.merge_staged_tree_into_archive(
+                self.folder_id, self.merge_reconcile_base)
+        else:
+            db.move_folder_path(self.folder_id, self.catalog_path,
+                                new_name=self.landing_name)
+        db.update_folder_counts()
+
+    def apply_mtime_corrections(self):
+        """Only now that the rows live at the destination.
+
+        Guarded on the values the plan was built from, so a concurrent scan
+        that committed a fresh stat of its own meanwhile wins instead of being
+        overwritten from a stale snapshot -- and an id the merge dropped as an
+        already-present collision simply matches nothing.
+        """
+        db = self.db
+        mtime_updates = self.mtime_updates
+        if not mtime_updates:
+            return
         # Carry the mtime-pinned working-copy markers along with the
         # correction. Both record "the ``file_mtime`` this decision was made
         # against": ``working_copy_evicted_mtime`` marks a rendition the
@@ -3652,7 +3789,7 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
             [(fresh, stale, fresh, stale, fresh, photo_id, stale, size)
              for fresh, photo_id, stale, size in mtime_updates],
         )
-        mtimes_refreshed = cursor.rowcount
+        self.mtimes_refreshed = cursor.rowcount
         # Same reasoning as the working-copy markers, one table over.
         # ``offline_originals.source_mtime`` records the ``file_mtime`` its
         # cached copy was taken from, and ``offline_cache`` treats a
@@ -3670,157 +3807,172 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
         log.info(
             "Re-stamped file_mtime for %d photo(s) under %s from the copy "
             "at %s -- the transfer did not carry their timestamps across",
-            mtimes_refreshed, src_path, catalog_path,
+            self.mtimes_refreshed, self.src_path, self.catalog_path,
         )
-        # The thumbnail endpoint gates cache freshness on ``cached_mtime >=
-        # photos.file_mtime``, and ``generate_thumbnail`` pegs a rendered
-        # thumbnail's file mtime to the source ``file_mtime`` it was made
-        # from. Advancing ``file_mtime`` alone would leave every cached
-        # thumbnail in the moved folder pinned below the new value: the next
-        # fetch would treat it as stale and regenerate, even though the
-        # pixels still describe the same unchanged bytes. Touch each
-        # thumbnail file to the corrected timestamp so the invariant
-        # continues to hold. Best-effort: a failure to touch is non-fatal --
-        # the worst case is a one-shot regeneration on next access, exactly
-        # the pre-fix behavior.
-        #
-        # Everything here runs AFTER the catalog commit above, so it is
-        # wrapped whole: an exception escaping at this point would leave the
-        # catalog repointed at the destination, the originals still sitting
-        # at the source, and the move reported as failed. Nothing about
-        # thumbnail freshness is worth that half-state, so any failure is
-        # logged and swallowed -- the cost is one regeneration on next
-        # access, which is exactly the behaviour without this block.
-        if thumb_cache_dir and mtime_updates:
-            try:
-                fresh_by_id = {photo_id: fresh
-                               for fresh, photo_id, _, _ in mtime_updates}
-                # Chunked: a folder of a few thousand photos would otherwise
-                # bind one variable per id and trip SQLite's
-                # SQLITE_MAX_VARIABLE_NUMBER (999 on older builds) -- and the
-                # transfer this exists for moved 1099 in one go.
-                thumb_rows = []
-                for chunk in _chunks(list(fresh_by_id)):
-                    placeholders = ",".join(["?"] * len(chunk))
-                    thumb_rows.extend(db.conn.execute(
-                        f"SELECT id, thumb_path FROM photos"
-                        f" WHERE id IN ({placeholders})"
-                        f" AND thumb_path IS NOT NULL",
-                        chunk,
-                    ).fetchall())
-                for row in thumb_rows:
-                    fresh = fresh_by_id.get(row["id"])
-                    if fresh is None:
-                        continue
-                    thumb_file = os.path.join(
-                        thumb_cache_dir, row["thumb_path"])
-                    try:
-                        os.utime(thumb_file, (fresh, fresh))
-                    except OSError:
-                        log.debug(
-                            "Could not align thumbnail mtime for photo %s "
-                            "at %s", row["id"], thumb_file, exc_info=True,
-                        )
-            except Exception:
-                log.exception(
-                    "Could not align thumbnail mtimes under %s after the "
-                    "move; they will regenerate on next access", src_path,
-                )
+        if self.thumb_cache_dir and mtime_updates:
+            self._align_thumbnail_mtimes()
 
-    # Rebase any developed-output subdirs nested under the configured
-    # darktable_output_dir. `developed_folder_key` hashes the folder's
-    # path, so the DB update above just invalidated the old subdir's
-    # implicit key — rename it on disk to match the new path, and cascade
-    # to any descendant folders whose paths also shifted.
-    #
-    # On the merge path the catalog was reparented onto
-    # ``merge_reconcile_base``, not ``catalog_path`` — those two only
-    # differ when the tracked destination was reached via a symlink or
-    # case-alias (see where ``merge_reconcile_base`` is set), but when they
-    # do differ the developed-dir key is derived from the STORED path, not
-    # the alias. Relocating from ``src_path`` to the aliased
-    # ``catalog_path`` would move renders under the alias-path hash and
-    # exports (which read the catalog's stored path) would look under the
-    # stored-path hash, miss them, and fall back to RAW. Use the same
-    # reconciled base the catalog uses.
-    developed_base = (merge_reconcile_base
-                      if merge_into_tracked is not None
-                      else catalog_path)
-    if developed_dir:
-        from export import relocate_developed_dir
-        relocate_developed_dir(developed_dir, src_path, developed_base)
-        # SQL LIKE treats `_` and `%` (and the escape char) as wildcards,
-        # all of which are valid POSIX path characters. Without a strict
-        # prefix guard, an unrelated folder like `/dXst/birds/fake` would
-        # match a pattern like `/d_st/birds/%` and feed a bogus computed
-        # old_path into relocate_developed_dir, mis-rebasing the wrong
-        # developed subdir. Filter results by a literal prefix check.
-        descendant_rows = db.conn.execute(
-            "SELECT path FROM folders WHERE path LIKE ?",
-            (developed_base + "/%",),
-        ).fetchall()
-        prefix = developed_base + "/"
-        for row in descendant_rows:
-            new_child = row["path"]
-            if not new_child.startswith(prefix):
-                continue
-            old_child = src_path + new_child[len(developed_base):]
-            relocate_developed_dir(developed_dir, old_child, new_child)
+    def _align_thumbnail_mtimes(self):
+        """Touch each cached thumbnail to its photo's corrected timestamp.
 
-    # Delete originals. The catalog already points at the new destination,
-    # so anything that goes wrong from here is post-commit: the archive is
-    # already published. Return a ``cleanup_error`` so the caller can warn
-    # the user about leftover originals without misreporting the move as
-    # failed (which would also leave the archive's tracked row in place
-    # while telling the user their data is still in staging).
-    if progress_cb:
-        progress_cb(total_files, total_files, "", "Removing originals")
-    log.info("Verification passed, deleting originals: %s", src_path)
-    cleanup_error = None
-    try:
-        shutil.rmtree(src_path)
-    except OSError as e:
-        log.exception("Post-commit cleanup of %s failed", src_path)
-        cleanup_error = str(e)
+        The thumbnail endpoint gates cache freshness on ``cached_mtime >=
+        photos.file_mtime``, and ``generate_thumbnail`` pegs a rendered
+        thumbnail's file mtime to the source ``file_mtime`` it was made
+        from. Advancing ``file_mtime`` alone would leave every cached
+        thumbnail in the moved folder pinned below the new value: the next
+        fetch would treat it as stale and regenerate, even though the
+        pixels still describe the same unchanged bytes. Touch each
+        thumbnail file to the corrected timestamp so the invariant
+        continues to hold. Best-effort: a failure to touch is non-fatal --
+        the worst case is a one-shot regeneration on next access, exactly
+        the pre-fix behavior.
 
-    if progress_cb:
-        progress_cb(total_files, total_files, folder_name, "Done")
+        Everything here runs AFTER the catalog commit above, so it is
+        wrapped whole: an exception escaping at this point would leave the
+        catalog repointed at the destination, the originals still sitting
+        at the source, and the move reported as failed. Nothing about
+        thumbnail freshness is worth that half-state, so any failure is
+        logged and swallowed -- the cost is one regeneration on next
+        access, which is exactly the behaviour without this block.
+        """
+        db = self.db
+        try:
+            fresh_by_id = {photo_id: fresh
+                           for fresh, photo_id, _, _ in self.mtime_updates}
+            # Chunked: a folder of a few thousand photos would otherwise
+            # bind one variable per id and trip SQLite's
+            # SQLITE_MAX_VARIABLE_NUMBER (999 on older builds) -- and the
+            # transfer this exists for moved 1099 in one go.
+            thumb_rows = []
+            for chunk in _chunks(list(fresh_by_id)):
+                placeholders = ",".join(["?"] * len(chunk))
+                thumb_rows.extend(db.conn.execute(
+                    f"SELECT id, thumb_path FROM photos"
+                    f" WHERE id IN ({placeholders})"
+                    f" AND thumb_path IS NOT NULL",
+                    chunk,
+                ).fetchall())
+            for row in thumb_rows:
+                fresh = fresh_by_id.get(row["id"])
+                if fresh is None:
+                    continue
+                thumb_file = os.path.join(
+                    self.thumb_cache_dir, row["thumb_path"])
+                try:
+                    os.utime(thumb_file, (fresh, fresh))
+                except OSError:
+                    log.debug(
+                        "Could not align thumbnail mtime for photo %s "
+                        "at %s", row["id"], thumb_file, exc_info=True,
+                    )
+        except Exception:
+            log.exception(
+                "Could not align thumbnail mtimes under %s after the "
+                "move; they will regenerate on next access", self.src_path,
+            )
 
-    result = {"moved": total_photos, "errors": [],
-              "mtimes_refreshed": mtimes_refreshed}
-    if merge_into_tracked is not None:
-        # ``dropped_photo_ids`` is a cleanup handle for the caller (thumbnails,
-        # previews, offline copies of the deleted staged photos), not a
-        # user-facing count. Lift it off ``merge_counts`` so ``result["merge"]``
-        # stays a stable dict of display numbers that gets serialized straight
-        # into the archive-stage summary/API payload.
-        dropped = merge_counts.pop("dropped_photo_ids", None) or []
-        # ``preserved_edit_count`` is likewise a caller-facing signal (the
-        # NAS transfer's residual check adds it to "still need a sync"), not
-        # a user-facing display number, so lift it off ``merge_counts`` too.
-        # ``preserved_off_staging_identities`` is the subset the caller adds
-        # to residual -- see ``merge_staged_tree_into_archive`` for why the
-        # full count would double-report the phantom/intra-staged remaps.
-        # Reported as identities (not a raw rowcount) so the caller can
-        # filter out rows the pre-transfer drain already classified as
-        # undeliverable and rows in sibling workspaces this sync would not
-        # have written anyway.
-        preserved_edits = merge_counts.pop("preserved_edit_count", 0) or 0
-        preserved_off_staging_identities = merge_counts.pop(
-            "preserved_off_staging_identities", None) or []
-        result["merge"] = merge_counts
-        result["merged_into_existing"] = merge_into_tracked
-        # On the merge path ``total_photos`` counts every staged source photo,
-        # including identical ones that were dropped as ``already_present``.
-        # Report ``moved`` as the photos actually added to the archive.
-        result["moved"] = merge_counts["new_photos"]
-        if dropped:
-            result["dropped_photo_ids"] = dropped
-        if preserved_edits:
-            result["preserved_edit_count"] = preserved_edits
-        if preserved_off_staging_identities:
-            result["preserved_off_staging_identities"] = (
-                preserved_off_staging_identities)
-    if cleanup_error is not None:
-        result["cleanup_error"] = cleanup_error
-    return result
+    def relocate_developed_dirs(self):
+        """Rebase any developed-output subdirs nested under the configured
+        darktable_output_dir.
+
+        `developed_folder_key` hashes the folder's path, so the DB update above
+        just invalidated the old subdir's implicit key — rename it on disk to
+        match the new path, and cascade to any descendant folders whose paths
+        also shifted.
+
+        On the merge path the catalog was reparented onto
+        ``merge_reconcile_base``, not ``catalog_path`` — those two only
+        differ when the tracked destination was reached via a symlink or
+        case-alias (see where ``merge_reconcile_base`` is set), but when they
+        do differ the developed-dir key is derived from the STORED path, not
+        the alias. Relocating from ``src_path`` to the aliased
+        ``catalog_path`` would move renders under the alias-path hash and
+        exports (which read the catalog's stored path) would look under the
+        stored-path hash, miss them, and fall back to RAW. Use the same
+        reconciled base the catalog uses.
+        """
+        src_path = self.src_path
+        developed_dir = self.developed_dir
+        developed_base = (self.merge_reconcile_base
+                          if self.merge_into_tracked is not None
+                          else self.catalog_path)
+        if developed_dir:
+            from export import relocate_developed_dir
+            relocate_developed_dir(developed_dir, src_path, developed_base)
+            # SQL LIKE treats `_` and `%` (and the escape char) as wildcards,
+            # all of which are valid POSIX path characters. Without a strict
+            # prefix guard, an unrelated folder like `/dXst/birds/fake` would
+            # match a pattern like `/d_st/birds/%` and feed a bogus computed
+            # old_path into relocate_developed_dir, mis-rebasing the wrong
+            # developed subdir. Filter results by a literal prefix check.
+            descendant_rows = self.db.conn.execute(
+                "SELECT path FROM folders WHERE path LIKE ?",
+                (developed_base + "/%",),
+            ).fetchall()
+            prefix = developed_base + "/"
+            for row in descendant_rows:
+                new_child = row["path"]
+                if not new_child.startswith(prefix):
+                    continue
+                old_child = src_path + new_child[len(developed_base):]
+                relocate_developed_dir(developed_dir, old_child, new_child)
+
+    def remove_originals(self):
+        """Delete originals.
+
+        The catalog already points at the new destination, so anything that
+        goes wrong from here is post-commit: the archive is already published.
+        Record a ``cleanup_error`` so the caller can warn the user about
+        leftover originals without misreporting the move as failed (which
+        would also leave the archive's tracked row in place while telling the
+        user their data is still in staging).
+        """
+        src_path = self.src_path
+        self.progress(self.total_files, self.total_files, "", "Removing originals")
+        log.info("Verification passed, deleting originals: %s", src_path)
+        try:
+            shutil.rmtree(src_path)
+        except OSError as e:
+            log.exception("Post-commit cleanup of %s failed", src_path)
+            self.cleanup_error = str(e)
+
+    def result(self):
+        merge_counts = self.merge_counts
+        result = {"moved": self.total_photos, "errors": [],
+                  "mtimes_refreshed": self.mtimes_refreshed}
+        if self.merge_into_tracked is not None:
+            # ``dropped_photo_ids`` is a cleanup handle for the caller (thumbnails,
+            # previews, offline copies of the deleted staged photos), not a
+            # user-facing count. Lift it off ``merge_counts`` so ``result["merge"]``
+            # stays a stable dict of display numbers that gets serialized straight
+            # into the archive-stage summary/API payload.
+            dropped = merge_counts.pop("dropped_photo_ids", None) or []
+            # ``preserved_edit_count`` is likewise a caller-facing signal (the
+            # NAS transfer's residual check adds it to "still need a sync"), not
+            # a user-facing display number, so lift it off ``merge_counts`` too.
+            # ``preserved_off_staging_identities`` is the subset the caller adds
+            # to residual -- see ``merge_staged_tree_into_archive`` for why the
+            # full count would double-report the phantom/intra-staged remaps.
+            # Reported as identities (not a raw rowcount) so the caller can
+            # filter out rows the pre-transfer drain already classified as
+            # undeliverable and rows in sibling workspaces this sync would not
+            # have written anyway.
+            preserved_edits = merge_counts.pop("preserved_edit_count", 0) or 0
+            preserved_off_staging_identities = merge_counts.pop(
+                "preserved_off_staging_identities", None) or []
+            result["merge"] = merge_counts
+            result["merged_into_existing"] = self.merge_into_tracked
+            # On the merge path ``total_photos`` counts every staged source photo,
+            # including identical ones that were dropped as ``already_present``.
+            # Report ``moved`` as the photos actually added to the archive.
+            result["moved"] = merge_counts["new_photos"]
+            if dropped:
+                result["dropped_photo_ids"] = dropped
+            if preserved_edits:
+                result["preserved_edit_count"] = preserved_edits
+            if preserved_off_staging_identities:
+                result["preserved_off_staging_identities"] = (
+                    preserved_off_staging_identities)
+        if self.cleanup_error is not None:
+            result["cleanup_error"] = self.cleanup_error
+        return result
