@@ -113,7 +113,19 @@ def _scenarios():
         "finished resume from before marks were kept": (
             _parent(),
             [_row("d", "2026-09-01T11:00:00",
-                  {"ok": True, "photo_ids": [], "collection_id": 7})],
+                  {"ok": True, "photo_ids": [], "collection_id": 7, "process_job_id": "process-d"})],
+        ),
+        "legacy collection with failed processing handoff": (
+            _parent(), [_row("d", "2026-09-01T11:00:00", {
+                "ok": True, "collection_id": 7,
+                "after_import_skipped": "failed to enqueue processing: unavailable",
+            })],
+        ),
+        "legacy collection cancelled": (
+            _parent(), [_row("d", "2026-09-01T11:00:00", {
+                "ok": True, "collection_id": 7, "cancelled": True,
+                "after_import_skipped": "import cancelled",
+            }, status="cancelled")],
         ),
         "legacy tag-only resume completed": (
             _parent(chained=True),
@@ -231,7 +243,7 @@ def _scenarios():
         "finished retry from before marks were kept": (
             _failed_parent(tags_applied=None, chained=None),
             [_row("r", "2026-09-01T11:00:00",
-                  {"ok": True, "photo_ids": [], "collection_id": 7})],
+                  {"ok": True, "photo_ids": [], "collection_id": 7, "process_job_id": "process-d"})],
         ),
         "completed import offers no retry": (
             {**_failed_parent(), "status": "completed",
@@ -279,6 +291,8 @@ EXPECTED = {
     "retry of the failed resume finished": ("r", "done", False, False),
     "resume of the interrupted resume finished": ("d2", "done", False, False),
     "finished resume from before marks were kept": ("d", "done", False, False),
+    "legacy collection with failed processing handoff": (None, None, True, False),
+    "legacy collection cancelled": (None, None, True, False),
     "legacy tag-only resume completed": ("d", "done", False, False),
     "legacy tag-only resume with errors": (None, None, True, False),
     "failed resume from before marks were kept": (None, None, True, False),
@@ -414,3 +428,20 @@ def test_descendant_chain_with_tag_errors_leaves_only_tag_replay():
     resume = ImportService._interrupted_parent_resume(parent["config"], parent["result"], takeover)
     assert resume["chain_already_ran"] is True
     assert resume["tags_applied"] is False
+
+
+def test_partial_descendant_landings_are_inherited_for_remaining_chain():
+    parent = _parent(landed_files={"/arch/parent.jpg": [1, 2, "hash-parent"]})
+    descendant = _row("d", "2026-09-01T11:00:00", {
+        "ok": True, "tags_applied": True, "chained": False,
+        "photo_ids": [3], "landed_files": {"/arch/child.jpg": [3, 4, "hash-child"]},
+    })
+    takeover = import_resume_takeover(PARENT_ID, parent["result"], [descendant])
+    resume = ImportService._interrupted_parent_resume(parent["config"], parent["result"], takeover)
+    assert takeover["by"] is None
+    assert resume["tags_applied"] is True
+    assert resume["chain_already_ran"] is False
+    assert resume["landed_files"] == {
+        "/arch/parent.jpg": [1, 2, "hash-parent"],
+        "/arch/child.jpg": [3, 4, "hash-child"],
+    }

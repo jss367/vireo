@@ -13169,3 +13169,53 @@ def test_failed_processing_handoff_does_not_mark_chain_paid(app_and_db, tmp_path
         assert result["chained"] is False
         assert "failed to enqueue processing" in result["after_import_skipped"]
         assert "chained" not in app._job_runner.get(job_id).get("partial_result", {})
+
+
+def test_parent_resume_recovers_photos_landed_by_unpaid_descendant(app_and_db, tmp_path, monkeypatch):
+    from services.import_photos import _ImportPhotosJob
+
+    app, db = app_and_db
+    with app.test_client() as client:
+        parent_id, own = _interrupted_tagged_import(app, db, client, tmp_path, "trip")
+        Image.new("RGB", (16, 16), "green").save(tmp_path / "chain-card" / "new.jpg")
+        # Model original discovery of a third file that the interrupted
+        # parent had not copied. Its source fingerprint stays unchanged
+        # through both real resume runs below.
+        from import_job import _capture_source_snapshots
+        from ingest import discover_source_files
+        card = str(tmp_path / "chain-card")
+        snapshots = _capture_source_snapshots(
+            discover_source_files(card, "both", recursive=True), [card],
+        )
+        db.conn.execute(
+            "UPDATE job_history SET result=json_set(result, '$.source_snapshots', json(?)) WHERE id=?",
+            (json.dumps(snapshots), parent_id),
+        )
+        db.conn.commit()
+        body = _resume_body(client, parent_id)
+        body["after_import"] = _process_id(db, "Cull-ready")
+        original_chain = _ImportPhotosJob._chain_after_import
+        handoffs = []
+
+        def chain_with_stubbed_handoff(self, job, result):
+            def handoff(*args, **kwargs):
+                handoffs.append(kwargs["collection_id"])
+                if len(handoffs) == 1:
+                    raise RuntimeError("temporary handoff failure")
+                return "stub-process", None, None
+            monkeypatch.setattr(self.service, "enqueue_process_job", handoff)
+            return original_chain(self, job, result)
+
+        monkeypatch.setattr(_ImportPhotosJob, "_chain_after_import", chain_with_stubbed_handoff)
+        response = client.post("/api/jobs/import-photos", json=body)
+        assert response.status_code == 200, response.get_json()
+        first = wait_for_job_via_client(client, response.get_json()["job_id"], wait_for_history=True)["result"]
+        assert first["photo_ids"] and first["chained"] is False
+        child_ids = set(first["photo_ids"])
+        response = client.post("/api/jobs/import-photos", json=body)
+        assert response.status_code == 200, response.get_json()
+        second = wait_for_job_via_client(client, response.get_json()["job_id"])["result"]
+        assert child_ids <= set(second["recovered_photo_ids"])
+        assert second["chained"] is True
+        collected = {p["id"] for p in db.get_collection_photos(handoffs[-1], per_page=999999)}
+        assert set(own) | child_ids <= collected

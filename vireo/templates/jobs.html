@@ -864,7 +864,11 @@
         var tagOnlyCompleted = e.status === 'completed' &&
           r.after_import_skipped === 'chain already ran on the interrupted parent' &&
           !((r.tagging || {}).errors || []).length;
-        tags = chainStep = r.collection_id != null || tagOnlyCompleted;
+        tags = r.collection_id != null || tagOnlyCompleted;
+        chainStep = tagOnlyCompleted || (!r.cancelled && (
+          r.process_job_id != null || r.after_import_skipped === 'import-only' ||
+          r.after_import_skipped === 'no new photos'));
+
       }
       e.tagsApplied = tags;
       // After a failed import the chain step marks but skips processing.

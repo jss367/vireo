@@ -208,6 +208,7 @@ def import_resume_takeover(parent_id, parent_result, rows):
             "status": row.get("status"),
             "started_at": row.get("started_at") or "",
             "result": result,
+            "config": cfg,
             "parent": cfg.get("parent_import_job_id"),
             "root": cfg.get("root_import_job_id"),
         }
@@ -240,8 +241,13 @@ def import_resume_takeover(parent_id, parent_result, rows):
                 == "chain already ran on the interrupted parent"
                 and not (result.get("tagging") or {}).get("errors")
             )
-            tags = chain_step = (
-                result.get("collection_id") is not None or tag_only_completed
+            tags = result.get("collection_id") is not None or tag_only_completed
+            skipped = result.get("after_import_skipped")
+            chain_step = tag_only_completed or (
+                not result.get("cancelled") and (
+                    result.get("process_job_id") is not None
+                    or skipped in ("import-only", "no new photos")
+                )
             )
         e["tags_applied"] = tags
         # The chain step also runs, and marks, after a failed import, but
@@ -287,6 +293,12 @@ def import_resume_takeover(parent_id, parent_result, rows):
     def newest(entries):
         return max(entries, key=lambda e: e["started_at"])
 
+    descendant_landings = {}
+    for entry in sorted(descendants, key=lambda e: e["started_at"]):
+        for value in (entry["config"].get("recover_landed_files"),
+                      entry["result"].get("landed_files")):
+            if isinstance(value, dict):
+                descendant_landings.update(value)
     by, kind = None, None
     if marked and tags_paid and chained:
         by, kind = newest(marked), "done"
@@ -300,6 +312,7 @@ def import_resume_takeover(parent_id, parent_result, rows):
         "by_started_at": by["started_at"] if by else None,
         "kind": kind,
         "parent_interrupted": parent_interrupted,
+        "descendant_landed_files": descendant_landings,
     }
 
 
@@ -1173,6 +1186,7 @@ class ImportService:
             "landed_files": {
                 **files(parent_config.get("recover_landed_files")),
                 **files(parent_result.get("landed_files")),
+                **files(takeover.get("descendant_landed_files")),
             },
             # Its tag/GPS pass covered everything it owed once it ran.
             "tags_applied": tags_applied,
