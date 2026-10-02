@@ -2294,6 +2294,383 @@ class _ThumbnailRequest:
             log.exception("Failed to persist thumb_path for photo %s", self.photo_id)
 
 
+class _EditPreviewRequest:
+    """One ``/photos/<id>/edit-preview`` request after its recipe is parsed.
+
+    ``recipe`` is the normalized edit recipe and ``display_recipe`` the copy
+    actually rendered (without the crop unless ``apply_crop``). The selected
+    source and its decode bound are filled in by ``load_source``; the
+    recovery steps move ``canonical`` when they swap in another file.
+    """
+
+    def __init__(
+        self,
+        db,
+        photo_id,
+        photo,
+        folder_row,
+        vireo_dir,
+        recipe,
+        display_recipe,
+        size,
+        apply_crop,
+    ):
+        self.db = db
+        self.photo_id = photo_id
+        self.photo = photo
+        self.folder_row = folder_row
+        self.vireo_dir = vireo_dir
+        self.recipe = recipe
+        self.display_recipe = display_recipe
+        self.size = size
+        self.apply_crop = apply_crop
+        self.original_abs = os.path.join(
+            folder_row["path"], photo["filename"],
+        )
+        self.canonical = None
+        self.using_working_copy = False
+        self.selected_ext = None
+        self.load_max_size = None
+        self.native_dims = None
+        self.source_failure_current = False
+
+    def load_source(self):
+        """Select the edit source and decode it; ``None`` when it failed.
+
+        If the original volume is offline, the working copy is the only
+        local edit source. Hold the publication/eviction guard from source
+        selection through Pillow decode so quota enforcement cannot unlink it
+        in the exists/open window. Once load_image returns, the decoded PIL
+        image no longer depends on the path.
+        """
+        source_guard = contextlib.nullcontext()
+        if self.photo["working_copy_path"] and not os.path.exists(self.original_abs):
+            source_guard = working_copy_publication_guard()
+        with source_guard:
+            return self._select_and_load_source()
+
+    def _source_recipe(self):
+        """The recipe ``_recipe_render_source`` selects the source with.
+
+        Resolve the source with the actual recipe (not None) so
+        _recipe_render_source applies its RAW-primary gating: a RAW photo
+        with a legacy JPEG working copy must use the RAW source here too, so
+        the in-progress edit preview matches the saved preview/export bytes
+        from the highlight-preserving decode. Auto Tone strips tonal
+        adjustments to sample neutral pixels; for a RAW primary that can
+        leave recipe empty, which would normally short-circuit
+        _recipe_render_source to the canonical working copy. Pass a sentinel
+        non-empty recipe in that case so the same RAW-primary gating applies
+        and analysis reads the highlight-preserved RAW decode rather than
+        clipped legacy working-copy bytes. The same sentinel applies when the
+        request asks for more pixels than the (size-capped) working copy
+        holds — the editor's 100% zoom requests a native-resolution render,
+        and short-circuiting to a 4096-capped working copy would silently
+        serve half-resolution pixels as "1:1".
+        """
+        from image_edits import SCHEMA_VERSION
+        from image_loader import RAW_EXTENSIONS
+
+        photo = self.photo
+        recipe = self.recipe
+        source_recipe = recipe
+        if not recipe:
+            from render_source import working_copy_satisfies_recipe_render
+
+            undersized_wc = photo["working_copy_path"] and (
+                not working_copy_satisfies_recipe_render(
+                    photo, recipe, self.size, self.vireo_dir,
+                )
+            )
+            if (
+                request.args.get("analysis") == "1" or undersized_wc
+                or os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
+            ):
+                source_recipe = {"version": SCHEMA_VERSION}
+        return source_recipe
+
+    def _select_and_load_source(self):
+        from image_loader import (
+            RAW_DECODE_LINEAR,
+            RAW_EXTENSIONS,
+            load_image,
+        )
+
+        photo = self.photo
+        folder_row = self.folder_row
+        source_recipe = self._source_recipe()
+        canonical, using_working_copy = _recipe_render_source(
+            photo, source_recipe, self.size, self.vireo_dir,
+            {folder_row["id"]: folder_row["path"]},
+        )
+        selected_ext = os.path.splitext(canonical)[1].lower()
+        self.canonical = canonical
+        self.using_working_copy = using_working_copy
+        self.selected_ext = selected_ext
+        self.source_failure_current = (
+            not using_working_copy
+            and selected_ext in RAW_EXTENSIONS
+            and _has_current_working_copy_failure(
+                photo,
+                self.vireo_dir,
+                trust_existing_working_copy=False,
+                live_source_path=canonical,
+                folder_path=folder_row["path"],
+            )
+        )
+        raw_decode = (
+            RAW_DECODE_LINEAR
+            if selected_ext in RAW_EXTENSIONS
+            else None
+        )
+        load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
+        self.native_dims = _recipe_source_dimensions(photo)
+        self.load_max_size = self._source_load_max_size()
+        img = None
+        if not self.source_failure_current:
+            if using_working_copy:
+                # Record access on the working copy whenever we
+                # read it as an edit-preview source. Without the
+                # touch the interactive editor's repeated
+                # ``/edit-preview`` requests never advance the
+                # WC's recency and an actively edited photo
+                # stays the oldest eviction candidate. The touch
+                # runs under the guard because it races
+                # ``_evict_once``'s identity check, which would
+                # otherwise skip this file as "replaced" and
+                # silently overshoot a lowered quota.
+                #
+                # The decode stays OUTSIDE the guard: it is a
+                # process-wide lock and the editor fires these
+                # on every slider move, so holding it across
+                # Pillow would serialize the whole app's image
+                # reads behind one preview. If eviction unlinks
+                # the copy in the exists/open window, ``img`` is
+                # None and the original-source retry below
+                # recovers. The offline-only ``source_guard``
+                # below still wraps the decode for the case
+                # where the WC is the only local source; the
+                # guard is an RLock, so the touch reentering it
+                # from there is safe.
+                with working_copy_publication_guard():
+                    touch_working_copy_access(canonical)
+            img = load_image(
+                canonical, max_size=self.load_max_size, **load_kwargs,
+            )
+        return img
+
+    def _source_load_max_size(self):
+        """The long edge to decode the selected source at.
+
+        A cropped output needs more source pixels than its requested long
+        edge. Scale the source request by the crop ratio, then let the recipe
+        renderer crop and cap the result to ``size``. At 100% this naturally
+        reaches the full source and stays truly 1:1 without forcing a native
+        decode for every fitted slider update.
+        """
+        from image_loader import RAW_EXTENSIONS
+        from render_source import rendered_recipe_long_edge
+
+        size = self.size
+        recipe = self.recipe
+        canonical = self.canonical
+        load_max_size = size
+        if self.apply_crop and recipe.get("crop"):
+            selected_dims = self.native_dims
+            try:
+                from PIL import Image as _PILImage
+
+                if self.selected_ext not in RAW_EXTENSIONS:
+                    with _PILImage.open(canonical) as selected_image:
+                        candidate_dims = _image_size_after_exif_orientation(
+                            selected_image,
+                        )
+                    if all(candidate_dims):
+                        selected_dims = candidate_dims
+            except Exception:
+                # Some RAW formats cannot be opened by Pillow. Their
+                # stored native dimensions remain the best available
+                # decode bound.
+                log.debug("Could not read dimensions of %s", canonical, exc_info=True)
+            if all(selected_dims):
+                selected_source_long = max(selected_dims)
+                rendered_long = rendered_recipe_long_edge(
+                    selected_dims[0], selected_dims[1], recipe,
+                )
+                if rendered_long > 0:
+                    load_max_size = min(
+                        selected_source_long,
+                        int(math.ceil(
+                            size * selected_source_long / rendered_long
+                        )),
+                    )
+            else:
+                load_max_size = None
+        return load_max_size
+
+    def retry_original_source(self):
+        """Decode the original after the working copy vanished; may be None.
+
+        Quota enforcement can unlink the selected working copy after
+        _recipe_render_source returned but before load_image opens it. Retry
+        the original source once so an otherwise healthy edit preview does
+        not become a transient 500 during eviction; mirrors the crop and
+        preview materializer recovery paths.
+        """
+        from image_loader import (
+            RAW_DECODE_LINEAR,
+            RAW_EXTENSIONS,
+            load_image,
+        )
+
+        original_abs = self.original_abs
+        img = None
+        original_ext = os.path.splitext(original_abs)[1].lower()
+        original_is_raw = original_ext in RAW_EXTENSIONS
+        original_failure_current = (
+            original_is_raw
+            and _has_current_working_copy_failure(
+                self.photo,
+                self.vireo_dir,
+                trust_existing_working_copy=False,
+                live_source_path=original_abs,
+                folder_path=self.folder_row["path"],
+            )
+        )
+        if (
+            os.path.abspath(original_abs)
+            != os.path.abspath(self.canonical)
+            and os.path.isfile(original_abs)
+            and not original_failure_current
+        ):
+            fallback_raw_decode = (
+                RAW_DECODE_LINEAR
+                if original_is_raw else None
+            )
+            fallback_kwargs = (
+                {"raw_decode": fallback_raw_decode}
+                if fallback_raw_decode else {}
+            )
+            img = load_image(
+                original_abs,
+                max_size=self.load_max_size,
+                **fallback_kwargs,
+            )
+            if img is not None:
+                self.canonical = original_abs
+                self.selected_ext = original_ext
+                self.using_working_copy = False
+        return img
+
+    def replace_undersized_raw_decode(self, img):
+        """Swap an undersized RAW decode for the companion JPEG if larger.
+
+        _load_raw falls back to an embedded camera JPEG when libraw can't
+        demosaic; that preview is often a fraction of sensor resolution, so
+        non-None can still be undersized. Mirror serve_preview's cache-miss
+        undersized check so the in-progress editor doesn't render against a
+        clipped downscaled preview when a full-size companion JPEG is sitting
+        next to the RAW.
+        """
+        from image_loader import load_image
+
+        photo = self.photo
+        expected_w, expected_h = _scaled_recipe_source_dimensions(
+            photo, self.load_max_size,
+        )
+        if _image_is_smaller_than_expected(img, expected_w, expected_h):
+            companion_rel = photo["companion_path"]
+            if companion_rel:
+                companion_abs = os.path.join(
+                    self.folder_row["path"], companion_rel,
+                )
+                if (
+                    os.path.exists(companion_abs)
+                    and companion_abs != self.canonical
+                ):
+                    companion_img = load_image(
+                        companion_abs, max_size=self.load_max_size,
+                    )
+                    if _companion_image_can_replace_raw_result(
+                        companion_img, img, expected_w, expected_h,
+                    ):
+                        log.info(
+                            "RAW decode for photo %s edit-preview "
+                            "returned undersized embedded preview "
+                            "(%dx%d, expected %dx%d); falling "
+                            "back to companion JPEG",
+                            self.photo_id, img.size[0], img.size[1],
+                            expected_w, expected_h,
+                        )
+                        img.close()
+                        img = companion_img
+                        self.canonical = companion_abs
+                    elif companion_img is not None:
+                        companion_img.close()
+        return img
+
+    def load_companion_after_raw_failure(self):
+        """Decode the companion JPEG after the RAW failed; may be None.
+
+        Same companion fallback as serve_preview's cache-miss path: an
+        unsupported RAW shouldn't kill the in-progress edit preview when a
+        usable companion JPEG sits next to it.
+        """
+        from image_loader import load_image
+
+        img = None
+        companion_rel = self.photo["companion_path"]
+        if companion_rel:
+            companion_abs = os.path.join(self.folder_row["path"], companion_rel)
+            if (
+                os.path.exists(companion_abs)
+                and companion_abs != self.canonical
+            ):
+                log.info(
+                    "RAW decode failed for photo %s edit-preview; "
+                    "falling back to companion JPEG", self.photo_id,
+                )
+                _record_working_copy_failure(self.db, self.photo, self.canonical)
+                img = load_image(companion_abs, max_size=self.load_max_size)
+                if img is not None:
+                    self.canonical = companion_abs
+        return img
+
+    def render(self, img):
+        """Apply the display recipe to the decoded source."""
+        from image_edits import apply_recipe_to_loaded_image, detail_render_scale
+        from render_source import rendered_recipe_long_edge
+
+        native_dims = self.native_dims
+        recipe = self.recipe
+        # Detail scale must reflect the saved cropped render. This matters
+        # especially in crop-edit mode, where the preview itself is still
+        # uncropped: a tighter crop must not make the saved output's
+        # sharpen/NR stronger than the preview showed.
+        preview_detail_scale = None
+        if native_dims and native_dims[0] and native_dims[1]:
+            saved_native_long = float(rendered_recipe_long_edge(
+                native_dims[0], native_dims[1], recipe,
+            ))
+            if saved_native_long > 0:
+                saved_rendered_long = min(float(self.size), saved_native_long)
+                preview_detail_scale = detail_render_scale(
+                    (saved_rendered_long, saved_rendered_long),
+                    native_dims,
+                    recipe,
+                )
+        import local_masks
+        return apply_recipe_to_loaded_image(
+            img, self.display_recipe, max_size=self.size,
+            camera_metadata=self.photo,
+            native_size=native_dims,
+            detail_scale=preview_detail_scale,
+            local_mask=local_masks.load_snapshot(
+                self.vireo_dir, self.photo_id, self.display_recipe,
+            ),
+        )
+
+
 def create_media_blueprint(
     get_db,
     json_error,
@@ -3284,318 +3661,53 @@ def create_media_blueprint(
             return "Invalid recipe", 400
 
         try:
-            from image_edits import (
-                SCHEMA_VERSION,
-                RecipeError,
-                apply_recipe_to_loaded_image,
-                detail_render_scale,
-                normalize_recipe,
-            )
-            from image_loader import (
-                RAW_DECODE_LINEAR,
-                RAW_EXTENSIONS,
-                load_image,
-            )
-            from render_source import rendered_recipe_long_edge
+            from image_edits import RecipeError, normalize_recipe
+            from image_loader import RAW_EXTENSIONS
             recipe = normalize_recipe(recipe) or {}
             apply_crop = request.args.get("apply_crop") == "1"
             display_recipe = dict(recipe)
             if not apply_crop:
                 display_recipe.pop("crop", None)
-            recipe_json = display_recipe
             vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
             folder_row = db.conn.execute(
                 "SELECT id, path FROM folders WHERE id=?", (photo["folder_id"],)
             ).fetchone()
             if not folder_row:
                 return "Not found", 404
-            # Resolve the source with the actual recipe (not None) so
-            # _recipe_render_source applies its RAW-primary gating: a RAW
-            # photo with a legacy JPEG working copy must use the RAW source
-            # here too, so the in-progress edit preview matches the saved
-            # preview/export bytes from the highlight-preserving decode.
-            # Auto Tone strips tonal adjustments to sample neutral pixels;
-            # for a RAW primary that can leave recipe empty, which would
-            # normally short-circuit _recipe_render_source to the canonical
-            # working copy. Pass a sentinel non-empty recipe in that case so
-            # the same RAW-primary gating applies and analysis reads the
-            # highlight-preserved RAW decode rather than clipped legacy
-            # working-copy bytes. The same sentinel applies when the request
-            # asks for more pixels than the (size-capped) working copy holds —
-            # the editor's 100% zoom requests a native-resolution render, and
-            # short-circuiting to a 4096-capped working copy would silently
-            # serve half-resolution pixels as "1:1".
-            original_abs = os.path.join(
-                folder_row["path"], photo["filename"],
+            edit = _EditPreviewRequest(
+                db,
+                photo_id,
+                photo,
+                folder_row,
+                vireo_dir,
+                recipe,
+                display_recipe,
+                size,
+                apply_crop,
             )
-
-            def _select_and_load_source():
-                source_recipe = recipe
-                if not recipe:
-                    from render_source import working_copy_satisfies_recipe_render
-
-                    undersized_wc = photo["working_copy_path"] and (
-                        not working_copy_satisfies_recipe_render(
-                            photo, recipe, size, vireo_dir,
-                        )
-                    )
-                    if (
-                        request.args.get("analysis") == "1" or undersized_wc
-                        or os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
-                    ):
-                        source_recipe = {"version": SCHEMA_VERSION}
-                canonical, using_working_copy = _recipe_render_source(
-                    photo, source_recipe, size, vireo_dir,
-                    {folder_row["id"]: folder_row["path"]},
-                )
-                selected_ext = os.path.splitext(canonical)[1].lower()
-                source_failure_current = (
-                    not using_working_copy
-                    and selected_ext in RAW_EXTENSIONS
-                    and _has_current_working_copy_failure(
-                        photo,
-                        vireo_dir,
-                        trust_existing_working_copy=False,
-                        live_source_path=canonical,
-                        folder_path=folder_row["path"],
-                    )
-                )
-                raw_decode = (
-                    RAW_DECODE_LINEAR
-                    if selected_ext in RAW_EXTENSIONS
-                    else None
-                )
-                load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
-                # A cropped output needs more source pixels than its requested
-                # long edge. Scale the source request by the crop ratio, then
-                # let the recipe renderer crop and cap the result to ``size``.
-                # At 100% this naturally reaches the full source and stays
-                # truly 1:1 without forcing a native decode for every fitted
-                # slider update.
-                native_dims = _recipe_source_dimensions(photo)
-                load_max_size = size
-                if apply_crop and recipe.get("crop"):
-                    selected_dims = native_dims
-                    try:
-                        from PIL import Image as _PILImage
-
-                        if selected_ext not in RAW_EXTENSIONS:
-                            with _PILImage.open(canonical) as selected_image:
-                                candidate_dims = _image_size_after_exif_orientation(
-                                    selected_image,
-                                )
-                            if all(candidate_dims):
-                                selected_dims = candidate_dims
-                    except Exception:
-                        # Some RAW formats cannot be opened by Pillow. Their
-                        # stored native dimensions remain the best available
-                        # decode bound.
-                        log.debug("Could not read dimensions of %s", canonical, exc_info=True)
-                    if all(selected_dims):
-                        selected_source_long = max(selected_dims)
-                        rendered_long = rendered_recipe_long_edge(
-                            selected_dims[0], selected_dims[1], recipe,
-                        )
-                        if rendered_long > 0:
-                            load_max_size = min(
-                                selected_source_long,
-                                int(math.ceil(
-                                    size * selected_source_long / rendered_long
-                                )),
-                            )
-                    else:
-                        load_max_size = None
-                img = None
-                if not source_failure_current:
-                    if using_working_copy:
-                        # Record access on the working copy whenever we
-                        # read it as an edit-preview source. Without the
-                        # touch the interactive editor's repeated
-                        # ``/edit-preview`` requests never advance the
-                        # WC's recency and an actively edited photo
-                        # stays the oldest eviction candidate. The touch
-                        # runs under the guard because it races
-                        # ``_evict_once``'s identity check, which would
-                        # otherwise skip this file as "replaced" and
-                        # silently overshoot a lowered quota.
-                        #
-                        # The decode stays OUTSIDE the guard: it is a
-                        # process-wide lock and the editor fires these
-                        # on every slider move, so holding it across
-                        # Pillow would serialize the whole app's image
-                        # reads behind one preview. If eviction unlinks
-                        # the copy in the exists/open window, ``img`` is
-                        # None and the original-source retry below
-                        # recovers. The offline-only ``source_guard``
-                        # below still wraps the decode for the case
-                        # where the WC is the only local source; the
-                        # guard is an RLock, so the touch reentering it
-                        # from there is safe.
-                        with working_copy_publication_guard():
-                            touch_working_copy_access(canonical)
-                    img = load_image(
-                        canonical, max_size=load_max_size, **load_kwargs,
-                    )
-                return (
-                    canonical, using_working_copy, selected_ext,
-                    load_max_size, native_dims, img, source_failure_current,
-                )
-
-            # If the original volume is offline, the working copy is the only
-            # local edit source. Hold the publication/eviction guard from
-            # source selection through Pillow decode so quota enforcement
-            # cannot unlink it in the exists/open window. Once load_image
-            # returns, the decoded PIL image no longer depends on the path.
-            source_guard = contextlib.nullcontext()
-            if photo["working_copy_path"] and not os.path.exists(original_abs):
-                source_guard = working_copy_publication_guard()
-            with source_guard:
-                (
-                    canonical, using_working_copy, selected_ext,
-                    load_max_size, native_dims, img, source_failure_current,
-                ) = _select_and_load_source()
-            if source_failure_current:
+            img = edit.load_source()
+            if edit.source_failure_current:
                 log.info(
                     "Skipping edit-preview generation for photo %s; RAW "
                     "working-copy extraction already failed for current source mtime",
                     photo_id,
                 )
                 return "Could not load image", 500
-            if img is None and using_working_copy:
-                # Quota enforcement can unlink the selected working copy
-                # after _recipe_render_source returned but before
-                # load_image opens it. Retry the original source once so an
-                # otherwise healthy edit preview does not become a
-                # transient 500 during eviction; mirrors the crop and
-                # preview materializer recovery paths.
-                original_ext = os.path.splitext(original_abs)[1].lower()
-                original_is_raw = original_ext in RAW_EXTENSIONS
-                original_failure_current = (
-                    original_is_raw
-                    and _has_current_working_copy_failure(
-                        photo,
-                        vireo_dir,
-                        trust_existing_working_copy=False,
-                        live_source_path=original_abs,
-                        folder_path=folder_row["path"],
-                    )
-                )
-                if (
-                    os.path.abspath(original_abs)
-                    != os.path.abspath(canonical)
-                    and os.path.isfile(original_abs)
-                    and not original_failure_current
-                ):
-                    fallback_raw_decode = (
-                        RAW_DECODE_LINEAR
-                        if original_is_raw else None
-                    )
-                    fallback_kwargs = (
-                        {"raw_decode": fallback_raw_decode}
-                        if fallback_raw_decode else {}
-                    )
-                    img = load_image(
-                        original_abs,
-                        max_size=load_max_size,
-                        **fallback_kwargs,
-                    )
-                    if img is not None:
-                        canonical = original_abs
-                        selected_ext = original_ext
-                        using_working_copy = False
+            if img is None and edit.using_working_copy:
+                img = edit.retry_original_source()
             if (
                 img is not None
-                and selected_ext in RAW_EXTENSIONS
+                and edit.selected_ext in RAW_EXTENSIONS
                 and photo["width"]
                 and photo["height"]
             ):
-                # _load_raw falls back to an embedded camera JPEG when libraw
-                # can't demosaic; that preview is often a fraction of sensor
-                # resolution, so non-None can still be undersized. Mirror
-                # serve_preview's cache-miss undersized check so the
-                # in-progress editor doesn't render against a clipped
-                # downscaled preview when a full-size companion JPEG is
-                # sitting next to the RAW.
-                expected_w, expected_h = _scaled_recipe_source_dimensions(
-                    photo, load_max_size,
-                )
-                if _image_is_smaller_than_expected(img, expected_w, expected_h):
-                    companion_rel = photo["companion_path"]
-                    if companion_rel:
-                        companion_abs = os.path.join(
-                            folder_row["path"], companion_rel,
-                        )
-                        if (
-                            os.path.exists(companion_abs)
-                            and companion_abs != canonical
-                        ):
-                            companion_img = load_image(
-                                companion_abs, max_size=load_max_size,
-                            )
-                            if _companion_image_can_replace_raw_result(
-                                companion_img, img, expected_w, expected_h,
-                            ):
-                                log.info(
-                                    "RAW decode for photo %s edit-preview "
-                                    "returned undersized embedded preview "
-                                    "(%dx%d, expected %dx%d); falling "
-                                    "back to companion JPEG",
-                                    photo_id, img.size[0], img.size[1],
-                                    expected_w, expected_h,
-                                )
-                                img.close()
-                                img = companion_img
-                                canonical = companion_abs
-                            elif companion_img is not None:
-                                companion_img.close()
-            if img is None and selected_ext in RAW_EXTENSIONS:
-                # Same companion fallback as serve_preview's cache-miss
-                # path: an unsupported RAW shouldn't kill the in-progress
-                # edit preview when a usable companion JPEG sits next to it.
-                companion_rel = photo["companion_path"]
-                if companion_rel:
-                    companion_abs = os.path.join(folder_row["path"], companion_rel)
-                    if (
-                        os.path.exists(companion_abs)
-                        and companion_abs != canonical
-                    ):
-                        log.info(
-                            "RAW decode failed for photo %s edit-preview; "
-                            "falling back to companion JPEG", photo_id,
-                        )
-                        _record_working_copy_failure(db, photo, canonical)
-                        img = load_image(companion_abs, max_size=load_max_size)
-                        if img is not None:
-                            canonical = companion_abs
+                img = edit.replace_undersized_raw_decode(img)
+            if img is None and edit.selected_ext in RAW_EXTENSIONS:
+                img = edit.load_companion_after_raw_failure()
             if img is None:
-                _record_working_copy_failure(db, photo, canonical)
+                _record_working_copy_failure(db, photo, edit.canonical)
                 return "Could not load image", 500
-            # Detail scale must reflect the saved cropped render. This matters
-            # especially in crop-edit mode, where the preview itself is still
-            # uncropped: a tighter crop must not make the saved output's
-            # sharpen/NR stronger than the preview showed.
-            preview_detail_scale = None
-            if native_dims and native_dims[0] and native_dims[1]:
-                saved_native_long = float(rendered_recipe_long_edge(
-                    native_dims[0], native_dims[1], recipe,
-                ))
-                if saved_native_long > 0:
-                    saved_rendered_long = min(float(size), saved_native_long)
-                    preview_detail_scale = detail_render_scale(
-                        (saved_rendered_long, saved_rendered_long),
-                        native_dims,
-                        recipe,
-                    )
-            import local_masks
-            img = apply_recipe_to_loaded_image(
-                img, recipe_json, max_size=size,
-                camera_metadata=photo,
-                native_size=native_dims,
-                detail_scale=preview_detail_scale,
-                local_mask=local_masks.load_snapshot(
-                    vireo_dir, photo_id, recipe_json,
-                ),
-            )
+            img = edit.render(img)
         except RecipeError as e:
             return str(e), 400
 
