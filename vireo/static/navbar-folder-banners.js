@@ -579,23 +579,24 @@ async function checkNewImages(options) {
     // path, and an import of them is refused until the copy is synced or
     // discarded -- so the count does not cover them and the banner says so.
     const localCopies = Array.isArray(data.local_copy_excluded) ? data.local_copy_excluded : [];
+    const uncheckedRoots = [...unreachable, ...localCopies];
     const cta = banner.querySelector('.banner-cta');
 
     // Only a *real* zero — every root checked, nothing new — resets the
     // dismissal. A zero with offline roots is "unknown", not "resolved".
-    if (data.new_count === 0 && !unreachable.length && wsId !== '') {
+    if (data.new_count === 0 && !uncheckedRoots.length && wsId !== '') {
       sessionStorage.removeItem(_newImagesDismissKey(wsId));
       sessionStorage.removeItem(_newImagesOfflineDismissKey(wsId));
     }
 
     banner.dataset.ws = wsId;
-    if (unreachable.length) {
-      banner.dataset.offline = _offlineRootsKey(unreachable);
+    if (uncheckedRoots.length) {
+      banner.dataset.offline = _offlineRootsKey(uncheckedRoots);
     } else {
       delete banner.dataset.offline;
     }
 
-    if (data.new_count > 0 && wsId !== '' && !_isNewImagesDismissed(wsId, data.new_count, unreachable)) {
+    if (data.new_count > 0 && wsId !== '' && !_isNewImagesDismissed(wsId, data.new_count, uncheckedRoots)) {
       const s = data.new_count === 1 ? '' : 's';
       let text = `${data.new_count} new image${s} detected in your registered folders.`;
       if (unreachable.length) {
@@ -608,13 +609,15 @@ async function checkNewImages(options) {
       _appendBannerTitlePaths(localCopies);
       banner.dataset.count = String(data.new_count);
       banner.style.display = 'flex';
-    } else if (data.new_count === 0 && unreachable.length && wsId !== '' && !_isNewImagesDismissed(wsId, 0, unreachable)) {
+    } else if (data.new_count === 0 && uncheckedRoots.length && wsId !== '' && !_isNewImagesDismissed(wsId, 0, uncheckedRoots)) {
       // Nothing importable was found, but that is not a real zero: at least
       // one registered folder is on a volume that is offline right now.
       // Say that instead of silently hiding, and offer nothing to import.
       // (Gated on a zero count: a dismissed *positive* banner with offline
       // roots must stay dismissed, not fall through to this notice.)
-      msg.textContent = `Couldn't check for new images: ${_offlineRootsPhrase(unreachable)} offline.`
+      msg.textContent = (unreachable.length
+        ? `Couldn't check for new images: ${_offlineRootsPhrase(unreachable)} offline.`
+        : 'No new images found in the checked folders.')
         + _localCopiesSentence(localCopies);
       if (cta) cta.style.display = 'none';
       _applyOfflineBannerDetail(unreachable, data.checked_at);

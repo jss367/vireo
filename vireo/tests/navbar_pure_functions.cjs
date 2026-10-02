@@ -329,10 +329,56 @@ test('pollWhileVisible stop cancels the poll and its visibility listener', () =>
   assert.equal(env.listeners.length, 0);
 });
 
+
+test('checkNewImages shows zero-count local-copy exclusions and allows dismissal', async () => {
+  const msg = {textContent: '', title: ''};
+  const cta = {style: {}};
+  const banner = {dataset: {}, style: {}, querySelector: () => cta};
+  const removed = [];
+  let dismissed = false;
+  const ctx = load([
+    fn(banners, 'checkNewImages'),
+    fn(banners, '_localCopiesSentence'),
+    fn(banners, '_appendBannerTitlePaths'),
+  ], {
+    _newImagesInFlight: false, _newImagesForcedRerun: false,
+    _newImagesInvalidatedToken: 0, _newImagesPendingTimer: null,
+    _newImagesRecheckToken: 0,
+    document: {getElementById: id => id === 'newImagesBanner' ? banner : msg},
+    fetch: async () => ({ok: true, json: async () => ({
+      workspace_id: 1, new_count: 0, unreachable_roots: [],
+      local_copy_excluded: ['/nas/photos'],
+    })}),
+    sessionStorage: {removeItem: key => removed.push(key)},
+    _newImagesDismissKey: () => 'count', _newImagesOfflineDismissKey: () => 'roots',
+    _offlineRootsKey: roots => roots.join('\n'),
+    _offlineRootsPhrase: roots => roots[0] + ' is',
+    _isNewImagesDismissed: (_ws, count, roots) => {
+      assert.equal(count, 0);
+      assert.equal(roots[0], '/nas/photos');
+      return dismissed;
+    },
+    _applyOfflineBannerDetail: () => {msg.title = '';},
+    _newImagesAnswersRecheck: () => true, _setNewImagesRecheckBusy: () => {},
+    _failNewImagesRecheck: () => assert.fail('banner rendering failed'),
+  });
+  await ctx.checkNewImages();
+  assert.equal(banner.style.display, 'flex');
+  assert.equal(cta.style.display, 'none');
+  assert.match(msg.textContent, /working locally and not checked/);
+  assert.equal(msg.title, '/nas/photos');
+  assert.equal(banner.dataset.offline, '/nas/photos');
+  assert.deepEqual(removed, []); // an excluded root is not a fully checked zero
+  dismissed = true;
+  await ctx.checkNewImages();
+  assert.equal(banner.style.display, 'none');
+});
+
+(async () => {
 let failed = 0;
 for (const [name, body] of tests) {
   try {
-    body();
+    await body();
   } catch (err) {
     failed++;
     console.error('FAIL ' + name + '\n' + (err && err.stack || err));
@@ -344,3 +390,5 @@ if (failed) {
 } else {
   console.log(tests.length + ' navbar tests passed');
 }
+
+})();

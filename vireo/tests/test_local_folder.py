@@ -3229,7 +3229,8 @@ def test_scan_counter_waits_for_the_read_it_is_reporting(tmp_path, monkeypatch):
         db.close()
 
 
-def test_discard_invalidates_new_images_for_ancestor_workspace_without_link(tmp_path):
+@pytest.mark.parametrize("aliased", [False, True])
+def test_discard_invalidates_new_images_for_ancestor_workspace_without_link(tmp_path, aliased):
     """The New Images walk leaves staged sources out, so ending a session
     changes the answer for every workspace whose root contains the source --
     including one that removed the staged folder and so is not among the
@@ -3243,7 +3244,14 @@ def test_discard_invalidates_new_images_for_ancestor_workspace_without_link(tmp_
         child = parent / "child"
         child.mkdir(parents=True)
         (child / "bird.jpg").write_bytes(b"original")
-        parent_id = db.add_folder(str(parent), link_to_workspace=False)
+        parent_path = parent
+        if aliased:
+            parent_path = tmp_path / "parent-alias"
+            try:
+                parent_path.symlink_to(parent, target_is_directory=True)
+            except OSError:
+                pytest.skip("directory symlinks unavailable")
+        parent_id = db.add_folder(str(parent_path), link_to_workspace=False)
         child_id = db.add_folder(str(child), parent_id=parent_id, link_to_workspace=False)
         db.add_workspace_folder(parent_ws, parent_id)
         db.add_workspace_folder(child_ws, child_id)

@@ -693,14 +693,16 @@ def _invalidate_new_images_for_source(
     """
     ids = {int(workspace_id) for workspace_id in workspace_ids}
     if source_path:
+        source_physical = _resolve_physical(source_path)
         for row in db.conn.execute(
             """SELECT DISTINCT wf.workspace_id, f.path
                FROM workspace_folders wf
                JOIN folders f ON f.id = wf.folder_id"""
         ).fetchall():
             path = row["path"]
-            if path and (
-                _is_within(path, source_path) or _is_within(source_path, path)
+            if path and _path_overlaps_source(
+                path, _resolve_physical(path), source_path, source_physical,
+                include_descendants=True,
             ):
                 ids.add(int(row["workspace_id"]))
     for workspace_id in sorted(ids):
