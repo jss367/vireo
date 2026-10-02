@@ -2179,6 +2179,7 @@ def move_folder_by_date(db, folder_id, destination, folder_template,
     total = sum(group["photo_count"] for group in groups)
     completed = 0
     moved = 0
+    already_in_place = 0
     errors = []
     destinations = []
 
@@ -2206,12 +2207,14 @@ def move_folder_by_date(db, folder_id, destination, folder_template,
         )
         group_moved = int(result.get("moved", 0))
         moved += group_moved
+        already_in_place += int(result.get("already_in_place", 0))
         errors.extend(result.get("errors") or [])
         completed += group["photo_count"]
         destinations.append({
             "path": group["destination"],
             "planned": group["photo_count"],
             "moved": group_moved,
+            "already_in_place": int(result.get("already_in_place", 0)),
         })
         if progress_cb and completed > group_start + group_moved:
             # Keep the overall bar advancing when a photo was skipped because
@@ -2221,6 +2224,7 @@ def move_folder_by_date(db, folder_id, destination, folder_template,
 
     result = {
         "moved": moved,
+        "already_in_place": already_in_place,
         "errors": errors,
         "destinations": destinations,
         "destination_count": len(destinations),
@@ -2320,6 +2324,22 @@ def _refuse_every_photo(photo_ids, conflict_msg):
     }
 
 
+def _is_same_directory(folder_id, folder_path, dest_folder_id, destination):
+    """Whether a photo's folder already is the move destination.
+
+    ``destination`` has been through ``catalog_folder_path``, so a case or
+    alias spelling of a cataloged folder resolves to that folder's row and
+    the ids match. ``samefile`` covers two catalog rows naming one
+    directory (e.g. both spellings on a case-insensitive volume).
+    """
+    if folder_id == dest_folder_id:
+        return True
+    try:
+        return os.path.samefile(folder_path, destination)
+    except OSError:
+        return False
+
+
 def move_photos(db, photo_ids, destination, progress_cb=None,
                 developed_dir="", developed_listing_cache=None, cancel_check=None,
                 pause_requested=None, pause_callback=None):
@@ -2347,7 +2367,8 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
     pause_requested is a non-parking probe; pause_callback runs after counts
     are reconciled, so a paused move leaves the folder tree consistent.
 
-    Returns dict with keys: moved (int), errors (list of str)
+    Returns dict with keys: moved (int), already_in_place (int: photos
+    already in the destination and left untouched), errors (list of str)
     """
     if developed_listing_cache is None:
         developed_listing_cache = {}
@@ -2391,6 +2412,10 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
             item = move.check_photo(pid)
             if item is None:
                 continue
+            if move.is_already_in_place(item):
+                if progress_cb:
+                    progress_cb(i + 1, total, item.photo["filename"])
+                continue
             if not move.copy_files(item):
                 continue
             move.update_catalog(item)
@@ -2407,7 +2432,8 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
         if move.moved > 0:
             db.update_folder_counts()
 
-    return {"moved": move.moved, "errors": move.errors,
+    return {"moved": move.moved, "already_in_place": move.already_in_place,
+            "errors": move.errors,
             "destination_folder_id": move.dest_folder_id}
 
 
@@ -2445,6 +2471,8 @@ class _PhotoMove:
         self.developed_dir = developed_dir
         self.developed_listing_cache = developed_listing_cache
         self.moved = 0
+        self.already_in_place = 0
+        self.in_place_folders = {}
         self.errors = []
         self.managed_default_developed = {}
         self.copied_xmp_companions = set()
@@ -2569,6 +2597,11 @@ class _PhotoMove:
             self.errors.append(f"{photo['filename']}: source file missing")
             return None
 
+        if self.folder_is_destination(photo["folder_id"], src_dir):
+            return _PhotoToMove(
+                pid=pid, photo=photo, src_dir=src_dir, src_file=src_file,
+                stem=stem, stem_key=self.stem_key(stem),
+            )
         item = _PhotoToMove(
             pid=pid, photo=photo, src_dir=src_dir, src_file=src_file,
             stem=stem, stem_key=self.stem_key(stem),
@@ -2578,6 +2611,20 @@ class _PhotoMove:
         if self.refuse_destination_collision(item):
             return None
         return item
+
+    def folder_is_destination(self, folder_id, src_dir):
+        if folder_id not in self.in_place_folders:
+            self.in_place_folders[folder_id] = _is_same_directory(
+                folder_id, src_dir, self.dest_folder_id, self.destination,
+            )
+        return self.in_place_folders[folder_id]
+
+    def is_already_in_place(self, item):
+        """Count photos already in the destination without touching their files."""
+        if self.folder_is_destination(item.photo["folder_id"], item.src_dir):
+            self.already_in_place += 1
+            return True
+        return False
 
     def refuse_render_collision(self, item):
         """Refuse a photo whose developed render would collide at the destination.

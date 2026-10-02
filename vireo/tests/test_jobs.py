@@ -2092,3 +2092,24 @@ def test_explicit_blocking_flag_overrides_the_job_type_policy():
         assert runner.get(singleton)["blocks_local_transitions"] is False
     finally:
         runner.shutdown()
+
+
+def test_structured_errors_keep_distinct_photo_identity(tmp_path):
+    from db import Database
+    from jobs import JobRunner
+
+    with Database(str(tmp_path / "catalog.db")) as db:
+        runner = JobRunner(db)
+        errors = [
+            {"photo_id": 1, "filename": "bird.jpg", "error": "export failed"},
+            {"photo_id": 2, "filename": "bird.jpg", "error": "export failed"},
+        ]
+        job_id = runner.start("inat-export", lambda job: {"ok": False, "errors": errors})
+        job = wait_for_job_via_runner(runner, job_id, wait_for_history=True)
+        assert len(job["errors"]) == 2
+        assert "bird.jpg: export failed (photo 1)" in job["result_details"]
+        assert "bird.jpg: export failed (photo 2)" in job["result_details"]
+        assert job["result"]["errors"] == errors
+        row = db.conn.execute("SELECT error_count FROM job_history WHERE id=?", (job_id,)).fetchone()
+        assert row["error_count"] == 2
+        assert runner.shutdown()

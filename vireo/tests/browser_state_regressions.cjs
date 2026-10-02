@@ -169,3 +169,26 @@ async function testSavedCollectionPreviewScope() {
 
 Promise.all([testAsyncModalOwnership(), testReadinessAndRegroupRaces(), testSavedCollectionPreviewScope()])
   .catch(err => { console.error(err); process.exitCode = 1; });
+
+const noteFilter = vm.createContext({});
+vm.runInContext(fn('vireo/templates/pipeline.html', '_pipelineFailureErrors'), noteFilter);
+const note = '[extract_masks] No detections to mask';
+assert.equal(noteFilter._pipelineFailureErrors({errors: [note], notes: [note]}).length, 0);
+assert.deepEqual(Array.from(noteFilter._pipelineFailureErrors({errors: [note, '[scan] failed'], notes: [note]})), ['[scan] failed']);
+
+const dateSource = fs.readFileSync('vireo/templates/jobs.html', 'utf8');
+const dateViewCode = dateSource.match(/  function moveDateView\([^]*?\n  \}/)[0];
+const dateView = vm.createContext({
+  isLiveStatus: status => ['running', 'queued'].includes(status),
+  DATE_FOLDER_ROWS: 10,
+  pathUnderRoot: path => path,
+  plural: (count, word) => word + (count === 1 ? '' : 's'),
+});
+vm.runInContext(dateViewCode, dateView);
+const alreadyPlaced = dateView.moveDateView({destination: '/archive'}, {
+  status: 'completed', result: {moved: 0, already_in_place: 2,
+    destinations: [{path: '/archive/2026-07-12', planned: 2, moved: 0, already_in_place: 2}]},
+});
+assert.equal(alreadyPlaced.folderCount, 1);
+assert.equal(alreadyPlaced.photoCount, 2);
+assert.match(alreadyPlaced.folders[0].text, /2 already in place/);

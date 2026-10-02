@@ -512,7 +512,9 @@
     // at the destination) still appears in ``destinations`` with
     // ``moved: 0``; counting it would claim more landing folders than the
     // move produced. It still gets a row in the list, reporting 0 of N.
-    var landed = dests.filter(function(item) { return (item.moved || 0) > 0; });
+    var landed = dests.filter(function(item) {
+      return (item.moved || 0) + (item.already_in_place || 0) > 0;
+    });
     // The denominator has to come from the same plan that produced
     // ``moved``. A photo scanned into the source subtree between enqueue and
     // the worker's re-plan is in the worker's plan but not in the config
@@ -531,19 +533,26 @@
         ? dests[0].path : (root || cfg.resolved_destination),
       folderCount: landed.length,
       listTotal: dests.length,
-      photoCount: result.moved,
+      photoCount: result.moved + (result.already_in_place || 0),
+      alreadyInPlace: result.already_in_place || 0,
       plannedFolderCount: plannedFolderCount,
       plannedPhotoCount: plannedInResult > 0 ? plannedInResult : plannedPhotos,
       folders: shown.map(function(item) {
-        var moved = item.moved || 0;
+        var moved = (item.moved || 0) + (item.already_in_place || 0);
         var planned = item.planned || 0;
+        var inPlaceNote = item.already_in_place
+          ? ' (' + item.already_in_place.toLocaleString() + ' already in place)' : '';
         return {
           path: item.path || '',
           label: pathUnderRoot(item.path, root),
           text: moved === planned
-            ? moved.toLocaleString() + ' ' + plural(moved, 'photo')
+            ? moved.toLocaleString() + ' ' + plural(moved, 'photo') + inPlaceNote
             : moved.toLocaleString() + ' of ' + planned.toLocaleString() +
-              ' ' + plural(planned, 'photo') + ' moved',
+              ' ' + plural(planned, 'photo') +
+              // "moved" stays exact when nothing was already there; with
+              // in-place photos the count includes them, so it says where
+              // they are rather than claiming they all moved.
+              (item.already_in_place ? ' at destination' : ' moved') + inPlaceNote,
         };
       }),
     };
@@ -570,7 +579,8 @@
       ? 'All ' + count.toLocaleString() + ' ' + plural(count, 'photo')
       : count.toLocaleString() + ' of ' + planned.toLocaleString() + ' ' +
         plural(planned, 'photo');
-    var verb = view.actual ? ' landed in ' : ' planned to land in ';
+    var verb = view.actual
+      ? (view.alreadyInPlace ? ' are in ' : ' landed in ') : ' planned to land in ';
 
     // Take the single-folder wording only when the move has exactly one
     // folder to talk about. One folder that received photos alongside others
@@ -596,7 +606,7 @@
     // that hasn't happened yet; a fan-out still being planned just states the
     // plan.
     var header = view.actual
-      ? photos + ' landed in ' + view.folderCount.toLocaleString()
+      ? photos + (view.alreadyInPlace ? ' are in ' : ' landed in ') + view.folderCount.toLocaleString()
       : count.toLocaleString() + ' ' + plural(count, 'photo') +
         ' planned across ' + view.folderCount.toLocaleString();
     var html = '<span class="job-move-route-note">' + header +

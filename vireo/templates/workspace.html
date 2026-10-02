@@ -355,7 +355,12 @@ async function loadHistory() {
       var started = r.started_at ? new Date(r.started_at).toLocaleString() : '-';
       var duration = r.duration != null ? formatDuration(r.duration) : '-';
       var result = '-';
-      if (r.result) {
+      if (r.summary) {
+        // The server's prose summary (job_summaries.py / step summaries)
+        // already words a Process run's skipped stages as skips; the raw
+        // key dump below would count those notes under "errors".
+        result = r.summary;
+      } else if (r.result) {
         try {
           var parsed = typeof r.result === 'string' ? JSON.parse(r.result) : r.result;
           var parts = [];
