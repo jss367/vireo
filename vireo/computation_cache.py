@@ -2014,70 +2014,63 @@ def _backfill_classification_enrichment(
     return filled
 
 
-def materialize_artifacts(
-    db, artifacts, known_runtimes=None, known_classifier_runtimes=None,
-):
-    """Apply portable output to every matching non-rejected catalog row.
+def _dedup_by_lookup_identity(items, key_fn, prefer=None):
+    """Keep one artifact per lookup identity, chosen by content.
 
-    Review rows are never inserted.  Existing matching materializations are
-    left alone, so a later artifact cannot churn already-surfaced results.
+    Break same-lookup-identity ties by lexicographically lowest
+    ``artifact_digest`` before any per-runtime dedup below runs.  Without
+    this, when a bundle declares divergent artifacts for the same
+    ``(photo_sha256, runtime_fingerprint, input_fingerprint)`` (e.g. the
+    same detector run's subjects rewritten with different rounding), the
+    downstream stable sort at end of this block preserves manifest order
+    and different installs would surface different boxes/species solely
+    because of manifest ordering.  Digest is canonical-bytes-derived so
+    the winner is content-defined and identical across installs.
 
-    ``known_runtimes`` extends the built-in whitelist of DETECTOR runtimes
-    this install recognizes.  ``known_classifier_runtimes`` does the same
-    for classifier runtimes — callers with additional trust context (a
-    classify job that just resolved its own runtime) pass them here so
-    the built-in local check does not have to grow special cases.
+    A caller-supplied ``prefer`` returns a small integer *rank* (lower
+    wins) that jumps ahead of the digest tiebreaker. Classification uses
+    it to prefer artifacts carrying a ``match`` block over pre-feature
+    artifacts for the same lookup identity — adding the block only
+    changes the digest, so without a preference the enriched artifact
+    loses roughly half the time and the "not recorded" state gets
+    permanently locked in behind the ``classifier_runs`` gate.
     """
-    normalized = [validate_artifact(artifact) for artifact in artifacts]
-    # Break same-lookup-identity ties by lexicographically lowest
-    # ``artifact_digest`` before any per-runtime dedup below runs.  Without
-    # this, when a bundle declares divergent artifacts for the same
-    # ``(photo_sha256, runtime_fingerprint, input_fingerprint)`` (e.g. the
-    # same detector run's subjects rewritten with different rounding), the
-    # downstream stable sort at end of this block preserves manifest order
-    # and different installs would surface different boxes/species solely
-    # because of manifest ordering.  Digest is canonical-bytes-derived so
-    # the winner is content-defined and identical across installs.
-    #
-    # A caller-supplied ``prefer`` returns a small integer *rank* (lower
-    # wins) that jumps ahead of the digest tiebreaker. Classification uses
-    # it to prefer artifacts carrying a ``match`` block over pre-feature
-    # artifacts for the same lookup identity — adding the block only
-    # changes the digest, so without a preference the enriched artifact
-    # loses roughly half the time and the "not recorded" state gets
-    # permanently locked in behind the ``classifier_runs`` gate.
-    def _dedup_by_lookup_identity(items, key_fn, prefer=None):
-        best = {}
-        for item in items:
-            key = key_fn(item)
-            rank = prefer(item) if prefer is not None else 0
-            digest = artifact_digest(item)
-            prior = best.get(key)
-            if prior is None or (rank, digest) < (prior[0], prior[1]):
-                best[key] = (rank, digest, item)
-        return [entry[2] for entry in best.values()]
+    best = {}
+    for item in items:
+        key = key_fn(item)
+        rank = prefer(item) if prefer is not None else 0
+        digest = artifact_digest(item)
+        prior = best.get(key)
+        if prior is None or (rank, digest) < (prior[0], prior[1]):
+            best[key] = (rank, digest, item)
+    return [entry[2] for entry in best.values()]
 
-    def _classification_enrichment_rank(artifact):
-        # Rank by the number of subjects missing a ``match`` block (lower
-        # wins). 0 = every subject enriched; a positive count = partial
-        # enrichment; equal to ``len(subjects)`` = pre-feature, no
-        # subject enriched at all.
-        #
-        # A boolean "has at least one enriched subject" tiebreaker is not
-        # enough for multi-detection artifacts: an interrupted enrichment
-        # pass can leave one subject's ``match`` block behind, and a
-        # later complete artifact carrying blocks for every subject then
-        # ties on rank 0 and falls back to the digest sort. If the
-        # partial digest wins, ``materialize_artifacts`` writes the
-        # classifier-run marker but the un-enriched detections
-        # permanently land with ``match_score`` NULL and no
-        # ``classifier_match_scores`` row — the very "not recorded"
-        # state this feature exists to close (Codex P2 on a1be510).
-        return sum(
-            1 for subject in artifact.get("subjects", ())
-            if "match" not in subject
-        )
 
+def _classification_enrichment_rank(artifact):
+    """Rank by the number of subjects missing a ``match`` block (lower wins).
+
+    0 = every subject enriched; a positive count = partial enrichment;
+    equal to ``len(subjects)`` = pre-feature, no subject enriched at all.
+
+    A boolean "has at least one enriched subject" tiebreaker is not
+    enough for multi-detection artifacts: an interrupted enrichment
+    pass can leave one subject's ``match`` block behind, and a
+    later complete artifact carrying blocks for every subject then
+    ties on rank 0 and falls back to the digest sort. If the
+    partial digest wins, ``materialize_artifacts`` writes the
+    classifier-run marker but the un-enriched detections
+    permanently land with ``match_score`` NULL and no
+    ``classifier_match_scores`` row — the very "not recorded"
+    state this feature exists to close (Codex P2 on a1be510).
+    """
+    return sum(
+        1 for subject in artifact.get("subjects", ())
+        if "match" not in subject
+    )
+
+
+def _dedup_artifacts(normalized):
+    """Split validated artifacts by type and dedup each by lookup identity."""
     detection_items = [a for a in normalized if a["type"] == "detection"]
     classification_items = [a for a in normalized if a["type"] == "classification"]
     detection_items = _dedup_by_lookup_identity(
@@ -2097,90 +2090,144 @@ def materialize_artifacts(
         ),
         prefer=_classification_enrichment_rank,
     )
+    return detection_items, classification_items
 
-    # Trusted detection artifacts for the same (photo, detector_model)
-    # can carry multiple runtime_fingerprints -- e.g. the local store
-    # was populated by successive imports from different weights.  Every
-    # ``materialize_local_store`` call would otherwise write each of
-    # them in turn, and each runtime change deletes the currently
-    # selected detections and cascades their unreviewed predictions.
-    # The result is churn on every reapply plus a settled winner of
-    # whichever runtime happens to sort last.  Collapse to one artifact
-    # per logical (photo, detector_model) run before the loop, preferring
-    # whichever runtime the catalog already has installed so routine
-    # cache reapplication is a no-op; ties fall back to a deterministic
-    # (runtime_fingerprint, artifact_digest) sort so repeated calls stay
-    # stable regardless of iteration order.
-    detection_by_key = {}
-    for artifact in detection_items:
-        key = (artifact["photo_sha256"], artifact["detector_model"])
-        detection_by_key.setdefault(key, []).append(artifact)
-    chosen_detections = []
-    for (photo_sha256, detector_model), candidates in detection_by_key.items():
-        if len(candidates) == 1:
-            chosen_detections.append(candidates[0])
-            continue
-        existing = db.conn.execute(
-            """SELECT dr.runtime_fingerprint
-               FROM detector_runs dr
-               JOIN photos p ON p.id = dr.photo_id
-               WHERE p.file_hash = ? AND dr.detector_model = ?
-                 AND p.companion_path IS NULL
-                 AND p.working_copy_path IS NULL
-                 AND (p.flag IS NULL OR p.flag != 'rejected')
-               LIMIT 1""",
-            (photo_sha256, detector_model),
-        ).fetchone()
-        existing_runtime = (
-            existing["runtime_fingerprint"] if existing else None
-        )
-        match = next(
-            (c for c in candidates
-             if c["runtime_fingerprint"] == existing_runtime),
-            None,
-        )
-        chosen_detections.append(
-            match if match is not None
-            else min(
-                candidates,
-                key=lambda a: (a["runtime_fingerprint"], artifact_digest(a)),
-            )
-        )
-    # Classification artifacts churn the same way: every artifact for one
-    # (photo, classifier, detector, labels, detector runtime, input) run
-    # lands on the same ``classifier_runs`` row, so two trusted runtimes
-    # would each replace the other's unreviewed predictions on every call,
-    # settling on whichever sorts last. Collapse to one per logical run,
-    # preferring the runtime the catalog already has installed; otherwise
-    # the lowest (runtime_fingerprint, digest) among runtimes this install
-    # recognizes, so the choice is stable and not a quarantined artifact.
-    #
-    # ``input_fingerprint`` is part of the key so per-detection artifacts
-    # from one photo stay separate: ``promote_and_publish_classifier_run``
-    # publishes one artifact per detection, each with a different input
-    # (subject/box). Grouping without it would collapse every detection's
-    # classification to one, leaving the rest unclassified on every
-    # reapply.
-    identity_cache = {}
-    classification_by_key = {}
-    for artifact in classification_items:
-        key = (
-            artifact["photo_sha256"], artifact["classifier_model"],
-            artifact["detector_model"], artifact["labels"]["fingerprint"],
+
+class _ArtifactMaterialization:
+    """One ``materialize_artifacts`` call: its trust context, tallies and cache.
+
+    ``identity_cache`` is shared by the runtime choice and the recognition
+    gate so each classifier identity is resolved once per call.
+    """
+
+    def __init__(self, db, known_runtimes, known_classifier_runtimes):
+        self.db = db
+        self.known_runtimes = known_runtimes
+        self.known_classifier_runtimes = known_classifier_runtimes
+        self.identity_cache = {}
+        self.result = {
+            "matched_photos": 0,
+            "detector_runs_applied": 0,
+            "classifier_runs_applied": 0,
+            "already_materialized": 0,
+            "enrichment_backfilled": 0,
+            "stored_unmatched": 0,
+            "pinned_older_runtime": 0,
+            "label_collisions": 0,
+            "unknown_runtime": 0,
+            "unknown_classifier_runtime": 0,
+            "classifier_deferred_pending_detection": 0,
+        }
+        self.matched_photo_ids = set()
+
+    def _classifier_runtime_recognized(self, artifact):
+        return _is_recognized_classifier_runtime(
+            artifact["classifier_model"],
+            artifact["labels"]["fingerprint"],
             artifact["detector_runtime_fingerprint"],
-            artifact["input_fingerprint"],
+            artifact["runtime_fingerprint"],
+            self.identity_cache,
+            extra=self.known_classifier_runtimes,
         )
-        classification_by_key.setdefault(key, []).append(artifact)
-    chosen_classifications = []
-    for key, candidates in classification_by_key.items():
-        if len(candidates) == 1:
-            chosen_classifications.append(candidates[0])
-            continue
+
+    def choose_detections(self, detection_items):
+        """Collapse detection artifacts to one per (photo, detector_model).
+
+        Trusted detection artifacts for the same (photo, detector_model)
+        can carry multiple runtime_fingerprints -- e.g. the local store
+        was populated by successive imports from different weights.  Every
+        ``materialize_local_store`` call would otherwise write each of
+        them in turn, and each runtime change deletes the currently
+        selected detections and cascades their unreviewed predictions.
+        The result is churn on every reapply plus a settled winner of
+        whichever runtime happens to sort last.  Collapse to one artifact
+        per logical (photo, detector_model) run before the loop, preferring
+        whichever runtime the catalog already has installed so routine
+        cache reapplication is a no-op; ties fall back to a deterministic
+        (runtime_fingerprint, artifact_digest) sort so repeated calls stay
+        stable regardless of iteration order.
+        """
+        detection_by_key = {}
+        for artifact in detection_items:
+            key = (artifact["photo_sha256"], artifact["detector_model"])
+            detection_by_key.setdefault(key, []).append(artifact)
+        chosen_detections = []
+        for (photo_sha256, detector_model), candidates in detection_by_key.items():
+            if len(candidates) == 1:
+                chosen_detections.append(candidates[0])
+                continue
+            existing = self.db.conn.execute(
+                """SELECT dr.runtime_fingerprint
+                   FROM detector_runs dr
+                   JOIN photos p ON p.id = dr.photo_id
+                   WHERE p.file_hash = ? AND dr.detector_model = ?
+                     AND p.companion_path IS NULL
+                     AND p.working_copy_path IS NULL
+                     AND (p.flag IS NULL OR p.flag != 'rejected')
+                   LIMIT 1""",
+                (photo_sha256, detector_model),
+            ).fetchone()
+            existing_runtime = (
+                existing["runtime_fingerprint"] if existing else None
+            )
+            match = next(
+                (c for c in candidates
+                 if c["runtime_fingerprint"] == existing_runtime),
+                None,
+            )
+            chosen_detections.append(
+                match if match is not None
+                else min(
+                    candidates,
+                    key=lambda a: (a["runtime_fingerprint"], artifact_digest(a)),
+                )
+            )
+        return chosen_detections
+
+    def choose_classifications(self, classification_items):
+        """Collapse classification artifacts to one per logical run.
+
+        Classification artifacts churn the same way: every artifact for one
+        (photo, classifier, detector, labels, detector runtime, input) run
+        lands on the same ``classifier_runs`` row, so two trusted runtimes
+        would each replace the other's unreviewed predictions on every call,
+        settling on whichever sorts last. Collapse to one per logical run,
+        preferring the runtime the catalog already has installed; otherwise
+        the lowest (runtime_fingerprint, digest) among runtimes this install
+        recognizes, so the choice is stable and not a quarantined artifact.
+
+        ``input_fingerprint`` is part of the key so per-detection artifacts
+        from one photo stay separate: ``promote_and_publish_classifier_run``
+        publishes one artifact per detection, each with a different input
+        (subject/box). Grouping without it would collapse every detection's
+        classification to one, leaving the rest unclassified on every
+        reapply.
+        """
+        classification_by_key = {}
+        for artifact in classification_items:
+            key = (
+                artifact["photo_sha256"], artifact["classifier_model"],
+                artifact["detector_model"], artifact["labels"]["fingerprint"],
+                artifact["detector_runtime_fingerprint"],
+                artifact["input_fingerprint"],
+            )
+            classification_by_key.setdefault(key, []).append(artifact)
+        chosen_classifications = []
+        for key, candidates in classification_by_key.items():
+            if len(candidates) == 1:
+                chosen_classifications.append(candidates[0])
+                continue
+            chosen_classifications.append(
+                self._choose_classification(key, candidates)
+            )
+        return chosen_classifications
+
+    def _choose_classification(self, key, candidates):
         (
             photo_sha256, classifier_model, detector_model,
             _labels, _det_rt, input_fingerprint,
         ) = key
-        existing = db.conn.execute(
+        existing = self.db.conn.execute(
             """SELECT cr.runtime_fingerprint
                FROM classifier_runs cr
                JOIN detections d ON d.id = cr.detection_id
@@ -2201,74 +2248,45 @@ def materialize_artifacts(
         ).fetchone()
         match = None
         if existing is not None:
-            def _recognized(candidate):
-                # Only prefer the existing-runtime match when this install
-                # can actually reproduce it; a stale row (obsolete or
-                # foreign runtime) that pins a candidate here would be
-                # quarantined by the recognition gate below, and the
-                # recognized competitors have already been discarded, so
-                # repeated materialization would never install a usable
-                # result.
-                return _is_recognized_classifier_runtime(
-                    candidate["classifier_model"],
-                    candidate["labels"]["fingerprint"],
-                    candidate["detector_runtime_fingerprint"],
-                    candidate["runtime_fingerprint"],
-                    identity_cache, extra=known_classifier_runtimes,
-                )
+            # Only prefer the existing-runtime match when this install
+            # can actually reproduce it; a stale row (obsolete or
+            # foreign runtime) that pins a candidate here would be
+            # quarantined by the recognition gate below, and the
+            # recognized competitors have already been discarded, so
+            # repeated materialization would never install a usable
+            # result.
             match = next(
                 (c for c in candidates
                  if c["runtime_fingerprint"] == existing["runtime_fingerprint"]
-                 and _recognized(c)),
+                 and self._classifier_runtime_recognized(c)),
                 None,
             )
         if match is None:
             recognized = [
                 c for c in candidates
-                if _is_recognized_classifier_runtime(
-                    c["classifier_model"], c["labels"]["fingerprint"],
-                    c["detector_runtime_fingerprint"], c["runtime_fingerprint"],
-                    identity_cache, extra=known_classifier_runtimes,
-                )
+                if self._classifier_runtime_recognized(c)
             ]
             match = min(
                 recognized or candidates,
                 key=lambda a: (a["runtime_fingerprint"], artifact_digest(a)),
             )
-        chosen_classifications.append(match)
-    classification_items = chosen_classifications
-    # Sort each group by digest so classification order is also
-    # content-defined instead of manifest-defined.
-    chosen_detections.sort(key=artifact_digest)
-    classification_items.sort(key=artifact_digest)
-    normalized = chosen_detections + classification_items
-    result = {
-        "matched_photos": 0,
-        "detector_runs_applied": 0,
-        "classifier_runs_applied": 0,
-        "already_materialized": 0,
-        "enrichment_backfilled": 0,
-        "stored_unmatched": 0,
-        "pinned_older_runtime": 0,
-        "label_collisions": 0,
-        "unknown_runtime": 0,
-        "unknown_classifier_runtime": 0,
-        "classifier_deferred_pending_detection": 0,
-    }
-    matched_photo_ids = set()
+        return match
 
-    for artifact in normalized:
-        # v1 artifacts carry only the original ``photo_sha256`` in their
-        # input identity. When a destination photo has a
-        # ``companion_path`` (RAW+JPEG), Vireo processes the companion
-        # rendition, whose pixels can differ from the original even though
-        # both photos share the RAW's ``file_hash``. Materializing the
-        # original-only artifact onto that row would install detections
-        # and classifications for the wrong rendition, silently replacing
-        # locally correct results. Until an artifact variant declares
-        # companion or working-copy identity, skip catalog rows backed by
-        # either alternate rendition.
-        photos = db.conn.execute(
+    def matching_photos(self, artifact):
+        """Catalog rows that the artifact's original-only identity describes.
+
+        v1 artifacts carry only the original ``photo_sha256`` in their
+        input identity. When a destination photo has a
+        ``companion_path`` (RAW+JPEG), Vireo processes the companion
+        rendition, whose pixels can differ from the original even though
+        both photos share the RAW's ``file_hash``. Materializing the
+        original-only artifact onto that row would install detections
+        and classifications for the wrong rendition, silently replacing
+        locally correct results. Until an artifact variant declares
+        companion or working-copy identity, skip catalog rows backed by
+        either alternate rendition.
+        """
+        return self.db.conn.execute(
             """SELECT id FROM photos
                WHERE file_hash = ? AND companion_path IS NULL
                  AND working_copy_path IS NULL
@@ -2276,63 +2294,63 @@ def materialize_artifacts(
                ORDER BY id""",
             (artifact["photo_sha256"],),
         ).fetchall()
-        if not photos:
-            result["stored_unmatched"] += 1
-            continue
-        matched_photo_ids.update(row["id"] for row in photos)
 
-        if artifact["type"] == "detection":
-            if not _is_recognized_detector_runtime(
-                artifact["detector_model"], artifact["runtime_fingerprint"],
-                extra=known_runtimes,
+    def apply_detection(self, artifact, photos):
+        db = self.db
+        result = self.result
+        if not _is_recognized_detector_runtime(
+            artifact["detector_model"], artifact["runtime_fingerprint"],
+            extra=self.known_runtimes,
+        ):
+            # Quarantine: keep the object in the store but don't plant a
+            # detector_runs row this install cannot describe.  A future
+            # materialize call after weights install will recognize it.
+            result["unknown_runtime"] += 1
+            return
+        detections = [{
+            "box": subject["box"],
+            "confidence": subject["confidence"],
+            "category": subject["category"],
+        } for subject in artifact["subjects"]]
+        for photo in photos:
+            photo_id = photo["id"]
+            existing = db.conn.execute(
+                """SELECT runtime_fingerprint, input_fingerprint
+                   FROM detector_runs
+                   WHERE photo_id = ? AND detector_model = ?""",
+                (photo_id, artifact["detector_model"]),
+            ).fetchone()
+            if existing is not None and (
+                existing["runtime_fingerprint"] == artifact["runtime_fingerprint"]
+                and existing["input_fingerprint"] == artifact["input_fingerprint"]
             ):
-                # Quarantine: keep the object in the store but don't plant a
-                # detector_runs row this install cannot describe.  A future
-                # materialize call after weights install will recognize it.
-                result["unknown_runtime"] += 1
+                result["already_materialized"] += 1
                 continue
-            detections = [{
-                "box": subject["box"],
-                "confidence": subject["confidence"],
-                "category": subject["category"],
-            } for subject in artifact["subjects"]]
-            for photo in photos:
-                photo_id = photo["id"]
-                existing = db.conn.execute(
-                    """SELECT runtime_fingerprint, input_fingerprint
-                       FROM detector_runs
-                       WHERE photo_id = ? AND detector_model = ?""",
-                    (photo_id, artifact["detector_model"]),
-                ).fetchone()
-                if existing is not None and (
-                    existing["runtime_fingerprint"] == artifact["runtime_fingerprint"]
-                    and existing["input_fingerprint"] == artifact["input_fingerprint"]
-                ):
-                    result["already_materialized"] += 1
-                    continue
-                db.write_detection_batch(
-                    photo_id,
-                    artifact["detector_model"],
-                    detections,
-                    runtime_fingerprint=artifact["runtime_fingerprint"],
-                    input_fingerprint=artifact["input_fingerprint"],
-                )
-                current = db.conn.execute(
-                    """SELECT runtime_fingerprint, input_fingerprint
-                       FROM detector_runs
-                       WHERE photo_id = ? AND detector_model = ?""",
-                    (photo_id, artifact["detector_model"]),
-                ).fetchone()
-                if (
-                    current is None
-                    or current["runtime_fingerprint"] != artifact["runtime_fingerprint"]
-                    or current["input_fingerprint"] != artifact["input_fingerprint"]
-                ):
-                    result["pinned_older_runtime"] += 1
-                else:
-                    result["detector_runs_applied"] += 1
-            continue
+            db.write_detection_batch(
+                photo_id,
+                artifact["detector_model"],
+                detections,
+                runtime_fingerprint=artifact["runtime_fingerprint"],
+                input_fingerprint=artifact["input_fingerprint"],
+            )
+            current = db.conn.execute(
+                """SELECT runtime_fingerprint, input_fingerprint
+                   FROM detector_runs
+                   WHERE photo_id = ? AND detector_model = ?""",
+                (photo_id, artifact["detector_model"]),
+            ).fetchone()
+            if (
+                current is None
+                or current["runtime_fingerprint"] != artifact["runtime_fingerprint"]
+                or current["input_fingerprint"] != artifact["input_fingerprint"]
+            ):
+                result["pinned_older_runtime"] += 1
+            else:
+                result["detector_runs_applied"] += 1
 
+    def apply_classification(self, artifact, photos):
+        db = self.db
+        result = self.result
         labels = artifact["labels"]
         collision = db.conn.execute(
             """SELECT 1 FROM labels_fingerprints
@@ -2342,7 +2360,7 @@ def materialize_artifacts(
         ).fetchone()
         if collision and labels["short_fingerprint"] != "tol":
             result["label_collisions"] += 1
-            continue
+            return
 
         # Quarantine classification artifacts whose classifier runtime
         # this install cannot reproduce.  The detector-runtime gate above
@@ -2351,16 +2369,9 @@ def materialize_artifacts(
         # renamed model whose predictions would silently surface as
         # authoritative results.  A future materialize call after the
         # matching classifier is installed will pick these up.
-        if not _is_recognized_classifier_runtime(
-            artifact["classifier_model"],
-            labels["fingerprint"],
-            artifact["detector_runtime_fingerprint"],
-            artifact["runtime_fingerprint"],
-            identity_cache,
-            extra=known_classifier_runtimes,
-        ):
+        if not self._classifier_runtime_recognized(artifact):
             result["unknown_classifier_runtime"] += 1
-            continue
+            return
 
         for photo in photos:
             photo_id = photo["id"]
@@ -2403,178 +2414,250 @@ def materialize_artifacts(
                 )
                 applied_subjects = 0
                 for subject in artifact["subjects"]:
-                    if subject["kind"] == "full_image":
-                        detection = db.conn.execute(
-                            """SELECT id FROM detections
-                               WHERE photo_id = ? AND detector_model = 'full-image'
-                               ORDER BY id LIMIT 1""",
-                            (photo_id,),
-                        ).fetchone()
-                        detection_id = detection["id"] if detection else None
-                    else:
-                        box = subject["box"]
-                        detection_id = compute_detection_id(
-                            photo_id,
-                            artifact["detector_model"],
-                            (box["x"], box["y"], box["w"], box["h"]),
-                            subject.get("category", "animal"),
-                        )
-                        detection = db.conn.execute(
-                            "SELECT 1 FROM detections WHERE id = ?",
-                            (detection_id,),
-                        ).fetchone()
-                        if detection is None:
-                            detection_id = None
-                    if detection_id is None:
-                        continue
-                    prior = db.conn.execute(
-                        """SELECT runtime_fingerprint, input_fingerprint
-                           FROM classifier_runs
-                           WHERE detection_id = ? AND classifier_model = ?
-                             AND labels_fingerprint = ?""",
-                        (
-                            detection_id, artifact["classifier_model"],
-                            labels["short_fingerprint"],
-                        ),
-                    ).fetchone()
-                    if prior is not None and (
-                        prior["runtime_fingerprint"] == artifact["runtime_fingerprint"]
-                        and prior["input_fingerprint"] == artifact["input_fingerprint"]
+                    if self._apply_classification_subject(
+                        artifact, photo_id, subject,
+                        compute_detection_id, normalize_keyword_display,
                     ):
-                        # Same identity, but the artifact may carry match-
-                        # strength fields that were not part of the identity
-                        # and were dropped when the pre-feature version of
-                        # this same run was applied by an earlier import.
-                        # See ``_backfill_classification_enrichment``.
-                        if _backfill_classification_enrichment(
-                            db.conn, detection_id,
-                            artifact["classifier_model"],
-                            labels["short_fingerprint"], subject,
-                        ):
-                            result["enrichment_backfilled"] += 1
-                        result["already_materialized"] += 1
-                        continue
-                    if _manual_review_exists(
-                        db.conn, detection_id, artifact["classifier_model"],
-                        labels["short_fingerprint"],
-                    ):
-                        result["pinned_older_runtime"] += 1
-                        continue
-                    # Predictions can predate classifier_runs. Replace all
-                    # unreviewed candidates before certifying this artifact.
-                    db.conn.execute(
-                        """DELETE FROM predictions
-                           WHERE detection_id = ? AND classifier_model = ?
-                             AND labels_fingerprint = ?""",
-                        (
-                            detection_id, artifact["classifier_model"],
-                            labels["short_fingerprint"],
-                        ),
-                    )
-                    for candidate in subject["candidates"]:
-                        taxonomy = candidate.get("taxonomy") or {}
-                        species = normalize_keyword_display(candidate["species"])
-                        db.conn.execute(
-                            """INSERT OR IGNORE INTO predictions
-                                 (detection_id, classifier_model,
-                                  labels_fingerprint, labels_fingerprint_full,
-                                  species, confidence, category, scientific_name,
-                                  taxonomy_kingdom, taxonomy_phylum,
-                                  taxonomy_class, taxonomy_order,
-                                  taxonomy_family, taxonomy_genus, source_taxon_id,
-                                  match_score)
-                               VALUES (?, ?, ?, ?, ?, ?, 'new', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                            (
-                                detection_id, artifact["classifier_model"],
-                                labels["short_fingerprint"], labels["fingerprint"],
-                                species, candidate["confidence"],
-                                taxonomy.get("scientific_name"),
-                                taxonomy.get("kingdom"), taxonomy.get("phylum"),
-                                taxonomy.get("class"), taxonomy.get("order"),
-                                taxonomy.get("family"), taxonomy.get("genus"),
-                                taxonomy.get("taxon_id"),
-                                # Absent on artifacts published before the
-                                # field existed; NULL there means "not
-                                # recorded", never "matched badly".
-                                candidate.get("match_score"),
-                            ),
-                        )
-                    # Written alongside the classifier_runs marker below, and
-                    # for the same reason it has to be written here at all:
-                    # that marker is the re-classification gate, so a
-                    # detection materialized from cache is never inferred
-                    # again and would otherwise report "match strength not
-                    # recorded" forever despite originating from real
-                    # inference. Omitted from the artifact => no row, which is
-                    # the honest state for a pre-feature bundle.
-                    #
-                    # Delete the existing summary as part of the replacement
-                    # BEFORE the conditional insert: materializing an older
-                    # artifact (no ``match`` block) over a catalog that
-                    # already carries a score for the same
-                    # (detection, model, fingerprint) would otherwise leave
-                    # the previous runtime's score attached to the fresh
-                    # prediction rows, contradicting the "not recorded" state
-                    # the missing block is meant to express.
-                    db.conn.execute(
-                        """DELETE FROM classifier_match_scores
-                           WHERE detection_id = ? AND classifier_model = ?
-                             AND labels_fingerprint = ?""",
-                        (
-                            detection_id, artifact["classifier_model"],
-                            labels["short_fingerprint"],
-                        ),
-                    )
-                    match = subject.get("match")
-                    if match and match.get("max_match_score") is not None:
-                        db.conn.execute(
-                            """INSERT INTO classifier_match_scores
-                                 (detection_id, classifier_model,
-                                  labels_fingerprint, max_match_score,
-                                  match_margin, top_species, label_count,
-                                  score_kind)
-                               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                            (
-                                detection_id, artifact["classifier_model"],
-                                labels["short_fingerprint"],
-                                match["max_match_score"],
-                                match.get("match_margin"),
-                                match.get("top_species"),
-                                match.get("label_count"),
-                                match.get("score_kind"),
-                            ),
-                        )
-                    db.conn.execute(
-                        """INSERT INTO classifier_runs
-                             (detection_id, classifier_model, labels_fingerprint,
-                              labels_fingerprint_full, runtime_fingerprint,
-                              input_fingerprint, prediction_count, input_recipe)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                           ON CONFLICT(detection_id, classifier_model,
-                                       labels_fingerprint)
-                           DO UPDATE SET
-                             labels_fingerprint_full = excluded.labels_fingerprint_full,
-                             runtime_fingerprint = excluded.runtime_fingerprint,
-                             input_fingerprint = excluded.input_fingerprint,
-                             prediction_count = excluded.prediction_count,
-                             input_recipe = excluded.input_recipe,
-                             run_at = datetime('now')""",
-                        (
-                            detection_id, artifact["classifier_model"],
-                            labels["short_fingerprint"], labels["fingerprint"],
-                            artifact["runtime_fingerprint"],
-                            artifact["input_fingerprint"],
-                            len(subject["candidates"]), artifact.get("input_recipe"),
-                        ),
-                    )
-                    applied_subjects += 1
+                        applied_subjects += 1
                 db.conn.commit()
                 result["classifier_runs_applied"] += applied_subjects
             except Exception:
                 db.conn.rollback()
                 raise
-    result["matched_photos"] = len(matched_photo_ids)
-    return result
+
+    def _apply_classification_subject(
+        self, artifact, photo_id, subject,
+        compute_detection_id, normalize_keyword_display,
+    ):
+        """Install one subject's classification; True when a run was written."""
+        db = self.db
+        result = self.result
+        labels = artifact["labels"]
+        detection_id = self._subject_detection_id(
+            artifact, photo_id, subject, compute_detection_id,
+        )
+        if detection_id is None:
+            return False
+        prior = db.conn.execute(
+            """SELECT runtime_fingerprint, input_fingerprint
+               FROM classifier_runs
+               WHERE detection_id = ? AND classifier_model = ?
+                 AND labels_fingerprint = ?""",
+            (
+                detection_id, artifact["classifier_model"],
+                labels["short_fingerprint"],
+            ),
+        ).fetchone()
+        if prior is not None and (
+            prior["runtime_fingerprint"] == artifact["runtime_fingerprint"]
+            and prior["input_fingerprint"] == artifact["input_fingerprint"]
+        ):
+            # Same identity, but the artifact may carry match-
+            # strength fields that were not part of the identity
+            # and were dropped when the pre-feature version of
+            # this same run was applied by an earlier import.
+            # See ``_backfill_classification_enrichment``.
+            if _backfill_classification_enrichment(
+                db.conn, detection_id,
+                artifact["classifier_model"],
+                labels["short_fingerprint"], subject,
+            ):
+                result["enrichment_backfilled"] += 1
+            result["already_materialized"] += 1
+            return False
+        if _manual_review_exists(
+            db.conn, detection_id, artifact["classifier_model"],
+            labels["short_fingerprint"],
+        ):
+            result["pinned_older_runtime"] += 1
+            return False
+        self._replace_subject_classification(
+            artifact, detection_id, subject, normalize_keyword_display,
+        )
+        return True
+
+    def _subject_detection_id(
+        self, artifact, photo_id, subject, compute_detection_id,
+    ):
+        db = self.db
+        if subject["kind"] == "full_image":
+            detection = db.conn.execute(
+                """SELECT id FROM detections
+                   WHERE photo_id = ? AND detector_model = 'full-image'
+                   ORDER BY id LIMIT 1""",
+                (photo_id,),
+            ).fetchone()
+            detection_id = detection["id"] if detection else None
+        else:
+            box = subject["box"]
+            detection_id = compute_detection_id(
+                photo_id,
+                artifact["detector_model"],
+                (box["x"], box["y"], box["w"], box["h"]),
+                subject.get("category", "animal"),
+            )
+            detection = db.conn.execute(
+                "SELECT 1 FROM detections WHERE id = ?",
+                (detection_id,),
+            ).fetchone()
+            if detection is None:
+                detection_id = None
+        return detection_id
+
+    def _replace_subject_classification(
+        self, artifact, detection_id, subject, normalize_keyword_display,
+    ):
+        db = self.db
+        labels = artifact["labels"]
+        # Predictions can predate classifier_runs. Replace all
+        # unreviewed candidates before certifying this artifact.
+        db.conn.execute(
+            """DELETE FROM predictions
+               WHERE detection_id = ? AND classifier_model = ?
+                 AND labels_fingerprint = ?""",
+            (
+                detection_id, artifact["classifier_model"],
+                labels["short_fingerprint"],
+            ),
+        )
+        for candidate in subject["candidates"]:
+            taxonomy = candidate.get("taxonomy") or {}
+            species = normalize_keyword_display(candidate["species"])
+            db.conn.execute(
+                """INSERT OR IGNORE INTO predictions
+                     (detection_id, classifier_model,
+                      labels_fingerprint, labels_fingerprint_full,
+                      species, confidence, category, scientific_name,
+                      taxonomy_kingdom, taxonomy_phylum,
+                      taxonomy_class, taxonomy_order,
+                      taxonomy_family, taxonomy_genus, source_taxon_id,
+                      match_score)
+                   VALUES (?, ?, ?, ?, ?, ?, 'new', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    detection_id, artifact["classifier_model"],
+                    labels["short_fingerprint"], labels["fingerprint"],
+                    species, candidate["confidence"],
+                    taxonomy.get("scientific_name"),
+                    taxonomy.get("kingdom"), taxonomy.get("phylum"),
+                    taxonomy.get("class"), taxonomy.get("order"),
+                    taxonomy.get("family"), taxonomy.get("genus"),
+                    taxonomy.get("taxon_id"),
+                    # Absent on artifacts published before the
+                    # field existed; NULL there means "not
+                    # recorded", never "matched badly".
+                    candidate.get("match_score"),
+                ),
+            )
+        # Written alongside the classifier_runs marker below, and
+        # for the same reason it has to be written here at all:
+        # that marker is the re-classification gate, so a
+        # detection materialized from cache is never inferred
+        # again and would otherwise report "match strength not
+        # recorded" forever despite originating from real
+        # inference. Omitted from the artifact => no row, which is
+        # the honest state for a pre-feature bundle.
+        #
+        # Delete the existing summary as part of the replacement
+        # BEFORE the conditional insert: materializing an older
+        # artifact (no ``match`` block) over a catalog that
+        # already carries a score for the same
+        # (detection, model, fingerprint) would otherwise leave
+        # the previous runtime's score attached to the fresh
+        # prediction rows, contradicting the "not recorded" state
+        # the missing block is meant to express.
+        db.conn.execute(
+            """DELETE FROM classifier_match_scores
+               WHERE detection_id = ? AND classifier_model = ?
+                 AND labels_fingerprint = ?""",
+            (
+                detection_id, artifact["classifier_model"],
+                labels["short_fingerprint"],
+            ),
+        )
+        match = subject.get("match")
+        if match and match.get("max_match_score") is not None:
+            db.conn.execute(
+                """INSERT INTO classifier_match_scores
+                     (detection_id, classifier_model,
+                      labels_fingerprint, max_match_score,
+                      match_margin, top_species, label_count,
+                      score_kind)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    detection_id, artifact["classifier_model"],
+                    labels["short_fingerprint"],
+                    match["max_match_score"],
+                    match.get("match_margin"),
+                    match.get("top_species"),
+                    match.get("label_count"),
+                    match.get("score_kind"),
+                ),
+            )
+        db.conn.execute(
+            """INSERT INTO classifier_runs
+                 (detection_id, classifier_model, labels_fingerprint,
+                  labels_fingerprint_full, runtime_fingerprint,
+                  input_fingerprint, prediction_count, input_recipe)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(detection_id, classifier_model,
+                           labels_fingerprint)
+               DO UPDATE SET
+                 labels_fingerprint_full = excluded.labels_fingerprint_full,
+                 runtime_fingerprint = excluded.runtime_fingerprint,
+                 input_fingerprint = excluded.input_fingerprint,
+                 prediction_count = excluded.prediction_count,
+                 input_recipe = excluded.input_recipe,
+                 run_at = datetime('now')""",
+            (
+                detection_id, artifact["classifier_model"],
+                labels["short_fingerprint"], labels["fingerprint"],
+                artifact["runtime_fingerprint"],
+                artifact["input_fingerprint"],
+                len(subject["candidates"]), artifact.get("input_recipe"),
+            ),
+        )
+
+
+def materialize_artifacts(
+    db, artifacts, known_runtimes=None, known_classifier_runtimes=None,
+):
+    """Apply portable output to every matching non-rejected catalog row.
+
+    Review rows are never inserted.  Existing matching materializations are
+    left alone, so a later artifact cannot churn already-surfaced results.
+
+    ``known_runtimes`` extends the built-in whitelist of DETECTOR runtimes
+    this install recognizes.  ``known_classifier_runtimes`` does the same
+    for classifier runtimes — callers with additional trust context (a
+    classify job that just resolved its own runtime) pass them here so
+    the built-in local check does not have to grow special cases.
+    """
+    normalized = [validate_artifact(artifact) for artifact in artifacts]
+    detection_items, classification_items = _dedup_artifacts(normalized)
+    run = _ArtifactMaterialization(
+        db, known_runtimes, known_classifier_runtimes,
+    )
+    chosen_detections = run.choose_detections(detection_items)
+    classification_items = run.choose_classifications(classification_items)
+    # Sort each group by digest so classification order is also
+    # content-defined instead of manifest-defined.
+    chosen_detections.sort(key=artifact_digest)
+    classification_items.sort(key=artifact_digest)
+    normalized = chosen_detections + classification_items
+
+    for artifact in normalized:
+        photos = run.matching_photos(artifact)
+        if not photos:
+            run.result["stored_unmatched"] += 1
+            continue
+        run.matched_photo_ids.update(row["id"] for row in photos)
+
+        if artifact["type"] == "detection":
+            run.apply_detection(artifact, photos)
+            continue
+        run.apply_classification(artifact, photos)
+    run.result["matched_photos"] = len(run.matched_photo_ids)
+    return run.result
 
 
 def materialize_local_store(
