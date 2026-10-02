@@ -6,6 +6,7 @@ import os
 import queue
 import sqlite3
 import time
+from dataclasses import dataclass
 
 from artifact_flight import ArtifactProducerFailed
 from camera_denoise import cache_matches as _camera_cache_matches
@@ -45,371 +46,460 @@ def thumbnail_stage(
     run.stages["thumbnails"]["status"] = "running"
     run.runner.update_step(run.job["id"], "thumbnails", status="running")
     run.update_stages(run.runner, run.job["id"], run.stages)
+    thumbs = _ThumbPass(
+        run,
+        raw_extensions=_RAW_EXTENSIONS,
+        sentinel=_SENTINEL,
+        filter_excluded=_filter_excluded,
+        recipe_render_source=_recipe_render_source,
+        retry_thumbnail_with_companion=_retry_thumbnail_with_companion,
+        retry_thumbnail_with_working_copy=_retry_thumbnail_with_working_copy,
+        thumb_min_source_size_kwargs=_thumb_min_source_size_kwargs,
+        thumb_raw_decode_kwargs=_thumb_raw_decode_kwargs,
+        effective_thumb_cache_dir=effective_thumb_cache_dir,
+        effective_vireo_dir=effective_vireo_dir,
+        scan_to_thumb=scan_to_thumb,
+    )
     try:
-        from thumbnails import (
-            _is_working_copy_source,
-            _retry_thumbnail_after_working_copy_eviction,
-            generate_thumbnail,
-        )
-
-        thread_db = run.database_factory(run.db_path)
-        thread_db.set_active_workspace(run.workspace_id)
-
-        import config as cfg
-        effective_cfg = thread_db.get_effective_config(cfg.load())
-        thumb_size = effective_cfg.get("display", {}).get("thumbnail_size", 300)
-
-        # Write thumbnails to the configured cache dir so custom
-        # --thumb-dir layouts receive the files the Flask serve
-        # route (reading from app.config["THUMB_CACHE_DIR"]) will
-        # look for. Falls back to <db_dir>/thumbnails only when the
-        # caller passed no explicit override.
-        cache_dir = effective_thumb_cache_dir
-        os.makedirs(cache_dir, exist_ok=True)
-
-        generated = 0
-        skipped = 0
-        failed = 0
-        failed_photos = []
-        failure_detail_limit = 100
-
-        def _record_failure(photo_id, photo_path, reason):
-            if len(failed_photos) >= failure_detail_limit:
-                return
-            failed_photos.append({
-                "id": photo_id,
-                "filename": os.path.basename(photo_path or ""),
-                "reason": reason,
-            })
-
-        # Mark photos.thumb_path so the dashboard's coverage query
-        # (`thumb_path IS NOT NULL`) reflects each freshly-generated or
-        # already-cached thumbnail. Batched so the writer lock isn't held
-        # per-row under sustained scan throughput.
-        THUMB_PATH_BATCH = 25
-        pending_thumb_paths = []
-
-        def _flush_thumb_paths():
-            if pending_thumb_paths:
-                thread_db.conn.executemany(
-                    "UPDATE photos SET thumb_path=? WHERE id=?",
-                    pending_thumb_paths,
-                )
-                commit_with_retry(thread_db.conn)
-                pending_thumb_paths.clear()
-
-        while True:
-            # Continue draining after cancellation, but park before
-            # taking another item when the whole pipeline is paused.
-            run.control.pause_checkpoint()
-            try:
-                item = scan_to_thumb.get(timeout=1.0)
-            except queue.Empty:
-                # Keep draining even if abort is set -- we want thumbnails
-                # for any photos already scanned. Only stop on sentinel.
-                if run.control.should_abort(run.abort) and scan_to_thumb.empty():
-                    break
-                continue
-            if item is _SENTINEL:
-                break
-            photo_id, photo_path = item
-            try:
-                thumb_path = os.path.join(cache_dir, f"{photo_id}.jpg")
-                already_exists = os.path.exists(thumb_path)
-                recipe = thread_db.get_photo_edit_recipe(photo_id)
-                detail_photo = None
-                if recipe:
-                    detail_photo = thread_db.get_photo(photo_id)
-                    if detail_photo:
-                        folder_row = thread_db.get_folder(detail_photo["folder_id"])
-                        folders = (
-                            {folder_row["id"]: folder_row["path"]}
-                            if folder_row else {}
-                        )
-                        photo_path = _recipe_render_source(
-                            detail_photo,
-                            recipe,
-                            thumb_size,
-                            effective_vireo_dir,
-                            folders,
-                        )
-                        if (
-                            os.path.splitext(photo_path)[1].lower() in _RAW_EXTENSIONS
-                            and _has_current_working_copy_failure(
-                                detail_photo,
-                                effective_vireo_dir,
-                                trust_existing_working_copy=False,
-                                live_source_path=photo_path,
-                                folder_path=folders.get(detail_photo["folder_id"]),
-                            )
-                        ):
-                            failed += 1
-                            _record_failure(
-                                photo_id, photo_path,
-                                "RAW decode previously failed and no "
-                                "acceptable fallback is available",
-                            )
-                            run.stages["thumbnails"]["count"] = (
-                                generated + skipped + failed
-                            )
-                            continue
-                recipe_kwargs = {"recipe": recipe} if recipe else {}
-                if recipe:
-                    recipe_kwargs["camera_metadata"] = detail_photo
-                    recipe_kwargs["native_size"] = (
-                        _recipe_source_dimensions(detail_photo)
-                    )
-                raw_decode_kwargs = _thumb_raw_decode_kwargs(
-                    detail_photo, recipe,
-                )
-                min_size_kwargs = _thumb_min_source_size_kwargs(
-                    detail_photo, recipe, thumb_size, photo_path,
-                )
-                result_path = generate_thumbnail(
-                    photo_id,
-                    photo_path,
-                    cache_dir,
-                    size=thumb_size,
-                    **recipe_kwargs,
-                    **raw_decode_kwargs,
-                    **min_size_kwargs,
-                )
-                if (
-                    result_path is None
-                    and detail_photo is not None
-                    and _is_working_copy_source(
-                        detail_photo,
-                        photo_path,
-                        effective_vireo_dir,
-                    )
-                ):
-                    result_path, photo_path = (
-                        _retry_thumbnail_after_working_copy_eviction(
-                            detail_photo,
-                            photo_path,
-                            cache_dir,
-                            thumb_size,
-                            85,
-                            recipe,
-                            folders.get(detail_photo["folder_id"]),
-                            effective_vireo_dir,
-                        )
-                    )
-                if (
-                    result_path is None
-                    and detail_photo is not None
-                    and os.path.splitext(photo_path)[1].lower() in _RAW_EXTENSIONS
-                ):
-                    result_path = _retry_thumbnail_with_companion(
-                        thread_db, generate_thumbnail, detail_photo,
-                        photo_id, photo_path, cache_dir, thumb_size,
-                        recipe, folders.get(detail_photo["folder_id"]),
-                    )
-                if (
-                    result_path is None
-                    and detail_photo is not None
-                    and os.path.splitext(photo_path)[1].lower() in _RAW_EXTENSIONS
-                ):
-                    result_path = _retry_thumbnail_with_working_copy(
-                        thread_db, generate_thumbnail, detail_photo,
-                        photo_id, photo_path, cache_dir, thumb_size,
-                        recipe, effective_vireo_dir,
-                    )
-                if result_path is None:
-                    failed += 1
-                    _record_failure(
-                        photo_id, photo_path,
-                        "No acceptable thumbnail render source",
-                    )
-                elif already_exists:
-                    skipped += 1
-                    pending_thumb_paths.append((f"{photo_id}.jpg", photo_id))
-                else:
-                    generated += 1
-                    pending_thumb_paths.append((f"{photo_id}.jpg", photo_id))
-                if len(pending_thumb_paths) >= THUMB_PATH_BATCH:
-                    _flush_thumb_paths()
-            except Exception as exc:
-                failed += 1
-                _record_failure(photo_id, photo_path, str(exc))
-                log.debug(
-                    "Thumbnail failed for photo %s", photo_id,
-                    exc_info=True,
-                )
-            # Include failed in the progress counter so the dashboard
-            # reflects all work attempted, not just successes. Mixed
-            # success/failure must not hide behind a 0/N progress bar.
-            run.stages["thumbnails"]["count"] = generated + skipped + failed
-            processed = generated + skipped + failed
-            # Use scan count directly regardless of whether scan has
-            # completed yet — this avoids the total staying at 0/? when
-            # the thumbnail worker catches up with scan before scan's
-            # status flips to "completed".
-            scan_total = run.stages["scan"].get("count", 0)
-            run.stages["thumbnails"]["total"] = scan_total
-            run.runner.update_step(run.job["id"], "thumbnails",
-                               current_file=os.path.basename(photo_path),
-                               progress={"current": processed, "total": scan_total})
-            elapsed = time.time() - run.job["_start_time"]
-            rate = round(processed / max(elapsed, 0.01) * 60, 1)
-            run.emit_progress(
-                run.runner, run.job["id"], run.stages, "thumbnails", "Generating thumbnails",
-                current_file=os.path.basename(photo_path),
-                rate=rate,
-            )
+        thumbs.setup()
+        thumbs.drain_scan_queue()
 
         # Collection mode: the scanner is skipped so the queue above was
         # empty. Iterate the collection's photos directly — mirrors the
         # pattern used by previews_stage — so replays against an existing
         # collection still regenerate any missing thumbs.
         if skip_scan and run.collection_id:
-            coll_photos = _filter_excluded(
-                thread_db.get_collection_photos(run.collection_id, per_page=999999)
+            thumbs.thumbnail_collection()
+
+        thumbs.finish()
+    except Exception as e:
+        run.errors.append(f"[thumbnails] Fatal: {e}")
+        log.exception("Pipeline thumbnail stage failed")
+        run.stages["thumbnails"]["status"] = "failed"
+        run.runner.update_step(run.job["id"], "thumbnails", status="failed", error=str(e))
+        # This stage is the sole consumer of scan_to_thumb. Anything
+        # above can raise BEFORE the drain loop (import, Database(),
+        # cfg.load(), os.makedirs) — if we just returned, the scanner
+        # would eventually block forever in put() once the queue fills,
+        # wedging threads["scanner"].join() and leaking a pipeline slot
+        # until restart. Set abort so the scanner stops producing, then
+        # drain whatever is already queued. Stop at the sentinel, or
+        # when the queue stays empty (the sentinel may already have
+        # been consumed by the main loop before a late failure; with
+        # abort set, photo_cb no longer blocks, so breaking on Empty
+        # is safe).
+        run.abort.set()
+        while True:
+            try:
+                item = scan_to_thumb.get(timeout=1.0)
+            except queue.Empty:
+                break
+            if item is _SENTINEL:
+                break
+    run.update_stages(run.runner, run.job["id"], run.stages)
+
+
+# Mark photos.thumb_path so the dashboard's coverage query
+# (`thumb_path IS NOT NULL`) reflects each freshly-generated or
+# already-cached thumbnail. Batched so the writer lock isn't held
+# per-row under sustained scan throughput.
+_THUMB_PATH_BATCH = 25
+_FAILURE_DETAIL_LIMIT = 100
+
+
+@dataclass
+class _ThumbPhoto:
+    """One photo being thumbnailed: its render source and edit recipe."""
+
+    photo_id: int
+    photo_path: str
+    already_exists: bool = False
+    recipe: object = None
+    detail_photo: object = None
+    folders: dict = None
+
+
+class _ThumbPass:
+    """State shared across one thumbnails stage run."""
+
+    def __init__(
+        self,
+        run,
+        *,
+        raw_extensions,
+        sentinel,
+        filter_excluded,
+        recipe_render_source,
+        retry_thumbnail_with_companion,
+        retry_thumbnail_with_working_copy,
+        thumb_min_source_size_kwargs,
+        thumb_raw_decode_kwargs,
+        effective_thumb_cache_dir,
+        effective_vireo_dir,
+        scan_to_thumb,
+    ):
+        self.run = run
+        self.raw_extensions = raw_extensions
+        self.sentinel = sentinel
+        self.filter_excluded = filter_excluded
+        self.recipe_render_source = recipe_render_source
+        self.retry_thumbnail_with_companion = retry_thumbnail_with_companion
+        self.retry_thumbnail_with_working_copy = retry_thumbnail_with_working_copy
+        self.thumb_min_source_size_kwargs = thumb_min_source_size_kwargs
+        self.thumb_raw_decode_kwargs = thumb_raw_decode_kwargs
+        self.effective_thumb_cache_dir = effective_thumb_cache_dir
+        self.effective_vireo_dir = effective_vireo_dir
+        self.scan_to_thumb = scan_to_thumb
+
+        self.generated = 0
+        self.skipped = 0
+        self.failed = 0
+        self.failed_photos = []
+        self.pending_thumb_paths = []
+
+    def setup(self):
+        from thumbnails import (
+            _is_working_copy_source,
+            _retry_thumbnail_after_working_copy_eviction,
+            generate_thumbnail,
+        )
+
+        self.is_working_copy_source = _is_working_copy_source
+        self.retry_thumbnail_after_working_copy_eviction = (
+            _retry_thumbnail_after_working_copy_eviction
+        )
+        self.generate_thumbnail = generate_thumbnail
+
+        self.thread_db = self.run.database_factory(self.run.db_path)
+        self.thread_db.set_active_workspace(self.run.workspace_id)
+
+        import config as cfg
+        effective_cfg = self.thread_db.get_effective_config(cfg.load())
+        self.thumb_size = effective_cfg.get("display", {}).get("thumbnail_size", 300)
+
+        # Write thumbnails to the configured cache dir so custom
+        # --thumb-dir layouts receive the files the Flask serve
+        # route (reading from app.config["THUMB_CACHE_DIR"]) will
+        # look for. Falls back to <db_dir>/thumbnails only when the
+        # caller passed no explicit override.
+        self.cache_dir = self.effective_thumb_cache_dir
+        os.makedirs(self.cache_dir, exist_ok=True)
+
+    # -- bookkeeping -------------------------------------------------
+
+    def _record_failure(self, photo_id, photo_path, reason):
+        if len(self.failed_photos) >= _FAILURE_DETAIL_LIMIT:
+            return
+        self.failed_photos.append({
+            "id": photo_id,
+            "filename": os.path.basename(photo_path or ""),
+            "reason": reason,
+        })
+
+    def _flush_thumb_paths(self):
+        if self.pending_thumb_paths:
+            self.thread_db.conn.executemany(
+                "UPDATE photos SET thumb_path=? WHERE id=?",
+                self.pending_thumb_paths,
             )
-            folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
-            total = len(coll_photos)
-            for photo in coll_photos:
-                if run.control.should_abort(run.abort):
+            commit_with_retry(self.thread_db.conn)
+            self.pending_thumb_paths.clear()
+
+    def _report_progress(self, photo_path, total):
+        # Include failed in the progress counter so the dashboard
+        # reflects all work attempted, not just successes. Mixed
+        # success/failure must not hide behind a 0/N progress bar.
+        processed = self.generated + self.skipped + self.failed
+        self.run.stages["thumbnails"]["count"] = processed
+        self.run.stages["thumbnails"]["total"] = total
+        self.run.runner.update_step(
+            self.run.job["id"], "thumbnails",
+            current_file=os.path.basename(photo_path),
+            progress={"current": processed, "total": total},
+        )
+        elapsed = time.time() - self.run.job["_start_time"]
+        rate = round(processed / max(elapsed, 0.01) * 60, 1)
+        self.run.emit_progress(
+            self.run.runner, self.run.job["id"], self.run.stages, "thumbnails",
+            "Generating thumbnails",
+            current_file=os.path.basename(photo_path),
+            rate=rate,
+        )
+
+    # -- scan queue --------------------------------------------------
+
+    def drain_scan_queue(self):
+        run = self.run
+        while True:
+            # Continue draining after cancellation, but park before
+            # taking another item when the whole pipeline is paused.
+            run.control.pause_checkpoint()
+            try:
+                item = self.scan_to_thumb.get(timeout=1.0)
+            except queue.Empty:
+                # Keep draining even if abort is set -- we want thumbnails
+                # for any photos already scanned. Only stop on sentinel.
+                if run.control.should_abort(run.abort) and self.scan_to_thumb.empty():
                     break
-                photo_id = photo["id"]
-                folder_path = folders.get(photo["folder_id"], "")
-                photo_path = os.path.join(folder_path, photo["filename"])
-                thumb_path = os.path.join(cache_dir, f"{photo_id}.jpg")
-                already_exists = os.path.exists(thumb_path)
-                try:
-                    recipe = thread_db.get_photo_edit_recipe(photo_id)
-                    detail_photo = None
-                    if recipe:
-                        detail_photo = thread_db.get_photo(photo_id) or photo
-                        photo_path = _recipe_render_source(
-                            detail_photo,
-                            recipe,
-                            thumb_size,
-                            effective_vireo_dir,
-                            folders,
-                        )
-                        if (
-                            os.path.splitext(photo_path)[1].lower() in _RAW_EXTENSIONS
-                            and _has_current_working_copy_failure(
-                                detail_photo,
-                                effective_vireo_dir,
-                                trust_existing_working_copy=False,
-                                live_source_path=photo_path,
-                                folder_path=folders.get(detail_photo["folder_id"]),
-                            )
-                        ):
-                            failed += 1
-                            _record_failure(
-                                photo_id, photo_path,
-                                "RAW decode previously failed and no "
-                                "acceptable fallback is available",
-                            )
-                            run.stages["thumbnails"]["count"] = (
-                                generated + skipped + failed
-                            )
-                            continue
-                    recipe_kwargs = {"recipe": recipe} if recipe else {}
-                    if recipe:
-                        recipe_kwargs["camera_metadata"] = detail_photo
-                        recipe_kwargs["native_size"] = (
-                            _recipe_source_dimensions(detail_photo)
-                        )
-                    raw_decode_kwargs = _thumb_raw_decode_kwargs(
-                        detail_photo, recipe,
-                    )
-                    min_size_kwargs = _thumb_min_source_size_kwargs(
-                        detail_photo, recipe, thumb_size, photo_path,
-                    )
-                    result_path = generate_thumbnail(
-                        photo_id,
-                        photo_path,
-                        cache_dir,
-                        size=thumb_size,
-                        **recipe_kwargs,
-                        **raw_decode_kwargs,
-                        **min_size_kwargs,
-                    )
-                    if (
-                        result_path is None
-                        and detail_photo is not None
-                        and _is_working_copy_source(
-                            detail_photo,
-                            photo_path,
-                            effective_vireo_dir,
-                        )
-                    ):
-                        result_path, photo_path = (
-                            _retry_thumbnail_after_working_copy_eviction(
-                                detail_photo,
-                                photo_path,
-                                cache_dir,
-                                thumb_size,
-                                85,
-                                recipe,
-                                folder_path,
-                                effective_vireo_dir,
-                            )
-                        )
-                    if (
-                        result_path is None
-                        and os.path.splitext(photo_path)[1].lower() in _RAW_EXTENSIONS
-                    ):
-                        fallback_photo = detail_photo or photo
-                        result_path = _retry_thumbnail_with_companion(
-                            thread_db, generate_thumbnail, fallback_photo,
-                            photo_id, photo_path, cache_dir, thumb_size,
-                            recipe, folder_path,
-                        )
-                    if (
-                        result_path is None
-                        and detail_photo is not None
-                        and os.path.splitext(photo_path)[1].lower() in _RAW_EXTENSIONS
-                    ):
-                        result_path = _retry_thumbnail_with_working_copy(
-                            thread_db, generate_thumbnail, detail_photo,
-                            photo_id, photo_path, cache_dir, thumb_size,
-                            recipe, effective_vireo_dir,
-                        )
-                    if result_path is None:
-                        failed += 1
-                        _record_failure(
-                            photo_id, photo_path,
-                            "No acceptable thumbnail render source",
-                        )
-                    elif already_exists:
-                        skipped += 1
-                        pending_thumb_paths.append((f"{photo_id}.jpg", photo_id))
-                    else:
-                        generated += 1
-                        pending_thumb_paths.append((f"{photo_id}.jpg", photo_id))
-                    if len(pending_thumb_paths) >= THUMB_PATH_BATCH:
-                        _flush_thumb_paths()
-                except Exception as exc:
-                    failed += 1
-                    _record_failure(photo_id, photo_path, str(exc))
-                    log.debug(
-                        "Thumbnail failed for photo %s", photo_id,
-                        exc_info=True,
-                    )
-                run.stages["thumbnails"]["count"] = generated + skipped + failed
-                run.stages["thumbnails"]["total"] = total
-                processed = generated + skipped + failed
-                run.runner.update_step(
-                    run.job["id"], "thumbnails",
-                    current_file=os.path.basename(photo_path),
-                    progress={"current": processed, "total": total},
+                continue
+            if item is self.sentinel:
+                break
+            photo_id, photo_path = item
+            thumb = _ThumbPhoto(photo_id, photo_path)
+            try:
+                if not self._thumbnail_scanned_photo(thumb):
+                    continue
+            except Exception as exc:
+                self.failed += 1
+                self._record_failure(thumb.photo_id, thumb.photo_path, str(exc))
+                log.debug(
+                    "Thumbnail failed for photo %s", thumb.photo_id,
+                    exc_info=True,
                 )
-                elapsed = time.time() - run.job["_start_time"]
-                rate = round(processed / max(elapsed, 0.01) * 60, 1)
-                run.emit_progress(
-                    run.runner, run.job["id"], run.stages, "thumbnails", "Generating thumbnails",
-                    current_file=os.path.basename(photo_path),
-                    rate=rate,
-                )
+            # Use scan count directly regardless of whether scan has
+            # completed yet — this avoids the total staying at 0/? when
+            # the thumbnail worker catches up with scan before scan's
+            # status flips to "completed".
+            scan_total = run.stages["scan"].get("count", 0)
+            self._report_progress(thumb.photo_path, scan_total)
 
+    def _thumbnail_scanned_photo(self, thumb):
+        """Thumbnail one photo taken from the scan queue.
+
+        Returns False when the photo was already counted as failed and
+        the per-photo progress update must be skipped.
+        """
+        thumb_path = os.path.join(self.cache_dir, f"{thumb.photo_id}.jpg")
+        thumb.already_exists = os.path.exists(thumb_path)
+        thumb.recipe = self.thread_db.get_photo_edit_recipe(thumb.photo_id)
+        if thumb.recipe:
+            thumb.detail_photo = self.thread_db.get_photo(thumb.photo_id)
+            if thumb.detail_photo:
+                folder_row = self.thread_db.get_folder(thumb.detail_photo["folder_id"])
+                thumb.folders = (
+                    {folder_row["id"]: folder_row["path"]}
+                    if folder_row else {}
+                )
+                if not self._resolve_recipe_source(thumb, thumb.folders):
+                    return False
+        result_path = self._generate(thumb)
+        detail_photo = thumb.detail_photo
+        if (
+            result_path is None
+            and detail_photo is not None
+            and self.is_working_copy_source(
+                detail_photo,
+                thumb.photo_path,
+                self.effective_vireo_dir,
+            )
+        ):
+            result_path = self._retry_after_working_copy_eviction(
+                thumb, thumb.folders.get(detail_photo["folder_id"]),
+            )
+        if (
+            result_path is None
+            and detail_photo is not None
+            and self._is_raw(thumb.photo_path)
+        ):
+            result_path = self._retry_with_companion(
+                thumb, detail_photo, thumb.folders.get(detail_photo["folder_id"]),
+            )
+        result_path = self._retry_with_working_copy(thumb, result_path)
+        self._tally(thumb, result_path)
+        return True
+
+    # -- collection replay -------------------------------------------
+
+    def thumbnail_collection(self):
+        run = self.run
+        coll_photos = self.filter_excluded(
+            self.thread_db.get_collection_photos(run.collection_id, per_page=999999)
+        )
+        folders = {f["id"]: f["path"] for f in self.thread_db.get_folder_tree()}
+        total = len(coll_photos)
+        for photo in coll_photos:
+            if run.control.should_abort(run.abort):
+                break
+            photo_id = photo["id"]
+            folder_path = folders.get(photo["folder_id"], "")
+            thumb = _ThumbPhoto(photo_id, os.path.join(folder_path, photo["filename"]))
+            thumb_path = os.path.join(self.cache_dir, f"{photo_id}.jpg")
+            thumb.already_exists = os.path.exists(thumb_path)
+            try:
+                if not self._thumbnail_collection_photo(thumb, photo, folders, folder_path):
+                    continue
+            except Exception as exc:
+                self.failed += 1
+                self._record_failure(thumb.photo_id, thumb.photo_path, str(exc))
+                log.debug(
+                    "Thumbnail failed for photo %s", thumb.photo_id,
+                    exc_info=True,
+                )
+            self._report_progress(thumb.photo_path, total)
+
+    def _thumbnail_collection_photo(self, thumb, photo, folders, folder_path):
+        """Thumbnail one photo of the replayed collection.
+
+        Returns False when the photo was already counted as failed and
+        the per-photo progress update must be skipped.
+        """
+        thumb.recipe = self.thread_db.get_photo_edit_recipe(thumb.photo_id)
+        if thumb.recipe:
+            thumb.detail_photo = self.thread_db.get_photo(thumb.photo_id) or photo
+            if not self._resolve_recipe_source(thumb, folders):
+                return False
+        result_path = self._generate(thumb)
+        detail_photo = thumb.detail_photo
+        if (
+            result_path is None
+            and detail_photo is not None
+            and self.is_working_copy_source(
+                detail_photo,
+                thumb.photo_path,
+                self.effective_vireo_dir,
+            )
+        ):
+            result_path = self._retry_after_working_copy_eviction(
+                thumb, folder_path,
+            )
+        if (
+            result_path is None
+            and self._is_raw(thumb.photo_path)
+        ):
+            fallback_photo = detail_photo or photo
+            result_path = self._retry_with_companion(
+                thumb, fallback_photo, folder_path,
+            )
+        result_path = self._retry_with_working_copy(thumb, result_path)
+        self._tally(thumb, result_path)
+        return True
+
+    # -- per-photo render --------------------------------------------
+
+    def _is_raw(self, path):
+        return os.path.splitext(path)[1].lower() in self.raw_extensions
+
+    def _resolve_recipe_source(self, thumb, folders):
+        """Point an edited photo at its recipe render source.
+
+        Returns False, after counting the photo as failed, when that
+        source is a RAW whose decode previously failed with no
+        acceptable fallback.
+        """
+        thumb.photo_path = self.recipe_render_source(
+            thumb.detail_photo,
+            thumb.recipe,
+            self.thumb_size,
+            self.effective_vireo_dir,
+            folders,
+        )
+        if (
+            self._is_raw(thumb.photo_path)
+            and _has_current_working_copy_failure(
+                thumb.detail_photo,
+                self.effective_vireo_dir,
+                trust_existing_working_copy=False,
+                live_source_path=thumb.photo_path,
+                folder_path=folders.get(thumb.detail_photo["folder_id"]),
+            )
+        ):
+            self.failed += 1
+            self._record_failure(
+                thumb.photo_id, thumb.photo_path,
+                "RAW decode previously failed and no "
+                "acceptable fallback is available",
+            )
+            self.run.stages["thumbnails"]["count"] = (
+                self.generated + self.skipped + self.failed
+            )
+            return False
+        return True
+
+    def _generate(self, thumb):
+        recipe = thumb.recipe
+        detail_photo = thumb.detail_photo
+        recipe_kwargs = {"recipe": recipe} if recipe else {}
+        if recipe:
+            recipe_kwargs["camera_metadata"] = detail_photo
+            recipe_kwargs["native_size"] = (
+                _recipe_source_dimensions(detail_photo)
+            )
+        raw_decode_kwargs = self.thumb_raw_decode_kwargs(
+            detail_photo, recipe,
+        )
+        min_size_kwargs = self.thumb_min_source_size_kwargs(
+            detail_photo, recipe, self.thumb_size, thumb.photo_path,
+        )
+        return self.generate_thumbnail(
+            thumb.photo_id,
+            thumb.photo_path,
+            self.cache_dir,
+            size=self.thumb_size,
+            **recipe_kwargs,
+            **raw_decode_kwargs,
+            **min_size_kwargs,
+        )
+
+    def _retry_after_working_copy_eviction(self, thumb, folder_path):
+        result_path, thumb.photo_path = (
+            self.retry_thumbnail_after_working_copy_eviction(
+                thumb.detail_photo,
+                thumb.photo_path,
+                self.cache_dir,
+                self.thumb_size,
+                85,
+                thumb.recipe,
+                folder_path,
+                self.effective_vireo_dir,
+            )
+        )
+        return result_path
+
+    def _retry_with_companion(self, thumb, fallback_photo, folder_path):
+        return self.retry_thumbnail_with_companion(
+            self.thread_db, self.generate_thumbnail, fallback_photo,
+            thumb.photo_id, thumb.photo_path, self.cache_dir, self.thumb_size,
+            thumb.recipe, folder_path,
+        )
+
+    def _retry_with_working_copy(self, thumb, result_path):
+        if (
+            result_path is None
+            and thumb.detail_photo is not None
+            and self._is_raw(thumb.photo_path)
+        ):
+            result_path = self.retry_thumbnail_with_working_copy(
+                self.thread_db, self.generate_thumbnail, thumb.detail_photo,
+                thumb.photo_id, thumb.photo_path, self.cache_dir, self.thumb_size,
+                thumb.recipe, self.effective_vireo_dir,
+            )
+        return result_path
+
+    def _tally(self, thumb, result_path):
+        if result_path is None:
+            self.failed += 1
+            self._record_failure(
+                thumb.photo_id, thumb.photo_path,
+                "No acceptable thumbnail render source",
+            )
+        elif thumb.already_exists:
+            self.skipped += 1
+            self.pending_thumb_paths.append((f"{thumb.photo_id}.jpg", thumb.photo_id))
+        else:
+            self.generated += 1
+            self.pending_thumb_paths.append((f"{thumb.photo_id}.jpg", thumb.photo_id))
+        if len(self.pending_thumb_paths) >= _THUMB_PATH_BATCH:
+            self._flush_thumb_paths()
+
+    # -- finish ------------------------------------------------------
+
+    def finish(self):
+        run = self.run
         # Flush any thumb_path updates from the final partial batch.
-        _flush_thumb_paths()
+        self._flush_thumb_paths()
 
+        generated, skipped, failed = self.generated, self.skipped, self.failed
+        failed_photos = self.failed_photos
         from thumbnails import format_summary as thumb_summary
         thumb_result = {
             "generated": generated,
@@ -443,31 +533,6 @@ def thumbnail_stage(
                            error=thumb_rollup,
                            progress={"current": processed, "total": processed})
         run.result["stages"]["thumbnails"] = thumb_result
-    except Exception as e:
-        run.errors.append(f"[thumbnails] Fatal: {e}")
-        log.exception("Pipeline thumbnail stage failed")
-        run.stages["thumbnails"]["status"] = "failed"
-        run.runner.update_step(run.job["id"], "thumbnails", status="failed", error=str(e))
-        # This stage is the sole consumer of scan_to_thumb. Anything
-        # above can raise BEFORE the drain loop (import, Database(),
-        # cfg.load(), os.makedirs) — if we just returned, the scanner
-        # would eventually block forever in put() once the queue fills,
-        # wedging threads["scanner"].join() and leaking a pipeline slot
-        # until restart. Set abort so the scanner stops producing, then
-        # drain whatever is already queued. Stop at the sentinel, or
-        # when the queue stays empty (the sentinel may already have
-        # been consumed by the main loop before a late failure; with
-        # abort set, photo_cb no longer blocks, so breaking on Empty
-        # is safe).
-        run.abort.set()
-        while True:
-            try:
-                item = scan_to_thumb.get(timeout=1.0)
-            except queue.Empty:
-                break
-            if item is _SENTINEL:
-                break
-    run.update_stages(run.runner, run.job["id"], run.stages)
 
 
 def previews_stage(
