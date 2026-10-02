@@ -117,7 +117,10 @@ def error_text(err: Any) -> str:
     than the dict's repr.
     """
     if isinstance(err, dict):
-        return _item_text(err) or str(err)
+        text = _item_text(err) or str(err)
+        if err.get("photo_id") is not None:
+            text += f" (photo {err['photo_id']})"
+        return text
     return str(err)
 
 

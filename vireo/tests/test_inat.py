@@ -707,7 +707,7 @@ def test_api_inat_export_marks_wholly_unsuccessful_job_failed(
 
     assert response.status_code == 200
     assert job["status"] == "failed"
-    assert job["errors"] == ["bird.jpg: render failed"]
+    assert job["errors"] == ["bird.jpg: render failed (photo 1)"]
     assert job["result"]["ok"] is False
     assert job["result"]["exported"] == []
     assert job["result"]["errors"] == [{
@@ -749,7 +749,7 @@ def test_api_inat_export_partial_failure_fails_job_and_keeps_counts(
 
     assert response.status_code == 200
     assert job["status"] == "failed"
-    assert job["errors"] == ["heron.jpg: render failed"]
+    assert job["errors"] == ["heron.jpg: render failed (photo 2)"]
     result = job["result"]
     assert result["ok"] is False
     assert [item["photo_id"] for item in result["exported"]] == [pid]

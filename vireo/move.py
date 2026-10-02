@@ -2214,6 +2214,7 @@ def move_folder_by_date(db, folder_id, destination, folder_template,
             "path": group["destination"],
             "planned": group["photo_count"],
             "moved": group_moved,
+            "already_in_place": int(result.get("already_in_place", 0)),
         })
         if progress_cb and completed > group_start + group_moved:
             # Keep the overall bar advancing when a photo was skipped because

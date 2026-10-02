@@ -7203,3 +7203,21 @@ def test_missing_original_is_not_counted_already_in_place(move_env):
     assert result["already_in_place"] == 0
     assert result["moved"] == 0
     assert any("source file missing" in error for error in result["errors"])
+
+
+def test_date_move_reports_photos_already_in_each_destination(tmp_path):
+    from move import move_folder_by_date
+
+    archive = tmp_path / "archive"
+    date = archive / "2026-07-12"
+    date.mkdir(parents=True)
+    (date / "bird.jpg").write_bytes(b"bird")
+    with Database(str(tmp_path / "catalog.db")) as db:
+        root_id = db.add_folder(str(archive))
+        date_id = db.add_folder(str(date), parent_id=root_id)
+        db.add_photo(date_id, "bird.jpg", ".jpg", 4, 1.0, timestamp="2026-07-12T09:30:00")
+        result = move_folder_by_date(db, root_id, str(archive), "%Y-%m-%d")
+        assert result["errors"] == []
+        assert result["moved"] == 0
+        assert result["already_in_place"] == 1
+        assert result["destinations"][0]["already_in_place"] == 1
