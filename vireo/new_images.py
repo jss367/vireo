@@ -103,6 +103,18 @@ def _staged_exclusions_for_root(root_path, staged_sources):
     for source, source_forms in staged_sources:
         resolved_source = volume_reachability.resolve_alias_bounded(source)
         if resolved_source is None:
+            lexical_overlap = any(
+                _is_within_key(root_key, source_key)
+                or _is_within_key(source_key, root_key)
+                for root_key in root_forms for source_key in source_forms
+            )
+            source_mounts = set(volume_reachability.mount_root_candidates(source))
+            root_mounts = set(volume_reachability.mount_root_candidates(resolved_root))
+            if not lexical_overlap and source_mounts and source_mounts.isdisjoint(root_mounts):
+                # A disconnected share cannot overlap a conclusively
+                # resolved local root or another share. Aliases on the
+                # same share remain ambiguous and must fail closed.
+                continue
             raise _RootOffline(OSError(errno.ETIMEDOUT, "staged alias resolution timed out"))
         source_forms = {*source_forms, _path_key(resolved_source)}
         for source_key in source_forms:

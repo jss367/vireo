@@ -3408,3 +3408,18 @@ def test_preflight_refuses_scan_overlapping_chosen_local_destination(
         )
         assert allowed.status_code == 200, allowed.get_json()
         assert preflights == [{folder_id: str(clear)}]
+
+
+def test_cache_invalidation_does_not_probe_offline_originals(tmp_path, monkeypatch):
+    from services import local_folder
+
+    with Database(str(tmp_path / "vireo.db")) as db:
+        ws = db.ensure_default_workspace()
+        db.set_active_workspace(ws)
+        db.add_folder("/Volumes/offline/photos")
+        db._new_images_cache.set(db._db_path, ws, {"new_count": 0})
+        def forbidden_probe(path):
+            raise AssertionError("cache invalidation touched a source path")
+        monkeypatch.setattr(local_folder, "_resolve_physical", forbidden_probe)
+        local_folder._invalidate_new_images_for_source(db, "/Volumes/offline/photos")
+        assert db._new_images_cache.get(db._db_path, ws) is None

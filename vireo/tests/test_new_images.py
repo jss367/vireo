@@ -2151,3 +2151,22 @@ def test_staged_alias_timeout_reports_root_unreachable(db_with_workspace, monkey
     assert result["new_count"] == 0
     assert result["unreachable_roots"] == [str(root)]
     assert result["per_root"][0]["unreachable"] is True
+
+
+def test_offline_staged_share_does_not_hide_unrelated_local_images(db_with_workspace, monkeypatch):
+    import new_images
+    import volume_reachability
+
+    db, ws_id, tmp_path = db_with_workspace
+    root = tmp_path / "archive"
+    _touch_image(str(root / "new.jpg"))
+    db.add_folder(str(root), name="archive")
+    source = "/Volumes/offline/day"
+    _record_staged_source(db, source, tmp_path / "local")
+    monkeypatch.setattr(volume_reachability, "resolve_alias_bounded",
+                        lambda path: None if path == source else path)
+    monkeypatch.setattr(volume_reachability, "mount_root_candidates",
+                        lambda path: ["/Volumes/offline"] if path == source else [])
+    result = new_images.count_new_images_for_workspace(db, ws_id)
+    assert result["new_count"] == 1
+    assert result["unreachable_roots"] == []

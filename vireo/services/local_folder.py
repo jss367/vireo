@@ -693,18 +693,14 @@ def _invalidate_new_images_for_source(
     """
     ids = {int(workspace_id) for workspace_id in workspace_ids}
     if source_path:
-        source_physical = _resolve_physical(source_path)
-        for row in db.conn.execute(
-            """SELECT DISTINCT wf.workspace_id, f.path
-               FROM workspace_folders wf
-               JOIN folders f ON f.id = wf.folder_id"""
-        ).fetchall():
-            path = row["path"]
-            if path and _path_overlaps_source(
-                path, _resolve_physical(path), source_path, source_physical,
-                include_descendants=True,
-            ):
-                ids.add(int(row["workspace_id"]))
+        # A source transition can change any workspace reached through an
+        # alias. Cache invalidation must never inspect the source: discard
+        # works while the original share is offline. Conservatively drop
+        # all linked workspace snapshots instead of resolving filesystem
+        # paths after the catalog commit.
+        ids.update(int(row["workspace_id"]) for row in db.conn.execute(
+            "SELECT DISTINCT workspace_id FROM workspace_folders"
+        ).fetchall())
     for workspace_id in sorted(ids):
         db.invalidate_new_images_cache_for_workspace(workspace_id)
 
