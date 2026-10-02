@@ -2106,3 +2106,48 @@ def test_a_walk_that_stalls_during_the_recheck_does_not_block_it(
     finally:
         release.set()
         wedged.join(5)
+
+
+def test_staged_exclusion_resolves_an_alias_below_a_mount(monkeypatch):
+    import new_images
+    import volume_reachability
+
+    root = "/Volumes/NAS/archive-alias"
+    source = "/Volumes/NAS/archive/day"
+    monkeypatch.setattr(volume_reachability, "resolve_alias_lexically", lambda path: path)
+    probes = []
+
+    def target(path):
+        probes.append(path)
+        return "archive" if path == root else None
+
+    monkeypatch.setattr(volume_reachability, "_bounded_link_target", target)
+    covering, excluded = new_images._staged_exclusions_for_root(root, [(source, {source})])
+    assert covering is None
+    assert root + "/day" in excluded
+    assert root in probes
+
+
+def test_staged_alias_probe_timeout_leaves_the_root_unchecked(monkeypatch):
+    import new_images
+    import volume_reachability
+
+    monkeypatch.setattr(volume_reachability, "resolve_alias_bounded", lambda path: None)
+    with pytest.raises(new_images._RootOffline):
+        new_images._staged_exclusions_for_root("/Volumes/NAS/alias", [("/Volumes/NAS/day", {"/Volumes/NAS/day"})])
+
+
+def test_staged_alias_timeout_reports_root_unreachable(db_with_workspace, monkeypatch):
+    import new_images
+    import volume_reachability
+
+    db, ws_id, tmp_path = db_with_workspace
+    root = tmp_path / "archive"
+    _touch_image(str(root / "new.jpg"))
+    db.add_folder(str(root), name="archive")
+    _record_staged_source(db, root / "day", tmp_path / "local")
+    monkeypatch.setattr(volume_reachability, "resolve_alias_bounded", lambda path: None)
+    result = new_images.count_new_images_for_workspace(db, ws_id)
+    assert result["new_count"] == 0
+    assert result["unreachable_roots"] == [str(root)]
+    assert result["per_root"][0]["unreachable"] is True

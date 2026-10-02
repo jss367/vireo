@@ -87,17 +87,24 @@ def _staged_exclusions_for_root(root_path, staged_sources):
     and ``excluded_dir_keys`` maps the :func:`_path_key` of each directory to
     prune to the path reported to the user. Both the literal path and its
     symlink-resolved form are compared on each side
-    (:func:`volume_reachability.resolve_alias_lexically`, which never looks
-    below a mount root), so a root reached through ``~/Photos -> /Volumes/NAS``
-    still prunes a source recorded under ``/Volumes/NAS``; this mirrors the
-    physical comparison the import admission makes.
+    with bounded component probes, including aliases below a mount root.
+    Inconclusive probes fail closed as an unchecked root rather than count
+    staged originals as new; this mirrors import admission's overlap check.
     """
     if not staged_sources:
         return None, {}
     root_forms = {_path_key(root_path)}
     root_forms.add(_path_key(volume_reachability.resolve_alias_lexically(root_path)))
+    resolved_root = volume_reachability.resolve_alias_bounded(root_path)
+    if resolved_root is None:
+        raise _RootOffline(OSError(errno.ETIMEDOUT, "root alias resolution timed out"))
+    root_forms.add(_path_key(resolved_root))
     excluded = {}
     for source, source_forms in staged_sources:
+        resolved_source = volume_reachability.resolve_alias_bounded(source)
+        if resolved_source is None:
+            raise _RootOffline(OSError(errno.ETIMEDOUT, "staged alias resolution timed out"))
+        source_forms = {*source_forms, _path_key(resolved_source)}
         for source_key in source_forms:
             for root_key in root_forms:
                 if _is_within_key(root_key, source_key):
@@ -332,9 +339,13 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit=5,
                 per_root.append({"folder_id": root["id"], "path": root_path, "new_count": 0})
                 continue
 
-        covering_source, excluded_dirs = _staged_exclusions_for_root(
-            root_path, staged_sources,
-        )
+        try:
+            covering_source, excluded_dirs = _staged_exclusions_for_root(
+                root_path, staged_sources,
+            )
+        except _RootOffline:
+            _unreachable(root, mount_root)
+            continue
         if covering_source is not None:
             local_copy_excluded.append(root_path)
             per_root.append({
