@@ -13001,12 +13001,18 @@ def test_failed_import_with_tag_errors_does_not_mark_chain_paid(app_and_db, tmp_
 
 
 def test_failed_processing_handoff_does_not_mark_chain_paid(app_and_db, tmp_path, monkeypatch):
-    from services.imports import ImportService
+    from services.import_photos import _ImportPhotosJob
 
     def failed_handoff(*args, **kwargs):
         raise RuntimeError("process handoff failed")
 
-    monkeypatch.setattr(ImportService, "enqueue_process_job", failed_handoff)
+    original_chain = _ImportPhotosJob._chain_after_import
+
+    def chain_with_failed_handoff(self, job, result):
+        monkeypatch.setattr(self.service, "enqueue_process_job", failed_handoff)
+        return original_chain(self, job, result)
+
+    monkeypatch.setattr(_ImportPhotosJob, "_chain_after_import", chain_with_failed_handoff)
     app, db = app_and_db
     card = _chain_card(tmp_path)
     with app.test_client() as client:
