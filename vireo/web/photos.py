@@ -19,6 +19,7 @@ import logging
 import math
 import os
 import tempfile
+from dataclasses import dataclass
 
 import config as cfg
 from best_batch import best_batch_scope, build_best_batch_response
@@ -503,96 +504,17 @@ def create_photos_blueprint(
         payload = request.get_json(silent=True)
         if payload is None or not isinstance(payload, dict):
             return json_error("request body must be a JSON object", 400)
-        rules = payload.get("rules")
-        if rules is None:
-            rules = []
-        page = payload.get("page", 1)
-        per_page = payload.get("per_page", 50)
-        sort = payload.get("sort", "date")
-        stacks = payload.get("stacks", False)
-        if not isinstance(page, int) or isinstance(page, bool) or page < 1:
-            return json_error("page must be a positive integer", 400)
-        if not isinstance(per_page, int) or isinstance(per_page, bool) or per_page < 1:
-            return json_error("per_page must be a positive integer", 400)
-        # sort feeds an unhashable-unsafe ``sort_map.get(sort, ...)`` in
-        # ``query_photos``; a JSON array/object here would raise TypeError
-        # (not ValueError) and bypass the 400 handler below.
-        if not isinstance(sort, str):
-            return json_error("sort must be a string", 400)
-        if not isinstance(stacks, bool):
-            return json_error("stacks must be a boolean", 400)
-        per_page = min(per_page, MAX_PER_PAGE)
-        collection_id = payload.get("collection_id")
-        if collection_id is not None and (
-            not isinstance(collection_id, int) or isinstance(collection_id, bool)
+        query = _PhotosQuery(db, payload, json_error)
+        for check in (
+            query.read_paging,
+            query.read_scope,
+            query.read_focus,
+            query.read_visual,
+            query.read_availability,
         ):
-            return json_error("collection_id must be an integer", 400)
-        # Rules-only scoping path: ``query_photo_ids`` / ``query_photos`` /
-        # ``count_photos_for_rules`` all funnel through
-        # ``_append_collection_restriction`` → ``_build_collection_query``,
-        # which reads only ``collections.rules``. An API/headless caller
-        # posting ``{"collection_id": <visual id>}`` would therefore silently
-        # widen to every metadata match instead of the saved visual result
-        # set; the Browse reopen path already sends the stored ``rules`` +
-        # ``visual`` without relying on ``collection_id`` (Codex review
-        # r3621903988).
-        err = reject_visual_collection(db, collection_id, json_error=json_error)
-        if err is not None:
-            return err
-        folder_id = payload.get("folder_id")
-        if folder_id is not None and (
-            not isinstance(folder_id, int) or isinstance(folder_id, bool)
-        ):
-            return json_error("folder_id must be an integer", 400)
-        # Browse sends ``focus_photo_id`` when a re-sort has to stay with the
-        # photo the user has selected: serve the page that photo landed on
-        # instead of page 1, and report where it is so the caller can anchor
-        # its loaded window there. A photo that no longer matches reports
-        # ``focus_index: null`` and the requested page — never a silent
-        # substitution the grid would have no way to notice.
-        #
-        # ``focus_photo_ids`` is the same question asked of several photos at
-        # once, for a caller holding a card that stands for more than one:
-        # every frame of a selected stack shares the card's position, so any
-        # frame this result set still contains can place it. The response
-        # names the one that answered, since the caller cannot assume it was
-        # the frame it would have asked about first.
-        focus_photo_id = payload.get("focus_photo_id")
-        if focus_photo_id is not None and (
-            not isinstance(focus_photo_id, int) or isinstance(focus_photo_id, bool)
-        ):
-            return json_error("focus_photo_id must be an integer", 400)
-        focus_photo_ids = payload.get("focus_photo_ids")
-        if focus_photo_ids is not None and (
-            not isinstance(focus_photo_ids, list)
-            or len(focus_photo_ids) > MAX_FOCUS_PHOTO_IDS
-            or any(not isinstance(pid, int) or isinstance(pid, bool)
-                   for pid in focus_photo_ids)
-        ):
-            return json_error(
-                "focus_photo_ids must be a list of at most "
-                f"{MAX_FOCUS_PHOTO_IDS} integers", 400,
-            )
-        focus_candidates = focus_candidate_ids(focus_photo_id, focus_photo_ids)
-        # One name for "is this a focused request" from here down, so the
-        # snapshot, the lookups and the response stay in step.
-        focus_photo_id = focus_candidates[0] if focus_candidates else None
-        rules = inject_active_visual_model(rules)
-        try:
-            visual = validate_visual_arg(payload.get("visual"))
-        except ValueError as exc:
-            return json_error(str(exc), 400)
-
-        include_offline = payload.get("include_offline", False)
-        include_availability = payload.get("include_availability", False)
-        if not isinstance(include_offline, bool):
-            return json_error("include_offline must be a boolean", 400)
-        if not isinstance(include_availability, bool):
-            return json_error("include_availability must be a boolean", 400)
-        # Offline rows are display-only. IDs-only responses feed selection
-        # and bulk actions, so those remain restricted to actionable photos.
-        if payload.get("ids_only"):
-            include_offline = False
+            err = check()
+            if err is not None:
+                return err
 
         # Offset pagination is only self-consistent within one snapshot, and
         # that applies to the visual path too: a deletion landing between the
@@ -602,7 +524,7 @@ def create_photos_blueprint(
         # of the visual clause, which returns before the rules path's ``BEGIN``
         # — and release it on every exit, error paths included (Codex review on
         # PR #1658). Reads only; ``rollback`` is what releases it.
-        if focus_photo_id is not None:
+        if query.focus_photo_id is not None:
             db.conn.execute("BEGIN")
 
             @after_this_request
@@ -612,13 +534,14 @@ def create_photos_blueprint(
                 return response
 
         visual_info = None
-        if visual is not None:
+        if query.visual is not None:
             try:
                 visual_info, ordered_ids, sims_by_pid = visual_scope.resolve(
-                    db, rules, visual,
-                    collection_id=collection_id, folder_id=folder_id,
+                    db, query.rules, query.visual,
+                    collection_id=query.collection_id,
+                    folder_id=query.folder_id,
                     include_offline_folders=(
-                        include_offline or include_availability
+                        query.include_offline or query.include_availability
                     ),
                 )
             except ValueError as exc:
@@ -626,182 +549,14 @@ def create_photos_blueprint(
             if ordered_ids is not None:
                 # Healthy visual clause: results are the similarity-ranked
                 # matches; sort is relevance by design while it is active.
-                availability = None
-                folder_statuses = None
-                if include_offline or include_availability:
-                    inventory_ids = ordered_ids
-                    folder_statuses = db.get_photo_folder_statuses(inventory_ids)
-                    available_ids = [
-                        pid for pid in inventory_ids
-                        if folder_statuses.get(pid) in ("ok", "partial")
-                    ]
-                    if not include_offline:
-                        ordered_ids = available_ids
-                    availability = {
-                        "inventory_total": len(inventory_ids),
-                        "available_total": len(available_ids),
-                        "offline_total": len(inventory_ids) - len(available_ids),
-                    }
-                if payload.get("ids_only"):
-                    if stacks:
-                        # Same cover-first flattening the paginated visual
-                        # branch below applies, so Select-all-matching
-                        # inserts each stack's visible cover ahead of its
-                        # hidden members and Best Batch, burst-review,
-                        # and export preview start from the visible first
-                        # card rather than a hidden burst frame (Codex
-                        # P2 on PR #1561).
-                        stack_items = db.collapse_browse_stack_photo_ids(
-                            ordered_ids,
-                            stack_config=db.browse_stack_settings(cfg.load()),
-                        )
-                        stacked_ids = []
-                        seen_ids = set()
-                        for item in stack_items:
-                            cover = item["cover_id"]
-                            if cover not in seen_ids:
-                                stacked_ids.append(cover)
-                                seen_ids.add(cover)
-                            for member in item["member_ids"]:
-                                if member in seen_ids:
-                                    continue
-                                stacked_ids.append(member)
-                                seen_ids.add(member)
-                        return jsonify({"ids": stacked_ids,
-                                        "total": len(stacked_ids),
-                                        "visual": visual_info})
-                    return jsonify({"ids": ordered_ids, "total": len(ordered_ids),
-                                    "visual": visual_info})
-                # Offline members are display-only, so they never join a
-                # stack: each one stays its own item and is left out of the
-                # duplicate / burst tallies. Same rule the SQL projection
-                # applies in ``_browse_stack_query_parts``.
-                offline_ids = (
-                    [
-                        pid for pid in ordered_ids
-                        if folder_statuses.get(pid) not in ("ok", "partial")
-                    ]
-                    if include_offline and folder_statuses is not None
-                    else None
+                return query.visual_response(
+                    visual_info, ordered_ids, sims_by_pid,
                 )
-                stack_items = (
-                    db.collapse_browse_stack_photo_ids(
-                        ordered_ids, standalone_ids=offline_ids,
-                        stack_config=db.browse_stack_settings(cfg.load()),
-                    )
-                    if stacks else None
-                )
-                logical_ids = (
-                    [item["cover_id"] for item in stack_items]
-                    if stack_items is not None else ordered_ids
-                )
-                # A healthy visual clause has every matching id in memory
-                # already, so the focused page is a list index rather than
-                # another query.
-                focus_index = None
-                focus_resolved_id = None
-                if focus_candidates:
-                    # Earliest-placed candidate, so a stack whose first
-                    # frames this clause dropped is still placed by the ones
-                    # it kept — the same rule the SQL path applies.
-                    wanted = set(focus_candidates)
-                    if stack_items is not None:
-                        for item_index, item in enumerate(stack_items):
-                            hit = wanted.intersection(
-                                [item["cover_id"], *item["member_ids"]]
-                            )
-                            if hit:
-                                focus_index = item_index
-                                focus_resolved_id = min(hit)
-                                break
-                    else:
-                        placed = [
-                            (logical_ids.index(pid), pid)
-                            for pid in wanted if pid in logical_ids
-                        ]
-                        if placed:
-                            focus_index, focus_resolved_id = min(placed)
-                    if focus_index is not None:
-                        page = focus_index // per_page + 1
-                start = (page - 1) * per_page
-                page_ids = logical_ids[start:start + per_page]
-                photos_map = db.get_photos_by_ids(page_ids)
-                page_stack_items = (
-                    stack_items[start:start + per_page]
-                    if stack_items is not None else None
-                )
-                photo_dicts = prepare_browse_photo_dicts(
-                    db,
-                    [photos_map[pid] for pid in page_ids if pid in photos_map],
-                    stack_items=page_stack_items,
-                )
-                similarity_by_cover = {
-                    item["cover_id"]: max(
-                        (
-                            sims_by_pid[pid]
-                            for pid in item["member_ids"]
-                            if pid in sims_by_pid
-                        ),
-                        default=None,
-                    )
-                    for item in (page_stack_items or [])
-                }
-                for entry in photo_dicts:
-                    entry["similarity"] = similarity_by_cover.get(
-                        entry["id"], sims_by_pid.get(entry["id"]),
-                    )
-                    if include_offline and folder_statuses is not None:
-                        entry["folder_status"] = folder_statuses.get(entry["id"])
-                response = {
-                    "photos": photo_dicts,
-                    "total": len(logical_ids),
-                    "page": page,
-                    "per_page": per_page,
-                    "visual": visual_info,
-                }
-                if focus_candidates:
-                    response["focus_index"] = focus_index
-                    response["focus_page"] = page
-                    response["focus_photo_id"] = focus_resolved_id
-                if stacks:
-                    # Availability totals below are photo counts, so the
-                    # underlying (unstacked) total is what they must agree
-                    # with — never the stack count.
-                    response["underlying_total"] = len(ordered_ids)
-                    response["stack_count"] = sum(
-                        len(item["member_ids"]) > 1 for item in stack_items
-                    )
-                if availability is not None:
-                    response.update(availability)
-                return jsonify(response)
             # Unhealthy: fall through to metadata-only results with the
             # status attached so the UI can say why — never silently zero.
 
         if payload.get("ids_only"):
-            # Select-all and other bulk flows need the complete matching id
-            # set; it must resolve exactly the photos the filtered grid
-            # shows, so it shares this endpoint rather than a legacy path.
-            # Under ``stacks=true`` emit each stack's cover ahead of its
-            # hidden members — matching the collection ``/photo-ids``
-            # projection — so Best Batch, burst-review, and export
-            # preview start from the visible first card rather than a
-            # hidden burst frame (Codex P2 on PR #1561).
-            try:
-                if stacks:
-                    ids = db.query_photo_ids_stacked(
-                        rules, sort=sort,
-                        collection_id=collection_id, folder_id=folder_id,
-                        stack_config=db.browse_stack_settings(cfg.load()),
-                    )
-                else:
-                    ids = db.query_photo_ids(rules, sort=sort, collection_id=collection_id,
-                                             folder_id=folder_id)
-            except ValueError as exc:
-                return json_error(str(exc), 400)
-            payload_out = {"ids": ids, "total": len(ids)}
-            if visual_info is not None:
-                payload_out["visual"] = visual_info
-            return jsonify(payload_out)
+            return query.rules_ids_response(visual_info)
         # A target sitting on a page boundary can move onto the adjacent
         # page when ingestion or deletion commits between the position lookup
         # and the page fetch below. The response would still carry a valid
@@ -817,117 +572,11 @@ def create_photos_blueprint(
         # before each error return: the enrichers and count queries below can
         # raise something other than ValueError, and the snapshot has to be
         # released on those paths too.
-        focus_snapshot = focus_photo_id is not None
+        focus_snapshot = query.focus_photo_id is not None
         if focus_snapshot and not db.conn.in_transaction:
             db.conn.execute("BEGIN")
         try:
-            focus_index = None
-            focus_resolved_id = None
-            try:
-                # One stack configuration for the whole request. The position
-                # below has to be read under exactly the grouping the page
-                # fetch uses, or a focused re-sort lands on the wrong page.
-                stack_cfg = db.browse_stack_settings(cfg.load()) if stacks else None
-                if focus_candidates:
-                    # Stacked Browse pages logical items, so a hidden member
-                    # resolves to the page its cover sits on.
-                    found = (
-                        db.query_browse_stack_position_first(
-                            rules, focus_candidates, sort=sort,
-                            collection_id=collection_id, folder_id=folder_id,
-                            include_offline_folders=include_offline,
-                            stack_config=stack_cfg,
-                        )
-                        if stacks
-                        else db.query_photo_position_first(
-                            rules, focus_candidates, sort=sort,
-                            collection_id=collection_id, folder_id=folder_id,
-                            include_offline_folders=include_offline,
-                        )
-                    )
-                    if found is not None:
-                        focus_resolved_id, focus_index = found
-                        page = focus_index // per_page + 1
-                underlying_total = db.count_photos_for_rules(
-                    rules,
-                    collection_id=collection_id,
-                    folder_id=folder_id,
-                    include_offline_folders=include_offline,
-                )
-                if stacks:
-                    photos = db.query_browse_stacks(
-                        rules, sort=sort, page=page, per_page=per_page,
-                        collection_id=collection_id, folder_id=folder_id,
-                        include_offline_folders=include_offline,
-                        stack_config=stack_cfg,
-                    )
-                    stack_totals = db.browse_stack_totals(
-                        rules, collection_id=collection_id, folder_id=folder_id,
-                        include_offline_folders=include_offline,
-                        stack_config=stack_cfg,
-                    )
-                    total = stack_totals["total"]
-                    stack_count = stack_totals["stack_count"]
-                else:
-                    photos = db.query_photos(
-                        rules, sort=sort, page=page, per_page=per_page,
-                        collection_id=collection_id, folder_id=folder_id,
-                        include_offline_folders=include_offline,
-                    )
-                    total = underlying_total
-            except ValueError as exc:
-                return json_error(str(exc), 400)
-
-            photo_dicts = prepare_browse_photo_dicts(db, photos)
-
-            response = {
-                "photos": photo_dicts,
-                "total": total,
-                "page": page,
-                "per_page": per_page,
-            }
-            if focus_candidates:
-                response["focus_index"] = focus_index
-                response["focus_page"] = page
-                response["focus_photo_id"] = focus_resolved_id
-            if stacks:
-                response["underlying_total"] = underlying_total
-                response["stack_count"] = stack_count
-            if include_offline or include_availability:
-                # Availability is always reported in photos, never in stacks:
-                # the notice reads "N of M photos available", so it has to agree
-                # with the sidebar collection count and with ``underlying_total``
-                # — ``total`` is the logical item count once Stacks collapses it.
-                try:
-                    inventory_total = (
-                        underlying_total
-                        if include_offline
-                        else db.count_photos_for_rules(
-                            rules,
-                            collection_id=collection_id,
-                            folder_id=folder_id,
-                            include_offline_folders=True,
-                        )
-                    )
-                    available_total = (
-                        db.count_photos_for_rules(
-                            rules,
-                            collection_id=collection_id,
-                            folder_id=folder_id,
-                        )
-                        if include_offline
-                        else underlying_total
-                    )
-                except ValueError as exc:
-                    return json_error(str(exc), 400)
-                response.update({
-                    "inventory_total": inventory_total,
-                    "available_total": available_total,
-                    "offline_total": max(0, inventory_total - available_total),
-                })
-            if visual_info is not None:
-                response["visual"] = visual_info
-            return jsonify(response)
+            return query.rules_page_response(visual_info)
         finally:
             # rollback(), not commit(): this endpoint is read-only, and the
             # rollback is what releases the snapshot.
@@ -2242,3 +1891,499 @@ def create_photos_blueprint(
         )
 
     return blueprint
+
+
+@dataclass
+class _RulesPage:
+    """One rules-path page with the counts and focus position it was read
+    under."""
+
+    photos: list
+    total: int
+    underlying_total: int
+    stack_count: int | None = None
+    focus_index: int | None = None
+    focus_resolved_id: int | None = None
+
+
+class _PhotosQuery:
+    """One ``/api/photos/query`` request.
+
+    ``api_photos_query`` calls the request checks in order; each reads what
+    it needs from the JSON body onto this object and returns the error
+    response that ends the request, or None to continue. The response
+    builders then serve the healthy visual clause or the rules path.
+    """
+
+    def __init__(self, db, payload, json_error):
+        self.db = db
+        self.payload = payload
+        self.json_error = json_error
+
+    def read_paging(self):
+        payload = self.payload
+        json_error = self.json_error
+        rules = payload.get("rules")
+        if rules is None:
+            rules = []
+        self.rules = rules
+        page = payload.get("page", 1)
+        per_page = payload.get("per_page", 50)
+        sort = payload.get("sort", "date")
+        stacks = payload.get("stacks", False)
+        if not isinstance(page, int) or isinstance(page, bool) or page < 1:
+            return json_error("page must be a positive integer", 400)
+        if not isinstance(per_page, int) or isinstance(per_page, bool) or per_page < 1:
+            return json_error("per_page must be a positive integer", 400)
+        # sort feeds an unhashable-unsafe ``sort_map.get(sort, ...)`` in
+        # ``query_photos``; a JSON array/object here would raise TypeError
+        # (not ValueError) and bypass the 400 handler below.
+        if not isinstance(sort, str):
+            return json_error("sort must be a string", 400)
+        if not isinstance(stacks, bool):
+            return json_error("stacks must be a boolean", 400)
+        self.page = page
+        self.per_page = min(per_page, MAX_PER_PAGE)
+        self.sort = sort
+        self.stacks = stacks
+        return None
+
+    def read_scope(self):
+        json_error = self.json_error
+        collection_id = self.payload.get("collection_id")
+        if collection_id is not None and (
+            not isinstance(collection_id, int) or isinstance(collection_id, bool)
+        ):
+            return json_error("collection_id must be an integer", 400)
+        # Rules-only scoping path: ``query_photo_ids`` / ``query_photos`` /
+        # ``count_photos_for_rules`` all funnel through
+        # ``_append_collection_restriction`` → ``_build_collection_query``,
+        # which reads only ``collections.rules``. An API/headless caller
+        # posting ``{"collection_id": <visual id>}`` would therefore silently
+        # widen to every metadata match instead of the saved visual result
+        # set; the Browse reopen path already sends the stored ``rules`` +
+        # ``visual`` without relying on ``collection_id`` (Codex review
+        # r3621903988).
+        err = reject_visual_collection(self.db, collection_id, json_error=json_error)
+        if err is not None:
+            return err
+        folder_id = self.payload.get("folder_id")
+        if folder_id is not None and (
+            not isinstance(folder_id, int) or isinstance(folder_id, bool)
+        ):
+            return json_error("folder_id must be an integer", 400)
+        self.collection_id = collection_id
+        self.folder_id = folder_id
+        return None
+
+    def read_focus(self):
+        """Browse sends ``focus_photo_id`` when a re-sort has to stay with
+        the photo the user has selected: serve the page that photo landed on
+        instead of page 1, and report where it is so the caller can anchor
+        its loaded window there. A photo that no longer matches reports
+        ``focus_index: null`` and the requested page — never a silent
+        substitution the grid would have no way to notice.
+
+        ``focus_photo_ids`` is the same question asked of several photos at
+        once, for a caller holding a card that stands for more than one:
+        every frame of a selected stack shares the card's position, so any
+        frame this result set still contains can place it. The response
+        names the one that answered, since the caller cannot assume it was
+        the frame it would have asked about first.
+        """
+        json_error = self.json_error
+        focus_photo_id = self.payload.get("focus_photo_id")
+        if focus_photo_id is not None and (
+            not isinstance(focus_photo_id, int) or isinstance(focus_photo_id, bool)
+        ):
+            return json_error("focus_photo_id must be an integer", 400)
+        focus_photo_ids = self.payload.get("focus_photo_ids")
+        if focus_photo_ids is not None and (
+            not isinstance(focus_photo_ids, list)
+            or len(focus_photo_ids) > MAX_FOCUS_PHOTO_IDS
+            or any(not isinstance(pid, int) or isinstance(pid, bool)
+                   for pid in focus_photo_ids)
+        ):
+            return json_error(
+                "focus_photo_ids must be a list of at most "
+                f"{MAX_FOCUS_PHOTO_IDS} integers", 400,
+            )
+        self.focus_candidates = focus_candidate_ids(focus_photo_id, focus_photo_ids)
+        # One name for "is this a focused request" from here down, so the
+        # snapshot, the lookups and the response stay in step.
+        self.focus_photo_id = (
+            self.focus_candidates[0] if self.focus_candidates else None
+        )
+        return None
+
+    def read_visual(self):
+        self.rules = inject_active_visual_model(self.rules)
+        try:
+            self.visual = validate_visual_arg(self.payload.get("visual"))
+        except ValueError as exc:
+            return self.json_error(str(exc), 400)
+        return None
+
+    def read_availability(self):
+        include_offline = self.payload.get("include_offline", False)
+        include_availability = self.payload.get("include_availability", False)
+        if not isinstance(include_offline, bool):
+            return self.json_error("include_offline must be a boolean", 400)
+        if not isinstance(include_availability, bool):
+            return self.json_error("include_availability must be a boolean", 400)
+        # Offline rows are display-only. IDs-only responses feed selection
+        # and bulk actions, so those remain restricted to actionable photos.
+        if self.payload.get("ids_only"):
+            include_offline = False
+        self.include_offline = include_offline
+        self.include_availability = include_availability
+        return None
+
+    def _add_focus_fields(self, response, focus_index, focus_resolved_id):
+        if self.focus_candidates:
+            response["focus_index"] = focus_index
+            response["focus_page"] = self.page
+            response["focus_photo_id"] = focus_resolved_id
+
+    def visual_response(self, visual_info, ordered_ids, sims_by_pid):
+        """Serve a healthy visual clause's similarity-ranked matches."""
+        ordered_ids, folder_statuses, availability = self._visual_availability(
+            ordered_ids,
+        )
+        if self.payload.get("ids_only"):
+            return self._visual_ids_response(ordered_ids, visual_info)
+        stack_items = self._visual_stack_items(ordered_ids, folder_statuses)
+        logical_ids = (
+            [item["cover_id"] for item in stack_items]
+            if stack_items is not None else ordered_ids
+        )
+        focus_index, focus_resolved_id = self._visual_focus(
+            stack_items, logical_ids,
+        )
+        photo_dicts = self._visual_page_photos(
+            logical_ids, stack_items, sims_by_pid, folder_statuses,
+        )
+        response = {
+            "photos": photo_dicts,
+            "total": len(logical_ids),
+            "page": self.page,
+            "per_page": self.per_page,
+            "visual": visual_info,
+        }
+        self._add_focus_fields(response, focus_index, focus_resolved_id)
+        if self.stacks:
+            # Availability totals below are photo counts, so the
+            # underlying (unstacked) total is what they must agree
+            # with — never the stack count.
+            response["underlying_total"] = len(ordered_ids)
+            response["stack_count"] = sum(
+                len(item["member_ids"]) > 1 for item in stack_items
+            )
+        if availability is not None:
+            response.update(availability)
+        return jsonify(response)
+
+    def _visual_availability(self, ordered_ids):
+        availability = None
+        folder_statuses = None
+        if self.include_offline or self.include_availability:
+            inventory_ids = ordered_ids
+            folder_statuses = self.db.get_photo_folder_statuses(inventory_ids)
+            available_ids = [
+                pid for pid in inventory_ids
+                if folder_statuses.get(pid) in ("ok", "partial")
+            ]
+            if not self.include_offline:
+                ordered_ids = available_ids
+            availability = {
+                "inventory_total": len(inventory_ids),
+                "available_total": len(available_ids),
+                "offline_total": len(inventory_ids) - len(available_ids),
+            }
+        return ordered_ids, folder_statuses, availability
+
+    def _visual_ids_response(self, ordered_ids, visual_info):
+        db = self.db
+        if self.stacks:
+            # Same cover-first flattening the paginated visual
+            # branch below applies, so Select-all-matching
+            # inserts each stack's visible cover ahead of its
+            # hidden members and Best Batch, burst-review,
+            # and export preview start from the visible first
+            # card rather than a hidden burst frame (Codex
+            # P2 on PR #1561).
+            stack_items = db.collapse_browse_stack_photo_ids(
+                ordered_ids,
+                stack_config=db.browse_stack_settings(cfg.load()),
+            )
+            stacked_ids = []
+            seen_ids = set()
+            for item in stack_items:
+                cover = item["cover_id"]
+                if cover not in seen_ids:
+                    stacked_ids.append(cover)
+                    seen_ids.add(cover)
+                for member in item["member_ids"]:
+                    if member in seen_ids:
+                        continue
+                    stacked_ids.append(member)
+                    seen_ids.add(member)
+            return jsonify({"ids": stacked_ids,
+                            "total": len(stacked_ids),
+                            "visual": visual_info})
+        return jsonify({"ids": ordered_ids, "total": len(ordered_ids),
+                        "visual": visual_info})
+
+    def _visual_stack_items(self, ordered_ids, folder_statuses):
+        db = self.db
+        # Offline members are display-only, so they never join a
+        # stack: each one stays its own item and is left out of the
+        # duplicate / burst tallies. Same rule the SQL projection
+        # applies in ``_browse_stack_query_parts``.
+        offline_ids = (
+            [
+                pid for pid in ordered_ids
+                if folder_statuses.get(pid) not in ("ok", "partial")
+            ]
+            if self.include_offline and folder_statuses is not None
+            else None
+        )
+        return (
+            db.collapse_browse_stack_photo_ids(
+                ordered_ids, standalone_ids=offline_ids,
+                stack_config=db.browse_stack_settings(cfg.load()),
+            )
+            if self.stacks else None
+        )
+
+    def _visual_focus(self, stack_items, logical_ids):
+        """A healthy visual clause has every matching id in memory already,
+        so the focused page is a list index rather than another query."""
+        focus_index = None
+        focus_resolved_id = None
+        if self.focus_candidates:
+            # Earliest-placed candidate, so a stack whose first
+            # frames this clause dropped is still placed by the ones
+            # it kept — the same rule the SQL path applies.
+            wanted = set(self.focus_candidates)
+            if stack_items is not None:
+                for item_index, item in enumerate(stack_items):
+                    hit = wanted.intersection(
+                        [item["cover_id"], *item["member_ids"]]
+                    )
+                    if hit:
+                        focus_index = item_index
+                        focus_resolved_id = min(hit)
+                        break
+            else:
+                placed = [
+                    (logical_ids.index(pid), pid)
+                    for pid in wanted if pid in logical_ids
+                ]
+                if placed:
+                    focus_index, focus_resolved_id = min(placed)
+            if focus_index is not None:
+                self.page = focus_index // self.per_page + 1
+        return focus_index, focus_resolved_id
+
+    def _visual_page_photos(
+        self, logical_ids, stack_items, sims_by_pid, folder_statuses,
+    ):
+        db = self.db
+        per_page = self.per_page
+        start = (self.page - 1) * per_page
+        page_ids = logical_ids[start:start + per_page]
+        photos_map = db.get_photos_by_ids(page_ids)
+        page_stack_items = (
+            stack_items[start:start + per_page]
+            if stack_items is not None else None
+        )
+        photo_dicts = prepare_browse_photo_dicts(
+            db,
+            [photos_map[pid] for pid in page_ids if pid in photos_map],
+            stack_items=page_stack_items,
+        )
+        similarity_by_cover = {
+            item["cover_id"]: max(
+                (
+                    sims_by_pid[pid]
+                    for pid in item["member_ids"]
+                    if pid in sims_by_pid
+                ),
+                default=None,
+            )
+            for item in (page_stack_items or [])
+        }
+        for entry in photo_dicts:
+            entry["similarity"] = similarity_by_cover.get(
+                entry["id"], sims_by_pid.get(entry["id"]),
+            )
+            if self.include_offline and folder_statuses is not None:
+                entry["folder_status"] = folder_statuses.get(entry["id"])
+        return photo_dicts
+
+    def rules_ids_response(self, visual_info):
+        """Select-all and other bulk flows need the complete matching id
+        set; it must resolve exactly the photos the filtered grid shows, so
+        it shares this endpoint rather than a legacy path. Under
+        ``stacks=true`` emit each stack's cover ahead of its hidden members
+        — matching the collection ``/photo-ids`` projection — so Best Batch,
+        burst-review, and export preview start from the visible first card
+        rather than a hidden burst frame (Codex P2 on PR #1561).
+        """
+        db = self.db
+        try:
+            if self.stacks:
+                ids = db.query_photo_ids_stacked(
+                    self.rules, sort=self.sort,
+                    collection_id=self.collection_id, folder_id=self.folder_id,
+                    stack_config=db.browse_stack_settings(cfg.load()),
+                )
+            else:
+                ids = db.query_photo_ids(self.rules, sort=self.sort,
+                                         collection_id=self.collection_id,
+                                         folder_id=self.folder_id)
+        except ValueError as exc:
+            return self.json_error(str(exc), 400)
+        payload_out = {"ids": ids, "total": len(ids)}
+        if visual_info is not None:
+            payload_out["visual"] = visual_info
+        return jsonify(payload_out)
+
+    def rules_page_response(self, visual_info):
+        """Serve one page of the rule tree's matches; runs inside the
+        focused request's read snapshot."""
+        try:
+            result = self._query_rules_page()
+        except ValueError as exc:
+            return self.json_error(str(exc), 400)
+
+        photo_dicts = prepare_browse_photo_dicts(self.db, result.photos)
+
+        response = {
+            "photos": photo_dicts,
+            "total": result.total,
+            "page": self.page,
+            "per_page": self.per_page,
+        }
+        self._add_focus_fields(
+            response, result.focus_index, result.focus_resolved_id,
+        )
+        if self.stacks:
+            response["underlying_total"] = result.underlying_total
+            response["stack_count"] = result.stack_count
+        if self.include_offline or self.include_availability:
+            try:
+                inventory_total, available_total = self._rules_availability(
+                    result.underlying_total,
+                )
+            except ValueError as exc:
+                return self.json_error(str(exc), 400)
+            response.update({
+                "inventory_total": inventory_total,
+                "available_total": available_total,
+                "offline_total": max(0, inventory_total - available_total),
+            })
+        if visual_info is not None:
+            response["visual"] = visual_info
+        return jsonify(response)
+
+    def _query_rules_page(self):
+        db = self.db
+        rules = self.rules
+        sort = self.sort
+        collection_id = self.collection_id
+        folder_id = self.folder_id
+        include_offline = self.include_offline
+        focus_index = None
+        focus_resolved_id = None
+        # One stack configuration for the whole request. The position
+        # below has to be read under exactly the grouping the page
+        # fetch uses, or a focused re-sort lands on the wrong page.
+        stack_cfg = db.browse_stack_settings(cfg.load()) if self.stacks else None
+        if self.focus_candidates:
+            # Stacked Browse pages logical items, so a hidden member
+            # resolves to the page its cover sits on.
+            found = (
+                db.query_browse_stack_position_first(
+                    rules, self.focus_candidates, sort=sort,
+                    collection_id=collection_id, folder_id=folder_id,
+                    include_offline_folders=include_offline,
+                    stack_config=stack_cfg,
+                )
+                if self.stacks
+                else db.query_photo_position_first(
+                    rules, self.focus_candidates, sort=sort,
+                    collection_id=collection_id, folder_id=folder_id,
+                    include_offline_folders=include_offline,
+                )
+            )
+            if found is not None:
+                focus_resolved_id, focus_index = found
+                self.page = focus_index // self.per_page + 1
+        underlying_total = db.count_photos_for_rules(
+            rules,
+            collection_id=collection_id,
+            folder_id=folder_id,
+            include_offline_folders=include_offline,
+        )
+        if self.stacks:
+            photos = db.query_browse_stacks(
+                rules, sort=sort, page=self.page, per_page=self.per_page,
+                collection_id=collection_id, folder_id=folder_id,
+                include_offline_folders=include_offline,
+                stack_config=stack_cfg,
+            )
+            stack_totals = db.browse_stack_totals(
+                rules, collection_id=collection_id, folder_id=folder_id,
+                include_offline_folders=include_offline,
+                stack_config=stack_cfg,
+            )
+            return _RulesPage(
+                photos=photos,
+                total=stack_totals["total"],
+                underlying_total=underlying_total,
+                stack_count=stack_totals["stack_count"],
+                focus_index=focus_index,
+                focus_resolved_id=focus_resolved_id,
+            )
+        photos = db.query_photos(
+            rules, sort=sort, page=self.page, per_page=self.per_page,
+            collection_id=collection_id, folder_id=folder_id,
+            include_offline_folders=include_offline,
+        )
+        return _RulesPage(
+            photos=photos,
+            total=underlying_total,
+            underlying_total=underlying_total,
+            focus_index=focus_index,
+            focus_resolved_id=focus_resolved_id,
+        )
+
+    def _rules_availability(self, underlying_total):
+        """Availability is always reported in photos, never in stacks: the
+        notice reads "N of M photos available", so it has to agree with the
+        sidebar collection count and with ``underlying_total`` — ``total``
+        is the logical item count once Stacks collapses it.
+        """
+        db = self.db
+        inventory_total = (
+            underlying_total
+            if self.include_offline
+            else db.count_photos_for_rules(
+                self.rules,
+                collection_id=self.collection_id,
+                folder_id=self.folder_id,
+                include_offline_folders=True,
+            )
+        )
+        available_total = (
+            db.count_photos_for_rules(
+                self.rules,
+                collection_id=self.collection_id,
+                folder_id=self.folder_id,
+            )
+            if self.include_offline
+            else underlying_total
+        )
+        return inventory_total, available_total
