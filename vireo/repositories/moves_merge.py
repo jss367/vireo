@@ -22,6 +22,8 @@ module imports no ``db`` code.
 
 import logging
 import os
+from collections.abc import Callable
+from dataclasses import dataclass, field
 
 from keyword_normalization import keyword_match_key
 from repositories import UNSET
@@ -685,85 +687,239 @@ class MovesMergeRepository:
                     "preserved_off_staging_identities": []}
         staged_root_path = staged_root["path"]
         ws = workspace_id_fn()
+        merge = _StagedTreeMerge(
+            self, ws, staged_root_path, archive_path,
+            root_ancestor_exists=root_ancestor_exists,
+            root_descendant_exists=root_descendant_exists,
+            prune_nonroot_links_outside_roots=(
+                prune_nonroot_links_outside_roots),
+            materialize_workspace_descendants=(
+                materialize_workspace_descendants),
+            add_workspace_folder=add_workspace_folder,
+            add_workspace_folder_no_commit=add_workspace_folder_no_commit,
+            case_insensitive_root=case_insensitive_root,
+            move_location_state=move_location_state,
+            reconcile_keyword_edits=reconcile_keyword_edits,
+            transfer_review_state=transfer_review_state,
+            link_survivor_for_sibling_edits=link_survivor_for_sibling_edits,
+        )
+        merge.link_archive_base()
+        merge.materialize_missing_intermediates()
+        staged_folders = merge.snapshot_staged_folders()
 
-        # Ensure the existing archive base — and every folder row already
-        # below it — is linked to the active workspace before any staged
-        # photo is reparented onto one of those pre-existing folder rows.
-        # If the archive was scanned only under a different workspace, the
-        # else-branch UPDATE below would move photos onto a ``target["id"]``
-        # that has no ``workspace_folders`` row for ``ws``; workspace-scoped
-        # photo queries join ``workspace_folders`` on ``p.folder_id`` and
-        # would silently drop every merged-in photo. ``add_workspace_folder``
-        # pulls the whole subtree (path-prefix), so a single link on the
-        # archive base covers every existing descendant the reconciliation
-        # can hit.
-        #
-        # Root the base ONLY when the active workspace has no existing root
-        # ancestor of it. For an ancestor merge (``/Photos`` is already a
-        # workspace root, base ``/Photos/USA``), rooting the base would create
-        # a SECOND overlapping workspace root inside the first — the exact
-        # duplicate-root state the tracked-overlap guards exist to prevent
-        # (``add_workspace_folder(is_root=True)`` only demotes rows inside the
-        # base's own subtree, so the outer ``/Photos`` root would survive). In
-        # that case just LINK the base non-root; the existing ancestor root
-        # keeps covering it. When there is no root ancestor (the base IS the
-        # archive the user imported into), the base is the natural root.
-        #
-        # When the base is ALREADY a workspace root for ``ws``, skip the
-        # ``add_workspace_folder`` call entirely instead of passing
-        # ``is_root=False`` — the descendant subtree is already linked from
-        # when the base was rooted, and calling with ``is_root=False`` would
-        # silently rely on ``add_workspace_folder``'s no-op-on-existing-row
-        # behavior to preserve the root flag. Making the "already root" case
-        # an explicit skip keeps the merge safe if that invariant ever changes.
+        # Wrap the reconciliation body in try/except + rollback so a mid-run
+        # exception (unexpected row shape, raised error from the
+        # case-insensitivity probe, etc.) can't leave a partially-applied
+        # merge sitting on the connection — an unrelated later commit would
+        # otherwise persist half-reparented folders/photos. Matches the
+        # convention used by other multi-step mutation methods in this file
+        # (``delete_folder``, ``move_folders_to_workspace``,
+        # ``_merge_duplicate_keywords_pass``). Archive-base linking and
+        # missing-intermediate materialization above each commit through
+        # their own ``add_workspace_folder`` calls, so their success is
+        # persisted independently — that's the desired shape here: partial
+        # progress on preparing the archive tree is a valid state a retry
+        # can build on, but partial photo/folder reparenting is not.
+        try:
+            for sf in staged_folders:
+                merge.fold_staged_folder(sf)
+            merge.delete_folded_staged_folders()
+            merge.link_survivors_for_sibling_edits()
+
+            remap_collection_photo_ids(self.conn, merge.collection_remap)
+
+            self.conn.commit()
+            invalidate_new_images([ws])
+        except Exception:
+            self.conn.rollback()
+            raise
+        update_folder_counts()
+        return merge.counts
+
+
+@dataclass
+class _ExistingFolderFold:
+    """A staged folder whose photos move into an existing target folder row."""
+
+    target_id: int
+    target_path: str
+    normalize: Callable[[str], str]
+    existing_by_key: dict
+    # ``staged_normalized_claimed`` tracks case-normalized
+    # filenames already reparented into ``target`` in this
+    # pass — the intra-staged analogue of
+    # ``existing_by_key``. On a case-insensitive target
+    # volume, two staged files whose names differ only in
+    # case (e.g. staged on a case-sensitive disk archiving
+    # to APFS/SMB) collide on the same on-disk destination:
+    # rsync ``--ignore-existing`` writes only the FIRST
+    # file and silently skips the rest, so any later
+    # staged row describes bytes that never landed on
+    # disk. Without this tracker every such row also gets
+    # reparented into ``target``, leaving multiple catalog
+    # rows for the same on-disk file (the SQL
+    # ``UNIQUE(folder_id, filename)`` doesn't fire because
+    # the recorded filenames differ in case). Drop
+    # subsequent case-alias staged rows as
+    # ``already_present`` — the safe direction since their
+    # bytes are unrepresented on disk. On case-sensitive
+    # targets ``normalize`` is identity, so different-case
+    # names have different keys and this tracker never
+    # triggers.
+    #
+    # Mapped to the winning ``photos.id`` so a later
+    # intra-staged collision remaps its pending edits
+    # onto that survivor directly, without a follow-up
+    # ``LOWER(filename) = LOWER(?)`` probe: SQLite's
+    # built-in ``LOWER`` is ASCII-only, so
+    # ``LOWER('Ä.raf') != LOWER('ä.raf')`` would leave
+    # ``survivor_id`` unset and the cascade would drop
+    # the edit this branch exists to preserve.
+    staged_normalized_claimed: dict = field(default_factory=dict)
+
+
+@dataclass
+class _StagedPhotoMatch:
+    """How one staged photo lines up with the target folder's rows."""
+
+    pid: int
+    staged_norm: str
+    collision: dict | None
+    intra_staged_collision: bool
+    real_collision: bool
+
+
+class _StagedTreeMerge:
+    """State for one ``merge_staged_tree_into_archive`` run.
+
+    Holds the active workspace, the staged root and archive paths, the façade
+    callbacks the merge composes, and the run-wide counts and deferred work
+    the reconciliation loop accumulates before the single commit.
+    """
+
+    def __init__(
+            self, repo, ws, staged_root_path, archive_path, *,
+            root_ancestor_exists, root_descendant_exists,
+            prune_nonroot_links_outside_roots,
+            materialize_workspace_descendants, add_workspace_folder,
+            add_workspace_folder_no_commit, case_insensitive_root,
+            move_location_state, reconcile_keyword_edits,
+            transfer_review_state, link_survivor_for_sibling_edits):
+        self.conn = repo.conn
+        self._subtree_prefix = repo._subtree_prefix
+        self._subtree_relative = repo._subtree_relative
+        self._join_subtree_path = repo._join_subtree_path
+        self.ws = ws
+        self.staged_root_path = staged_root_path
+        self.archive_path = archive_path
+        self.root_ancestor_exists = root_ancestor_exists
+        self.root_descendant_exists = root_descendant_exists
+        self.prune_nonroot_links_outside_roots = (
+            prune_nonroot_links_outside_roots)
+        self.materialize_workspace_descendants = (
+            materialize_workspace_descendants)
+        self.add_workspace_folder = add_workspace_folder
+        self.add_workspace_folder_no_commit = add_workspace_folder_no_commit
+        self.case_insensitive_root = case_insensitive_root
+        self.move_location_state = move_location_state
+        self.reconcile_keyword_edits = reconcile_keyword_edits
+        self.transfer_review_state = transfer_review_state
+        self.link_survivor_for_sibling_edits = link_survivor_for_sibling_edits
+
+        self.counts = {"new_photos": 0, "new_folders": 0,
+                       "merged_folders": 0, "already_present": 0,
+                       "dropped_photo_ids": [],
+                       # Pending edits that were queued against a photo the
+                       # collision loop is about to delete (a staged row on a
+                       # real collision, or the phantom target row on a
+                       # replacement), remapped onto the surviving row before
+                       # ON DELETE CASCADE could drop them. Reported up so the
+                       # NAS transfer's residual check can add them to the
+                       # "still need a sync" count instead of silently losing
+                       # them to the cascade.
+                       "preserved_edit_count": 0,
+                       # Active-workspace identities (``change_token`` or
+                       # ``("id", id)``, matching ``staged_sync_scope``) of the
+                       # off-staging remap subset -- the archive-side survivor
+                       # on a real collision. The caller's residual re-read is
+                       # scoped by the captured staged ids, so only this subset
+                       # is invisible to it and has to be added separately. The
+                       # phantom-target branch (survivor is the staged photo)
+                       # and the intra-staged case (survivor is another staged
+                       # photo already reparented in this pass) are already
+                       # covered by the residual re-read, and counting them
+                       # here as well would report one edit as two. Restricted
+                       # to the active workspace and reported as identities --
+                       # not a raw ``rowcount`` -- so the caller can filter out
+                       # rows its pre-transfer drain already left as
+                       # undeliverable (which are not "queued during transfer",
+                       # only edits this workspace declined to write) and
+                       # exclude sibling-workspace rows (which this sync would
+                       # not have written either).
+                       "preserved_off_staging_identities": []}
+        # Staged folders that fold into an existing target row are deleted only
+        # after every staged folder has been processed. Deleting eagerly would
+        # hit a FK violation when a not-yet-reparented staged child still points
+        # at the staged parent we are removing.
+        self.to_delete = []
+        # ``(workspace_id, survivor_photo_id)`` pairs for pending edits the
+        # collision loop remapped out of a workspace other than the one
+        # running the merge. Collected here and applied after every folder
+        # reparent has settled, because the link has to name the survivor's
+        # FINAL folder: an intra-staged or phantom survivor is still sitting
+        # in a staged folder when its remap happens and only lands in the
+        # archive folder later in the loop. A set, so two edits sharing a
+        # survivor write one link.
+        self.sibling_links = set()
+        # Collection memberships of every photo row this merge drops, keyed
+        # to the survivor that absorbs it; applied once, before the commit.
+        self.collection_remap = {}
+        # Map of target-path -> folder id for folders already processed in this
+        # run, so a child can fall back to its parent's id (Fix I2) even if the
+        # parent's row isn't yet findable by path lookup.
+        self.last_target_parent = {}
+
+    def link_archive_base(self):
+        """Link the archive base to the active workspace before the merge.
+
+        Ensure the existing archive base — and every folder row already
+        below it — is linked to the active workspace before any staged
+        photo is reparented onto one of those pre-existing folder rows.
+        If the archive was scanned only under a different workspace, the
+        else-branch UPDATE below would move photos onto a ``target["id"]``
+        that has no ``workspace_folders`` row for ``ws``; workspace-scoped
+        photo queries join ``workspace_folders`` on ``p.folder_id`` and
+        would silently drop every merged-in photo. ``add_workspace_folder``
+        pulls the whole subtree (path-prefix), so a single link on the
+        archive base covers every existing descendant the reconciliation
+        can hit.
+
+        Root the base ONLY when the active workspace has no existing root
+        ancestor of it. For an ancestor merge (``/Photos`` is already a
+        workspace root, base ``/Photos/USA``), rooting the base would create
+        a SECOND overlapping workspace root inside the first — the exact
+        duplicate-root state the tracked-overlap guards exist to prevent
+        (``add_workspace_folder(is_root=True)`` only demotes rows inside the
+        base's own subtree, so the outer ``/Photos`` root would survive). In
+        that case just LINK the base non-root; the existing ancestor root
+        keeps covering it. When there is no root ancestor (the base IS the
+        archive the user imported into), the base is the natural root.
+
+        When the base is ALREADY a workspace root for ``ws``, skip the
+        ``add_workspace_folder`` call entirely instead of passing
+        ``is_root=False`` — the descendant subtree is already linked from
+        when the base was rooted, and calling with ``is_root=False`` would
+        silently rely on ``add_workspace_folder``'s no-op-on-existing-row
+        behavior to preserve the root flag. Making the "already root" case
+        an explicit skip keeps the merge safe if that invariant ever changes.
+        """
         archive_row = self.conn.execute(
-            "SELECT id, status FROM folders WHERE path = ?", (archive_path,)
+            "SELECT id, status FROM folders WHERE path = ?",
+            (self.archive_path,),
         ).fetchone()
         if archive_row:
-            existing_link = self.conn.execute(
-                "SELECT is_root FROM workspace_folders "
-                "WHERE workspace_id = ? AND folder_id = ?",
-                (ws, archive_row["id"]),
-            ).fetchone()
-            if existing_link is None or existing_link["is_root"] == 0:
-                # Not root of ws (unlinked, or linked non-root): link the
-                # subtree, and root the base only if it would not replace an
-                # existing narrower or broader root. A strict descendant root
-                # means the workspace is intentionally scoped inside this
-                # archive (e.g. ``/Photos/USA/2026`` while importing into
-                # ``/Photos/USA``). In that shape, do not link the broad base
-                # at all: even a non-root link materializes every descendant
-                # and would make archive siblings part of workspace queries.
-                has_root_ancestor = root_ancestor_exists(
-                    ws, archive_path)
-                has_root_descendant = root_descendant_exists(
-                    ws, archive_path)
-                if has_root_descendant and not has_root_ancestor:
-                    prune_nonroot_links_outside_roots(
-                        ws, archive_path)
-                    materialize_workspace_descendants(ws)
-                else:
-                    add_workspace_folder(
-                        ws,
-                        archive_row["id"],
-                        is_root=not has_root_ancestor,
-                    )
-            # else: base is already a workspace root — nothing to do.
-            # If the archive base was marked ``missing`` at a previous health
-            # scan (drive unmounted at the time), the storage preflight has
-            # since verified the volume is mounted and the rsync copy landed
-            # files on disk — flip it back to ``ok`` so ws-scoped photo queries
-            # (which filter ``folders.status IN ('ok', 'partial')``) show the
-            # merged photos instead of hiding them until the next health scan
-            # happens to reconcile. Only migrate ``missing`` → ``ok``: leave
-            # ``partial`` alone (the row still has unverified photos) and
-            # ``ok`` unchanged.
-            if archive_row["status"] == "missing":
-                self.conn.execute(
-                    "UPDATE folders SET status = 'ok' WHERE id = ?",
-                    (archive_row["id"],),
-                )
-        elif not root_ancestor_exists(ws, archive_path):
+            self._link_existing_archive_base(archive_row)
+        elif not self.root_ancestor_exists(self.ws, self.archive_path):
             # ``archive_path`` has no folder row yet — it's a brand-new
             # subfolder inside an already-tracked archive that the staged
             # root will be repointed onto below. When the tracked archive
@@ -779,67 +935,122 @@ class MovesMergeRepository:
             # tree has a visible anchor. The intermediate-materialization
             # block below then links each freshly-created intermediate as a
             # non-root descendant under this new root.
-            probe = os.path.dirname(archive_path)
-            while probe and probe != os.path.dirname(probe):
-                ancestor_row = self.conn.execute(
-                    "SELECT id FROM folders WHERE path = ?", (probe,)
-                ).fetchone()
-                if ancestor_row is not None:
-                    if not root_descendant_exists(ws, probe):
-                        add_workspace_folder(
-                            ws, ancestor_row["id"], is_root=True)
-                    else:
-                        # Descendant-root guard fires: the workspace is
-                        # scoped narrower than this ancestor, so rooting
-                        # it would widen the scope past the intended root.
-                        # But any pre-existing ``is_root=0`` link on this
-                        # ancestor (or on descendants below it that no
-                        # root still covers) would let
-                        # ``_materialize_workspace_descendants`` — called
-                        # by later ``get_workspace_folders()`` reads —
-                        # pull the broader subtree back into the workspace
-                        # and defeat the scoped merge. Prune those
-                        # uncovered non-root links now, matching the
-                        # cleanup the ``existing_link is None or
-                        # is_root == 0`` branch above already performs
-                        # via ``_prune_ws_nonroot_links_outside_roots``.
-                        prune_nonroot_links_outside_roots(
-                            ws, probe)
-                    break
-                probe = os.path.dirname(probe)
+            self._root_deepest_tracked_ancestor()
 
-        # Materialize any missing intermediate folder rows between the deepest
-        # existing catalog ancestor and ``archive_path``'s parent (inclusive)
-        # BEFORE the reconciliation loop reads ``parent_id`` by path.
-        #
-        # Nested archive destinations expose this gap: when ``/Photos`` is
-        # tracked and the user imports to ``/Photos/2026/NewShoot``, the
-        # storage preflight materializes ``/Photos/2026`` ON DISK (rsync needs
-        # the transfer parent to exist) but never opens a folder row for it —
-        # the scanner didn't visit that path. Without the row, the loop's
-        # ``WHERE path = ?`` lookup for the staged root's target-parent
-        # returns nothing, and the UPDATE below repoints the staged root to
-        # ``archive_path`` with ``parent_id=NULL`` — floating it outside the
-        # managed archive tree and breaking every parent-based subtree
-        # operation (cascade path renames, ``_folder_subtree_ids_by_path``,
-        # etc.). Walk up from the archive parent until an existing row shows
-        # up (or the filesystem root). When no anchor is found (no tracked
-        # ancestor row in the catalog), the destination is a brand-new
-        # unrelated root — leave the loop's ``parent_id=NULL`` alone, which
-        # is the expected shape for a root. Otherwise insert missing rows
-        # top-down so each child's ``parent_id`` resolves to its freshly-
-        # created parent, and link each to the active workspace non-root
-        # ONLY when an existing workspace root actually covers the
-        # intermediate. Linking non-root unconditionally would leak: if the
-        # workspace is scoped to a narrower root (e.g. ``/archive/USA/2026``)
-        # and the merge target is a sibling like ``/archive/USA/2027/Trip``,
-        # the descendant-root guard above suppresses rooting ``/archive/USA``,
-        # so no workspace root covers the ``/archive/USA/2027`` intermediate.
-        # A non-root link there still makes 2027's subtree visible via
-        # ``_materialize_workspace_descendants`` (called by
-        # ``get_workspace_folders``), defeating the scoped-merge behavior.
+    def _link_existing_archive_base(self, archive_row):
+        ws, archive_path = self.ws, self.archive_path
+        existing_link = self.conn.execute(
+            "SELECT is_root FROM workspace_folders "
+            "WHERE workspace_id = ? AND folder_id = ?",
+            (ws, archive_row["id"]),
+        ).fetchone()
+        if existing_link is None or existing_link["is_root"] == 0:
+            # Not root of ws (unlinked, or linked non-root): link the
+            # subtree, and root the base only if it would not replace an
+            # existing narrower or broader root. A strict descendant root
+            # means the workspace is intentionally scoped inside this
+            # archive (e.g. ``/Photos/USA/2026`` while importing into
+            # ``/Photos/USA``). In that shape, do not link the broad base
+            # at all: even a non-root link materializes every descendant
+            # and would make archive siblings part of workspace queries.
+            has_root_ancestor = self.root_ancestor_exists(
+                ws, archive_path)
+            has_root_descendant = self.root_descendant_exists(
+                ws, archive_path)
+            if has_root_descendant and not has_root_ancestor:
+                self.prune_nonroot_links_outside_roots(
+                    ws, archive_path)
+                self.materialize_workspace_descendants(ws)
+            else:
+                self.add_workspace_folder(
+                    ws,
+                    archive_row["id"],
+                    is_root=not has_root_ancestor,
+                )
+        # else: base is already a workspace root — nothing to do.
+        # If the archive base was marked ``missing`` at a previous health
+        # scan (drive unmounted at the time), the storage preflight has
+        # since verified the volume is mounted and the rsync copy landed
+        # files on disk — flip it back to ``ok`` so ws-scoped photo queries
+        # (which filter ``folders.status IN ('ok', 'partial')``) show the
+        # merged photos instead of hiding them until the next health scan
+        # happens to reconcile. Only migrate ``missing`` → ``ok``: leave
+        # ``partial`` alone (the row still has unverified photos) and
+        # ``ok`` unchanged.
+        if archive_row["status"] == "missing":
+            self.conn.execute(
+                "UPDATE folders SET status = 'ok' WHERE id = ?",
+                (archive_row["id"],),
+            )
+
+    def _root_deepest_tracked_ancestor(self):
+        ws = self.ws
+        probe = os.path.dirname(self.archive_path)
+        while probe and probe != os.path.dirname(probe):
+            ancestor_row = self.conn.execute(
+                "SELECT id FROM folders WHERE path = ?", (probe,)
+            ).fetchone()
+            if ancestor_row is not None:
+                if not self.root_descendant_exists(ws, probe):
+                    self.add_workspace_folder(
+                        ws, ancestor_row["id"], is_root=True)
+                else:
+                    # Descendant-root guard fires: the workspace is
+                    # scoped narrower than this ancestor, so rooting
+                    # it would widen the scope past the intended root.
+                    # But any pre-existing ``is_root=0`` link on this
+                    # ancestor (or on descendants below it that no
+                    # root still covers) would let
+                    # ``_materialize_workspace_descendants`` — called
+                    # by later ``get_workspace_folders()`` reads —
+                    # pull the broader subtree back into the workspace
+                    # and defeat the scoped merge. Prune those
+                    # uncovered non-root links now, matching the
+                    # cleanup the ``existing_link is None or
+                    # is_root == 0`` branch above already performs
+                    # via ``_prune_ws_nonroot_links_outside_roots``.
+                    self.prune_nonroot_links_outside_roots(
+                        ws, probe)
+                break
+            probe = os.path.dirname(probe)
+
+    def materialize_missing_intermediates(self):
+        """Create the missing folder rows above ``archive_path``.
+
+        Materialize any missing intermediate folder rows between the deepest
+        existing catalog ancestor and ``archive_path``'s parent (inclusive)
+        BEFORE the reconciliation loop reads ``parent_id`` by path.
+
+        Nested archive destinations expose this gap: when ``/Photos`` is
+        tracked and the user imports to ``/Photos/2026/NewShoot``, the
+        storage preflight materializes ``/Photos/2026`` ON DISK (rsync needs
+        the transfer parent to exist) but never opens a folder row for it —
+        the scanner didn't visit that path. Without the row, the loop's
+        ``WHERE path = ?`` lookup for the staged root's target-parent
+        returns nothing, and the UPDATE below repoints the staged root to
+        ``archive_path`` with ``parent_id=NULL`` — floating it outside the
+        managed archive tree and breaking every parent-based subtree
+        operation (cascade path renames, ``_folder_subtree_ids_by_path``,
+        etc.). Walk up from the archive parent until an existing row shows
+        up (or the filesystem root). When no anchor is found (no tracked
+        ancestor row in the catalog), the destination is a brand-new
+        unrelated root — leave the loop's ``parent_id=NULL`` alone, which
+        is the expected shape for a root. Otherwise insert missing rows
+        top-down so each child's ``parent_id`` resolves to its freshly-
+        created parent, and link each to the active workspace non-root
+        ONLY when an existing workspace root actually covers the
+        intermediate. Linking non-root unconditionally would leak: if the
+        workspace is scoped to a narrower root (e.g. ``/archive/USA/2026``)
+        and the merge target is a sibling like ``/archive/USA/2027/Trip``,
+        the descendant-root guard above suppresses rooting ``/archive/USA``,
+        so no workspace root covers the ``/archive/USA/2027`` intermediate.
+        A non-root link there still makes 2027's subtree visible via
+        ``_materialize_workspace_descendants`` (called by
+        ``get_workspace_folders``), defeating the scoped-merge behavior.
+        """
+        ws = self.ws
         missing_intermediates = []
-        probe = os.path.dirname(archive_path)
+        probe = os.path.dirname(self.archive_path)
         anchor_found = False
         while probe and probe != os.path.dirname(probe):
             row = self.conn.execute(
@@ -884,668 +1095,611 @@ class MovesMergeRepository:
                     mid_id = self.conn.execute(
                         "SELECT id FROM folders WHERE path = ?", (mid_path,)
                     ).fetchone()["id"]
-                if root_ancestor_exists(ws, mid_path):
-                    add_workspace_folder(
+                if self.root_ancestor_exists(ws, mid_path):
+                    self.add_workspace_folder(
                         ws, mid_id, is_root=False)
 
-        # Snapshot staged folders root-first (shallowest path first) so a
-        # parent's target row exists before its children are processed.
+    def snapshot_staged_folders(self):
+        """Snapshot staged folders root-first (shallowest path first) so a
+        parent's target row exists before its children are processed."""
+        staged_root_path = self.staged_root_path
         prefix = self._subtree_prefix(staged_root_path)
-        staged_folders = self.conn.execute(
+        return self.conn.execute(
             """SELECT id, path FROM folders
                WHERE path = ? OR substr(REPLACE(path, '\\', '/'), 1, ?) = ?
                ORDER BY length(path) ASC""",
             (staged_root_path, len(prefix), prefix),
         ).fetchall()
 
-        counts = {"new_photos": 0, "new_folders": 0,
-                  "merged_folders": 0, "already_present": 0,
-                  "dropped_photo_ids": [],
-                  # Pending edits that were queued against a photo the
-                  # collision loop is about to delete (a staged row on a
-                  # real collision, or the phantom target row on a
-                  # replacement), remapped onto the surviving row before
-                  # ON DELETE CASCADE could drop them. Reported up so the
-                  # NAS transfer's residual check can add them to the
-                  # "still need a sync" count instead of silently losing
-                  # them to the cascade.
-                  "preserved_edit_count": 0,
-                  # Active-workspace identities (``change_token`` or
-                  # ``("id", id)``, matching ``staged_sync_scope``) of the
-                  # off-staging remap subset -- the archive-side survivor
-                  # on a real collision. The caller's residual re-read is
-                  # scoped by the captured staged ids, so only this subset
-                  # is invisible to it and has to be added separately. The
-                  # phantom-target branch (survivor is the staged photo)
-                  # and the intra-staged case (survivor is another staged
-                  # photo already reparented in this pass) are already
-                  # covered by the residual re-read, and counting them
-                  # here as well would report one edit as two. Restricted
-                  # to the active workspace and reported as identities --
-                  # not a raw ``rowcount`` -- so the caller can filter out
-                  # rows its pre-transfer drain already left as
-                  # undeliverable (which are not "queued during transfer",
-                  # only edits this workspace declined to write) and
-                  # exclude sibling-workspace rows (which this sync would
-                  # not have written either).
-                  "preserved_off_staging_identities": []}
-        # Staged folders that fold into an existing target row are deleted only
-        # after every staged folder has been processed. Deleting eagerly would
-        # hit a FK violation when a not-yet-reparented staged child still points
-        # at the staged parent we are removing.
-        to_delete = []
-        # ``(workspace_id, survivor_photo_id)`` pairs for pending edits the
-        # collision loop remapped out of a workspace other than the one
-        # running the merge. Collected here and applied after every folder
-        # reparent has settled, because the link has to name the survivor's
-        # FINAL folder: an intra-staged or phantom survivor is still sitting
-        # in a staged folder when its remap happens and only lands in the
-        # archive folder later in the loop. A set, so two edits sharing a
-        # survivor write one link.
-        sibling_links = set()
-        # Collection memberships of every photo row this merge drops, keyed
-        # to the survivor that absorbs it; applied once, before the commit.
-        collection_remap = {}
-        # Map of target-path -> folder id for folders already processed in this
-        # run, so a child can fall back to its parent's id (Fix I2) even if the
-        # parent's row isn't yet findable by path lookup.
-        last_target_parent = {}
+    def fold_staged_folder(self, sf):
+        """Repoint one staged folder into the archive, or fold it into the
+        existing target folder at the same relative path."""
+        rel = self._subtree_relative(sf["path"], self.staged_root_path)
+        target_path = self._join_subtree_path(self.archive_path, rel)
+        target = self.conn.execute(
+            "SELECT id FROM folders WHERE path = ?", (target_path,)
+        ).fetchone()
+        parent_id = self._target_parent_id(target_path)
 
-        # Wrap the reconciliation body in try/except + rollback so a mid-run
-        # exception (unexpected row shape, raised error from the
-        # case-insensitivity probe, etc.) can't leave a partially-applied
-        # merge sitting on the connection — an unrelated later commit would
-        # otherwise persist half-reparented folders/photos. Matches the
-        # convention used by other multi-step mutation methods in this file
-        # (``delete_folder``, ``move_folders_to_workspace``,
-        # ``_merge_duplicate_keywords_pass``). Archive-base linking and
-        # missing-intermediate materialization above each commit through
-        # their own ``add_workspace_folder`` calls, so their success is
-        # persisted independently — that's the desired shape here: partial
-        # progress on preparing the archive tree is a valid state a retry
-        # can build on, but partial photo/folder reparenting is not.
-        try:
-            for sf in staged_folders:
-                rel = self._subtree_relative(sf["path"], staged_root_path)
-                target_path = self._join_subtree_path(archive_path, rel)
-                target = self.conn.execute(
-                    "SELECT id FROM folders WHERE path = ?", (target_path,)
-                ).fetchone()
-                parent_path = os.path.dirname(target_path)
-                parent_row = self.conn.execute(
-                    "SELECT id FROM folders WHERE path = ?", (parent_path,)
-                ).fetchone()
-                parent_id = parent_row["id"] if parent_row else None
+        if target is None:
+            self._repoint_new_folder(sf, target_path, parent_id)
+        else:
+            self._fold_into_existing_folder(sf, target, target_path)
 
-                # Defensive: a non-root staged folder whose target-parent row is
-                # missing would silently get parent_id=NULL, breaking the chain.
-                # The scanner normally materializes every intermediate, so this
-                # is an unenforced invariant — log it, and fall back to the last
-                # processed target-parent id when we have one.
-                if (parent_id is None
-                        and target_path != archive_path
-                        and parent_path and parent_path != target_path):
-                    fallback = last_target_parent.get(parent_path)
-                    if fallback is not None:
-                        log.warning(
-                            "merge_staged_tree_into_archive: no folder row "
-                            "for target parent %r of %r; falling back to "
-                            "id %s",
-                            parent_path, target_path, fallback,
-                        )
-                        parent_id = fallback
-                    else:
-                        log.warning(
-                            "merge_staged_tree_into_archive: no folder row "
-                            "for target parent %r of %r; leaving parent_id "
-                            "NULL",
-                            parent_path, target_path,
-                        )
+    def _target_parent_id(self, target_path):
+        parent_path = os.path.dirname(target_path)
+        parent_row = self.conn.execute(
+            "SELECT id FROM folders WHERE path = ?", (parent_path,)
+        ).fetchone()
+        parent_id = parent_row["id"] if parent_row else None
 
-                if target is None:
-                    target_in_workspace = root_ancestor_exists(
-                        ws, target_path)
-                    # New folder under the archive: repoint + reparent + link.
-                    self.conn.execute(
-                        "UPDATE folders SET path = ?, parent_id = ? "
-                        "WHERE id = ?",
-                        (target_path, parent_id, sf["id"]),
-                    )
-                    # Use the non-committing variant so the folder path/parent_
-                    # id UPDATE just above stays in the outer transaction — the
-                    # public ``add_workspace_folder`` commits, and a mid-loop
-                    # commit would persist a partial reparent that the outer
-                    # rollback (below) could no longer undo if a later staged
-                    # folder raised.
-                    if target_in_workspace:
-                        add_workspace_folder_no_commit(
-                            ws, sf["id"], is_root=False)
-                        # The staging scan registers each photo-bearing leaf as
-                        # its own workspace ROOT (scanner restrict_dirs =>
-                        # is_root=1). Once that leaf is folded under the existing
-                        # archive base it must become a plain descendant,
-                        # otherwise the merge leaves a stray second workspace
-                        # root inside the archive — the exact overlap the
-                        # tracked-ancestor guard was meant to prevent.
-                        # add_workspace_folder's INSERT OR IGNORE can't downgrade
-                        # an existing is_root=1 row, so demote it explicitly here.
-                        self.conn.execute(
-                            "UPDATE workspace_folders SET is_root = 0 "
-                            "WHERE workspace_id = ? AND folder_id = ?",
-                            (ws, sf["id"]),
-                        )
-                    else:
-                        self.conn.execute(
-                            "DELETE FROM workspace_folders "
-                            "WHERE workspace_id = ? AND folder_id = ?",
-                            (ws, sf["id"]),
-                        )
-                    # Every staged photo in a brand-new folder is newly
-                    # archived.
-                    new_count = self.conn.execute(
-                        "SELECT COUNT(*) c FROM photos WHERE folder_id = ?",
-                        (sf["id"],),
-                    ).fetchone()["c"]
-                    counts["new_photos"] += new_count
-                    counts["new_folders"] += 1
-                    # Record this folder's id so a child whose path-parent is
-                    # this folder can resolve its parent even before counts
-                    # re-query.
-                    last_target_parent[target_path] = sf["id"]
-                else:
-                    # Existing folder: move photos in, drop filename-collisions.
-                    # Restore the target row to visible status if it was marked
-                    # ``missing`` — same rationale as the archive-base status
-                    # flip above. We just verified files exist at
-                    # ``target_path`` (rsync + verify), so a lingering
-                    # ``missing`` from an earlier health scan would hide the
-                    # newly-merged photos from workspace-scoped queries. Only
-                    # migrate ``missing`` → ``ok``; leave ``partial``/``ok``
-                    # alone. Runs inside the outer try/except so a later
-                    # exception still rolls this back.
-                    self.conn.execute(
-                        "UPDATE folders SET status = 'ok' "
-                        "WHERE id = ? AND status = 'missing'",
-                        (target["id"],),
-                    )
-                    staged_photos = list(self.conn.execute(
-                        "SELECT id, filename, file_hash, file_size "
-                        "FROM photos WHERE folder_id = ?",
-                        (sf["id"],),
-                    ))
-                    # Detect collisions against the ACTUAL target volume's case
-                    # rules — not SQLite's default case-sensitive TEXT compare.
-                    # On a case-insensitive volume (default macOS APFS, Windows
-                    # NTFS), a target row/file named ``IMG.RAF`` and a staged
-                    # ``img.raf`` are the same on-disk file: rsync
-                    # ``--ignore-existing`` treats them as already present and
-                    # skips the copy. A case-sensitive SQL match would miss
-                    # that, fall into the else-branch reparent below, and land
-                    # TWO catalog rows in one folder pointing at the same
-                    # on-disk file (SQLite text-equality is case-sensitive, so
-                    # UNIQUE(folder_id, filename) would not fire to catch the
-                    # mistake). Build the collision map by normalizing
-                    # filenames with the target filesystem's case rules
-                    # instead. Probes ``target_path``'s deepest existing
-                    # ancestor, so a fresh subfolder inherits its mount's
-                    # behavior.
-                    target_folds_case = (
-                        case_insensitive_root(target_path) is not None)
-                    normalize = (str.casefold if target_folds_case
-                                 else (lambda s: s))
-                    existing_by_key = {}
-                    for row in self.conn.execute(
-                        "SELECT id, filename, file_hash, file_size "
-                        "FROM photos WHERE folder_id = ?",
-                        (target["id"],),
-                    ):
-                        # First writer wins on the (unlikely) chance two
-                        # case-alias rows already coexist in the target folder
-                        # from a pre-fix catalog.
-                        existing_by_key.setdefault(
-                            normalize(row["filename"]),
-                            {"id": row["id"], "filename": row["filename"],
-                             "file_hash": row["file_hash"],
-                             "file_size": row["file_size"]},
-                        )
+        # Defensive: a non-root staged folder whose target-parent row is
+        # missing would silently get parent_id=NULL, breaking the chain.
+        # The scanner normally materializes every intermediate, so this
+        # is an unenforced invariant — log it, and fall back to the last
+        # processed target-parent id when we have one.
+        if (parent_id is None
+                and target_path != self.archive_path
+                and parent_path and parent_path != target_path):
+            fallback = self.last_target_parent.get(parent_path)
+            if fallback is not None:
+                log.warning(
+                    "merge_staged_tree_into_archive: no folder row "
+                    "for target parent %r of %r; falling back to "
+                    "id %s",
+                    parent_path, target_path, fallback,
+                )
+                parent_id = fallback
+            else:
+                log.warning(
+                    "merge_staged_tree_into_archive: no folder row "
+                    "for target parent %r of %r; leaving parent_id "
+                    "NULL",
+                    parent_path, target_path,
+                )
+        return parent_id
 
-                    # A filename-collision alone is NOT enough to drop the
-                    # staged photo as ``already_present``. The drop is only
-                    # safe when the collision is REAL on disk — i.e. the
-                    # target row accurately describes the bytes at
-                    # ``target_path/filename``. rsync ``--ignore-existing``
-                    # skipped the staged copy only when a byte-identical
-                    # archived file was already there (a DIFFERING file
-                    # would have aborted the move upstream in the
-                    # content-conflict check). If the target catalog row is
-                    # stale — its file was MISSING on disk before the
-                    # archive step — the upstream check never fired (no
-                    # dest file to compare) and rsync COPIED the staged
-                    # bytes into place. By the time we run here rsync has
-                    # already finished, so ``os.path.exists`` returns True
-                    # in BOTH the real-collision and the phantom-row cases
-                    # and cannot tell them apart. Require MATCHING recorded
-                    # ``file_hash`` on both the staged photo and the target
-                    # row to call a collision "real": a hash match means
-                    # the row correctly describes what is on disk (dropping
-                    # the staged row is safe); a hash mismatch means rsync
-                    # replaced a missing file with fresh staged bytes and
-                    # the row is stale. When either recorded hash is
-                    # missing there is no reliable post-copy signal —
-                    # ``file_size`` alone can coincidentally match a
-                    # phantom row's stored size (empty XMP sidecars, small
-                    # metadata files), and hashing the on-disk file to
-                    # compare against the STAGED hash matches trivially in
-                    # BOTH the real-collision case (byte-identical by
-                    # definition) and the phantom case (rsync wrote the
-                    # staged bytes). Default to phantom-replacement below
-                    # when unverifiable: it preserves the freshly-imported
-                    # pipeline output at the cost of any accumulated
-                    # metadata on an unhashed archive row, which is the
-                    # strictly-safer direction — silently dropping the
-                    # newly-imported photo behind a same-size stale row is
-                    # the opposite (and worse) failure. In the phantom
-                    # case delete the stale target row and reparent the
-                    # staged photo in its place so the surviving catalog
-                    # row describes the bytes actually on disk. This also
-                    # avoids a UNIQUE(folder_id, filename) violation from
-                    # moving the staged row onto a folder that still holds
-                    # the same basename.
-                    #
-                    # ``staged_normalized_claimed`` tracks case-normalized
-                    # filenames already reparented into ``target`` in this
-                    # pass — the intra-staged analogue of
-                    # ``existing_by_key``. On a case-insensitive target
-                    # volume, two staged files whose names differ only in
-                    # case (e.g. staged on a case-sensitive disk archiving
-                    # to APFS/SMB) collide on the same on-disk destination:
-                    # rsync ``--ignore-existing`` writes only the FIRST
-                    # file and silently skips the rest, so any later
-                    # staged row describes bytes that never landed on
-                    # disk. Without this tracker every such row also gets
-                    # reparented into ``target``, leaving multiple catalog
-                    # rows for the same on-disk file (the SQL
-                    # ``UNIQUE(folder_id, filename)`` doesn't fire because
-                    # the recorded filenames differ in case). Drop
-                    # subsequent case-alias staged rows as
-                    # ``already_present`` — the safe direction since their
-                    # bytes are unrepresented on disk. On case-sensitive
-                    # targets ``normalize`` is identity, so different-case
-                    # names have different keys and this tracker never
-                    # triggers.
-                    #
-                    # Mapped to the winning ``photos.id`` so a later
-                    # intra-staged collision remaps its pending edits
-                    # onto that survivor directly, without a follow-up
-                    # ``LOWER(filename) = LOWER(?)`` probe: SQLite's
-                    # built-in ``LOWER`` is ASCII-only, so
-                    # ``LOWER('Ä.raf') != LOWER('ä.raf')`` would leave
-                    # ``survivor_id`` unset and the cascade would drop
-                    # the edit this branch exists to preserve.
-                    staged_normalized_claimed = {}
-                    for staged in staged_photos:
-                        pid = staged["id"]
-                        staged_norm = normalize(staged["filename"])
-                        collision = existing_by_key.get(staged_norm)
-                        intra_staged_collision = (
-                            staged_norm in staged_normalized_claimed)
-                        # The archived filename may differ in case from the
-                        # staged one; probe for the ACTUAL archived name so
-                        # the on-disk existence check matches on
-                        # case-sensitive volumes too (where any case-alias
-                        # check is pointless anyway).
-                        target_filename = (collision["filename"]
-                                           if collision else None)
-                        target_disk_path = (
-                            self._join_subtree_path(target_path, target_filename)
-                            if target_filename is not None else None)
-                        # A missing file on disk is definitely phantom
-                        # (rsync would have written the staged bytes if
-                        # this ever ran in production; the code path
-                        # tolerates the isolated-unit-test case where no
-                        # rsync happened).
-                        target_on_disk = (
-                            target_disk_path is not None
-                            and os.path.exists(target_disk_path))
-                        real_collision = False
-                        if collision is not None and target_on_disk:
-                            staged_hash = staged["file_hash"]
-                            target_hash = collision["file_hash"]
-                            if staged_hash and target_hash:
-                                # Both hashes present → byte-identity
-                                # comparison is reliable. Match → the
-                                # target row's claim matches the file on
-                                # disk (real collision). Mismatch → rsync
-                                # replaced a missing file with fresh
-                                # bytes; the target row is stale.
-                                real_collision = (staged_hash == target_hash)
-                            # else: at least one recorded hash is missing.
-                            # Leave ``real_collision`` False so the
-                            # phantom-replacement branch below runs — see
-                            # the outer comment for why size alone (or a
-                            # freshly-computed on-disk hash) can't safely
-                            # stand in for the recorded-hash comparison
-                            # here.
-                        if real_collision or intra_staged_collision:
-                            # photo_keywords.photo_id has no ON DELETE CASCADE
-                            # (unlike every other photo_id FK), so clear
-                            # keyword links before deleting the photo or the
-                            # FK fires.
-                            #
-                            # ``intra_staged_collision`` shares this branch
-                            # for the same net effect: the staged row's
-                            # bytes are not represented on disk (an earlier
-                            # staged case-alias already claimed the slot,
-                            # rsync ``--ignore-existing`` skipped this
-                            # file), so treating it as ``already_present``
-                            # is correct.
-                            #
-                            # Reparent any pending edits queued against the
-                            # staged row onto the surviving photo before the
-                            # DELETE fires the ON DELETE CASCADE on
-                            # ``pending_changes.photo_id`` and drops them.
-                            # An edit queued between the pre-transfer sync's
-                            # last drain and this reconciliation is still a
-                            # write the user asked for: the survivor points
-                            # at the same on-disk file (real-collision → the
-                            # byte-identical archived row; intra-staged →
-                            # the earlier staged twin that already claimed
-                            # the normalized slot in ``target["id"]``), so
-                            # its sidecar is the one the edit was aimed at.
-                            # Without this remap the cascade would silently
-                            # discard the edit and the residual re-read
-                            # below would find nothing to report.
-                            # Prefer the intra-staged winner over a stale
-                            # ``collision`` entry. ``existing_by_key`` is
-                            # built once from the target folder and is not
-                            # refreshed when the phantom-replacement branch
-                            # below deletes ``collision["id"]``. If an
-                            # earlier iteration hit that branch on the same
-                            # case-normalized name, ``existing_by_key[
-                            # staged_norm]`` still points at the deleted
-                            # phantom while ``staged_normalized_claimed[
-                            # staged_norm]`` holds the live winner. Reading
-                            # the tracker first also sidesteps SQLite's
-                            # ASCII-only ``LOWER``, which cannot match
-                            # non-ASCII case aliases like ``Ä.raf`` /
-                            # ``ä.raf`` and would otherwise leave the
-                            # remap unset.
-                            #
-                            # An in-staging survivor is still in the
-                            # captured ``staged_photo_ids`` and the
-                            # residual re-read already picks its remapped
-                            # edits up — adding the same count again would
-                            # report one edit as two. An off-staging
-                            # survivor (the byte-identical archive row) is
-                            # invisible to a photo-id-scoped residual
-                            # re-read, so the caller has to add its remap
-                            # count separately. See
-                            # ``_residual_staged_changes``.
-                            if intra_staged_collision:
-                                survivor_id = staged_normalized_claimed.get(
-                                    staged_norm)
-                                survivor_off_staging = False
-                            else:
-                                survivor_id = (
-                                    collision["id"] if collision is not None
-                                    else None)
-                                survivor_off_staging = collision is not None
-                            if survivor_id is not None:
-                                # A queued ``location`` change stores its
-                                # coordinates only in the deleted photo's
-                                # ``photo_keywords`` link to a
-                                # ``type='location'`` keyword; the delete
-                                # below strips those links and
-                                # ``sync_to_xmp`` would otherwise derive
-                                # coordinates from whatever unrelated
-                                # location keyword (or none) the survivor
-                                # carries, silently writing the wrong GPS
-                                # -- or clearing it -- for the remapped
-                                # row. Move the location state across when
-                                # the staged row holds the newer queued
-                                # assignment; the helper leaves the
-                                # survivor's own tags alone when ITS
-                                # queued change is newer.
-                                move_location_state(pid, survivor_id)
-                                # Opposing keyword edits on the two rows
-                                # would fold into a rename pair once they
-                                # share a photo and cancel the newer one
-                                # out. Resolve before anything reads the
-                                # queue: the identity capture and the
-                                # sibling-workspace scan below must see the
-                                # rows that actually survive.
-                                reconcile_keyword_edits(
-                                    pid, survivor_id)
-                                # ``photos.rating`` / ``photos.flag`` live
-                                # outside the queue row, so they have to
-                                # travel with it or the survivor's catalog
-                                # keeps a value the sidecar no longer has.
-                                transfer_review_state(
-                                    pid, survivor_id)
-                                # Capture the identities of the rows this
-                                # remap is about to move -- restricted to
-                                # the active workspace so sibling-workspace
-                                # edits (which this sync would not have
-                                # written anyway) don't inflate the caller's
-                                # "queued during transfer" count. Read
-                                # before the UPDATE, because after it the
-                                # rows now live on ``survivor_id`` and the
-                                # caller has no way to distinguish them
-                                # from anything the survivor already
-                                # carried.
-                                off_staging_row_identities = []
-                                if survivor_off_staging:
-                                    off_staging_row_identities = [
-                                        (row["change_token"]
-                                         or ("id", row["id"]))
-                                        for row in self.conn.execute(
-                                            "SELECT id, change_token "
-                                            "FROM pending_changes "
-                                            "WHERE photo_id = ? "
-                                            "  AND workspace_id = ?",
-                                            (pid, ws),
-                                        ).fetchall()
-                                    ]
-                                # Sibling workspaces owning rows this remap
-                                # will move. Read before the UPDATE for the
-                                # same reason as above: afterwards these rows
-                                # are indistinguishable from the survivor's
-                                # own. Their folder link is deferred to the
-                                # end of the merge, where the survivor's
-                                # final ``folder_id`` is settled.
-                                sibling_ws_ids = [
-                                    r["workspace_id"] for r in
-                                    self.conn.execute(
-                                        "SELECT DISTINCT workspace_id "
-                                        "FROM pending_changes "
-                                        "WHERE photo_id = ? "
-                                        "  AND workspace_id IS NOT NULL "
-                                        "  AND workspace_id != ?",
-                                        (pid, ws),
-                                    ).fetchall()
-                                ]
-                                for sibling_ws in sibling_ws_ids:
-                                    sibling_links.add(
-                                        (sibling_ws, survivor_id))
-                                remap = self.conn.execute(
-                                    "UPDATE pending_changes "
-                                    "SET photo_id = ? WHERE photo_id = ?",
-                                    (survivor_id, pid),
-                                )
-                                counts["preserved_edit_count"] += (
-                                    remap.rowcount or 0)
-                                if off_staging_row_identities:
-                                    counts[
-                                        "preserved_off_staging_identities"
-                                    ].extend(off_staging_row_identities)
-                            self.conn.execute(
-                                "DELETE FROM photo_keywords "
-                                "WHERE photo_id = ?",
-                                (pid,))
-                            self.conn.execute(
-                                "DELETE FROM photos WHERE id = ?", (pid,))
-                            collection_remap[pid] = survivor_id
-                            counts["already_present"] += 1
-                            # The staged photo id is now free. Thumbnails,
-                            # previews, working copies, and offline cache files
-                            # were keyed off this id, and SQLite reuses freed
-                            # rowids — a later import that lands on this id
-                            # would inherit stale imagery. Report the id up so
-                            # the caller can drop those files.
-                            counts["dropped_photo_ids"].append(pid)
-                        else:
-                            if collision is not None:
-                                # Filename collided (case-normalized) but the
-                                # target row is a phantom — either the
-                                # archived file was missing on disk (rsync
-                                # copied the staged bytes into the empty
-                                # slot) or the file is there but its
-                                # bytes-identity (hash/size) doesn't match
-                                # the row's claim (rsync replaced a missing
-                                # file with fresh staged bytes). Either way
-                                # the staged row correctly describes what's
-                                # on disk. Drop the phantom by id so the
-                                # reparent below can take its (folder_id,
-                                # filename) slot and represent the real file.
-                                # Deleting by id (not filename) is required on
-                                # case-insensitive volumes where the staged
-                                # and phantom filenames differ only in case:
-                                # the SQL ``filename = ?`` lookup used earlier
-                                # would miss the stale row and leave both
-                                # intact.
-                                #
-                                # Reparent the phantom's pending edits onto
-                                # the staged row that is about to take its
-                                # slot. The staged bytes are what will live
-                                # at that (folder_id, filename), so any
-                                # queued write is aimed at that sidecar --
-                                # letting the cascade drop it would silently
-                                # discard the user's edit.
-                                #
-                                # A queued ``location`` change on the
-                                # phantom stores its coordinates only in
-                                # the phantom's ``photo_keywords`` link to
-                                # a ``type='location'`` keyword; the
-                                # DELETE below strips those links and
-                                # ``sync_to_xmp`` would otherwise derive
-                                # coordinates from whatever unrelated
-                                # location tag (or none) the staged
-                                # survivor carries, silently writing the
-                                # wrong GPS -- or clearing it -- for the
-                                # remapped row. Move the phantom's
-                                # location keyword links onto the survivor
-                                # before the delete so the queued edit's
-                                # intent survives -- unless the survivor
-                                # holds a NEWER queued location change, the
-                                # replacement-import shape where a fresh
-                                # assignment on the staged row would be
-                                # reverted by the stale archive row's. The
-                                # helper resolves that by queue chronology,
-                                # identically in the collision→staged
-                                # branch above.
-                                move_location_state(
-                                    collision["id"], pid)
-                                # Same reconciliation as the branch above,
-                                # and for the same reason it runs here: an
-                                # older add on one row must not reverse a
-                                # newer remove on the other once the remap
-                                # puts them on one photo.
-                                reconcile_keyword_edits(
-                                    collision["id"], pid)
-                                # Same carry-over of the catalog columns the
-                                # queue row does not hold.
-                                transfer_review_state(
-                                    collision["id"], pid)
-                                # Sibling workspaces owning phantom rows this
-                                # remap will move onto the staged survivor.
-                                # Read before the UPDATE; the link itself is
-                                # deferred to the end of the merge, after the
-                                # survivor has been reparented into the
-                                # archive folder.
-                                for sibling_ws in [
-                                    r["workspace_id"] for r in
-                                    self.conn.execute(
-                                        "SELECT DISTINCT workspace_id "
-                                        "FROM pending_changes "
-                                        "WHERE photo_id = ? "
-                                        "  AND workspace_id IS NOT NULL "
-                                        "  AND workspace_id != ?",
-                                        (collision["id"], ws),
-                                    ).fetchall()
-                                ]:
-                                    sibling_links.add((sibling_ws, pid))
-                                remap = self.conn.execute(
-                                    "UPDATE pending_changes "
-                                    "SET photo_id = ? WHERE photo_id = ?",
-                                    (pid, collision["id"]),
-                                )
-                                # No ``preserved_off_staging_identities``
-                                # bump: the survivor is ``pid``, still one
-                                # of the ids the caller captured before
-                                # the merge, so a residual re-read scoped
-                                # by those ids already finds the remapped
-                                # edits.
-                                counts["preserved_edit_count"] += (
-                                    remap.rowcount or 0)
-                                self.conn.execute(
-                                    "DELETE FROM photo_keywords "
-                                    "WHERE photo_id = ?", (collision["id"],))
-                                self.conn.execute(
-                                    "DELETE FROM photos WHERE id = ?",
-                                    (collision["id"],))
-                                collection_remap[collision["id"]] = pid
-                                # The phantom target-row id is likewise freed —
-                                # its cache files can be reused for a new
-                                # photo. Report it up for cleanup too.
-                                counts["dropped_photo_ids"].append(
-                                    collision["id"])
-                            self.conn.execute(
-                                "UPDATE photos SET folder_id = ? "
-                                "WHERE id = ?",
-                                (target["id"], pid),
-                            )
-                            # A photo moved into a pre-existing archive folder
-                            # is still a newly-archived photo from the user's
-                            # view.
-                            counts["new_photos"] += 1
-                            # Claim the case-normalized slot so a later
-                            # staged row whose filename case-folds to this
-                            # name is dropped as ``already_present``
-                            # instead of adding a second catalog row for
-                            # the same on-disk destination.
-                            staged_normalized_claimed[staged_norm] = pid
-                    to_delete.append(sf["id"])
-                    counts["merged_folders"] += 1
-                    last_target_parent[target_path] = target["id"]
+    def _repoint_new_folder(self, sf, target_path, parent_id):
+        """New folder under the archive: repoint + reparent + link."""
+        ws = self.ws
+        target_in_workspace = self.root_ancestor_exists(
+            ws, target_path)
+        self.conn.execute(
+            "UPDATE folders SET path = ?, parent_id = ? "
+            "WHERE id = ?",
+            (target_path, parent_id, sf["id"]),
+        )
+        # Use the non-committing variant so the folder path/parent_
+        # id UPDATE just above stays in the outer transaction — the
+        # public ``add_workspace_folder`` commits, and a mid-loop
+        # commit would persist a partial reparent that the outer
+        # rollback (below) could no longer undo if a later staged
+        # folder raised.
+        if target_in_workspace:
+            self.add_workspace_folder_no_commit(
+                ws, sf["id"], is_root=False)
+            # The staging scan registers each photo-bearing leaf as
+            # its own workspace ROOT (scanner restrict_dirs =>
+            # is_root=1). Once that leaf is folded under the existing
+            # archive base it must become a plain descendant,
+            # otherwise the merge leaves a stray second workspace
+            # root inside the archive — the exact overlap the
+            # tracked-ancestor guard was meant to prevent.
+            # add_workspace_folder's INSERT OR IGNORE can't downgrade
+            # an existing is_root=1 row, so demote it explicitly here.
+            self.conn.execute(
+                "UPDATE workspace_folders SET is_root = 0 "
+                "WHERE workspace_id = ? AND folder_id = ?",
+                (ws, sf["id"]),
+            )
+        else:
+            self.conn.execute(
+                "DELETE FROM workspace_folders "
+                "WHERE workspace_id = ? AND folder_id = ?",
+                (ws, sf["id"]),
+            )
+        # Every staged photo in a brand-new folder is newly
+        # archived.
+        new_count = self.conn.execute(
+            "SELECT COUNT(*) c FROM photos WHERE folder_id = ?",
+            (sf["id"],),
+        ).fetchone()["c"]
+        self.counts["new_photos"] += new_count
+        self.counts["new_folders"] += 1
+        # Record this folder's id so a child whose path-parent is
+        # this folder can resolve its parent even before counts
+        # re-query.
+        self.last_target_parent[target_path] = sf["id"]
 
-            # Delete deepest-first: ``staged_folders`` (hence ``to_delete``)
-            # is shallowest-first, so reverse to remove children before
-            # parents and never orphan a still-referenced ``parent_id``.
-            # Drop the folder's workspace links first —
-            # ``workspace_folders.folder_id`` has no ON DELETE CASCADE, so
-            # the folder delete would hit a FK violation.
-            for fid in reversed(to_delete):
-                self.conn.execute(
-                    "DELETE FROM workspace_folders WHERE folder_id = ?",
-                    (fid,))
-                self.conn.execute("DELETE FROM folders WHERE id = ?", (fid,))
+    def _fold_into_existing_folder(self, sf, target, target_path):
+        """Existing folder: move photos in, drop filename-collisions."""
+        # Restore the target row to visible status if it was marked
+        # ``missing`` — same rationale as the archive-base status
+        # flip above. We just verified files exist at
+        # ``target_path`` (rsync + verify), so a lingering
+        # ``missing`` from an earlier health scan would hide the
+        # newly-merged photos from workspace-scoped queries. Only
+        # migrate ``missing`` → ``ok``; leave ``partial``/``ok``
+        # alone. Runs inside the outer try/except so a later
+        # exception still rolls this back.
+        self.conn.execute(
+            "UPDATE folders SET status = 'ok' "
+            "WHERE id = ? AND status = 'missing'",
+            (target["id"],),
+        )
+        staged_photos = list(self.conn.execute(
+            "SELECT id, filename, file_hash, file_size "
+            "FROM photos WHERE folder_id = ?",
+            (sf["id"],),
+        ))
+        fold = self._existing_folder_fold(target, target_path)
+        for staged in staged_photos:
+            match = self._match_staged_photo(fold, staged)
+            if match.real_collision or match.intra_staged_collision:
+                self._drop_staged_photo(fold, match)
+            else:
+                self._reparent_staged_photo(fold, match)
+        self.to_delete.append(sf["id"])
+        self.counts["merged_folders"] += 1
+        self.last_target_parent[target_path] = target["id"]
 
-            # Last, after every survivor's ``folder_id`` is final and the
-            # staged folder rows (and their workspace links) are gone: give
-            # each sibling workspace whose queued edits were remapped a way
-            # to resolve the survivor. Without it those rows stay queued and
-            # fail every future sync as inaccessible, with nothing reporting
-            # why.
-            for sibling_ws, survivor_photo_id in sorted(sibling_links):
-                link_survivor_for_sibling_edits(
-                    sibling_ws, survivor_photo_id)
+    def _existing_folder_fold(self, target, target_path):
+        """Index the target folder's photos by case-normalized filename.
 
-            remap_collection_photo_ids(self.conn, collection_remap)
+        Detect collisions against the ACTUAL target volume's case
+        rules — not SQLite's default case-sensitive TEXT compare.
+        On a case-insensitive volume (default macOS APFS, Windows
+        NTFS), a target row/file named ``IMG.RAF`` and a staged
+        ``img.raf`` are the same on-disk file: rsync
+        ``--ignore-existing`` treats them as already present and
+        skips the copy. A case-sensitive SQL match would miss
+        that, fall into the else-branch reparent below, and land
+        TWO catalog rows in one folder pointing at the same
+        on-disk file (SQLite text-equality is case-sensitive, so
+        UNIQUE(folder_id, filename) would not fire to catch the
+        mistake). Build the collision map by normalizing
+        filenames with the target filesystem's case rules
+        instead. Probes ``target_path``'s deepest existing
+        ancestor, so a fresh subfolder inherits its mount's
+        behavior.
+        """
+        target_folds_case = (
+            self.case_insensitive_root(target_path) is not None)
+        normalize = (str.casefold if target_folds_case
+                     else (lambda s: s))
+        existing_by_key = {}
+        for row in self.conn.execute(
+            "SELECT id, filename, file_hash, file_size "
+            "FROM photos WHERE folder_id = ?",
+            (target["id"],),
+        ):
+            # First writer wins on the (unlikely) chance two
+            # case-alias rows already coexist in the target folder
+            # from a pre-fix catalog.
+            existing_by_key.setdefault(
+                normalize(row["filename"]),
+                {"id": row["id"], "filename": row["filename"],
+                 "file_hash": row["file_hash"],
+                 "file_size": row["file_size"]},
+            )
+        return _ExistingFolderFold(
+            target_id=target["id"],
+            target_path=target_path,
+            normalize=normalize,
+            existing_by_key=existing_by_key,
+        )
 
-            self.conn.commit()
-            invalidate_new_images([ws])
-        except Exception:
-            self.conn.rollback()
-            raise
-        update_folder_counts()
-        return counts
+    def _match_staged_photo(self, fold, staged):
+        """Classify one staged photo against the target folder's rows.
+
+        A filename-collision alone is NOT enough to drop the
+        staged photo as ``already_present``. The drop is only
+        safe when the collision is REAL on disk — i.e. the
+        target row accurately describes the bytes at
+        ``target_path/filename``. rsync ``--ignore-existing``
+        skipped the staged copy only when a byte-identical
+        archived file was already there (a DIFFERING file
+        would have aborted the move upstream in the
+        content-conflict check). If the target catalog row is
+        stale — its file was MISSING on disk before the
+        archive step — the upstream check never fired (no
+        dest file to compare) and rsync COPIED the staged
+        bytes into place. By the time we run here rsync has
+        already finished, so ``os.path.exists`` returns True
+        in BOTH the real-collision and the phantom-row cases
+        and cannot tell them apart. Require MATCHING recorded
+        ``file_hash`` on both the staged photo and the target
+        row to call a collision "real": a hash match means
+        the row correctly describes what is on disk (dropping
+        the staged row is safe); a hash mismatch means rsync
+        replaced a missing file with fresh staged bytes and
+        the row is stale. When either recorded hash is
+        missing there is no reliable post-copy signal —
+        ``file_size`` alone can coincidentally match a
+        phantom row's stored size (empty XMP sidecars, small
+        metadata files), and hashing the on-disk file to
+        compare against the STAGED hash matches trivially in
+        BOTH the real-collision case (byte-identical by
+        definition) and the phantom case (rsync wrote the
+        staged bytes). Default to phantom-replacement below
+        when unverifiable: it preserves the freshly-imported
+        pipeline output at the cost of any accumulated
+        metadata on an unhashed archive row, which is the
+        strictly-safer direction — silently dropping the
+        newly-imported photo behind a same-size stale row is
+        the opposite (and worse) failure. In the phantom
+        case delete the stale target row and reparent the
+        staged photo in its place so the surviving catalog
+        row describes the bytes actually on disk. This also
+        avoids a UNIQUE(folder_id, filename) violation from
+        moving the staged row onto a folder that still holds
+        the same basename.
+        """
+        pid = staged["id"]
+        staged_norm = fold.normalize(staged["filename"])
+        collision = fold.existing_by_key.get(staged_norm)
+        intra_staged_collision = (
+            staged_norm in fold.staged_normalized_claimed)
+        # The archived filename may differ in case from the
+        # staged one; probe for the ACTUAL archived name so
+        # the on-disk existence check matches on
+        # case-sensitive volumes too (where any case-alias
+        # check is pointless anyway).
+        target_filename = (collision["filename"]
+                           if collision else None)
+        target_disk_path = (
+            self._join_subtree_path(fold.target_path, target_filename)
+            if target_filename is not None else None)
+        # A missing file on disk is definitely phantom
+        # (rsync would have written the staged bytes if
+        # this ever ran in production; the code path
+        # tolerates the isolated-unit-test case where no
+        # rsync happened).
+        target_on_disk = (
+            target_disk_path is not None
+            and os.path.exists(target_disk_path))
+        real_collision = False
+        if collision is not None and target_on_disk:
+            staged_hash = staged["file_hash"]
+            target_hash = collision["file_hash"]
+            if staged_hash and target_hash:
+                # Both hashes present → byte-identity
+                # comparison is reliable. Match → the
+                # target row's claim matches the file on
+                # disk (real collision). Mismatch → rsync
+                # replaced a missing file with fresh
+                # bytes; the target row is stale.
+                real_collision = (staged_hash == target_hash)
+            # else: at least one recorded hash is missing.
+            # Leave ``real_collision`` False so the
+            # phantom-replacement branch below runs — see
+            # the outer comment for why size alone (or a
+            # freshly-computed on-disk hash) can't safely
+            # stand in for the recorded-hash comparison
+            # here.
+        return _StagedPhotoMatch(
+            pid=pid,
+            staged_norm=staged_norm,
+            collision=collision,
+            intra_staged_collision=intra_staged_collision,
+            real_collision=real_collision,
+        )
+
+    def _drop_staged_photo(self, fold, match):
+        pid = match.pid
+        collision = match.collision
+        # photo_keywords.photo_id has no ON DELETE CASCADE
+        # (unlike every other photo_id FK), so clear
+        # keyword links before deleting the photo or the
+        # FK fires.
+        #
+        # ``intra_staged_collision`` shares this branch
+        # for the same net effect: the staged row's
+        # bytes are not represented on disk (an earlier
+        # staged case-alias already claimed the slot,
+        # rsync ``--ignore-existing`` skipped this
+        # file), so treating it as ``already_present``
+        # is correct.
+        #
+        # Reparent any pending edits queued against the
+        # staged row onto the surviving photo before the
+        # DELETE fires the ON DELETE CASCADE on
+        # ``pending_changes.photo_id`` and drops them.
+        # An edit queued between the pre-transfer sync's
+        # last drain and this reconciliation is still a
+        # write the user asked for: the survivor points
+        # at the same on-disk file (real-collision → the
+        # byte-identical archived row; intra-staged →
+        # the earlier staged twin that already claimed
+        # the normalized slot in ``target["id"]``), so
+        # its sidecar is the one the edit was aimed at.
+        # Without this remap the cascade would silently
+        # discard the edit and the residual re-read
+        # below would find nothing to report.
+        # Prefer the intra-staged winner over a stale
+        # ``collision`` entry. ``existing_by_key`` is
+        # built once from the target folder and is not
+        # refreshed when the phantom-replacement branch
+        # below deletes ``collision["id"]``. If an
+        # earlier iteration hit that branch on the same
+        # case-normalized name, ``existing_by_key[
+        # staged_norm]`` still points at the deleted
+        # phantom while ``staged_normalized_claimed[
+        # staged_norm]`` holds the live winner. Reading
+        # the tracker first also sidesteps SQLite's
+        # ASCII-only ``LOWER``, which cannot match
+        # non-ASCII case aliases like ``Ä.raf`` /
+        # ``ä.raf`` and would otherwise leave the
+        # remap unset.
+        #
+        # An in-staging survivor is still in the
+        # captured ``staged_photo_ids`` and the
+        # residual re-read already picks its remapped
+        # edits up — adding the same count again would
+        # report one edit as two. An off-staging
+        # survivor (the byte-identical archive row) is
+        # invisible to a photo-id-scoped residual
+        # re-read, so the caller has to add its remap
+        # count separately. See
+        # ``_residual_staged_changes``.
+        if match.intra_staged_collision:
+            survivor_id = fold.staged_normalized_claimed.get(
+                match.staged_norm)
+            survivor_off_staging = False
+        else:
+            survivor_id = (
+                collision["id"] if collision is not None
+                else None)
+            survivor_off_staging = collision is not None
+        if survivor_id is not None:
+            self._carry_staged_state_to_survivor(
+                pid, survivor_id, survivor_off_staging)
+        self.conn.execute(
+            "DELETE FROM photo_keywords "
+            "WHERE photo_id = ?",
+            (pid,))
+        self.conn.execute(
+            "DELETE FROM photos WHERE id = ?", (pid,))
+        self.collection_remap[pid] = survivor_id
+        self.counts["already_present"] += 1
+        # The staged photo id is now free. Thumbnails,
+        # previews, working copies, and offline cache files
+        # were keyed off this id, and SQLite reuses freed
+        # rowids — a later import that lands on this id
+        # would inherit stale imagery. Report the id up so
+        # the caller can drop those files.
+        self.counts["dropped_photo_ids"].append(pid)
+
+    def _carry_staged_state_to_survivor(
+            self, pid, survivor_id, survivor_off_staging):
+        # A queued ``location`` change stores its
+        # coordinates only in the deleted photo's
+        # ``photo_keywords`` link to a
+        # ``type='location'`` keyword; the delete
+        # below strips those links and
+        # ``sync_to_xmp`` would otherwise derive
+        # coordinates from whatever unrelated
+        # location keyword (or none) the survivor
+        # carries, silently writing the wrong GPS
+        # -- or clearing it -- for the remapped
+        # row. Move the location state across when
+        # the staged row holds the newer queued
+        # assignment; the helper leaves the
+        # survivor's own tags alone when ITS
+        # queued change is newer.
+        self.move_location_state(pid, survivor_id)
+        # Opposing keyword edits on the two rows
+        # would fold into a rename pair once they
+        # share a photo and cancel the newer one
+        # out. Resolve before anything reads the
+        # queue: the identity capture and the
+        # sibling-workspace scan below must see the
+        # rows that actually survive.
+        self.reconcile_keyword_edits(
+            pid, survivor_id)
+        # ``photos.rating`` / ``photos.flag`` live
+        # outside the queue row, so they have to
+        # travel with it or the survivor's catalog
+        # keeps a value the sidecar no longer has.
+        self.transfer_review_state(
+            pid, survivor_id)
+        # Capture the identities of the rows this
+        # remap is about to move -- restricted to
+        # the active workspace so sibling-workspace
+        # edits (which this sync would not have
+        # written anyway) don't inflate the caller's
+        # "queued during transfer" count. Read
+        # before the UPDATE, because after it the
+        # rows now live on ``survivor_id`` and the
+        # caller has no way to distinguish them
+        # from anything the survivor already
+        # carried.
+        off_staging_row_identities = []
+        if survivor_off_staging:
+            off_staging_row_identities = [
+                (row["change_token"]
+                 or ("id", row["id"]))
+                for row in self.conn.execute(
+                    "SELECT id, change_token "
+                    "FROM pending_changes "
+                    "WHERE photo_id = ? "
+                    "  AND workspace_id = ?",
+                    (pid, self.ws),
+                ).fetchall()
+            ]
+        # Sibling workspaces owning rows this remap
+        # will move. Read before the UPDATE for the
+        # same reason as above: afterwards these rows
+        # are indistinguishable from the survivor's
+        # own. Their folder link is deferred to the
+        # end of the merge, where the survivor's
+        # final ``folder_id`` is settled.
+        self._defer_sibling_links(pid, survivor_id)
+        self._remap_pending_changes(pid, survivor_id)
+        if off_staging_row_identities:
+            self.counts[
+                "preserved_off_staging_identities"
+            ].extend(off_staging_row_identities)
+
+    def _reparent_staged_photo(self, fold, match):
+        pid = match.pid
+        if match.collision is not None:
+            self._replace_phantom_target(pid, match.collision)
+        self.conn.execute(
+            "UPDATE photos SET folder_id = ? "
+            "WHERE id = ?",
+            (fold.target_id, pid),
+        )
+        # A photo moved into a pre-existing archive folder
+        # is still a newly-archived photo from the user's
+        # view.
+        self.counts["new_photos"] += 1
+        # Claim the case-normalized slot so a later
+        # staged row whose filename case-folds to this
+        # name is dropped as ``already_present``
+        # instead of adding a second catalog row for
+        # the same on-disk destination.
+        fold.staged_normalized_claimed[match.staged_norm] = pid
+
+    def _replace_phantom_target(self, pid, collision):
+        """Drop a phantom target row so staged photo ``pid`` takes its slot.
+
+        Filename collided (case-normalized) but the
+        target row is a phantom — either the
+        archived file was missing on disk (rsync
+        copied the staged bytes into the empty
+        slot) or the file is there but its
+        bytes-identity (hash/size) doesn't match
+        the row's claim (rsync replaced a missing
+        file with fresh staged bytes). Either way
+        the staged row correctly describes what's
+        on disk. Drop the phantom by id so the
+        reparent below can take its (folder_id,
+        filename) slot and represent the real file.
+        Deleting by id (not filename) is required on
+        case-insensitive volumes where the staged
+        and phantom filenames differ only in case:
+        the SQL ``filename = ?`` lookup used earlier
+        would miss the stale row and leave both
+        intact.
+        """
+        # Reparent the phantom's pending edits onto
+        # the staged row that is about to take its
+        # slot. The staged bytes are what will live
+        # at that (folder_id, filename), so any
+        # queued write is aimed at that sidecar --
+        # letting the cascade drop it would silently
+        # discard the user's edit.
+        #
+        # A queued ``location`` change on the
+        # phantom stores its coordinates only in
+        # the phantom's ``photo_keywords`` link to
+        # a ``type='location'`` keyword; the
+        # DELETE below strips those links and
+        # ``sync_to_xmp`` would otherwise derive
+        # coordinates from whatever unrelated
+        # location tag (or none) the staged
+        # survivor carries, silently writing the
+        # wrong GPS -- or clearing it -- for the
+        # remapped row. Move the phantom's
+        # location keyword links onto the survivor
+        # before the delete so the queued edit's
+        # intent survives -- unless the survivor
+        # holds a NEWER queued location change, the
+        # replacement-import shape where a fresh
+        # assignment on the staged row would be
+        # reverted by the stale archive row's. The
+        # helper resolves that by queue chronology,
+        # identically in the collision→staged
+        # branch above.
+        self.move_location_state(
+            collision["id"], pid)
+        # Same reconciliation as the branch above,
+        # and for the same reason it runs here: an
+        # older add on one row must not reverse a
+        # newer remove on the other once the remap
+        # puts them on one photo.
+        self.reconcile_keyword_edits(
+            collision["id"], pid)
+        # Same carry-over of the catalog columns the
+        # queue row does not hold.
+        self.transfer_review_state(
+            collision["id"], pid)
+        # Sibling workspaces owning phantom rows this
+        # remap will move onto the staged survivor.
+        # Read before the UPDATE; the link itself is
+        # deferred to the end of the merge, after the
+        # survivor has been reparented into the
+        # archive folder.
+        self._defer_sibling_links(collision["id"], pid)
+        self._remap_pending_changes(collision["id"], pid)
+        # No ``preserved_off_staging_identities``
+        # bump: the survivor is ``pid``, still one
+        # of the ids the caller captured before
+        # the merge, so a residual re-read scoped
+        # by those ids already finds the remapped
+        # edits.
+        self.conn.execute(
+            "DELETE FROM photo_keywords "
+            "WHERE photo_id = ?", (collision["id"],))
+        self.conn.execute(
+            "DELETE FROM photos WHERE id = ?",
+            (collision["id"],))
+        self.collection_remap[collision["id"]] = pid
+        # The phantom target-row id is likewise freed —
+        # its cache files can be reused for a new
+        # photo. Report it up for cleanup too.
+        self.counts["dropped_photo_ids"].append(
+            collision["id"])
+
+    def _defer_sibling_links(self, losing_id, survivor_id):
+        """Queue a survivor link for each sibling workspace with edits on
+        ``losing_id``; read before the remap moves them."""
+        for sibling_ws in [
+            r["workspace_id"] for r in
+            self.conn.execute(
+                "SELECT DISTINCT workspace_id "
+                "FROM pending_changes "
+                "WHERE photo_id = ? "
+                "  AND workspace_id IS NOT NULL "
+                "  AND workspace_id != ?",
+                (losing_id, self.ws),
+            ).fetchall()
+        ]:
+            self.sibling_links.add((sibling_ws, survivor_id))
+
+    def _remap_pending_changes(self, losing_id, survivor_id):
+        remap = self.conn.execute(
+            "UPDATE pending_changes "
+            "SET photo_id = ? WHERE photo_id = ?",
+            (survivor_id, losing_id),
+        )
+        self.counts["preserved_edit_count"] += (
+            remap.rowcount or 0)
+
+    def delete_folded_staged_folders(self):
+        """Delete the staged folder rows folded into existing targets.
+
+        Delete deepest-first: ``staged_folders`` (hence ``to_delete``)
+        is shallowest-first, so reverse to remove children before
+        parents and never orphan a still-referenced ``parent_id``.
+        Drop the folder's workspace links first —
+        ``workspace_folders.folder_id`` has no ON DELETE CASCADE, so
+        the folder delete would hit a FK violation.
+        """
+        for fid in reversed(self.to_delete):
+            self.conn.execute(
+                "DELETE FROM workspace_folders WHERE folder_id = ?",
+                (fid,))
+            self.conn.execute("DELETE FROM folders WHERE id = ?", (fid,))
+
+    def link_survivors_for_sibling_edits(self):
+        """Last, after every survivor's ``folder_id`` is final and the
+        staged folder rows (and their workspace links) are gone: give
+        each sibling workspace whose queued edits were remapped a way
+        to resolve the survivor. Without it those rows stay queued and
+        fail every future sync as inaccessible, with nothing reporting
+        why."""
+        for sibling_ws, survivor_photo_id in sorted(self.sibling_links):
+            self.link_survivor_for_sibling_edits(
+                sibling_ws, survivor_photo_id)
