@@ -3227,3 +3227,170 @@ def test_scan_counter_waits_for_the_read_it_is_reporting(tmp_path, monkeypatch):
         assert reports[-1] == (1, 1, "")
     finally:
         db.close()
+
+
+def test_discard_invalidates_new_images_for_ancestor_workspace_without_link(tmp_path):
+    """The New Images walk leaves staged sources out, so ending a session
+    changes the answer for every workspace whose root contains the source --
+    including one that removed the staged folder and so is not among the
+    workspaces linked to the mapped rows. Its cached walk must be dropped,
+    or the source stays silently left out for the cache lifetime.
+    """
+    with Database(str(tmp_path / "vireo.db")) as db:
+        parent_ws = db.create_workspace("Parent")
+        child_ws = db.create_workspace("Child")
+        parent = tmp_path / "nas" / "parent"
+        child = parent / "child"
+        child.mkdir(parents=True)
+        (child / "bird.jpg").write_bytes(b"original")
+        parent_id = db.add_folder(str(parent), link_to_workspace=False)
+        child_id = db.add_folder(str(child), parent_id=parent_id, link_to_workspace=False)
+        db.add_workspace_folder(parent_ws, parent_id)
+        db.add_workspace_folder(child_ws, child_id)
+        db.set_active_workspace(parent_ws)
+        db.delete_folder(child_id)
+        db.set_active_workspace(child_ws)
+        vireo_dir = str(tmp_path / "vireo")
+        cache = db._new_images_cache
+
+        stage_folder(db, child_id, vireo_dir)
+        cache.set(db._db_path, parent_ws, {"new_count": 0, "sample": []})
+        assert cache.get(db._db_path, parent_ws) is not None
+
+        discard_folder(db, child_id, vireo_dir)
+
+        assert cache.get(db._db_path, parent_ws) is None
+
+
+def _destination_blocker_app(tmp_path, monkeypatch, scan_root_for):
+    """An app with one remote root and a fake scan in another workspace whose
+    root is ``scan_root_for(vireo_dir)`` -- overlapping a stage destination
+    but not the stage source."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from app import create_app
+
+    source = tmp_path / "nas" / "photos"
+    source.mkdir(parents=True)
+    (source / "bird.jpg").write_bytes(b"original")
+    vireo_dir = tmp_path / "vireo"
+    thumbs = vireo_dir / "thumbnails"
+    thumbs.mkdir(parents=True)
+    db_path = str(vireo_dir / "vireo.db")
+
+    db = Database(db_path)
+    workspace_id = db.create_workspace("Owner")
+    folder_id = db.add_folder(str(source), name="photos", link_to_workspace=False)
+    db.add_workspace_folder(workspace_id, folder_id)
+    db.set_active_workspace(workspace_id)
+    db.close()
+
+    app = create_app(db_path, thumb_cache_dir=str(thumbs))
+    app.config["TESTING"] = True
+    scan_job = {
+        "id": "scan-1",
+        "type": "scan",
+        "status": "running",
+        "workspace_id": workspace_id + 1000,
+        "config": {"roots": [str(scan_root_for(vireo_dir))]},
+        "blocks_local_transitions": True,
+    }
+    monkeypatch.setattr(app._job_runner, "list_jobs", lambda: [scan_job])
+    return app, workspace_id, folder_id, vireo_dir
+
+
+def test_blocker_reports_scan_overlapping_default_local_destination(
+    tmp_path, monkeypatch,
+):
+    """The stage admission refuses a scan that overlaps the local
+    destination, not only the source. The blocker status used to check the
+    source alone, so the folder looked available and the stage POST then
+    returned 409. It now checks the destination the stage dialog prefills.
+    """
+    from services.local_folder import default_local_base
+
+    app, workspace_id, folder_id, vireo_dir = _destination_blocker_app(
+        tmp_path, monkeypatch, lambda vireo_dir: vireo_dir / "local-folders",
+    )
+    with app.test_client() as client:
+        assert client.post(
+            f"/api/workspaces/{workspace_id}/activate", json={}
+        ).status_code == 200
+        blocker = client.get(
+            "/api/workspaces/active/local-folders/blocker"
+        ).get_json()
+        expected = {"id": "scan-1", "type": "scan", "status": "running"}
+        assert blocker["folder_blocking_jobs"] == {str(folder_id): expected}
+        assert blocker["blocking_job"] == expected
+
+        default_base = str(default_local_base(str(vireo_dir), folder_id))
+        for body in (
+            {"folder_ids": [folder_id]},
+            {"folder_ids": [folder_id],
+             "destination_bases": {str(folder_id): default_base}},
+        ):
+            stage = client.post(
+                "/api/workspaces/active/local-folders/stage", json=body,
+            )
+            assert stage.status_code == 409, stage.get_json()
+            assert "scan" in stage.get_json()["error"]
+
+
+def test_preflight_refuses_scan_overlapping_chosen_local_destination(
+    tmp_path, monkeypatch,
+):
+    """A destination the user picks in the stage dialog is checked by the
+    preflight the dialog runs, so the confirm button is not enabled for a
+    stage the admission would refuse; a destination clear of the scan
+    still gets its capacity preflight.
+    """
+    import web.local_folder as local_folder_web
+
+    chosen = tmp_path / "chosen"
+    chosen.mkdir()
+    clear = tmp_path / "clear"
+    clear.mkdir()
+    app, workspace_id, folder_id, _vireo_dir = _destination_blocker_app(
+        tmp_path, monkeypatch, lambda _vireo_dir: chosen,
+    )
+    preflights = []
+
+    def fake_preflight(_db, root_ids, _vireo_dir, **kwargs):
+        preflights.append(kwargs.get("destination_bases"))
+        return {"can_copy": True, "folders": [], "volumes": []}
+
+    monkeypatch.setattr(local_folder_web, "local_copy_preflight", fake_preflight)
+
+    with app.test_client() as client:
+        assert client.post(
+            f"/api/workspaces/{workspace_id}/activate", json={}
+        ).status_code == 200
+        # The scan overlaps only the chosen destination, not the default the
+        # blocker status checks, so the folder is not reported blocked...
+        blocker = client.get(
+            "/api/workspaces/active/local-folders/blocker"
+        ).get_json()
+        assert blocker["folder_blocking_jobs"] == {}
+
+        # ...but the preflight for that destination answers like admission.
+        refused = client.post(
+            "/api/workspaces/active/local-folders/preflight",
+            json={"folder_ids": [folder_id],
+                  "destination_bases": {str(folder_id): str(chosen)}},
+        )
+        assert refused.status_code == 409
+        assert "scan" in refused.get_json()["error"]
+        stage = client.post(
+            "/api/workspaces/active/local-folders/stage",
+            json={"folder_ids": [folder_id],
+                  "destination_bases": {str(folder_id): str(chosen)}},
+        )
+        assert stage.status_code == 409
+        assert preflights == []
+
+        allowed = client.post(
+            "/api/workspaces/active/local-folders/preflight",
+            json={"folder_ids": [folder_id],
+                  "destination_bases": {str(folder_id): str(clear)}},
+        )
+        assert allowed.status_code == 200, allowed.get_json()
+        assert preflights == [{folder_id: str(clear)}]

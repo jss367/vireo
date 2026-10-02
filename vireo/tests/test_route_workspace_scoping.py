@@ -512,6 +512,103 @@ def test_snapshot_import_refuses_paths_inside_staged_source(staged):
     assert "local copy" in resp.get_json()["error"]
 
 
+def test_new_images_leaves_out_staged_source_so_snapshot_import_runs(staged):
+    """A workspace whose root contains a folder another workspace staged
+    must not see the staged originals as new.
+
+    Staging rebases their catalog rows onto the local copy, so the walk used
+    to count every original in the source as new; the snapshot then carried
+    them, and ``import-in-place`` refused the whole snapshot (the staged-path
+    guard below), taking the genuinely new files elsewhere in the root down
+    with it. The walk now prunes staged sources and reports them, so the
+    banner count, its sample and the snapshot agree, and the import runs.
+    """
+    from new_images import count_new_images_for_workspace
+    from wait import wait_for_job_via_client
+
+    db, client = staged["db"], staged["client"]
+    db.add_folder(staged["archive"], name="archive")
+    elsewhere = os.path.join(staged["archive"], "2024-06-01")
+    os.mkdir(elsewhere)
+    genuinely_new = os.path.join(elsewhere, "new.jpg")
+    with open(genuinely_new, "wb") as f:
+        f.write(b"jpg")
+    staged_original = os.path.join(staged["source"], "a.jpg")
+
+    result = count_new_images_for_workspace(
+        db, db._active_workspace_id, sample_limit=None,
+    )
+    assert genuinely_new in result["sample"]
+    assert staged_original not in result["sample"]
+    assert result["new_count"] == len(result["sample"])
+    assert result["local_copy_excluded"] == [staged["source"]]
+
+    banner = client.get("/api/workspaces/active/new-images").get_json()
+    assert banner["new_count"] == result["new_count"]
+    assert banner["local_copy_excluded"] == [staged["source"]]
+
+    snap = client.post("/api/workspaces/active/new-images/snapshot")
+    assert snap.status_code == 200
+    snapshot = snap.get_json()
+    assert snapshot["file_count"] == banner["new_count"]
+    assert staged["source"] not in snapshot["folders"]
+
+    resp = client.post(
+        "/api/jobs/import-in-place",
+        json={"source_snapshot_id": snapshot["snapshot_id"], "after_import": None},
+    )
+    assert resp.status_code == 200, resp.get_json()
+    wait_for_job_via_client(client, resp.get_json()["job_id"])
+
+
+@pytest.mark.parametrize("job_workspace,status,expected", [
+    ("own", "queued", "this workspace has a queued folder-stage job"),
+    ("own", "running", "this workspace has a running folder-stage job"),
+    ("other", "running", "another workspace has a running folder-stage job"),
+    ("other", "queued", "another workspace has a queued folder-stage job"),
+    ("other", "paused", "another workspace has a paused folder-stage job"),
+])
+def test_pending_stage_refusal_names_owner_and_status(
+    staged, tmp_path, job_workspace, status, expected,
+):
+    """``stage_pending_source_paths`` returns the active workspace's own
+    stage jobs and running or paused ones too, so the refusal must not
+    always claim "another workspace" has one "queued".
+    """
+    from services.local_folder import (
+        local_copy_scan_conflict,
+        stage_pending_source_paths,
+    )
+
+    db = staged["db"]
+    active = db._active_workspace_id
+    pending_source = tmp_path / "pending-source"
+    pending_source.mkdir()
+    fid = db.add_folder(str(pending_source), name="pending")
+    jobs = [{
+        "id": "stage-1",
+        "type": "work-locally-folder-stage",
+        "status": status,
+        "workspace_id": active if job_workspace == "own" else active + 1000,
+        "config": {"root_folder_ids": [fid]},
+    }]
+
+    conflict = local_copy_scan_conflict(
+        db, [str(pending_source)],
+        active_workspace_id=active,
+        pending_stage_sources=stage_pending_source_paths(jobs, db),
+    )
+
+    assert conflict is not None
+    assert expected in conflict
+    wrong_owner = "another workspace" if job_workspace == "own" else "this workspace"
+    assert wrong_owner not in conflict
+    if status == "paused":
+        assert "Resume" in conflict and "cancel" in conflict
+    else:
+        assert "Wait for that stage job to finish" in conflict
+
+
 def _stub_final_check_conflict(monkeypatch, workflow, marker):
     """Make the final atomic ``local_copy_scan_conflict`` fail while the
     pre-flight passes.

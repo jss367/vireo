@@ -574,6 +574,11 @@ async function checkNewImages(options) {
     // count above covers only the reachable roots, so the banner must say
     // so rather than present a partial number as the whole truth.
     const unreachable = Array.isArray(data.unreachable_roots) ? data.unreachable_roots : [];
+    // Folders whose originals are staged as a local copy (Work Locally). The
+    // walk leaves them out -- the catalog knows those photos by their local
+    // path, and an import of them is refused until the copy is synced or
+    // discarded -- so the count does not cover them and the banner says so.
+    const localCopies = Array.isArray(data.local_copy_excluded) ? data.local_copy_excluded : [];
     const cta = banner.querySelector('.banner-cta');
 
     // Only a *real* zero — every root checked, nothing new — resets the
@@ -596,9 +601,11 @@ async function checkNewImages(options) {
       if (unreachable.length) {
         text += ` ${_offlineRootsPhrase(unreachable)} offline and not checked.`;
       }
+      text += _localCopiesSentence(localCopies);
       msg.textContent = text;
       if (cta) cta.style.display = '';
       _applyOfflineBannerDetail(unreachable, data.checked_at);
+      _appendBannerTitlePaths(localCopies);
       banner.dataset.count = String(data.new_count);
       banner.style.display = 'flex';
     } else if (data.new_count === 0 && unreachable.length && wsId !== '' && !_isNewImagesDismissed(wsId, 0, unreachable)) {
@@ -607,9 +614,11 @@ async function checkNewImages(options) {
       // Say that instead of silently hiding, and offer nothing to import.
       // (Gated on a zero count: a dismissed *positive* banner with offline
       // roots must stay dismissed, not fall through to this notice.)
-      msg.textContent = `Couldn't check for new images: ${_offlineRootsPhrase(unreachable)} offline.`;
+      msg.textContent = `Couldn't check for new images: ${_offlineRootsPhrase(unreachable)} offline.`
+        + _localCopiesSentence(localCopies);
       if (cta) cta.style.display = 'none';
       _applyOfflineBannerDetail(unreachable, data.checked_at);
+      _appendBannerTitlePaths(localCopies);
       banner.dataset.count = '0';
       banner.style.display = 'flex';
     } else {
@@ -698,6 +707,24 @@ function _applyOfflineBannerDetail(roots, checkedAt) {
     const when = roots.length ? _formatCheckedAt(checkedAt) : '';
     stamp.textContent = when ? `checked ${when}` : '';
   }
+}
+
+// Sentence naming the folders the walk left out because they are working
+// locally (empty when there are none), with a leading space so it appends.
+function _localCopiesSentence(localCopies) {
+  if (!localCopies.length) return '';
+  const one = localCopies.length === 1;
+  return ` ${_offlineRootsPhrase(localCopies)} working locally and not checked;`
+    + ` sync or discard ${one ? 'that local copy' : 'those local copies'}`
+    + ` to include ${one ? 'it' : 'them'}.`;
+}
+
+// Add full paths to the banner message's hover text after whatever
+// _applyOfflineBannerDetail put there.
+function _appendBannerTitlePaths(paths) {
+  const msg = document.getElementById('newImagesMsg');
+  if (!msg || !paths.length) return;
+  msg.title = (msg.title ? msg.title + '\n' : '') + paths.join('\n');
 }
 
 function _formatCheckedAt(checkedAt) {

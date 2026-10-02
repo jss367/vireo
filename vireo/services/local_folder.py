@@ -413,6 +413,57 @@ def local_root_overlapping_path(
     return None
 
 
+_PENDING_STAGE_STATUSES = frozenset({"queued", "running", "pausing", "paused"})
+
+
+class PendingStagePath(str):
+    """A path a live folder-stage job will claim, tagged with that job.
+
+    It is the plain path everywhere a path is expected; ``workspace_id`` and
+    ``status`` of the claiming job let :func:`local_copy_scan_conflict` say
+    whose job it is and what state it is in.
+    """
+
+    def __new__(cls, path: str, *, workspace_id=None, status=None):
+        obj = super().__new__(cls, path)
+        obj.workspace_id = workspace_id
+        obj.status = status
+        return obj
+
+
+def _pending_stage_refusal(path: str, pending, active_workspace_id) -> str:
+    """Refusal naming whose folder-stage job overlaps ``path`` and its state.
+
+    The job can belong to the caller's own workspace as easily as to
+    another, and it can be queued, running or paused; the message says
+    which. A plain-string entry (no job details) gets a neutral sentence.
+    """
+    job_ws = getattr(pending, "workspace_id", None)
+    status = getattr(pending, "status", None)
+    job = (
+        f"a {status} folder-stage job" if status in _PENDING_STAGE_STATUSES
+        else "a folder-stage job"
+    )
+    try:
+        own = int(job_ws) == int(active_workspace_id)
+    except (TypeError, ValueError):
+        own = None  # owner unknown: say nothing about it
+    if own is None:
+        clause = f"{job} overlaps it"
+    elif own:
+        clause = f"this workspace has {job} that overlaps it"
+    else:
+        clause = f"another workspace has {job} that overlaps it"
+    if status in {"pausing", "paused"}:
+        advice = (
+            "Resume that stage job and let it finish, or cancel it, "
+            "before scanning."
+        )
+    else:
+        advice = "Wait for that stage job to finish before scanning."
+    return f"Cannot scan {path}: {clause}. {advice}"
+
+
 def stage_pending_source_paths(list_jobs, db) -> list[str]:
     """Paths reserved by queued/running folder-stage jobs.
 
@@ -436,36 +487,53 @@ def stage_pending_source_paths(list_jobs, db) -> list[str]:
 
     ``list_jobs`` is the runner's ``list_jobs`` callable, or an already
     materialized job list.
+
+    Each entry is a :class:`PendingStagePath` carrying the claiming job's
+    ``workspace_id`` and ``status``. The job may be the caller's own
+    workspace's, so the refusal built from it must not assume "another
+    workspace" or "queued".
     """
     if list_jobs is None:
         return []
     jobs = list_jobs() if callable(list_jobs) else list_jobs
-    pending_root_ids: set[int] = set()
+    sources: list[str] = []
     destination_paths: list[str] = []
+    seen_sources: set[tuple[str, object, object]] = set()
+    folder_paths: dict[int, str | None] = {}
     for job in jobs or []:
         if job.get("type") != "work-locally-folder-stage":
             continue
-        if job.get("status") not in {"queued", "running", "pausing", "paused"}:
+        status = job.get("status")
+        if status not in _PENDING_STAGE_STATUSES:
             continue
         config = job.get("config") or {}
         if not isinstance(config, dict):
             continue
+        job_ws = job.get("workspace_id")
+        root_ids: set[int] = set()
         for raw in config.get("root_folder_ids") or []:
             try:
-                pending_root_ids.add(int(raw))
+                root_ids.add(int(raw))
             except (TypeError, ValueError):
                 continue
+        for root_id in sorted(root_ids):
+            if root_id not in folder_paths:
+                row = db.conn.execute(
+                    "SELECT path FROM folders WHERE id=?",
+                    (root_id,),
+                ).fetchone()
+                folder_paths[root_id] = row["path"] if row and row["path"] else None
+            path = folder_paths[root_id]
+            if path and (path, job_ws, status) not in seen_sources:
+                seen_sources.add((path, job_ws, status))
+                sources.append(
+                    PendingStagePath(path, workspace_id=job_ws, status=status)
+                )
         for raw in config.get("destination_paths") or []:
             if isinstance(raw, str) and raw:
-                destination_paths.append(raw)
-    sources: list[str] = []
-    for root_id in sorted(pending_root_ids):
-        row = db.conn.execute(
-            "SELECT path FROM folders WHERE id=?",
-            (int(root_id),),
-        ).fetchone()
-        if row and row["path"]:
-            sources.append(row["path"])
+                destination_paths.append(
+                    PendingStagePath(raw, workspace_id=job_ws, status=status)
+                )
     return sources + destination_paths
 
 
@@ -491,9 +559,11 @@ def local_copy_scan_conflict(
     see. Same for a queued folder-stage that overlaps: the caller is
     told a stage job overlaps their path, not which source it names.
 
-    ``pending_stage_sources`` covers folder-stage jobs another workspace
-    has queued but whose worker has not yet created the mapping row --
-    otherwise the DB check alone would accept the path in that window.
+    ``pending_stage_sources`` covers live folder-stage jobs (from any
+    workspace, this one included) whose worker has not yet created the
+    mapping row -- otherwise the DB check alone would accept the path in
+    that window. Entries from :func:`stage_pending_source_paths` carry the
+    job's workspace and status, and the refusal states both.
     """
     staged = _load_staged_source_index(db)
     pending: list[str] = []
@@ -528,10 +598,8 @@ def local_copy_scan_conflict(
                 path, path_physical, source, source_physical,
                 include_descendants=include_descendants,
             ):
-                return (
-                    f"Cannot scan {path}: another workspace has a "
-                    "folder-stage job queued that overlaps it. Wait for "
-                    "that stage job to finish before scanning."
+                return _pending_stage_refusal(
+                    path, source, active_workspace_id,
                 )
     return None
 
@@ -609,6 +677,34 @@ def workspace_ids_for_folder_tree(db, root_folder_id: int) -> list[int]:
         if _is_within(row["path"], root["path"]) or _is_within(root["path"], row["path"]):
             workspace_ids.add(int(row["workspace_id"]))
     return sorted(workspace_ids)
+
+
+def _invalidate_new_images_for_source(
+    db, source_path: str | None, workspace_ids=(),
+) -> None:
+    """Drop cached New Images answers that a staged source changes.
+
+    The New Images walk leaves every staged source out (see
+    ``new_images.staged_source_paths``), so staging, a failed stage, a sync
+    and a discard each change the answer for every workspace whose folders
+    reach ``source_path`` -- including an ancestor-linked workspace that
+    never linked the staged folder itself, which ``affected_workspace_ids``
+    misses. ``workspace_ids`` adds the workspaces linked to the mapped rows.
+    """
+    ids = {int(workspace_id) for workspace_id in workspace_ids}
+    if source_path:
+        for row in db.conn.execute(
+            """SELECT DISTINCT wf.workspace_id, f.path
+               FROM workspace_folders wf
+               JOIN folders f ON f.id = wf.folder_id"""
+        ).fetchall():
+            path = row["path"]
+            if path and (
+                _is_within(path, source_path) or _is_within(source_path, path)
+            ):
+                ids.add(int(row["workspace_id"]))
+    for workspace_id in sorted(ids):
+        db.invalidate_new_images_cache_for_workspace(workspace_id)
 
 
 def workspace_summaries_for_ids(db, workspace_ids: list[int]) -> list[dict]:
@@ -916,6 +1012,8 @@ def stage_folder(
                 db.conn.rollback()
                 _remove_folder_dir(vireo_dir, root_folder_id, local_root)
                 raise
+            # From here the New Images walk leaves the source out.
+            _invalidate_new_images_for_source(db, roots[0]["source_path"])
 
         copied = 0
         copied_bytes = 0
@@ -979,8 +1077,10 @@ def stage_folder(
             except BaseException:
                 db.conn.rollback()
                 raise
-            for workspace_id in affected_workspace_ids(db, root_folder_id):
-                db.invalidate_new_images_cache_for_workspace(workspace_id)
+            _invalidate_new_images_for_source(
+                db, roots[0]["source_path"],
+                affected_workspace_ids(db, root_folder_id),
+            )
             return {
                 "ok": True,
                 "root_folder_id": root_folder_id,
@@ -997,6 +1097,9 @@ def stage_folder(
                 )
                 _delete_state_rows(db, root_folder_id)
                 db.conn.commit()
+                # The source is no longer staged: walks cached while it
+                # was must not keep leaving it out.
+                _invalidate_new_images_for_source(db, roots[0]["source_path"])
             raise
 
 
@@ -1410,8 +1513,9 @@ def sync_folder(
         workspace_ids = affected_workspace_ids(db, root_folder_id)
         _restore_catalog(db, root_folder_id)
         _remove_folder_dir(vireo_dir, root_folder_id, root["local_path"])
-        for workspace_id in workspace_ids:
-            db.invalidate_new_images_cache_for_workspace(workspace_id)
+        _invalidate_new_images_for_source(
+            db, root["source_path"], workspace_ids,
+        )
         return {
             "ok": True,
             "root_folder_id": root_folder_id,
@@ -1436,6 +1540,9 @@ def discard_folder(db, root_folder_id: int, vireo_dir: str, *, acknowledge_publi
             )
             _delete_state_rows(db, root_folder_id)
             db.conn.commit()
+            _invalidate_new_images_for_source(
+                db, root["source_path"] if root else None,
+            )
             return {"ok": True, "root_folder_id": root_folder_id, "discarded": True}
         if state == "syncing" and not acknowledge_published:
             raise LocalWorkspaceError(
@@ -1449,6 +1556,7 @@ def discard_folder(db, root_folder_id: int, vireo_dir: str, *, acknowledge_publi
         workspace_ids = affected_workspace_ids(db, root_folder_id)
         _restore_catalog(db, root_folder_id)
         _remove_folder_dir(vireo_dir, root_folder_id, root["local_path"])
-        for workspace_id in workspace_ids:
-            db.invalidate_new_images_cache_for_workspace(workspace_id)
+        _invalidate_new_images_for_source(
+            db, root["source_path"], workspace_ids,
+        )
         return {"ok": True, "root_folder_id": root_folder_id, "discarded": True}

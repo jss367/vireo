@@ -71,6 +71,63 @@ def test_count_new_images_deduplicates_repeated_walk_entries(
     assert result["sample"] == [str(photo)]
 
 
+def _record_staged_source(db, source, local):
+    """A local_folder_mappings root row as Work Locally staging writes it."""
+    fid = db.add_folder(str(local), name=os.path.basename(str(local)),
+                        link_to_workspace=False)
+    db.conn.execute(
+        "INSERT INTO local_folders (root_folder_id, state, created_at) "
+        "VALUES (?, 'active', 0)", (fid,),
+    )
+    db.conn.execute(
+        "INSERT INTO local_folder_mappings "
+        "(root_folder_id, folder_id, source_path, local_path, is_root) "
+        "VALUES (?, ?, ?, ?, 1)", (fid, fid, str(source), str(local)),
+    )
+    db.conn.commit()
+
+
+def test_count_new_images_prunes_nested_staged_source_and_reports_it(
+    db_with_workspace,
+):
+    """A staged source anywhere below a root is pruned before the walk
+    descends into it, and named in ``local_copy_excluded`` / ``per_root``."""
+    from new_images import count_new_images_for_workspace
+
+    db, ws_id, tmp_path = db_with_workspace
+    root = tmp_path / "archive"
+    staged = root / "2024" / "05-01"
+    _touch_image(str(staged / "deep" / "IMG_STAGED.JPG"))
+    _touch_image(str(root / "2024" / "06-01" / "IMG_NEW.JPG"))
+    db.add_folder(str(root), name="archive")
+    _record_staged_source(db, staged, tmp_path / "local" / "05-01")
+
+    result = count_new_images_for_workspace(db, ws_id, sample_limit=None)
+
+    assert result["sample"] == [str(root / "2024" / "06-01" / "IMG_NEW.JPG")]
+    assert result["new_count"] == 1
+    assert result["local_copy_excluded"] == [str(staged)]
+    assert result["per_root"][0]["local_copy_excluded"] == [str(staged)]
+
+
+def test_count_new_images_skips_root_inside_staged_source(db_with_workspace):
+    """A root that itself lies inside a staged source is not walked."""
+    from new_images import count_new_images_for_workspace
+
+    db, ws_id, tmp_path = db_with_workspace
+    staged = tmp_path / "archive" / "2024-05-01"
+    root = staged / "sub"
+    _touch_image(str(root / "IMG_0001.JPG"))
+    db.add_folder(str(root), name="sub")
+    _record_staged_source(db, staged, tmp_path / "local" / "2024-05-01")
+
+    result = count_new_images_for_workspace(db, ws_id, sample_limit=None)
+
+    assert result["new_count"] == 0
+    assert result["sample"] == []
+    assert result["local_copy_excluded"] == [str(root)]
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks required")
 def test_count_new_images_ignores_broken_symlinks(db_with_workspace):
     """A dangling *.jpg symlink must not be counted as a "new image".

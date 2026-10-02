@@ -47,6 +47,68 @@ def _known_paths_for_workspace(db, workspace_id):
     return known
 
 
+def _path_key(path):
+    """Comparison key for a directory path: normalized, case-folded where the
+    platform folds case."""
+    return os.path.normcase(os.path.normpath(path))
+
+
+def _is_within_key(path_key, root_key):
+    try:
+        return os.path.commonpath([path_key, root_key]) == root_key
+    except ValueError:
+        return False
+
+
+def staged_source_paths(db):
+    """Original locations of every folder-level local copy (Work Locally).
+
+    Staging rebases the catalog rows of ``source_path`` onto the local copy,
+    so the originals there are known to the catalog only by their local
+    path. A walk that compared them against catalog paths would report every
+    one as new, and the in-place import refuses any path inside a staged
+    source anyway, so the walk leaves these trees out and reports them.
+    """
+    return [
+        row["source_path"]
+        for row in db.conn.execute(
+            "SELECT source_path FROM local_folder_mappings "
+            "WHERE is_root = 1 ORDER BY source_path"
+        ).fetchall()
+        if row["source_path"]
+    ]
+
+
+def _staged_exclusions_for_root(root_path, staged_sources):
+    """Where staged sources meet one root, in the walk's own spelling.
+
+    Returns ``(covering_source, excluded_dir_keys)``: ``covering_source`` is a
+    staged source containing the whole root (the root is not walked at all),
+    and ``excluded_dir_keys`` maps the :func:`_path_key` of each directory to
+    prune to the path reported to the user. Both the literal path and its
+    symlink-resolved form are compared on each side
+    (:func:`volume_reachability.resolve_alias_lexically`, which never looks
+    below a mount root), so a root reached through ``~/Photos -> /Volumes/NAS``
+    still prunes a source recorded under ``/Volumes/NAS``; this mirrors the
+    physical comparison the import admission makes.
+    """
+    if not staged_sources:
+        return None, {}
+    root_forms = {_path_key(root_path)}
+    root_forms.add(_path_key(volume_reachability.resolve_alias_lexically(root_path)))
+    excluded = {}
+    for source, source_forms in staged_sources:
+        for source_key in source_forms:
+            for root_key in root_forms:
+                if _is_within_key(root_key, source_key):
+                    return source, {}
+                if _is_within_key(source_key, root_key):
+                    rel = os.path.relpath(source_key, root_key)
+                    walk_path = os.path.normpath(os.path.join(root_path, rel))
+                    excluded[_path_key(walk_path)] = walk_path
+    return None, excluded
+
+
 def mapped_roots(db, workspace_id, *, include_missing=False):
     """Return the workspace's user-facing roots — folders linked to the
     workspace with ``is_root = 1`` and no ``is_root = 1`` ancestor also linked
@@ -159,6 +221,12 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit=5,
     changed since it was last read, so a periodic check re-reads only the
     folders that changed. ``folders_read`` / ``folders_unchanged`` say how
     many directories were read from disk versus reused.
+
+    Folders whose originals are staged as a local copy (Work Locally, in any
+    workspace) are not walked: their catalog rows point at the local copy,
+    so every original would read as new, and an import of them is refused
+    until the copy is synced or discarded. They are listed in
+    ``local_copy_excluded`` so the banner can say what was left out.
     """
     if reachability is None:
         reachability = volume_reachability.get_shared()
@@ -166,6 +234,13 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit=5,
         stall_timeout = WALK_STALL_TIMEOUT_SECONDS
     known = _known_paths_for_workspace(db, workspace_id)
     roots = mapped_roots(db, workspace_id)
+    staged_sources = [
+        (source, {
+            _path_key(source),
+            _path_key(volume_reachability.resolve_alias_lexically(source)),
+        })
+        for source in staged_source_paths(db)
+    ]
     # Snapshot now, before any root is touched: an outage this walk observes
     # later belongs to the world as it is here. If a manual recheck clears
     # the gate mid-walk, the stale report is dropped rather than undoing it.
@@ -184,6 +259,7 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit=5,
     live_mount_roots = set()
     folders_read = 0
     folders_unchanged = 0
+    local_copy_excluded = []
 
     def _unreachable(root, mount_root):
         log.warning(
@@ -256,13 +332,27 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit=5,
                 per_root.append({"folder_id": root["id"], "path": root_path, "new_count": 0})
                 continue
 
+        covering_source, excluded_dirs = _staged_exclusions_for_root(
+            root_path, staged_sources,
+        )
+        if covering_source is not None:
+            local_copy_excluded.append(root_path)
+            per_root.append({
+                "folder_id": root["id"], "path": root_path, "new_count": 0,
+                "local_copy_excluded": [root_path],
+            })
+            continue
+
         listing_pass = dir_listing_cache.ListingPass(listing_cache)
+        excluded_hits = []
         outcome = _walk_root_bounded(
             root, root_path, mount_root, known, seen_new_paths, reachability,
             files_checked, total, progress_callback, progress_every,
             last_emitted, stall_timeout,
             reachability_generation=reachability_generation,
             listing_pass=listing_pass,
+            excluded_dirs=excluded_dirs,
+            excluded_hits=excluded_hits,
         )
         if outcome is None:
             # Offline (error or stall): nothing from this root is kept.
@@ -278,10 +368,14 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit=5,
             if sample_limit is None or len(sample) < sample_limit:
                 sample.append(path)
 
-        per_root.append({
+        entry = {
             "folder_id": root["id"], "path": root_path,
             "new_count": len(root_new_paths),
-        })
+        }
+        if excluded_hits:
+            entry["local_copy_excluded"] = list(excluded_hits)
+            local_copy_excluded.extend(excluded_hits)
+        per_root.append(entry)
 
     if progress_callback is not None:
         progress_callback(files_checked, total)
@@ -295,6 +389,10 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit=5,
         "sample": sample,
         "sample_complete": sample_limit is None or len(sample) >= total,
         "unreachable_roots": unreachable_roots,
+        # Folders left out because their originals are staged as a local
+        # copy. ``new_count`` and ``sample`` exclude them, so an import of
+        # this answer never names a path the import would refuse.
+        "local_copy_excluded": sorted(set(local_copy_excluded)),
         "folders_read": folders_read,
         "folders_unchanged": folders_unchanged,
         # Wall-clock stamp of when this answer was produced. The banner shows
@@ -413,7 +511,8 @@ def _reachability_generation(reachability):
 def _walk_root_bounded(root, root_path, mount_root, known, seen_new_paths,
                        reachability, files_checked, total, progress_callback,
                        progress_every, last_emitted, stall_timeout,
-                       reachability_generation=None, listing_pass=None):
+                       reachability_generation=None, listing_pass=None,
+                       excluded_dirs=None, excluded_hits=None):
     """Walk one root on a worker thread under a stall watchdog.
 
     Returns ``(root_new_paths, files_checked_in_root, last_emitted)`` on
@@ -424,6 +523,10 @@ def _walk_root_bounded(root, root_path, mount_root, known, seen_new_paths,
     merges only on success, so an abandoned thread that wakes up later can
     not corrupt a result that has already been published. ``listing_pass``
     is this root's own, and the caller reads its counts only on success.
+
+    ``excluded_dirs`` maps the :func:`_path_key` of each directory to leave
+    out (staged local-copy sources) to its reported path; the ones the walk
+    actually met are appended to ``excluded_hits`` on success only.
     """
     # Recorded on this root if the watchdog fires: it dates the outage to the
     # world this walk started in, so a later recheck can tell it apart from
@@ -498,6 +601,7 @@ def _walk_root_bounded(root, root_path, mount_root, known, seen_new_paths,
     state = {
         "checked": 0, "paths": [], "last": time.monotonic(),
         "emitted": last_emitted, "abandoned": False, "offline": None,
+        "excluded": [],
     }
     local_seen = set(seen_new_paths)
 
@@ -552,6 +656,7 @@ def _walk_root_bounded(root, root_path, mount_root, known, seen_new_paths,
             _walk_root_for_new_images(
                 walk, known, local_seen, state["paths"],
                 on_file=_on_file, on_error=_on_walk_error,
+                excluded_dirs=excluded_dirs, excluded_hits=state["excluded"],
             )
         except _RootOffline as exc:
             state["offline"] = exc
@@ -596,6 +701,8 @@ def _walk_root_bounded(root, root_path, mount_root, known, seen_new_paths,
         if isinstance(failure, _RootOffline):
             return None
         raise failure
+    if excluded_hits is not None:
+        excluded_hits.extend(state["excluded"])
     return state["paths"], state["checked"], state["emitted"]
 
 
@@ -618,7 +725,8 @@ def _is_regular_file(path, on_error):
 
 
 def _walk_root_for_new_images(walk, known, seen_new_paths, root_new_paths,
-                              on_file, on_error):
+                              on_file, on_error, excluded_dirs=None,
+                              excluded_hits=None):
     """Consume one root's ``safe_scan_walk`` and collect its new image paths.
 
     Appends each newly discovered path to ``root_new_paths`` (and to the
@@ -627,9 +735,22 @@ def _walk_root_for_new_images(walk, known, seen_new_paths, root_new_paths,
     caller owns error handling: an offline-class ``OSError`` — from the walk's
     ``onerror`` or from the per-file ``stat`` via ``on_error`` — surfaces as
     :class:`_RootOffline` and unwinds this loop.
+
+    Subdirectories named in ``excluded_dirs`` (staged local-copy sources,
+    keyed by :func:`_path_key`) are pruned from the top-down walk before it
+    descends, and their reported paths are appended to ``excluded_hits``.
     """
     root_new = 0
-    for dirpath, _dirnames, filenames in walk:
+    for dirpath, dirnames, filenames in walk:
+        if excluded_dirs:
+            kept = []
+            for name in dirnames:
+                reported = excluded_dirs.get(_path_key(os.path.join(dirpath, name)))
+                if reported is None:
+                    kept.append(name)
+                elif excluded_hits is not None:
+                    excluded_hits.append(reported)
+            dirnames[:] = kept
         for name in filenames:
             is_new = False
             # Mirror ``vireo/scanner.py``: skip dotfiles (e.g. macOS
