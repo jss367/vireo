@@ -316,7 +316,7 @@ class _FeatureLoad:
         self.variant_mismatches = 0
 
     def load_rows(self, scoped_photo_ids):
-        conn = self.db.conn
+        db = self.db
         if scoped_photo_ids is not None:
             scoped_photo_ids = sorted(scoped_photo_ids)
             # Stage the scope in a connection-local temp table instead of inline
@@ -324,9 +324,9 @@ class _FeatureLoad:
             # cap (999 on legacy builds), and this scope is interpolated into
             # three queries below.
             _replace_temp_id_scope(
-                conn, "pipeline_scope_ids", scoped_photo_ids,
+                db.conn, "pipeline_scope_ids", scoped_photo_ids,
             )
-            self.rows = conn.execute(
+            self.rows = db.conn.execute(
                 f"""SELECT {_PIPELINE_PHOTO_COLS}
                     FROM photos p
                     JOIN workspace_folders wf ON wf.folder_id = p.folder_id
@@ -336,7 +336,7 @@ class _FeatureLoad:
                 (self.ws_id,),
             ).fetchall()
         else:
-            self.rows = conn.execute(
+            self.rows = db.conn.execute(
                 f"""SELECT {_PIPELINE_PHOTO_COLS}
                     FROM photos p
                     JOIN workspace_folders wf ON wf.folder_id = p.folder_id
