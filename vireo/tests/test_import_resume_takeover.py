@@ -98,6 +98,21 @@ def _scenarios():
             [_row("d", "2026-09-01T11:00:00",
                   {"ok": True, "photo_ids": [], "collection_id": 7})],
         ),
+        "legacy tag-only resume completed": (
+            _parent(chained=True),
+            [_row("d", "2026-09-01T11:00:00", {
+                "ok": True, "photo_ids": [],
+                "after_import_skipped": "chain already ran on the interrupted parent",
+            })],
+        ),
+        "legacy tag-only resume with errors": (
+            _parent(chained=True),
+            [_row("d", "2026-09-01T11:00:00", {
+                "ok": True, "photo_ids": [],
+                "after_import_skipped": "chain already ran on the interrupted parent",
+                "tagging": {"errors": ["tags failed"]},
+            })],
+        ),
         "failed resume from before marks were kept": (
             _parent(),
             [_row("d", "2026-09-01T11:00:00",
@@ -189,6 +204,8 @@ EXPECTED = {
     "retry of the failed resume finished": ("r", "done", False),
     "resume of the interrupted resume finished": ("d2", "done", False),
     "finished resume from before marks were kept": ("d", "done", False),
+    "legacy tag-only resume completed": ("d", "done", False),
+    "legacy tag-only resume with errors": (None, None, True),
     "failed resume from before marks were kept": (None, None, True),
     "descendant linked only by parent id": ("d", "done", False),
     "descendant linked only by root id": ("d3", "done", False),

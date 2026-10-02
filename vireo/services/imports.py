@@ -212,7 +212,15 @@ def import_resume_takeover(parent_id, parent_result, rows):
             # Finished before the marks were kept on the final row. Only a
             # run that passed its tag pass and reached the chain after a
             # clean import records an import collection.
-            tags = chain_step = result.get("collection_id") is not None
+            tag_only_completed = (
+                e["status"] == "completed"
+                and result.get("after_import_skipped")
+                == "chain already ran on the interrupted parent"
+                and not (result.get("tagging") or {}).get("errors")
+            )
+            tags = chain_step = (
+                result.get("collection_id") is not None or tag_only_completed
+            )
         e["tags_applied"] = tags
         # The chain step also runs, and marks, after a failed import, but
         # then skips the collection and processing: that debt moves to the

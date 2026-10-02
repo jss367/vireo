@@ -853,7 +853,10 @@
       } else {
         // Finished before the marks were kept on the final row; only a
         // run that reached the chain after a clean import has a collection.
-        tags = chainStep = r.collection_id != null;
+        var tagOnlyCompleted = e.status === 'completed' &&
+          r.after_import_skipped === 'chain already ran on the interrupted parent' &&
+          !((r.tagging || {}).errors || []).length;
+        tags = chainStep = r.collection_id != null || tagOnlyCompleted;
       }
       e.tagsApplied = tags;
       // After a failed import the chain step marks but skips processing.
