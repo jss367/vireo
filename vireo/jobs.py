@@ -1487,7 +1487,12 @@ class JobRunner:
         ``errors_total`` when it is larger so the persisted ``error_count``
         and the Jobs-page badge reflect the true total.
         """
-        count = len(job.get("errors") or [])
+        errors = job.get("errors") or []
+        result = job.get("result")
+        if job.get("type") == "pipeline" and isinstance(result, dict):
+            notes = result.get("notes") or []
+            errors = [error for error in errors if error not in notes]
+        count = len(errors)
         if isinstance(job.get("result"), dict):
             try:
                 total = int(job["result"].get("errors_total") or 0)

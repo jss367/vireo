@@ -1462,3 +1462,27 @@ def test_move_rule_preview(app_and_db):
     data = resp.get_json()
     assert "count" in data
     assert "photo_ids" in data
+
+
+def test_date_move_all_in_place_reports_successful_rerun(app_and_db, tmp_path, monkeypatch):
+    import move
+    from wait import wait_for_job_via_client
+
+    app, db = app_and_db
+    source = tmp_path / "date-source"
+    source.mkdir()
+    fid = db.add_folder(str(source), name="date-source")
+    db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg",
+                 file_size=1, file_mtime=1, timestamp="2026-07-12T10:00:00")
+    monkeypatch.setattr(move, "move_folder_by_date", lambda *a, **kw: {
+        "moved": 0, "already_in_place": 3, "errors": [],
+    })
+    response = app.test_client().post("/api/jobs/move-folder", json={
+        "folder_id": fid, "destination": str(tmp_path / "destination"),
+        "folder_template": "%Y-%m-%d",
+    })
+    assert response.status_code == 200, response.get_json()
+    job = wait_for_job_via_client(app.test_client(), response.get_json()["job_id"])
+    assert job["status"] == "completed"
+    assert job["result"]["summary"] == "3 photos already in the destination"
+    assert job["summary"] == "3 photos already in the destination"

@@ -350,10 +350,12 @@ class FolderMoves:
                     result["ok"] = not errors
                     in_place = int(result.get("already_in_place") or 0)
                     result["summary"] = (
-                        f"Moved {moved} photo{'s' if moved != 1 else ''}"
+                        (f"{in_place} photo{'s' if in_place != 1 else ''} already in the destination"
+                         if moved == 0 and in_place else
+                         f"Moved {moved} photo{'s' if moved != 1 else ''}")
                         + (
                             f", {in_place} already in the destination"
-                            if in_place else ""
+                            if in_place and moved else ""
                         )
                         + (f", {len(errors)} error(s)" if errors else "")
                         + (
