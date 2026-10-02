@@ -13219,3 +13219,19 @@ def test_parent_resume_recovers_photos_landed_by_unpaid_descendant(app_and_db, t
         assert second["chained"] is True
         collected = {p["id"] for p in db.get_collection_photos(handoffs[-1], per_page=999999)}
         assert set(own) | child_ids <= collected
+
+
+def test_import_only_collection_failure_leaves_chain_unpaid(app_and_db, tmp_path, monkeypatch):
+    from services.imports import ImportService
+
+    def failed_collection(self, result, workspace_id, chain_photo_ids=None):
+        result["collection_error"] = "collection unavailable"
+        return None, None
+    monkeypatch.setattr(ImportService, "_record_import_collection", failed_collection)
+    app, _db = app_and_db
+    with app.test_client() as client:
+        job_id = _post_import(client, _chain_card(tmp_path), tmp_path / "archive", after_import=None)
+        result = wait_for_job_via_client(client, job_id)["result"]
+        assert result["photo_ids"]
+        assert result["chained"] is False
+        assert result["collection_error"] == "collection unavailable"

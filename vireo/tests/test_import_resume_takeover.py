@@ -121,6 +121,13 @@ def _scenarios():
                 "after_import_skipped": "failed to enqueue processing: unavailable",
             })],
         ),
+        "descendant processing never started": (
+            _parent(), [
+                _row("d", "2026-09-01T11:00:00", {**DONE, "process_job_id": "process-d"}),
+                _row("process-d", "2026-09-01T11:01:00", {"never_started": True},
+                     status="failed", job_type="pipeline"),
+            ],
+        ),
         "legacy completed chain with unpaid tags": (
             _parent(), [_row("d", "2026-09-01T11:00:00", {
                 "ok": True, "collection_id": 7, "process_job_id": "process-d",
@@ -298,6 +305,7 @@ EXPECTED = {
     "resume of the interrupted resume finished": ("d2", "done", False, False),
     "finished resume from before marks were kept": ("d", "done", False, False),
     "legacy collection with failed processing handoff": (None, None, True, False),
+    "descendant processing never started": (None, None, True, False),
     "legacy completed chain with unpaid tags": (None, None, True, False),
     "legacy collection cancelled": (None, None, True, False),
     "legacy tag-only resume completed": ("d", "done", False, False),
@@ -461,3 +469,34 @@ def test_legacy_processing_with_tag_errors_leaves_only_tag_replay():
     assert takeover["by"] is None
     assert resume["tags_applied"] is False
     assert resume["chain_already_ran"] is True
+
+
+def test_takeover_reads_never_started_descendant_pipeline_history(tmp_path):
+    from unittest.mock import Mock
+
+    from db import Database
+    from jobs import JobRunner
+
+    with Database(str(tmp_path / "catalog.db")) as db:
+        history_runner = JobRunner(db)
+        assert history_runner.shutdown()
+        runner = Mock()
+        runner.list_jobs.return_value = []
+        child = _row("d", "2026-09-01T11:00:00", {**DONE, "process_job_id": "process-d"})
+        process = _row("process-d", "2026-09-01T11:01:00", {"never_started": True},
+                       status="failed", job_type="pipeline")
+        for row in (child, process):
+            db.conn.execute(
+                "INSERT INTO job_history (id,type,status,started_at,config,result,workspace_id) VALUES (?,?,?,?,?,?,?)",
+                (row["id"], row["type"], row["status"], row["started_at"],
+                 json.dumps(row["config"]), json.dumps(row["result"]), db._active_workspace_id),
+            )
+        db.conn.commit()
+        service = ImportService(lambda: runner, db._db_path, {},
+                                invalidate_missing_originals=Mock(), enqueue_process_job=Mock(),
+                                chain_after_move=Mock(), bulk_gps_location_payload=Mock())
+        rows = service._import_resume_rows(db, PARENT_ID, {}, db._active_workspace_id)
+        assert {row["id"] for row in rows} == {"d", "process-d"}
+        takeover = import_resume_takeover(PARENT_ID, _parent()["result"], rows)
+        assert takeover["by"] is None
+        assert takeover["chained"] is False

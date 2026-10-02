@@ -1321,7 +1321,7 @@ class _ImportPhotosJob:
 
         if after_import is None:
             result["after_import_skipped"] = "import-only"
-            return True
+            return not chain_scope or col_id is not None
         if not result.get("ok"):
             result["after_import_skipped"] = "import failed"
             return False

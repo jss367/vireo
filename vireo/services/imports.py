@@ -192,6 +192,10 @@ def import_resume_takeover(parent_id, parent_result, rows):
             "by": None, "by_started_at": None, "kind": None,
             "parent_interrupted": False,
         }
+    never_started_processes = {
+        row.get("id") for row in rows or []
+        if row.get("type") == "pipeline" and _json_dict(row.get("result")).get("never_started")
+    }
     children = {}
     candidates = []
     for row in rows or []:
@@ -256,7 +260,10 @@ def import_resume_takeover(parent_id, parent_result, rows):
         # The chain step also runs, and marks, after a failed import, but
         # then skips the collection and processing: that debt moves to the
         # run's own Retry instead of being paid.
-        e["chained"] = chain_step and result.get("ok") is not False
+        e["chained"] = (
+            chain_step and result.get("ok") is not False
+            and result.get("process_job_id") not in never_started_processes
+        )
         e["resumable"] = (
             e["status"] == "failed"
             and bool(result.get("interrupted"))
@@ -1095,6 +1102,24 @@ class ImportService:
                     and cfg.get("parent_import_job_id") != parent_id):
                 continue
             by_id[job["id"]] = job
+        # A queued child can be marked never_started by startup. Its
+        # import's chain checkpoint is then unpaid, just as the parent's
+        # own _chained_job_exists guard treats that child.
+        process_ids = {
+            _json_dict(row.get("result")).get("process_job_id")
+            for row in by_id.values()
+        } - {None}
+        if process_ids:
+            placeholders = ",".join("?" for _ in process_ids)
+            for row in db.conn.execute(
+                f"SELECT id, type, status, started_at, config, result FROM job_history "
+                f"WHERE type='pipeline' AND workspace_id IS ? AND id IN ({placeholders})",
+                (workspace_id, *process_ids),
+            ).fetchall():
+                by_id[row["id"]] = dict(row)
+            for job in runner.list_jobs() if runner is not None else []:
+                if job.get("id") in process_ids and job.get("workspace_id") == workspace_id:
+                    by_id[job["id"]] = job
         return list(by_id.values())
 
     @staticmethod
