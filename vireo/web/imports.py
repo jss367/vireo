@@ -663,6 +663,404 @@ def _suffix_slot_recovered(source, folder, listing, primary_name, size):
         counter += 1
 
 
+@dataclass
+class _ImportFullRequest:
+    """The ``/api/jobs/import-full`` request body, read in the order the
+    view always read it."""
+
+    source: object
+    destination: object
+    file_types: object
+    folder_template: object
+    skip_duplicates: object
+    verify_by_hash: bool
+    copy: object
+    exclude_paths: set
+
+    @classmethod
+    def from_body(cls, body):
+        return cls(
+            source=body.get("source", ""),
+            destination=body.get("destination", ""),
+            file_types=body.get("file_types", "both"),
+            folder_template=body.get("folder_template", "%Y/%Y-%m-%d"),
+            skip_duplicates=body.get("skip_duplicates", True),
+            verify_by_hash=bool(body.get("verify_by_hash")),
+            copy=body.get("copy", True),
+            exclude_paths=set(body.get("exclude_paths", [])),
+        )
+
+    @property
+    def scan_path(self):
+        return self.destination if self.copy else self.source
+
+    def validation_error(self):
+        """The first 400 message for this request, or None when it is
+        valid."""
+        source = self.source
+        destination = self.destination
+        if not source:
+            return "source is required"
+        from image_loader import is_excluded_scan_path
+        # See api_job_scan for why this must run before os.path.isdir.
+        if is_excluded_scan_path(source):
+            return (
+                f"source is inside a macOS app-managed library and cannot "
+                f"be imported: {source}"
+            )
+        if not os.path.isdir(source):
+            return f"source directory not found: {source}"
+        if self.copy:
+            if not destination:
+                return "source and destination are required"
+            if not os.path.isabs(destination):
+                return "destination must be an absolute path"
+            from ingest import _is_unsafe_path
+            if self.folder_template and _is_unsafe_path(self.folder_template):
+                return "folder_template must be a relative path without '..' or backslashes"
+        return None
+
+
+def _import_scan_conflict(runner, db, scan_paths, workspace_id):
+    """The local-copy conflict for an import scanning ``scan_paths``, or
+    None. Callers hold ``stage_boundary_lock``."""
+    pending_sources = stage_pending_source_paths(
+        runner.list_jobs if runner is not None else None,
+        db,
+    )
+    return local_copy_scan_conflict(
+        db, scan_paths,
+        active_workspace_id=workspace_id,
+        pending_stage_sources=pending_sources,
+    )
+
+
+def _ingested_restrict_dirs(destination, copied_paths, duplicate_folders):
+    """Build restrict_dirs from the folders ingest actually touched
+    so the post-ingest scan doesn't re-walk the entire
+    destination tree. Without this, importing ~2k RAWs into a
+    populated library caused scanner.scan to enumerate tens of
+    thousands of already-indexed files (observed: 59k). Mirrors
+    the same pattern in pipeline_job.py. Only paths under the
+    normalized destination are included; ".." tricks cannot
+    escape. If nothing was copied and no duplicate folders were
+    reported, restrict_dirs stays an empty list — scanner.scan
+    then has no directories to enumerate, which matches intent
+    (there is nothing new to index)."""
+    dest_normalized = Path(os.path.normpath(destination))
+
+    def _under_destination(path_str):
+        try:
+            return Path(os.path.normpath(path_str)).is_relative_to(
+                dest_normalized
+            )
+        except ValueError:
+            return False
+
+    restrict_set = set()
+    for cp in copied_paths:
+        parent = str(Path(cp).parent)
+        if _under_destination(parent):
+            restrict_set.add(parent)
+    for folder in duplicate_folders:
+        if _under_destination(folder):
+            restrict_set.add(folder)
+    return sorted(restrict_set)
+
+
+class _ImportFullRun:
+    """One ``import-full`` job.
+
+    ``api_job_import_full`` validates the request and its ``work`` closure
+    runs one of these: copy files (when ``copy``), scan them into the
+    catalog, generate thumbnails, and collect the imported photos into a
+    new collection. ``config`` is the Flask app's config mapping, read at
+    job time.
+    """
+
+    def __init__(self, ctx, params, config, invalidate_missing_originals, job):
+        self.ctx = ctx
+        self.params = params
+        self.config = config
+        self.invalidate_missing_originals = invalidate_missing_originals
+        self.job = job
+        self.thread_db = None
+        self.scan_target = None
+        self.restrict_dirs = None
+        self.ingest_result = None
+        self.copied_paths = None
+        self.vireo_dir = None
+
+    def run(self):
+        from scanner import scan as do_scan
+        from thumbnails import generate_all
+
+        job = self.job
+        self.thread_db = self.ctx.thread_db()
+        # Check folder health before scanning to prevent duplicate imports
+        if self.thread_db.check_folder_health():
+            self.invalidate_missing_originals()
+        job["_start_time"] = time.time()
+
+        self.scan_target = str(Path(self.params.source))  # normalize (strips trailing slash)
+        # restrict_dirs narrows the post-ingest scan to just the subfolders
+        # that received files, instead of walking the full destination
+        # tree. Populated in the copy branch from ingest_result's
+        # copied_paths (parent dirs) and duplicate_folders. Left as None
+        # for copy=false so scan-in-place keeps its original full-tree
+        # behavior.
+        self.restrict_dirs = None
+
+        self._set_steps()
+        if self.params.copy:
+            self._ingest()
+        self._scan(do_scan)
+        self._generate_thumbnails(generate_all)
+        return self._create_collection()
+
+    def _set_steps(self):
+        # Define steps based on whether we're copying
+        steps = []
+        if self.params.copy:
+            steps.append({"id": "ingest", "label": "Import photos"})
+        steps.extend([
+            {"id": "scan", "label": "Scan photos"},
+            {"id": "thumbnails", "label": "Generate thumbnails"},
+            {"id": "collection", "label": "Create collection"},
+        ])
+        self.ctx.runner.set_steps(self.job["id"], steps)
+
+    def _ingest(self):
+        """Phase 1: Copy files."""
+        from ingest import ingest as do_ingest
+
+        ctx, job, params = self.ctx, self.job, self.params
+        ctx.runner.update_step(job["id"], "ingest", status="running")
+
+        def ingest_cb(current, total, filename):
+            job["progress"]["current"] = current
+            job["progress"]["total"] = total
+            job["progress"]["current_file"] = filename
+            ctx.runner.push_event(job["id"], "progress", {
+                "current": current, "total": total,
+                "current_file": filename,
+                "phase": "Importing photos",
+            })
+
+        ingest_result = do_ingest(
+            source_dir=params.source,
+            destination_dir=params.destination,
+            db=self.thread_db,
+            file_types=params.file_types,
+            folder_template=params.folder_template,
+            skip_duplicates=params.skip_duplicates,
+            verify_by_hash=params.verify_by_hash,
+            progress_callback=ingest_cb,
+            pause_callback=lambda: ctx.checkpoint(job),
+            skip_paths=params.exclude_paths or None,
+        )
+        self.ingest_result = ingest_result
+        self.copied_paths = ingest_result.get("copied_paths", [])
+        duplicate_folders = ingest_result.get("duplicate_folders", [])
+        self.scan_target = params.destination
+
+        self.restrict_dirs = _ingested_restrict_dirs(
+            params.destination, self.copied_paths, duplicate_folders,
+        )
+
+        ctx.runner.update_step(job["id"], "ingest", status="completed",
+                           summary=f"{ingest_result.get('copied', 0)} copied")
+
+    def _scan(self, do_scan):
+        """Phase 2: Scan to index into DB."""
+        ctx, job, thread_db = self.ctx, self.job, self.thread_db
+        scan_target = self.scan_target
+        ctx.checkpoint(job)
+        ctx.runner.update_step(job["id"], "scan", status="running")
+
+        def scan_cb(current, total):
+            job["progress"]["current"] = current
+            job["progress"]["total"] = total
+            ctx.runner.push_event(job["id"], "progress", {
+                "current": current, "total": total,
+                "current_file": "",
+                "phase": "Scanning photos",
+            })
+
+        # ``import-photos`` is a pausable job (registered as a
+        # pause participant by the runner). Without these probes
+        # the scan phase would keep hashing on its process pool
+        # and hold its CPU lease across the entire pause, ignoring
+        # the pause signal until the current source finishes.
+        # Same wiring the in-place import path picked up in
+        # 37e0e3a0 for the identical reason.
+        #
+        # ``ctx.runner.is_cancelled`` internally parks on Pause via
+        # ``wait_if_paused``. Wrap the parking call in
+        # ``suspend_resource_wait_timing`` so an hour-long pause
+        # while a scan is waiting for CPU permits does not persist
+        # as an hour of "resource contention" on the job's
+        # diagnostics. The context manager is a no-op when no
+        # ledger wait is active, so it's safe on non-pausable
+        # invocations too. Mirrors what ``_pause_checkpoint``
+        # does for pipeline participants (pipeline_job.py:1567).
+        def scan_cancel_check():
+            from resource_ledger import suspend_resource_wait_timing
+            with suspend_resource_wait_timing():
+                return ctx.runner.is_cancelled(job["id"])
+
+        def scan_pause_check():
+            return ctx.runner.pause_requested(job["id"])
+
+        def scan_cancel_only_check():
+            return ctx.runner.cancellation_requested(job["id"])
+
+        self.vireo_dir = os.path.dirname(self.config["THUMB_CACHE_DIR"])
+        try:
+            # copy=false: scan_target is the source and restrict_dirs is
+            #   None, so scanner walks the full source tree (unchanged).
+            # copy=true: scan_target is the destination (folder hierarchy
+            #   root, for parent-folder chain creation), but restrict_dirs
+            #   narrows enumeration to only the subfolders ingest wrote
+            #   into. An empty list means "nothing new to scan" — a no-op
+            #   inside scanner.scan.
+            do_scan(
+                scan_target, thread_db,
+                progress_callback=scan_cb,
+                skip_paths=self.params.exclude_paths or None,
+                vireo_dir=self.vireo_dir,
+                thumb_cache_dir=self.config["THUMB_CACHE_DIR"],
+                restrict_dirs=self.restrict_dirs,
+                cancel_check=scan_cancel_check,
+                pause_check=scan_pause_check,
+                cancel_only_check=scan_cancel_only_check,
+            )
+        finally:
+            # scanner.scan commits photo rows incrementally, so even a mid-scan
+            # failure can leave DB state that invalidates cached new-image counts.
+            invalidate_new_images_after_scan(thread_db, scan_target)
+            # scanner.scan touches disk and may reconcile ghost rows
+            # (e.g. a user restored an original before running import).
+            # The pre-scan health-check invalidation only fires when a
+            # folder flips missing/ok, so also drop the missing-originals
+            # cache once the scan itself has run — even on partial
+            # failure, since rows are committed incrementally.
+            try:
+                self.invalidate_missing_originals()
+            except Exception:
+                log.exception(
+                    "Failed to invalidate missing-originals cache after import scan of %s",
+                    scan_target,
+                )
+        scan_count = job["progress"].get("total", 0)
+        scan_summary = f"{scan_count} photos"
+        metadata_warning = scan_metadata_warning()
+        if metadata_warning:
+            scan_summary += f" — {metadata_warning}"
+        ctx.runner.update_step(job["id"], "scan", status="completed",
+                           summary=scan_summary)
+
+    def _generate_thumbnails(self, generate_all):
+        """Phase 3: Generate thumbnails."""
+        ctx, job = self.ctx, self.job
+        ctx.checkpoint(job)
+        ctx.runner.update_step(job["id"], "thumbnails", status="running")
+        ctx.runner.push_event(job["id"], "progress", {
+            "current": 0, "total": 0,
+            "current_file": "Checking for new thumbnails...",
+            "phase": "Generating thumbnails",
+        })
+
+        def thumb_cb(current, total):
+            job["progress"]["current"] = current
+            job["progress"]["total"] = total
+            ctx.runner.push_event(job["id"], "progress", {
+                "current": current, "total": total,
+                "current_file": "",
+                "phase": "Generating thumbnails",
+            })
+
+        thumb_result = generate_all(
+            self.thread_db, self.config["THUMB_CACHE_DIR"],
+            progress_callback=thumb_cb,
+            cancel_check=lambda: ctx.runner.is_cancelled(job["id"]),
+            vireo_dir=self.vireo_dir,
+        )
+        from thumbnails import format_summary as thumb_summary
+        ctx.runner.update_step(job["id"], "thumbnails", status="completed",
+                           summary=thumb_summary(thumb_result))
+
+    def _imported_photo_ids(self):
+        thread_db = self.thread_db
+        photo_ids = []
+        if self.params.copy:
+            # Collection from copied files (existing logic)
+            copied_paths = self.copied_paths
+            if copied_paths:
+                thread_db.conn.execute(
+                    "CREATE TEMP TABLE IF NOT EXISTS _imported_paths (dirpath TEXT, fname TEXT)"
+                )
+                thread_db.conn.execute("DELETE FROM _imported_paths")
+                thread_db.conn.executemany(
+                    "INSERT INTO _imported_paths (dirpath, fname) VALUES (?, ?)",
+                    [(os.path.dirname(p), os.path.basename(p)) for p in copied_paths],
+                )
+                rows = thread_db.conn.execute(
+                    """SELECT p.id FROM photos p
+                       JOIN folders f ON p.folder_id = f.id
+                       JOIN _imported_paths ip ON f.path = ip.dirpath
+                                               AND p.filename = ip.fname"""
+                ).fetchall()
+                photo_ids = [r["id"] for r in rows]
+                thread_db.conn.execute("DROP TABLE IF EXISTS _imported_paths")
+        else:
+            # Collection from all photos in the scanned folder
+            scan_target = self.scan_target
+            rows = thread_db.conn.execute(
+                """SELECT p.id FROM photos p
+                   JOIN folders f ON p.folder_id = f.id
+                   WHERE f.path = ? OR f.path LIKE ?""",
+                (scan_target, scan_target.rstrip("/") + "/%"),
+            ).fetchall()
+            photo_ids = [r["id"] for r in rows]
+        return photo_ids
+
+    def _create_collection(self):
+        """Phase 4: Create collection."""
+        ctx, job = self.ctx, self.job
+        ctx.checkpoint(job)
+        ctx.runner.update_step(job["id"], "collection", status="running")
+        photo_ids = self._imported_photo_ids()
+
+        collection_id = None
+        collection_name = None
+        if photo_ids:
+            from datetime import datetime as dt
+            collection_name = "Import " + dt.now().strftime("%Y-%m-%d %H:%M")
+            collection_id = self.thread_db.add_collection(
+                collection_name,
+                json.dumps([{"field": "photo_ids", "value": photo_ids}]),
+            )
+
+        col_summary = collection_name if collection_name else "no photos"
+        ctx.runner.update_step(job["id"], "collection", status="completed",
+                           summary=col_summary)
+
+        result = {
+            "photos_indexed": len(photo_ids),
+            "collection_id": collection_id,
+            "collection_name": collection_name,
+        }
+        if self.params.copy:
+            ingest_result = self.ingest_result
+            result["copied"] = ingest_result.get("copied", 0)
+            result["skipped_duplicate"] = ingest_result.get("skipped_duplicate", 0)
+            result["failed"] = ingest_result.get("failed", 0)
+            result["total"] = ingest_result.get("total", 0)
+
+        return result
+
+
 def create_imports_blueprint(
     get_db,
     json_error,
@@ -1532,34 +1930,10 @@ def create_imports_blueprint(
         if ctx.workspace_id is None:
             return json_error("no active workspace", 400)
         body = request.get_json(silent=True) or {}
-        source = body.get("source", "")
-        destination = body.get("destination", "")
-        file_types = body.get("file_types", "both")
-        folder_template = body.get("folder_template", "%Y/%Y-%m-%d")
-        skip_duplicates = body.get("skip_duplicates", True)
-        verify_by_hash = bool(body.get("verify_by_hash"))
-        copy = body.get("copy", True)
-        exclude_paths = set(body.get("exclude_paths", []))
-
-        if not source:
-            return json_error("source is required")
-        from image_loader import is_excluded_scan_path
-        # See api_job_scan for why this must run before os.path.isdir.
-        if is_excluded_scan_path(source):
-            return json_error(
-                f"source is inside a macOS app-managed library and cannot "
-                f"be imported: {source}"
-            )
-        if not os.path.isdir(source):
-            return json_error(f"source directory not found: {source}")
-        if copy:
-            if not destination:
-                return json_error("source and destination are required")
-            if not os.path.isabs(destination):
-                return json_error("destination must be an absolute path")
-            from ingest import _is_unsafe_path
-            if folder_template and _is_unsafe_path(folder_template):
-                return json_error("folder_template must be a relative path without '..' or backslashes")
+        params = _ImportFullRequest.from_body(body)
+        error = params.validation_error()
+        if error is not None:
+            return json_error(error)
         # The scan below walks the destination (or, in place, the source); a
         # folder-level local copy of any part of that tree would be
         # catalogued a second time at its original path.
@@ -1578,14 +1952,8 @@ def create_imports_blueprint(
         db_for_conflict = get_db()
         runner = get_runner()
         with stage_boundary_lock():
-            pending_sources = stage_pending_source_paths(
-                runner.list_jobs if runner is not None else None,
-                db_for_conflict,
-            )
-            conflict = local_copy_scan_conflict(
-                db_for_conflict, [destination if copy else source],
-                active_workspace_id=ctx.workspace_id,
-                pending_stage_sources=pending_sources,
+            conflict = _import_scan_conflict(
+                runner, db_for_conflict, [params.scan_path], ctx.workspace_id,
             )
         if conflict:
             return json_error(conflict, 409)
@@ -1597,293 +1965,22 @@ def create_imports_blueprint(
         # register the job atomically under the boundary lock so a stage
         # racing the registration blocks on the same guard its admission
         # takes. See ``local_folder._busy_job`` for the reverse direction.
-        _scan_path = [destination if copy else source]
+        _scan_path = [params.scan_path]
 
         def work(job):
-            from scanner import scan as do_scan
-            from thumbnails import generate_all
-
-            thread_db = ctx.thread_db()
-            # Check folder health before scanning to prevent duplicate imports
-            if thread_db.check_folder_health():
-                invalidate_missing_originals()
-            job["_start_time"] = time.time()
-
-            scan_target = str(Path(source))  # normalize (strips trailing slash)
-            # restrict_dirs narrows the post-ingest scan to just the subfolders
-            # that received files, instead of walking the full destination
-            # tree. Populated in the copy branch from ingest_result's
-            # copied_paths (parent dirs) and duplicate_folders. Left as None
-            # for copy=false so scan-in-place keeps its original full-tree
-            # behavior.
-            restrict_dirs = None
-
-            # Define steps based on whether we're copying
-            steps = []
-            if copy:
-                steps.append({"id": "ingest", "label": "Import photos"})
-            steps.extend([
-                {"id": "scan", "label": "Scan photos"},
-                {"id": "thumbnails", "label": "Generate thumbnails"},
-                {"id": "collection", "label": "Create collection"},
-            ])
-            ctx.runner.set_steps(job["id"], steps)
-
-            if copy:
-                from ingest import ingest as do_ingest
-
-                # Phase 1: Copy files
-                ctx.runner.update_step(job["id"], "ingest", status="running")
-
-                def ingest_cb(current, total, filename):
-                    job["progress"]["current"] = current
-                    job["progress"]["total"] = total
-                    job["progress"]["current_file"] = filename
-                    ctx.runner.push_event(job["id"], "progress", {
-                        "current": current, "total": total,
-                        "current_file": filename,
-                        "phase": "Importing photos",
-                    })
-
-                ingest_result = do_ingest(
-                    source_dir=source,
-                    destination_dir=destination,
-                    db=thread_db,
-                    file_types=file_types,
-                    folder_template=folder_template,
-                    skip_duplicates=skip_duplicates,
-                    verify_by_hash=verify_by_hash,
-                    progress_callback=ingest_cb,
-                    pause_callback=lambda: ctx.checkpoint(job),
-                    skip_paths=exclude_paths or None,
-                )
-                copied_paths = ingest_result.get("copied_paths", [])
-                duplicate_folders = ingest_result.get("duplicate_folders", [])
-                scan_target = destination
-
-                # Build restrict_dirs from the folders ingest actually touched
-                # so the post-ingest scan doesn't re-walk the entire
-                # destination tree. Without this, importing ~2k RAWs into a
-                # populated library caused scanner.scan to enumerate tens of
-                # thousands of already-indexed files (observed: 59k). Mirrors
-                # the same pattern in pipeline_job.py. Only paths under the
-                # normalized destination are included; ".." tricks cannot
-                # escape. If nothing was copied and no duplicate folders were
-                # reported, restrict_dirs stays an empty list — scanner.scan
-                # then has no directories to enumerate, which matches intent
-                # (there is nothing new to index).
-                dest_normalized = Path(os.path.normpath(destination))
-
-                def _under_destination(path_str):
-                    try:
-                        return Path(os.path.normpath(path_str)).is_relative_to(
-                            dest_normalized
-                        )
-                    except ValueError:
-                        return False
-
-                restrict_set = set()
-                for cp in copied_paths:
-                    parent = str(Path(cp).parent)
-                    if _under_destination(parent):
-                        restrict_set.add(parent)
-                for folder in duplicate_folders:
-                    if _under_destination(folder):
-                        restrict_set.add(folder)
-                restrict_dirs = sorted(restrict_set)
-
-                ctx.runner.update_step(job["id"], "ingest", status="completed",
-                                   summary=f"{ingest_result.get('copied', 0)} copied")
-
-            # Phase 2: Scan to index into DB
-            ctx.checkpoint(job)
-            ctx.runner.update_step(job["id"], "scan", status="running")
-
-            def scan_cb(current, total):
-                job["progress"]["current"] = current
-                job["progress"]["total"] = total
-                ctx.runner.push_event(job["id"], "progress", {
-                    "current": current, "total": total,
-                    "current_file": "",
-                    "phase": "Scanning photos",
-                })
-
-            # ``import-photos`` is a pausable job (registered as a
-            # pause participant by the runner). Without these probes
-            # the scan phase would keep hashing on its process pool
-            # and hold its CPU lease across the entire pause, ignoring
-            # the pause signal until the current source finishes.
-            # Same wiring the in-place import path picked up in
-            # 37e0e3a0 for the identical reason.
-            #
-            # ``ctx.runner.is_cancelled`` internally parks on Pause via
-            # ``wait_if_paused``. Wrap the parking call in
-            # ``suspend_resource_wait_timing`` so an hour-long pause
-            # while a scan is waiting for CPU permits does not persist
-            # as an hour of "resource contention" on the job's
-            # diagnostics. The context manager is a no-op when no
-            # ledger wait is active, so it's safe on non-pausable
-            # invocations too. Mirrors what ``_pause_checkpoint``
-            # does for pipeline participants (pipeline_job.py:1567).
-            def scan_cancel_check():
-                from resource_ledger import suspend_resource_wait_timing
-                with suspend_resource_wait_timing():
-                    return ctx.runner.is_cancelled(job["id"])
-
-            def scan_pause_check():
-                return ctx.runner.pause_requested(job["id"])
-
-            def scan_cancel_only_check():
-                return ctx.runner.cancellation_requested(job["id"])
-
-            vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
-            try:
-                # copy=false: scan_target is the source and restrict_dirs is
-                #   None, so scanner walks the full source tree (unchanged).
-                # copy=true: scan_target is the destination (folder hierarchy
-                #   root, for parent-folder chain creation), but restrict_dirs
-                #   narrows enumeration to only the subfolders ingest wrote
-                #   into. An empty list means "nothing new to scan" — a no-op
-                #   inside scanner.scan.
-                do_scan(
-                    scan_target, thread_db,
-                    progress_callback=scan_cb,
-                    skip_paths=exclude_paths or None,
-                    vireo_dir=vireo_dir,
-                    thumb_cache_dir=config["THUMB_CACHE_DIR"],
-                    restrict_dirs=restrict_dirs,
-                    cancel_check=scan_cancel_check,
-                    pause_check=scan_pause_check,
-                    cancel_only_check=scan_cancel_only_check,
-                )
-            finally:
-                # scanner.scan commits photo rows incrementally, so even a mid-scan
-                # failure can leave DB state that invalidates cached new-image counts.
-                invalidate_new_images_after_scan(thread_db, scan_target)
-                # scanner.scan touches disk and may reconcile ghost rows
-                # (e.g. a user restored an original before running import).
-                # The pre-scan health-check invalidation only fires when a
-                # folder flips missing/ok, so also drop the missing-originals
-                # cache once the scan itself has run — even on partial
-                # failure, since rows are committed incrementally.
-                try:
-                    invalidate_missing_originals()
-                except Exception:
-                    log.exception(
-                        "Failed to invalidate missing-originals cache after import scan of %s",
-                        scan_target,
-                    )
-            scan_count = job["progress"].get("total", 0)
-            scan_summary = f"{scan_count} photos"
-            metadata_warning = scan_metadata_warning()
-            if metadata_warning:
-                scan_summary += f" — {metadata_warning}"
-            ctx.runner.update_step(job["id"], "scan", status="completed",
-                               summary=scan_summary)
-
-            # Phase 3: Generate thumbnails
-            ctx.checkpoint(job)
-            ctx.runner.update_step(job["id"], "thumbnails", status="running")
-            ctx.runner.push_event(job["id"], "progress", {
-                "current": 0, "total": 0,
-                "current_file": "Checking for new thumbnails...",
-                "phase": "Generating thumbnails",
-            })
-
-            def thumb_cb(current, total):
-                job["progress"]["current"] = current
-                job["progress"]["total"] = total
-                ctx.runner.push_event(job["id"], "progress", {
-                    "current": current, "total": total,
-                    "current_file": "",
-                    "phase": "Generating thumbnails",
-                })
-
-            thumb_result = generate_all(
-                thread_db, config["THUMB_CACHE_DIR"],
-                progress_callback=thumb_cb,
-                cancel_check=lambda: ctx.runner.is_cancelled(job["id"]),
-                vireo_dir=vireo_dir,
-            )
-            from thumbnails import format_summary as thumb_summary
-            ctx.runner.update_step(job["id"], "thumbnails", status="completed",
-                               summary=thumb_summary(thumb_result))
-
-            # Phase 4: Create collection
-            ctx.checkpoint(job)
-            ctx.runner.update_step(job["id"], "collection", status="running")
-            photo_ids = []
-            if copy:
-                # Collection from copied files (existing logic)
-                if copied_paths:
-                    thread_db.conn.execute(
-                        "CREATE TEMP TABLE IF NOT EXISTS _imported_paths (dirpath TEXT, fname TEXT)"
-                    )
-                    thread_db.conn.execute("DELETE FROM _imported_paths")
-                    thread_db.conn.executemany(
-                        "INSERT INTO _imported_paths (dirpath, fname) VALUES (?, ?)",
-                        [(os.path.dirname(p), os.path.basename(p)) for p in copied_paths],
-                    )
-                    rows = thread_db.conn.execute(
-                        """SELECT p.id FROM photos p
-                           JOIN folders f ON p.folder_id = f.id
-                           JOIN _imported_paths ip ON f.path = ip.dirpath
-                                                   AND p.filename = ip.fname"""
-                    ).fetchall()
-                    photo_ids = [r["id"] for r in rows]
-                    thread_db.conn.execute("DROP TABLE IF EXISTS _imported_paths")
-            else:
-                # Collection from all photos in the scanned folder
-                rows = thread_db.conn.execute(
-                    """SELECT p.id FROM photos p
-                       JOIN folders f ON p.folder_id = f.id
-                       WHERE f.path = ? OR f.path LIKE ?""",
-                    (scan_target, scan_target.rstrip("/") + "/%"),
-                ).fetchall()
-                photo_ids = [r["id"] for r in rows]
-
-            collection_id = None
-            collection_name = None
-            if photo_ids:
-                from datetime import datetime as dt
-                collection_name = "Import " + dt.now().strftime("%Y-%m-%d %H:%M")
-                collection_id = thread_db.add_collection(
-                    collection_name,
-                    json.dumps([{"field": "photo_ids", "value": photo_ids}]),
-                )
-
-            col_summary = collection_name if collection_name else "no photos"
-            ctx.runner.update_step(job["id"], "collection", status="completed",
-                               summary=col_summary)
-
-            result = {
-                "photos_indexed": len(photo_ids),
-                "collection_id": collection_id,
-                "collection_name": collection_name,
-            }
-            if copy:
-                result["copied"] = ingest_result.get("copied", 0)
-                result["skipped_duplicate"] = ingest_result.get("skipped_duplicate", 0)
-                result["failed"] = ingest_result.get("failed", 0)
-                result["total"] = ingest_result.get("total", 0)
-
-            return result
+            return _ImportFullRun(
+                ctx, params, config, invalidate_missing_originals, job,
+            ).run()
 
         with stage_boundary_lock():
-            pending_sources = stage_pending_source_paths(
-                runner.list_jobs if runner is not None else None,
-                db_for_conflict,
-            )
-            conflict = local_copy_scan_conflict(
-                db_for_conflict, _scan_path,
-                active_workspace_id=ctx.workspace_id,
-                pending_stage_sources=pending_sources,
+            conflict = _import_scan_conflict(
+                runner, db_for_conflict, _scan_path, ctx.workspace_id,
             )
             if conflict:
                 return json_error(conflict, 409)
             return ctx.start(
                 "import-full", work, pausable=True,
-                config={"source": source, "destination": destination, "copy": copy, "file_types": file_types},
+                config={"source": params.source, "destination": params.destination, "copy": params.copy, "file_types": params.file_types},
             )
 
     @blueprint.route("/api/jobs/import", methods=["POST"])
