@@ -45,7 +45,9 @@ def test_production_classifier_calls_are_cache_factories():
     vireo_dir = Path(__file__).resolve().parents[1]
     violations = []
 
-    for path in vireo_dir.glob("*.py"):
+    for path in vireo_dir.rglob("*.py"):
+        if "tests" in path.relative_to(vireo_dir).parts:
+            continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         parents = {}
         for node in ast.walk(tree):
@@ -82,7 +84,9 @@ def test_production_classifier_calls_are_cache_factories():
                     break
                 current = parents.get(current)
             if not routed:
-                violations.append(f"{path.name}:{node.lineno}")
+                violations.append(
+                    f"{path.relative_to(vireo_dir).as_posix()}:{node.lineno}"
+                )
 
     assert not violations, (
         "Classifier construction must be a factory passed to "
