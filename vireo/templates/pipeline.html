@@ -110,6 +110,10 @@ body { padding-bottom: 36px; }
   background: color-mix(in srgb, var(--danger, #E74C3C) 18%, transparent);
   color: var(--danger, #E74C3C);
 }
+.stage-status-pill.skipped {
+  background: color-mix(in srgb, var(--warning, #F0A030) 20%, transparent);
+  color: var(--warning, #F0A030);
+}
 .stage-status-pill.cancelled {
   background: color-mix(in srgb, var(--warning, #F0A030) 20%, transparent);
   color: var(--warning, #F0A030);
@@ -366,6 +370,7 @@ body { padding-bottom: 36px; }
 .status-msg { font-size: 13px; color: var(--text-dim, #888); }
 .status-msg.ok { color: var(--accent, #24E5CA); }
 .status-msg.error { color: var(--danger, #E74C3C); }
+.status-msg.note { color: var(--warning, #F0A030); }
 
 /* Readiness panel */
 .readiness-panel {
@@ -944,6 +949,12 @@ body { padding-bottom: 36px; }
     <strong>Processing failed</strong>
     <div id="pipelineErrorText" style="margin-top:4px;white-space:pre-line;"></div>
   </div>
+  <div id="pipelineNoteBanner" data-testid="pipeline-note-banner" style="display:none;border:1px solid var(--warning,#f0a030);color:var(--text-primary,inherit);padding:10px 14px;border-radius:6px;margin:8px 0;font-size:13px;">
+    <button onclick="this.parentElement.style.display='none'" style="float:right;background:none;border:none;color:inherit;cursor:pointer;font-size:16px;line-height:1;padding:0 4px;">&times;</button>
+    <strong>Some stages were skipped</strong>
+    <div id="pipelineNoteText" style="margin-top:4px;white-space:pre-line;"></div>
+    <a id="pipelineNoteReviewLink" href="/pipeline/review" style="display:none;margin-top:6px;">Continue to Process Review &rarr;</a>
+  </div>
 </div><!-- end pipeline-left -->
 
 <div class="pipeline-right">
@@ -1034,6 +1045,7 @@ body { padding-bottom: 36px; }
   </div>
 </div>
 
+<script src="/static/pipeline-messages.js"></script>
 <script>
 // -- Page init: fetch pipeline data from API and populate the page --
 // Signals that /api/pipeline/page-init's success/failure handler has run,
@@ -2297,6 +2309,8 @@ async function startPipeline() {
   document.getElementById('modelWarningBanner').style.display = 'none';
   var _prevErrBanner = document.getElementById('pipelineErrorBanner');
   if (_prevErrBanner) _prevErrBanner.style.display = 'none';
+  var _prevNoteBanner = document.getElementById('pipelineNoteBanner');
+  if (_prevNoteBanner) _prevNoteBanner.style.display = 'none';
 
   var btn = document.getElementById('btnStartPipeline');
   btn.textContent = 'Stop Pipeline';
@@ -2727,6 +2741,19 @@ function _humanizePipelineError(msg) {
   return String(msg).replace(/^\[\w+\]\s*/, '').replace(/^Fatal:\s*/i, '');
 }
 
+// Show why stages of a run that did not fail were skipped. Warning-styled,
+// not the red failure banner: nothing failed, but the user should know why
+// a stage did nothing (e.g. every detection below detector_confidence).
+function _showPipelineNotes(messages, offerReview) {
+  var banner = document.getElementById('pipelineNoteBanner');
+  var text = document.getElementById('pipelineNoteText');
+  if (!banner || !text) return;
+  text.textContent = messages.join('\n');
+  var link = document.getElementById('pipelineNoteReviewLink');
+  if (link) link.style.display = offerReview ? 'inline-block' : 'none';
+  banner.style.display = '';
+}
+
 // Show a prominent, dismissible error banner with the full failure message(s).
 function _showPipelineError(messages) {
   var banner = document.getElementById('pipelineErrorBanner');
@@ -2957,23 +2984,37 @@ function _onPipelineComplete(result) {
     if (statusEkp) { statusEkp.textContent = 'Done!'; statusEkp.className = 'status-msg ok'; }
   }
 
-  // Show errors if any
-  if (failureErrors.length > 0) {
-    var errorStages = {};
-    failureErrors.forEach(function(err) {
-      var match = err.match(/^\[(\w+)\]/);
-      var stage = match ? match[1] : 'unknown';
-      // One stage can report several errors. Keep the actionable one rather
-      // than whichever was appended last: a generic "1 of 2 photos failed"
-      // line would otherwise bury the "reconnect this volume" instruction
-      // that tells the user what to do (Codex #1392 P2). Mirrors the
-      // backend's own headline pick, which prefers "[stage] Fatal:".
-      var existing = errorStages[stage];
-      var isFatal = err.indexOf('] Fatal:') >= 0;
-      if (existing === undefined || (isFatal && existing.indexOf('] Fatal:') < 0)) {
-        errorStages[stage] = err;
-      }
-    });
+  // Show errors and notes. Notes (result.notes, a subset of result.errors)
+  // explain a stage that skipped without failing; they get their own wording
+  // and style and never read "Failed". Older job rows have no notes key, so
+  // every entry stays an error there.
+  var messages = splitPipelineMessages(r.errors, r.notes);
+  var errorStages = messages.errors;
+  for (var noteStage in messages.notes) {
+    var noteCard = _stageToCard[noteStage] || _failureOnlyStageToCard[noteStage];
+    if (!noteCard) continue;
+    var noteStatusEl = document.getElementById('status' + noteCard);
+    if (noteStatusEl) {
+      noteStatusEl.textContent = 'Skipped: ' + _humanizePipelineError(messages.notes[noteStage]);
+      noteStatusEl.className = 'status-msg note';
+    }
+    // A card fed by several backend stages keeps the worse outcome: a
+    // failure on a sibling stage below still overwrites this.
+    if (_stageOutcomes[noteCard] !== 'failed') {
+      delete _runningStages[noteCard];
+      _stageOutcomes[noteCard] = 'skipped';
+      _setPill(noteCard, 'skipped');
+    }
+  }
+  if (messages.noteList.length) {
+    // A run that completed with only notes doesn't auto-redirect (below), so
+    // the banner offers the way on to Review.
+    _showPipelineNotes(
+      messages.noteList.map(_humanizePipelineError),
+      succeeded && failureErrors.length === 0,
+    );
+  }
+  if (Object.keys(errorStages).length > 0) {
     var firstFailedCard = null;
     for (var stage in errorStages) {
       // Failure-only stages (e.g. ``collection``) have no card of their own
@@ -2983,7 +3024,10 @@ function _onPipelineComplete(result) {
       var cardSuffix = _stageToCard[stage] || _failureOnlyStageToCard[stage];
       if (cardSuffix) {
         var statusEl = document.getElementById('status' + cardSuffix);
-        if (statusEl) statusEl.textContent = 'Failed: ' + errorStages[stage];
+        if (statusEl) {
+          statusEl.textContent = 'Failed: ' + errorStages[stage];
+          statusEl.className = 'status-msg error';
+        }
         delete _runningStages[cardSuffix];
         _stageOutcomes[cardSuffix] = 'failed';
         _setPill(cardSuffix, 'failed');
@@ -3007,8 +3051,11 @@ function _onPipelineComplete(result) {
 
   refreshPipelineUI();
 
-  // Auto-redirect to review page on success
-  if (succeeded && failureErrors.length === 0) {
+  // Auto-redirect to Process Review when nothing failed and nothing was
+  // skipped. A run whose only messages are notes completed, but stays here so
+  // the user sees why a stage did nothing (photos with no mask are rejected
+  // in Review as no_subject_mask); the notes banner links on to Review.
+  if (succeeded && failureErrors.length === 0 && messages.noteList.length === 0) {
     window.location.href = '/pipeline/review';
   }
 }
@@ -4086,7 +4133,7 @@ var _pipelineState = {
 // and a single global would let one stage's status update clobber another's
 // "Running…" pill on the next refresh.
 var _runningStages = {};  // suffix -> true while that stage is running
-var _stageOutcomes = {};  // suffix -> 'done' | 'failed' | 'cancelled' | 'will-skip' | 'done-prior'
+var _stageOutcomes = {};  // suffix -> 'done' | 'failed' | 'cancelled' | 'skipped' | 'will-skip' | 'done-prior'
 
 // Plan response from POST /api/pipeline/plan, keyed by stage suffix:
 //   { Classify: { state, summary, detail }, Extract: ..., ... }
@@ -4136,6 +4183,7 @@ var _PILL_LABELS = {
   'done':       'Done',
   'failed':     'Failed',
   'cancelled':  'Cancelled',
+  'skipped':    'Skipped',
   'will-run':   'Will run',
   'will-skip':  'Will skip',
   'done-prior': 'Already done',
@@ -4157,6 +4205,7 @@ function _formatPillLabel(stage, planEntry, state) {
   if (state === 'warning')   return 'Completed with warnings';
   if (state === 'failed')    return 'Failed';
   if (state === 'cancelled') return 'Cancelled';
+  if (state === 'skipped')   return 'Skipped';
   if (state === 'will-skip') return 'Will skip';
   if (state === 'blocked')   return 'Needs labels';
   if (state === 'needs-source') return 'Select a source';

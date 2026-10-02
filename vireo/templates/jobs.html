@@ -548,7 +548,11 @@
           text: moved === planned
             ? moved.toLocaleString() + ' ' + plural(moved, 'photo') + inPlaceNote
             : moved.toLocaleString() + ' of ' + planned.toLocaleString() +
-              ' ' + plural(planned, 'photo') + ' at destination' + inPlaceNote,
+              ' ' + plural(planned, 'photo') +
+              // "moved" stays exact when nothing was already there; with
+              // in-place photos the count includes them, so it says where
+              // they are rather than claiming they all moved.
+              (item.already_in_place ? ' at destination' : ' moved') + inPlaceNote,
         };
       }),
     };
