@@ -120,3 +120,142 @@ def test_admission_failures_and_live_settings_without_flask_context(
     assert failure.details == {"code": "exiftool_required", "exiftool": status}
     assert db._active_workspace_id == original_workspace
     assert runner.list_jobs() == []
+
+
+def _source_body(tmp_path, method, name):
+    source = tmp_path / "card"
+    source.mkdir(exist_ok=True)
+    Image.new("RGB", (32, 32), "green").save(source / "bird.jpg")
+    body = {"sources": [str(source)], "new_workspace_name": name}
+    if method == "import_photos":
+        body["destination"] = str(tmp_path / "archive")
+        body["folder_template"] = "trip"
+    return body
+
+
+def _assert_workspace_rolled_back(db, runner, name, original_workspace):
+    """A rejected new-workspace import leaves no workspace and no switch."""
+    assert not any(ws["name"] == name for ws in db.get_workspaces())
+    assert db._active_workspace_id == original_workspace
+    assert runner.list_jobs() == []
+
+
+def test_in_place_default_after_import_failure_rolls_back_new_workspace(
+    import_service, tmp_path,
+):
+    """The omitted after_import resolves to the default process only after
+    the workspace switch; a default naming a deleted process must still
+    leave no orphan workspace and keep the previous workspace active."""
+    import config as cfg
+
+    service, db, runner = import_service
+    original_workspace = db._active_workspace_id
+    cfg.save({"pipeline": {"default_process_id": 987654}})
+    body = _source_body(tmp_path, "import_in_place", "Default gone")
+
+    failure = service.import_in_place(db, body)
+
+    assert failure == ImportFailure("unknown process id: 987654")
+    _assert_workspace_rolled_back(db, runner, "Default gone", original_workspace)
+
+
+def test_in_place_process_snapshot_failure_rolls_back_new_workspace(
+    import_service, tmp_path, monkeypatch,
+):
+    """A process deleted between validation and the enqueue-time snapshot
+    makes ``resolve_process`` raise after the switch; roll the workspace back."""
+    service, db, runner = import_service
+    original_workspace = db._active_workspace_id
+    monkeypatch.setattr(db, "get_saved_process", lambda pid: {"id": pid})
+
+    def gone(pid):
+        raise ValueError(f"process {pid} was deleted")
+
+    monkeypatch.setattr(db, "resolve_process", gone)
+    body = _source_body(tmp_path, "import_in_place", "Snapshot gone")
+    body["after_import"] = 4242
+
+    failure = service.import_in_place(db, body)
+
+    assert failure == ImportFailure("process 4242 was deleted", 404)
+    _assert_workspace_rolled_back(db, runner, "Snapshot gone", original_workspace)
+
+
+def test_import_photos_competing_retry_rolls_back_new_workspace(
+    import_service, tmp_path, monkeypatch,
+):
+    """The competing-retry 409 runs after the workspace switch."""
+    import services.import_photos as import_photos
+
+    service, db, runner = import_service
+    original_workspace = db._active_workspace_id
+    monkeypatch.setattr(
+        import_photos, "_competing_retry_failure",
+        lambda runner, job_config: ImportFailure("retry already running", 409),
+    )
+    body = _source_body(tmp_path, "import_photos", "Competing retry")
+    body["after_import"] = None
+
+    failure = service.import_photos(db, body)
+
+    assert failure == ImportFailure("retry already running", 409)
+    _assert_workspace_rolled_back(db, runner, "Competing retry", original_workspace)
+
+
+@pytest.mark.parametrize("method", ["import_in_place", "import_photos"])
+def test_exception_after_workspace_switch_rolls_back_new_workspace(
+    import_service, tmp_path, monkeypatch, method,
+):
+    """An exception between the switch and a started job (here the runner
+    refusing to start) must not leak the workspace either."""
+    service, db, runner = import_service
+    original_workspace = db._active_workspace_id
+
+    def refuse(*args, **kwargs):
+        raise RuntimeError("JobRunner is shut down")
+
+    monkeypatch.setattr(runner, "start", refuse)
+    body = _source_body(tmp_path, method, "Runner down")
+    body["after_import"] = None
+
+    with pytest.raises(RuntimeError, match="shut down"):
+        getattr(service, method)(db, body)
+
+    _assert_workspace_rolled_back(db, runner, "Runner down", original_workspace)
+
+
+@pytest.mark.parametrize("method", ["import_in_place", "import_photos"])
+def test_workspace_setup_failure_rolls_back_created_workspace(
+    import_service, tmp_path, monkeypatch, method,
+):
+    """``create_workspace`` commits, so a failure in a later setup step of
+    ``_prepare_import_workspace`` must delete the half-made workspace."""
+    service, db, runner = import_service
+    original_workspace = db._active_workspace_id
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("collections unavailable")
+
+    monkeypatch.setattr(db, "create_default_collections", broken)
+    body = _source_body(tmp_path, method, "Half made")
+    body["after_import"] = None
+
+    failure = getattr(service, method)(db, body)
+
+    assert failure == ImportFailure("collections unavailable")
+    _assert_workspace_rolled_back(db, runner, "Half made", original_workspace)
+
+
+@pytest.mark.parametrize("method", ["import_in_place", "import_photos"])
+def test_started_import_keeps_new_workspace(import_service, tmp_path, method):
+    """The rollback wrapper never undoes a workspace whose job started."""
+    service, db, runner = import_service
+    body = _source_body(tmp_path, method, "Kept")
+    body["after_import"] = None
+
+    response = getattr(service, method)(db, body)
+
+    assert isinstance(response, dict)
+    wait_for_job_via_runner(runner, response["job_id"], wait_for_history=True)
+    assert any(ws["name"] == "Kept" for ws in db.get_workspaces())
+    assert db._active_workspace_id == response["workspace"]["id"]

@@ -57,12 +57,28 @@ def enqueue_import_photos(service: ImportService, db: Database, body: dict) -> d
         request.plan_after_import_transfer,
         request.check_retry_move_target,
         request.check_pending_archive,
-        request.prepare_workspace,
     ):
         failure = phase()
         if failure is not None:
             return failure
 
+    failure = request.prepare_workspace()
+    if failure is not None:
+        return failure
+    # Everything from here to ``runner.start`` runs inside
+    # ``_admit_into_import_workspace``: a ``new_workspace_name`` request
+    # has already committed the workspace and switched active to it, so
+    # any failure, returned or raised, must undo both. Add new checks
+    # before ``prepare_workspace`` or inside ``_admit_import_job``.
+    return service._admit_into_import_workspace(
+        db, request.created_workspace, request.previous_active_ws,
+        lambda: _admit_import_job(service, db, request),
+    )
+
+
+def _admit_import_job(service, db, request):
+    """The admission steps after the workspace switch; returns a job id or
+    an ``ImportFailure``. ``runner.start`` must stay the last step."""
     runner = service.get_runner()
     thumb_cache_dir = service.config["THUMB_CACHE_DIR"]
     vireo_dir = os.path.dirname(thumb_cache_dir)
@@ -88,21 +104,11 @@ def enqueue_import_photos(service: ImportService, db: Database, body: dict) -> d
             runner, db, request.conflict_paths,
         )
         if conflict:
-            # A ``new_workspace_name`` request has already committed the
-            # workspace and switched active to it. Roll both back so the
-            # 409 leaves no orphan and no silent active-workspace change.
-            service._rollback_import_workspace(
-                db, request.created_workspace, request.previous_active_ws,
-            )
             return ImportFailure(conflict, 409)
-        job_id = runner.start(
+        return runner.start(
             "import", import_job.work, config=job_config,
             workspace_id=request.active_ws, pausable=True,
         )
-    response = {"job_id": job_id}
-    if request.created_workspace is not None:
-        response["workspace"] = request.created_workspace
-    return response
 
 
 def _local_copy_conflict(runner, db, paths):

@@ -480,6 +480,7 @@ class ImportService:
             return None, None, previous_active_ws, ImportFailure(
                 "new_workspace_name is required",
             )
+        ws_id = None
         try:
             from datetime import datetime
 
@@ -497,19 +498,57 @@ class ImportService:
             )
         except Exception as e:
             log.warning("Could not create the import's new workspace %r", name, exc_info=True)
+            # ``create_workspace`` commits, so a failure in a later setup
+            # step (default collections, the switch) would otherwise leave
+            # a half-made workspace behind, possibly still active.
+            if ws_id is not None:
+                self._rollback_import_workspace(
+                    db, {"id": ws_id}, previous_active_ws,
+                )
             return None, None, previous_active_ws, ImportFailure(str(e))
+
+    def _admit_into_import_workspace(
+        self, db, created_workspace, previous_active_ws, admit,
+    ):
+        """Run everything an import does after ``_prepare_import_workspace``.
+
+        ``admit()`` holds every check between the workspace switch and the
+        job's registration, and returns either an ``ImportFailure`` or the
+        id ``runner.start`` returned, which must be its last step. Any
+        failure, returned or raised, rolls back the workspace the request
+        created and restores the previously active one, so a check added
+        later cannot leave an orphan workspace and a silently changed
+        active workspace behind. Once ``admit`` has returned a job id the
+        job owns the workspace and nothing is rolled back.
+        """
+        try:
+            outcome = admit()
+        except BaseException:
+            self._rollback_import_workspace(
+                db, created_workspace, previous_active_ws,
+            )
+            raise
+        if isinstance(outcome, ImportFailure):
+            self._rollback_import_workspace(
+                db, created_workspace, previous_active_ws,
+            )
+            return outcome
+        response = {"job_id": outcome}
+        if created_workspace is not None:
+            response["workspace"] = created_workspace
+        return response
 
     def _rollback_import_workspace(self, db, created_workspace, previous_active_ws):
         """Undo ``_prepare_import_workspace`` when a later admission check fails.
 
-        A ``new_workspace_name`` import that passes the pre-flight but is
-        later rejected inside the atomic stage-boundary block has already
-        committed a workspace row and switched active-workspace to it.
-        Returning 409 without this rollback would leak that state: an
-        orphan workspace with no import attached, plus a silent change of
-        the user's active workspace even though no job was queued.
-        Restore the previous active workspace and delete the freshly
-        created one so the 409 is state-neutral.
+        A ``new_workspace_name`` import that is rejected after the workspace
+        step has already committed a workspace row and switched
+        active-workspace to it. Returning the error without this rollback
+        would leak that state: an orphan workspace with no import attached,
+        plus a silent change of the user's active workspace even though no
+        job was queued. Restore the previous active workspace and delete the
+        freshly created one so the failure is state-neutral. Callers reach
+        this through ``_admit_into_import_workspace``.
         """
         if created_workspace is None:
             return
@@ -517,13 +556,13 @@ class ImportService:
             db.set_active_workspace(previous_active_ws)
         except Exception:
             log.exception(
-                "Failed to restore active workspace after import conflict",
+                "Failed to restore active workspace after a rejected import",
             )
         try:
             db.delete_workspace(int(created_workspace["id"]))
         except Exception:
             log.exception(
-                "Failed to delete created import workspace after conflict",
+                "Failed to delete created import workspace after a rejected import",
             )
 
     def _remote_target_snapshot(self, remote_archive_config):
