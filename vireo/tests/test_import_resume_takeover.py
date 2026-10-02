@@ -248,3 +248,39 @@ def test_jobs_page_agrees_with_the_server(node, tmp_path):
         if page["by"]:
             # The note names where to continue, never a bare "resumed".
             assert page["note"].startswith("Already resumed by the import started")
+
+
+@pytest.mark.parametrize("status", ["completed", "failed"])
+def test_terminal_runner_descendant_overrides_unpersisted_history(tmp_path, status):
+    """The completion event can precede the terminal history write."""
+    from unittest.mock import Mock
+
+    from db import Database
+    from jobs import JobRunner
+
+    runner = Mock()
+    row = _row("resume", "2026-09-01T11:00:00", DONE, status=status)
+    with Database(str(tmp_path / "catalog.db")) as db:
+        history_runner = JobRunner(db)
+        assert history_runner.shutdown()
+        row["workspace_id"] = db._active_workspace_id
+        runner.list_jobs.return_value = [row]
+        service = ImportService(
+            lambda: runner, str(tmp_path / "catalog.db"), {},
+            invalidate_missing_originals=Mock(), enqueue_process_job=Mock(),
+            chain_after_move=Mock(), bulk_gps_location_payload=Mock(),
+        )
+        rows = service._import_resume_rows(db, PARENT_ID, {}, db._active_workspace_id)
+        assert import_resume_takeover(PARENT_ID, _parent()["result"], rows)["by"] == "resume"
+
+
+def test_descendant_chain_with_tag_errors_leaves_only_tag_replay():
+    parent = _parent()
+    child = _row("resume", "2026-09-01T11:00:00", {
+        "ok": True, "photo_ids": [1, 2], "tags_applied": False,
+        "chained": True, "tagging": {"errors": ["temporary lock"]},
+    })
+    takeover = import_resume_takeover(PARENT_ID, parent["result"], [child])
+    resume = ImportService._interrupted_parent_resume(parent["config"], parent["result"], takeover)
+    assert resume["chain_already_ran"] is True
+    assert resume["tags_applied"] is False

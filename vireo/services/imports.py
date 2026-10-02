@@ -1000,17 +1000,16 @@ class ImportService:
             (parent_id,),
         ).fetchone() is not None
 
-    @staticmethod
-    def _import_resume_rows(db, parent_id, parent_config, workspace_id):
+    def _import_resume_rows(self, db, parent_id, parent_config, workspace_id):
         """Finished import rows that may descend from ``parent_id``, for
         ``import_resume_takeover``. Every descendant inherits the chain's
         root, so matching it (or a direct parent link, for retries older
         than ``root_import_job_id``) finds them all; the walk itself picks
-        out the actual descendants. Reads ``job_history`` only, the same
-        rows the Jobs page decides from.
+        out the actual descendants. Terminal runner snapshots override
+        history while the final row is still being persisted.
         """
         root = parent_config.get("root_import_job_id") or parent_id
-        return [
+        rows = [
             dict(row) for row in db.conn.execute(
                 "SELECT id, type, status, started_at, config, result "
                 "FROM job_history "
@@ -1022,6 +1021,20 @@ class ImportService:
                 (workspace_id, root, parent_id),
             ).fetchall()
         ]
+
+        by_id = {row["id"]: row for row in rows}
+        runner = self.get_runner()
+        for job in runner.list_jobs() if runner is not None else []:
+            if (job.get("type") != "import"
+                    or job.get("status") not in ("completed", "failed", "cancelled")
+                    or job.get("workspace_id") != workspace_id):
+                continue
+            cfg = _json_dict(job.get("config"))
+            if (cfg.get("root_import_job_id") != root
+                    and cfg.get("parent_import_job_id") != parent_id):
+                continue
+            by_id[job["id"]] = job
+        return list(by_id.values())
 
     @staticmethod
     def _resume_takeover_message(takeover):

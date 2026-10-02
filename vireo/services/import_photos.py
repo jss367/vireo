@@ -1135,7 +1135,7 @@ class _ImportPhotosJob:
                 result["local_processing"] = True
                 result["final_destination"] = self.destination
                 result["staging_destination"] = import_destination
-            tag_errors = self._apply_tags(job, result)
+            self._apply_tags(job, result)
             # Atomically honor a pending pause/cancel before collection
             # publication and child-job handoff. The shared runner gate
             # rejects new requests once this final phase begins.
@@ -1151,11 +1151,10 @@ class _ImportPhotosJob:
                 result["after_import_skipped"] = (
                     "chain already ran on the interrupted parent"
                 )
-            # A cancelled run skipped the chain (and may owe tags), so it
-            # stays resumable; a chain that ran with owed tag work also
-            # stays resumable — the mark is a promise both post-import
-            # steps landed.
-            if not result.get("cancelled") and not tag_errors:
+            # Record the chain independently of the tag pass: a tag-only
+            # resume must not publish a second collection or processing job.
+            # A cancelled run skipped the chain and still owes it.
+            if not result.get("cancelled"):
                 self._mark_post_import_step(job, "chained", result)
                 result["chained"] = True
             # Both marks land on the final row either way, so a row that

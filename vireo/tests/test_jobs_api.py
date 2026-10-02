@@ -12109,7 +12109,7 @@ def test_resume_replays_tags_when_chain_ran_but_tags_owed(
         # The chain ran, but tags are owed — the row is resumable via the
         # tag-only path.
         assert "tags_applied" not in marks
-        assert "chained" not in marks
+        assert marks["chained"] is True
         own = parent["photo_ids"]
         assert own
 
