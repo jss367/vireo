@@ -20,6 +20,7 @@ import sys
 import time
 import uuid
 import webbrowser
+from dataclasses import dataclass, field
 
 import id_conflicts
 import remote_setup
@@ -742,85 +743,158 @@ def _trash_paths(filepaths, progress_callback=None, already_missing_out=None,
     which is the exact case we routed through Finder in the first place.
     """
     ordered = list(dict.fromkeys(filepaths))
-    successful = set()
-    moved = 0
-    fallback = []
-    preflight_errors = {}
-    finder_candidates = []
-    network_finder_candidates = set()
-    send_errors = {}
     if network_roots is _NETWORK_ROOTS_UNSET:
         network_roots = _network_volume_roots()
-    processed = set()
+    run = _TrashRun(ordered, progress_callback, already_missing_out)
 
-    def report_processed(filepath):
-        if filepath in processed:
+    local_paths = run.route_network_paths_to_finder(network_roots)
+    run.snapshot_parent_devices(local_paths)
+    run.preflight_and_move_local_paths(local_paths)
+    if run.fallback:
+        run.send_fallback_to_trash()
+
+    for finder_batch in _chunked(
+        run.finder_candidates, size=_FINDER_TRASH_BATCH_SIZE,
+    ):
+        try:
+            run.trash_finder_batch(finder_batch)
+        except subprocess.TimeoutExpired:
+            log.warning(
+                "Finder Trash timed out after %ss for %d file(s)",
+                _FINDER_TRASH_TIMEOUT_SECS, len(finder_batch),
+            )
+            for filepath in finder_batch:
+                run.send_errors[filepath] = (
+                    f"Finder Trash timed out after "
+                    f"{_FINDER_TRASH_TIMEOUT_SECS}s"
+                )
+        except Exception as exc:
+            log.warning("Finder Trash failed for a file batch", exc_info=True)
+            for filepath in finder_batch:
+                run.send_errors[filepath] = str(exc) or "Finder Trash failed"
+        for filepath in finder_batch:
+            run.report_processed(filepath)
+
+    return run.moved, run.successful, run.collect_failures()
+
+
+@dataclass
+class _FinderMissingEvidence:
+    """One Finder batch's independent checks on its "missing" outcomes."""
+
+    batch_network_roots: object = None
+    reachable_network_roots: set = field(default_factory=set)
+    path_to_deepest_root: dict = field(default_factory=dict)
+    confirmed_network_missing: set = field(default_factory=set)
+    finder_recheck_errors: set = field(default_factory=set)
+
+
+class _TrashRun:
+    """Per-call state for one :func:`_trash_paths` invocation."""
+
+    def __init__(self, ordered, progress_callback, already_missing_out):
+        self.ordered = ordered
+        self.progress_callback = progress_callback
+        self.already_missing_out = already_missing_out
+        self.successful = set()
+        self.moved = 0
+        self.fallback = []
+        self.preflight_errors = {}
+        self.finder_candidates = []
+        self.network_finder_candidates = set()
+        self.send_errors = {}
+        self.processed = set()
+        self.parent_devs = {}
+
+    def report_processed(self, filepath):
+        if filepath in self.processed:
             return
-        processed.add(filepath)
-        if progress_callback:
-            progress_callback(
-                len(processed), len(ordered), os.path.basename(filepath),
+        self.processed.add(filepath)
+        if self.progress_callback:
+            self.progress_callback(
+                len(self.processed), len(self.ordered),
+                os.path.basename(filepath),
             )
 
-    # Classify paths using the kernel mount table before any source or parent
-    # stat.  Those metadata calls can themselves block indefinitely while an
-    # unhealthy SMB mount is reconnecting, so network candidates must go
-    # straight to the bounded Finder subprocess.
-    local_paths = []
-    for filepath in ordered:
-        if _path_on_network_volume(filepath, network_roots):
-            finder_candidates.append(filepath)
-            network_finder_candidates.add(filepath)
-            send_errors[filepath] = "Network volume Trash operation failed"
-        else:
-            local_paths.append(filepath)
+    def _mark_already_missing(self, filepath):
+        self.successful.add(filepath)
+        if self.already_missing_out is not None:
+            self.already_missing_out.add(filepath)
 
-    # Snapshot each local parent's st_dev before we touch anything. A network
-    # mount that vanishes mid-batch can leave the mount-point directory
-    # visible on the underlying local FS, so ``os.path.isdir`` alone would
-    # accept the file as gone. Comparing pre-op vs post-op st_dev catches
-    # the mount drop even when the directory still stats cleanly.
-    parent_devs = {path: _snapshot_parent_device(path) for path in local_paths}
+    def route_network_paths_to_finder(self, network_roots):
+        """Return the local paths; queue network paths for Finder.
 
-    for filepath in local_paths:
-        if not os.path.isfile(filepath):
-            # ``os.path.isfile`` returning False is ambiguous on network
-            # volumes — it also happens when the underlying stat fails
-            # because the mount is already disconnected. Only treat the
-            # path as "already gone" when the parent directory is still
-            # reachable AND its device matches the pre-op snapshot;
-            # otherwise preserve as a failure so the caller doesn't prune
-            # the catalog row for a photo that reappears when the mount
-            # comes back.
-            if _path_confirmed_gone(filepath, parent_devs.get(filepath)):
-                log.warning("File already missing: %s", filepath)
-                successful.add(filepath)
-                if already_missing_out is not None:
-                    already_missing_out.add(filepath)
+        Classify paths using the kernel mount table before any source or
+        parent stat.  Those metadata calls can themselves block indefinitely
+        while an unhealthy SMB mount is reconnecting, so network candidates
+        must go straight to the bounded Finder subprocess.
+        """
+        local_paths = []
+        for filepath in self.ordered:
+            if _path_on_network_volume(filepath, network_roots):
+                self.finder_candidates.append(filepath)
+                self.network_finder_candidates.add(filepath)
+                self.send_errors[filepath] = (
+                    "Network volume Trash operation failed"
+                )
             else:
-                preflight_errors[filepath] = (
-                    "Source path is unreachable"
-                )
-                log.warning(
-                    "Trash preflight: source unreachable for %s", filepath,
-                )
-            report_processed(filepath)
-            continue
-        if _move_to_volume_trash(filepath):
-            successful.add(filepath)
-            moved += 1
-            report_processed(filepath)
-        else:
-            fallback.append(filepath)
+                local_paths.append(filepath)
+        return local_paths
 
-    if fallback:
+    def snapshot_parent_devices(self, local_paths):
+        """Snapshot each local parent's st_dev before we touch anything.
+
+        A network mount that vanishes mid-batch can leave the mount-point
+        directory visible on the underlying local FS, so ``os.path.isdir``
+        alone would accept the file as gone. Comparing pre-op vs post-op
+        st_dev catches the mount drop even when the directory still stats
+        cleanly.
+        """
+        self.parent_devs = {
+            path: _snapshot_parent_device(path) for path in local_paths
+        }
+
+    def preflight_and_move_local_paths(self, local_paths):
+        for filepath in local_paths:
+            if not os.path.isfile(filepath):
+                self._settle_absent_local_path(filepath)
+                self.report_processed(filepath)
+                continue
+            if _move_to_volume_trash(filepath):
+                self.successful.add(filepath)
+                self.moved += 1
+                self.report_processed(filepath)
+            else:
+                self.fallback.append(filepath)
+
+    def _settle_absent_local_path(self, filepath):
+        # ``os.path.isfile`` returning False is ambiguous on network
+        # volumes — it also happens when the underlying stat fails
+        # because the mount is already disconnected. Only treat the
+        # path as "already gone" when the parent directory is still
+        # reachable AND its device matches the pre-op snapshot;
+        # otherwise preserve as a failure so the caller doesn't prune
+        # the catalog row for a photo that reappears when the mount
+        # comes back.
+        if _path_confirmed_gone(filepath, self.parent_devs.get(filepath)):
+            log.warning("File already missing: %s", filepath)
+            self._mark_already_missing(filepath)
+        else:
+            self.preflight_errors[filepath] = (
+                "Source path is unreachable"
+            )
+            log.warning(
+                "Trash preflight: source unreachable for %s", filepath,
+            )
+
+    def send_fallback_to_trash(self):
         from send2trash import send2trash as _trash
-        for filepath in fallback:
+        for filepath in self.fallback:
             try:
                 _trash(filepath)
-                successful.add(filepath)
-                moved += 1
-                report_processed(filepath)
+                self.successful.add(filepath)
+                self.moved += 1
+                self.report_processed(filepath)
             except BaseException as exc:
                 if isinstance(exc, (KeyboardInterrupt, GeneratorExit)):
                     raise
@@ -831,21 +905,148 @@ def _trash_paths(filepaths, progress_callback=None, already_missing_out=None,
                 # (the underlying stat fails), which would otherwise mask a
                 # real failure and prune the catalog row for a photo that
                 # reappears when the mount comes back.
-                if _path_confirmed_gone(filepath, parent_devs.get(filepath)):
-                    successful.add(filepath)
-                    moved += 1
-                    report_processed(filepath)
+                if _path_confirmed_gone(
+                    filepath, self.parent_devs.get(filepath),
+                ):
+                    self.successful.add(filepath)
+                    self.moved += 1
+                    self.report_processed(filepath)
                     continue
-                send_errors[filepath] = str(exc)
+                self.send_errors[filepath] = str(exc)
                 if sys.platform == "darwin":
-                    finder_candidates.append(filepath)
+                    self.finder_candidates.append(filepath)
                 else:
-                    report_processed(filepath)
+                    self.report_processed(filepath)
 
-    def _finder_missing_is_trustworthy(
-        filepath, current_network_roots, reachable_network_roots,
-        confirmed_network_missing, path_to_deepest_root,
-    ):
+    def trash_finder_batch(self, finder_batch):
+        finder_moved_paths, finder_missing_paths, finder_failures = (
+            _trash_via_finder(finder_batch)
+        )
+        self.moved += len(finder_moved_paths)
+        self.successful.update(finder_moved_paths)
+        evidence = self._gather_missing_evidence(finder_missing_paths)
+        self._settle_finder_missing(finder_missing_paths, evidence)
+        for failure in finder_failures:
+            self.send_errors[failure["path"]] = failure["error"]
+
+    def _gather_missing_evidence(self, finder_missing_paths):
+        evidence = _FinderMissingEvidence()
+        # Query the mount table at most once per batch. A retry that
+        # contains many paths already moved by an earlier timed-out
+        # Finder call comes back with every path in ``missing`` — doing
+        # a fresh ``mount`` subprocess per path could otherwise burn up
+        # to ``_MOUNT_QUERY_TIMEOUT_SECS`` × ``len(batch)`` seconds and
+        # undermine the bounded batch behaviour this code establishes.
+        batch_network_missing = any(
+            path in self.network_finder_candidates
+            for path in finder_missing_paths
+        )
+        evidence.batch_network_roots = (
+            _network_volume_roots() if batch_network_missing else None
+        )
+        if batch_network_missing and evidence.batch_network_roots is not None:
+            paths_still_on_network = {
+                path for path in finder_missing_paths
+                if path in self.network_finder_candidates
+                and _path_on_network_volume(
+                    path, evidence.batch_network_roots,
+                )
+            }
+            self._probe_deepest_network_roots(
+                paths_still_on_network, evidence,
+            )
+            if paths_still_on_network:
+                self._recheck_missing_via_finder(
+                    paths_still_on_network, evidence,
+                )
+        return evidence
+
+    def _probe_deepest_network_roots(self, paths_still_on_network, evidence):
+        """Probe each still-relevant mount root with a bounded
+        out-of-process ``stat`` — a signal independent of Finder's
+        exists-cache — so a still-listed but unreachable SMB server
+        cannot make ``missing`` outcomes look legitimate. Run the
+        probes concurrently so a Finder batch spanning many
+        unavailable shares completes within one probe timeout
+        rather than accumulating ``len(distinct_roots)`` ×
+        ``_MOUNT_QUERY_TIMEOUT_SECS`` serially — a full 20-item
+        batch across unreachable roots would otherwise add up to
+        ~100 seconds of hang time before the Finder recheck.
+        """
+        # Associate each path with the *deepest* mount root it
+        # resolves into so nested mounts probe reachability of the
+        # inner share rather than an outer one that happens to be
+        # iterated first. Set iteration is order-independent, so
+        # picking the first match could otherwise validate a
+        # detached inner mount using a live outer one and prune
+        # rows for photos that reappear on reconnect.
+        for path in paths_still_on_network:
+            root = _deepest_network_root_for_path(
+                path, evidence.batch_network_roots,
+            )
+            if root is not None:
+                evidence.path_to_deepest_root[path] = root
+        distinct_roots = list(set(evidence.path_to_deepest_root.values()))
+        if distinct_roots:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=len(distinct_roots),
+            ) as executor:
+                probe_results = executor.map(
+                    _network_root_reachable, distinct_roots,
+                )
+                for root, is_reachable in zip(
+                    distinct_roots, probe_results, strict=True,
+                ):
+                    if is_reachable:
+                        evidence.reachable_network_roots.add(root)
+
+    def _recheck_missing_via_finder(self, paths_still_on_network, evidence):
+        try:
+            (
+                evidence.confirmed_network_missing,
+                reappeared_paths,
+                recheck_failures,
+            ) = _missing_paths_via_finder(paths_still_on_network)
+            for path in reappeared_paths:
+                evidence.finder_recheck_errors.add(path)
+                self.send_errors[path] = (
+                    "Source reappeared during Trash operation"
+                )
+            for failure in recheck_failures:
+                evidence.finder_recheck_errors.add(failure["path"])
+                self.send_errors[failure["path"]] = failure["error"]
+        except subprocess.TimeoutExpired:
+            for path in paths_still_on_network:
+                evidence.finder_recheck_errors.add(path)
+                self.send_errors[path] = (
+                    "Finder existence check timed out"
+                )
+        except Exception as exc:
+            # Fail safe: every path in the batch is reported as a
+            # send error, so nothing is pruned on a failed recheck.
+            log.warning("Finder existence recheck failed", exc_info=True)
+            for path in paths_still_on_network:
+                evidence.finder_recheck_errors.add(path)
+                self.send_errors[path] = (
+                    str(exc) or "Finder existence check failed"
+                )
+
+    def _settle_finder_missing(self, finder_missing_paths, evidence):
+        for missing_path in finder_missing_paths:
+            if self._finder_missing_is_trustworthy(missing_path, evidence):
+                self._mark_already_missing(missing_path)
+            else:
+                if missing_path not in evidence.finder_recheck_errors:
+                    self.send_errors[missing_path] = (
+                        "Source path is unreachable"
+                    )
+                log.warning(
+                    "Rejecting Finder 'missing' outcome for %s: "
+                    "underlying mount appears to have detached",
+                    missing_path,
+                )
+
+    def _finder_missing_is_trustworthy(self, filepath, evidence):
         """Reject Finder's "missing" outcome when the underlying mount is gone.
 
         Finder reports "missing" when ``sourceExists=false`` but
@@ -872,7 +1073,8 @@ def _trash_paths(filepaths, progress_callback=None, already_missing_out=None,
         we reuse the parent-device snapshot check that guards the
         send2trash path already.
         """
-        if filepath in network_finder_candidates:
+        if filepath in self.network_finder_candidates:
+            current_network_roots = evidence.batch_network_roots
             if current_network_roots is None:
                 # Mount discovery failed on the recheck — we cannot
                 # confirm the volume is still mounted, so refuse to trust
@@ -880,7 +1082,7 @@ def _trash_paths(filepaths, progress_callback=None, already_missing_out=None,
                 return False
             if not _path_on_network_volume(filepath, current_network_roots):
                 return False
-            if filepath not in confirmed_network_missing:
+            if filepath not in evidence.confirmed_network_missing:
                 return False
             # Require the *exact* mount the path depends on — not just any
             # reachable ancestor — to respond to the out-of-process stat
@@ -888,159 +1090,25 @@ def _trash_paths(filepaths, progress_callback=None, already_missing_out=None,
             # reachable outer share (e.g. ``/Volumes/NAS/archive`` under a
             # still-live ``/Volumes/NAS``), only the deepest match tells us
             # whether the photo could reappear on reconnect.
-            deepest_root = path_to_deepest_root.get(filepath)
+            deepest_root = evidence.path_to_deepest_root.get(filepath)
             if deepest_root is None:
                 return False
-            return deepest_root in reachable_network_roots
-        return _path_confirmed_gone(filepath, parent_devs.get(filepath))
+            return deepest_root in evidence.reachable_network_roots
+        return _path_confirmed_gone(filepath, self.parent_devs.get(filepath))
 
-    for finder_batch in _chunked(
-        finder_candidates, size=_FINDER_TRASH_BATCH_SIZE,
-    ):
-        try:
-            finder_moved_paths, finder_missing_paths, finder_failures = (
-                _trash_via_finder(finder_batch)
+    def collect_failures(self):
+        failures = []
+        for filepath in self.ordered:
+            if filepath in self.successful:
+                continue
+            error = (
+                self.preflight_errors.get(filepath)
+                or self.send_errors.get(filepath)
+                or "Trash operation failed"
             )
-            moved += len(finder_moved_paths)
-            successful.update(finder_moved_paths)
-            # Query the mount table at most once per batch. A retry that
-            # contains many paths already moved by an earlier timed-out
-            # Finder call comes back with every path in ``missing`` — doing
-            # a fresh ``mount`` subprocess per path could otherwise burn up
-            # to ``_MOUNT_QUERY_TIMEOUT_SECS`` × ``len(batch)`` seconds and
-            # undermine the bounded batch behaviour this code establishes.
-            batch_network_missing = any(
-                path in network_finder_candidates
-                for path in finder_missing_paths
-            )
-            batch_network_roots = (
-                _network_volume_roots() if batch_network_missing else None
-            )
-            # Probe each still-relevant mount root with a bounded
-            # out-of-process ``stat`` — a signal independent of Finder's
-            # exists-cache — so a still-listed but unreachable SMB server
-            # cannot make ``missing`` outcomes look legitimate. Run the
-            # probes concurrently so a Finder batch spanning many
-            # unavailable shares completes within one probe timeout
-            # rather than accumulating ``len(distinct_roots)`` ×
-            # ``_MOUNT_QUERY_TIMEOUT_SECS`` serially — a full 20-item
-            # batch across unreachable roots would otherwise add up to
-            # ~100 seconds of hang time before the Finder recheck.
-            reachable_network_roots = set()
-            path_to_deepest_root = {}
-            confirmed_network_missing = set()
-            finder_recheck_errors = set()
-            if batch_network_missing and batch_network_roots is not None:
-                paths_still_on_network = {
-                    path for path in finder_missing_paths
-                    if path in network_finder_candidates
-                    and _path_on_network_volume(path, batch_network_roots)
-                }
-                # Associate each path with the *deepest* mount root it
-                # resolves into so nested mounts probe reachability of the
-                # inner share rather than an outer one that happens to be
-                # iterated first. Set iteration is order-independent, so
-                # picking the first match could otherwise validate a
-                # detached inner mount using a live outer one and prune
-                # rows for photos that reappear on reconnect.
-                for path in paths_still_on_network:
-                    root = _deepest_network_root_for_path(
-                        path, batch_network_roots,
-                    )
-                    if root is not None:
-                        path_to_deepest_root[path] = root
-                distinct_roots = list(set(path_to_deepest_root.values()))
-                if distinct_roots:
-                    with concurrent.futures.ThreadPoolExecutor(
-                        max_workers=len(distinct_roots),
-                    ) as executor:
-                        probe_results = executor.map(
-                            _network_root_reachable, distinct_roots,
-                        )
-                        for root, is_reachable in zip(
-                            distinct_roots, probe_results, strict=True,
-                        ):
-                            if is_reachable:
-                                reachable_network_roots.add(root)
-                if paths_still_on_network:
-                    try:
-                        (
-                            confirmed_network_missing,
-                            reappeared_paths,
-                            recheck_failures,
-                        ) = _missing_paths_via_finder(paths_still_on_network)
-                        for path in reappeared_paths:
-                            finder_recheck_errors.add(path)
-                            send_errors[path] = (
-                                "Source reappeared during Trash operation"
-                            )
-                        for failure in recheck_failures:
-                            finder_recheck_errors.add(failure["path"])
-                            send_errors[failure["path"]] = failure["error"]
-                    except subprocess.TimeoutExpired:
-                        for path in paths_still_on_network:
-                            finder_recheck_errors.add(path)
-                            send_errors[path] = (
-                                "Finder existence check timed out"
-                            )
-                    except Exception as exc:
-                        # Fail safe: every path in the batch is reported as a
-                        # send error, so nothing is pruned on a failed recheck.
-                        log.warning("Finder existence recheck failed", exc_info=True)
-                        for path in paths_still_on_network:
-                            finder_recheck_errors.add(path)
-                            send_errors[path] = (
-                                str(exc) or "Finder existence check failed"
-                            )
-            for missing_path in finder_missing_paths:
-                if _finder_missing_is_trustworthy(
-                    missing_path, batch_network_roots,
-                    reachable_network_roots,
-                    confirmed_network_missing,
-                    path_to_deepest_root,
-                ):
-                    successful.add(missing_path)
-                    if already_missing_out is not None:
-                        already_missing_out.add(missing_path)
-                else:
-                    if missing_path not in finder_recheck_errors:
-                        send_errors[missing_path] = "Source path is unreachable"
-                    log.warning(
-                        "Rejecting Finder 'missing' outcome for %s: "
-                        "underlying mount appears to have detached",
-                        missing_path,
-                    )
-            for failure in finder_failures:
-                send_errors[failure["path"]] = failure["error"]
-        except subprocess.TimeoutExpired:
-            log.warning(
-                "Finder Trash timed out after %ss for %d file(s)",
-                _FINDER_TRASH_TIMEOUT_SECS, len(finder_batch),
-            )
-            for filepath in finder_batch:
-                send_errors[filepath] = (
-                    f"Finder Trash timed out after "
-                    f"{_FINDER_TRASH_TIMEOUT_SECS}s"
-                )
-        except Exception as exc:
-            log.warning("Finder Trash failed for a file batch", exc_info=True)
-            for filepath in finder_batch:
-                send_errors[filepath] = str(exc) or "Finder Trash failed"
-        for filepath in finder_batch:
-            report_processed(filepath)
-
-    failures = []
-    for filepath in ordered:
-        if filepath in successful:
-            continue
-        error = (
-            preflight_errors.get(filepath)
-            or send_errors.get(filepath)
-            or "Trash operation failed"
-        )
-        failures.append({"path": filepath, "error": error})
-        log.warning("Trash failed for %s: %s", filepath, error)
-    return moved, successful, failures
+            failures.append({"path": filepath, "error": error})
+            log.warning("Trash failed for %s: %s", filepath, error)
+        return failures
 
 
 def _migrate_legacy_preview_cache(app):
