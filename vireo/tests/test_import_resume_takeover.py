@@ -500,3 +500,33 @@ def test_takeover_reads_never_started_descendant_pipeline_history(tmp_path):
         takeover = import_resume_takeover(PARENT_ID, _parent()["result"], rows)
         assert takeover["by"] is None
         assert takeover["chained"] is False
+
+
+def test_takeover_fetches_transitive_legacy_descendants(tmp_path):
+    from unittest.mock import Mock
+
+    from db import Database
+    from jobs import JobRunner
+
+    with Database(str(tmp_path / "catalog.db")) as db:
+        history_runner = JobRunner(db)
+        assert history_runner.shutdown()
+        runner = Mock()
+        runner.list_jobs.return_value = []
+        child = _row("legacy-child", "2026-09-01T11:00:00",
+                     {"ok": False, "failed": 1, "photo_ids": [3]}, root=None, status="failed")
+        grandchild = _row("grandchild", "2026-09-01T12:00:00", DONE,
+                          parent="legacy-child", root="legacy-child")
+        for row in (child, grandchild):
+            db.conn.execute(
+                "INSERT INTO job_history (id,type,status,started_at,config,result,workspace_id) VALUES (?,?,?,?,?,?,?)",
+                (row["id"], row["type"], row["status"], row["started_at"],
+                 json.dumps(row["config"]), json.dumps(row["result"]), db._active_workspace_id),
+            )
+        db.conn.commit()
+        service = ImportService(lambda: runner, db._db_path, {},
+                                invalidate_missing_originals=Mock(), enqueue_process_job=Mock(),
+                                chain_after_move=Mock(), bulk_gps_location_payload=Mock())
+        rows = service._import_resume_rows(db, PARENT_ID, {}, db._active_workspace_id)
+        assert {row["id"] for row in rows} == {"legacy-child", "grandchild"}
+        assert import_resume_takeover(PARENT_ID, _parent()["result"], rows)["by"] == "grandchild"

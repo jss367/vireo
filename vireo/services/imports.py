@@ -1079,14 +1079,17 @@ class ImportService:
         root = parent_config.get("root_import_job_id") or parent_id
         rows = [
             dict(row) for row in db.conn.execute(
-                "SELECT id, type, status, started_at, config, result "
-                "FROM job_history "
-                "WHERE type = 'import' "
-                "  AND status IN ('completed', 'failed', 'cancelled') "
-                "  AND workspace_id IS ? "
-                "  AND (json_extract(config, '$.root_import_job_id') = ? "
-                "       OR json_extract(config, '$.parent_import_job_id') = ?)",
-                (workspace_id, root, parent_id),
+                "WITH RECURSIVE lineage(id) AS ("
+                " SELECT id FROM job_history WHERE type='import' AND workspace_id IS ?"
+                " AND (id IN (?, ?) OR json_extract(config, '$.root_import_job_id') = ?"
+                " OR json_extract(config, '$.parent_import_job_id') = ?)"
+                " UNION SELECT child.id FROM job_history child JOIN lineage"
+                " ON json_extract(child.config, '$.parent_import_job_id') = lineage.id"
+                " WHERE child.type='import' AND child.workspace_id IS ?"
+                ") SELECT id, type, status, started_at, config, result FROM job_history"
+                " WHERE id IN (SELECT id FROM lineage)"
+                " AND status IN ('completed', 'failed', 'cancelled')",
+                (workspace_id, root, parent_id, root, parent_id, workspace_id),
             ).fetchall()
         ]
 
@@ -1097,10 +1100,8 @@ class ImportService:
                     or job.get("status") not in ("completed", "failed", "cancelled")
                     or job.get("workspace_id") != workspace_id):
                 continue
-            cfg = _json_dict(job.get("config"))
-            if (cfg.get("root_import_job_id") != root
-                    and cfg.get("parent_import_job_id") != parent_id):
-                continue
+            # Include terminal snapshots before following parent links:
+            # a mixed-version grandchild can name the legacy child as root.
             by_id[job["id"]] = job
         # A queued child can be marked never_started by startup. Its
         # import's chain checkpoint is then unpaid, just as the parent's
