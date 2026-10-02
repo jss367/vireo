@@ -240,11 +240,47 @@ def load_photo_features(db, collection_id=None, config=None,
     ws_id = db._ws_id()
 
     # Resolve optional scopes to a single ID set.
+    scoped_photo_ids = _resolve_feature_scope(db, collection_id, photo_ids)
+    if scoped_photo_ids is not None and not scoped_photo_ids:
+        return []
+
+    load = _FeatureLoad(db, ws_id, config, labels_fingerprint)
+    load.load_rows(scoped_photo_ids)
+    load.resolve_thresholds(effective_config)
+    load.find_weak_runs()
+    load.widen_detection_floor()
+    load.load_subjects()
+    load.load_predictions()
+    load.load_primary_detections()
+    load.load_subject_evidence()
+    load.load_confirmed_species()
+    load.rescue_weak_runs()
+    photos = load.build_photos()
+
+    log.info("Loaded %d photos with pipeline features", len(photos))
+    if load.variant_mismatches:
+        log.warning(
+            "Dropped %d stale subject embeddings that don't match configured "
+            "DINOv2 variant %s; those photos will need re-embedding for "
+            "grouping to use their embeddings",
+            load.variant_mismatches,
+            load.expected_variant,
+        )
+    return photos
+
+
+def _resolve_feature_scope(db, collection_id, photo_ids):
+    """Intersect the optional collection and photo-ID scopes.
+
+    Returns ``None`` when neither scope is given, an empty set when the
+    scope matches nothing (the caller returns no photos), and otherwise the
+    set of in-scope photo IDs.
+    """
     scoped_photo_ids = None
     if collection_id is not None:
         scoped_photo_ids = _resolve_collection_photo_ids(db, collection_id)
         if not scoped_photo_ids:
-            return []
+            return set()
     if photo_ids is not None:
         requested_ids = {
             int(pid)
@@ -252,100 +288,134 @@ def load_photo_features(db, collection_id=None, config=None,
             if isinstance(pid, int) and not isinstance(pid, bool)
         }
         if not requested_ids:
-            return []
+            return set()
         scoped_photo_ids = (
             requested_ids if scoped_photo_ids is None
             else scoped_photo_ids & requested_ids
         )
         if not scoped_photo_ids:
-            return []
+            return set()
+    return scoped_photo_ids
 
-    if scoped_photo_ids is not None:
-        scoped_photo_ids = sorted(scoped_photo_ids)
-        # Stage the scope in a connection-local temp table instead of inline
-        # placeholders — a large collection exceeds SQLite's bound-parameter
-        # cap (999 on legacy builds), and this scope is interpolated into
-        # three queries below.
-        _replace_temp_id_scope(
-            db.conn, "pipeline_scope_ids", scoped_photo_ids,
+
+class _FeatureLoad:
+    """Run-wide state for one ``load_photo_features`` call.
+
+    Each phase reads what the earlier phases left on the instance, so the
+    phases must run in the order ``load_photo_features`` calls them.
+    """
+
+    def __init__(self, db, ws_id, config, labels_fingerprint):
+        self.db = db
+        self.ws_id = ws_id
+        self.config = config
+        self.labels_fingerprint = labels_fingerprint
+        self.scope_sql = ""
+        self.scope_params = ()
+        self.expected_variant = None
+        self.variant_mismatches = 0
+
+    def load_rows(self, scoped_photo_ids):
+        db = self.db
+        if scoped_photo_ids is not None:
+            scoped_photo_ids = sorted(scoped_photo_ids)
+            # Stage the scope in a connection-local temp table instead of inline
+            # placeholders — a large collection exceeds SQLite's bound-parameter
+            # cap (999 on legacy builds), and this scope is interpolated into
+            # three queries below.
+            _replace_temp_id_scope(
+                db.conn, "pipeline_scope_ids", scoped_photo_ids,
+            )
+            self.rows = db.conn.execute(
+                f"""SELECT {_PIPELINE_PHOTO_COLS}
+                    FROM photos p
+                    JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                    WHERE wf.workspace_id = ?
+                      AND p.id IN (SELECT id FROM pipeline_scope_ids)
+                    ORDER BY p.timestamp, p.filename ASC, p.id ASC""",
+                (self.ws_id,),
+            ).fetchall()
+        else:
+            self.rows = db.conn.execute(
+                f"""SELECT {_PIPELINE_PHOTO_COLS}
+                    FROM photos p
+                    JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                    WHERE wf.workspace_id = ?
+                    ORDER BY p.timestamp, p.filename ASC, p.id ASC""",
+                (self.ws_id,),
+            ).fetchall()
+
+        if scoped_photo_ids is not None:
+            self.scope_sql = " AND p.id IN (SELECT id FROM pipeline_scope_ids)"
+
+    def resolve_thresholds(self, effective_config):
+        """Resolve the workspace-effective detector_confidence threshold once.
+
+        The detections table is global (no workspace_id); threshold filtering
+        happens at read time against the active workspace's effective config.
+        """
+        if effective_config is None:
+            import config as cfg
+            effective_cfg = self.db.get_effective_config(cfg.load())
+        else:
+            effective_cfg = effective_config
+        self.effective_cfg = effective_cfg
+        self.min_conf = effective_cfg.get("detector_confidence", 0.2)
+        self.pipeline_cfg = effective_cfg.get("pipeline", {})
+        self.weak_rescue_enabled = self.pipeline_cfg.get(
+            "weak_detection_rescue_enabled", True,
         )
-        rows = db.conn.execute(
-            f"""SELECT {_PIPELINE_PHOTO_COLS}
-                FROM photos p
-                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-                WHERE wf.workspace_id = ?
-                  AND p.id IN (SELECT id FROM pipeline_scope_ids)
-                ORDER BY p.timestamp, p.filename ASC, p.id ASC""",
-            (ws_id,),
-        ).fetchall()
-    else:
-        rows = db.conn.execute(
-            f"""SELECT {_PIPELINE_PHOTO_COLS}
-                FROM photos p
-                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-                WHERE wf.workspace_id = ?
-                ORDER BY p.timestamp, p.filename ASC, p.id ASC""",
-            (ws_id,),
-        ).fetchall()
-
-    scope_sql = ""
-    scope_params = ()
-    if scoped_photo_ids is not None:
-        scope_sql = " AND p.id IN (SELECT id FROM pipeline_scope_ids)"
-
-    # Resolve the workspace-effective detector_confidence threshold once.
-    # The detections table is global (no workspace_id); threshold filtering
-    # happens at read time against the active workspace's effective config.
-    if effective_config is None:
-        import config as cfg
-        effective_cfg = db.get_effective_config(cfg.load())
-    else:
-        effective_cfg = effective_config
-    min_conf = effective_cfg.get("detector_confidence", 0.2)
-    pipeline_cfg = effective_cfg.get("pipeline", {})
-    weak_rescue_enabled = pipeline_cfg.get(
-        "weak_detection_rescue_enabled", True,
-    )
-    weak_confidence = pipeline_cfg.get("weak_detection_confidence", 0.12)
-    photo_ids_for_dets = [row["id"] for row in rows]
-
-    # Find only low-confidence runs bracketed by normal-confidence animal
-    # detections. The classifier uses this same pure selector, so reruns and
-    # regroup-only passes agree about which frames are eligible for rescue.
-    weak_runs = []
-    weak_candidate_ids = set()
-    raw_mdv6_dets = {}
-    if weak_rescue_enabled and weak_confidence < min_conf:
-        from weak_detections import contextual_weak_runs
-
-        raw_mdv6_dets = db.get_detections_for_photos(
-            photo_ids_for_dets,
-            min_conf=weak_confidence,
-            detector_model="megadetector-v6",
+        self.weak_confidence = self.pipeline_cfg.get(
+            "weak_detection_confidence", 0.12,
         )
-        weak_runs = contextual_weak_runs(
-            [dict(row) for row in rows],
-            raw_mdv6_dets,
-            detector_confidence=min_conf,
-            weak_confidence=weak_confidence,
-            max_gap=pipeline_cfg.get("burst_time_gap", 3.0),
-        )
-        weak_candidate_ids = {
-            photo_id
-            for run in weak_runs
-            for photo_id in run["photo_ids"]
-        }
+        self.photo_ids_for_dets = [row["id"] for row in self.rows]
 
-    # Keep the normal confidence predicate index-friendly for the rest of a
-    # potentially large workspace. Only the small, preselected candidate set
-    # gets the lower floor in the subject and prediction queries below.
-    detection_floor_sql = "AND d.detector_confidence >= ?"
-    detection_floor_params = (min_conf,)
-    if weak_candidate_ids:
-        _replace_temp_id_scope(
-            db.conn, "pipeline_weak_detection_ids", weak_candidate_ids,
-        )
-        detection_floor_sql = """AND (
+    def find_weak_runs(self):
+        """Find only low-confidence runs bracketed by normal-confidence animal
+        detections.
+
+        The classifier uses this same pure selector, so reruns and
+        regroup-only passes agree about which frames are eligible for rescue.
+        """
+        self.weak_runs = []
+        self.weak_candidate_ids = set()
+        self.raw_mdv6_dets = {}
+        if self.weak_rescue_enabled and self.weak_confidence < self.min_conf:
+            from weak_detections import contextual_weak_runs
+
+            self.raw_mdv6_dets = self.db.get_detections_for_photos(
+                self.photo_ids_for_dets,
+                min_conf=self.weak_confidence,
+                detector_model="megadetector-v6",
+            )
+            self.weak_runs = contextual_weak_runs(
+                [dict(row) for row in self.rows],
+                self.raw_mdv6_dets,
+                detector_confidence=self.min_conf,
+                weak_confidence=self.weak_confidence,
+                max_gap=self.pipeline_cfg.get("burst_time_gap", 3.0),
+            )
+            self.weak_candidate_ids = {
+                photo_id
+                for run in self.weak_runs
+                for photo_id in run["photo_ids"]
+            }
+
+    def widen_detection_floor(self):
+        """Keep the normal confidence predicate index-friendly for the rest of
+        a potentially large workspace.
+
+        Only the small, preselected candidate set gets the lower floor in the
+        subject and prediction queries below.
+        """
+        self.detection_floor_sql = "AND d.detector_confidence >= ?"
+        self.detection_floor_params = (self.min_conf,)
+        if self.weak_candidate_ids:
+            _replace_temp_id_scope(
+                self.db.conn, "pipeline_weak_detection_ids",
+                self.weak_candidate_ids,
+            )
+            self.detection_floor_sql = """AND (
               d.detector_confidence >= ?
               OR (
                   d.detector_confidence >= ?
@@ -356,96 +426,107 @@ def load_photo_features(db, collection_id=None, config=None,
                   )
               )
           )"""
-        detection_floor_params = (min_conf, weak_confidence)
+            self.detection_floor_params = (self.min_conf, self.weak_confidence)
 
-    # Preserve every qualifying animal detection as a first-class subject,
-    # including detections that do not have a species prediction yet. The
-    # latter is important review information: a second box must not disappear
-    # merely because classification failed or has not run for that detection.
-    from subjects import primary_order_sql
-    subject_det_rows = db.conn.execute(
-        f"""SELECT d.id AS detection_id, d.photo_id,
-                   d.box_x, d.box_y, d.box_w, d.box_h,
-                   d.detector_confidence, d.category, d.detector_model,
-                   ds.crop AS suggested_crop, ds.quality_score AS subject_quality_score,
-                   ds.exposure_ev
-            FROM detections d
-            LEFT JOIN detection_subjects ds ON ds.detection_id=d.id
-            JOIN photos p ON p.id = d.photo_id
-            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-            WHERE wf.workspace_id = ?
-              {detection_floor_sql}
-              AND d.detector_model != 'full-image'
-              AND d.category = 'animal'
-              {scope_sql}
-            ORDER BY d.photo_id, {primary_order_sql("d")}""",
-        (ws_id, *detection_floor_params, *scope_params),
-    ).fetchall()
-    subjects_by_photo = defaultdict(list)
-    subjects_by_detection = {}
-    for det in subject_det_rows:
+    def _below_floor(self, photo_id, det):
+        """True when a detection-backed row misses the workspace threshold
+        and is not a contextual weak candidate."""
         is_contextual_weak = (
-            det["photo_id"] in weak_candidate_ids
+            photo_id in self.weak_candidate_ids
             and det["detector_model"] == "megadetector-v6"
-            and det["detector_confidence"] < min_conf
+            and det["detector_confidence"] < self.min_conf
         )
-        if det["detector_confidence"] < min_conf and not is_contextual_weak:
-            continue
-        subject = {
-            "detection_id": det["detection_id"],
-            "box": {
-                "x": det["box_x"],
-                "y": det["box_y"],
-                "w": det["box_w"],
-                "h": det["box_h"],
-            },
-            "detection_confidence": det["detector_confidence"],
-            "category": det["category"],
-            "is_primary": not subjects_by_photo[det["photo_id"]],
-            "suggested_crop": json.loads(det["suggested_crop"]) if det["suggested_crop"] else None,
-            "quality_score": det["subject_quality_score"],
-            "exposure_ev": det["exposure_ev"],
-            "predictions": [],
-        }
-        subjects_by_photo[det["photo_id"]].append(subject)
-        subjects_by_detection[det["detection_id"]] = subject
+        return det["detector_confidence"] < self.min_conf and not is_contextual_weak
 
-    # Load species predictions (top-5 per photo, ordered by confidence).
-    # Predictions reference detections (not photos directly), so JOIN through
-    # the detections table to get photo_id. Only surface predictions whose
-    # backing detection passes the workspace threshold — lowering the
-    # threshold in workspace config should surface more predictions without
-    # rewriting any rows.
-    # Keep name/confidence/model in the first three tuple positions and
-    # append the identity key for grouping and serialized review evidence.
-    #
-    # Fingerprint filter: a detection + classifier_model can have predictions
-    # from multiple label sets (fingerprints) when the user rotates labels.
-    # If the caller pinned a specific fingerprint, use it; otherwise pick
-    # the most recent one per (detection, model) so stale species from an
-    # old label set don't leak into the top-k.
-    if labels_fingerprint is not None:
-        pred_rows = db.conn.execute(
-            f"""SELECT d.photo_id, d.id AS detection_id,
-                      pr.species, pr.confidence, pr.scientific_name, pr.labels_fingerprint, pr.source_taxon_id,
-                      pr.classifier_model AS model,
-                      d.detector_confidence, d.detector_model
-               FROM predictions pr
-               JOIN detections d ON d.id = pr.detection_id
-               JOIN photos p ON p.id = d.photo_id
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-               WHERE wf.workspace_id = ?
-                 {detection_floor_sql}
-                 AND pr.labels_fingerprint = ?
-                 {scope_sql}
-               ORDER BY d.photo_id, pr.confidence DESC""",
-            (
-                ws_id, *detection_floor_params, labels_fingerprint,
-                *scope_params,
-            ),
+    def load_subjects(self):
+        """Preserve every qualifying animal detection as a first-class subject,
+        including detections that do not have a species prediction yet.
+
+        The latter is important review information: a second box must not
+        disappear merely because classification failed or has not run for
+        that detection.
+        """
+        from subjects import primary_order_sql
+        subject_det_rows = self.db.conn.execute(
+            f"""SELECT d.id AS detection_id, d.photo_id,
+                       d.box_x, d.box_y, d.box_w, d.box_h,
+                       d.detector_confidence, d.category, d.detector_model,
+                       ds.crop AS suggested_crop, ds.quality_score AS subject_quality_score,
+                       ds.exposure_ev
+                FROM detections d
+                LEFT JOIN detection_subjects ds ON ds.detection_id=d.id
+                JOIN photos p ON p.id = d.photo_id
+                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                WHERE wf.workspace_id = ?
+                  {self.detection_floor_sql}
+                  AND d.detector_model != 'full-image'
+                  AND d.category = 'animal'
+                  {self.scope_sql}
+                ORDER BY d.photo_id, {primary_order_sql("d")}""",
+            (self.ws_id, *self.detection_floor_params, *self.scope_params),
         ).fetchall()
-    else:
-        pred_rows = db.conn.execute(
+        subjects_by_photo = self.subjects_by_photo = defaultdict(list)
+        subjects_by_detection = self.subjects_by_detection = {}
+        for det in subject_det_rows:
+            if self._below_floor(det["photo_id"], det):
+                continue
+            subject = {
+                "detection_id": det["detection_id"],
+                "box": {
+                    "x": det["box_x"],
+                    "y": det["box_y"],
+                    "w": det["box_w"],
+                    "h": det["box_h"],
+                },
+                "detection_confidence": det["detector_confidence"],
+                "category": det["category"],
+                "is_primary": not subjects_by_photo[det["photo_id"]],
+                "suggested_crop": json.loads(det["suggested_crop"]) if det["suggested_crop"] else None,
+                "quality_score": det["subject_quality_score"],
+                "exposure_ev": det["exposure_ev"],
+                "predictions": [],
+            }
+            subjects_by_photo[det["photo_id"]].append(subject)
+            subjects_by_detection[det["detection_id"]] = subject
+
+    def _query_predictions(self):
+        """Load species predictions (top-5 per photo, ordered by confidence).
+
+        Predictions reference detections (not photos directly), so JOIN
+        through the detections table to get photo_id. Only surface predictions
+        whose backing detection passes the workspace threshold — lowering the
+        threshold in workspace config should surface more predictions without
+        rewriting any rows.
+        Keep name/confidence/model in the first three tuple positions and
+        append the identity key for grouping and serialized review evidence.
+
+        Fingerprint filter: a detection + classifier_model can have
+        predictions from multiple label sets (fingerprints) when the user
+        rotates labels. If the caller pinned a specific fingerprint, use it;
+        otherwise pick the most recent one per (detection, model) so stale
+        species from an old label set don't leak into the top-k.
+        """
+        if self.labels_fingerprint is not None:
+            return self.db.conn.execute(
+                f"""SELECT d.photo_id, d.id AS detection_id,
+                          pr.species, pr.confidence, pr.scientific_name, pr.labels_fingerprint, pr.source_taxon_id,
+                          pr.classifier_model AS model,
+                          d.detector_confidence, d.detector_model
+                   FROM predictions pr
+                   JOIN detections d ON d.id = pr.detection_id
+                   JOIN photos p ON p.id = d.photo_id
+                   JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                   WHERE wf.workspace_id = ?
+                     {self.detection_floor_sql}
+                     AND pr.labels_fingerprint = ?
+                     {self.scope_sql}
+                   ORDER BY d.photo_id, pr.confidence DESC""",
+                (
+                    self.ws_id, *self.detection_floor_params,
+                    self.labels_fingerprint, *self.scope_params,
+                ),
+            ).fetchall()
+        return self.db.conn.execute(
             f"""SELECT d.photo_id, d.id AS detection_id,
                       pr.species, pr.confidence, pr.scientific_name, pr.labels_fingerprint, pr.source_taxon_id,
                       pr.classifier_model AS model,
@@ -455,8 +536,8 @@ def load_photo_features(db, collection_id=None, config=None,
                JOIN photos p ON p.id = d.photo_id
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
                WHERE wf.workspace_id = ?
-                 {detection_floor_sql}
-                 {scope_sql}
+                 {self.detection_floor_sql}
+                 {self.scope_sql}
                  AND pr.labels_fingerprint = (
                      SELECT pr2.labels_fingerprint FROM predictions pr2
                      WHERE pr2.detection_id = pr.detection_id
@@ -465,183 +546,251 @@ def load_photo_features(db, collection_id=None, config=None,
                      LIMIT 1
                  )
                ORDER BY d.photo_id, pr.confidence DESC""",
-            (ws_id, *detection_floor_params, *scope_params),
+            (self.ws_id, *self.detection_floor_params, *self.scope_params),
         ).fetchall()
 
-    # Group predictions by photo_id, keep top K
-    top_k = (config or {}).get("top_k_predictions", 5)
-    from species_identity import SpeciesResolver
-    species_resolver = SpeciesResolver(db=db)
-    species_by_photo = defaultdict(list)
-    for pr in pred_rows:
-        pid = pr["photo_id"]
-        is_contextual_weak = (
-            pid in weak_candidate_ids
-            and pr["detector_model"] == "megadetector-v6"
-            and pr["detector_confidence"] < min_conf
-        )
-        if pr["detector_confidence"] < min_conf and not is_contextual_weak:
-            continue
-        identity = species_resolver.prediction(pr)
-        species = identity.display_name
-        if len(species_by_photo[pid]) < top_k:
-            species_by_photo[pid].append((species, pr["confidence"], pr["model"], identity.key))
-        subject = subjects_by_detection.get(pr["detection_id"])
-        if subject is not None and len(subject["predictions"]) < top_k:
-            subject["predictions"].append(
-                (species, pr["confidence"], pr["model"], identity.key)
-            )
+    def load_predictions(self):
+        pred_rows = self._query_predictions()
 
-    # Load the selected primary detection per photo via the global
-    # read-time helper. This replaces the old photos.detection_box /
-    # photos.detection_conf columns; the helper applies the same threshold
-    # resolved above.
-    dets_by_photo = db.get_detections_for_photos(
-        photo_ids_for_dets, min_conf=min_conf,
-    )
-    primary_det_by_photo = {}
-    for pid, dets in dets_by_photo.items():
-        if not dets:
-            continue
-        top = dets[0]  # helper returns the selected primary first
-        primary_det_by_photo[pid] = {
-            "x": top["x"],
-            "y": top["y"],
-            "w": top["w"],
-            "h": top["h"],
-            "detection_conf": top["confidence"],
-        }
-
-    # Photos the detector has actually been run on. Used to gate
-    # subject_absent below — a photo with no detector_runs row hasn't been
-    # evaluated yet (e.g. first-time regroup with skip_classify=True, or
-    # photos imported after the last classify run). Treating those as
-    # "subject_absent" would conflate "unknown" with "detector confirmed
-    # empty" and create false asymmetric cuts in compute_s_enc.
-    detected_photo_ids = db.get_detector_run_photo_ids("megadetector-v6")
-
-    # Photos with at least one MDV6 detection passing the workspace
-    # threshold — i.e. affirmative subject evidence. Computed against
-    # `megadetector-v6` only so synthetic `full-image` fallback rows
-    # (written at confidence 0 by classify_job when MDV6 is empty) can't
-    # mask MDV6's empty-scene verdict. `primary_det_by_photo` above
-    # serves det_box/det_conf for downstream scoring and intentionally
-    # accepts any detector model; the subject_absent / subject_present
-    # signals must be tighter to stay in lockstep with `detected_photo_ids`.
-    mdv6_dets = db.get_detections_for_photos(
-        photo_ids_for_dets, min_conf=min_conf,
-        detector_model="megadetector-v6",
-    )
-    mdv6_passing_photo_ids = {pid for pid, dets in mdv6_dets.items() if dets}
-
-    # Load user-confirmed species keywords, canonicalizing hierarchy
-    # leaves to the same-taxon root's stored spelling. Without this
-    # collapse a photo carrying only the repaired ``verdin`` hierarchy
-    # leaf and a sibling still on the canonical ``Verdin`` root read as
-    # different confirmed species; serialize_pipeline_results then sees
-    # a mixed confirmed_set and marks an already-confirmed encounter or
-    # burst as unconfirmed, so already-reviewed groups reappear for
-    # review even though every photo carries the same taxon.
-    # ``get_species_keywords_for_photos`` applies the same rank filter
-    # ``(is_species = 1 OR type = 'taxonomy')`` and
-    # ``(t.rank = 'species' OR t.rank IS NULL)`` this query used to run
-    # inline, deduplicates by ``taxon_id``, and maps hierarchy leaves to
-    # the canonical root spelling — so life-list, highlights, and the
-    # encounter confirmation flag all key off the same string. For
-    # photos with multiple species tags we keep the alphabetically-first
-    # entry so the choice stays deterministic across runs.
-    confirmed_identities = db.get_species_keywords_for_photos(photo_ids_for_dets, include_identities=True)
-    species_names_by_photo = {pid: [entry["name"] for entry in entries] for pid, entries in confirmed_identities.items()}
-    confirmed_by_photo = {
-        pid: names[0]
-        for pid, names in species_names_by_photo.items()
-        if names
-    }
-    # Every confirmed species per photo (a photo can carry two subjects);
-    # ``confirmed_species`` above stays the primary for legacy consumers.
-    confirmed_list_by_photo = {
-        pid: list(names)
-        for pid, names in species_names_by_photo.items()
-        if names
-    }
-
-    # Classification is intentionally more permissive than grouping: it may
-    # evaluate every bracketed weak run, but grouping promotes the run to an
-    # uncertain (rather than absent) subject state only when the two strong
-    # anchors independently identify the same species. This prevents a burst
-    # spanning a real subject change from being glued together by time alone.
-    rescued_weak_ids = set()
-    weak_context_by_photo = {}
-    if weak_runs:
-        from weak_detections import matching_anchor_species
-
-        species_floor = effective_cfg.get("classification_threshold", 0.4)
-        for run in weak_runs:
-            context = matching_anchor_species(
-                run,
-                species_by_photo,
-                confirmed_by_photo=confirmed_by_photo,
-                min_confidence=species_floor,
-            )
-            if context is None:
+        # Group predictions by photo_id, keep top K
+        top_k = (self.config or {}).get("top_k_predictions", 5)
+        from species_identity import SpeciesResolver
+        species_resolver = SpeciesResolver(db=self.db)
+        species_by_photo = self.species_by_photo = defaultdict(list)
+        for pr in pred_rows:
+            pid = pr["photo_id"]
+            if self._below_floor(pid, pr):
                 continue
-            for photo_id in run["photo_ids"]:
-                rescued_weak_ids.add(photo_id)
-                weak_context_by_photo[photo_id] = context
+            identity = species_resolver.prediction(pr)
+            species = identity.display_name
+            if len(species_by_photo[pid]) < top_k:
+                species_by_photo[pid].append((species, pr["confidence"], pr["model"], identity.key))
+            subject = self.subjects_by_detection.get(pr["detection_id"])
+            if subject is not None and len(subject["predictions"]) < top_k:
+                subject["predictions"].append(
+                    (species, pr["confidence"], pr["model"], identity.key)
+                )
 
-    # Weak predictions/boxes are visible downstream only after the matching-
-    # species gate succeeds. Keep non-rescued candidates equivalent to the
-    # long-standing normal-threshold behavior.
-    for photo_id in weak_candidate_ids - rescued_weak_ids:
-        species_by_photo.pop(photo_id, None)
-        kept_subjects = [
-            subject for subject in subjects_by_photo.get(photo_id, [])
-            if subject["detection_confidence"] >= min_conf
-        ]
-        if kept_subjects:
-            subjects_by_photo[photo_id] = kept_subjects
-        else:
-            subjects_by_photo.pop(photo_id, None)
+    def load_primary_detections(self):
+        """Load the selected primary detection per photo via the global
+        read-time helper.
 
-    # Rescued photos use their best raw MDV6 box for display and downstream
-    # classification context. Ordinary photos continue to use the normal
-    # threshold map above.
-    for photo_id in rescued_weak_ids:
-        raw = raw_mdv6_dets.get(photo_id) or []
-        if raw:
-            top = raw[0]
-            primary_det_by_photo[photo_id] = {
-                "x": top["x"], "y": top["y"],
-                "w": top["w"], "h": top["h"],
+        This replaces the old photos.detection_box / photos.detection_conf
+        columns; the helper applies the same threshold resolved above.
+        """
+        dets_by_photo = self.db.get_detections_for_photos(
+            self.photo_ids_for_dets, min_conf=self.min_conf,
+        )
+        primary_det_by_photo = self.primary_det_by_photo = {}
+        for pid, dets in dets_by_photo.items():
+            if not dets:
+                continue
+            top = dets[0]  # helper returns the selected primary first
+            primary_det_by_photo[pid] = {
+                "x": top["x"],
+                "y": top["y"],
+                "w": top["w"],
+                "h": top["h"],
                 "detection_conf": top["confidence"],
             }
 
-    # Only accept embeddings written with the currently configured DINOv2
-    # variant. Without this check, switching variants leaves stale embeddings
-    # of the old dim in place and the regroup stage crashes with
-    # "shapes (1024,) and (768,) not aligned" in encounters.sim_embedding.
-    expected_variant = (config or {}).get("pipeline", {}).get("dinov2_variant")
-    variant_mismatches = 0
+    def load_subject_evidence(self):
+        # Photos the detector has actually been run on. Used to gate
+        # subject_absent below — a photo with no detector_runs row hasn't been
+        # evaluated yet (e.g. first-time regroup with skip_classify=True, or
+        # photos imported after the last classify run). Treating those as
+        # "subject_absent" would conflate "unknown" with "detector confirmed
+        # empty" and create false asymmetric cuts in compute_s_enc.
+        self.detected_photo_ids = self.db.get_detector_run_photo_ids(
+            "megadetector-v6",
+        )
 
-    photos = []
-    for row in rows:
-        pid = row["id"]
+        # Photos with at least one MDV6 detection passing the workspace
+        # threshold — i.e. affirmative subject evidence. Computed against
+        # `megadetector-v6` only so synthetic `full-image` fallback rows
+        # (written at confidence 0 by classify_job when MDV6 is empty) can't
+        # mask MDV6's empty-scene verdict. `primary_det_by_photo` above
+        # serves det_box/det_conf for downstream scoring and intentionally
+        # accepts any detector model; the subject_absent / subject_present
+        # signals must be tighter to stay in lockstep with `detected_photo_ids`.
+        mdv6_dets = self.db.get_detections_for_photos(
+            self.photo_ids_for_dets, min_conf=self.min_conf,
+            detector_model="megadetector-v6",
+        )
+        self.mdv6_passing_photo_ids = {
+            pid for pid, dets in mdv6_dets.items() if dets
+        }
 
+    def load_confirmed_species(self):
+        """Load user-confirmed species keywords, canonicalizing hierarchy
+        leaves to the same-taxon root's stored spelling.
+
+        Without this collapse a photo carrying only the repaired ``verdin``
+        hierarchy leaf and a sibling still on the canonical ``Verdin`` root
+        read as different confirmed species; serialize_pipeline_results then
+        sees a mixed confirmed_set and marks an already-confirmed encounter or
+        burst as unconfirmed, so already-reviewed groups reappear for review
+        even though every photo carries the same taxon.
+        ``get_species_keywords_for_photos`` applies the same rank filter
+        ``(is_species = 1 OR type = 'taxonomy')`` and
+        ``(t.rank = 'species' OR t.rank IS NULL)`` this query used to run
+        inline, deduplicates by ``taxon_id``, and maps hierarchy leaves to
+        the canonical root spelling — so life-list, highlights, and the
+        encounter confirmation flag all key off the same string. For photos
+        with multiple species tags we keep the alphabetically-first entry so
+        the choice stays deterministic across runs.
+        """
+        self.confirmed_identities = self.db.get_species_keywords_for_photos(
+            self.photo_ids_for_dets, include_identities=True,
+        )
+        species_names_by_photo = {pid: [entry["name"] for entry in entries] for pid, entries in self.confirmed_identities.items()}
+        self.confirmed_by_photo = {
+            pid: names[0]
+            for pid, names in species_names_by_photo.items()
+            if names
+        }
+        # Every confirmed species per photo (a photo can carry two subjects);
+        # ``confirmed_species`` above stays the primary for legacy consumers.
+        self.confirmed_list_by_photo = {
+            pid: list(names)
+            for pid, names in species_names_by_photo.items()
+            if names
+        }
+
+    def rescue_weak_runs(self):
+        self._match_weak_run_anchors()
+        self._drop_unrescued_weak_candidates()
+        self._use_raw_boxes_for_rescued()
+
+    def _match_weak_run_anchors(self):
+        """Classification is intentionally more permissive than grouping: it
+        may evaluate every bracketed weak run, but grouping promotes the run
+        to an uncertain (rather than absent) subject state only when the two
+        strong anchors independently identify the same species.
+
+        This prevents a burst spanning a real subject change from being glued
+        together by time alone.
+        """
+        self.rescued_weak_ids = set()
+        self.weak_context_by_photo = {}
+        if self.weak_runs:
+            from weak_detections import matching_anchor_species
+
+            species_floor = self.effective_cfg.get(
+                "classification_threshold", 0.4,
+            )
+            for run in self.weak_runs:
+                context = matching_anchor_species(
+                    run,
+                    self.species_by_photo,
+                    confirmed_by_photo=self.confirmed_by_photo,
+                    min_confidence=species_floor,
+                )
+                if context is None:
+                    continue
+                for photo_id in run["photo_ids"]:
+                    self.rescued_weak_ids.add(photo_id)
+                    self.weak_context_by_photo[photo_id] = context
+
+    def _drop_unrescued_weak_candidates(self):
+        """Weak predictions/boxes are visible downstream only after the
+        matching-species gate succeeds.
+
+        Keep non-rescued candidates equivalent to the long-standing
+        normal-threshold behavior.
+        """
+        subjects_by_photo = self.subjects_by_photo
+        for photo_id in self.weak_candidate_ids - self.rescued_weak_ids:
+            self.species_by_photo.pop(photo_id, None)
+            kept_subjects = [
+                subject for subject in subjects_by_photo.get(photo_id, [])
+                if subject["detection_confidence"] >= self.min_conf
+            ]
+            if kept_subjects:
+                subjects_by_photo[photo_id] = kept_subjects
+            else:
+                subjects_by_photo.pop(photo_id, None)
+
+    def _use_raw_boxes_for_rescued(self):
+        """Rescued photos use their best raw MDV6 box for display and
+        downstream classification context.
+
+        Ordinary photos continue to use the normal threshold map above.
+        """
+        for photo_id in self.rescued_weak_ids:
+            raw = self.raw_mdv6_dets.get(photo_id) or []
+            if raw:
+                top = raw[0]
+                self.primary_det_by_photo[photo_id] = {
+                    "x": top["x"], "y": top["y"],
+                    "w": top["w"], "h": top["h"],
+                    "detection_conf": top["confidence"],
+                }
+
+    def build_photos(self):
+        # Only accept embeddings written with the currently configured DINOv2
+        # variant. Without this check, switching variants leaves stale embeddings
+        # of the old dim in place and the regroup stage crashes with
+        # "shapes (1024,) and (768,) not aligned" in encounters.sim_embedding.
+        self.expected_variant = (self.config or {}).get("pipeline", {}).get("dinov2_variant")
+        self.variant_mismatches = 0
+        return [self._photo_features(row) for row in self.rows]
+
+    def _embeddings(self, row):
+        """Return ``(subject_embedding, global_embedding)`` for one row,
+        counting a dropped subject embedding as a variant mismatch."""
         stored_variant = row["dino_embedding_variant"]
+        expected_variant = self.expected_variant
 
         subj_bytes = row["dino_subject_embedding"]
         subj_emb = None
         if subj_bytes and _embedding_usable(stored_variant, expected_variant, subj_bytes):
             subj_emb = np.frombuffer(subj_bytes, dtype=np.float32)
         elif subj_bytes:
-            variant_mismatches += 1
+            self.variant_mismatches += 1
 
         glob_bytes = row["dino_global_embedding"]
         global_emb = None
         if glob_bytes and _embedding_usable(stored_variant, expected_variant, glob_bytes):
             global_emb = np.frombuffer(glob_bytes, dtype=np.float32)
+        return subj_emb, global_emb
 
-        det = primary_det_by_photo.get(pid)
+    def _subject_state(self, pid):
+        """Return ``(subject_absent, subject_present, subject_uncertain)``.
+
+        Four states encoded as three booleans (mutually exclusive: at
+        most one is True at a time):
+
+          subject_absent=True   detector ran AND found no qualifying or
+                                contextually rescued detection
+          subject_present=True  detector ran AND has a passing detection
+          subject_uncertain=True detector found a weaker box in a short run
+                                bracketed by matching-species anchors
+          both False            detector hasn't run yet — state is
+                                "unknown" (compute_s_enc treats the same
+                                way as cached-feature absence: drop and
+                                renormalize, no penalty)
+
+        Both queries are filtered to `megadetector-v6` so synthetic
+        `full-image` fallback rows can't sway the signal. Read at
+        regroup time because regroup runs BEFORE the miss stage —
+        photos.miss_no_subject would lag by one run.
+        """
+        subject_uncertain = pid in self.rescued_weak_ids
+        subject_absent = (
+            pid in self.detected_photo_ids
+            and pid not in self.mdv6_passing_photo_ids
+            and not subject_uncertain
+        )
+        subject_present = pid in self.mdv6_passing_photo_ids
+        return subject_absent, subject_present, subject_uncertain
+
+    def _photo_features(self, row):
+        pid = row["id"]
+
+        subj_emb, global_emb = self._embeddings(row)
+
+        det = self.primary_det_by_photo.get(pid)
         det_box = None
         det_conf = None
         if det:
@@ -649,32 +798,11 @@ def load_photo_features(db, collection_id=None, config=None,
                        "w": det["w"], "h": det["h"]}
             det_conf = det["detection_conf"]
 
-        # Four states encoded as three booleans (mutually exclusive: at
-        # most one is True at a time):
-        #
-        #   subject_absent=True   detector ran AND found no qualifying or
-        #                         contextually rescued detection
-        #   subject_present=True  detector ran AND has a passing detection
-        #   subject_uncertain=True detector found a weaker box in a short run
-        #                         bracketed by matching-species anchors
-        #   both False            detector hasn't run yet — state is
-        #                         "unknown" (compute_s_enc treats the same
-        #                         way as cached-feature absence: drop and
-        #                         renormalize, no penalty)
-        #
-        # Both queries are filtered to `megadetector-v6` so synthetic
-        # `full-image` fallback rows can't sway the signal. Read at
-        # regroup time because regroup runs BEFORE the miss stage —
-        # photos.miss_no_subject would lag by one run.
-        subject_uncertain = pid in rescued_weak_ids
-        subject_absent = (
-            pid in detected_photo_ids
-            and pid not in mdv6_passing_photo_ids
-            and not subject_uncertain
+        subject_absent, subject_present, subject_uncertain = (
+            self._subject_state(pid)
         )
-        subject_present = pid in mdv6_passing_photo_ids
 
-        photos.append({
+        return {
             "id": pid,
             "folder_id": row["folder_id"],
             "filename": row["filename"],
@@ -697,15 +825,15 @@ def load_photo_features(db, collection_id=None, config=None,
             "phash_crop": row["phash_crop"],
             "dino_subject_embedding": subj_emb,
             "dino_global_embedding": global_emb,
-            "species_top5": species_by_photo.get(pid, []),
-            "confirmed_species_identities": confirmed_identities.get(pid, []),
-            "subjects": subjects_by_photo.get(pid, []),
-            "confirmed_species": confirmed_by_photo.get(pid),
-            "confirmed_species_list": confirmed_list_by_photo.get(pid, []),
+            "species_top5": self.species_by_photo.get(pid, []),
+            "confirmed_species_identities": self.confirmed_identities.get(pid, []),
+            "subjects": self.subjects_by_photo.get(pid, []),
+            "confirmed_species": self.confirmed_by_photo.get(pid),
+            "confirmed_species_list": self.confirmed_list_by_photo.get(pid, []),
             "subject_absent": subject_absent,
             "subject_present": subject_present,
             "subject_uncertain": subject_uncertain,
-            "weak_detection_context": weak_context_by_photo.get(pid),
+            "weak_detection_context": self.weak_context_by_photo.get(pid),
             "focal_length": row["focal_length"],
             "burst_id": row["burst_id"],
             "noise_estimate": row["noise_estimate"],
@@ -715,18 +843,7 @@ def load_photo_features(db, collection_id=None, config=None,
             "eye_y": row["eye_y"],
             "eye_conf": row["eye_conf"],
             "eye_tenengrad": row["eye_tenengrad"],
-        })
-
-    log.info("Loaded %d photos with pipeline features", len(photos))
-    if variant_mismatches:
-        log.warning(
-            "Dropped %d stale subject embeddings that don't match configured "
-            "DINOv2 variant %s; those photos will need re-embedding for "
-            "grouping to use their embeddings",
-            variant_mismatches,
-            expected_variant,
-        )
-    return photos
+        }
 
 
 def run_grouping(photos, config=None, emit_trace=False):
