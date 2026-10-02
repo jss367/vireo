@@ -1332,315 +1332,22 @@ def eye_keypoints_stage(
     run.runner.update_step(run.job["id"], "eye_keypoints", status="running")
     run.update_stages(run.runner, run.job["id"], run.stages)
 
+    eyes = _EyeKeypointPass(
+        run,
+        still_offline_folder_ids_of=_still_offline_folder_ids_of,
+        source_offline_state=source_offline_state,
+    )
     try:
-        import config as cfg
-        from pipeline import (
-            _resolve_collection_photo_ids,
-            detect_eye_keypoints_stage,
-            eye_keypoint_stage_preflight,
-        )
-
-        thread_db = run.database_factory(run.db_path)
-        thread_db.set_active_workspace(run.workspace_id)
-        effective_cfg = thread_db.get_effective_config(cfg.load())
-        pipeline_cfg = dict(effective_cfg.get("pipeline", {}))
-
-        # Apply the per-run eye-detect override only when the caller
-        # sent an explicit signal. ``skip_eye_keypoints=False`` alone
-        # is not proof of opt-in: ``the "Full" saved process`` sets it
-        # to False as a base default, so an after-import ``full``
-        # chain would otherwise force ``eye_detect_enabled=True``
-        # against a workspace whose Settings default is False (the
-        # new default) — triggering SuperAnimal downloads and eye-
-        # based scoring by default. ``eye_detect_override`` is the
-        # explicit signal the Process page sends alongside its
-        # checkbox state; strategy expansion leaves it None, so a
-        # chained ``full`` run respects the user's Settings value.
-        if run.params.eye_detect_override is not None:
-            pipeline_cfg["eye_detect_enabled"] = run.params.eye_detect_override
-
-        # Mirror the stage-level preflight so a no-op run doesn't pay the
-        # O(N) eligibility join cost or report a misleading
-        # "0 of N processed" summary on large libraries.
-        skip_reason = eye_keypoint_stage_preflight(pipeline_cfg)
-        if skip_reason is not None:
-            run.stages["eye_keypoints"]["status"] = "skipped"
-            run.runner.update_step(
-                run.job["id"], "eye_keypoints",
-                status="completed", summary=f"Skipped — {skip_reason}",
-            )
-            run.result["stages"]["eye_keypoints"] = {
-                "processed": 0, "total": 0, "skipped": skip_reason,
-            }
-            run.update_stages(run.runner, run.job["id"], run.stages)
+        eyes.setup()
+        if eyes.exit_on_preflight_skip():
             return
-
-        eye_exclude_ids = set(run.params.exclude_photo_ids or ())
-        collection_photo_ids = (
-            _resolve_collection_photo_ids(thread_db, run.collection_id)
-            if run.collection_id is not None else None
-        )
-        # Honor preview-deselection so the eye stage matches the set of
-        # photos extract/regroup will act on. Without this the stage
-        # mutates eye_* for unchecked photos and those values are locked
-        # in by the eye_tenengrad IS NULL idempotency guard on reruns.
-        if run.params.exclude_photo_ids and collection_photo_ids is not None:
-            collection_photo_ids = {
-                pid for pid in collection_photo_ids
-                if pid not in run.params.exclude_photo_ids
-            }
-        photos_for_stage = thread_db.list_photos_for_eye_keypoint_stage(
-            photo_ids=collection_photo_ids,
-        )
-        # Defensive second filter: when collection_photo_ids is None
-        # (whole-workspace path) the DB query above returned every
-        # eligible row, so excluded IDs would otherwise still influence
-        # the download planner below and trigger weights for variants no
-        # included photo routes to.
-        if run.params.exclude_photo_ids:
-            photos_for_stage = [
-                p for p in photos_for_stage
-                if p["id"] not in run.params.exclude_photo_ids
-            ]
-
-        # Drop photos whose folder is offline. eye_keypoints also
-        # opens the source image (via the pipeline
-        # detect_eye_keypoints_stage → keypoint runners), so
-        # without this it would walk every unreachable photo and
-        # record them as eye-detection failures — the same
-        # downstream-hammering pattern the classify pause is
-        # meant to prevent (Codex #1388 P2 r3664058173).
-        #
-        # Always probe the worklist's folders — not just when
-        # classify populated ``source_skipped_photo_ids`` (Codex
-        # #1388 P1 r3664891993). A fully-cached-classify /
-        # eye-only rerun makes no image reads in classify, so
-        # the seed set can stay empty even when every remaining
-        # file is on an unreachable share.
-        #
-        # Filter by FOLDER, not by photo id — cached photos
-        # never populate the classify seed set, so an ID-only
-        # filter would leave them in the worklist (Codex #1388
-        # P2 r3664694179). Re-probing per folder also lets a
-        # folder that recovered between classify and this stage
-        # rejoin (Codex #1388 P2 r3664348758).
-        def _row_folder_id(row):
-            # sqlite.Row raises IndexError on missing columns; a
-            # test-shape dict raises KeyError. Both mean "no
-            # folder to probe" for this row.
-            try:
-                fid = row["folder_id"]
-            except (KeyError, IndexError):
-                return None
-            return fid
-
-        worklist_folder_ids = {
-            fid for fid in (
-                _row_folder_id(p) for p in photos_for_stage
-            ) if fid is not None
-        }
-        still_offline_folder_ids = _still_offline_folder_ids_of(
-            thread_db, worklist_folder_ids,
-        )
-        if still_offline_folder_ids:
-            dropped_ids = {
-                p["id"] for p in photos_for_stage
-                if _row_folder_id(p) in still_offline_folder_ids
-            }
-            photos_for_stage = [
-                p for p in photos_for_stage
-                if _row_folder_id(p) not in still_offline_folder_ids
-            ]
-            # The stage-level call at the bottom re-resolves
-            # photos from ``collection_id`` and filters via
-            # ``exclude_photo_ids`` — the local filter above
-            # only drives the weight-download planner and
-            # ``total``. Merge the offline IDs into the stage's
-            # exclusion set so the actual keypoint runners
-            # don't reopen the dead source (CodeRabbit
-            # r3664548813).
-            eye_exclude_ids.update(dropped_ids)
-            # Publish for anyone downstream that may probe
-            # ``source_offline_state`` later.
-            prior_skipped = (
-                source_offline_state.get("skipped_photo_ids")
-                or set()
-            )
-            source_offline_state["skipped_photo_ids"] = (
-                set(prior_skipped) | dropped_ids
-            )
-            if dropped_ids:
-                log.warning(
-                    "Eye-keypoints: dropped %d photo(s) from "
-                    "%d offline folder(s); source not "
-                    "reachable.",
-                    len(dropped_ids),
-                    len(still_offline_folder_ids),
-                )
-        total = len(photos_for_stage)
-        start_time = time.time()
-        processed = {"count": 0}
-
-        def _progress(phase, current, total_steps):
-            processed["count"] = current
-            run.stages["eye_keypoints"]["count"] = current
-            run.stages["eye_keypoints"]["total"] = total_steps
-            run.runner.update_step(
-                run.job["id"], "eye_keypoints",
-                progress={"current": current, "total": total_steps},
-            )
-            run.emit_progress(
-                run.runner, run.job["id"], run.stages, "eye_keypoints", phase,
-                rate=round(
-                    current / max(time.time() - start_time, 0.01) * 60, 1
-                ),
-            )
-
-        # Auto-download SuperAnimal weights on first pipeline run.
-        # Mirrors the SAM2/DINOv2 auto-download pattern in extract_masks
-        # (commit 90cd0f9): without this, every photo silently skips on
-        # a fresh install. Only fetch variants the per-photo router
-        # would actually pick — a collection of out-of-scope classes
-        # (fish/reptiles/invertebrates) shouldn't pay the bandwidth
-        # cost for weights that will never be used.
-        if total > 0:
-            import keypoints as kp
-            from pipeline import _resolve_keypoint_model
-
-            # Mirror Gate 1 in _process_photo_for_eye: rows whose
-            # classifier confidence is below eye_classifier_conf_gate
-            # get skipped at run time, so they shouldn't influence
-            # which variants get downloaded — otherwise an all-low-
-            # confidence collection still pays the bandwidth cost
-            # for weights no photo can reach.
-            conf_gate = pipeline_cfg.get(
-                "eye_classifier_conf_gate", 0.5,
-            )
-            needed_models = []
-            for row in photos_for_stage:
-                if (row.get("species_conf") or 0.0) < conf_gate:
-                    continue
-                model_name = _resolve_keypoint_model(thread_db, row)
-                if model_name and model_name not in needed_models:
-                    needed_models.append(model_name)
-
-            # Use a separate download-progress callback so a cancel
-            # during/just after weight download doesn't leak the
-            # download counter into `processed['count']` (which would
-            # surface as e.g. "Cancelled (1 of N processed)" before any
-            # photo has actually been touched).
-            def _dl_progress(phase, current, total_steps):
-                run.emit_progress(
-                    run.runner, run.job["id"], run.stages, "eye_keypoints", phase,
-                )
-
-            # Preserve a stable order (quadruped, bird) for tests and
-            # log readability when both variants are needed. Re-check
-            # abort between models so a cancel that arrives after the
-            # first weights download can short-circuit the second
-            # multi-hundred-MB fetch instead of forcing the user to
-            # wait through it.
-            #
-            # Eye Keypoints is an optional stage: a transient HF /
-            # network failure must degrade to a skipped stage, not a
-            # hard pipeline failure. Without this guard the RuntimeError
-            # raised by ensure_keypoint_weights bubbles to the outer
-            # except, marks the stage 'failed', and tanks the whole
-            # run for a first-run/offline user who never opted into
-            # eye keypoints in the first place.
-            try:
-                for kp_model in (
-                    "superanimal-quadruped", "superanimal-bird",
-                ):
-                    if run.control.should_abort(run.abort):
-                        break
-                    if kp_model in needed_models:
-                        kp.ensure_keypoint_weights(
-                            kp_model, progress_callback=_dl_progress,
-                        )
-            except ResourceWaitCancelled:
-                # A cancel or pause that fires while another thread
-                # holds the per-model download lock surfaces here
-                # as ResourceWaitCancelled from
-                # ``acquire_session_cache_lock`` — that is a
-                # cooperative cancel, not a download failure.
-                # Finalize the stage as cancelled the same way the
-                # extract_masks path handles its own
-                # ResourceWaitCancelled (line ~7293) so the job
-                # tree does not report "failed to download
-                # keypoint weights" for what was actually a user
-                # cancel.
-                run.abort.set()
-                run.stages["eye_keypoints"]["status"] = "completed"
-                run.runner.update_step(
-                    run.job["id"], "eye_keypoints",
-                    status="completed",
-                    summary="Cancelled",
-                )
-                run.result["stages"]["eye_keypoints"] = {
-                    "processed": 0, "total": total,
-                    "cancelled": True,
-                }
-                run.update_stages(run.runner, run.job["id"], run.stages)
-                return
-            except Exception as dl_err:
-                log.warning(
-                    "Eye keypoints stage skipped — weight download "
-                    "failed: %s", dl_err,
-                )
-                run.errors.append(f"[eye_keypoints] {dl_err}")
-                run.stages["eye_keypoints"]["status"] = "skipped"
-                run.runner.update_step(
-                    run.job["id"], "eye_keypoints",
-                    status="completed",
-                    summary=(
-                        f"Skipped — failed to download keypoint "
-                        f"weights: {dl_err}"
-                    ),
-                )
-                run.result["stages"]["eye_keypoints"] = {
-                    "processed": 0, "total": total,
-                    "skipped": "weight_download_failed",
-                }
-                run.update_stages(run.runner, run.job["id"], run.stages)
-                return
-
-        detect_eye_keypoints_stage(
-            thread_db, config=pipeline_cfg, progress_callback=_progress,
-            collection_id=run.collection_id,
-            exclude_photo_ids=eye_exclude_ids,
-            abort_check=lambda: run.control.should_abort(run.abort),
-        )
-
-        run.stages["eye_keypoints"]["status"] = "completed"
-        if run.control.should_abort(run.abort):
-            # Match the classify- and extract_masks-cancel summaries so
-            # the job tree distinguishes a user cancel from a clean
-            # finish that happened to process the same count.
-            summary = (
-                f"Cancelled ({processed['count']} of {total} processed)"
-                if total else "Cancelled"
-            )
-            run.runner.update_step(
-                run.job["id"], "eye_keypoints",
-                status="completed", summary=summary,
-            )
-            run.result["stages"]["eye_keypoints"] = {
-                "processed": processed["count"], "total": total,
-                "cancelled": True,
-            }
-        else:
-            summary = (
-                f"{processed['count']} of {total} photos processed"
-                if total else "No eligible photos"
-            )
-            run.runner.update_step(
-                run.job["id"], "eye_keypoints",
-                status="completed", summary=summary,
-            )
-            run.result["stages"]["eye_keypoints"] = {
-                "processed": processed["count"], "total": total,
-            }
+        eyes.load_worklist()
+        eyes.drop_offline_folders()
+        eyes.start_counting()
+        if eyes.exit_without_weights():
+            return
+        eyes.detect()
+        eyes.finalize()
     except ResourceWaitCancelled:
         # ``detect_eye_keypoints_stage`` catches ``ResourceWaitCancelled``
         # per-photo in ``pipeline.py`` today, so this outer handler is
@@ -1654,19 +1361,7 @@ def eye_keypoints_stage(
         # ``extract_masks`` handler at line ~7293 so the summary lines
         # up with the other stages' cancel outcomes.
         run.abort.set()
-        run.stages["eye_keypoints"]["status"] = "completed"
-        summary = (
-            f"Cancelled ({processed['count']} of {total} processed)"
-            if total else "Cancelled"
-        )
-        run.runner.update_step(
-            run.job["id"], "eye_keypoints",
-            status="completed", summary=summary,
-        )
-        run.result["stages"]["eye_keypoints"] = {
-            "processed": processed["count"], "total": total,
-            "cancelled": True,
-        }
+        eyes.finish_cancelled()
     except Exception as e:
         run.errors.append(f"[eye_keypoints] Fatal: {e}")
         log.exception("Pipeline eye-keypoints stage failed")
@@ -1676,3 +1371,372 @@ def eye_keypoints_stage(
         )
 
     run.update_stages(run.runner, run.job["id"], run.stages)
+
+
+class _EyeKeypointPass:
+    """State shared across one eye_keypoints stage run."""
+
+    def __init__(
+        self,
+        run,
+        *,
+        still_offline_folder_ids_of,
+        source_offline_state,
+    ):
+        self.run = run
+        self.still_offline_folder_ids_of = still_offline_folder_ids_of
+        self.source_offline_state = source_offline_state
+
+    # -- setup -------------------------------------------------------
+
+    def setup(self):
+        import config as cfg
+        from pipeline import (
+            _resolve_collection_photo_ids,
+            detect_eye_keypoints_stage,
+            eye_keypoint_stage_preflight,
+        )
+
+        self.resolve_collection_photo_ids = _resolve_collection_photo_ids
+        self.detect_eye_keypoints_stage = detect_eye_keypoints_stage
+        self.eye_keypoint_stage_preflight = eye_keypoint_stage_preflight
+
+        self.thread_db = self.run.database_factory(self.run.db_path)
+        self.thread_db.set_active_workspace(self.run.workspace_id)
+        effective_cfg = self.thread_db.get_effective_config(cfg.load())
+        self.pipeline_cfg = dict(effective_cfg.get("pipeline", {}))
+
+        # Apply the per-run eye-detect override only when the caller
+        # sent an explicit signal. ``skip_eye_keypoints=False`` alone
+        # is not proof of opt-in: ``the "Full" saved process`` sets it
+        # to False as a base default, so an after-import ``full``
+        # chain would otherwise force ``eye_detect_enabled=True``
+        # against a workspace whose Settings default is False (the
+        # new default) — triggering SuperAnimal downloads and eye-
+        # based scoring by default. ``eye_detect_override`` is the
+        # explicit signal the Process page sends alongside its
+        # checkbox state; strategy expansion leaves it None, so a
+        # chained ``full`` run respects the user's Settings value.
+        if self.run.params.eye_detect_override is not None:
+            self.pipeline_cfg["eye_detect_enabled"] = self.run.params.eye_detect_override
+
+    def exit_on_preflight_skip(self):
+        """Mirror the stage-level preflight so a no-op run doesn't pay the
+        O(N) eligibility join cost or report a misleading
+        "0 of N processed" summary on large libraries.
+
+        True when the stage is done.
+        """
+        run = self.run
+        skip_reason = self.eye_keypoint_stage_preflight(self.pipeline_cfg)
+        if skip_reason is None:
+            return False
+        run.stages["eye_keypoints"]["status"] = "skipped"
+        run.runner.update_step(
+            run.job["id"], "eye_keypoints",
+            status="completed", summary=f"Skipped — {skip_reason}",
+        )
+        run.result["stages"]["eye_keypoints"] = {
+            "processed": 0, "total": 0, "skipped": skip_reason,
+        }
+        run.update_stages(run.runner, run.job["id"], run.stages)
+        return True
+
+    # -- worklist ----------------------------------------------------
+
+    def load_worklist(self):
+        params = self.run.params
+        self.eye_exclude_ids = set(params.exclude_photo_ids or ())
+        collection_photo_ids = (
+            self.resolve_collection_photo_ids(self.thread_db, self.run.collection_id)
+            if self.run.collection_id is not None else None
+        )
+        # Honor preview-deselection so the eye stage matches the set of
+        # photos extract/regroup will act on. Without this the stage
+        # mutates eye_* for unchecked photos and those values are locked
+        # in by the eye_tenengrad IS NULL idempotency guard on reruns.
+        if params.exclude_photo_ids and collection_photo_ids is not None:
+            collection_photo_ids = {
+                pid for pid in collection_photo_ids
+                if pid not in params.exclude_photo_ids
+            }
+        self.photos = self.thread_db.list_photos_for_eye_keypoint_stage(
+            photo_ids=collection_photo_ids,
+        )
+        # Defensive second filter: when collection_photo_ids is None
+        # (whole-workspace path) the DB query above returned every
+        # eligible row, so excluded IDs would otherwise still influence
+        # the download planner below and trigger weights for variants no
+        # included photo routes to.
+        if params.exclude_photo_ids:
+            self.photos = [
+                p for p in self.photos
+                if p["id"] not in params.exclude_photo_ids
+            ]
+
+    def drop_offline_folders(self):
+        """Drop photos whose folder is offline.
+
+        eye_keypoints also opens the source image (via the pipeline
+        detect_eye_keypoints_stage → keypoint runners), so without this it
+        would walk every unreachable photo and record them as eye-detection
+        failures — the same downstream-hammering pattern the classify pause
+        is meant to prevent (Codex #1388 P2 r3664058173).
+
+        Always probe the worklist's folders — not just when classify
+        populated ``source_skipped_photo_ids`` (Codex #1388 P1
+        r3664891993). A fully-cached-classify / eye-only rerun makes no
+        image reads in classify, so the seed set can stay empty even when
+        every remaining file is on an unreachable share.
+
+        Filter by FOLDER, not by photo id — cached photos never populate
+        the classify seed set, so an ID-only filter would leave them in the
+        worklist (Codex #1388 P2 r3664694179). Re-probing per folder also
+        lets a folder that recovered between classify and this stage rejoin
+        (Codex #1388 P2 r3664348758).
+        """
+        worklist_folder_ids = {
+            fid for fid in (
+                _row_folder_id(p) for p in self.photos
+            ) if fid is not None
+        }
+        still_offline_folder_ids = self.still_offline_folder_ids_of(
+            self.thread_db, worklist_folder_ids,
+        )
+        if not still_offline_folder_ids:
+            return
+        dropped_ids = {
+            p["id"] for p in self.photos
+            if _row_folder_id(p) in still_offline_folder_ids
+        }
+        self.photos = [
+            p for p in self.photos
+            if _row_folder_id(p) not in still_offline_folder_ids
+        ]
+        # The stage-level call at the bottom re-resolves
+        # photos from ``collection_id`` and filters via
+        # ``exclude_photo_ids`` — the local filter above
+        # only drives the weight-download planner and
+        # ``total``. Merge the offline IDs into the stage's
+        # exclusion set so the actual keypoint runners
+        # don't reopen the dead source (CodeRabbit
+        # r3664548813).
+        self.eye_exclude_ids.update(dropped_ids)
+        # Publish for anyone downstream that may probe
+        # ``source_offline_state`` later.
+        prior_skipped = (
+            self.source_offline_state.get("skipped_photo_ids")
+            or set()
+        )
+        self.source_offline_state["skipped_photo_ids"] = (
+            set(prior_skipped) | dropped_ids
+        )
+        if dropped_ids:
+            log.warning(
+                "Eye-keypoints: dropped %d photo(s) from "
+                "%d offline folder(s); source not "
+                "reachable.",
+                len(dropped_ids),
+                len(still_offline_folder_ids),
+            )
+
+    def start_counting(self):
+        self.total = len(self.photos)
+        self.start_time = time.time()
+        self.processed = 0
+
+    def _progress(self, phase, current, total_steps):
+        run = self.run
+        self.processed = current
+        run.stages["eye_keypoints"]["count"] = current
+        run.stages["eye_keypoints"]["total"] = total_steps
+        run.runner.update_step(
+            run.job["id"], "eye_keypoints",
+            progress={"current": current, "total": total_steps},
+        )
+        run.emit_progress(
+            run.runner, run.job["id"], run.stages, "eye_keypoints", phase,
+            rate=round(
+                current / max(time.time() - self.start_time, 0.01) * 60, 1
+            ),
+        )
+
+    # -- weights -----------------------------------------------------
+
+    def exit_without_weights(self):
+        """Auto-download SuperAnimal weights on first pipeline run.
+
+        Mirrors the SAM2/DINOv2 auto-download pattern in extract_masks
+        (commit 90cd0f9): without this, every photo silently skips on
+        a fresh install. Only fetch variants the per-photo router
+        would actually pick — a collection of out-of-scope classes
+        (fish/reptiles/invertebrates) shouldn't pay the bandwidth
+        cost for weights that will never be used.
+
+        True when a cancelled or failed download finished the stage.
+        """
+        if self.total <= 0:
+            return False
+        import keypoints as kp
+        from pipeline import _resolve_keypoint_model
+
+        needed_models = self._needed_models(_resolve_keypoint_model)
+
+        # Preserve a stable order (quadruped, bird) for tests and
+        # log readability when both variants are needed. Re-check
+        # abort between models so a cancel that arrives after the
+        # first weights download can short-circuit the second
+        # multi-hundred-MB fetch instead of forcing the user to
+        # wait through it.
+        #
+        # Eye Keypoints is an optional stage: a transient HF /
+        # network failure must degrade to a skipped stage, not a
+        # hard pipeline failure. Without this guard the RuntimeError
+        # raised by ensure_keypoint_weights bubbles to the outer
+        # except, marks the stage 'failed', and tanks the whole
+        # run for a first-run/offline user who never opted into
+        # eye keypoints in the first place.
+        try:
+            for kp_model in (
+                "superanimal-quadruped", "superanimal-bird",
+            ):
+                if self.run.control.should_abort(self.run.abort):
+                    break
+                if kp_model in needed_models:
+                    kp.ensure_keypoint_weights(
+                        kp_model, progress_callback=self._dl_progress,
+                    )
+        except ResourceWaitCancelled:
+            self._finish_download_cancelled()
+            return True
+        except Exception as dl_err:
+            # Degrade an optional-stage weight-download failure to a
+            # skipped stage; _skip_failed_download logs and records it.
+            self._skip_failed_download(dl_err)
+            return True
+        return False
+
+    def _needed_models(self, resolve_keypoint_model):
+        # Mirror Gate 1 in _process_photo_for_eye: rows whose
+        # classifier confidence is below eye_classifier_conf_gate
+        # get skipped at run time, so they shouldn't influence
+        # which variants get downloaded — otherwise an all-low-
+        # confidence collection still pays the bandwidth cost
+        # for weights no photo can reach.
+        conf_gate = self.pipeline_cfg.get(
+            "eye_classifier_conf_gate", 0.5,
+        )
+        needed_models = []
+        for row in self.photos:
+            if (row.get("species_conf") or 0.0) < conf_gate:
+                continue
+            model_name = resolve_keypoint_model(self.thread_db, row)
+            if model_name and model_name not in needed_models:
+                needed_models.append(model_name)
+        return needed_models
+
+    def _dl_progress(self, phase, current, total_steps):
+        """A separate download-progress callback, so a cancel during/just
+        after weight download doesn't leak the download counter into
+        ``processed`` (which would surface as e.g. "Cancelled (1 of N
+        processed)" before any photo has actually been touched).
+        """
+        self.run.emit_progress(
+            self.run.runner, self.run.job["id"], self.run.stages, "eye_keypoints", phase,
+        )
+
+    def _finish_download_cancelled(self):
+        """A cancel or pause that fires while another thread holds the
+        per-model download lock surfaces as ResourceWaitCancelled from
+        ``acquire_session_cache_lock`` — that is a cooperative cancel, not
+        a download failure. Finalize the stage as cancelled the same way
+        the extract_masks path handles its own ResourceWaitCancelled (line
+        ~7293) so the job tree does not report "failed to download
+        keypoint weights" for what was actually a user cancel.
+        """
+        run = self.run
+        run.abort.set()
+        run.stages["eye_keypoints"]["status"] = "completed"
+        run.runner.update_step(
+            run.job["id"], "eye_keypoints",
+            status="completed",
+            summary="Cancelled",
+        )
+        run.result["stages"]["eye_keypoints"] = {
+            "processed": 0, "total": self.total,
+            "cancelled": True,
+        }
+        run.update_stages(run.runner, run.job["id"], run.stages)
+
+    def _skip_failed_download(self, dl_err):
+        run = self.run
+        log.warning(
+            "Eye keypoints stage skipped — weight download "
+            "failed: %s", dl_err,
+        )
+        run.errors.append(f"[eye_keypoints] {dl_err}")
+        run.stages["eye_keypoints"]["status"] = "skipped"
+        run.runner.update_step(
+            run.job["id"], "eye_keypoints",
+            status="completed",
+            summary=(
+                f"Skipped — failed to download keypoint "
+                f"weights: {dl_err}"
+            ),
+        )
+        run.result["stages"]["eye_keypoints"] = {
+            "processed": 0, "total": self.total,
+            "skipped": "weight_download_failed",
+        }
+        run.update_stages(run.runner, run.job["id"], run.stages)
+
+    # -- detection and rollup ----------------------------------------
+
+    def detect(self):
+        run = self.run
+        self.detect_eye_keypoints_stage(
+            self.thread_db, config=self.pipeline_cfg, progress_callback=self._progress,
+            collection_id=run.collection_id,
+            exclude_photo_ids=self.eye_exclude_ids,
+            abort_check=lambda: run.control.should_abort(run.abort),
+        )
+
+    def finalize(self):
+        run = self.run
+        run.stages["eye_keypoints"]["status"] = "completed"
+        if run.control.should_abort(run.abort):
+            # Match the classify- and extract_masks-cancel summaries so
+            # the job tree distinguishes a user cancel from a clean
+            # finish that happened to process the same count.
+            self._report_cancelled()
+            return
+        summary = (
+            f"{self.processed} of {self.total} photos processed"
+            if self.total else "No eligible photos"
+        )
+        run.runner.update_step(
+            run.job["id"], "eye_keypoints",
+            status="completed", summary=summary,
+        )
+        run.result["stages"]["eye_keypoints"] = {
+            "processed": self.processed, "total": self.total,
+        }
+
+    def finish_cancelled(self):
+        self.run.stages["eye_keypoints"]["status"] = "completed"
+        self._report_cancelled()
+
+    def _report_cancelled(self):
+        run = self.run
+        summary = (
+            f"Cancelled ({self.processed} of {self.total} processed)"
+            if self.total else "Cancelled"
+        )
+        run.runner.update_step(
+            run.job["id"], "eye_keypoints",
+            status="completed", summary=summary,
+        )
+        run.result["stages"]["eye_keypoints"] = {
+            "processed": self.processed, "total": self.total,
+            "cancelled": True,
+        }
