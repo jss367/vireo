@@ -783,8 +783,11 @@
     }
     // An import whose chain ran AND whose tag pass was marked applied
     // finished everything but the final write; resuming would collect
-    // and process its photos twice.
-    if (result.chained && result.tags_applied) return false;
+    // and process its photos twice. A ``chained`` mark on a row whose
+    // import failed (``ok === false``) came from ``_chain_after_import``
+    // returning early via its "import failed" branch — the chain never
+    // actually ran, so the row stays resumable.
+    if (result.chained && result.ok !== false && result.tags_applied) return false;
     // Chain ran but tag/GPS work is still owed (a Stop cut the pass
     // short, or an error left tags unmarked). The resume replays only
     // the tag pass and skips re-chaining server-side.
@@ -861,7 +864,10 @@
     });
     var tagsApplied = !!parentResult.tags_applied ||
       descendants.some(function(e) { return e.tagsApplied; });
-    var chained = !!parentResult.chained ||
+    // The parent's chain step marks after a failed import too, but then
+    // skips the collection and processing; apply the same ``ok`` filter
+    // to the parent's own mark as to a descendant's (above).
+    var chained = (!!parentResult.chained && parentResult.ok !== false) ||
       descendants.some(function(e) { return e.chained; });
     var marked = descendants.filter(function(e) { return e.tagsApplied || e.chained; });
     var nextSteps = descendants.filter(function(e) {

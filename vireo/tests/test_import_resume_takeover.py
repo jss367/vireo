@@ -138,6 +138,25 @@ def _scenarios():
                 _row("d2", "2026-09-01T12:00:00", DONE),
             ],
         ),
+        # ``_chain_after_import`` returns via its "import failed" branch
+        # when ``ok`` is False, so the chain never actually enqueues
+        # processing — but ``chained=True`` was still recorded on the
+        # checkpoint. If a crash lands between that checkpoint and the
+        # terminal row, the parent must stay resumable so the retry can
+        # recover the failed files AND run processing.
+        "parent chained mark discounted when ok is False": (
+            {
+                "id": PARENT_ID, "type": "import", "status": "failed",
+                "started_at": "2026-09-01T10:00:00",
+                "config": {"sources": ["/card"], "destination": "/arch"},
+                "result": {
+                    "interrupted": True, "photo_ids": [1, 2],
+                    "ok": False, "failed": 1,
+                    "tags_applied": True, "chained": True,
+                },
+            },
+            [],
+        ),
     }
 
 
@@ -178,6 +197,7 @@ EXPECTED = {
     "parent chained, resume applied the owed tags": ("d", "done", False),
     "parent already did both itself": (None, None, False),
     "newest of two finished resumes": ("d2", "done", False),
+    "parent chained mark discounted when ok is False": (None, None, True),
 }
 
 
