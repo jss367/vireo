@@ -18,6 +18,7 @@ import os
 import stat as stat_mod
 import tempfile
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -509,6 +510,498 @@ def _card_gate_promotion_block(entry):
     return None
 
 
+@dataclass
+class _HashOutcome:
+    """What one pending hash's archive rows showed this run."""
+    reason: str = KEEP_ARCHIVE_UNREACHABLE
+    verified: bool = False
+    saw_inside_source_alias: bool = False
+    saw_terminal_failure: bool = False
+    saw_retryable_external: bool = False
+
+
+@dataclass
+class _ArchiveRead:
+    """One archive file hashed through a pinned descriptor."""
+    actual_hash: str
+    before: os.stat_result
+    after: os.stat_result
+    after_real: str
+
+
+class _ScopedArchiveVerify:
+    """Run-wide state for one ``verify_manifest_archives`` call.
+
+    Each phase method returns True when the cancel checkpoint fired, so the
+    caller returns ``stats`` right there without publishing the manifest.
+    """
+
+    def __init__(self, db, manifest, progress_cb, should_cancel):
+        self.db = db
+        self.manifest = manifest
+        self.progress_cb = progress_cb
+        self.should_cancel = should_cancel
+        self.source_root = manifest["source_root"]
+        self.contains_check = path_guard.make_case_folded_check(
+            self.source_root)
+        self.stats = {
+            "hashes_total": 0, "hashes_processed": 0,
+            "archive_files_read": 0, "verified": 0,
+            "modified": 0, "corrupt": 0, "unreadable": 0,
+            "cancelled": False, "remaining": 0,
+            "unblocked_files": 0, "unblocked_bytes": 0,
+        }
+        self.pending_by_hash = {}
+        self.failure_reasons = {}
+        # qualify_rows deliberately prioritizes any NULL-status row so a viable
+        # independent copy remains retryable. Once this run establishes that no
+        # such copy remains, however, a NULL same-file/source alias must not mask
+        # either the terminal "inside source" result or a failed independent
+        # archive. Record that final reason for the refresh below.
+        self.terminal_reasons = {}
+
+    def checkpoint(self):
+        stats = self.stats
+        if self.should_cancel is not None and self.should_cancel():
+            stats["cancelled"] = True
+            stats["remaining"] = stats["hashes_total"] - stats["hashes_processed"]
+            # Promotions are only visible after the manifest is published.
+            stats["unblocked_files"] = 0
+            stats["unblocked_bytes"] = 0
+            return True
+        return False
+
+    def drop_gone_deletable_entries(self):
+        """Codex P2: a prior delete_verified run on this scan unlinks card
+        files but never rewrites the manifest, so its deletable entries
+        sit here even though their card paths are gone. If we left them
+        in, the totals recomputed below would still credit their bytes
+        to the deletable bucket and the refreshed UI would re-enable
+        Delete asking the user to confirm counts that include files
+        already deleted from the card. Drop entries whose card path is
+        gone; a transient stat error (mount hiccup, EACCES) preserves
+        the entry so a NAS blip cannot shrink the preview.
+
+        Codex P2 (follow-up): the FileNotFoundError-only check misses
+        files delete_verified skipped for size/mtime/type mismatches
+        (SKIP_CHANGED / SKIP_NOT_REGULAR / SKIP_SYMLINK). lstat still
+        succeeds for those files, so the stale entry would stay in the
+        deletable bucket, inflate totals, and re-enable Delete for a
+        count the delete-time gates will refuse. Mirror the cheap gates
+        here so the refreshed preview matches what delete would accept.
+        Content-changed-but-metadata-matching is still caught by
+        delete_verified's own hash pass — expensive re-hashing here
+        would defeat the point of scoped verification.
+
+        Codex P2 (follow-up 2): dropping a changed-but-still-present
+        card entry hid a file that still exists on the card, so the
+        kept-list and totals undercounted what would remain after
+        deletion. Reclassify those entries into the kept bucket with
+        the corresponding SKIP_* reason instead; only a confirmed-
+        absent path (FileNotFoundError above) leaves the manifest.
+
+        Pending entries with a removed card file are handled in the
+        promotion loop below via _card_gate_promotion_block's
+        SKIP_ALREADY_GONE path, which lets scoped verify still hash
+        the archive and refresh the catalog row before dropping the
+        entry from the manifest. Keeping that dispatch in one place
+        (rather than short-circuiting here) preserves the DB-refresh
+        side effect other card scans keyed off the same hash rely on.
+        """
+        surviving = []
+        for entry in self.manifest["entries"]:
+            if self.checkpoint():
+                return True
+            if entry.get("bucket") != "deletable":
+                surviving.append(entry)
+                continue
+            path = entry.get("path")
+            if not path:
+                surviving.append(entry)
+                continue
+            try:
+                st = os.lstat(path)
+            except FileNotFoundError:
+                continue
+            except OSError:
+                surviving.append(entry)
+                continue
+            if stat_mod.S_ISLNK(st.st_mode):
+                reclassify_reason = SKIP_SYMLINK
+            elif not stat_mod.S_ISREG(st.st_mode):
+                reclassify_reason = SKIP_NOT_REGULAR
+            elif (st.st_size != entry.get("size")
+                    or st.st_mtime_ns != entry.get("mtime_ns")):
+                reclassify_reason = SKIP_CHANGED
+            else:
+                surviving.append(entry)
+                continue
+            entry["bucket"] = "kept"
+            entry["reason"] = reclassify_reason
+            entry.pop("archive_path", None)
+            surviving.append(entry)
+        self.manifest["entries"] = surviving
+        return False
+
+    def group_pending_by_hash(self):
+        for entry in self.manifest["entries"]:
+            if self.checkpoint():
+                return True
+            if (entry.get("bucket") == "kept"
+                    and entry.get("reason") == KEEP_NOT_VERIFIED
+                    and entry.get("hash")):
+                self.pending_by_hash.setdefault(
+                    entry["hash"], []).append(entry)
+        return False
+
+    def verify_pending_hashes(self):
+        pending = list(self.pending_by_hash.items())
+        self.stats["hashes_total"] = len(pending)
+        for i, (expected_hash, card_entries) in enumerate(pending):
+            if self.checkpoint():
+                return True
+            if self.progress_cb is not None:
+                self.progress_cb(
+                    i + 1, len(pending),
+                    os.path.basename(card_entries[0]["path"]),
+                )
+
+            outcome = self._verify_hash(expected_hash, card_entries)
+
+            self.db.conn.commit()
+            self.stats["hashes_processed"] += 1
+            if not outcome.verified:
+                self.failure_reasons[expected_hash] = outcome.reason
+                if not outcome.saw_retryable_external:
+                    if outcome.saw_terminal_failure:
+                        self.terminal_reasons[expected_hash] = (
+                            KEEP_ARCHIVE_HASH_FAILED)
+                    elif outcome.saw_inside_source_alias:
+                        self.terminal_reasons[expected_hash] = (
+                            KEEP_INSIDE_SOURCE)
+        return False
+
+    def _verify_hash(self, expected_hash, card_entries):
+        rows = fetch_rows_by_hash(self.db, expected_hash)
+        unchecked = [row for row in rows if row["hash_status"] is None]
+        outcome = _HashOutcome(saw_terminal_failure=any(
+            row["hash_status"] not in (None, "ok") for row in rows
+        ))
+        for row in unchecked:
+            if self._verify_row(row, expected_hash, card_entries, outcome):
+                break
+        return outcome
+
+    def _record_failure(self, row, expected_hash, status, outcome):
+        """Persist a reached-but-failed verdict for ``row``."""
+        if _record_unchecked_hash_verdict(
+                self.db, row, expected_hash, status):
+            self.stats[status] += 1
+            outcome.reason = KEEP_ARCHIVE_HASH_FAILED
+            outcome.saw_terminal_failure = True
+        else:
+            outcome.reason = KEEP_ARCHIVE_CHANGED
+            outcome.saw_retryable_external = True
+
+    def _verify_row(self, row, expected_hash, card_entries, outcome):
+        """Try one unchecked archive row; return True once it verified."""
+        folder_path = row["folder_path"]
+        if not folder_path:
+            if _record_unchecked_hash_verdict(
+                    self.db, row, expected_hash, "unreadable"):
+                self.stats["unreadable"] += 1
+                outcome.saw_terminal_failure = True
+            else:
+                outcome.reason = KEEP_ARCHIVE_CHANGED
+                outcome.saw_retryable_external = True
+            return False
+        archive_path = os.path.join(folder_path, row["filename"])
+        try:
+            archive_real = os.path.realpath(archive_path)
+        except (OSError, ValueError):
+            # Codex P2: keep hash_status NULL when we can't even
+            # reach the archive path. Marking unreadable here is
+            # permanent — after a transiently-down mount comes
+            # back, a re-scan would classify the row as a prior
+            # integrity failure and route users to the
+            # workspace-wide Audit page instead of a targeted
+            # verify retry.
+            self.stats["unreadable"] += 1
+            outcome.reason = KEEP_ARCHIVE_UNREACHABLE
+            outcome.saw_retryable_external = True
+            return False
+        if self.contains_check(archive_real):
+            outcome.reason = KEEP_INSIDE_SOURCE
+            outcome.saw_inside_source_alias = True
+            return False
+        # CodeRabbit: pin the checked object via a descriptor rather
+        # than re-opening the pathname. A concurrent rename that swaps
+        # the archive for a FIFO between our S_ISREG check and the
+        # hash-open would leave compute_file_hash blocking forever
+        # inside open() — cancellation is checked only at file
+        # boundaries, so the verify worker would hang. Opening with
+        # O_NONBLOCK bypasses the FIFO-open block; fstat then rejects
+        # anything that is not a regular file, and every subsequent
+        # read/stat operates on this pinned fd so a later rename
+        # cannot slip a different object under us.
+        try:
+            archive_fd = os.open(
+                archive_path, os.O_RDONLY | O_NONBLOCK | O_BINARY)
+        except (OSError, ValueError):
+            # Same rationale as the realpath branch above (Codex
+            # P2): a stat that can't see the file — the common
+            # symptom of a disconnected NAS mount — means the
+            # archive is unreachable, not corrupt. Leave the row
+            # unchecked so targeted verification can retry once
+            # the mount returns; reserve 'unreadable' for files
+            # we actually reached but could not read.
+            self.stats["unreadable"] += 1
+            outcome.reason = KEEP_ARCHIVE_UNREACHABLE
+            outcome.saw_retryable_external = True
+            return False
+        try:
+            read = self._read_pinned_archive(
+                archive_fd, archive_path, row, expected_hash, card_entries,
+                outcome)
+        finally:
+            os.close(archive_fd)
+        if read is None:
+            return False
+        return self._certify_read(
+            row, expected_hash, archive_path, archive_real, read, outcome)
+
+    def _read_pinned_archive(self, archive_fd, archive_path, row,
+                             expected_hash, card_entries, outcome):
+        """Hash the pinned archive fd; return None when it can't count."""
+        try:
+            before = os.fstat(archive_fd)
+        except OSError:
+            # We opened the object but immediately failed to
+            # stat it (extremely rare — a race on the mount
+            # itself). Treat as reached-but-unreadable rather
+            # than unreachable; the fd itself would have
+            # failed at open() in the mount-down case.
+            #
+            # Codex P2 (follow-up): outcome_reason must match
+            # what qualify_rows will return for the row we
+            # just persisted as 'unreadable' — KEEP_ARCHIVE_
+            # HASH_FAILED. Leaving it at the initial KEEP_
+            # ARCHIVE_UNREACHABLE lets the promotion-loop
+            # override downgrade qualify_rows' terminal
+            # verdict, hiding the failure and stripping the
+            # Audit-page guidance the UI shows for
+            # KEEP_ARCHIVE_HASH_FAILED.
+            self._record_failure(row, expected_hash, "unreadable", outcome)
+            return None
+        if not stat_mod.S_ISREG(before.st_mode):
+            # The object is present but is a directory/FIFO/
+            # device swapped in on top of the path — not
+            # "unreachable" (we reached it), just not something
+            # we can hash. Marking unreadable is intentional;
+            # a subsequent audit is the right remedy.
+            #
+            # Codex P2 (follow-up): see the fstat branch above.
+            self._record_failure(row, expected_hash, "unreadable", outcome)
+            return None
+
+        # An outside-path hardlink to a card file is not a second
+        # copy.  Compare against the fd's dev/inode — the same
+        # object every later step here operates on.
+        same_as_card = False
+        for entry in card_entries:
+            try:
+                card_st = os.stat(entry["path"])
+            except OSError:
+                continue
+            if ((before.st_dev, before.st_ino)
+                    == (card_st.st_dev, card_st.st_ino)):
+                same_as_card = True
+                break
+        if same_as_card:
+            outcome.reason = KEEP_INSIDE_SOURCE
+            outcome.saw_inside_source_alias = True
+            return None
+
+        try:
+            actual_hash = compute_fd_hash(archive_fd)
+            after = os.fstat(archive_fd)
+            after_real = os.path.realpath(archive_path)
+        except (OSError, ValueError):
+            # Codex P2 (follow-up): see the earlier fstat
+            # branch — outcome_reason must reflect the
+            # persisted 'unreadable' verdict so the
+            # promotion loop does not override qualify_rows'
+            # KEEP_ARCHIVE_HASH_FAILED with the initial
+            # KEEP_ARCHIVE_UNREACHABLE.
+            self._record_failure(row, expected_hash, "unreadable", outcome)
+            return None
+        self.stats["archive_files_read"] += 1
+        return _ArchiveRead(actual_hash, before, after, after_real)
+
+    def _certify_read(self, row, expected_hash, archive_path, archive_real,
+                      read, outcome):
+        """Record the verdict for a hashed archive; True once verified."""
+        before, after = read.before, read.after
+        # Codex P1: the pinned fd's fstat describes the object we
+        # actually hashed, but an atomic replace under the same
+        # name during compute_fd_hash would leave that fd pointing
+        # at the old (now-unlinked) inode. before/after fstat then
+        # still match, and after_real == archive_real, but the
+        # pathname now resolves to a fresh object. A replacement
+        # that preserves size+mtime could then pass qualify_rows
+        # later and let the card copy be deleted against an
+        # archive whose bytes we never read. Re-stat the pathname
+        # and require its dev/inode still match the fd's — a
+        # mismatch means the successor is a different file.
+        try:
+            after_path_st = os.stat(archive_path)
+        except (OSError, ValueError):
+            after_path_st = None
+
+        # Do not certify a pathname that moved or changed while it was
+        # being read.  A later retry can verify the stable object.
+        if (read.after_real != archive_real
+                or self.contains_check(read.after_real)
+                or after_path_st is None
+                or (after_path_st.st_dev, after_path_st.st_ino)
+                != (after.st_dev, after.st_ino)
+                or (before.st_dev, before.st_ino, before.st_size,
+                    before.st_mtime_ns)
+                != (after.st_dev, after.st_ino, after.st_size,
+                    after.st_mtime_ns)):
+            outcome.reason = KEEP_ARCHIVE_CHANGED
+            outcome.saw_retryable_external = True
+            return False
+
+        if read.actual_hash == expected_hash:
+            if _record_unchecked_hash_verdict(
+                    self.db, row, expected_hash, "ok",
+                    file_size=after.st_size, file_mtime=after.st_mtime):
+                self.stats["verified"] += 1
+                outcome.verified = True
+                return True
+            outcome.reason = KEEP_ARCHIVE_CHANGED
+            outcome.saw_retryable_external = True
+            return False
+
+        db_mtime = row["file_mtime"]
+        if (db_mtime is not None
+                and abs(after.st_mtime - db_mtime) > 1.0):
+            status = "modified"
+        else:
+            status = "corrupt"
+        self._record_failure(row, expected_hash, status, outcome)
+        return False
+
+    def refresh_pending_entries(self):
+        """Only previously-unverified entries can change here.  Existing
+        deletable rows are not re-audited or invalidated by this scoped job.
+        """
+        missing_pending_entry_ids = set()
+        for expected_hash, card_entries in self.pending_by_hash.items():
+            if self.checkpoint():
+                return True
+            rows = fetch_rows_by_hash(self.db, expected_hash)
+            for entry in card_entries:
+                if self.checkpoint():
+                    return True
+                if self._refresh_pending_entry(entry, expected_hash, rows):
+                    missing_pending_entry_ids.add(id(entry))
+
+        if missing_pending_entry_ids:
+            self.manifest["entries"] = [
+                entry for entry in self.manifest["entries"]
+                if id(entry) not in missing_pending_entry_ids
+            ]
+        return False
+
+    def _refresh_pending_entry(self, entry, expected_hash, rows):
+        """Re-bucket one pending entry; True when it left the card."""
+        # Codex P2 (follow-up 3): qualify_rows only inspects catalog
+        # rows — it cannot see that this card file has been replaced,
+        # resized, or turned into a symlink since the scan. Promoting
+        # a changed pending entry to the deletable bucket would let
+        # its bytes land in the refreshed totals the user confirms,
+        # even though delete_verified would later skip it
+        # (SKIP_CHANGED / SKIP_SYMLINK / SKIP_NOT_REGULAR) and
+        # actually unlink nothing. Reproduce the delete-time card
+        # gates here so promotion honors the same baseline. Content
+        # drift (bytes changed with size + mtime intact) still lands
+        # in delete_verified's full-hash pass — repeating that here
+        # would defeat the point of scoped verification.
+        promote_block = _card_gate_promotion_block(entry)
+        if promote_block == SKIP_ALREADY_GONE:
+            # A prior delete or external removal means this file no
+            # longer exists on the card. Do not retain its historical
+            # bytes in the refreshed kept totals.
+            return True
+        if promote_block is not None:
+            entry["bucket"] = "kept"
+            entry["reason"] = promote_block
+            entry.pop("archive_path", None)
+            return False
+        archive_path, reason = qualify_rows(
+            rows, self.source_root, entry["path"], self.contains_check)
+        if archive_path is not None:
+            entry["bucket"] = "deletable"
+            entry["archive_path"] = archive_path
+            entry.pop("reason", None)
+            self.stats["unblocked_files"] += 1
+            self.stats["unblocked_bytes"] += entry.get("size", 0)
+        elif reason == KEEP_NOT_VERIFIED:
+            # Codex P2: qualify_rows saw a viable unchecked row
+            # after our attempt, so verify still has a lever here.
+            # Overwriting with this run's transient
+            # KEEP_ARCHIVE_UNREACHABLE/CHANGED would push the entry
+            # out of the KEEP_NOT_VERIFIED bucket that the verify
+            # endpoint's pending-reason filter and the UI callout
+            # key off; once the NAS mount returns or the file
+            # settles, targeted verification would then report
+            # "nothing needs checking" until the user re-scans the
+            # card. Keep the entry in the retry-eligible bucket.
+            #
+            # Codex P2 (follow-up): the exception is when this
+            # run proved every unchecked row for the hash is a
+            # same-source alias / hardlink of the card file — no
+            # independent archive copy exists, so there IS no
+            # future retry that can change the outcome. Preserving
+            # KEEP_NOT_VERIFIED there traps the entry in an
+            # infinite verify loop (qualify_rows keeps returning
+            # KEEP_NOT_VERIFIED off the still-NULL alias rows).
+            # Adopt the terminal inside-source reason instead.
+            entry["reason"] = self.terminal_reasons.get(
+                expected_hash, KEEP_NOT_VERIFIED)
+        elif reason == KEEP_ARCHIVE_HASH_FAILED:
+            # A reached row whose fstat/read failed was persisted as
+            # unreadable. That terminal catalog verdict must win over a
+            # transient run-local fallback so the preview offers the
+            # Audit remedy instead of neither retry nor repair guidance.
+            entry["reason"] = reason
+        elif expected_hash in self.failure_reasons:
+            entry["reason"] = self.failure_reasons[expected_hash]
+        else:
+            entry["reason"] = reason
+        return False
+
+    def recompute_totals(self):
+        totals = {
+            "deletable": {"count": 0, "bytes": 0},
+            "kept": {"count": 0, "bytes": 0},
+            "ignored": {"count": 0},
+        }
+        for entry in self.manifest["entries"]:
+            if self.checkpoint():
+                return True
+            bucket = entry.get("bucket")
+            if bucket == "ignored":
+                totals["ignored"]["count"] += 1
+            elif bucket in ("deletable", "kept"):
+                totals[bucket]["count"] += 1
+                totals[bucket]["bytes"] += entry.get("size", 0)
+        self.manifest["totals"] = totals
+        return False
+
+
 def verify_manifest_archives(db, manifest, manifest_dir, progress_cb=None,
                              should_cancel=None):
     """Verify only archive copies needed by one card-cleanup preview.
@@ -520,451 +1013,28 @@ def verify_manifest_archives(db, manifest, manifest_dir, progress_cb=None,
     second card scan.  Destructive-time card and archive gates remain in
     ``delete_verified``.
     """
-    source_root = manifest["source_root"]
-    contains_check = path_guard.make_case_folded_check(source_root)
-    stats = {
-        "hashes_total": 0, "hashes_processed": 0,
-        "archive_files_read": 0, "verified": 0,
-        "modified": 0, "corrupt": 0, "unreadable": 0,
-        "cancelled": False, "remaining": 0,
-        "unblocked_files": 0, "unblocked_bytes": 0,
-    }
-
-    def checkpoint():
-        if should_cancel is not None and should_cancel():
-            stats["cancelled"] = True
-            stats["remaining"] = stats["hashes_total"] - stats["hashes_processed"]
-            # Promotions are only visible after the manifest is published.
-            stats["unblocked_files"] = 0
-            stats["unblocked_bytes"] = 0
-            return True
-        return False
-
-    # Codex P2: a prior delete_verified run on this scan unlinks card
-    # files but never rewrites the manifest, so its deletable entries
-    # sit here even though their card paths are gone. If we left them
-    # in, the totals recomputed below would still credit their bytes
-    # to the deletable bucket and the refreshed UI would re-enable
-    # Delete asking the user to confirm counts that include files
-    # already deleted from the card. Drop entries whose card path is
-    # gone; a transient stat error (mount hiccup, EACCES) preserves
-    # the entry so a NAS blip cannot shrink the preview.
-    #
-    # Codex P2 (follow-up): the FileNotFoundError-only check misses
-    # files delete_verified skipped for size/mtime/type mismatches
-    # (SKIP_CHANGED / SKIP_NOT_REGULAR / SKIP_SYMLINK). lstat still
-    # succeeds for those files, so the stale entry would stay in the
-    # deletable bucket, inflate totals, and re-enable Delete for a
-    # count the delete-time gates will refuse. Mirror the cheap gates
-    # here so the refreshed preview matches what delete would accept.
-    # Content-changed-but-metadata-matching is still caught by
-    # delete_verified's own hash pass — expensive re-hashing here
-    # would defeat the point of scoped verification.
-    #
-    # Codex P2 (follow-up 2): dropping a changed-but-still-present
-    # card entry hid a file that still exists on the card, so the
-    # kept-list and totals undercounted what would remain after
-    # deletion. Reclassify those entries into the kept bucket with
-    # the corresponding SKIP_* reason instead; only a confirmed-
-    # absent path (FileNotFoundError above) leaves the manifest.
-    #
-    # Pending entries with a removed card file are handled in the
-    # promotion loop below via _card_gate_promotion_block's
-    # SKIP_ALREADY_GONE path, which lets scoped verify still hash
-    # the archive and refresh the catalog row before dropping the
-    # entry from the manifest. Keeping that dispatch in one place
-    # (rather than short-circuiting here) preserves the DB-refresh
-    # side effect other card scans keyed off the same hash rely on.
-    surviving = []
-    for entry in manifest["entries"]:
-        if checkpoint():
-            return stats
-        if entry.get("bucket") != "deletable":
-            surviving.append(entry)
-            continue
-        path = entry.get("path")
-        if not path:
-            surviving.append(entry)
-            continue
-        try:
-            st = os.lstat(path)
-        except FileNotFoundError:
-            continue
-        except OSError:
-            surviving.append(entry)
-            continue
-        if stat_mod.S_ISLNK(st.st_mode):
-            reclassify_reason = SKIP_SYMLINK
-        elif not stat_mod.S_ISREG(st.st_mode):
-            reclassify_reason = SKIP_NOT_REGULAR
-        elif (st.st_size != entry.get("size")
-                or st.st_mtime_ns != entry.get("mtime_ns")):
-            reclassify_reason = SKIP_CHANGED
-        else:
-            surviving.append(entry)
-            continue
-        entry["bucket"] = "kept"
-        entry["reason"] = reclassify_reason
-        entry.pop("archive_path", None)
-        surviving.append(entry)
-    manifest["entries"] = surviving
-
-    pending_by_hash = {}
-    for entry in manifest["entries"]:
-        if checkpoint():
-            return stats
-        if (entry.get("bucket") == "kept"
-                and entry.get("reason") == KEEP_NOT_VERIFIED
-                and entry.get("hash")):
-            pending_by_hash.setdefault(entry["hash"], []).append(entry)
-
-    pending = list(pending_by_hash.items())
-    stats["hashes_total"] = len(pending)
-    failure_reasons = {}
-    # qualify_rows deliberately prioritizes any NULL-status row so a viable
-    # independent copy remains retryable. Once this run establishes that no
-    # such copy remains, however, a NULL same-file/source alias must not mask
-    # either the terminal "inside source" result or a failed independent
-    # archive. Record that final reason for the refresh below.
-    terminal_reasons = {}
-
-    for i, (expected_hash, card_entries) in enumerate(pending):
-        if checkpoint():
-            return stats
-        if progress_cb is not None:
-            progress_cb(
-                i + 1, len(pending),
-                os.path.basename(card_entries[0]["path"]),
-            )
-
-        rows = fetch_rows_by_hash(db, expected_hash)
-        unchecked = [row for row in rows if row["hash_status"] is None]
-        outcome_reason = KEEP_ARCHIVE_UNREACHABLE
-        verified = False
-        saw_inside_source_alias = False
-        saw_terminal_failure = any(
-            row["hash_status"] not in (None, "ok") for row in rows
-        )
-        saw_retryable_external = False
-        for row in unchecked:
-            folder_path = row["folder_path"]
-            if not folder_path:
-                if _record_unchecked_hash_verdict(
-                        db, row, expected_hash, "unreadable"):
-                    stats["unreadable"] += 1
-                    saw_terminal_failure = True
-                else:
-                    outcome_reason = KEEP_ARCHIVE_CHANGED
-                    saw_retryable_external = True
-                continue
-            archive_path = os.path.join(folder_path, row["filename"])
-            try:
-                archive_real = os.path.realpath(archive_path)
-            except (OSError, ValueError):
-                # Codex P2: keep hash_status NULL when we can't even
-                # reach the archive path. Marking unreadable here is
-                # permanent — after a transiently-down mount comes
-                # back, a re-scan would classify the row as a prior
-                # integrity failure and route users to the
-                # workspace-wide Audit page instead of a targeted
-                # verify retry.
-                stats["unreadable"] += 1
-                outcome_reason = KEEP_ARCHIVE_UNREACHABLE
-                saw_retryable_external = True
-                continue
-            if contains_check(archive_real):
-                outcome_reason = KEEP_INSIDE_SOURCE
-                saw_inside_source_alias = True
-                continue
-            # CodeRabbit: pin the checked object via a descriptor rather
-            # than re-opening the pathname. A concurrent rename that swaps
-            # the archive for a FIFO between our S_ISREG check and the
-            # hash-open would leave compute_file_hash blocking forever
-            # inside open() — cancellation is checked only at file
-            # boundaries, so the verify worker would hang. Opening with
-            # O_NONBLOCK bypasses the FIFO-open block; fstat then rejects
-            # anything that is not a regular file, and every subsequent
-            # read/stat operates on this pinned fd so a later rename
-            # cannot slip a different object under us.
-            try:
-                archive_fd = os.open(
-                    archive_path, os.O_RDONLY | O_NONBLOCK | O_BINARY)
-            except (OSError, ValueError):
-                # Same rationale as the realpath branch above (Codex
-                # P2): a stat that can't see the file — the common
-                # symptom of a disconnected NAS mount — means the
-                # archive is unreachable, not corrupt. Leave the row
-                # unchecked so targeted verification can retry once
-                # the mount returns; reserve 'unreadable' for files
-                # we actually reached but could not read.
-                stats["unreadable"] += 1
-                outcome_reason = KEEP_ARCHIVE_UNREACHABLE
-                saw_retryable_external = True
-                continue
-            try:
-                try:
-                    before = os.fstat(archive_fd)
-                except OSError:
-                    # We opened the object but immediately failed to
-                    # stat it (extremely rare — a race on the mount
-                    # itself). Treat as reached-but-unreadable rather
-                    # than unreachable; the fd itself would have
-                    # failed at open() in the mount-down case.
-                    #
-                    # Codex P2 (follow-up): outcome_reason must match
-                    # what qualify_rows will return for the row we
-                    # just persisted as 'unreadable' — KEEP_ARCHIVE_
-                    # HASH_FAILED. Leaving it at the initial KEEP_
-                    # ARCHIVE_UNREACHABLE lets the promotion-loop
-                    # override downgrade qualify_rows' terminal
-                    # verdict, hiding the failure and stripping the
-                    # Audit-page guidance the UI shows for
-                    # KEEP_ARCHIVE_HASH_FAILED.
-                    if _record_unchecked_hash_verdict(
-                            db, row, expected_hash, "unreadable"):
-                        stats["unreadable"] += 1
-                        outcome_reason = KEEP_ARCHIVE_HASH_FAILED
-                        saw_terminal_failure = True
-                    else:
-                        outcome_reason = KEEP_ARCHIVE_CHANGED
-                        saw_retryable_external = True
-                    continue
-                if not stat_mod.S_ISREG(before.st_mode):
-                    # The object is present but is a directory/FIFO/
-                    # device swapped in on top of the path — not
-                    # "unreachable" (we reached it), just not something
-                    # we can hash. Marking unreadable is intentional;
-                    # a subsequent audit is the right remedy.
-                    #
-                    # Codex P2 (follow-up): see the fstat branch above.
-                    if _record_unchecked_hash_verdict(
-                            db, row, expected_hash, "unreadable"):
-                        stats["unreadable"] += 1
-                        outcome_reason = KEEP_ARCHIVE_HASH_FAILED
-                        saw_terminal_failure = True
-                    else:
-                        outcome_reason = KEEP_ARCHIVE_CHANGED
-                        saw_retryable_external = True
-                    continue
-
-                # An outside-path hardlink to a card file is not a second
-                # copy.  Compare against the fd's dev/inode — the same
-                # object every later step here operates on.
-                same_as_card = False
-                for entry in card_entries:
-                    try:
-                        card_st = os.stat(entry["path"])
-                    except OSError:
-                        continue
-                    if ((before.st_dev, before.st_ino)
-                            == (card_st.st_dev, card_st.st_ino)):
-                        same_as_card = True
-                        break
-                if same_as_card:
-                    outcome_reason = KEEP_INSIDE_SOURCE
-                    saw_inside_source_alias = True
-                    continue
-
-                try:
-                    actual_hash = compute_fd_hash(archive_fd)
-                    after = os.fstat(archive_fd)
-                    after_real = os.path.realpath(archive_path)
-                except (OSError, ValueError):
-                    # Codex P2 (follow-up): see the earlier fstat
-                    # branch — outcome_reason must reflect the
-                    # persisted 'unreadable' verdict so the
-                    # promotion loop does not override qualify_rows'
-                    # KEEP_ARCHIVE_HASH_FAILED with the initial
-                    # KEEP_ARCHIVE_UNREACHABLE.
-                    if _record_unchecked_hash_verdict(
-                            db, row, expected_hash, "unreadable"):
-                        stats["unreadable"] += 1
-                        outcome_reason = KEEP_ARCHIVE_HASH_FAILED
-                        saw_terminal_failure = True
-                    else:
-                        outcome_reason = KEEP_ARCHIVE_CHANGED
-                        saw_retryable_external = True
-                    continue
-                stats["archive_files_read"] += 1
-            finally:
-                os.close(archive_fd)
-
-            # Codex P1: the pinned fd's fstat describes the object we
-            # actually hashed, but an atomic replace under the same
-            # name during compute_fd_hash would leave that fd pointing
-            # at the old (now-unlinked) inode. before/after fstat then
-            # still match, and after_real == archive_real, but the
-            # pathname now resolves to a fresh object. A replacement
-            # that preserves size+mtime could then pass qualify_rows
-            # later and let the card copy be deleted against an
-            # archive whose bytes we never read. Re-stat the pathname
-            # and require its dev/inode still match the fd's — a
-            # mismatch means the successor is a different file.
-            try:
-                after_path_st = os.stat(archive_path)
-            except (OSError, ValueError):
-                after_path_st = None
-
-            # Do not certify a pathname that moved or changed while it was
-            # being read.  A later retry can verify the stable object.
-            if (after_real != archive_real
-                    or contains_check(after_real)
-                    or after_path_st is None
-                    or (after_path_st.st_dev, after_path_st.st_ino)
-                    != (after.st_dev, after.st_ino)
-                    or (before.st_dev, before.st_ino, before.st_size,
-                        before.st_mtime_ns)
-                    != (after.st_dev, after.st_ino, after.st_size,
-                        after.st_mtime_ns)):
-                outcome_reason = KEEP_ARCHIVE_CHANGED
-                saw_retryable_external = True
-                continue
-
-            if actual_hash == expected_hash:
-                if _record_unchecked_hash_verdict(
-                        db, row, expected_hash, "ok",
-                        file_size=after.st_size, file_mtime=after.st_mtime):
-                    stats["verified"] += 1
-                    verified = True
-                    break
-                outcome_reason = KEEP_ARCHIVE_CHANGED
-                saw_retryable_external = True
-                continue
-
-            db_mtime = row["file_mtime"]
-            if (db_mtime is not None
-                    and abs(after.st_mtime - db_mtime) > 1.0):
-                status = "modified"
-            else:
-                status = "corrupt"
-            if _record_unchecked_hash_verdict(
-                    db, row, expected_hash, status):
-                stats[status] += 1
-                outcome_reason = KEEP_ARCHIVE_HASH_FAILED
-                saw_terminal_failure = True
-            else:
-                outcome_reason = KEEP_ARCHIVE_CHANGED
-                saw_retryable_external = True
-
-        db.conn.commit()
-        stats["hashes_processed"] += 1
-        if not verified:
-            failure_reasons[expected_hash] = outcome_reason
-            if not saw_retryable_external:
-                if saw_terminal_failure:
-                    terminal_reasons[expected_hash] = (
-                        KEEP_ARCHIVE_HASH_FAILED)
-                elif saw_inside_source_alias:
-                    terminal_reasons[expected_hash] = KEEP_INSIDE_SOURCE
-
-    # Only previously-unverified entries can change here.  Existing
-    # deletable rows are not re-audited or invalidated by this scoped job.
-    missing_pending_entry_ids = set()
-    for expected_hash, card_entries in pending_by_hash.items():
-        if checkpoint():
-            return stats
-        rows = fetch_rows_by_hash(db, expected_hash)
-        for entry in card_entries:
-            if checkpoint():
-                return stats
-            # Codex P2 (follow-up 3): qualify_rows only inspects catalog
-            # rows — it cannot see that this card file has been replaced,
-            # resized, or turned into a symlink since the scan. Promoting
-            # a changed pending entry to the deletable bucket would let
-            # its bytes land in the refreshed totals the user confirms,
-            # even though delete_verified would later skip it
-            # (SKIP_CHANGED / SKIP_SYMLINK / SKIP_NOT_REGULAR) and
-            # actually unlink nothing. Reproduce the delete-time card
-            # gates here so promotion honors the same baseline. Content
-            # drift (bytes changed with size + mtime intact) still lands
-            # in delete_verified's full-hash pass — repeating that here
-            # would defeat the point of scoped verification.
-            promote_block = _card_gate_promotion_block(entry)
-            if promote_block == SKIP_ALREADY_GONE:
-                # A prior delete or external removal means this file no
-                # longer exists on the card. Do not retain its historical
-                # bytes in the refreshed kept totals.
-                missing_pending_entry_ids.add(id(entry))
-                continue
-            if promote_block is not None:
-                entry["bucket"] = "kept"
-                entry["reason"] = promote_block
-                entry.pop("archive_path", None)
-                continue
-            archive_path, reason = qualify_rows(
-                rows, source_root, entry["path"], contains_check)
-            if archive_path is not None:
-                entry["bucket"] = "deletable"
-                entry["archive_path"] = archive_path
-                entry.pop("reason", None)
-                stats["unblocked_files"] += 1
-                stats["unblocked_bytes"] += entry.get("size", 0)
-            elif reason == KEEP_NOT_VERIFIED:
-                # Codex P2: qualify_rows saw a viable unchecked row
-                # after our attempt, so verify still has a lever here.
-                # Overwriting with this run's transient
-                # KEEP_ARCHIVE_UNREACHABLE/CHANGED would push the entry
-                # out of the KEEP_NOT_VERIFIED bucket that the verify
-                # endpoint's pending-reason filter and the UI callout
-                # key off; once the NAS mount returns or the file
-                # settles, targeted verification would then report
-                # "nothing needs checking" until the user re-scans the
-                # card. Keep the entry in the retry-eligible bucket.
-                #
-                # Codex P2 (follow-up): the exception is when this
-                # run proved every unchecked row for the hash is a
-                # same-source alias / hardlink of the card file — no
-                # independent archive copy exists, so there IS no
-                # future retry that can change the outcome. Preserving
-                # KEEP_NOT_VERIFIED there traps the entry in an
-                # infinite verify loop (qualify_rows keeps returning
-                # KEEP_NOT_VERIFIED off the still-NULL alias rows).
-                # Adopt the terminal inside-source reason instead.
-                entry["reason"] = terminal_reasons.get(
-                    expected_hash, KEEP_NOT_VERIFIED)
-            elif reason == KEEP_ARCHIVE_HASH_FAILED:
-                # A reached row whose fstat/read failed was persisted as
-                # unreadable. That terminal catalog verdict must win over a
-                # transient run-local fallback so the preview offers the
-                # Audit remedy instead of neither retry nor repair guidance.
-                entry["reason"] = reason
-            elif expected_hash in failure_reasons:
-                entry["reason"] = failure_reasons[expected_hash]
-            else:
-                entry["reason"] = reason
-
-    if missing_pending_entry_ids:
-        manifest["entries"] = [
-            entry for entry in manifest["entries"]
-            if id(entry) not in missing_pending_entry_ids
-        ]
-
-    totals = {
-        "deletable": {"count": 0, "bytes": 0},
-        "kept": {"count": 0, "bytes": 0},
-        "ignored": {"count": 0},
-    }
-    for entry in manifest["entries"]:
-        if checkpoint():
-            return stats
-        bucket = entry.get("bucket")
-        if bucket == "ignored":
-            totals["ignored"]["count"] += 1
-        elif bucket in ("deletable", "kept"):
-            totals[bucket]["count"] += 1
-            totals[bucket]["bytes"] += entry.get("size", 0)
-    manifest["totals"] = totals
+    run = _ScopedArchiveVerify(db, manifest, progress_cb, should_cancel)
+    if run.drop_gone_deletable_entries():
+        return run.stats
+    if run.group_pending_by_hash():
+        return run.stats
+    if run.verify_pending_hashes():
+        return run.stats
+    if run.refresh_pending_entries():
+        return run.stats
+    if run.recompute_totals():
+        return run.stats
     # Bump before write: the delete endpoint's revision check compares
     # against whatever is on disk, so the new manifest must carry a fresh
     # number the moment it lands. Missing on old manifests (pre-revision
     # schema) is treated as the initial revision — the next write is the
     # first observable change.
-    if checkpoint():
-        return stats
+    if run.checkpoint():
+        return run.stats
     manifest["revision"] = int(
         manifest.get("revision", INITIAL_MANIFEST_REVISION)) + 1
     write_manifest(manifest_dir, manifest)
-    return stats
+    return run.stats
 
 
 def scan_card(db, source, recursive, manifest_dir, scan_job_id,
