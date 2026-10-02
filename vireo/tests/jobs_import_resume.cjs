@@ -15,19 +15,21 @@ function fn(name) {
 }
 
 const ctx = vm.createContext({});
-for (const name of ['jobConfig', 'isResumableImport', 'importResumeTakeover', 'importTakeoverNote']) {
+for (const name of ['jobConfig', 'hasFailedImportFiles', 'isResumableImport', 'importResumeTakeover', 'importTakeoverNote']) {
   vm.runInContext(fn(name), ctx);
 }
 ctx.scenarios = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 const out = vm.runInContext(`scenarios.map(function(s) {
   var takeover = importResumeTakeover(s.parent, s.rows);
+  var offersResume = isResumableImport(s.parent) && !takeover.by;
   return {
     tags_applied: takeover.tagsApplied,
     chained: takeover.chained,
     by: takeover.by,
     kind: takeover.kind,
-    // What the page offers on the parent row.
-    offers_resume: isResumableImport(s.parent) && !takeover.by,
+    // What the page offers on the parent row (renderJobCard).
+    offers_resume: offersResume,
+    offers_retry: Number(s.parent.result.failed || 0) > 0 && !offersResume && !takeover.by,
     note: takeover.by ? importTakeoverNote(takeover) : null,
   };
 })`, ctx);

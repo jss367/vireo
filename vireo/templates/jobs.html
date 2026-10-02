@@ -794,23 +794,31 @@
     return true;
   }
 
-  // Whether a later run took over an interrupted import's Resume. A
-  // resume marks ``tags_applied`` / ``chained`` on its own row, never on
-  // the parent's, so the parent's row alone still looks resumable after
-  // its resume finished; a second click would re-tag the photos and
-  // process them again. ``rows`` are finished history rows (the page's
-  // ``historyJobs``: a descendant always starts after its parent, so it is
-  // in the same newest-first window). Mirrors ``import_resume_takeover``
-  // in services/imports.py, which the server enforces with a 409; keep the
-  // two equivalent. ``by`` is the descendant to continue from, null while
-  // the parent itself is still the place to resume; ``kind`` is
-  // "done" (nothing left), "resume" (it was interrupted too) or "retry"
-  // (it applied the tags, then failed files).
+  function hasFailedImportFiles(result) {
+    return !!result && typeof result.failed === 'number' && result.failed > 0;
+  }
+
+  // Whether a later run took over an import's Resume (interrupted by a
+  // restart) or Retry (failed files). The run that continues it marks
+  // ``tags_applied`` / ``chained`` on its own row, never on the parent's,
+  // so the parent's row alone still offers its button after that run
+  // finished; a second click would process the photos again (and a
+  // Resume would re-tag them). ``rows`` are finished history rows (the
+  // page's ``historyJobs``: a descendant always starts after its parent,
+  // so it is in the same newest-first window). Mirrors
+  // ``import_resume_takeover`` in services/imports.py, which the server
+  // enforces with a 409; keep the two equivalent. ``by`` is the
+  // descendant to continue from, null while the parent itself is still
+  // the place to continue; ``kind`` is "done" (nothing left), "resume"
+  // (it was interrupted) or "retry" (it failed files after its tag pass).
   function importResumeTakeover(parent, rows) {
     var parentResult = parent && parent.result;
+    var parentInterrupted = !!(parentResult && parentResult.interrupted);
     if (!(parent && parent.type === 'import' && parentResult &&
-        parentResult.interrupted)) {
-      return {tagsApplied: false, chained: false, by: null, byStartedAt: null, kind: null};
+        (parentInterrupted || hasFailedImportFiles(parentResult)))) {
+      return {tagsApplied: !!(parentResult && parentResult.tags_applied),
+              chained: !!(parentResult && parentResult.chained),
+              by: null, byStartedAt: null, kind: null, parentInterrupted: false};
     }
     var children = {};
     var candidates = [];
@@ -862,19 +870,25 @@
       // After a failed import the chain step marks but skips processing.
       e.chained = chainStep && r.ok !== false;
       e.resumable = e.status === 'failed' && !!r.interrupted &&
-        Array.isArray(r.photo_ids) && !(tags && chainStep);
-      e.hasFailedFiles = typeof r.failed === 'number' && r.failed > 0;
+        Array.isArray(r.photo_ids) && !(tags && e.chained);
+      e.hasFailedFiles = hasFailedImportFiles(r);
     });
+    // What a Resume replays: the parent's marks plus what descendants paid.
     var tagsApplied = !!parentResult.tags_applied ||
       descendants.some(function(e) { return e.tagsApplied; });
     // The parent's chain step marks after a failed import too, but then
     // skips the collection and processing; apply the same ``ok`` filter
-    // to the parent's own mark as to a descendant's (above).
+    // to the parent's own mark as to a descendant's (above). That is also
+    // why a failed-files parent still owes processing to its Retry.
     var chained = (!!parentResult.chained && parentResult.ok !== false) ||
       descendants.some(function(e) { return e.chained; });
+    // A Retry of a parent that was not interrupted replays no tags.
+    var tagsPaid = tagsApplied || !parentInterrupted;
     var marked = descendants.filter(function(e) { return e.tagsApplied || e.chained; });
+    // Failing files after its tag pass makes a descendant's own Retry the
+    // next step; one cancelled or crashed before that did none of the work.
     var nextSteps = descendants.filter(function(e) {
-      return e.resumable || (tagsApplied && e.hasFailedFiles);
+      return e.resumable || (e.hasFailedFiles && e.tagsApplied);
     });
     function newest(entries) {
       return entries.reduce(function(best, e) {
@@ -883,7 +897,7 @@
     }
     var by = null;
     var kind = null;
-    if (marked.length && tagsApplied && chained) {
+    if (marked.length && tagsPaid && chained) {
       by = newest(marked);
       kind = 'done';
     } else if (nextSteps.length) {
@@ -891,7 +905,8 @@
       kind = by.resumable ? 'resume' : 'retry';
     }
     return {tagsApplied: tagsApplied, chained: chained, by: by ? by.id : null,
-            byStartedAt: by ? by.startedAt : null, kind: kind};
+            byStartedAt: by ? by.startedAt : null, kind: kind,
+            parentInterrupted: parentInterrupted};
   }
 
   function importTakeoverNote(takeover) {
@@ -899,13 +914,17 @@
     var which = when && !isNaN(when.getTime())
       ? 'the import started ' + when.toLocaleString()
       : 'a later import';
+    var resuming = takeover.parentInterrupted;
+    var lead = (resuming ? 'Already resumed by ' : 'Already retried by ') + which;
     if (takeover.kind === 'done') {
-      return 'Already resumed by ' + which + ', which finished the work this import owed. Nothing is left to resume.';
+      return lead + ', which finished the work this import owed. Nothing is left to ' +
+        (resuming ? 'resume.' : 'retry.');
     }
     if (takeover.kind === 'resume') {
-      return 'Already resumed by ' + which + ', which was interrupted too. Resume that import instead; it carries these photos.';
+      return lead + ', which was interrupted' + (resuming ? ' too' : '') +
+        '. Resume that import instead; it carries these photos.';
     }
-    return 'Already resumed by ' + which + ', which had files fail. Retry them from that import instead; it carries these photos.';
+    return lead + ', which had files fail. Retry them from that import instead; it carries these photos.';
   }
 
   function importResumeHint(job) {
@@ -1105,8 +1124,9 @@
     html += renderSourceCleanup(job);
 
     var failedImportCount = job.result && Number(job.result.failed || 0);
-    // Once a resume took over, the server refuses both Resume and Retry on
-    // this row (409), so neither is offered; say where to go instead.
+    // Once a later resume or retry took over, the server refuses both
+    // Resume and Retry on this row (409), so neither is offered; say where
+    // to go instead.
     var resumeTakeover = importResumeTakeover(job, historyJobs);
     var resumableImport = isResumableImport(job) && !resumeTakeover.by;
     if (!isLive && (failedImportCount > 0 || resumableImport || resumeTakeover.by) &&

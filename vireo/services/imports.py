@@ -136,40 +136,62 @@ def _json_dict(value):
     return value if isinstance(value, dict) else {}
 
 
-def import_resume_takeover(parent_id, parent_result, rows):
-    """Whether a later run took over an interrupted import's Resume.
+def _has_failed_files(result):
+    failed = result.get("failed")
+    return (
+        isinstance(failed, (int, float)) and not isinstance(failed, bool)
+        and failed > 0
+    )
 
-    An interrupted import owes two post-import steps: the tag/GPS pass
-    (``tags_applied``) and the chain that records its collection and
-    queues processing (``chained``). A resume does both and marks each on
-    its own row, never on the parent's, so the parent's row alone cannot
-    tell that it was already resumed. This reads the parent's descendants
-    in ``rows`` (finished ``job_history`` import rows): those naming it as
+
+def import_resume_takeover(parent_id, parent_result, rows):
+    """Whether a later run took over an import's Resume or Retry.
+
+    Two rows offer to continue an import: one a Vireo restart interrupted
+    (Resume) and one that failed files (Retry). An interrupted import owes
+    the tag/GPS pass (``tags_applied``) and the chain that records its
+    collection and queues processing (``chained``); a failed one skipped
+    processing, so it owes the chain over its photos plus the failed
+    files. The run that continues it marks each step on its own row, never
+    on the parent's, so the parent's row alone cannot tell it was already
+    resumed or retried. This reads the parent's descendants in ``rows``
+    (finished ``job_history`` import rows): those naming it as
     ``root_import_job_id`` or reaching it through ``parent_import_job_id``
     links. Each run's scope is cumulative (carried ids, untagged ids and
     landed files are inherited), so a descendant's marks discharge the
     parent's debts too.
 
-    Returns ``{"tags_applied", "chained", "by", "by_started_at", "kind"}``.
-    The marks are the parent's own merged with what its descendants did.
-    ``by`` is the descendant that took the Resume over, or None while the
-    parent is still the place to resume from:
+    Returns ``{"tags_applied", "chained", "by", "by_started_at", "kind",
+    "parent_interrupted"}``. The marks are the parent's own merged with
+    what its descendants did, for a Resume to replay only what's owed.
+    ``by`` is the descendant that took over, or None while the parent is
+    still the place to continue from (always None for a row offering
+    neither):
 
     * ``"done"``: descendants did the owed work, so with the parent's own
-      marks nothing is left. Resuming again would re-tag the photos
+      marks nothing is left. Going again would re-tag the photos
       (overwriting locations corrected since) and process them twice.
     * ``"resume"`` / ``"retry"``: a descendant is the next step. Either it
       was itself interrupted with its landed photos recorded (resume it;
-      it carries the parent's scope), or the tags are paid and it failed
-      files, so its own Retry carries the parent's photos to processing.
-      Resuming the parent as well would fork the chain and redo work.
+      it carries the parent's scope), or it failed files after its tag
+      pass, so its own Retry carries the parent's photos to processing.
+      Continuing from the parent as well would fork the chain.
 
-    A descendant that failed or was cancelled before doing any of the work
-    leaves the parent resumable, replaying only the steps still owed.
+    A descendant that crashed or was cancelled before its tag pass did
+    none of the work and leaves the parent as the place to continue from.
     Mirrored by ``importResumeTakeover`` in ``templates/jobs.html``; keep
     the two equivalent.
     """
     parent_result = _json_dict(parent_result)
+    parent_interrupted = bool(parent_result.get("interrupted"))
+    if not (parent_interrupted or _has_failed_files(parent_result)):
+        # Neither Resume nor Retry applies to this row.
+        return {
+            "tags_applied": bool(parent_result.get("tags_applied")),
+            "chained": bool(parent_result.get("chained")),
+            "by": None, "by_started_at": None, "kind": None,
+            "parent_interrupted": False,
+        }
     children = {}
     candidates = []
     for row in rows or []:
@@ -230,14 +252,12 @@ def import_resume_takeover(parent_id, parent_result, rows):
             e["status"] == "failed"
             and bool(result.get("interrupted"))
             and isinstance(result.get("photo_ids"), list)
-            and not (tags and chain_step)
+            and not (tags and e["chained"])
         )
-        failed = result.get("failed")
-        e["has_failed_files"] = (
-            isinstance(failed, (int, float)) and not isinstance(failed, bool)
-            and failed > 0
-        )
+        e["has_failed_files"] = _has_failed_files(result)
 
+    # What a Resume of the parent replays: its own marks plus what
+    # descendants paid (``_interrupted_parent_resume``).
     tags_applied = bool(parent_result.get("tags_applied")) or any(
         e["tags_applied"] for e in descendants
     )
@@ -245,24 +265,30 @@ def import_resume_takeover(parent_id, parent_result, rows):
     # skips the collection and processing; apply the same ``ok`` filter to
     # the parent's own mark as to a descendant's (above) so a crash between
     # that checkpoint and the terminal row can't make the resume believe
-    # the chain already ran and skip processing on recovery.
+    # the chain already ran and skip processing on recovery. That is also
+    # why a failed-files parent still owes processing to its Retry.
     chained = (
         bool(parent_result.get("chained"))
         and parent_result.get("ok") is not False
     ) or any(e["chained"] for e in descendants)
+    # A Retry of a parent that was not interrupted replays no tags, so only
+    # processing is owed there.
+    tags_paid = tags_applied or not parent_interrupted
     marked = [e for e in descendants if e["tags_applied"] or e["chained"]]
-    # A plain Retry replays no owed tags, so a descendant's Retry is the
-    # next step only once the tags are paid.
+    # A descendant that failed files after its tag pass offers its own
+    # Retry, which carries the parent's photos to processing. One that was
+    # cancelled or crashed before its tag pass did none of the work, so
+    # the parent stays the place to continue from.
     next_steps = [
         e for e in descendants
-        if e["resumable"] or (tags_applied and e["has_failed_files"])
+        if e["resumable"] or (e["has_failed_files"] and e["tags_applied"])
     ]
 
     def newest(entries):
         return max(entries, key=lambda e: e["started_at"])
 
     by, kind = None, None
-    if marked and tags_applied and chained:
+    if marked and tags_paid and chained:
         by, kind = newest(marked), "done"
     elif next_steps:
         by = newest(next_steps)
@@ -273,6 +299,7 @@ def import_resume_takeover(parent_id, parent_result, rows):
         "by": by["id"] if by else None,
         "by_started_at": by["started_at"] if by else None,
         "kind": kind,
+        "parent_interrupted": parent_interrupted,
     }
 
 
@@ -946,7 +973,7 @@ class ImportService:
         if not isinstance(parent_source_snapshots, dict):
             parent_source_snapshots = None
         takeover = None
-        if parent_result.get("interrupted"):
+        if parent_result.get("interrupted") or _has_failed_files(parent_result):
             takeover = import_resume_takeover(
                 parent_id, parent_result,
                 self._import_resume_rows(
@@ -957,9 +984,13 @@ class ImportService:
                 return None, None, None, None, None, ImportFailure(
                     self._resume_takeover_message(takeover), 409,
                     details={
-                        "code": "import_already_resumed",
-                        "resumed_by_job_id": takeover["by"],
-                        "resume_takeover": takeover["kind"],
+                        "code": (
+                            "import_already_resumed"
+                            if takeover["parent_interrupted"]
+                            else "import_already_retried"
+                        ),
+                        "taken_over_by_job_id": takeover["by"],
+                        "takeover": takeover["kind"],
                     },
                 )
         parent_resume = self._interrupted_parent_resume(
@@ -1057,21 +1088,34 @@ class ImportService:
             f"the import started {started} (job {takeover['by']})"
             if started else f"job {takeover['by']}"
         )
+        if takeover["parent_interrupted"]:
+            verb, step, again, also = (
+                "resumed", "resume",
+                "Resuming again would tag and process the same photos a "
+                "second time.",
+                " too",
+            )
+        else:
+            verb, step, again, also = (
+                "retried", "retry",
+                "Retrying again would process the same photos a second "
+                "time.",
+                "",
+            )
         if takeover["kind"] == "done":
             return (
-                f"This import was already resumed by {which}, which "
+                f"This import was already {verb} by {which}, which "
                 "finished the work it owed, so there is nothing left to "
-                "resume. Resuming again would tag and process the same "
-                "photos a second time."
+                f"{step}. {again}"
             )
         if takeover["kind"] == "resume":
             return (
-                f"This import was already resumed by {which}, and that "
-                "run was interrupted too. Resume that import from the Jobs "
-                "page instead; it carries this import's photos."
+                f"This import was already {verb} by {which}, and that "
+                f"run was interrupted{also}. Resume that import from the "
+                "Jobs page instead; it carries this import's photos."
             )
         return (
-            f"This import was already resumed by {which}, which had "
+            f"This import was already {verb} by {which}, which had "
             "files fail. Retry its failed files from the Jobs page "
             "instead; that retry carries this import's photos."
         )

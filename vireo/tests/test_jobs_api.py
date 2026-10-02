@@ -11966,8 +11966,8 @@ def test_resume_refuses_a_parent_its_finished_resume_took_over(
         assert resp.status_code == 409, resp.get_json()
         body = resp.get_json()
         assert body["code"] == "import_already_resumed"
-        assert body["resumed_by_job_id"] == resume_id
-        assert body["resume_takeover"] == "done"
+        assert body["taken_over_by_job_id"] == resume_id
+        assert body["takeover"] == "done"
         assert "already resumed" in body["error"]
         assert "nothing left to resume" in body["error"]
         assert len(app._job_runner.list_jobs()) == jobs_before
@@ -12013,8 +12013,8 @@ def test_resume_of_a_parent_whose_resume_was_interrupted_goes_through_it(
         )
         assert resp.status_code == 409, resp.get_json()
         body = resp.get_json()
-        assert body["resumed_by_job_id"] == resume_id
-        assert body["resume_takeover"] == "resume"
+        assert body["taken_over_by_job_id"] == resume_id
+        assert body["takeover"] == "resume"
         assert "Resume that import" in body["error"]
 
         # The interrupted resume still resumes, and pays the parent's tags.
@@ -12058,6 +12058,151 @@ def test_resume_stays_available_when_the_resume_failed_before_any_work(
         assert resp.status_code == 200, resp.get_json()
         wait_for_job_via_client(client, resp.get_json()["job_id"])
         assert _tagged_count(db, own) == len(own)
+
+
+def _import_with_failed_files(client, tmp_path, monkeypatch):
+    """Run an import whose run reports one failed file (so its row offers
+    Retry); return ``(parent_id, its result, the retry body)``. Later runs
+    are real."""
+    import import_job
+
+    run_import = import_job.run_import_job
+
+    def one_failed(*args, **kwargs):
+        result = run_import(*args, **kwargs)
+        result.update(failed=1, ok=False)
+        return result
+
+    monkeypatch.setattr(import_job, "run_import_job", one_failed)
+    card = _chain_card(tmp_path)
+    body = {
+        "sources": [str(card)],
+        "destination": str(tmp_path / "arch"),
+        "skip_duplicates": True,
+    }
+    resp = client.post("/api/jobs/import-photos", json=body)
+    assert resp.status_code == 200, resp.get_json()
+    parent_id = resp.get_json()["job_id"]
+    parent = wait_for_job_via_client(
+        client, parent_id, wait_for_history=True)
+    assert parent["status"] == "failed"
+    result = parent["result"]
+    assert result["failed"] == 1
+    assert result.get("process_job_id") is None
+    monkeypatch.setattr(import_job, "run_import_job", run_import)
+    # The body the Jobs page's importRetryBody builds for this row.
+    retry_body = {
+        **body,
+        "after_import": parent["config"]["after_import"],
+        "parent_import_job_id": parent_id,
+        "carry_photo_ids": result["photo_ids"],
+    }
+    return parent_id, result, retry_body
+
+
+def test_retry_refuses_a_failed_import_its_finished_retry_took_over(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """The failed row never changes after its retry succeeds, so "Retry 1
+    failed file" stayed offered, and a second click made another
+    collection and processing run over the same photos. It must be
+    refused, pointing at the retry that finished the work."""
+    app, db = app_and_db
+    with app.test_client() as client:
+        parent_id, parent, retry_body = _import_with_failed_files(
+            client, tmp_path, monkeypatch)
+
+        resp = client.post("/api/jobs/import-photos", json=retry_body)
+        assert resp.status_code == 200, resp.get_json()
+        retry_id = resp.get_json()["job_id"]
+        retried = wait_for_job_via_client(
+            client, retry_id, wait_for_history=True)
+        assert retried["status"] == "completed", retried
+        assert retried["result"]["chained"] is True
+        if retried["result"].get("process_job_id"):
+            wait_for_job_via_client(
+                client, retried["result"]["process_job_id"],
+                wait_for_history=True)
+
+        collections = db.conn.execute(
+            "SELECT COUNT(*) FROM collections").fetchone()[0]
+        jobs_before = len(app._job_runner.list_jobs())
+        resp = client.post("/api/jobs/import-photos", json=retry_body)
+        assert resp.status_code == 409, resp.get_json()
+        body = resp.get_json()
+        assert body["code"] == "import_already_retried"
+        assert body["taken_over_by_job_id"] == retry_id
+        assert body["takeover"] == "done"
+        assert "already retried" in body["error"]
+        assert "nothing left to retry" in body["error"]
+        assert len(app._job_runner.list_jobs()) == jobs_before
+        assert db.conn.execute(
+            "SELECT COUNT(*) FROM collections").fetchone()[0] == collections
+
+
+def test_retry_of_a_failed_import_goes_through_a_retry_that_failed_too(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """A retry that failed files of its own offers its own Retry, which
+    carries the original's photos; the original points there. A retry that
+    crashed before doing anything leaves the original retryable."""
+    import import_job
+
+    app, db = app_and_db
+    with app.test_client() as client:
+        parent_id, parent, retry_body = _import_with_failed_files(
+            client, tmp_path, monkeypatch)
+
+        # A retry that crashed before its tag pass: the original stays
+        # the place to retry from.
+        db.conn.execute(
+            "INSERT INTO job_history "
+            "(id, type, status, started_at, config, result, workspace_id) "
+            "VALUES (?, 'import', 'failed', ?, ?, ?, ?)",
+            (
+                f"crashed-retry-{parent_id}",
+                "2999-01-01T00:00:00",
+                json.dumps({
+                    "parent_import_job_id": parent_id,
+                    "root_import_job_id": parent_id,
+                }),
+                json.dumps({"error": "disk vanished"}),
+                db._active_workspace_id,
+            ),
+        )
+        db.conn.commit()
+
+        run_import = import_job.run_import_job
+
+        def one_failed(*args, **kwargs):
+            result = run_import(*args, **kwargs)
+            result.update(failed=1, ok=False)
+            return result
+
+        monkeypatch.setattr(import_job, "run_import_job", one_failed)
+        resp = client.post("/api/jobs/import-photos", json=retry_body)
+        assert resp.status_code == 200, resp.get_json()
+        retry_id = resp.get_json()["job_id"]
+        retried = wait_for_job_via_client(
+            client, retry_id, wait_for_history=True)
+        assert retried["status"] == "failed"
+        monkeypatch.setattr(import_job, "run_import_job", run_import)
+
+        resp = client.post("/api/jobs/import-photos", json=retry_body)
+        assert resp.status_code == 409, resp.get_json()
+        body = resp.get_json()
+        assert body["taken_over_by_job_id"] == retry_id
+        assert body["takeover"] == "retry"
+        assert "Retry its failed files" in body["error"]
+
+        # The failed retry's own Retry still goes through.
+        resp = client.post("/api/jobs/import-photos", json={
+            **retry_body,
+            "parent_import_job_id": retry_id,
+            "carry_photo_ids": parent["photo_ids"],
+        })
+        assert resp.status_code == 200, resp.get_json()
+        wait_for_job_via_client(client, resp.get_json()["job_id"])
 
 
 def test_resume_replays_tags_when_chain_ran_but_tags_owed(
