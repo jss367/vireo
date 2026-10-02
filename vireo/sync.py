@@ -670,54 +670,129 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
     if not changes:
         return _sync_result(0, [])
 
-    by_photo = defaultdict(list)
-    for c in changes:
-        by_photo[c["photo_id"]].append(c)
-
-    sync_flags = _sync_flags_to_xmp_enabled(db)
-    sync_locations = _write_assigned_location_to_xmp_enabled(db)
-    # Tri-state so a config read failure ("unknown") is not treated as an
-    # explicit off -- cleanup would otherwise strip the marker on every
-    # queued location change and clear the pending row, stranding the
-    # sidecars until manual backfill. See _plan_photo_sync.
-    sync_location_keywords_state = _write_location_keywords_to_xmp_state(db)
-    sync_location_keywords = sync_location_keywords_state == "on"
-
+    run = _XmpSyncRun(
+        db, changes,
+        progress_callback=progress_callback,
+        status_callback=status_callback,
+        create_missing_sidecars=create_missing_sidecars,
+        folder_paths=folder_paths,
+        require_workspace_membership=require_workspace_membership,
+    )
     # Everything that needs the database happens here, on the caller's
     # thread: the sidecar writers below run on a pool and must not touch the
     # connection.
-    xmp_paths = _resolve_xmp_paths(db, list(by_photo), folder_paths=folder_paths)
-    prepare_failures = {}
-    plans = {}
-    folder_accessible = {}
-    for photo_id, photo_changes in by_photo.items():
-        xmp_path = xmp_paths.get(photo_id)
+    run.plan_photos()
+    run.load_location_paths()
+    run.load_assigned_locations()
+    run.resolve_sidecar_targets()
+    run.group_by_sidecar()
+    run.plan_sidecar_writes()
+    run.write_sidecars()
+
+    failures = run.failures_in_queue_order()
+    log.info("Sync complete: %d synced, %d failed", run.synced, len(failures))
+    return _sync_result(run.synced, failures)
+
+
+def _exception_failure(photo_id, error):
+    return {
+        "photo_id": photo_id,
+        "error": str(error),
+        "reason": _failure_reason(error),
+    }
+
+
+class _XmpSyncRun:
+    """One ``sync_to_xmp`` pass over the claimed pending changes."""
+
+    def __init__(
+        self, db, changes, *,
+        progress_callback, status_callback, create_missing_sidecars,
+        folder_paths, require_workspace_membership,
+    ):
+        self.db = db
+        self.changes = changes
+        self.progress_callback = progress_callback
+        self.status_callback = status_callback
+        self.create_missing_sidecars = create_missing_sidecars
+        self.folder_paths = folder_paths
+        self.require_workspace_membership = require_workspace_membership
+
+        self.by_photo = defaultdict(list)
+        for c in changes:
+            self.by_photo[c["photo_id"]].append(c)
+
+        self.sync_flags = _sync_flags_to_xmp_enabled(db)
+        self.sync_locations = _write_assigned_location_to_xmp_enabled(db)
+        # Tri-state so a config read failure ("unknown") is not treated as an
+        # explicit off -- cleanup would otherwise strip the marker on every
+        # queued location change and clear the pending row, stranding the
+        # sidecars until manual backfill. See _plan_photo_sync.
+        self.sync_location_keywords_state = _write_location_keywords_to_xmp_state(db)
+        self.sync_location_keywords = self.sync_location_keywords_state == "on"
+
+        self.xmp_paths = {}
+        self.prepare_failures = {}
+        self.plans = {}
+        self.folder_accessible = {}
+        self.location_paths = {}
+        self.locations = {}
+        self.accessible_photos = []
+        self.resolved_paths = {}
+        self.resolve_errors = {}
+        self.by_sidecar = defaultdict(list)
+        self.sidecar_for_photo = {}
+        self.write_steps = {}
+
+        self.results = {}
+        self.total = 0
+        self.completed = 0
+        self.synced = 0
+        self.failed = 0
+        self.synced_tokens = []
+        self.synced_legacy_ids = []
+        self.checkpoint = 0
+        self.last_checkpoint = None
+
+    # -- preparation (caller's thread) -------------------------------
+
+    def plan_photos(self):
+        self.xmp_paths = _resolve_xmp_paths(
+            self.db, list(self.by_photo), folder_paths=self.folder_paths,
+        )
+        for photo_id, photo_changes in self.by_photo.items():
+            self._plan_photo(photo_id, photo_changes)
+
+        _plan_merged_keyword_hierarchies(self.db, self.plans)
+
+    def _plan_photo(self, photo_id, photo_changes):
+        xmp_path = self.xmp_paths.get(photo_id)
         if not xmp_path:
-            prepare_failures[photo_id] = {
+            self.prepare_failures[photo_id] = {
                 "photo_id": photo_id, "error": "photo not found in DB",
             }
-            continue
+            return
 
         # Check if the folder exists (NAS might be offline). Cache the answer
         # per folder: on a slow or offline mount this is a network round trip,
         # and a folder holds thousands of photos.
         folder = os.path.dirname(xmp_path)
-        if folder not in folder_accessible:
-            folder_accessible[folder] = os.path.isdir(folder)
-        if not folder_accessible[folder]:
-            prepare_failures[photo_id] = {
+        if folder not in self.folder_accessible:
+            self.folder_accessible[folder] = os.path.isdir(folder)
+        if not self.folder_accessible[folder]:
+            self.prepare_failures[photo_id] = {
                 "photo_id": photo_id,
                 "error": f"folder not accessible: {folder}",
                 # Strip the per-folder path so many photos on an offline NAS
                 # summarise as one cause instead of one per subfolder.
                 "reason": "folder not accessible",
             }
-            continue
+            return
 
         try:
-            plans[photo_id] = _plan_photo_sync(
-                photo_changes, sync_flags, sync_locations,
-                sync_location_keywords_state,
+            self.plans[photo_id] = _plan_photo_sync(
+                photo_changes, self.sync_flags, self.sync_locations,
+                self.sync_location_keywords_state,
             )
         except Exception as e:
             log.warning("Could not plan XMP sync for photo %s", photo_id, exc_info=True)
@@ -725,36 +800,31 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
             # integer, which the schema permits -- must fail its own photo, as
             # it did when planning ran inside the per-photo try, rather than
             # abort every other photo's write.
-            prepare_failures[photo_id] = {
-                "photo_id": photo_id,
-                "error": str(e),
-                "reason": _failure_reason(e),
-            }
+            self.prepare_failures[photo_id] = _exception_failure(photo_id, e)
 
-    _plan_merged_keyword_hierarchies(db, plans)
+    def load_location_paths(self):
+        # Names, unlike coordinates, come out of one batched query: a shoot
+        # shares a place, and a 38,000-photo backfill cannot afford a chain walk
+        # per photo. No workspace check here -- ``get_pending_changes`` is already
+        # workspace-scoped, and the sidecar path these names are written to was
+        # resolved under the same membership and sync-only rules above.
+        if self.sync_location_keywords:
+            keyword_photo_ids = [
+                photo_id for photo_id, plan in self.plans.items()
+                if plan.sync_location_keywords
+            ]
+            self.location_paths = self.db.get_photo_location_paths(keyword_photo_ids)
 
-    # Names, unlike coordinates, come out of one batched query: a shoot
-    # shares a place, and a 38,000-photo backfill cannot afford a chain walk
-    # per photo. No workspace check here -- ``get_pending_changes`` is already
-    # workspace-scoped, and the sidecar path these names are written to was
-    # resolved under the same membership and sync-only rules above.
-    location_paths = {}
-    if sync_location_keywords:
-        keyword_photo_ids = [
-            photo_id for photo_id, plan in plans.items()
-            if plan.sync_location_keywords
-        ]
-        location_paths = db.get_photo_location_paths(keyword_photo_ids)
-
-    locations = {}
-    if sync_locations:
-        for photo_id, plan in list(plans.items()):
+    def load_assigned_locations(self):
+        if not self.sync_locations:
+            return
+        for photo_id, plan in list(self.plans.items()):
             if not plan.sync_location:
                 continue
             try:
-                locations[photo_id] = db.get_assigned_photo_location(
+                self.locations[photo_id] = self.db.get_assigned_photo_location(
                     photo_id,
-                    verify_workspace=require_workspace_membership,
+                    verify_workspace=self.require_workspace_membership,
                     # A sync-only grant authorizes writing this sidecar;
                     # the path map above already honors it, and the
                     # membership test here would otherwise refuse the same
@@ -766,68 +836,68 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
                 # Historically this lookup ran inside the per-photo try, so a
                 # photo the workspace can no longer see failed alone rather
                 # than aborting the run.
-                del plans[photo_id]
-                prepare_failures[photo_id] = {
-                    "photo_id": photo_id,
-                    "error": str(e),
-                    "reason": _failure_reason(e),
-                }
+                del self.plans[photo_id]
+                self.prepare_failures[photo_id] = _exception_failure(photo_id, e)
 
-    # Resolve targets on the pool before scheduling writes. A sidecar symlink
-    # can join different basenames; a lock alone serialized those aliases in
-    # arbitrary worker order. Grouping by the full target preserves queue order
-    # for them too. Keep each original write path: case-folding may conservatively
-    # group distinct files on a case-sensitive volume, which must stay distinct.
-    accessible_photos = [
-        pid for pid in by_photo
-        if (path := xmp_paths.get(pid)) and folder_accessible.get(os.path.dirname(path))
-    ]
-    paths = list(dict.fromkeys(xmp_paths[pid] for pid in accessible_photos))
-    resolved_paths = {}
-    resolve_errors = {}
-    if paths:
-        with ThreadPoolExecutor(max_workers=min(_SYNC_MAX_WORKERS, len(paths))) as pool:
-            futures = {pool.submit(os.path.realpath, path): path for path in paths}
-            for future in as_completed(futures):
-                path = futures[future]
-                try:
-                    resolved_paths[path] = future.result()
-                except (OSError, ValueError) as error:
-                    resolve_errors[path] = error
-    # Keep conservative aliases on one worker, including preparation failures.
-    # Their identity may only become clear after a sibling creates its sidecar.
-    by_sidecar = defaultdict(list)
-    sidecar_for_photo = {}
-    for photo_id in accessible_photos:
-        path = xmp_paths[photo_id]
-        if path in resolve_errors:
-            error = resolve_errors[path]
-            prepare_failures[photo_id] = {
-                "photo_id": photo_id, "error": str(error), "reason": _failure_reason(error),
-            }
-            plans.pop(photo_id, None)
-            continue
-        canonical_key = os.path.normcase(resolved_paths[path]).casefold()
-        by_sidecar[canonical_key].append(photo_id)
-        sidecar_for_photo[photo_id] = canonical_key
+    def resolve_sidecar_targets(self):
+        """Resolve targets on the pool before scheduling writes.
 
-    shared_changes = defaultdict(list)
-    for change in changes:
-        key = sidecar_for_photo.get(change["photo_id"])
-        if key is not None and len(by_sidecar[key]) > 1 and change["photo_id"] in plans:
-            shared_changes[key].append(change)
-    write_steps = {}
-    for key, photo_ids in by_sidecar.items():
-        if len(photo_ids) == 1:
-            pid = photo_ids[0]
-            write_steps[key] = [(pid, plans[pid])] if pid in plans else []
-        else:
-            write_steps[key] = _ordered_sidecar_steps(
-                db, shared_changes[key], sync_flags, sync_locations,
-                sync_location_keywords_state,
-            )
+        A sidecar symlink can join different basenames; a lock alone
+        serialized those aliases in arbitrary worker order. Grouping by the
+        full target preserves queue order for them too. Keep each original
+        write path: case-folding may conservatively group distinct files on a
+        case-sensitive volume, which must stay distinct.
+        """
+        xmp_paths = self.xmp_paths
+        self.accessible_photos = [
+            pid for pid in self.by_photo
+            if (path := xmp_paths.get(pid)) and self.folder_accessible.get(os.path.dirname(path))
+        ]
+        paths = list(dict.fromkeys(xmp_paths[pid] for pid in self.accessible_photos))
+        if paths:
+            with ThreadPoolExecutor(max_workers=min(_SYNC_MAX_WORKERS, len(paths))) as pool:
+                futures = {pool.submit(os.path.realpath, path): path for path in paths}
+                for future in as_completed(futures):
+                    path = futures[future]
+                    try:
+                        self.resolved_paths[path] = future.result()
+                    except (OSError, ValueError) as error:
+                        self.resolve_errors[path] = error
 
-    def write_sidecar_group(canonical_key):
+    def group_by_sidecar(self):
+        # Keep conservative aliases on one worker, including preparation failures.
+        # Their identity may only become clear after a sibling creates its sidecar.
+        for photo_id in self.accessible_photos:
+            path = self.xmp_paths[photo_id]
+            if path in self.resolve_errors:
+                error = self.resolve_errors[path]
+                self.prepare_failures[photo_id] = _exception_failure(photo_id, error)
+                self.plans.pop(photo_id, None)
+                continue
+            canonical_key = os.path.normcase(self.resolved_paths[path]).casefold()
+            self.by_sidecar[canonical_key].append(photo_id)
+            self.sidecar_for_photo[photo_id] = canonical_key
+
+    def plan_sidecar_writes(self):
+        shared_changes = defaultdict(list)
+        for change in self.changes:
+            key = self.sidecar_for_photo.get(change["photo_id"])
+            if (key is not None and len(self.by_sidecar[key]) > 1
+                    and change["photo_id"] in self.plans):
+                shared_changes[key].append(change)
+        for key, photo_ids in self.by_sidecar.items():
+            if len(photo_ids) == 1:
+                pid = photo_ids[0]
+                self.write_steps[key] = [(pid, self.plans[pid])] if pid in self.plans else []
+            else:
+                self.write_steps[key] = _ordered_sidecar_steps(
+                    self.db, shared_changes[key], self.sync_flags, self.sync_locations,
+                    self.sync_location_keywords_state,
+                )
+
+    # -- writes (pool workers) ---------------------------------------
+
+    def _write_sidecar_group(self, canonical_key):
         """Attempt ordered writes, then couple failures by the resulting files.
 
         Never stop a conservative alias group at its first failure: another
@@ -837,17 +907,19 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
         case-insensitive storage. The latter must retain its entire sequence
         for retry, including any preparation failures.
         """
-        photo_ids = by_sidecar[canonical_key]
+        xmp_paths = self.xmp_paths
+        resolved_paths = self.resolved_paths
+        photo_ids = self.by_sidecar[canonical_key]
         errors = {
-            pid: RuntimeError(prepare_failures[pid]["error"])
-            for pid in photo_ids if pid in prepare_failures
+            pid: RuntimeError(self.prepare_failures[pid]["error"])
+            for pid in photo_ids if pid in self.prepare_failures
         }
-        for photo_id, plan in write_steps[canonical_key]:
+        for photo_id, plan in self.write_steps[canonical_key]:
             try:
                 _write_photo_sync(
-                    xmp_paths[photo_id], plan, locations.get(photo_id),
-                    location_paths.get(photo_id),
-                    create_missing_sidecars=create_missing_sidecars,
+                    xmp_paths[photo_id], plan, self.locations.get(photo_id),
+                    self.location_paths.get(photo_id),
+                    create_missing_sidecars=self.create_missing_sidecars,
                 )
             except Exception as e:
                 log.warning("XMP sidecar write failed for photo %s", photo_id, exc_info=True)
@@ -865,105 +937,102 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
             for pid in photo_ids
         }
 
-    results = {}
-    total = len(by_photo)
-    completed = len(prepare_failures.keys() - sidecar_for_photo.keys())
-    synced = 0
-    failed = completed
-    synced_tokens = []
-    synced_legacy_ids = []
-    checkpoint = 0
-    last_checkpoint = time.monotonic()
+    # -- completion (caller's thread) --------------------------------
 
-    def flush_completed():
-        nonlocal checkpoint, last_checkpoint
-        if not synced_tokens and not synced_legacy_ids:
+    def write_sidecars(self):
+        self.total = len(self.by_photo)
+        self.completed = len(self.prepare_failures.keys() - self.sidecar_for_photo.keys())
+        self.failed = self.completed
+        self.last_checkpoint = time.monotonic()
+
+        self._report_progress()
+        if self.by_sidecar:
+            workers = min(_SYNC_MAX_WORKERS, len(self.by_sidecar))
+            with ThreadPoolExecutor(
+                max_workers=workers, thread_name_prefix="xmp-sync",
+            ) as pool:
+                futures = [pool.submit(self._write_sidecar_group, p) for p in self.by_sidecar]
+                for future in as_completed(futures):
+                    self._record_outcomes(future.result())
+                    # Never checkpoint a partially completed sidecar group.
+                    if (len(self.synced_tokens) + len(self.synced_legacy_ids)
+                            >= _SYNC_CHECKPOINT_CHANGES
+                            or time.monotonic() - self.last_checkpoint
+                            >= _SYNC_CHECKPOINT_SECONDS):
+                        self._flush_completed()
+                    self._report_progress()
+
+        self._flush_completed()
+        self._report_progress()
+
+    def _record_outcomes(self, outcomes):
+        self.results.update(outcomes)
+        self.completed += len(outcomes)
+        for photo_id, error in outcomes.items():
+            if error is not None:
+                self.failed += 1
+                continue
+            plan = self.plans[photo_id]
+            if plan.unsupported_changes:
+                self.failed += 1
+            if plan.supported_changes:
+                self.synced += 1
+                for change_id, token in plan.supported_changes:
+                    if token:
+                        self.synced_tokens.append(token)
+                    else:
+                        self.synced_legacy_ids.append(change_id)
+
+    def _flush_completed(self):
+        if not self.synced_tokens and not self.synced_legacy_ids:
             return
         # Immutable tokens protect edits replaced while the write was in flight.
-        if synced_tokens:
-            db.clear_pending_by_token(
-                synced_tokens, clear_equivalent_flat_removals=True,
+        if self.synced_tokens:
+            self.db.clear_pending_by_token(
+                self.synced_tokens, clear_equivalent_flat_removals=True,
             )
-            synced_tokens.clear()
-        if synced_legacy_ids:
+            self.synced_tokens.clear()
+        if self.synced_legacy_ids:
             # A legacy rowid may now name a newly queued, tokened edit.
-            db.clear_pending(
-                synced_legacy_ids, expected_tokens=[None] * len(synced_legacy_ids),
+            self.db.clear_pending(
+                self.synced_legacy_ids,
+                expected_tokens=[None] * len(self.synced_legacy_ids),
                 clear_equivalent_flat_removals=True,
             )
-            synced_legacy_ids.clear()
-        checkpoint += 1
-        last_checkpoint = time.monotonic()
+            self.synced_legacy_ids.clear()
+        self.checkpoint += 1
+        self.last_checkpoint = time.monotonic()
 
-    def report_progress():
-        if status_callback:
-            status_callback({
-                "current": completed, "total": total, "synced": synced,
-                "failed": failed, "checkpoint": checkpoint,
+    def _report_progress(self):
+        if self.status_callback:
+            self.status_callback({
+                "current": self.completed, "total": self.total, "synced": self.synced,
+                "failed": self.failed, "checkpoint": self.checkpoint,
             })
-        if progress_callback:
-            progress_callback(completed, total)
+        if self.progress_callback:
+            self.progress_callback(self.completed, self.total)
 
-    report_progress()
-    if by_sidecar:
-        workers = min(_SYNC_MAX_WORKERS, len(by_sidecar))
-        with ThreadPoolExecutor(
-            max_workers=workers, thread_name_prefix="xmp-sync",
-        ) as pool:
-            futures = [pool.submit(write_sidecar_group, p) for p in by_sidecar]
-            for future in as_completed(futures):
-                outcomes = future.result()
-                results.update(outcomes)
-                completed += len(outcomes)
-                for photo_id, error in outcomes.items():
-                    if error is not None:
-                        failed += 1
-                        continue
-                    plan = plans[photo_id]
-                    if plan.unsupported_changes:
-                        failed += 1
-                    if plan.supported_changes:
-                        synced += 1
-                        for change_id, token in plan.supported_changes:
-                            if token:
-                                synced_tokens.append(token)
-                            else:
-                                synced_legacy_ids.append(change_id)
-                # Never checkpoint a partially completed sidecar group.
-                if (len(synced_tokens) + len(synced_legacy_ids) >= _SYNC_CHECKPOINT_CHANGES
-                        or time.monotonic() - last_checkpoint >= _SYNC_CHECKPOINT_SECONDS):
-                    flush_completed()
-                report_progress()
-
-    flush_completed()
-    report_progress()
-
-    # Report failures in queue order regardless of worker completion order.
-    failures = []
-    for photo_id in by_photo:
-        if photo_id in prepare_failures:
-            failures.append(prepare_failures[photo_id])
-        plan = plans.get(photo_id)
-        if plan is None:
-            continue
-        error = results.get(photo_id)
-        if error is not None:
-            failures.append({
-                "photo_id": photo_id,
-                "error": str(error),
-                "reason": _failure_reason(error),
-            })
-            log.warning("Failed to sync photo %d: %s", photo_id, error)
-            continue
-        for c in plan.unsupported_changes:
-            failures.append({
-                "photo_id": photo_id,
-                "change_id": c["id"],
-                "error": f"unsupported change type: {c['change_type']}",
-            })
-
-    log.info("Sync complete: %d synced, %d failed", synced, len(failures))
-    return _sync_result(synced, failures)
+    def failures_in_queue_order(self):
+        """Report failures in queue order regardless of worker completion order."""
+        failures = []
+        for photo_id in self.by_photo:
+            if photo_id in self.prepare_failures:
+                failures.append(self.prepare_failures[photo_id])
+            plan = self.plans.get(photo_id)
+            if plan is None:
+                continue
+            error = self.results.get(photo_id)
+            if error is not None:
+                failures.append(_exception_failure(photo_id, error))
+                log.warning("Failed to sync photo %d: %s", photo_id, error)
+                continue
+            for c in plan.unsupported_changes:
+                failures.append({
+                    "photo_id": photo_id,
+                    "change_id": c["id"],
+                    "error": f"unsupported change type: {c['change_type']}",
+                })
+        return failures
 
 
 def sync_from_xmp(db, photo_ids):
