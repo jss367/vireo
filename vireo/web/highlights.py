@@ -34,6 +34,466 @@ from sql_chunks import chunked
 from web.request_args import request_bool_arg
 
 
+class _HighlightsRelabel:
+    """One ``/api/highlights/relabel`` decision, run under the
+    prediction-decision lock by ``_highlights_relabel_under_lock``.
+
+    ``snapshot_curation()`` reads the curation the relabel moves before any
+    write; ``retag_photos()``, ``rename_curation()`` and ``record_relabel_edit()``
+    then write inside the caller's transaction.
+    """
+
+    def __init__(self, db, photo_ids, species, top_predictions):
+        self.db = db
+        self.photo_ids = photo_ids
+        self.species = species
+        self.top_predictions = top_predictions
+        self.ws_id = None
+        self.predicted_species_by_pid = {}
+        self.current_species_by_pid = {}
+        self.highlight_renames = {}
+        self.hl_prev_by_pid = {}
+        # Photos that already had a `(species=<target>, photo_id)` row in
+        # species_highlights before the relabel. rename_species_highlights_species
+        # skips inserting a duplicate for these, so the destination row is
+        # pre-existing and undo must not delete it.
+        self.hl_dst_preexisting = set()
+        self.pref_dst_taken = set()
+        self.rep_dst_preexisting = set()
+        self.rep_selected_order_by_pid_species = {}
+        self.preference_renames = {}
+        self.pref_prev_by_pid = {}
+        self.pref_covered_by_pid_species = set()
+        self.representative_renames = {}
+        self.rep_prev_by_pid = {}
+        self.items = []
+        self.rejected_prediction_ids = []
+        self.has_old_species = False
+
+    def snapshot_curation(self):
+        self._snapshot_predicted_species()
+        self.ws_id = self.db._ws_id()
+        # Chunk both lookups: photo_ids has no upstream cap
+        # (_parse_highlight_photo_ids just parses the list), so a bulk
+        # relabel of >999 photos would blow SQLITE_MAX_VARIABLE_NUMBER
+        # on the legacy builds this file already guards against.
+        self._snapshot_current_species()
+        self._snapshot_highlights()
+        self._snapshot_destination_slots()
+        self._snapshot_preferences()
+        self._snapshot_representatives()
+
+    def _snapshot_predicted_species(self):
+        """Snapshot the top-prediction species per photo, keyed by
+        keyword_match_key (SQLite's ASCII-only NOCASE fold). Used in
+        ``_accept_curation_source``'s current_species-empty filter branch
+        to accept only curation whose old species matches an active
+        prediction — see the prediction-only relabel scenario in
+        test_highlights_relabel_prediction_only_undo_restores_curation.
+        keyword_match_key (not Python's str.lower()) matches
+        add_keyword's SQLite dedupe, so `Éclair` vs `éclair` — which
+        SQLite/add_keyword keep distinct — stay distinct here too;
+        otherwise a stale curation row for one would fold onto the
+        other on relabel.
+
+        Track both the raw prediction label and its canonicalized form
+        via ``resolve_species_display_name``: highlight buckets
+        canonicalize hierarchy aliases through that resolver before
+        saving (e.g. an unconfirmed prediction ``Desert Verdin`` is
+        stored under its unique-taxon root ``Verdin``). Without the
+        canonical key, ``_accept_curation_source`` would reject the
+        saved ``Verdin`` highlight/representative row as stale when
+        only the raw prediction key is in the set, leaving that
+        curation stranded under the old bucket after relabel.
+        """
+        predicted_species_by_pid = self.predicted_species_by_pid
+        for pid_pred, pred_row in self.top_predictions.items():
+            pred_species = pred_row["species"] if pred_row else None
+            if not pred_species:
+                continue
+            raw_key = keyword_match_key(pred_species)
+            if raw_key:
+                predicted_species_by_pid.setdefault(pid_pred, set()).add(raw_key)
+            canonical = self.db.resolve_species_display_name(pred_species)
+            if canonical and canonical != pred_species:
+                canonical_key = keyword_match_key(canonical)
+                if canonical_key:
+                    predicted_species_by_pid.setdefault(pid_pred, set()).add(canonical_key)
+
+    def _snapshot_current_species(self):
+        """Snapshot each photo's current species-rank taxonomy keywords
+        before the relabel touches them. Used to skip stale curation rows
+        for species the photo no longer carries across all three curation
+        tables (species_highlights, photo_preferences,
+        species_representatives): untag_photo does not clear any of them,
+        so a photo can retain a curation row for species A after that
+        keyword was removed. Without this filter, relabeling the photo's
+        current species B→C would sweep the stale A rows into A→C
+        renames — losing the preserved A state and making C look
+        manually selected.
+
+        Species-rank filter matches the old_rows removal query in
+        ``_retag_photo`` — higher-rank taxonomy keywords (genus/family) are
+        not untagged by the relabel, so treating them as "current" would
+        migrate their curation onto the new species while leaving the
+        higher-rank keyword attached with its curation stripped.
+
+        Route through get_species_keywords_for_photos so taxon-linked
+        hierarchy leaves canonicalize to the same-taxon root spelling
+        (e.g. an attached ``Desert Verdin`` reads as ``Verdin``).
+        Existing curation is keyed under that root, so a raw-name
+        snapshot would reject the root-key highlight/representative row
+        as stale after duplicate repair left only the hierarchy leaf,
+        stranding it under a species the photo no longer carries by
+        name.
+        """
+        current_species_by_pid = self.current_species_by_pid
+        for pid, names in self.db.get_species_keywords_for_photos(
+            self.photo_ids
+        ).items():
+            for name in names:
+                key = keyword_match_key(name)
+                if key:
+                    current_species_by_pid.setdefault(pid, set()).add(key)
+
+    def _accept_curation_source(self, pid, old_species_name):
+        """Shared filter for the highlight, preference, and rep passes.
+
+        With any current taxonomy keywords, only migrate curation for
+        species the photo currently carries. Without any taxonomy —
+        the prediction-only relabel path (``keyword_add`` instead of
+        ``species_replace``) — only migrate curation whose species
+        matches an active prediction on the photo. That preserves the
+        legitimate prediction-species migration exercised by
+        ``test_highlights_relabel_prediction_only_undo_restores_curation``
+        while blocking stale curation rows for species that were
+        tagged and later untagged.
+
+        Keyed by keyword_match_key (see ``_snapshot_predicted_species``):
+        SQLite's ASCII-only NOCASE keeps `Éclair` and `éclair` distinct as
+        separate keyword rows, and str.lower() folds them together —
+        which would let a stale `éclair` curation row migrate onto a
+        photo still carrying `Éclair`.
+        """
+        old_key = keyword_match_key(old_species_name)
+        if not old_key:
+            return False
+        current = self.current_species_by_pid.get(pid)
+        if current:
+            return old_key in current
+        predicted = self.predicted_species_by_pid.get(pid) or set()
+        return old_key in predicted
+
+    def _snapshot_highlights(self):
+        species = self.species
+        for chunk in chunked(self.photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self.db.conn.execute(
+                f"""SELECT species, photo_id, rank FROM species_highlights
+                    WHERE workspace_id = ? AND photo_id IN ({placeholders})""",
+                (self.ws_id, *chunk),
+            ).fetchall()
+            for row in rows:
+                old_species_name = row["species"]
+                if old_species_name == species:
+                    self.hl_dst_preexisting.add(row["photo_id"])
+                    continue
+                if not self._accept_curation_source(
+                    row["photo_id"], old_species_name
+                ):
+                    continue
+                self.highlight_renames.setdefault(old_species_name, []).append(
+                    row["photo_id"]
+                )
+                # Snapshot the original rank so undo can restore each
+                # highlighted photo at its original position instead of
+                # dumping it at MAX(rank)+1 (see _restore_relabel_curation).
+                self.hl_prev_by_pid.setdefault(row["photo_id"], []).append({
+                    "species": old_species_name,
+                    "rank": row["rank"],
+                })
+        # Backfill dst_existed onto each entry now that the target-species
+        # pass has finished (row order within the query is unspecified).
+        for pid, entries in self.hl_prev_by_pid.items():
+            dst = pid in self.hl_dst_preexisting
+            for entry in entries:
+                entry["dst_existed"] = dst
+
+    def _snapshot_destination_slots(self):
+        db = self.db
+        species = self.species
+        # Purposes that already have a row at (new_species, purpose) — for
+        # any photo. rename_photo_preferences_species uses INSERT OR IGNORE,
+        # so when the destination slot is already taken (either by this
+        # photo or a different one), the relabel does not create a new
+        # destination row for this photo and undo must not attempt to
+        # delete it. Un-gating the old-species restore from a destination
+        # row lookup lets undo recover representatives even when the
+        # relabel collided with another photo holding the slot.
+        self.pref_dst_taken = {
+            r["purpose"] for r in db.conn.execute(
+                """SELECT purpose FROM photo_preferences
+                   WHERE workspace_id = ? AND species = ?
+                     AND purpose IN (
+                         'species_representative', 'life_list', 'highlights'
+                     )""",
+                (self.ws_id, species),
+            ).fetchall()
+        }
+        # Photos that already had a (species=<target>, photo_id) row in
+        # species_representatives before the relabel.
+        # rename_species_representatives_species uses INSERT OR IGNORE, so
+        # when the destination rep row is already present the relabel does
+        # not create a new one and undo must not delete it. Applies to
+        # both preference-covered moves (via pref_prev.rep_dst_existed in
+        # _snapshot_preferences) and rep-only moves (via
+        # rep_prev.dst_existed).
+        for chunk in chunked(self.photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            for row in db.conn.execute(
+                f"""SELECT photo_id FROM species_representatives
+                    WHERE species = ? AND photo_id IN ({placeholders})""",
+                (species, *chunk),
+            ).fetchall():
+                self.rep_dst_preexisting.add(row["photo_id"])
+        # Snapshot the original selected_order for every existing
+        # species_representatives row on the retagged photos. Undo restores
+        # each row at its captured order rather than the fresh MAX+1 that
+        # _set_global_species_representative would assign — so undoing a
+        # relabel of a secondary representative does not promote it above
+        # the pre-existing primary for that species.
+        for chunk in chunked(self.photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            for row in db.conn.execute(
+                f"""SELECT species, photo_id, selected_order
+                    FROM species_representatives
+                    WHERE photo_id IN ({placeholders})""",
+                chunk,
+            ).fetchall():
+                self.rep_selected_order_by_pid_species[
+                    (row["photo_id"], row["species"])
+                ] = row["selected_order"]
+
+    def _snapshot_preferences(self):
+        species = self.species
+        for chunk in chunked(self.photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self.db.conn.execute(
+                f"""SELECT species, photo_id, purpose FROM photo_preferences
+                    WHERE workspace_id = ?
+                      AND photo_id IN ({placeholders})
+                      AND purpose IN (
+                          'species_representative', 'life_list', 'highlights'
+                      )""",
+                (self.ws_id, *chunk),
+            ).fetchall()
+            for row in rows:
+                old_species_name = row["species"]
+                if old_species_name == species:
+                    continue
+                if not self._accept_curation_source(
+                    row["photo_id"], old_species_name
+                ):
+                    continue
+                self.preference_renames.setdefault(old_species_name, []).append(
+                    row["photo_id"]
+                )
+                self.pref_prev_by_pid.setdefault(row["photo_id"], []).append({
+                    "purpose": row["purpose"],
+                    "species": old_species_name,
+                    "dst_existed": row["purpose"] in self.pref_dst_taken,
+                    "rep_dst_existed": row["photo_id"] in self.rep_dst_preexisting,
+                    "rep_selected_order": self.rep_selected_order_by_pid_species.get(
+                        (row["photo_id"], old_species_name)
+                    ),
+                })
+                self.pref_covered_by_pid_species.add(
+                    (row["photo_id"], old_species_name)
+                )
+
+    def _snapshot_representatives(self):
+        """Global species_representatives moves. Representatives are global
+        (no workspace column), so a photo can carry a
+        (species, photo_id) row picked from a different workspace with
+        no matching photo_preferences row in the active workspace. In
+        that case the preference-rename pass (``_snapshot_preferences``)
+        would miss it, and the retag would strand the representative under
+        the old species name — leaving both species without a
+        representative. Query species_representatives directly and enqueue
+        any rep-only moves the preference pass didn't already cover. The
+        same current-species filter applies here (see
+        ``_snapshot_current_species``).
+        """
+        species = self.species
+        for chunk in chunked(self.photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self.db.conn.execute(
+                f"""SELECT species, photo_id FROM species_representatives
+                    WHERE photo_id IN ({placeholders})""",
+                chunk,
+            ).fetchall()
+            for row in rows:
+                old_species_name = row["species"]
+                pid = row["photo_id"]
+                if old_species_name == species:
+                    continue
+                # rename_photo_preferences_species already migrates
+                # species_representatives for pids in preference_renames,
+                # so skip anything the preference pass will cover.
+                if (pid, old_species_name) in self.pref_covered_by_pid_species:
+                    continue
+                if not self._accept_curation_source(pid, old_species_name):
+                    continue
+                self.representative_renames.setdefault(old_species_name, []).append(pid)
+                self.rep_prev_by_pid.setdefault(pid, []).append({
+                    "species": old_species_name,
+                    "dst_existed": pid in self.rep_dst_preexisting,
+                    "selected_order": self.rep_selected_order_by_pid_species.get(
+                        (pid, old_species_name)
+                    ),
+                })
+
+    def adopt_stored_spelling(self, kid):
+        """Use the stored spelling from here on: add_keyword applies the
+        species casing convention, so it can differ from the request
+        value, and the queued sidecar changes / curation renames /
+        history payload must match the row actually tagged.
+        """
+        stored = self.db.conn.execute(
+            "SELECT name FROM keywords WHERE id = ?", (kid,)
+        ).fetchone()
+        if stored and stored["name"]:
+            self.species = stored["name"]
+
+    def retag_photos(self, kid):
+        for pid in self.photo_ids:
+            self._retag_photo(pid, kid)
+
+    def _retag_photo(self, pid, kid):
+        db = self.db
+        pred = self.top_predictions.get(pid)
+        if pred is not None:
+            db.update_prediction_status(pred["id"], "rejected", _commit=False)
+            self.rejected_prediction_ids.append(pred["id"])
+
+        old_rows = db.conn.execute(
+            """SELECT k.id, k.name, k.is_species, k.type
+               FROM photo_keywords pk
+               JOIN keywords k ON k.id = pk.keyword_id
+               LEFT JOIN taxa t ON t.id = k.taxon_id
+               WHERE pk.photo_id = ?
+                 AND (k.is_species = 1 OR k.type = 'taxonomy')
+                 AND (t.rank = 'species' OR t.rank IS NULL)
+               ORDER BY k.is_species DESC, pk.rowid DESC""",
+            (pid,),
+        ).fetchall()
+        old_primary = old_rows[0] if old_rows else None
+        if old_primary is not None:
+            self.has_old_species = True
+        for old in old_rows:
+            db.untag_photo(pid, old["id"], _commit=False)
+            # Compare by keyword id: SQLite's NOCASE is ASCII-only,
+            # so `Éclair` and `éclair` live as distinct rows with
+            # distinct ids, but Python `.lower()` folds them equal.
+            # A name-based skip would suppress the remove for a
+            # different SQLite row and leave the old spelling in
+            # the sidecar after the next XMP sync (add_keyword
+            # normalized `species` to the row it will tag, so `kid`
+            # is authoritative).
+            if old["id"] != kid:
+                queue_keyword_remove(
+                    db, pid, old["name"], workspace_id=self.ws_id, _commit=False,
+                )
+
+        db.tag_photo(pid, kid, source="manual", _commit=False)
+        queue_keyword_add(db, pid, self.species, workspace_id=self.ws_id, _commit=False)
+        self.items.append({
+            "photo_id": pid,
+            "old_value": self._history_old_value(pid, pred, old_primary, old_rows),
+            "new_value": str(kid),
+        })
+
+    def _history_old_value(self, pid, pred, old_primary, old_rows):
+        old_value = str(old_primary["id"]) if old_primary else ""
+        old_keyword_ids = [old["id"] for old in old_rows]
+        hl_prev = self.hl_prev_by_pid.get(pid) or []
+        pref_prev = self.pref_prev_by_pid.get(pid) or []
+        rep_prev = self.rep_prev_by_pid.get(pid) or []
+        needs_payload = (
+            pred is not None
+            or len(old_keyword_ids) > 1
+            or hl_prev
+            or pref_prev
+            or rep_prev
+        )
+        if needs_payload:
+            old_payload = {
+                "keyword_id": old_value,
+                "keyword_ids": old_keyword_ids,
+            }
+            if pred is not None:
+                old_payload.update({
+                    "prediction_id": pred["id"],
+                    "prediction_status": pred["status"],
+                })
+            if hl_prev or pref_prev or rep_prev:
+                curation = {
+                    "hl_prev": hl_prev,
+                    "pref_prev": pref_prev,
+                }
+                if rep_prev:
+                    curation["rep_prev"] = rep_prev
+                old_payload["curation"] = curation
+            old_value = json.dumps(old_payload, sort_keys=True)
+        return old_value
+
+    def rename_curation(self):
+        db = self.db
+        species = self.species
+        ws_id = self.ws_id
+        for old_species_name, pids in self.highlight_renames.items():
+            db.rename_species_highlights_species(
+                old_species_name,
+                species,
+                [(pid, ws_id) for pid in pids],
+                _commit=False,
+            )
+        for old_species_name, pids in self.preference_renames.items():
+            db.rename_photo_preferences_species(
+                old_species_name,
+                species,
+                [(pid, ws_id) for pid in pids],
+                _commit=False,
+            )
+        for old_species_name, pids in self.representative_renames.items():
+            db.rename_species_representatives_species(
+                old_species_name,
+                species,
+                photo_ids=pids,
+                _commit=False,
+            )
+
+    def record_relabel_edit(self, kid):
+        species = self.species
+        action_type = (
+            "species_replace"
+            if self.has_old_species
+            else "keyword_add"
+        )
+        if action_type == "species_replace":
+            desc = f'Replaced species with "{species}" on {len(self.photo_ids)} photos'
+        else:
+            desc = f'Set species "{species}" on {len(self.photo_ids)} photos'
+        self.db.record_edit(
+            action_type,
+            desc,
+            str(kid),
+            self.items,
+            is_batch=len(self.items) > 1,
+            _commit=False,
+        )
+
+
 def create_highlights_blueprint(get_db, json_error):
     """Build the highlights / photo-preferences blueprint.
 
@@ -608,402 +1068,16 @@ def create_highlights_blueprint(get_db, json_error):
         )
 
     def _highlights_relabel_under_lock(db, photo_ids, species):
-        top_predictions = _highlight_top_predictions(db, photo_ids)
-        # Snapshot the top-prediction species per photo, keyed by
-        # keyword_match_key (SQLite's ASCII-only NOCASE fold). Used below
-        # in the current_species-empty filter branch to accept only
-        # curation whose old species matches an active prediction — see
-        # the prediction-only relabel scenario in
-        # test_highlights_relabel_prediction_only_undo_restores_curation.
-        # keyword_match_key (not Python's str.lower()) matches
-        # add_keyword's SQLite dedupe, so `Éclair` vs `éclair` — which
-        # SQLite/add_keyword keep distinct — stay distinct here too;
-        # otherwise a stale curation row for one would fold onto the
-        # other on relabel.
-        #
-        # Track both the raw prediction label and its canonicalized form
-        # via ``resolve_species_display_name``: highlight buckets
-        # canonicalize hierarchy aliases through that resolver before
-        # saving (e.g. an unconfirmed prediction ``Desert Verdin`` is
-        # stored under its unique-taxon root ``Verdin``). Without the
-        # canonical key, ``_accept_curation_source`` would reject the
-        # saved ``Verdin`` highlight/representative row as stale when
-        # only the raw prediction key is in the set, leaving that
-        # curation stranded under the old bucket after relabel.
-        predicted_species_by_pid = {}
-        for pid_pred, pred_row in top_predictions.items():
-            pred_species = pred_row["species"] if pred_row else None
-            if not pred_species:
-                continue
-            raw_key = keyword_match_key(pred_species)
-            if raw_key:
-                predicted_species_by_pid.setdefault(pid_pred, set()).add(raw_key)
-            canonical = db.resolve_species_display_name(pred_species)
-            if canonical and canonical != pred_species:
-                canonical_key = keyword_match_key(canonical)
-                if canonical_key:
-                    predicted_species_by_pid.setdefault(pid_pred, set()).add(canonical_key)
-        ws_id = db._ws_id()
-        # Chunk both lookups: photo_ids has no upstream cap
-        # (_parse_highlight_photo_ids just parses the list), so a bulk
-        # relabel of >999 photos would blow SQLITE_MAX_VARIABLE_NUMBER
-        # on the legacy builds this file already guards against.
-
-        # Snapshot each photo's current species-rank taxonomy keywords
-        # before the relabel touches them. Used to skip stale curation rows
-        # for species the photo no longer carries across all three curation
-        # tables (species_highlights, photo_preferences,
-        # species_representatives): untag_photo does not clear any of them,
-        # so a photo can retain a curation row for species A after that
-        # keyword was removed. Without this filter, relabeling the photo's
-        # current species B→C would sweep the stale A rows into A→C
-        # renames — losing the preserved A state and making C look
-        # manually selected.
-        #
-        # Species-rank filter matches the old_rows removal query below —
-        # higher-rank taxonomy keywords (genus/family) are not untagged by
-        # the relabel, so treating them as "current" would migrate their
-        # curation onto the new species while leaving the higher-rank
-        # keyword attached with its curation stripped.
-        #
-        # Route through get_species_keywords_for_photos so taxon-linked
-        # hierarchy leaves canonicalize to the same-taxon root spelling
-        # (e.g. an attached ``Desert Verdin`` reads as ``Verdin``).
-        # Existing curation is keyed under that root, so a raw-name
-        # snapshot would reject the root-key highlight/representative row
-        # as stale after duplicate repair left only the hierarchy leaf,
-        # stranding it under a species the photo no longer carries by
-        # name.
-        current_species_by_pid = {}
-        for pid, names in db.get_species_keywords_for_photos(photo_ids).items():
-            for name in names:
-                key = keyword_match_key(name)
-                if key:
-                    current_species_by_pid.setdefault(pid, set()).add(key)
-
-        def _accept_curation_source(pid, old_species_name):
-            """Shared filter for the highlight, preference, and rep passes.
-
-            With any current taxonomy keywords, only migrate curation for
-            species the photo currently carries. Without any taxonomy —
-            the prediction-only relabel path (``keyword_add`` instead of
-            ``species_replace``) — only migrate curation whose species
-            matches an active prediction on the photo. That preserves the
-            legitimate prediction-species migration exercised by
-            ``test_highlights_relabel_prediction_only_undo_restores_curation``
-            while blocking stale curation rows for species that were
-            tagged and later untagged.
-
-            Keyed by keyword_match_key (see the snapshot above): SQLite's
-            ASCII-only NOCASE keeps `Éclair` and `éclair` distinct as
-            separate keyword rows, and str.lower() folds them together —
-            which would let a stale `éclair` curation row migrate onto a
-            photo still carrying `Éclair`.
-            """
-            old_key = keyword_match_key(old_species_name)
-            if not old_key:
-                return False
-            current = current_species_by_pid.get(pid)
-            if current:
-                return old_key in current
-            predicted = predicted_species_by_pid.get(pid) or set()
-            return old_key in predicted
-
-        highlight_renames = {}
-        hl_prev_by_pid = {}
-        # Photos that already had a `(species=<target>, photo_id)` row in
-        # species_highlights before the relabel. rename_species_highlights_species
-        # skips inserting a duplicate for these, so the destination row is
-        # pre-existing and undo must not delete it.
-        hl_dst_preexisting = set()
-        for chunk in chunked(photo_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            rows = db.conn.execute(
-                f"""SELECT species, photo_id, rank FROM species_highlights
-                    WHERE workspace_id = ? AND photo_id IN ({placeholders})""",
-                (ws_id, *chunk),
-            ).fetchall()
-            for row in rows:
-                old_species_name = row["species"]
-                if old_species_name == species:
-                    hl_dst_preexisting.add(row["photo_id"])
-                    continue
-                if not _accept_curation_source(
-                    row["photo_id"], old_species_name
-                ):
-                    continue
-                highlight_renames.setdefault(old_species_name, []).append(
-                    row["photo_id"]
-                )
-                # Snapshot the original rank so undo can restore each
-                # highlighted photo at its original position instead of
-                # dumping it at MAX(rank)+1 (see _restore_relabel_curation).
-                hl_prev_by_pid.setdefault(row["photo_id"], []).append({
-                    "species": old_species_name,
-                    "rank": row["rank"],
-                })
-        # Backfill dst_existed onto each entry now that the target-species
-        # pass has finished (row order within the query is unspecified).
-        for pid, entries in hl_prev_by_pid.items():
-            dst = pid in hl_dst_preexisting
-            for entry in entries:
-                entry["dst_existed"] = dst
-        preference_renames = {}
-        pref_prev_by_pid = {}
-        # Purposes that already have a row at (new_species, purpose) — for
-        # any photo. rename_photo_preferences_species uses INSERT OR IGNORE,
-        # so when the destination slot is already taken (either by this
-        # photo or a different one), the relabel does not create a new
-        # destination row for this photo and undo must not attempt to
-        # delete it. Un-gating the old-species restore from a destination
-        # row lookup lets undo recover representatives even when the
-        # relabel collided with another photo holding the slot.
-        pref_dst_taken = {
-            r["purpose"] for r in db.conn.execute(
-                """SELECT purpose FROM photo_preferences
-                   WHERE workspace_id = ? AND species = ?
-                     AND purpose IN (
-                         'species_representative', 'life_list', 'highlights'
-                     )""",
-                (ws_id, species),
-            ).fetchall()
-        }
-        # Photos that already had a (species=<target>, photo_id) row in
-        # species_representatives before the relabel.
-        # rename_species_representatives_species uses INSERT OR IGNORE, so
-        # when the destination rep row is already present the relabel does
-        # not create a new one and undo must not delete it. Applies to
-        # both preference-covered moves (via pref_prev.rep_dst_existed
-        # below) and rep-only moves (via rep_prev.dst_existed).
-        rep_dst_preexisting = set()
-        for chunk in chunked(photo_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            for row in db.conn.execute(
-                f"""SELECT photo_id FROM species_representatives
-                    WHERE species = ? AND photo_id IN ({placeholders})""",
-                (species, *chunk),
-            ).fetchall():
-                rep_dst_preexisting.add(row["photo_id"])
-        # Snapshot the original selected_order for every existing
-        # species_representatives row on the retagged photos. Undo restores
-        # each row at its captured order rather than the fresh MAX+1 that
-        # _set_global_species_representative would assign — so undoing a
-        # relabel of a secondary representative does not promote it above
-        # the pre-existing primary for that species.
-        rep_selected_order_by_pid_species = {}
-        for chunk in chunked(photo_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            for row in db.conn.execute(
-                f"""SELECT species, photo_id, selected_order
-                    FROM species_representatives
-                    WHERE photo_id IN ({placeholders})""",
-                chunk,
-            ).fetchall():
-                rep_selected_order_by_pid_species[
-                    (row["photo_id"], row["species"])
-                ] = row["selected_order"]
-        pref_covered_by_pid_species = set()
-        for chunk in chunked(photo_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            rows = db.conn.execute(
-                f"""SELECT species, photo_id, purpose FROM photo_preferences
-                    WHERE workspace_id = ?
-                      AND photo_id IN ({placeholders})
-                      AND purpose IN (
-                          'species_representative', 'life_list', 'highlights'
-                      )""",
-                (ws_id, *chunk),
-            ).fetchall()
-            for row in rows:
-                old_species_name = row["species"]
-                if old_species_name == species:
-                    continue
-                if not _accept_curation_source(
-                    row["photo_id"], old_species_name
-                ):
-                    continue
-                preference_renames.setdefault(old_species_name, []).append(
-                    row["photo_id"]
-                )
-                pref_prev_by_pid.setdefault(row["photo_id"], []).append({
-                    "purpose": row["purpose"],
-                    "species": old_species_name,
-                    "dst_existed": row["purpose"] in pref_dst_taken,
-                    "rep_dst_existed": row["photo_id"] in rep_dst_preexisting,
-                    "rep_selected_order": rep_selected_order_by_pid_species.get(
-                        (row["photo_id"], old_species_name)
-                    ),
-                })
-                pref_covered_by_pid_species.add(
-                    (row["photo_id"], old_species_name)
-                )
-        # Global species_representatives moves. Representatives are global
-        # (no workspace column), so a photo can carry a
-        # (species, photo_id) row picked from a different workspace with
-        # no matching photo_preferences row in the active workspace. In
-        # that case the preference-rename pass above would miss it, and
-        # the retag would strand the representative under the old species
-        # name — leaving both species without a representative. Query
-        # species_representatives directly and enqueue any rep-only moves
-        # the preference pass didn't already cover. The same
-        # current-species filter applies here (see the snapshot comment
-        # above).
-        representative_renames = {}
-        rep_prev_by_pid = {}
-        for chunk in chunked(photo_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            rows = db.conn.execute(
-                f"""SELECT species, photo_id FROM species_representatives
-                    WHERE photo_id IN ({placeholders})""",
-                chunk,
-            ).fetchall()
-            for row in rows:
-                old_species_name = row["species"]
-                pid = row["photo_id"]
-                if old_species_name == species:
-                    continue
-                # rename_photo_preferences_species already migrates
-                # species_representatives for pids in preference_renames,
-                # so skip anything the preference pass will cover.
-                if (pid, old_species_name) in pref_covered_by_pid_species:
-                    continue
-                if not _accept_curation_source(pid, old_species_name):
-                    continue
-                representative_renames.setdefault(old_species_name, []).append(pid)
-                rep_prev_by_pid.setdefault(pid, []).append({
-                    "species": old_species_name,
-                    "dst_existed": pid in rep_dst_preexisting,
-                    "selected_order": rep_selected_order_by_pid_species.get(
-                        (pid, old_species_name)
-                    ),
-                })
+        relabel = _HighlightsRelabel(
+            db, photo_ids, species, _highlight_top_predictions(db, photo_ids),
+        )
+        relabel.snapshot_curation()
         try:
             kid = db.add_keyword(species, is_species=True, _commit=False)
-            # Use the stored spelling from here on: add_keyword applies the
-            # species casing convention, so it can differ from the request
-            # value, and the queued sidecar changes / curation renames /
-            # history payload must match the row actually tagged.
-            stored = db.conn.execute(
-                "SELECT name FROM keywords WHERE id = ?", (kid,)
-            ).fetchone()
-            if stored and stored["name"]:
-                species = stored["name"]
-            items = []
-            rejected_prediction_ids = []
-            has_old_species = False
-            for pid in photo_ids:
-                pred = top_predictions.get(pid)
-                if pred is not None:
-                    db.update_prediction_status(pred["id"], "rejected", _commit=False)
-                    rejected_prediction_ids.append(pred["id"])
-
-                old_rows = db.conn.execute(
-                    """SELECT k.id, k.name, k.is_species, k.type
-                       FROM photo_keywords pk
-                       JOIN keywords k ON k.id = pk.keyword_id
-                       LEFT JOIN taxa t ON t.id = k.taxon_id
-                       WHERE pk.photo_id = ?
-                         AND (k.is_species = 1 OR k.type = 'taxonomy')
-                         AND (t.rank = 'species' OR t.rank IS NULL)
-                       ORDER BY k.is_species DESC, pk.rowid DESC""",
-                    (pid,),
-                ).fetchall()
-                old_primary = old_rows[0] if old_rows else None
-                if old_primary is not None:
-                    has_old_species = True
-                for old in old_rows:
-                    db.untag_photo(pid, old["id"], _commit=False)
-                    # Compare by keyword id: SQLite's NOCASE is ASCII-only,
-                    # so `Éclair` and `éclair` live as distinct rows with
-                    # distinct ids, but Python `.lower()` folds them equal.
-                    # A name-based skip would suppress the remove for a
-                    # different SQLite row and leave the old spelling in
-                    # the sidecar after the next XMP sync (add_keyword above
-                    # normalized `species` to the row it will tag, so `kid`
-                    # is authoritative).
-                    if old["id"] != kid:
-                        queue_keyword_remove(
-                            db, pid, old["name"], workspace_id=ws_id, _commit=False,
-                        )
-
-                db.tag_photo(pid, kid, source="manual", _commit=False)
-                queue_keyword_add(db, pid, species, workspace_id=ws_id, _commit=False)
-                old_value = str(old_primary["id"]) if old_primary else ""
-                old_keyword_ids = [old["id"] for old in old_rows]
-                hl_prev = hl_prev_by_pid.get(pid) or []
-                pref_prev = pref_prev_by_pid.get(pid) or []
-                rep_prev = rep_prev_by_pid.get(pid) or []
-                needs_payload = (
-                    pred is not None
-                    or len(old_keyword_ids) > 1
-                    or hl_prev
-                    or pref_prev
-                    or rep_prev
-                )
-                if needs_payload:
-                    old_payload = {
-                        "keyword_id": old_value,
-                        "keyword_ids": old_keyword_ids,
-                    }
-                    if pred is not None:
-                        old_payload.update({
-                            "prediction_id": pred["id"],
-                            "prediction_status": pred["status"],
-                        })
-                    if hl_prev or pref_prev or rep_prev:
-                        curation = {
-                            "hl_prev": hl_prev,
-                            "pref_prev": pref_prev,
-                        }
-                        if rep_prev:
-                            curation["rep_prev"] = rep_prev
-                        old_payload["curation"] = curation
-                    old_value = json.dumps(old_payload, sort_keys=True)
-                items.append({
-                    "photo_id": pid,
-                    "old_value": old_value,
-                    "new_value": str(kid),
-                })
-
-            for old_species_name, pids in highlight_renames.items():
-                db.rename_species_highlights_species(
-                    old_species_name,
-                    species,
-                    [(pid, ws_id) for pid in pids],
-                    _commit=False,
-                )
-            for old_species_name, pids in preference_renames.items():
-                db.rename_photo_preferences_species(
-                    old_species_name,
-                    species,
-                    [(pid, ws_id) for pid in pids],
-                    _commit=False,
-                )
-            for old_species_name, pids in representative_renames.items():
-                db.rename_species_representatives_species(
-                    old_species_name,
-                    species,
-                    photo_ids=pids,
-                    _commit=False,
-                )
-
-            action_type = (
-                "species_replace"
-                if has_old_species
-                else "keyword_add"
-            )
-            if action_type == "species_replace":
-                desc = f'Replaced species with "{species}" on {len(photo_ids)} photos'
-            else:
-                desc = f'Set species "{species}" on {len(photo_ids)} photos'
-            db.record_edit(
-                action_type,
-                desc,
-                str(kid),
-                items,
-                is_batch=len(items) > 1,
-                _commit=False,
-            )
+            relabel.adopt_stored_spelling(kid)
+            relabel.retag_photos(kid)
+            relabel.rename_curation()
+            relabel.record_relabel_edit(kid)
             db.conn.commit()
         except Exception:
             db.conn.rollback()
@@ -1012,8 +1086,8 @@ def create_highlights_blueprint(get_db, json_error):
         return jsonify({
             "ok": True,
             "keyword_id": kid,
-            "affected": items,
-            "rejected_prediction_ids": rejected_prediction_ids,
+            "affected": relabel.items,
+            "rejected_prediction_ids": relabel.rejected_prediction_ids,
         })
 
     @blueprint.route("/api/highlights/bucket")
