@@ -6872,6 +6872,91 @@ def test_extract_masks_stage_warns_on_mixed_already_masked_and_subthreshold(
     )
 
 
+def test_extract_masks_with_only_subthreshold_detections_keeps_process_green(
+    tmp_path, monkeypatch
+):
+    """Every detection below detector_confidence: extract_masks has nothing
+    to mask and skips. The reason (lower detector_confidence to mask these)
+    is recorded in the run's errors, which under the runner's any-error
+    rollup failed every Process run over a library of low-confidence or
+    empty-scene photos. It is a note: still listed, but the run is green.
+    """
+    import classifier as classifier_mod
+    import classify_job
+    import config as cfg
+    from db import Database
+    from jobs import JobRunner
+    from wait import wait_for_job_via_runner
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    _stub_extract_masks_heavy_ops(monkeypatch)
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    lowconf_id = db.add_photo(folder_id, "lowconf.jpg", ".jpg", 23456, 1_000_001.0)
+    _drop_jpeg(folder_path, "lowconf.jpg")
+    db.save_detections(
+        lowconf_id,
+        [{"box": {"x": 0, "y": 0, "w": 50, "h": 50},
+          "confidence": 0.05, "category": "animal"}],
+        detector_model="megadetector-v6",
+    )
+    db.record_detector_run(lowconf_id, "megadetector-v6", box_count=1)
+    col_id = db.add_collection(
+        "Test", json.dumps([{"field": "photo_ids", "value": [lowconf_id]}]),
+    )
+
+    model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
+
+    def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
+                          det_conf_threshold=None, already_detected_ids=None,
+                          cached_detections=None, vireo_dir=None):
+        return {}, 0, {p["id"] for p in batch}
+
+    monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
+
+    class FakeClassifier:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def classify_batch_with_embedding(self, images, threshold=0):
+            import numpy as np
+            emb = np.zeros(512, dtype=np.float32)
+            return [
+                ([{"species": "Unknown", "score": 0.5}], emb)
+                for _ in images
+            ]
+
+    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        model_ids=[model_id],
+        skip_extract_masks=False,
+        skip_regroup=True,
+    )
+    runner = JobRunner()
+    job_id = runner.start(
+        "pipeline",
+        lambda job: run_pipeline_job(job, runner, db_path, ws_id, params),
+    )
+    job = wait_for_job_via_runner(runner, job_id)
+
+    result = job["result"]
+    assert result["stages"]["extract_masks"]["reason"] == "all_subthreshold"
+    em_notes = [e for e in job["errors"] if e.startswith("[extract_masks]")]
+    assert em_notes and "detector_confidence" in em_notes[0], job["errors"]
+    assert job["status"] == "completed", job["errors"]
+    assert result["ok"] is True
+    assert result["notes"] == em_notes
+
+
 def test_pipeline_rerun_with_existing_prediction_and_bursts_does_not_crash(
     tmp_path, monkeypatch
 ):
@@ -12135,6 +12220,120 @@ def test_pipeline_eye_keypoints_stage_download_failure_skips_stage_not_pipeline(
         f"result.stages.eye_keypoints must record the skip reason; "
         f"got {ek_result!r}"
     )
+
+
+def _run_eye_keypoints_download_failure_through_runner(
+    tmp_path, monkeypatch, extra_error=None,
+):
+    """Run Process through a real JobRunner with the eye-keypoint weight
+    download failing, so the final status comes from the runner's rollup.
+    ``extra_error`` is recorded on the job as an ordinary (non-note) error
+    while the run is in flight."""
+    import config as cfg
+    import keypoints as _kp_mod
+    import pipeline as pipeline_mod
+    from db import Database
+    from jobs import JobRunner
+    from wait import wait_for_job_via_runner
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
+    _drop_jpeg(folder_path, "p.jpg")
+    db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="MegaDetector",
+    )
+    col_id = db.add_collection(
+        "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
+    )
+
+    _stub_extract_masks_heavy_ops(monkeypatch)
+    monkeypatch.setattr(
+        pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
+    )
+    monkeypatch.setattr(
+        Database, "list_photos_for_eye_keypoint_stage",
+        lambda self, **k: [
+            {"id": pid, "taxonomy_class": "Mammalia", "species_conf": 0.9},
+        ],
+    )
+    monkeypatch.setattr(
+        pipeline_mod, "detect_eye_keypoints_stage", lambda *a, **k: None,
+    )
+
+    jobs_seen = []
+
+    def _ensure_raises(name, progress_callback=None):
+        if extra_error:
+            jobs_seen[0]["errors"].append(extra_error)
+        raise RuntimeError(f"Failed to download {name} weights: offline")
+
+    monkeypatch.setattr(_kp_mod, "ensure_keypoint_weights", _ensure_raises)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        skip_classify=True,
+        skip_extract_masks=False,
+        skip_regroup=True,
+    )
+    runner = JobRunner()
+
+    def work(job):
+        jobs_seen.append(job)
+        return run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    job_id = runner.start("pipeline", work)
+    return wait_for_job_via_runner(runner, job_id)
+
+
+def test_pipeline_benign_skip_note_keeps_the_run_completed(
+    tmp_path, monkeypatch,
+):
+    """An optional stage that only skipped must not fail Process.
+
+    The eye-keypoint weight download failing skips that stage and records
+    why in the run's errors. Since the runner's rollup rule fails any job
+    whose errors list is non-empty, every such run ended "failed" even
+    though no stage failed. The pipeline's own verdict keeps it green, and
+    the note stays visible in the errors list.
+    """
+    job = _run_eye_keypoints_download_failure_through_runner(
+        tmp_path, monkeypatch,
+    )
+
+    assert job["status"] == "completed", job["errors"]
+    notes = [e for e in job["errors"] if e.startswith("[eye_keypoints]")]
+    assert notes and "Failed to download" in notes[0], job["errors"]
+    result = job["result"]
+    assert result["ok"] is True
+    assert result["notes"] == notes
+
+
+def test_pipeline_error_that_is_not_a_note_still_fails_the_run(
+    tmp_path, monkeypatch,
+):
+    """Only benign-skip notes are exempt: any other recorded error (e.g. a
+    directory the scan was refused, which leaves the scan stage
+    "completed") still fails the run."""
+    denied = "[scan] PERMISSION_DENIED: /Volumes/Card — access refused"
+    job = _run_eye_keypoints_download_failure_through_runner(
+        tmp_path, monkeypatch, extra_error=denied,
+    )
+
+    assert job["status"] == "failed"
+    assert denied in job["errors"]
+    assert job["result"]["ok"] is False
+    assert denied not in job["result"]["notes"]
 
 
 def test_pipeline_eye_keypoints_download_cancel_finalizes_as_cancelled_not_failure(

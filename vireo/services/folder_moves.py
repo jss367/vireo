@@ -348,8 +348,13 @@ class FolderMoves:
                 else:
                     cleanup_error = result.get("cleanup_error")
                     result["ok"] = not errors
+                    in_place = int(result.get("already_in_place") or 0)
                     result["summary"] = (
                         f"Moved {moved} photo{'s' if moved != 1 else ''}"
+                        + (
+                            f", {in_place} already in the destination"
+                            if in_place else ""
+                        )
                         + (f", {len(errors)} error(s)" if errors else "")
                         + (
                             f"; cleanup failed: {cleanup_error}"

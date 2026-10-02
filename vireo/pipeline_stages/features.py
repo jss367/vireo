@@ -656,7 +656,6 @@ class _MaskPass:
     def _exit_early(self, em_reason, reason, summary):
         run = self.run
         log.warning("Pipeline extract-masks: %s", reason)
-        run.errors.append(f"[extract_masks] {reason}")
         exit_status, exit_step_status, exit_step_extra, exit_payload = (
             self.extract_masks_early_exit(
                 em_reason, self.photos_subthreshold_only,
@@ -664,6 +663,17 @@ class _MaskPass:
                 self.em_offline_latched, self.em_offline_preflight_error,
             )
         )
+        # No detection qualified for a mask (empty scenes, or everything
+        # below detector_confidence): the stage skipped and the reason says
+        # what to change, but the run did not fail. Missing MegaDetector
+        # weights, or an exit the pre-flight outage already failed, stay
+        # errors: the run could not do what it was asked.
+        if exit_status != "failed" and em_reason in (
+            "no_detections", "all_subthreshold",
+        ):
+            run.note(f"[extract_masks] {reason}")
+        else:
+            run.errors.append(f"[extract_masks] {reason}")
         run.stages["extract_masks"]["status"] = exit_status
         run.runner.update_step(
             run.job["id"], "extract_masks", status=exit_step_status,
@@ -1674,7 +1684,8 @@ class _EyeKeypointPass:
             "Eye keypoints stage skipped — weight download "
             "failed: %s", dl_err,
         )
-        run.errors.append(f"[eye_keypoints] {dl_err}")
+        # An optional stage that skipped: shown to the user, not a failure.
+        run.note(f"[eye_keypoints] {dl_err}")
         run.stages["eye_keypoints"]["status"] = "skipped"
         run.runner.update_step(
             run.job["id"], "eye_keypoints",

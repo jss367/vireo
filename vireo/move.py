@@ -2178,6 +2178,7 @@ def move_folder_by_date(db, folder_id, destination, folder_template,
     total = sum(group["photo_count"] for group in groups)
     completed = 0
     moved = 0
+    already_in_place = 0
     errors = []
     destinations = []
 
@@ -2205,6 +2206,7 @@ def move_folder_by_date(db, folder_id, destination, folder_template,
         )
         group_moved = int(result.get("moved", 0))
         moved += group_moved
+        already_in_place += int(result.get("already_in_place", 0))
         errors.extend(result.get("errors") or [])
         completed += group["photo_count"]
         destinations.append({
@@ -2220,6 +2222,7 @@ def move_folder_by_date(db, folder_id, destination, folder_template,
 
     result = {
         "moved": moved,
+        "already_in_place": already_in_place,
         "errors": errors,
         "destinations": destinations,
         "destination_count": len(destinations),
@@ -2307,6 +2310,22 @@ def _blocked_destination_developed_path(destination, developed_dir):
     return None
 
 
+def _is_same_directory(folder_id, folder_path, dest_folder_id, destination):
+    """Whether a photo's folder already is the move destination.
+
+    ``destination`` has been through ``catalog_folder_path``, so a case or
+    alias spelling of a cataloged folder resolves to that folder's row and
+    the ids match. ``samefile`` covers two catalog rows naming one
+    directory (e.g. both spellings on a case-insensitive volume).
+    """
+    if folder_id == dest_folder_id:
+        return True
+    try:
+        return os.path.samefile(folder_path, destination)
+    except OSError:
+        return False
+
+
 def move_photos(db, photo_ids, destination, progress_cb=None,
                 developed_dir="", developed_listing_cache=None, cancel_check=None,
                 pause_requested=None, pause_callback=None):
@@ -2334,7 +2353,9 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
     pause_requested is a non-parking probe; pause_callback runs after counts
     are reconciled, so a paused move leaves the folder tree consistent.
 
-    Returns dict with keys: moved (int), errors (list of str)
+    Returns dict with keys: moved (int), already_in_place (int: photos
+    whose folder already is the destination, left untouched), errors (list
+    of str)
     """
     if developed_listing_cache is None:
         developed_listing_cache = {}
@@ -2378,6 +2399,8 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
         }
     total = len(photo_ids)
     moved = 0
+    already_in_place = 0
+    in_place_folders = {}
     errors = []
     managed_default_developed = {}
     copied_xmp_companions = set()
@@ -2481,6 +2504,24 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
             src_dir = folder_row["path"]
             src_file = os.path.join(src_dir, photo["filename"])
             stem = os.path.splitext(photo["filename"])[0]
+
+            # A photo that already lives in the destination has nothing to
+            # move. Without this the collision check below finds the photo's
+            # own file and reports "already exists at destination", failing
+            # a move whose every photo ended up where it was asked to go.
+            in_place = in_place_folders.get(photo["folder_id"])
+            if in_place is None:
+                in_place = in_place_folders[photo["folder_id"]] = (
+                    _is_same_directory(
+                        photo["folder_id"], src_dir,
+                        dest_folder_id, destination,
+                    )
+                )
+            if in_place:
+                already_in_place += 1
+                if progress_cb:
+                    progress_cb(i + 1, total, photo["filename"])
+                continue
 
             if not os.path.isfile(src_file):
                 log.warning("Move skipped for %s: source file missing", photo["filename"])
@@ -2760,7 +2801,12 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
         if moved > 0:
             db.update_folder_counts()
 
-    return {"moved": moved, "errors": errors, "destination_folder_id": dest_folder_id}
+    return {
+        "moved": moved,
+        "already_in_place": already_in_place,
+        "errors": errors,
+        "destination_folder_id": dest_folder_id,
+    }
 
 
 def _plan_moved_file_mtimes(db, src_path, dest_path,

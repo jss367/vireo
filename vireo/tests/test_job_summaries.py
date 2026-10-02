@@ -126,6 +126,35 @@ def test_explicit_summary_wins():
     assert out["details"] == ["2 errors:", "DSC_1.NEF: stem exists", "DSC_2.NEF: stem exists"]
 
 
+def test_move_summary_counts_photos_already_in_the_destination():
+    out = describe_result("move-photos", {"moved": 0, "already_in_place": 3, "errors": []})
+    assert out["summary"] == "3 photos already in the destination"
+
+    out = describe_result("move-photos", {
+        "moved": 2, "already_in_place": 1, "errors": ["c.jpg: copy failed"],
+    })
+    assert out["summary"] == "2 photos moved, 1 already in the destination, 1 error"
+
+
+def test_pipeline_notes_are_listed_as_notes_not_errors():
+    """A Process run's benign-skip notes ride in its errors list; the
+    details call them notes so a green run doesn't claim it erred."""
+    note = "[eye_keypoints] Failed to download superanimal-bird weights"
+    out = describe_result("pipeline", {
+        "stages": {}, "duration": 4.0, "ok": True,
+        "errors": [note], "notes": [note],
+    })
+    assert out["summary"] == "1 note"
+    assert out["details"] == ["1 note:", note]
+
+    denied = "[scan] PERMISSION_DENIED: /Volumes/Card"
+    out = describe_result("pipeline", {
+        "stages": {}, "duration": 4.0, "ok": False,
+        "errors": [denied, note], "notes": [note],
+    })
+    assert out["details"] == ["1 error:", denied, "1 note:", note]
+
+
 def test_error_only_result_surfaces_error():
     out = describe_result("sync", {"error": "No module named 'xmp_writer'"})
     assert out["error"] == "No module named 'xmp_writer'"

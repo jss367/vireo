@@ -2417,6 +2417,17 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         _raise_if_stages_failed(
             job, result, stages, errors, control.cancellation_requested,
         )
+        # No stage failed, so the run's own verdict decides the status
+        # instead of the runner's any-error rollup. ``errors`` also carries
+        # notes that explain a benign skip (no detections to mask, an
+        # optional weight download that failed); those keep the run green.
+        # Anything else recorded there still failed it, e.g. a directory
+        # the scan was refused, which leaves the scan stage "completed".
+        # The notes stay in ``errors`` (and ``result["notes"]`` names them)
+        # so the Process page and Jobs details keep showing them.
+        noted = set(run.notes)
+        result["notes"] = list(run.notes)
+        result["ok"] = all(e in noted for e in errors)
         return result
     finally:
         if archive_destination_reserved:

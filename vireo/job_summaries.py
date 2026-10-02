@@ -108,6 +108,19 @@ def _item_text(item: Any) -> str:
     return _format_scalar(item)
 
 
+def error_text(err: Any) -> str:
+    """One result error as the line the job's error list shows.
+
+    Jobs whose result carries structured errors (``{"photo_id": 12,
+    "error": "render failed"}``) keep that shape for their own UI; the
+    runner folds each into ``job["errors"]`` as this readable line rather
+    than the dict's repr.
+    """
+    if isinstance(err, dict):
+        return _item_text(err) or str(err)
+    return str(err)
+
+
 def _list_details(items: Any, heading: str) -> list[str]:
     """``heading`` line followed by up to MAX_DETAIL_ITEMS entries.
 
@@ -734,14 +747,33 @@ def _duplicate_scan(result: dict, config: dict) -> tuple[str, list[str]]:
 
 def _move(result: dict, config: dict) -> tuple[str, list[str]]:
     moved = _int(result, "moved")
+    in_place = _int(result, "already_in_place")
     errors = result.get("errors") or []
-    summary = _n(moved, "photo") + " moved"
+    if in_place and not moved:
+        # Nothing needed moving; "0 photos moved" would read as a failure.
+        summary = _n(in_place, "photo") + " already in the destination"
+    else:
+        summary = _n(moved, "photo") + " moved"
+        if in_place:
+            summary += f", {in_place:,} already in the destination"
     if isinstance(errors, list) and errors:
         summary += f", {_n(len(errors), 'error')}"
     return summary, _error_details(result)
 
 
+def _pipeline(result: dict, config: dict) -> tuple[str, list[str]]:
+    # ``notes`` are the entries of ``errors`` that explain a benign skip
+    # (no detections to mask, an optional download that failed). List them
+    # as notes, not errors, so a green run's details don't claim it erred.
+    notes = result.get("notes")
+    errors = result.get("errors")
+    if isinstance(notes, list) and notes and isinstance(errors, list):
+        result = {**result, "errors": [e for e in errors if e not in notes]}
+    return _generic(result, config)
+
+
 _DESCRIBERS: dict[str, Callable[[dict, dict], tuple[str, list[str]]]] = {
+    "pipeline": _pipeline,
     "batch-delete": _batch_delete,
     "thumbnails": _thumbnails,
     "previews": _previews,

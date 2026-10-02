@@ -12,7 +12,7 @@ from datetime import datetime
 
 import power
 from job_contract import failure_event
-from job_summaries import describe_result
+from job_summaries import describe_result, error_text
 from resource_ledger import (
     bind_resource_cancel_check,
     bind_resource_owner,
@@ -1370,7 +1370,9 @@ class JobRunner:
                     has_verdict = isinstance(result, dict) and isinstance(result.get("ok"), bool)
                     if has_verdict:
                         for err in (result.get("errors") or []):
-                            err_str = str(err)
+                            # Structured errors ({"photo_id", "error"})
+                            # read as "<file>: <reason>", not a dict repr.
+                            err_str = error_text(err)
                             if err_str not in job["errors"]:
                                 job["errors"].append(err_str)
                         if result["ok"] is False:

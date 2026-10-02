@@ -90,6 +90,76 @@ def test_move_photos_copies_and_deletes(move_env):
     assert not (env["src"] / "bird1.xmp").exists()
 
 
+def test_move_photos_leaves_photos_already_in_destination_alone(move_env):
+    """A photo whose folder already is the destination is a no-op, not an
+    error. The collision check used to find the photo's own file and report
+    "already exists at destination", which failed the whole move job."""
+    from move import move_photos
+
+    env = move_env
+    db = env["db"]
+    (env["dst"] / "owl.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 50)
+    (env["dst"] / "owl.xmp").write_text("<xmp/>")
+    in_place = db.add_photo(folder_id=env["fid_dst"], filename="owl.jpg",
+                            extension=".jpg", file_size=52, file_mtime=3.0)
+
+    result = move_photos(
+        db=db, photo_ids=[in_place, env["p1"]], destination=str(env["dst"]),
+    )
+
+    assert result["errors"] == []
+    assert result["moved"] == 1
+    assert result["already_in_place"] == 1
+    assert (env["dst"] / "owl.jpg").exists()
+    assert (env["dst"] / "owl.xmp").exists()
+    assert db.get_photo(in_place)["folder_id"] == env["fid_dst"]
+    assert db.get_photo(env["p1"])["folder_id"] == env["fid_dst"]
+
+
+@pytest.mark.skipif(not _TMP_FOLDS_CASE, reason="needs a case-folding filesystem")
+def test_move_photos_in_place_check_matches_other_case_spelling(move_env):
+    """On a case-insensitive volume a destination typed in another case is
+    the photo's own folder; the photo stays put rather than "colliding"
+    with itself."""
+    from move import move_photos
+
+    env = move_env
+    result = move_photos(
+        db=env["db"], photo_ids=[env["p1"]],
+        destination=str(env["src"]).upper(),
+    )
+
+    assert result["errors"] == []
+    assert result["moved"] == 0
+    assert result["already_in_place"] == 1
+    assert (env["src"] / "bird1.jpg").exists()
+    assert env["db"].get_photo(env["p1"])["folder_id"] == env["fid_src"]
+
+
+def test_move_photos_in_place_check_matches_alias_folder_row(move_env):
+    """Two catalog rows can name one directory (a symlinked mount next to
+    its target). Moving to one of them a photo filed under the other is
+    still a no-op."""
+    from move import move_photos
+
+    env = move_env
+    alias = env["tmp_path"] / "src-alias"
+    try:
+        os.symlink(env["src"], alias, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+    env["db"].add_folder(str(alias), name="src-alias")
+
+    result = move_photos(
+        db=env["db"], photo_ids=[env["p1"]], destination=str(alias),
+    )
+
+    assert result["errors"] == []
+    assert result["moved"] == 0
+    assert result["already_in_place"] == 1
+    assert (env["src"] / "bird1.jpg").exists()
+
+
 def test_move_photos_updates_db(move_env):
     """move_photos updates folder_id in the database."""
     from move import move_photos

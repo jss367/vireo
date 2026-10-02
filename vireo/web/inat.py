@@ -358,8 +358,12 @@ def create_inat_blueprint(
                             "filename": os.path.basename(path),
                         })
                     except (InatExportError, OSError, ValueError) as exc:
+                        # ``filename`` names the photo in the job's error
+                        # list ("bird.jpg: render failed"), which the runner
+                        # builds from these entries.
                         errors.append({
                             "photo_id": photo_id,
+                            "filename": photo["filename"],
                             "error": str(exc),
                         })
                     finally:
@@ -378,8 +382,11 @@ def create_inat_blueprint(
                     revealed = reveal_inat_exports(
                         [item["path"] for item in exported], destination,
                     )
+                # Like export and move: a photo that failed to export fails
+                # the job, so 5 of 10 exported doesn't read as "completed".
+                # The counts stay in the result for the summary and modal.
                 return {
-                    "ok": bool(exported),
+                    "ok": not errors,
                     "exported": exported,
                     "errors": errors,
                     "destination": destination,
