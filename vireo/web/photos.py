@@ -1202,11 +1202,6 @@ def create_photos_blueprint(
 
     @blueprint.route("/api/photos/open-external", methods=["POST"])
     def api_photos_open_external():
-        import subprocess
-        import sys
-
-        import config as cfg
-
         body = request.get_json(silent=True) or {}
         photo_ids = body.get("photo_ids")
         if not isinstance(photo_ids, list) or not photo_ids:
@@ -1215,453 +1210,38 @@ def create_photos_blueprint(
             return json_error("photo_ids must be a list of integers")
 
         db = get_db()
-        folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
-        vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
-        photo_paths = []
-        for pid in photo_ids:
-            photo = db.get_photo(pid)
-            if not photo:
-                continue
-            folder_path = folders.get(photo["folder_id"], "")
-            if folder_path:
-                photo_paths.append((
-                    photo,
-                    os.path.join(folder_path, photo["filename"]),
-                ))
-
+        run = _OpenExternal(
+            db,
+            {f["id"]: f["path"] for f in db.get_folder_tree()},
+            os.path.dirname(config["THUMB_CACHE_DIR"]),
+            json_error,
+        )
+        photo_paths = run.photo_paths(photo_ids)
         if not photo_paths:
             return json_error("No photos found", 404)
 
-        def _external_edit_recipe_source(photo, recipe, fallback_path):
-            from image_loader import RAW_EXTENSIONS
-
-            primary_is_raw = (
-                os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
-            )
-
-            if recipe.get("crop"):
-                source_path, using_working_copy = _recipe_render_source(
-                    photo, recipe, 0, vireo_dir, folders,
-                )
-                return source_path or fallback_path, bool(using_working_copy)
-
-            # For RAW primaries, skip the working-copy short-circuit while the
-            # RAW source is available: legacy working copies predate the
-            # highlight-preserving RAW decode and would feed the editor a
-            # clipped JPEG to apply the recipe to. If the RAW source is
-            # offline/missing, the working copy is the only local fallback.
-            wc_rel = photo["working_copy_path"]
-            if wc_rel and (
-                not primary_is_raw or not os.path.exists(fallback_path)
-            ):
-                wc_path = (
-                    wc_rel if os.path.isabs(wc_rel)
-                    else os.path.join(vireo_dir, wc_rel)
-                )
-                if (
-                    os.path.exists(wc_path)
-                    and _path_satisfies_recipe_render(wc_path, photo, recipe, 0)
-                ):
-                    return wc_path, True
-
-            folder_path = folders.get(photo["folder_id"])
-            if folder_path:
-                raw_source_available = os.path.exists(fallback_path)
-                # For RAW primaries, skip the companion JPEG while the RAW is
-                # available so edits render from the preserve-highlights decode.
-                # If the RAW volume is offline, a full-size sidecar is the best
-                # remaining local source.
-                if not primary_is_raw or not raw_source_available:
-                    companion_path = photo["companion_path"]
-                    if companion_path:
-                        companion = os.path.join(folder_path, companion_path)
-                        if (
-                            os.path.exists(companion)
-                            and _path_satisfies_recipe_render(
-                                companion, photo, recipe, 0,
-                            )
-                        ):
-                            return companion, False
-                original = os.path.join(folder_path, photo["filename"])
-                if os.path.exists(original):
-                    return original, False
-            return fallback_path, False
-
-        def _external_edit_handoff_path(photo, fallback_path):
-            recipe = db.get_photo_edit_recipe(photo["id"])
-            if not recipe:
-                return fallback_path, None
-
-            import local_masks as _local_masks
-            from image_edits import (
-                EDIT_MATH_VERSION,
-                apply_recipe_to_loaded_image,
-                recipe_to_json,
-            )
-            from image_loader import (
-                RAW_DECODE_LINEAR,
-                RAW_EXTENSIONS,
-                load_image,
-            )
-
-            source_path, using_working_copy = _external_edit_recipe_source(
-                photo, recipe, fallback_path,
-            )
-            fallback_available = bool(
-                fallback_path and os.path.isfile(fallback_path)
-            )
-            # When the original is offline the working copy is the only usable
-            # local source; the retry-from-original recovery below cannot save
-            # us. Hold the publication/eviction guard through the exists →
-            # getmtime → decode window so quota enforcement cannot unlink the
-            # working copy mid-handoff. Guard is an RLock, so nested
-            # acquisitions inside load_image are safe.
-            pin_working_copy = using_working_copy and not fallback_available
-            source_pin_cm = (
-                working_copy_publication_guard()
-                if pin_working_copy else contextlib.nullcontext()
-            )
-            with source_pin_cm:
-                if not source_path or not os.path.isfile(source_path):
-                    if using_working_copy and fallback_available:
-                        # Quota enforcement can unlink the working copy between
-                        # recipe-source resolution and this existence check.
-                        # Fall back to the original before reporting missing.
-                        source_path = fallback_path
-                        using_working_copy = False
-                    else:
-                        return None, f"{photo['filename']}: source file missing"
-
-                out_dir = os.path.join(vireo_dir, "external-edits")
-                os.makedirs(out_dir, exist_ok=True)
-                out_path = os.path.join(out_dir, f"{photo['id']}.jpg")
-                meta_path = os.path.join(out_dir, f"{photo['id']}.json")
-                try:
-                    source_mtime = os.path.getmtime(source_path)
-                except FileNotFoundError:
-                    if using_working_copy and fallback_available:
-                        source_path = fallback_path
-                        using_working_copy = False
-                        source_mtime = os.path.getmtime(source_path)
-                    else:
-                        return None, f"{photo['filename']}: source file missing"
-                recipe_json = recipe_to_json(recipe) or ""
-                # Include the edit-math version so a math bump invalidates this
-                # handoff render: the JPEG is keyed by recipe/source/mtime,
-                # none of which change when only the per-pixel rendering math
-                # changes, so without this we'd keep handing editors the stale
-                # render.
-                expected_meta = {
-                    "recipe": recipe_json,
-                    "source_path": source_path,
-                    "source_mtime": source_mtime,
-                    "edit_math_version": EDIT_MATH_VERSION,
-                    **_camera_render_cache_fields(photo, recipe),
-                }
-                try:
-                    if os.path.isfile(out_path) and os.path.isfile(meta_path):
-                        with open(meta_path, encoding="utf-8") as f:
-                            cached_meta = json.load(f)
-                        if cached_meta == expected_meta:
-                            return out_path, None
-                except (OSError, ValueError, TypeError):
-                    pass
-
-                # Derive the decode mode from the primary photo's extension
-                # rather than source_path so a future change to source_path
-                # resolution (working copy, companion JPEG fallback, etc.)
-                # cannot silently bypass RAW_DECODE_LINEAR for a
-                # RAW primary.
-                primary_is_raw = (
-                    os.path.splitext(photo["filename"])[1].lower()
-                    in RAW_EXTENSIONS
-                )
-                raw_decode = (
-                    RAW_DECODE_LINEAR if primary_is_raw else None
-                )
-                load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
-                img = load_image(source_path, max_size=None, **load_kwargs)
-                if img is None and using_working_copy and fallback_path and (
-                    os.path.isfile(fallback_path)
-                    and os.path.abspath(fallback_path)
-                    != os.path.abspath(source_path)
-                ):
-                    # Working copy was evicted between validation and decode.
-                    # Retry from the original before the companion fallback so
-                    # RAW primaries still use the highlight-preserving decode.
-                    retry_img = load_image(
-                        fallback_path, max_size=None, **load_kwargs,
-                    )
-                    if retry_img is not None:
-                        img = retry_img
-                        source_path = fallback_path
-                        using_working_copy = False
-                        with contextlib.suppress(OSError):
-                            source_mtime = os.path.getmtime(source_path)
-                        expected_meta["source_path"] = source_path
-                        expected_meta["source_mtime"] = source_mtime
-            expected_w, expected_h = 0, 0
-            needs_companion = False
-            if primary_is_raw:
-                # libraw may return the embedded JPEG when it cannot
-                # demosaic — that preview is typically much smaller than the
-                # full-size companion JPEG, so the handoff would apply the
-                # recipe to clipped pixels even when a usable sidecar exists.
-                # Trigger the companion fallback when the RAW failed outright
-                # or came back undersized (both axes checked, shared helper).
-                expected_w, expected_h = _recipe_source_dimensions(photo)
-                needs_companion = img is None or _image_is_smaller_than_expected(
-                    img, expected_w, expected_h,
-                )
-            if needs_companion:
-                # libraw can't decode this RAW (unsupported variant, corrupt
-                # sensor data, no usable embedded JPEG) or only produced an
-                # undersized embedded preview. Fall back to the full-size
-                # companion JPEG so Open External still works for RAW+JPEG
-                # pairs that have a usable handoff JPEG. Cache key stays on
-                # the RAW source so a future RAW replacement (mtime bump)
-                # re-tries the RAW; we accept that companion-only edits
-                # won't invalidate this render — matching the cache
-                # contract used elsewhere for RAW-primary photos.
-                folder_path = folders.get(photo["folder_id"])
-                companion_path = photo["companion_path"]
-                if folder_path and companion_path:
-                    companion_abs = os.path.join(folder_path, companion_path)
-                    if (
-                        os.path.exists(companion_abs)
-                        and os.path.abspath(companion_abs)
-                        != os.path.abspath(source_path)
-                    ):
-                        companion_img = load_image(companion_abs, max_size=None)
-                        # Prefer companion when it covers the expected size on
-                        # both axes — a long-edge-only check misses cases like
-                        # a 6000x3376 embedded preview "tying" a 6000x4000
-                        # sidecar and losing the short-edge content.
-                        if _companion_image_can_replace_raw_result(
-                            companion_img, img, expected_w, expected_h,
-                        ):
-                            if img is None:
-                                log.info(
-                                    "External-edit RAW decode failed for "
-                                    "photo %s; falling back to companion "
-                                    "JPEG %s",
-                                    photo["id"], companion_abs,
-                                )
-                            else:
-                                log.info(
-                                    "External-edit RAW decode fell back to "
-                                    "undersized embedded JPEG (%dx%d) for "
-                                    "photo %s; using companion JPEG %s "
-                                    "(%dx%d)",
-                                    img.size[0], img.size[1], photo["id"],
-                                    companion_abs,
-                                    companion_img.size[0],
-                                    companion_img.size[1],
-                                )
-                                img.close()
-                            img = companion_img
-                        elif companion_img is not None:
-                            companion_img.close()
-            if img is None:
-                return None, f"{photo['filename']}: failed to load image"
-            rendered = None
-            tmp_path = None
-            fd = None
-            try:
-                rendered = apply_recipe_to_loaded_image(
-                    img, recipe,
-                    camera_metadata=photo,
-                    native_size=_recipe_source_dimensions(photo),
-                    local_mask=_local_masks.load_snapshot(
-                        vireo_dir, photo["id"], recipe,
-                    ),
-                )
-                quality = cfg.load().get("working_copy_quality", 92)
-                fd, tmp_path = tempfile.mkstemp(
-                    prefix=f".{photo['id']}.", suffix=".jpg.tmp", dir=out_dir,
-                )
-                os.close(fd)
-                fd = None
-                rendered.save(tmp_path, format="JPEG", quality=quality)
-                replace_file(tmp_path, out_path)
-                with open(meta_path, "w", encoding="utf-8") as f:
-                    json.dump(expected_meta, f, sort_keys=True)
-            except Exception:
-                if fd is not None:
-                    with contextlib.suppress(OSError):
-                        os.close(fd)
-                with contextlib.suppress(OSError):
-                    if tmp_path:
-                        os.unlink(tmp_path)
-                raise
-            finally:
-                if rendered is not None:
-                    rendered.close()
-                if rendered is not img:
-                    img.close()
-            return out_path, None
-
-        editors = cfg.get_editors()
-        selected_editor = None
-        editor_index = body.get("editor_index")
-        if editor_index is None:
-            # No index = use the first configured editor (or fall through to
-            # the OS default if no editors are configured at all).
-            selected_editor = editors[0] if editors else None
-            editor = selected_editor["path"] if selected_editor else ""
-        else:
-            if not isinstance(editor_index, int) or isinstance(editor_index, bool):
-                return json_error("editor_index must be an integer")
-            if not editors:
-                return json_error(
-                    "No external editors configured. Add one in Settings.", 400
-                )
-            if editor_index < 0 or editor_index >= len(editors):
-                return json_error(
-                    f"editor_index {editor_index} out of range "
-                    f"(have {len(editors)} editor(s))", 400
-                )
-            selected_editor = editors[editor_index]
-            editor = selected_editor["path"]
-        editor_path = os.path.expanduser(editor) if editor else ""
-
-        # On macOS, an .app bundle is a directory — execing it raises EACCES.
-        # Resolve the bundle when the user gives the parent folder (e.g.
-        # /Applications/Adobe Lightroom Classic/) and route through `open -a`.
-        app_bundle = None
-        if sys.platform == "darwin" and editor_path:
-            if editor_path.endswith(".app"):
-                app_bundle = editor_path
-            elif os.path.isdir(editor_path):
-                try:
-                    bundles = [
-                        entry for entry in sorted(os.listdir(editor_path))
-                        if entry.endswith(".app")
-                    ]
-                except OSError:
-                    bundles = []
-                if len(bundles) == 1:
-                    app_bundle = os.path.join(editor_path, bundles[0])
-                elif len(bundles) > 1:
-                    return json_error(
-                        f"Multiple .app bundles found in {editor_path} "
-                        f"({', '.join(bundles)}). "
-                        "Set the editor to a specific .app bundle.",
-                        500,
-                    )
-                else:
-                    return json_error(
-                        f"No .app bundle found in {editor_path}. "
-                        "Set the editor to the .app bundle directly.",
-                        500,
-                    )
-
-        def _is_darktable_editor():
-            parts = [
-                selected_editor.get("name", "") if selected_editor else "",
-                editor_path,
-                app_bundle or "",
-            ]
-            return "darktable" in " ".join(parts).lower()
+        error = run.select_editor(body)
+        if error is not None:
+            return error
+        error = run.resolve_app_bundle()
+        if error is not None:
+            return error
 
         file_paths = []
         for photo, path in photo_paths:
-            handoff_path, handoff_error = _external_edit_handoff_path(photo, path)
+            handoff_path, handoff_error = run.handoff_path(photo, path)
             if handoff_error:
                 return json_error(handoff_error, 500)
             file_paths.append(handoff_path)
-        if _is_darktable_editor():
-            from develop import convert_to_dng, is_nikon_high_efficiency_nef
-
-            converted_paths = []
-            for (photo, _original_path), input_path in zip(
-                photo_paths, file_paths, strict=True,
-            ):
-                try:
-                    metadata = (
-                        json.loads(photo["exif_data"])
-                        if photo["exif_data"] else None
-                    )
-                except (TypeError, json.JSONDecodeError):
-                    metadata = None
-
-                if not is_nikon_high_efficiency_nef(input_path, metadata=metadata):
-                    converted_paths.append(input_path)
-                    continue
-
-                out_dir = os.path.join(vireo_dir, "external-dng", str(photo["id"]))
-                stem = os.path.splitext(os.path.basename(input_path))[0]
-                cached = os.path.join(out_dir, f"{stem}.dng")
-                cached_alt = os.path.join(out_dir, f"{stem}.DNG")
-                source_mtime = (
-                    os.path.getmtime(input_path)
-                    if os.path.exists(input_path) else 0
-                )
-                fresh_cached = None
-                for candidate in (cached, cached_alt):
-                    if (
-                        os.path.isfile(candidate)
-                        and os.path.getmtime(candidate) >= source_mtime
-                    ):
-                        log.info(
-                            "Using cached DNG for darktable external editor: %s",
-                            candidate,
-                        )
-                        fresh_cached = candidate
-                        break
-                if fresh_cached:
-                    converted_paths.append(fresh_cached)
-                    continue
-
-                log.info(
-                    "Converting Nikon HE NEF for darktable external editor: %s",
-                    input_path,
-                )
-                conversion = convert_to_dng(
-                    cfg.get("dng_converter_bin") or "",
-                    input_path,
-                    out_dir,
-                )
-                if not conversion["success"]:
-                    return json_error(
-                        "Nikon High Efficiency NEF detected, but DNG conversion failed: "
-                        f"{conversion['error']}",
-                        500,
-                    )
-                converted_paths.append(conversion["output_path"])
-            file_paths = converted_paths
+        if run.is_darktable_editor():
+            file_paths, error = run.darktable_paths(photo_paths, file_paths)
+            if error is not None:
+                return error
 
         try:
-            if app_bundle:
-                # `open -a` returns quickly after launching; capture the exit
-                # so launch failures surface instead of disappearing silently.
-                result = subprocess.run(
-                    ["open", "-a", app_bundle] + file_paths,
-                    capture_output=True, text=True, timeout=30,
-                    **no_window_kwargs(),
-                )
-                if result.returncode != 0:
-                    err = (result.stderr or result.stdout or "open failed").strip()
-                    log.warning("open -a %s failed: %s", app_bundle, err)
-                    return json_error(err, 500)
-            elif editor_path:
-                subprocess.Popen([editor_path] + file_paths, **no_window_kwargs())
-            elif sys.platform == "darwin":
-                result = subprocess.run(
-                    ["open"] + file_paths,
-                    capture_output=True, text=True, timeout=30,
-                    **no_window_kwargs(),
-                )
-                if result.returncode != 0:
-                    err = (result.stderr or result.stdout or "open failed").strip()
-                    log.warning("open %s failed: %s", file_paths, err)
-                    return json_error(err, 500)
-            elif sys.platform == "win32":
-                for fp in file_paths:
-                    os.startfile(fp)
-            else:
-                for fp in file_paths:
-                    subprocess.Popen(["xdg-open", fp], **no_window_kwargs())
+            error = run.launch(file_paths)
+            if error is not None:
+                return error
         except Exception as e:
             log.warning("Failed to open external editor: %s", e)
             return json_error(str(e), 500)
@@ -2387,3 +1967,519 @@ class _PhotosQuery:
             else underlying_total
         )
         return inventory_total, available_total
+
+
+@dataclass
+class _HandoffSource:
+    """The source one Open External handoff render decodes, and where the
+    render and its cache metadata are written."""
+
+    source_path: str | None
+    using_working_copy: bool
+    fallback_path: str
+    fallback_available: bool
+    out_dir: str | None = None
+    out_path: str | None = None
+    meta_path: str | None = None
+    source_mtime: float | None = None
+    expected_meta: dict | None = None
+
+
+class _OpenExternal:
+    """One ``/api/photos/open-external`` request.
+
+    ``api_photos_open_external`` validates the body, then calls the phases in
+    order: collect the photos' original paths, pick the editor, resolve a
+    macOS ``.app`` bundle, render each photo's edit-recipe handoff, convert
+    Nikon HE NEFs for darktable, and launch. Each phase that can end the
+    request returns the error response, or None to continue.
+    """
+
+    def __init__(self, db, folders, vireo_dir, json_error):
+        self.db = db
+        self.folders = folders
+        self.vireo_dir = vireo_dir
+        self.json_error = json_error
+        self.selected_editor = None
+        self.editor_path = ""
+        self.app_bundle = None
+
+    def photo_paths(self, photo_ids):
+        photo_paths = []
+        for pid in photo_ids:
+            photo = self.db.get_photo(pid)
+            if not photo:
+                continue
+            folder_path = self.folders.get(photo["folder_id"], "")
+            if folder_path:
+                photo_paths.append((
+                    photo,
+                    os.path.join(folder_path, photo["filename"]),
+                ))
+        return photo_paths
+
+    def recipe_source(self, photo, recipe, fallback_path):
+        from image_loader import RAW_EXTENSIONS
+
+        vireo_dir = self.vireo_dir
+        folders = self.folders
+        primary_is_raw = (
+            os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
+        )
+
+        if recipe.get("crop"):
+            source_path, using_working_copy = _recipe_render_source(
+                photo, recipe, 0, vireo_dir, folders,
+            )
+            return source_path or fallback_path, bool(using_working_copy)
+
+        # For RAW primaries, skip the working-copy short-circuit while the
+        # RAW source is available: legacy working copies predate the
+        # highlight-preserving RAW decode and would feed the editor a
+        # clipped JPEG to apply the recipe to. If the RAW source is
+        # offline/missing, the working copy is the only local fallback.
+        wc_rel = photo["working_copy_path"]
+        if wc_rel and (
+            not primary_is_raw or not os.path.exists(fallback_path)
+        ):
+            wc_path = (
+                wc_rel if os.path.isabs(wc_rel)
+                else os.path.join(vireo_dir, wc_rel)
+            )
+            if (
+                os.path.exists(wc_path)
+                and _path_satisfies_recipe_render(wc_path, photo, recipe, 0)
+            ):
+                return wc_path, True
+
+        folder_path = folders.get(photo["folder_id"])
+        if folder_path:
+            raw_source_available = os.path.exists(fallback_path)
+            # For RAW primaries, skip the companion JPEG while the RAW is
+            # available so edits render from the preserve-highlights decode.
+            # If the RAW volume is offline, a full-size sidecar is the best
+            # remaining local source.
+            if not primary_is_raw or not raw_source_available:
+                companion_path = photo["companion_path"]
+                if companion_path:
+                    companion = os.path.join(folder_path, companion_path)
+                    if (
+                        os.path.exists(companion)
+                        and _path_satisfies_recipe_render(
+                            companion, photo, recipe, 0,
+                        )
+                    ):
+                        return companion, False
+            original = os.path.join(folder_path, photo["filename"])
+            if os.path.exists(original):
+                return original, False
+        return fallback_path, False
+
+    def handoff_path(self, photo, fallback_path):
+        recipe = self.db.get_photo_edit_recipe(photo["id"])
+        if not recipe:
+            return fallback_path, None
+
+        import local_masks as _local_masks
+        from image_edits import (
+            EDIT_MATH_VERSION,
+            apply_recipe_to_loaded_image,
+            recipe_to_json,
+        )
+        from image_loader import (
+            RAW_DECODE_LINEAR,
+            RAW_EXTENSIONS,
+            load_image,
+        )
+
+        vireo_dir = self.vireo_dir
+        source_path, using_working_copy = self.recipe_source(
+            photo, recipe, fallback_path,
+        )
+        src = _HandoffSource(
+            source_path=source_path,
+            using_working_copy=using_working_copy,
+            fallback_path=fallback_path,
+            fallback_available=bool(
+                fallback_path and os.path.isfile(fallback_path)
+            ),
+        )
+        # When the original is offline the working copy is the only usable
+        # local source; the retry-from-original recovery below cannot save
+        # us. Hold the publication/eviction guard through the exists →
+        # getmtime → decode window so quota enforcement cannot unlink the
+        # working copy mid-handoff. Guard is an RLock, so nested
+        # acquisitions inside load_image are safe.
+        pin_working_copy = src.using_working_copy and not src.fallback_available
+        source_pin_cm = (
+            working_copy_publication_guard()
+            if pin_working_copy else contextlib.nullcontext()
+        )
+        with source_pin_cm:
+            error = self._open_handoff_source(photo, src)
+            if error is not None:
+                return None, error
+            recipe_json = recipe_to_json(recipe) or ""
+            # Include the edit-math version so a math bump invalidates this
+            # handoff render: the JPEG is keyed by recipe/source/mtime,
+            # none of which change when only the per-pixel rendering math
+            # changes, so without this we'd keep handing editors the stale
+            # render.
+            src.expected_meta = {
+                "recipe": recipe_json,
+                "source_path": src.source_path,
+                "source_mtime": src.source_mtime,
+                "edit_math_version": EDIT_MATH_VERSION,
+                **_camera_render_cache_fields(photo, recipe),
+            }
+            if self._cached_handoff_is_fresh(src):
+                return src.out_path, None
+
+            # Derive the decode mode from the primary photo's extension
+            # rather than source_path so a future change to source_path
+            # resolution (working copy, companion JPEG fallback, etc.)
+            # cannot silently bypass RAW_DECODE_LINEAR for a
+            # RAW primary.
+            primary_is_raw = (
+                os.path.splitext(photo["filename"])[1].lower()
+                in RAW_EXTENSIONS
+            )
+            raw_decode = (
+                RAW_DECODE_LINEAR if primary_is_raw else None
+            )
+            load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
+            img = load_image(src.source_path, max_size=None, **load_kwargs)
+            if img is None and src.using_working_copy and fallback_path and (
+                os.path.isfile(fallback_path)
+                and os.path.abspath(fallback_path)
+                != os.path.abspath(src.source_path)
+            ):
+                # Working copy was evicted between validation and decode.
+                # Retry from the original before the companion fallback so
+                # RAW primaries still use the highlight-preserving decode.
+                retry_img = load_image(
+                    fallback_path, max_size=None, **load_kwargs,
+                )
+                if retry_img is not None:
+                    img = retry_img
+                    src.source_path = fallback_path
+                    src.using_working_copy = False
+                    with contextlib.suppress(OSError):
+                        src.source_mtime = os.path.getmtime(src.source_path)
+                    src.expected_meta["source_path"] = src.source_path
+                    src.expected_meta["source_mtime"] = src.source_mtime
+        if primary_is_raw:
+            img = self._companion_fallback(photo, src, img, load_image)
+        if img is None:
+            return None, f"{photo['filename']}: failed to load image"
+        rendered = None
+        tmp_path = None
+        fd = None
+        try:
+            rendered = apply_recipe_to_loaded_image(
+                img, recipe,
+                camera_metadata=photo,
+                native_size=_recipe_source_dimensions(photo),
+                local_mask=_local_masks.load_snapshot(
+                    vireo_dir, photo["id"], recipe,
+                ),
+            )
+            quality = cfg.load().get("working_copy_quality", 92)
+            fd, tmp_path = tempfile.mkstemp(
+                prefix=f".{photo['id']}.", suffix=".jpg.tmp", dir=src.out_dir,
+            )
+            os.close(fd)
+            fd = None
+            rendered.save(tmp_path, format="JPEG", quality=quality)
+            replace_file(tmp_path, src.out_path)
+            with open(src.meta_path, "w", encoding="utf-8") as f:
+                json.dump(src.expected_meta, f, sort_keys=True)
+        except Exception:
+            if fd is not None:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+            with contextlib.suppress(OSError):
+                if tmp_path:
+                    os.unlink(tmp_path)
+            raise
+        finally:
+            if rendered is not None:
+                rendered.close()
+            if rendered is not img:
+                img.close()
+        return src.out_path, None
+
+    def _open_handoff_source(self, photo, src):
+        """Confirm the resolved source still exists, lay out the handoff
+        output paths, and read the source mtime; return the "source file
+        missing" error, or None."""
+        if not src.source_path or not os.path.isfile(src.source_path):
+            if src.using_working_copy and src.fallback_available:
+                # Quota enforcement can unlink the working copy between
+                # recipe-source resolution and this existence check.
+                # Fall back to the original before reporting missing.
+                src.source_path = src.fallback_path
+                src.using_working_copy = False
+            else:
+                return f"{photo['filename']}: source file missing"
+
+        src.out_dir = os.path.join(self.vireo_dir, "external-edits")
+        os.makedirs(src.out_dir, exist_ok=True)
+        src.out_path = os.path.join(src.out_dir, f"{photo['id']}.jpg")
+        src.meta_path = os.path.join(src.out_dir, f"{photo['id']}.json")
+        try:
+            src.source_mtime = os.path.getmtime(src.source_path)
+        except FileNotFoundError:
+            if src.using_working_copy and src.fallback_available:
+                src.source_path = src.fallback_path
+                src.using_working_copy = False
+                src.source_mtime = os.path.getmtime(src.source_path)
+            else:
+                return f"{photo['filename']}: source file missing"
+        return None
+
+    @staticmethod
+    def _cached_handoff_is_fresh(src):
+        try:
+            if os.path.isfile(src.out_path) and os.path.isfile(src.meta_path):
+                with open(src.meta_path, encoding="utf-8") as f:
+                    cached_meta = json.load(f)
+                if cached_meta == src.expected_meta:
+                    return True
+        except (OSError, ValueError, TypeError):
+            pass
+        return False
+
+    def _companion_fallback(self, photo, src, img, load_image):
+        # libraw may return the embedded JPEG when it cannot
+        # demosaic — that preview is typically much smaller than the
+        # full-size companion JPEG, so the handoff would apply the
+        # recipe to clipped pixels even when a usable sidecar exists.
+        # Trigger the companion fallback when the RAW failed outright
+        # or came back undersized (both axes checked, shared helper).
+        expected_w, expected_h = _recipe_source_dimensions(photo)
+        needs_companion = img is None or _image_is_smaller_than_expected(
+            img, expected_w, expected_h,
+        )
+        if not needs_companion:
+            return img
+        # libraw can't decode this RAW (unsupported variant, corrupt
+        # sensor data, no usable embedded JPEG) or only produced an
+        # undersized embedded preview. Fall back to the full-size
+        # companion JPEG so Open External still works for RAW+JPEG
+        # pairs that have a usable handoff JPEG. Cache key stays on
+        # the RAW source so a future RAW replacement (mtime bump)
+        # re-tries the RAW; we accept that companion-only edits
+        # won't invalidate this render — matching the cache
+        # contract used elsewhere for RAW-primary photos.
+        folder_path = self.folders.get(photo["folder_id"])
+        companion_path = photo["companion_path"]
+        if folder_path and companion_path:
+            companion_abs = os.path.join(folder_path, companion_path)
+            if (
+                os.path.exists(companion_abs)
+                and os.path.abspath(companion_abs)
+                != os.path.abspath(src.source_path)
+            ):
+                companion_img = load_image(companion_abs, max_size=None)
+                # Prefer companion when it covers the expected size on
+                # both axes — a long-edge-only check misses cases like
+                # a 6000x3376 embedded preview "tying" a 6000x4000
+                # sidecar and losing the short-edge content.
+                if _companion_image_can_replace_raw_result(
+                    companion_img, img, expected_w, expected_h,
+                ):
+                    if img is None:
+                        log.info(
+                            "External-edit RAW decode failed for "
+                            "photo %s; falling back to companion "
+                            "JPEG %s",
+                            photo["id"], companion_abs,
+                        )
+                    else:
+                        log.info(
+                            "External-edit RAW decode fell back to "
+                            "undersized embedded JPEG (%dx%d) for "
+                            "photo %s; using companion JPEG %s "
+                            "(%dx%d)",
+                            img.size[0], img.size[1], photo["id"],
+                            companion_abs,
+                            companion_img.size[0],
+                            companion_img.size[1],
+                        )
+                        img.close()
+                    img = companion_img
+                elif companion_img is not None:
+                    companion_img.close()
+        return img
+
+    def select_editor(self, body):
+        json_error = self.json_error
+        editors = cfg.get_editors()
+        editor_index = body.get("editor_index")
+        if editor_index is None:
+            # No index = use the first configured editor (or fall through to
+            # the OS default if no editors are configured at all).
+            self.selected_editor = editors[0] if editors else None
+            editor = self.selected_editor["path"] if self.selected_editor else ""
+        else:
+            if not isinstance(editor_index, int) or isinstance(editor_index, bool):
+                return json_error("editor_index must be an integer")
+            if not editors:
+                return json_error(
+                    "No external editors configured. Add one in Settings.", 400
+                )
+            if editor_index < 0 or editor_index >= len(editors):
+                return json_error(
+                    f"editor_index {editor_index} out of range "
+                    f"(have {len(editors)} editor(s))", 400
+                )
+            self.selected_editor = editors[editor_index]
+            editor = self.selected_editor["path"]
+        self.editor_path = os.path.expanduser(editor) if editor else ""
+        return None
+
+    def resolve_app_bundle(self):
+        """On macOS, an .app bundle is a directory — execing it raises EACCES.
+        Resolve the bundle when the user gives the parent folder (e.g.
+        /Applications/Adobe Lightroom Classic/) and route through `open -a`.
+        """
+        import sys
+
+        json_error = self.json_error
+        editor_path = self.editor_path
+        if sys.platform == "darwin" and editor_path:
+            if editor_path.endswith(".app"):
+                self.app_bundle = editor_path
+            elif os.path.isdir(editor_path):
+                try:
+                    bundles = [
+                        entry for entry in sorted(os.listdir(editor_path))
+                        if entry.endswith(".app")
+                    ]
+                except OSError:
+                    bundles = []
+                if len(bundles) == 1:
+                    self.app_bundle = os.path.join(editor_path, bundles[0])
+                elif len(bundles) > 1:
+                    return json_error(
+                        f"Multiple .app bundles found in {editor_path} "
+                        f"({', '.join(bundles)}). "
+                        "Set the editor to a specific .app bundle.",
+                        500,
+                    )
+                else:
+                    return json_error(
+                        f"No .app bundle found in {editor_path}. "
+                        "Set the editor to the .app bundle directly.",
+                        500,
+                    )
+        return None
+
+    def is_darktable_editor(self):
+        parts = [
+            self.selected_editor.get("name", "") if self.selected_editor else "",
+            self.editor_path,
+            self.app_bundle or "",
+        ]
+        return "darktable" in " ".join(parts).lower()
+
+    def darktable_paths(self, photo_paths, file_paths):
+        from develop import convert_to_dng, is_nikon_high_efficiency_nef
+
+        converted_paths = []
+        for (photo, _original_path), input_path in zip(
+            photo_paths, file_paths, strict=True,
+        ):
+            try:
+                metadata = (
+                    json.loads(photo["exif_data"])
+                    if photo["exif_data"] else None
+                )
+            except (TypeError, json.JSONDecodeError):
+                metadata = None
+
+            if not is_nikon_high_efficiency_nef(input_path, metadata=metadata):
+                converted_paths.append(input_path)
+                continue
+
+            out_dir = os.path.join(self.vireo_dir, "external-dng", str(photo["id"]))
+            stem = os.path.splitext(os.path.basename(input_path))[0]
+            cached = os.path.join(out_dir, f"{stem}.dng")
+            cached_alt = os.path.join(out_dir, f"{stem}.DNG")
+            source_mtime = (
+                os.path.getmtime(input_path)
+                if os.path.exists(input_path) else 0
+            )
+            fresh_cached = None
+            for candidate in (cached, cached_alt):
+                if (
+                    os.path.isfile(candidate)
+                    and os.path.getmtime(candidate) >= source_mtime
+                ):
+                    log.info(
+                        "Using cached DNG for darktable external editor: %s",
+                        candidate,
+                    )
+                    fresh_cached = candidate
+                    break
+            if fresh_cached:
+                converted_paths.append(fresh_cached)
+                continue
+
+            log.info(
+                "Converting Nikon HE NEF for darktable external editor: %s",
+                input_path,
+            )
+            conversion = convert_to_dng(
+                cfg.get("dng_converter_bin") or "",
+                input_path,
+                out_dir,
+            )
+            if not conversion["success"]:
+                return None, self.json_error(
+                    "Nikon High Efficiency NEF detected, but DNG conversion failed: "
+                    f"{conversion['error']}",
+                    500,
+                )
+            converted_paths.append(conversion["output_path"])
+        return converted_paths, None
+
+    def launch(self, file_paths):
+        import subprocess
+        import sys
+
+        json_error = self.json_error
+        app_bundle = self.app_bundle
+        editor_path = self.editor_path
+        if app_bundle:
+            # `open -a` returns quickly after launching; capture the exit
+            # so launch failures surface instead of disappearing silently.
+            result = subprocess.run(
+                ["open", "-a", app_bundle] + file_paths,
+                capture_output=True, text=True, timeout=30,
+                **no_window_kwargs(),
+            )
+            if result.returncode != 0:
+                err = (result.stderr or result.stdout or "open failed").strip()
+                log.warning("open -a %s failed: %s", app_bundle, err)
+                return json_error(err, 500)
+        elif editor_path:
+            subprocess.Popen([editor_path] + file_paths, **no_window_kwargs())
+        elif sys.platform == "darwin":
+            result = subprocess.run(
+                ["open"] + file_paths,
+                capture_output=True, text=True, timeout=30,
+                **no_window_kwargs(),
+            )
+            if result.returncode != 0:
+                err = (result.stderr or result.stdout or "open failed").strip()
+                log.warning("open %s failed: %s", file_paths, err)
+                return json_error(err, 500)
+        elif sys.platform == "win32":
+            for fp in file_paths:
+                os.startfile(fp)
+        else:
+            for fp in file_paths:
+                subprocess.Popen(["xdg-open", fp], **no_window_kwargs())
+        return None
