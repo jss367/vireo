@@ -81,6 +81,10 @@ def classify_stage(
     try:
         classify.run_all()
     except Exception as e:
+        # fail() logs via log.exception, records the fatal-stage status
+        # and sets run.abort; we deliberately swallow rather than
+        # re-raise so the finally block still releases the classifier
+        # cache handle and the stages update below still runs.
         classify.fail(e)
     finally:
         # Release the held classifier so subsequent pipelines can reuse
