@@ -1610,6 +1610,8 @@ class _EyeKeypointPass:
             self._finish_download_cancelled()
             return True
         except Exception as dl_err:
+            # Degrade an optional-stage weight-download failure to a
+            # skipped stage; _skip_failed_download logs and records it.
             self._skip_failed_download(dl_err)
             return True
         return False
