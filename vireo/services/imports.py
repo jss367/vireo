@@ -241,7 +241,10 @@ def import_resume_takeover(parent_id, parent_result, rows):
                 == "chain already ran on the interrupted parent"
                 and not (result.get("tagging") or {}).get("errors")
             )
-            tags = result.get("collection_id") is not None or tag_only_completed
+            tags = tag_only_completed or (
+                result.get("collection_id") is not None
+                and not (result.get("tagging") or {}).get("errors")
+            )
             skipped = result.get("after_import_skipped")
             chain_step = tag_only_completed or (
                 not result.get("cancelled") and (

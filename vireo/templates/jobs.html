@@ -864,7 +864,8 @@
         var tagOnlyCompleted = e.status === 'completed' &&
           r.after_import_skipped === 'chain already ran on the interrupted parent' &&
           !((r.tagging || {}).errors || []).length;
-        tags = r.collection_id != null || tagOnlyCompleted;
+        tags = tagOnlyCompleted || (r.collection_id != null &&
+          !((r.tagging || {}).errors || []).length);
         chainStep = tagOnlyCompleted || (!r.cancelled && (
           r.process_job_id != null || r.after_import_skipped === 'import-only' ||
           r.after_import_skipped === 'no new photos'));

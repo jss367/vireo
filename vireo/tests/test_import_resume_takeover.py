@@ -121,6 +121,12 @@ def _scenarios():
                 "after_import_skipped": "failed to enqueue processing: unavailable",
             })],
         ),
+        "legacy completed chain with unpaid tags": (
+            _parent(), [_row("d", "2026-09-01T11:00:00", {
+                "ok": True, "collection_id": 7, "process_job_id": "process-d",
+                "tagging": {"errors": ["tag write failed"]},
+            })],
+        ),
         "legacy collection cancelled": (
             _parent(), [_row("d", "2026-09-01T11:00:00", {
                 "ok": True, "collection_id": 7, "cancelled": True,
@@ -292,6 +298,7 @@ EXPECTED = {
     "resume of the interrupted resume finished": ("d2", "done", False, False),
     "finished resume from before marks were kept": ("d", "done", False, False),
     "legacy collection with failed processing handoff": (None, None, True, False),
+    "legacy completed chain with unpaid tags": (None, None, True, False),
     "legacy collection cancelled": (None, None, True, False),
     "legacy tag-only resume completed": ("d", "done", False, False),
     "legacy tag-only resume with errors": (None, None, True, False),
@@ -445,3 +452,12 @@ def test_partial_descendant_landings_are_inherited_for_remaining_chain():
         "/arch/parent.jpg": [1, 2, "hash-parent"],
         "/arch/child.jpg": [3, 4, "hash-child"],
     }
+
+
+def test_legacy_processing_with_tag_errors_leaves_only_tag_replay():
+    parent, rows = _scenarios()["legacy completed chain with unpaid tags"]
+    takeover = import_resume_takeover(PARENT_ID, parent["result"], rows)
+    resume = ImportService._interrupted_parent_resume(parent["config"], parent["result"], takeover)
+    assert takeover["by"] is None
+    assert resume["tags_applied"] is False
+    assert resume["chain_already_ran"] is True
