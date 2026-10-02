@@ -528,29 +528,14 @@ def create_local_folder_blueprint(
         selectable_root_ids = set(root_ids) | set(
             workspace_local_root_ids(db, workspace_id)
         )
-        # A folder that can be staged is blocked by whatever would refuse
-        # its stage: the admission also checks the local destination, so
-        # the status checks the destination the stage dialog prefills (the
-        # default base). A local folder's sync/discard checks no
-        # destination, so neither does its status.
-        stageable_root_ids = {
-            root_id for root_id in selectable_root_ids
-            if local_root_for_folder(db, root_id) is None
-            and local_root_under_folder(db, root_id) is None
-        }
+        # Source conflicts prevent opening the dialog. Destination conflicts
+        # are checked by its preflight after the user can choose a safe base.
         folder_blocking_jobs = {}
         for root_id in selectable_root_ids:
-            if root_id in stageable_root_ids:
-                blocking_job = _stage_blocking_job(db, [root_id], workspace_id)
-            else:
-                blocking_job = _busy_job(db, [root_id], workspace_id)
+            blocking_job = _busy_job(db, [root_id], workspace_id)
             if blocking_job is not None:
                 folder_blocking_jobs[str(root_id)] = _job_payload(blocking_job)
         overall = _busy_job(db, selectable_root_ids, workspace_id)
-        if overall is None and stageable_root_ids:
-            overall = _stage_blocking_job(
-                db, sorted(stageable_root_ids), workspace_id,
-            )
         return {
             "blocking_job": _job_payload(overall),
             "folder_blocking_jobs": folder_blocking_jobs,

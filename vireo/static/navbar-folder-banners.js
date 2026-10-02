@@ -579,7 +579,10 @@ async function checkNewImages(options) {
     // path, and an import of them is refused until the copy is synced or
     // discarded -- so the count does not cover them and the banner says so.
     const localCopies = Array.isArray(data.local_copy_excluded) ? data.local_copy_excluded : [];
-    const uncheckedRoots = [...unreachable, ...localCopies];
+    const uncheckedRoots = [
+      ...unreachable.map(path => 'offline:' + path),
+      ...localCopies.map(path => 'local:' + path),
+    ];
     const cta = banner.querySelector('.banner-cta');
 
     // Only a *real* zero — every root checked, nothing new — resets the

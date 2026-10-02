@@ -3306,13 +3306,11 @@ def _destination_blocker_app(tmp_path, monkeypatch, scan_root_for):
     return app, workspace_id, folder_id, vireo_dir
 
 
-def test_blocker_reports_scan_overlapping_default_local_destination(
+def test_destination_only_blocker_allows_choosing_a_safe_base(
     tmp_path, monkeypatch,
 ):
-    """The stage admission refuses a scan that overlaps the local
-    destination, not only the source. The blocker status used to check the
-    source alone, so the folder looked available and the stage POST then
-    returned 409. It now checks the destination the stage dialog prefills.
+    """A destination-only conflict leaves the dialog accessible so its
+    user can select a safe base; default-destination admission still refuses.
     """
     from services.local_folder import default_local_base
 
@@ -3326,9 +3324,17 @@ def test_blocker_reports_scan_overlapping_default_local_destination(
         blocker = client.get(
             "/api/workspaces/active/local-folders/blocker"
         ).get_json()
-        expected = {"id": "scan-1", "type": "scan", "status": "running"}
-        assert blocker["folder_blocking_jobs"] == {str(folder_id): expected}
-        assert blocker["blocking_job"] == expected
+        assert blocker["folder_blocking_jobs"] == {}
+        assert blocker["blocking_job"] is None
+        import web.local_folder as local_folder_web
+        monkeypatch.setattr(local_folder_web, "local_copy_preflight", lambda *a, **k: {
+            "can_copy": True, "folders": [], "volumes": [],
+        })
+        safe = client.post("/api/workspaces/active/local-folders/preflight", json={
+            "folder_ids": [folder_id],
+            "destination_bases": {str(folder_id): str(tmp_path / "safe")},
+        })
+        assert safe.status_code == 200, safe.get_json()
 
         default_base = str(default_local_base(str(vireo_dir), folder_id))
         for body in (
