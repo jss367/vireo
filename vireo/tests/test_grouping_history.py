@@ -564,6 +564,46 @@ def test_species_confirmation_restores_cache_on_commit_failure(
     assert client.post('/api/encounters/species', json=payload).status_code == 200
 
 
+def test_species_confirmation_restores_cache_when_rollback_also_fails(
+    app_and_db, monkeypatch, caplog,
+):
+    """A failed rollback still restores the cache and surfaces the commit error."""
+    from db import Database
+
+    app, db = app_and_db
+    client = app.test_client()
+    ids, _ = _seed(db)
+    before = _load(db)
+    original_init = Database.__init__
+
+    class FailCommitAndRollback:
+        def __init__(self, conn):
+            self.conn = conn
+
+        def __getattr__(self, name):
+            return getattr(self.conn, name)
+
+        def commit(self):
+            raise OSError('Commit failed')
+
+        def rollback(self):
+            raise RuntimeError('Rollback failed')
+
+    with monkeypatch.context() as patch:
+        def failing_init(self, *args, **kwargs):
+            original_init(self, *args, **kwargs)
+            self.conn = FailCommitAndRollback(self.conn)
+
+        patch.setattr(Database, '__init__', failing_init)
+        response = client.post('/api/encounters/species', json={
+            'species': 'Cardinal', 'photo_ids': ids,
+        })
+        assert response.status_code == 500
+    assert _load(db) == before
+    assert 'Rollback failed after species confirmation failed' in caplog.text
+    assert 'Commit failed' in caplog.text
+
+
 @pytest.mark.parametrize('replacement', [False, True])
 def test_keyword_changing_auto_detach_is_one_atomic_history_action(app_and_db, replacement):
     app, db = app_and_db

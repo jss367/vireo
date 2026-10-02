@@ -133,7 +133,12 @@ def create_encounters_blueprint(get_db, json_error, db_path):
             confirmation.apply_cache_mutation()
             db.conn.commit()
         except Exception:
-            db.conn.rollback()
+            # A failed rollback must not skip the cache restore below or
+            # replace the original error.
+            try:
+                db.conn.rollback()
+            except Exception:
+                log.exception("Rollback failed after species confirmation failed")
             if confirmation.cache_saved:
                 try:
                     save_results_raw(
