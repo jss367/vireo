@@ -79,7 +79,7 @@ def staged_source_paths(db):
     ]
 
 
-def _staged_exclusions_for_root(root_path, staged_sources):
+def _staged_exclusions_for_root(root_path, staged_sources, source_resolutions=None):
     """Where staged sources meet one root, in the walk's own spelling.
 
     Returns ``(covering_source, excluded_dir_keys)``: ``covering_source`` is a
@@ -101,14 +101,19 @@ def _staged_exclusions_for_root(root_path, staged_sources):
     root_forms.add(_path_key(resolved_root))
     excluded = {}
     for source, source_forms in staged_sources:
-        resolved_source = volume_reachability.resolve_alias_bounded(source)
+        if source_resolutions is None:
+            resolved_source = volume_reachability.resolve_alias_bounded(source)
+            source_mounts = None
+        else:
+            resolved_source, source_mounts = source_resolutions[source]
         if resolved_source is None:
             lexical_overlap = any(
                 _is_within_key(root_key, source_key)
                 or _is_within_key(source_key, root_key)
                 for root_key in root_forms for source_key in source_forms
             )
-            source_mounts = set(volume_reachability.mount_root_candidates(source))
+            if source_mounts is None:
+                source_mounts = set(volume_reachability.mount_root_candidates(source))
             root_mounts = set(volume_reachability.mount_root_candidates(resolved_root))
             if not lexical_overlap and source_mounts and source_mounts.isdisjoint(root_mounts):
                 # A disconnected share cannot overlap a conclusively
@@ -260,6 +265,14 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit=5,
         })
         for source in staged_source_paths(db)
     ]
+    # Source identity is invariant during this snapshot. Probe each source
+    # once, rather than repeating NAS metadata lookups for every root.
+    source_resolutions = {}
+    for source, _forms in staged_sources:
+        resolved = volume_reachability.resolve_alias_bounded(source)
+        mounts = (set(volume_reachability.mount_root_candidates(source))
+                  if resolved is None else None)
+        source_resolutions[source] = (resolved, mounts)
     # Snapshot now, before any root is touched: an outage this walk observes
     # later belongs to the world as it is here. If a manual recheck clears
     # the gate mid-walk, the stale report is dropped rather than undoing it.
@@ -353,7 +366,7 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit=5,
 
         try:
             covering_source, excluded_dirs = _staged_exclusions_for_root(
-                root_path, staged_sources,
+                root_path, staged_sources, source_resolutions,
             )
         except _RootOffline:
             _unreachable(root, mount_root)

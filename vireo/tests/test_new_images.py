@@ -2170,3 +2170,24 @@ def test_offline_staged_share_does_not_hide_unrelated_local_images(db_with_works
     result = new_images.count_new_images_for_workspace(db, ws_id)
     assert result["new_count"] == 1
     assert result["unreachable_roots"] == []
+
+
+def test_staged_sources_are_resolved_once_across_workspace_roots(db_with_workspace, monkeypatch):
+    import new_images
+    import volume_reachability
+
+    db, ws_id, tmp_path = db_with_workspace
+    for name in ("one", "two"):
+        root = tmp_path / name
+        _touch_image(str(root / "new.jpg"))
+        db.add_folder(str(root), name=name)
+    source = str(tmp_path / "staged")
+    _record_staged_source(db, source, tmp_path / "local")
+    calls = []
+    def resolve(path):
+        calls.append(path)
+        return path
+    monkeypatch.setattr(volume_reachability, "resolve_alias_bounded", resolve)
+    result = new_images.count_new_images_for_workspace(db, ws_id)
+    assert result["new_count"] == 2
+    assert calls.count(source) == 1
