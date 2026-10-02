@@ -1014,6 +1014,371 @@ def _stored_detection_list(db, photo_id, min_conf=None):
     } for d in rows]
 
 
+class _DetectBatchRun:
+    """Run-wide state of one ``_detect_batch`` call.
+
+    ``det_conf_threshold`` is resolved lazily by ``_resolve_threshold`` and
+    read back by the reclassify subject sync and the subject-analysis pass,
+    so both see the value the detection loop settled on.
+    """
+
+    def __init__(self, photos, folders, job, reclassify, db,
+                 det_conf_threshold, already_detected_ids, cached_detections):
+        self.photos = photos
+        self.folders = folders
+        self.job = job
+        self.reclassify = reclassify
+        self.db = db
+        self.det_conf_threshold = det_conf_threshold
+        self.already_detected_ids = already_detected_ids
+        self.cached_detections = cached_detections
+        self.detected = 0
+        self.detection_map = {}
+        self.processed_ids: set[int] = set()
+
+    def sync_reclassified_subjects(self):
+        # Reclassification already committed detection replacements (or a
+        # clear in the standalone caller). Cleanup is required even on Stop;
+        # it performs no image decoding or additional inference.
+        if not self.reclassify:
+            return
+        from db import commit_with_retry
+        from pipeline_locks import acquire_photo_mask
+        from subjects import sync_primary
+        for photo in self.photos:
+            with acquire_photo_mask(photo["id"]):
+                sync_primary(self.db, photo["id"], min_conf=self.det_conf_threshold)
+                commit_with_retry(self.db.conn)
+
+    def mark_cached_photos_for_analysis(self):
+        """Queue cached detector runs for subject analysis without a detector.
+
+        Detector module unavailable. Skip the detection call itself,
+        but the subject-analysis backfill below can still run over
+        photos that already have cached detection rows — analyzing
+        cached boxes doesn't require detect_animals/get_primary_detection,
+        so cached-only installations must still receive subject
+        quality/crop/exposure data (Codex r4056698679).
+        """
+        for photo in self.photos:
+            if photo["id"] in self.cached_detections:
+                continue
+            try:
+                if (photo["id"] in self.already_detected_ids
+                        or self.db.get_detections(photo["id"], min_conf=0)):
+                    # Empty and now-subthreshold cached runs still need
+                    # to clear outputs from their former primary.
+                    self.processed_ids.add(photo["id"])
+            except sqlite3.Error:
+                log.warning(
+                    "Could not read cached detections for photo %s; "
+                    "skipping its subject-analysis backfill",
+                    photo["id"], exc_info=True,
+                )
+
+    def detect_photo(self, photo):
+        """Detect one photo, or reuse its prior detector run."""
+        folder_path = self.folders.get(photo["folder_id"], "")
+        image_path = os.path.join(folder_path, photo["filename"])
+
+        # Skip if already detected (unless reclassifying). After the
+        # detector_runs migration, `already_detected_ids` includes
+        # empty-scene photos (box_count=0) — we must not re-invoke
+        # MegaDetector for them either. Either the detector produced
+        # rows (reuse them) or it ran and found nothing (skip entirely).
+        if not self.reclassify and photo["id"] in self.already_detected_ids:
+            self._reuse_prior_detections(photo)
+            return
+
+        self._resolve_threshold()
+
+        detections = detect_animals(image_path)
+
+        if detections is None:
+            # Detector run itself failed (image decode error, ONNX
+            # error, etc.). Do NOT clear prior detections and do NOT
+            # record a run — otherwise future non-reclassify passes
+            # would skip the photo permanently, leaving it without
+            # detections unless the user forces --reclassify.
+            # The photo stays out of processed_ids so the caller
+            # treats it as "will be retried next pass".
+            return
+
+        # Persist detection rows and record the detector run atomically —
+        # `write_detection_batch` wraps both writes in one transaction so a
+        # crash between them can't leave a torn state (detections without a
+        # matching detector_runs row, or the reverse for empty scenes).
+        # Failures from `detect_animals` were handled by the ``is None``
+        # early-continue above and must not poison the skip set.
+        detector_runtime = self.job.get("_detector_runtime_fingerprint") or "legacy"
+        portable_input, portable_photo_hash = self._portable_identity(
+            photo, detector_runtime,
+        )
+        det_ids = self.db.write_detection_batch(
+            photo["id"], "megadetector-v6", detections,
+            runtime_fingerprint=detector_runtime,
+            input_fingerprint=portable_input,
+            force_runtime_replace=self.reclassify,
+        )
+
+        if portable_input is not None:
+            self._publish_portable_result(
+                photo, detector_runtime, portable_photo_hash,
+            )
+
+        if detections:
+            self.detected += 1
+            self.detection_map[photo["id"]] = self._detection_list(
+                photo, detections, det_ids,
+            )
+
+            # Mark as processed immediately after detection rows are committed
+            # so that even if the quality-scoring calls below raise, the
+            # reclassify purge in pipeline_job correctly removes the now-stale
+            # pre-run detection rows for this photo rather than leaving them in
+            # place and allowing future non-reclassify runs to reuse them.
+            self.processed_ids.add(photo["id"])
+
+            self._score_subject_quality(photo, image_path, detections)
+
+        self.processed_ids.add(photo["id"])
+
+    def _reuse_prior_detections(self, photo):
+        # Prefer cached detections from an earlier model in this
+        # same pipeline run so that model 2+ is bound to the
+        # detection rows just produced, not stale rows from a
+        # prior pipeline pass that db.get_detections() would
+        # return when old rows haven't been cleared.
+        if self.cached_detections is not None and photo["id"] in self.cached_detections:
+            det_list = self.cached_detections[photo["id"]]
+            if det_list:
+                self.detection_map[photo["id"]] = det_list
+                self.detected += 1
+            self.processed_ids.add(photo["id"])
+            return
+        # Pull cached rows if any; an empty result means this photo
+        # was scanned and had no animals, which is still a skip.
+        # (Task 20 will add a min_conf filter to get_detections.)
+        det_list = _stored_detection_list(self.db, photo["id"])
+        if det_list:
+            self.detection_map[photo["id"]] = det_list
+            self.detected += 1
+        self.processed_ids.add(photo["id"])
+
+    def _resolve_threshold(self):
+        # Resolve workspace-effective threshold lazily on first actual
+        # detection call so a batch where every photo hits the
+        # cached/already-detected short-circuit doesn't need a working
+        # config/db at all (the cached-detections short-circuit test
+        # relies on this).
+        #
+        # The threshold is NOT passed to detect_animals — detector writes
+        # everything above RAW_CONF_FLOOR so results can be globally
+        # cached. The effective threshold is applied as a read-time
+        # filter by get_detections / stats queries (Tasks 20-22).
+        if self.det_conf_threshold is None:
+            import config as cfg
+            effective_cfg = self.db.get_effective_config(cfg.load())
+            self.det_conf_threshold = effective_cfg.get("detector_confidence", 0.2)
+
+    def _portable_identity(self, photo, detector_runtime):
+        """Return ``(input_fingerprint, photo_hash)`` for a portable run.
+
+        Both are ``None`` for the legacy runtime, companion-backed photos,
+        and photos whose hash cannot fingerprint a source input.
+        """
+        portable_input = None
+        portable_photo_hash = None
+        if detector_runtime != "legacy":
+            identity_row = self.db.conn.execute(
+                "SELECT file_hash, companion_path FROM photos WHERE id = ?",
+                (photo["id"],),
+            ).fetchone()
+            if (
+                identity_row is not None
+                and not identity_row["companion_path"]
+            ):
+                try:
+                    from computation_cache import source_input
+
+                    portable_photo_hash = identity_row["file_hash"]
+                    _input_block, portable_input = source_input(
+                        portable_photo_hash, "vireo-detector-source-v1",
+                    )
+                except (TypeError, ValueError):
+                    portable_input = None
+                    portable_photo_hash = None
+        return portable_input, portable_photo_hash
+
+    def _publish_portable_result(self, photo, detector_runtime, portable_photo_hash):
+        """Publish the committed detector result as a portable artifact.
+
+        Publication follows the database commit.  A store failure must
+        never turn successful inference into a failed detector run.
+
+        ``write_detection_batch`` returns early (leaving the stored
+        detector_runs.runtime_fingerprint at its OLD value) when a
+        runtime change is proposed against a review-pinned run and
+        ``force_runtime_replace`` is False.  Publishing with the new
+        ``detector_runtime`` in that case would attach a foreign
+        runtime identity to boxes that were actually produced by an
+        older runtime — the artifact is content-addressed and
+        exportable, so downstream catalogs would trust that lie.
+        Read back the persisted runtime and only publish when it
+        equals the runtime we intended to write.
+        """
+        db = self.db
+        try:
+            from computation_cache import publish_detection_artifact
+
+            persisted_runtime_row = db.conn.execute(
+                """SELECT runtime_fingerprint
+                   FROM detector_runs
+                   WHERE photo_id = ?
+                     AND detector_model = 'megadetector-v6'""",
+                (photo["id"],),
+            ).fetchone()
+            persisted_runtime = (
+                persisted_runtime_row["runtime_fingerprint"]
+                if persisted_runtime_row else None
+            )
+            if persisted_runtime == detector_runtime:
+                normalized_detections = [{
+                    "box": {
+                        "x": row["box_x"], "y": row["box_y"],
+                        "w": row["box_w"], "h": row["box_h"],
+                    },
+                    "confidence": row["detector_confidence"],
+                    "category": row["category"],
+                } for row in sorted(db.get_detections(
+                    photo["id"], min_conf=0,
+                    detector_model="megadetector-v6",
+                ), key=lambda row: (-row["detector_confidence"], row["id"]))]
+                # Reconstruct the configured ArtifactStore from
+                # the path stashed by ``run_classify_job`` /
+                # ``run_pipeline_job`` so newly published detector
+                # artifacts honor ``COMPUTATION_CACHE_DIR``
+                # instead of landing in the default location.
+                from computation_cache import ArtifactStore
+                _cache_dir = self.job.get("_computation_cache_dir")
+                _publish_store = (
+                    ArtifactStore(_cache_dir) if _cache_dir else None
+                )
+                publish_detection_artifact(
+                    portable_photo_hash,
+                    "megadetector-v6",
+                    detector_runtime,
+                    normalized_detections,
+                    store=_publish_store,
+                )
+        except Exception:
+            log.warning(
+                "Could not publish portable detector result for photo %s",
+                photo["id"], exc_info=True,
+            )
+
+    def _detection_list(self, photo, detections, det_ids):
+        """Build the ``detection_map`` entries with database IDs.
+
+        Content-addressed IDs can collapse near-duplicate detector outputs
+        into one persisted row, so fall back to the DB rows if the returned
+        ID count no longer matches the raw detector output count.
+        """
+        det_list = []
+        if len(det_ids) == len(detections):
+            for det, det_id in zip(detections, det_ids, strict=True):
+                det_list.append({
+                    "id": det_id,
+                    "box_x": det["box"]["x"],
+                    "box_y": det["box"]["y"],
+                    "box_w": det["box"]["w"],
+                    "box_h": det["box"]["h"],
+                    "confidence": det["confidence"],
+                    "category": det.get("category", "animal"),
+                    "detector_model": "megadetector-v6",
+                })
+        else:
+            for det in self.db.get_detections(
+                photo["id"], min_conf=0,
+                detector_model="megadetector-v6",
+            ):
+                det_list.append({
+                    "id": det["id"],
+                    "box_x": det["box_x"],
+                    "box_y": det["box_y"],
+                    "box_w": det["box_w"],
+                    "box_h": det["box_h"],
+                    "confidence": det["detector_confidence"],
+                    "category": det["category"],
+                    "detector_model": det["detector_model"],
+                })
+        return det_list
+
+    def _score_subject_quality(self, photo, image_path, detections):
+        """Score subject quality from the primary detection."""
+        db = self.db
+        # Use highest-confidence detection as primary for quality scoring
+        primary = get_primary_detection(detections)
+        if primary and primary["confidence"] < self.det_conf_threshold:
+            # Top detection is below the workspace's detector_confidence
+            # threshold — it's noise, not a real subject. Skip scoring
+            # and clear any stale quality fields from a prior run so
+            # noise photos don't float to the top of highlights with a
+            # giant ``subject_size`` from a whole-frame noise box.
+            db.update_photo_quality(photo["id"])
+            primary = None
+        if not primary:
+            return
+        det_box = primary["box"]
+        subject_size = det_box["w"] * det_box["h"]
+
+        if compute_sharpness is None:
+            db.update_photo_quality(
+                photo["id"],
+            )
+            return
+
+        overall_sharpness = compute_sharpness(image_path)
+        subject_sharpness = None
+        quality = 0
+
+        try:
+            from PIL import Image
+
+            img = Image.open(image_path)
+            try:
+                iw, ih = img.size
+                px = int(det_box["x"] * iw)
+                py = int(det_box["y"] * ih)
+                pw = int(det_box["w"] * iw)
+                ph = int(det_box["h"] * ih)
+                subject_sharpness = compute_sharpness(
+                    image_path, region=(px, py, pw, ph)
+                )
+            finally:
+                img.close()
+        except Exception:
+            log.debug(
+                "Subject-region sharpness failed for photo %s; "
+                "using whole-frame sharpness",
+                photo["id"], exc_info=True,
+            )
+            subject_sharpness = overall_sharpness
+
+        if subject_sharpness is not None and subject_size is not None:
+            norm_sharp = min(1.0, math.log1p(subject_sharpness) / 10.0)
+            norm_size = min(1.0, subject_size * 4)
+            quality = round(0.7 * norm_sharp + 0.3 * norm_size, 4)
+
+        db.update_photo_quality(
+            photo["id"],
+            subject_sharpness=subject_sharpness,
+            subject_size=subject_size,
+            quality_score=quality,
+            sharpness=overall_sharpness,
+        )
+
+
 def _detect_batch(photos, folders, runner, job, reclassify, db,
                    det_conf_threshold=None, already_detected_ids=None,
                    cached_detections=None, vireo_dir=None):
@@ -1051,317 +1416,24 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
         (callers use this to distinguish "ran and found nothing" from
         "never reached because an earlier photo raised mid-loop").
     """
-    detected = 0
-    detection_map = {}
-    processed_ids: set[int] = set()
     if already_detected_ids is None:
         already_detected_ids = set()
     if cached_detections is None:
         cached_detections = {}
-
-    def sync_reclassified_subjects():
-        # Reclassification already committed detection replacements (or a
-        # clear in the standalone caller). Cleanup is required even on Stop;
-        # it performs no image decoding or additional inference.
-        if not reclassify:
-            return
-        from db import commit_with_retry
-        from pipeline_locks import acquire_photo_mask
-        from subjects import sync_primary
-        for photo in photos:
-            with acquire_photo_mask(photo["id"]):
-                sync_primary(db, photo["id"], min_conf=det_conf_threshold)
-                commit_with_retry(db.conn)
+    run = _DetectBatchRun(
+        photos, folders, job, reclassify, db, det_conf_threshold,
+        already_detected_ids, cached_detections,
+    )
 
     try:
         if detect_animals is None or get_primary_detection is None:
-            # Detector module unavailable. Skip the detection call itself,
-            # but the subject-analysis backfill below can still run over
-            # photos that already have cached detection rows — analyzing
-            # cached boxes doesn't require detect_animals/get_primary_detection,
-            # so cached-only installations must still receive subject
-            # quality/crop/exposure data (Codex r4056698679).
-            for photo in photos:
-                if photo["id"] in cached_detections:
-                    continue
-                try:
-                    if (photo["id"] in already_detected_ids
-                            or db.get_detections(photo["id"], min_conf=0)):
-                        # Empty and now-subthreshold cached runs still need
-                        # to clear outputs from their former primary.
-                        processed_ids.add(photo["id"])
-                except sqlite3.Error:
-                    log.warning(
-                        "Could not read cached detections for photo %s; "
-                        "skipping its subject-analysis backfill",
-                        photo["id"], exc_info=True,
-                    )
+            run.mark_cached_photos_for_analysis()
             detection_photos: list = []
         else:
             detection_photos = photos
 
         for photo in detection_photos:
-            folder_path = folders.get(photo["folder_id"], "")
-            image_path = os.path.join(folder_path, photo["filename"])
-
-            # Skip if already detected (unless reclassifying). After the
-            # detector_runs migration, `already_detected_ids` includes
-            # empty-scene photos (box_count=0) — we must not re-invoke
-            # MegaDetector for them either. Either the detector produced
-            # rows (reuse them) or it ran and found nothing (skip entirely).
-            if not reclassify and photo["id"] in already_detected_ids:
-                # Prefer cached detections from an earlier model in this
-                # same pipeline run so that model 2+ is bound to the
-                # detection rows just produced, not stale rows from a
-                # prior pipeline pass that db.get_detections() would
-                # return when old rows haven't been cleared.
-                if cached_detections is not None and photo["id"] in cached_detections:
-                    det_list = cached_detections[photo["id"]]
-                    if det_list:
-                        detection_map[photo["id"]] = det_list
-                        detected += 1
-                    processed_ids.add(photo["id"])
-                    continue
-                # Pull cached rows if any; an empty result means this photo
-                # was scanned and had no animals, which is still a skip.
-                # (Task 20 will add a min_conf filter to get_detections.)
-                det_list = _stored_detection_list(db, photo["id"])
-                if det_list:
-                    detection_map[photo["id"]] = det_list
-                    detected += 1
-                processed_ids.add(photo["id"])
-                continue
-
-            # Resolve workspace-effective threshold lazily on first actual
-            # detection call so a batch where every photo hits the
-            # cached/already-detected short-circuit doesn't need a working
-            # config/db at all (the cached-detections short-circuit test
-            # relies on this).
-            #
-            # The threshold is NOT passed to detect_animals — detector writes
-            # everything above RAW_CONF_FLOOR so results can be globally
-            # cached. The effective threshold is applied as a read-time
-            # filter by get_detections / stats queries (Tasks 20-22).
-            if det_conf_threshold is None:
-                import config as cfg
-                effective_cfg = db.get_effective_config(cfg.load())
-                det_conf_threshold = effective_cfg.get("detector_confidence", 0.2)
-
-            detections = detect_animals(image_path)
-
-            if detections is None:
-                # Detector run itself failed (image decode error, ONNX
-                # error, etc.). Do NOT clear prior detections and do NOT
-                # record a run — otherwise future non-reclassify passes
-                # would skip the photo permanently, leaving it without
-                # detections unless the user forces --reclassify.
-                # The photo stays out of processed_ids so the caller
-                # treats it as "will be retried next pass".
-                continue
-
-            # Persist detection rows and record the detector run atomically —
-            # `write_detection_batch` wraps both writes in one transaction so a
-            # crash between them can't leave a torn state (detections without a
-            # matching detector_runs row, or the reverse for empty scenes).
-            # Failures from `detect_animals` were handled by the ``is None``
-            # early-continue above and must not poison the skip set.
-            detector_runtime = job.get("_detector_runtime_fingerprint") or "legacy"
-            portable_input = None
-            portable_photo_hash = None
-            if detector_runtime != "legacy":
-                identity_row = db.conn.execute(
-                    "SELECT file_hash, companion_path FROM photos WHERE id = ?",
-                    (photo["id"],),
-                ).fetchone()
-                if (
-                    identity_row is not None
-                    and not identity_row["companion_path"]
-                ):
-                    try:
-                        from computation_cache import source_input
-
-                        portable_photo_hash = identity_row["file_hash"]
-                        _input_block, portable_input = source_input(
-                            portable_photo_hash, "vireo-detector-source-v1",
-                        )
-                    except (TypeError, ValueError):
-                        portable_input = None
-                        portable_photo_hash = None
-            det_ids = db.write_detection_batch(
-                photo["id"], "megadetector-v6", detections,
-                runtime_fingerprint=detector_runtime,
-                input_fingerprint=portable_input,
-                force_runtime_replace=reclassify,
-            )
-
-            # Publication follows the database commit.  A store failure must
-            # never turn successful inference into a failed detector run.
-            #
-            # ``write_detection_batch`` returns early (leaving the stored
-            # detector_runs.runtime_fingerprint at its OLD value) when a
-            # runtime change is proposed against a review-pinned run and
-            # ``force_runtime_replace`` is False.  Publishing with the new
-            # ``detector_runtime`` in that case would attach a foreign
-            # runtime identity to boxes that were actually produced by an
-            # older runtime — the artifact is content-addressed and
-            # exportable, so downstream catalogs would trust that lie.
-            # Read back the persisted runtime and only publish when it
-            # equals the runtime we intended to write.
-            if portable_input is not None:
-                try:
-                    from computation_cache import publish_detection_artifact
-
-                    persisted_runtime_row = db.conn.execute(
-                        """SELECT runtime_fingerprint
-                           FROM detector_runs
-                           WHERE photo_id = ?
-                             AND detector_model = 'megadetector-v6'""",
-                        (photo["id"],),
-                    ).fetchone()
-                    persisted_runtime = (
-                        persisted_runtime_row["runtime_fingerprint"]
-                        if persisted_runtime_row else None
-                    )
-                    if persisted_runtime == detector_runtime:
-                        normalized_detections = [{
-                            "box": {
-                                "x": row["box_x"], "y": row["box_y"],
-                                "w": row["box_w"], "h": row["box_h"],
-                            },
-                            "confidence": row["detector_confidence"],
-                            "category": row["category"],
-                        } for row in sorted(db.get_detections(
-                            photo["id"], min_conf=0,
-                            detector_model="megadetector-v6",
-                        ), key=lambda row: (-row["detector_confidence"], row["id"]))]
-                        # Reconstruct the configured ArtifactStore from
-                        # the path stashed by ``run_classify_job`` /
-                        # ``run_pipeline_job`` so newly published detector
-                        # artifacts honor ``COMPUTATION_CACHE_DIR``
-                        # instead of landing in the default location.
-                        from computation_cache import ArtifactStore
-                        _cache_dir = job.get("_computation_cache_dir")
-                        _publish_store = (
-                            ArtifactStore(_cache_dir) if _cache_dir else None
-                        )
-                        publish_detection_artifact(
-                            portable_photo_hash,
-                            "megadetector-v6",
-                            detector_runtime,
-                            normalized_detections,
-                            store=_publish_store,
-                        )
-                except Exception:
-                    log.warning(
-                        "Could not publish portable detector result for photo %s",
-                        photo["id"], exc_info=True,
-                    )
-
-            if detections:
-                detected += 1
-
-                # Build detection list with database IDs. Content-addressed IDs
-                # can collapse near-duplicate detector outputs into one
-                # persisted row, so fall back to the DB rows if the returned ID
-                # count no longer matches the raw detector output count.
-                det_list = []
-                if len(det_ids) == len(detections):
-                    for det, det_id in zip(detections, det_ids, strict=True):
-                        det_list.append({
-                            "id": det_id,
-                            "box_x": det["box"]["x"],
-                            "box_y": det["box"]["y"],
-                            "box_w": det["box"]["w"],
-                            "box_h": det["box"]["h"],
-                            "confidence": det["confidence"],
-                            "category": det.get("category", "animal"),
-                            "detector_model": "megadetector-v6",
-                        })
-                else:
-                    for det in db.get_detections(
-                        photo["id"], min_conf=0,
-                        detector_model="megadetector-v6",
-                    ):
-                        det_list.append({
-                            "id": det["id"],
-                            "box_x": det["box_x"],
-                            "box_y": det["box_y"],
-                            "box_w": det["box_w"],
-                            "box_h": det["box_h"],
-                            "confidence": det["detector_confidence"],
-                            "category": det["category"],
-                            "detector_model": det["detector_model"],
-                        })
-                detection_map[photo["id"]] = det_list
-
-                # Mark as processed immediately after detection rows are committed
-                # so that even if the quality-scoring calls below raise, the
-                # reclassify purge in pipeline_job correctly removes the now-stale
-                # pre-run detection rows for this photo rather than leaving them in
-                # place and allowing future non-reclassify runs to reuse them.
-                processed_ids.add(photo["id"])
-
-            if detections:
-                # Use highest-confidence detection as primary for quality scoring
-                primary = get_primary_detection(detections)
-                if primary and primary["confidence"] < det_conf_threshold:
-                    # Top detection is below the workspace's detector_confidence
-                    # threshold — it's noise, not a real subject. Skip scoring
-                    # and clear any stale quality fields from a prior run so
-                    # noise photos don't float to the top of highlights with a
-                    # giant ``subject_size`` from a whole-frame noise box.
-                    db.update_photo_quality(photo["id"])
-                    primary = None
-                if primary:
-                    det_box = primary["box"]
-                    subject_size = det_box["w"] * det_box["h"]
-
-                    if compute_sharpness is not None:
-                        overall_sharpness = compute_sharpness(image_path)
-                        subject_sharpness = None
-                        quality = 0
-
-                        try:
-                            from PIL import Image
-
-                            img = Image.open(image_path)
-                            try:
-                                iw, ih = img.size
-                                px = int(det_box["x"] * iw)
-                                py = int(det_box["y"] * ih)
-                                pw = int(det_box["w"] * iw)
-                                ph = int(det_box["h"] * ih)
-                                subject_sharpness = compute_sharpness(
-                                    image_path, region=(px, py, pw, ph)
-                                )
-                            finally:
-                                img.close()
-                        except Exception:
-                            log.debug(
-                                "Subject-region sharpness failed for photo %s; "
-                                "using whole-frame sharpness",
-                                photo["id"], exc_info=True,
-                            )
-                            subject_sharpness = overall_sharpness
-
-                        if subject_sharpness is not None and subject_size is not None:
-                            norm_sharp = min(1.0, math.log1p(subject_sharpness) / 10.0)
-                            norm_size = min(1.0, subject_size * 4)
-                            quality = round(0.7 * norm_sharp + 0.3 * norm_size, 4)
-
-                        db.update_photo_quality(
-                            photo["id"],
-                            subject_sharpness=subject_sharpness,
-                            subject_size=subject_size,
-                            quality_score=quality,
-                            sharpness=overall_sharpness,
-                        )
-                    else:
-                        db.update_photo_quality(
-                            photo["id"],
-                        )
-
-            processed_ids.add(photo["id"])
+            run.detect_photo(photo)
 
     except ResourceWaitCancelled as exc:
         # Cooperative cancellation during a MegaDetector inference-lease
@@ -1374,9 +1446,9 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
         # committed catalog change even though the user pressed Stop.
         # ``ResourceWaitCancelled`` subclasses ``RuntimeError``, so
         # this narrow arm MUST precede the broad one.
-        sync_reclassified_subjects()
+        run.sync_reclassified_subjects()
         _attach_partial_detect_result(
-            exc, detection_map, detected, processed_ids,
+            exc, run.detection_map, run.detected, run.processed_ids,
         )
         raise
     except (ImportError, RuntimeError) as e:
@@ -1388,7 +1460,7 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
     except Exception:
         log.warning("Detection failed for batch (non-fatal)", exc_info=True)
 
-    sync_reclassified_subjects()
+    run.sync_reclassified_subjects()
 
     # Analyze every retained subject, including cached detector runs from older
     # libraries. Detection/classification results remain usable if a source goes
@@ -1408,8 +1480,8 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
 
     try:
         _analyze_subjects(
-            photos, folders, db, reclassify, det_conf_threshold,
-            cached_detections, processed_ids, vireo_dir,
+            photos, folders, db, reclassify, run.det_conf_threshold,
+            cached_detections, run.processed_ids, vireo_dir,
             _subject_analysis_checkpoint,
         )
     except ResourceWaitCancelled as exc:
@@ -1418,11 +1490,11 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
         # rebuilds predictions for exactly the photos whose boxes were
         # replaced, and the in-flight photo is one of them.
         _attach_partial_detect_result(
-            exc, detection_map, detected, processed_ids,
+            exc, run.detection_map, run.detected, run.processed_ids,
         )
         raise
 
-    return detection_map, detected, processed_ids
+    return run.detection_map, run.detected, run.processed_ids
 
 
 def _attach_partial_detect_result(exc, detection_map, detected, processed_ids):
