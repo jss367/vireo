@@ -342,7 +342,13 @@
       if (seq !== this.seq) return;
       var counts = data.counts || {};
       var incomplete = data.incomplete || [];
-      Object.keys(counts).forEach(function (path) {
+      uncached.forEach(function (path) {
+        if (!Object.prototype.hasOwnProperty.call(counts, path)) {
+          // The request deadline can skip this folder entirely. Keep it
+          // uncached so reopening the picker retries it.
+          this._applyCount(path, {count: 0, incomplete: true});
+          return;
+        }
         var entry = {count: counts[path], incomplete: incomplete.indexOf(path) !== -1};
         this.countCache[this._countKey(path, fileTypes)] = entry;
         this._applyCount(path, entry);

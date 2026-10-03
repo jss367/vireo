@@ -3378,6 +3378,7 @@ def test_import_folder_browser_marks_counts_that_stopped_early(live_server, page
                 dirs: [
                   {name: 'Photos', path: '/Volumes/Photos'},
                   {name: 'Macintosh HD', path: '/Volumes/Macintosh HD'},
+                  {name: 'Skipped', path: '/Volumes/Skipped'},
                 ],
               }), {status: 200, headers: {'Content-Type': 'application/json'}}));
             }
@@ -3390,12 +3391,13 @@ def test_import_folder_browser_marks_counts_that_stopped_early(live_server, page
     page.locator("[data-testid='import-source-browse-btn']").click()
 
     rows = page.locator("#folderBrowserList .folder-browser-item[data-folder-path]")
-    expect(rows).to_have_count(2)
+    expect(rows).to_have_count(3)
     photos = rows.nth(0).locator(".folder-browser-count")
     expect(photos).to_have_text("1,234+ photos")
     expect(photos).to_have_attribute(
         "title", "Stopped counting: this folder holds too many files to count quickly.")
     expect(rows.nth(1).locator(".folder-browser-count")).to_have_text("Not counted")
+    expect(rows.nth(2).locator(".folder-browser-count")).to_have_text("Not counted")
 
 
 def test_import_folder_browser_selects_multiple_source_folders(live_server, page):
