@@ -337,9 +337,23 @@
     window.Keymap.setScope(_pageCtx);
   }
 
+  // Applying the config calls parseShortcut and formatShortcut
+  // (lightbox/keyboard.js) and escapeHtml (vireo-utils.js), which load after
+  // this script. A fast /api/config answer used to land first, and the
+  // ReferenceError, swallowed below, left the page with no navigation
+  // shortcuts at all. Wait until every script has run.
+  var scriptsLoaded = new Promise(function(resolve) {
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', resolve, { once: true });
+    } else {
+      resolve();
+    }
+  });
+
   // Fetch config and apply
   fetch('/api/config')
     .then(function(r) { return r.ok ? r.json() : null; })
+    .then(function(cfg) { return scriptsLoaded.then(function() { return cfg; }); })
     .then(function(cfg) {
       if (!cfg) return;
       var shortcuts = cfg.keyboard_shortcuts || {};
