@@ -593,6 +593,14 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
     @invariant()
     def no_photo_drops_out_of_a_workspace(self):
         now = self._workspace_visibility()
+        new_invisible = {
+            pid: sorted(workspaces)
+            for pid, workspaces in now.items()
+            if pid not in self.visibility and self.ws_id not in workspaces
+        }
+        assert not new_invisible, (
+            f"newly cataloged photos invisible to active workspace {self.ws_id}: {new_invisible}"
+        )
         if self.visibility_known_broken:
             # move_photos links its destination only to the active workspace.
             # Remove this once the strict xfail below starts passing.
@@ -722,6 +730,7 @@ def test_visibility_invariant_distinguishes_linkless_from_deleted(delete_catalog
         machine = PhotoSafetyMachine.__new__(PhotoSafetyMachine)
         machine.db = SimpleNamespace(conn=conn)
         machine.visibility_known_broken = False
+        machine.ws_id = 1
         machine.visibility = machine._workspace_visibility()
         assert machine.visibility == {1: {1}}
         conn.execute("DELETE FROM workspace_folders")
@@ -731,6 +740,35 @@ def test_visibility_invariant_distinguishes_linkless_from_deleted(delete_catalog
             assert machine.visibility == {}
         else:
             with pytest.raises(AssertionError, match="photos lost workspace visibility"):
+                machine.no_photo_drops_out_of_a_workspace()
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("linked_workspace", [None, 2, 1], ids=["no-link", "wrong-workspace", "active-workspace"])
+def test_new_catalog_photo_must_be_visible_to_active_workspace(linked_workspace):
+    import sqlite3
+    from types import SimpleNamespace
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.executescript(
+            "CREATE TABLE photos (id INTEGER, folder_id INTEGER);"
+            "CREATE TABLE workspace_folders (folder_id INTEGER, workspace_id INTEGER);"
+        )
+        machine = PhotoSafetyMachine.__new__(PhotoSafetyMachine)
+        machine.db = SimpleNamespace(conn=conn)
+        machine.ws_id = 1
+        machine.visibility_known_broken = False
+        machine.visibility = machine._workspace_visibility()
+        conn.execute("INSERT INTO photos VALUES (1, 10)")
+        if linked_workspace is not None:
+            conn.execute("INSERT INTO workspace_folders VALUES (10, ?)", (linked_workspace,))
+        if linked_workspace == machine.ws_id:
+            machine.no_photo_drops_out_of_a_workspace()
+            assert machine.visibility == {1: {1}}
+        else:
+            with pytest.raises(AssertionError, match="newly cataloged photos invisible"):
                 machine.no_photo_drops_out_of_a_workspace()
     finally:
         conn.close()
