@@ -1,6 +1,16 @@
 """End-to-end tests for the keymap registry and dispatcher."""
 
 
+def _wait_for_nav_shortcuts(page):
+    """Wait until the navbar has applied /api/config's navigation shortcuts.
+
+    A key pressed before then hits no binding: a test expecting navigation
+    times out without saying why, and one expecting none passes without
+    testing anything. The navbar defines _applyNavHotkeyHints in the same
+    step that binds the keys.
+    """
+    page.wait_for_function("() => typeof window._applyNavHotkeyHints === 'function'")
+
 
 def test_keymap_globals_exposed(live_server, page):
     """Loading any page exposes the Keymap module on window."""
@@ -168,6 +178,7 @@ def test_legacy_bare_navigation_shortcut_is_ignored(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/cull", timeout=15000)
     page.wait_for_load_state("networkidle")
+    _wait_for_nav_shortcuts(page)
     page.keyboard.press("b")
     page.wait_for_timeout(300)
     assert page.url.endswith("/cull"), f"Expected to stay on /cull, got {page.url}"
@@ -184,6 +195,7 @@ def test_fixed_browse_view_key_is_reserved_from_navigation(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/browse", timeout=15000)
     page.wait_for_load_state("networkidle")
+    _wait_for_nav_shortcuts(page)
 
     navigation_names = page.evaluate("""
         window.Keymap.shortcutsForScope('global')
@@ -212,6 +224,7 @@ def test_non_letter_bare_keys_are_reserved_from_navigation(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/browse", timeout=15000)
     page.wait_for_load_state("networkidle")
+    _wait_for_nav_shortcuts(page)
 
     navigation_names = page.evaluate("""
         window.Keymap.shortcutsForScope('global')
@@ -234,6 +247,7 @@ def test_unreserved_bare_navigation_shortcut_navigates(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/cull", timeout=15000)
     page.wait_for_load_state("networkidle")
+    _wait_for_nav_shortcuts(page)
     # The shortcut's job ends once the browser asks for the page. Waiting
     # for the server to answer as well only measures how busy the machine is.
     with page.expect_request(
@@ -256,6 +270,39 @@ def test_modified_navigation_shortcut_still_navigates(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/cull", timeout=15000)
     page.wait_for_load_state("networkidle")
+    _wait_for_nav_shortcuts(page)
+    with page.expect_request(
+        lambda request: (
+            request.url == f"{url}/browse" and request.is_navigation_request()
+        ),
+        timeout=3000,
+    ):
+        page.keyboard.press("Control+B")
+
+
+def test_navigation_shortcuts_bind_when_config_beats_later_scripts(live_server, page):
+    """Shortcuts bind even when /api/config answers before the navbar's helpers load.
+
+    Applying the config calls helpers from scripts that load after the navbar
+    (lightbox/keyboard.js, vireo-utils.js). A config answer that landed first
+    used to throw, and the swallowed error left the page with no navigation
+    shortcuts. Holding back lightbox/keyboard.js forces that order.
+    """
+    def late_script(route):
+        page.wait_for_timeout(1000)
+        route.continue_()
+
+    page.route("**/static/lightbox/keyboard.js", late_script)
+    page.route(
+        "**/api/config",
+        lambda route: route.fulfill(
+            json={"keyboard_shortcuts": {"navigation": {"browse": "ctrl+b"}}}
+        ),
+    )
+    url = live_server["url"]
+    page.goto(f"{url}/cull", timeout=15000)
+    page.wait_for_load_state("networkidle")
+    _wait_for_nav_shortcuts(page)
     with page.expect_request(
         lambda request: (
             request.url == f"{url}/browse" and request.is_navigation_request()
@@ -276,6 +323,7 @@ def test_nav_shortcut_suppressed_when_overlay_open(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/cull", timeout=15000)
     page.wait_for_load_state("networkidle")
+    _wait_for_nav_shortcuts(page)
 
     # Inject an overlay matching the OVERLAY_SELECTOR set
     page.evaluate("""
