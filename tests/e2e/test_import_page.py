@@ -3353,6 +3353,51 @@ def test_import_folder_browser_shows_recursive_photo_counts(live_server, page):
     assert request["file_types"] == "both"
 
 
+def test_import_folder_browser_marks_counts_that_stopped_early(live_server, page):
+    """A count that ran out of the server's time budget reads as a lower
+    bound, and one that found nothing before stopping says it wasn't
+    counted rather than looking empty."""
+    url = live_server["url"]
+    page.goto(f"{url}/import")
+    page.evaluate("window.pickDirectory = async () => null")
+    page.evaluate(
+        """
+        () => {
+          const originalFetch = window.fetch.bind(window);
+          window.fetch = (input, init) => {
+            const target = typeof input === 'string' ? input : input.url;
+            if (target === '/api/browse/photo-counts') {
+              return Promise.resolve(new Response(JSON.stringify({
+                counts: {'/Volumes/Photos': 1234, '/Volumes/Macintosh HD': 0},
+                incomplete: ['/Volumes/Photos', '/Volumes/Macintosh HD'],
+              }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+            }
+            if (target && target.indexOf('/api/browse') === 0) {
+              return Promise.resolve(new Response(JSON.stringify({
+                path: '/Volumes',
+                dirs: [
+                  {name: 'Photos', path: '/Volumes/Photos'},
+                  {name: 'Macintosh HD', path: '/Volumes/Macintosh HD'},
+                ],
+              }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+            }
+            return originalFetch(input, init);
+          };
+        }
+        """
+    )
+
+    page.locator("[data-testid='import-source-browse-btn']").click()
+
+    rows = page.locator("#folderBrowserList .folder-browser-item[data-folder-path]")
+    expect(rows).to_have_count(2)
+    photos = rows.nth(0).locator(".folder-browser-count")
+    expect(photos).to_have_text("1,234+ photos")
+    expect(photos).to_have_attribute(
+        "title", "Stopped counting: this folder holds too many files to count quickly.")
+    expect(rows.nth(1).locator(".folder-browser-count")).to_have_text("Not counted")
+
+
 def test_import_folder_browser_selects_multiple_source_folders(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/import")
