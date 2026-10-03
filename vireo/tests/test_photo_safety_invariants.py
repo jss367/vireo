@@ -344,7 +344,10 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
 
     def _cataloged_hashes(self):
         hashes = set()
+        visible = set(self._visible_photo_ids())
         for row in self._catalog_rows():
+            if row["id"] not in visible:
+                continue
             path = os.path.join(row["folder_path"], row["filename"])
             if os.path.isfile(path):
                 hashes.add(_sha256(path))
@@ -445,13 +448,16 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
         result = self._run_import(card, _Runner())
         event(f"import: copied={bool(result.get('copied'))} "
               f"failed={bool(result.get('failed'))} cancelled={bool(result.get('cancelled'))}")
-        if result.get("cancelled") or result.get("failed"):
+        self._check_finished_import(result, card, card_hashes)
+
+    def _check_finished_import(self, result, card, card_hashes):
+        if not result.get("ok") or result.get("cancelled") or result.get("failed"):
             return
         missing = card_hashes - self._cataloged_hashes()
         assert not missing, (
             f"import of {card} reported success (copied={result.get('copied')}, "
             f"skipped={result.get('skipped')}) but {len(missing)} of its photos "
-            "are not in the catalog"
+            "are not visible in the active workspace catalog"
         )
 
     @precondition(lambda self: self._loaded_cards())
@@ -576,16 +582,26 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
         rows = self._catalog_rows()
         chosen = data.draw(st.lists(st.sampled_from(visible),
                                     min_size=1, max_size=3, unique=True))
+        permanent_hashes = {}
         if mode == "disk_permanent":
             for row in rows:
                 if row["id"] in chosen:
                     path = os.path.join(row["folder_path"], row["filename"])
                     if os.path.isfile(path):
-                        self.allowed_to_vanish[_sha256(path)] += 1
+                        permanent_hashes[row["id"]] = _sha256(path)
         result = self._deleter().run_batch_delete(self.db, chosen, mode=mode)
-        if result.get("ok"):
-            self.allowed_catalog_deletions.update(set(chosen) - set(result.get("failed_photo_ids") or []))
+        self._record_successful_deletions(chosen, result, permanent_hashes)
         event(f"delete {mode}: ok={result.get('ok')}")
+
+    def _record_successful_deletions(self, chosen, result, permanent_hashes):
+        if not result.get("ok"):
+            return
+        remaining = {row["id"] for row in self._catalog_rows()}
+        succeeded = set(chosen) - set(result.get("failed_photo_ids") or []) - remaining
+        self.allowed_catalog_deletions.update(succeeded)
+        self.allowed_to_vanish.update(
+            permanent_hashes[pid] for pid in succeeded if pid in permanent_hashes
+        )
 
     # -- invariants ----------------------------------------------------------
 
@@ -847,3 +863,61 @@ def test_catalog_invariant_requires_matching_hash(tmp_path, stored_hash):
     else:
         with pytest.raises(AssertionError, match="(no recorded file hash|hash that does not match)"):
             machine.catalog_matches_disk()
+
+
+@pytest.mark.parametrize(
+    "workspace,ok,should_fail",
+    [(2, True, True), (1, True, False), (2, False, False)],
+    ids=["other-workspace-only", "active-workspace", "reported-failure"],
+)
+def test_finished_import_checks_active_workspace_catalog(tmp_path, workspace, ok, should_fail):
+    import sqlite3
+    from types import SimpleNamespace
+
+    path = tmp_path / "photo.jpg"
+    path.write_bytes(b"imported-photo")
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.executescript(
+            "CREATE TABLE photos (id INTEGER, folder_id INTEGER, filename TEXT, file_hash TEXT);"
+            "CREATE TABLE folders (id INTEGER, path TEXT);"
+            "CREATE TABLE workspace_folders (folder_id INTEGER, workspace_id INTEGER);"
+            "INSERT INTO photos VALUES (1, 10, 'photo.jpg', NULL);"
+        )
+        conn.execute("INSERT INTO folders VALUES (10, ?)", (str(tmp_path),))
+        conn.execute("INSERT INTO workspace_folders VALUES (10, ?)", (workspace,))
+        machine = PhotoSafetyMachine.__new__(PhotoSafetyMachine)
+        machine.db = SimpleNamespace(conn=conn)
+        machine.ws_id = 1
+        result = {"ok": ok, "copied": 0, "skipped": 1, "failed": 0}
+        hashes = {_sha256(path)}
+        if should_fail:
+            with pytest.raises(AssertionError, match="not visible in the active workspace"):
+                machine._check_finished_import(result, "card", hashes)
+        else:
+            machine._check_finished_import(result, "card", hashes)
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize(
+    "ok,failed_ids,remaining_ids,allowed",
+    [(True, [1], [1], False), (False, [], [], False),
+     (True, [], [1], False), (True, [], [], True)],
+    ids=["failed-id", "failed-operation", "row-retained", "successful-delete"],
+)
+def test_only_successful_deletions_allow_identical_copy_loss(ok, failed_ids, remaining_ids, allowed):
+    machine = PhotoSafetyMachine.__new__(PhotoSafetyMachine)
+    machine.allowed_catalog_deletions = set()
+    machine.allowed_to_vanish = Counter()
+    machine._catalog_rows = lambda: [{"id": pid} for pid in remaining_ids]
+    machine._record_successful_deletions([1], {"ok": ok, "failed_photo_ids": failed_ids}, {1: "same-bytes"})
+    assert machine.allowed_catalog_deletions == ({1} if allowed else set())
+    machine.snapshot = {"selected.jpg": "same-bytes", "card-copy.jpg": "same-bytes"}
+    machine._disk_snapshot = lambda: {"selected.jpg": "same-bytes"}
+    if allowed:
+        machine.no_photo_lost_or_overwritten()
+    else:
+        with pytest.raises(AssertionError, match="vanished from disk"):
+            machine.no_photo_lost_or_overwritten()
