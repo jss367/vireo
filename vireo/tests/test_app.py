@@ -5559,6 +5559,7 @@ def test_trash_paths_preflight_preserves_failure_on_disconnected_mount(
     photo that reappears when the mount comes back.
     """
     import app as app_module
+    import send2trash
 
     volume = tmp_path / "SMB_Share"
     volume.mkdir()
@@ -5573,8 +5574,6 @@ def test_trash_paths_preflight_preserves_failure_on_disconnected_mount(
     shutil.rmtree(str(volume))
 
     called = {"send2trash": False, "finder": False}
-
-    import send2trash
 
     def unexpected_send2trash(_path):
         called["send2trash"] = True

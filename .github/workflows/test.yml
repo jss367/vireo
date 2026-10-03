@@ -97,27 +97,40 @@ jobs:
               ])
               .write();
 
-  # Impact-selected unit tests on Linux only. ``scripts/select_tests.py``
+  # Impact-selected unit tests on Linux. ``scripts/select_tests.py``
   # maps the PR's diff onto the per-test coverage recorded by the last
   # post-merge "Full tests" run (test-main.yml) and runs just the tests
   # that executed the changed functions. The complete suite on all three
-  # OSes runs after merge instead; harness changes (conftest, pyproject,
+  # OSes still runs after merge; harness changes (conftest, pyproject,
   # these workflows, vireo/data) or the ``ci-full-suite`` label force the
   # full suite here. No map (cache miss) also falls back to the full suite,
   # so selection can only ever narrow a run, never skip one by accident.
   #
-  # The run is split across four parallel jobs (``--shard K/4`` from
+  # The run is split across four parallel jobs per OS (``--shard K/4`` from
   # ``scripts/selected_tests_plugin.py``): every shard makes the same
   # selection and runs every fourth test of it, so a full-suite fallback
   # takes about a quarter of the wall time. The ``test`` gate below
-  # requires all four.
+  # requires all of them. Windows always runs the full unit suite because
+  # Linux coverage cannot record tests or branches that only run on Windows.
+  #
+  # Windows verifies the complete suite before merge. Most red runs of Full
+  # tests on main have come from the Windows leg alone: POSIX paths in a new
+  # test, CRLF checkouts of harnessed JS, a file held open across
+  # ``os.replace``. In most of them the failing test was new or edited in
+  # the breaking PR, so it was in that PR's selection and fails here before
+  # merge instead. macOS stays post-merge only; it has not been the one to
+  # break main.
   unit:
     needs: changes
-    runs-on: ubuntu-latest
+    # Linux keeps its original ``unit (K)`` check names; Windows shards are
+    # ``unit-windows (K)``.
+    name: ${{ matrix.os == 'windows-latest' && format('unit-windows ({0})', matrix.shard) || format('unit ({0})', matrix.shard) }}
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-latest]
         shard: [1, 2, 3, 4]
 
     steps:
@@ -140,9 +153,9 @@ jobs:
       # ``key`` hits exactly when main hasn't moved since the map was built;
       # ``restore-keys`` otherwise picks the newest map published by any
       # merge. Cache keys are immutable, so a SHA suffix is what makes each
-      # merge's map distinct.
+      # merge's map distinct. Only Linux uses this map; Windows runs in full.
       - name: Restore test-impact map
-        if: needs.changes.outputs.python == 'true' && needs.changes.outputs.full != 'true'
+        if: needs.changes.outputs.python == 'true' && needs.changes.outputs.full != 'true' && runner.os == 'Linux'
         uses: actions/cache/restore@v5
         with:
           path: .test-impact
@@ -157,9 +170,9 @@ jobs:
           FORCE_FULL: ${{ needs.changes.outputs.full }}
         run: |
           mkdir -p .test-impact
-          if [ "$FORCE_FULL" = "true" ]; then
+          if [ "$FORCE_FULL" = "true" ] || [ "$RUNNER_OS" = "Windows" ]; then
             mode=full
-            echo "mode: full (ci-full-suite label)" | tee .test-impact/select.log
+            echo "mode: full (full-suite override or Windows platform coverage)" | tee .test-impact/select.log
           else
             set +e
             python scripts/select_tests.py --explain --output .test-impact/selected.txt \
@@ -174,7 +187,7 @@ jobs:
             fi
           fi
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
-          if [ "${{ matrix.shard }}" != "1" ]; then exit 0; fi
+          if [ "${{ matrix.shard }}" != "1" ] || [ "$RUNNER_OS" != "Linux" ]; then exit 0; fi
           {
             echo "## Unit test selection"
             echo
@@ -184,7 +197,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload test selection
-        if: needs.changes.outputs.python == 'true' && matrix.shard == 1
+        if: needs.changes.outputs.python == 'true' && matrix.shard == 1 && runner.os == 'Linux'
         uses: actions/upload-artifact@v6
         with:
           name: test-selection
