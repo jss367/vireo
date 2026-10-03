@@ -80,10 +80,23 @@ def test_hidden_window_stops_background_polls_and_catches_up_when_shown(live_ser
     # before the work finished would fire while hidden. Under load the ticks
     # above can reach the automatic missing-originals check (due 180s in).
     # Its scan then lags the job list by one retry.
-    page.wait_for_function(
-        '() => !_newImagesInFlight && _newImagesPendingTimer === null'
-        ' && window.__missingPhotosChecksInFlight === 0'
-        ' && !_missingPhotosBannerInFlight && _missingPhotosBannerStatusPoll === null')
+    #
+    # Each retry is a setTimeout under the installed fake clock, so one armed
+    # just before this point can only fire once the fake clock advances. A
+    # real-time wait never drives it, so step the fake clock past the 3s
+    # retry delay in a loop: each step lets the armed retry fire its fetch,
+    # and the next iteration either settles or carries the chain forward.
+    for _ in range(20):
+        settled = page.evaluate(
+            '() => !_newImagesInFlight && _newImagesPendingTimer === null'
+            ' && window.__missingPhotosChecksInFlight === 0'
+            ' && !_missingPhotosBannerInFlight && _missingPhotosBannerStatusPoll === null')
+        if settled:
+            break
+        page.clock.fast_forward(3100)
+        page.wait_for_timeout(200)
+    else:
+        raise AssertionError('pending-answer retries did not drain')
     page.wait_for_timeout(300)
 
     requested = []
