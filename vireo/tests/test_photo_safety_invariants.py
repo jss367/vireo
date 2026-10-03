@@ -366,6 +366,18 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
                 hashes.add(_sha256(path))
         return hashes
 
+    def _cataloged_hashes_outside_active(self):
+        """Hashes present in the catalog but invisible to the active workspace."""
+        hashes = set()
+        visible = set(self._visible_photo_ids())
+        for row in self._catalog_rows():
+            if row["id"] in visible:
+                continue
+            path = os.path.join(row["folder_path"], row["filename"])
+            if os.path.isfile(path):
+                hashes.add(_sha256(path))
+        return hashes
+
     def _deleter(self):
         import app as app_module
         from services.photo_deletion import PhotoDeletion
@@ -467,9 +479,21 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
         if not result.get("ok") or result.get("cancelled") or result.get("failed"):
             return
         missing = card_hashes - self._cataloged_hashes()
+        skipped_duplicate = int(result.get("skipped_duplicate") or 0)
+        if missing and skipped_duplicate >= len(missing):
+            # Known defect: on a reimport in a workspace that does not share
+            # the folder where the duplicate already lives, the import's
+            # duplicate gate correctly skips the card file
+            # (``skipped_duplicate`` covers it) but the existing catalog row
+            # stays invisible to the reimporting workspace. Pinned via a
+            # strict xfail unit test
+            # (``test_reimport_moved_duplicate_is_visible_in_receiving_workspace``),
+            # alongside the Move Photos defect. When this passes, drop the
+            # xfail and this carve-out.
+            missing = missing - self._cataloged_hashes_outside_active()
         assert not missing, (
             f"import of {card} reported success (copied={result.get('copied')}, "
-            f"skipped={result.get('skipped')}) but {len(missing)} of its photos "
+            f"skipped={result.get('skipped_duplicate')}) but {len(missing)} of its photos "
             "are not visible in the active workspace catalog"
         )
 
@@ -920,11 +944,25 @@ def test_catalog_invariant_requires_matching_hash(tmp_path, stored_hash):
 
 
 @pytest.mark.parametrize(
-    "workspace,ok,should_fail",
-    [(2, True, True), (1, True, False), (2, False, False)],
-    ids=["other-workspace-only", "active-workspace", "reported-failure"],
+    "workspace,ok,skipped_duplicate,should_fail",
+    [
+        (2, True, 0, True),
+        (1, True, 0, False),
+        (2, False, 0, False),
+        (2, True, 1, False),
+        (2, True, 0, True),
+    ],
+    ids=[
+        "other-workspace-only",
+        "active-workspace",
+        "reported-failure",
+        "reimport-skipped-duplicate-in-other-workspace",
+        "no-skip-still-fails",
+    ],
 )
-def test_finished_import_checks_active_workspace_catalog(tmp_path, workspace, ok, should_fail):
+def test_finished_import_checks_active_workspace_catalog(
+    tmp_path, workspace, ok, skipped_duplicate, should_fail,
+):
     import sqlite3
     from types import SimpleNamespace
 
@@ -944,7 +982,10 @@ def test_finished_import_checks_active_workspace_catalog(tmp_path, workspace, ok
         machine = PhotoSafetyMachine.__new__(PhotoSafetyMachine)
         machine.db = SimpleNamespace(conn=conn)
         machine.ws_id = 1
-        result = {"ok": ok, "copied": 0, "skipped": 1, "failed": 0}
+        result = {
+            "ok": ok, "copied": 0, "skipped_duplicate": skipped_duplicate,
+            "failed": 0,
+        }
         hashes = {_sha256(path)}
         if should_fail:
             with pytest.raises(AssertionError, match="not visible in the active workspace"):
@@ -1039,11 +1080,23 @@ def test_reimport_moved_duplicate_is_visible_in_receiving_workspace(request):
         request.node.add_marker(pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
             "Re-importing a moved duplicate reports success without making it visible "
             "in the receiving workspace; photo-specific versus folder-wide access "
-            "requires a product decision."
+            "requires a product decision. When this passes, drop the xfail and "
+            "the ``_check_finished_import`` carve-out."
         )))
-        machine._check_finished_import(result, CARDS[0], {
-            _sha256(os.path.join(machine.cards[CARDS[0]], "DSC_0001.jpg")),
-        })
+        # Assert the production behavior directly: the reimport in the active
+        # workspace should expose the duplicate photo there. The state machine
+        # carves out this exact case in ``_check_finished_import``, so going
+        # through the invariant would silently pass; drive straight at the
+        # workspace link, the same shape ``test_move_photos_keeps_photo_visible_in_sharing_workspaces``
+        # uses.
+        visible = [
+            r[0] for r in machine.db.conn.execute(
+                "SELECT p.id FROM photos p JOIN workspace_folders wf "
+                "ON wf.folder_id = p.folder_id WHERE wf.workspace_id = ? ORDER BY p.id",
+                (machine.ws_id,),
+            )
+        ]
+        assert visible, "reimported duplicate should be visible in the active workspace"
     finally:
         machine.teardown()
 
