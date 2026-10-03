@@ -721,17 +721,11 @@ PhotoSafetyMachine.TestCase.settings = settings.get_profile(PROFILE)
 TestPhotoSafetyInvariants = PhotoSafetyMachine.TestCase
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "move_photos links its destination folder only to the active "
-        "workspace, so a photo in a folder shared with another workspace "
-        "drops out of that workspace when moved (Move Photos, move rules, "
-        "Move Folder with a date template). Found by PhotoSafetyMachine. When "
-        "this passes, drop the xfail and the known_move_visibility_losses carve-out."
-    ),
-)
-def test_move_photos_keeps_photo_visible_in_sharing_workspaces(tmp_path):
+class _KnownWorkspaceVisibilityDefect(AssertionError):
+    """Only the final assertion for a pinned product defect may be xfailed."""
+
+
+def test_move_photos_keeps_photo_visible_in_sharing_workspaces(tmp_path, request):
     import move
     from db import Database
 
@@ -761,9 +755,15 @@ def test_move_photos_keeps_photo_visible_in_sharing_workspaces(tmp_path):
                 (photo_id,),
             )
         }
-        assert visible_to == {mine, theirs}
     finally:
         db.close()
+    request.node.add_marker(pytest.mark.xfail(strict=True, raises=_KnownWorkspaceVisibilityDefect, reason=(
+        "Move Photos links the destination only to the active workspace and loses "
+        "a previously sharing workspace. Choose the access policy before fixing; "
+        "remove this strict xfail and the precise known-move exemption once fixed."
+    )))
+    if visible_to != {mine, theirs}:
+        raise _KnownWorkspaceVisibilityDefect(f"visible to {visible_to}, expected {mine, theirs}")
 
 
 @pytest.mark.parametrize(
@@ -1034,18 +1034,18 @@ def test_reimport_moved_duplicate_is_visible_in_receiving_workspace(request):
         machine.switch_workspace()
         result = machine._run_import(CARDS[0], _Runner())
         assert result["ok"] and not result["failed"]
-        # Mark only after setup and job-success assertions have passed. A
-        # broken setup or failed import must not become this known xfail.
-        request.node.add_marker(pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-            "Re-importing a moved duplicate reports success without making it visible "
-            "in the receiving workspace; photo-specific versus folder-wide access "
-            "requires a product decision."
-        )))
-        machine._check_finished_import(result, CARDS[0], {
-            _sha256(os.path.join(machine.cards[CARDS[0]], "DSC_0001.jpg")),
-        })
+        card_hashes = {_sha256(os.path.join(machine.cards[CARDS[0]], "DSC_0001.jpg"))}
+        missing = card_hashes - machine._cataloged_hashes()
     finally:
         machine.teardown()
+    request.node.add_marker(pytest.mark.xfail(strict=True, raises=_KnownWorkspaceVisibilityDefect, reason=(
+        "Re-importing a moved duplicate reports success without making it visible "
+        "in the receiving workspace; photo-specific versus folder-wide access "
+        "requires a product decision."
+    )))
+    if missing:
+        raise _KnownWorkspaceVisibilityDefect(f"successful import left {len(missing)} photo(s) invisible")
+
 
 
 def test_crashed_import_archive_merge_consolidates_verified_copy():
