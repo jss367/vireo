@@ -9595,6 +9595,71 @@ def test_api_browse_photo_counts_respects_file_types(app_and_db, tmp_path):
     assert resp.get_json()["counts"][str(d)] == 1
 
 
+def test_api_browse_photo_counts_reports_lower_bound_when_budget_runs_out(
+        app_and_db, tmp_path, monkeypatch):
+    """A folder whose count runs out of time reports what it found so far
+    and is listed as incomplete, instead of walking the whole tree."""
+    import ingest
+    from image_loader import ScanCancelled
+
+    big = tmp_path / "big"
+    big.mkdir()
+    small = tmp_path / "small"
+    small.mkdir()
+    (small / "one.jpg").write_bytes(b"x")
+    real_discover = ingest.discover_source_files
+
+    def fake_discover(source_dir, *args, **kwargs):
+        if str(source_dir) != str(big):
+            return real_discover(source_dir, *args, **kwargs)
+        kwargs["progress_callback"](900, 412)
+        raise ScanCancelled("file discovery cancelled")
+
+    monkeypatch.setattr(ingest, "discover_source_files", fake_discover)
+    app, _ = app_and_db
+    resp = app.test_client().post(
+        '/api/browse/photo-counts',
+        json={"paths": [str(big), str(small)], "file_types": [".jpg"]})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["counts"] == {str(big): 412, str(small): 1}
+    assert data["incomplete"] == [str(big)]
+
+
+def test_api_browse_photo_counts_stops_each_folder_at_its_budget(
+        app_and_db, tmp_path, monkeypatch):
+    """The per-folder budget really stops the walk (a disk root under
+    /Volumes used to be counted in full)."""
+    import web.browse as browse_mod
+
+    d = tmp_path / "deep"
+    (d / "nested").mkdir(parents=True)
+    (d / "nested" / "a.jpg").write_bytes(b"x")
+    monkeypatch.setattr(browse_mod, "PHOTO_COUNT_PATH_BUDGET_SECS", 0)
+    app, _ = app_and_db
+    resp = app.test_client().post(
+        '/api/browse/photo-counts', json={"paths": [str(d)]})
+    data = resp.get_json()
+    assert data["counts"] == {str(d): 0}
+    assert data["incomplete"] == [str(d)]
+
+
+def test_api_browse_photo_counts_leaves_out_folders_past_request_budget(
+        app_and_db, tmp_path, monkeypatch):
+    """Folders not reached before the request budget runs out are left out
+    of ``counts`` rather than reported as empty."""
+    import web.browse as browse_mod
+
+    d = tmp_path / "later"
+    d.mkdir()
+    (d / "a.jpg").write_bytes(b"x")
+    monkeypatch.setattr(browse_mod, "PHOTO_COUNT_REQUEST_BUDGET_SECS", 0)
+    app, _ = app_and_db
+    resp = app.test_client().post(
+        '/api/browse/photo-counts', json={"paths": [str(d)]})
+    assert resp.get_json() == {"counts": {}, "incomplete": []}
+
+
 def _read_workspace_overrides(db, ws_id):
     """Helper: read and JSON-decode the config_overrides column for ws_id."""
     import json

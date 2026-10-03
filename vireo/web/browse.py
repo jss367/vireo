@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 
 import filter_shortcuts
 from filter_fields import SUGGEST_FIELDS, fields_for_api
@@ -33,6 +34,11 @@ from web.request_args import (
     request_rules_arg,
     request_visual_arg,
 )
+
+# Folder-picker photo counts are a hint: stop walking a folder after this
+# long, and stop the whole request after the second budget.
+PHOTO_COUNT_PATH_BUDGET_SECS = 1.5
+PHOTO_COUNT_REQUEST_BUDGET_SECS = 5.0
 
 
 def create_browse_blueprint(
@@ -835,6 +841,15 @@ def create_browse_blueprint(
         Used by the folder browser to show per-folder counts next to each
         subfolder so users can see which folders contain photos before
         selecting one.
+
+        A count is a hint, not an import, so each folder gets
+        ``PHOTO_COUNT_PATH_BUDGET_SECS`` and the request
+        ``PHOTO_COUNT_REQUEST_BUDGET_SECS``: browsing ``/Volumes`` used to
+        count every photo on the boot disk and the NAS share, holding a
+        server thread for over a minute after the user had moved on. A
+        folder whose count ran out of time is listed in ``incomplete`` with
+        the photos found so far (a lower bound); a folder never reached
+        before the request budget ran out is left out of ``counts``.
         """
         body = request.get_json(silent=True) or {}
         paths = body.get("paths", [])
@@ -842,11 +857,13 @@ def create_browse_blueprint(
         if not isinstance(paths, list):
             return json_error("paths must be a list", 400)
 
-        from image_loader import is_excluded_scan_path
+        from image_loader import ScanCancelled, is_excluded_scan_path
         from ingest import discover_source_files
 
         ft = file_types if file_types else "both"
         counts = {}
+        incomplete = []
+        request_deadline = time.monotonic() + PHOTO_COUNT_REQUEST_BUDGET_SECS
         for p in paths:
             # Non-string entries (dicts, lists, numbers) can't be dict keys
             # and aren't valid paths — skip them rather than 500.
@@ -860,15 +877,33 @@ def create_browse_blueprint(
             if is_excluded_scan_path(p):
                 counts[p] = 0
                 continue
+            if time.monotonic() >= request_deadline:
+                break
             if not os.path.isdir(p):
                 counts[p] = 0
                 continue
+            deadline = min(
+                time.monotonic() + PHOTO_COUNT_PATH_BUDGET_SECS,
+                request_deadline,
+            )
+            found = [0]
+
+            def on_progress(_checked, found_so_far, found=found):
+                found[0] = found_so_far
+
             try:
-                discovered = discover_source_files(p, file_types=ft, recursive=True)
+                discovered = discover_source_files(
+                    p, file_types=ft, recursive=True,
+                    cancel_check=lambda deadline=deadline: time.monotonic() >= deadline,
+                    progress_callback=on_progress,
+                )
                 counts[p] = len(discovered)
+            except ScanCancelled:
+                counts[p] = found[0]
+                incomplete.append(p)
             except (OSError, PermissionError):
                 counts[p] = 0
-        return jsonify({"counts": counts})
+        return jsonify({"counts": counts, "incomplete": incomplete})
 
     @blueprint.route("/api/browse/mkdir", methods=["POST"])
     def api_browse_mkdir():
