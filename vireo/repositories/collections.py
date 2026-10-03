@@ -2288,7 +2288,14 @@ class _RuleQueryBuilder:
             values_contain([f"pred.{col}" for col in PREDICTION_COLUMNS]
                            + ["COALESCE(prv.status, 'pending')"]), [like],
         )
-        parts.append(prediction_sql)
+        # Once a photo has a species, search matches what the user said it
+        # is, not what a classifier guessed: a Wood duck photo must not
+        # answer "least" through a stray detection's "Least Grebe" guess.
+        # Predictions still find photos nobody has identified yet.
+        parts.append(
+            f"(NOT EXISTS (SELECT 1 {_species_keyword_from('_search')}) "
+            f"AND {prediction_sql})"
+        )
         params.extend(prediction_params)
         condition = "(" + " OR ".join(parts) + ")"
         return (f"NOT {condition}" if op == "not_contains" else condition), params

@@ -177,6 +177,40 @@ def test_metadata_search_uses_current_visible_predictions(catalog):
     assert search("New species") == []
 
 
+def test_metadata_search_ignores_predictions_on_identified_photos(catalog):
+    """A photo the user identified answers search by its species, not by a
+    classifier guess on some other detection (a Wood duck found by "least"
+    through a stray "Least Grebe" box)."""
+    db, ids = catalog
+    genus = db.add_keyword("Tyto", is_species=True)
+    genus_taxon = db.conn.execute(
+        "INSERT INTO taxa (name, common_name, rank) VALUES ('Tyto', 'Masked owls', 'genus')"
+    ).lastrowid
+    db.conn.execute("UPDATE keywords SET taxon_id=? WHERE id=?", (genus_taxon, genus))
+    db.tag_photo(ids["robin"], genus)
+    for name in ("owl", "hawk", "robin", "empty"):
+        det = db.save_detections(ids[name], [
+            {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"},
+        ], detector_model="test")[0]
+        db.conn.execute(
+            "INSERT INTO predictions (detection_id, classifier_model, labels_fingerprint, species, "
+            "scientific_name, confidence) VALUES (?, 'test', 'fp', 'Least Grebe', "
+            "'Tachybaptus dominicus', 0.9)", (det,),
+        )
+    db.conn.commit()
+
+    def search(value, op="contains"):
+        return sorted(db.query_photo_ids([{"field": "metadata", "op": op, "value": value}]))
+
+    # owl is identified as Barn Owl; hawk only has a non-species keyword and
+    # robin only a genus, so their predictions still answer search.
+    unidentified = sorted([ids["hawk"], ids["robin"], ids["empty"]])
+    assert search("Least Grebe") == unidentified
+    assert search("Tachybaptus") == unidentified
+    assert ids["owl"] in search("Least Grebe", op="not_contains")
+    assert search("Barn Owl") == [ids["owl"]]
+
+
 def test_color_search_is_workspace_scoped_for_shared_photos(catalog):
     db, ids = catalog
     original_ws = db._ws_id()

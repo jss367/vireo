@@ -540,13 +540,16 @@ def collect_highlight_buckets(
 
 
 def _highlight_search_fields(photo):
+    # A photo with a species is searched by that species, not by a
+    # classifier guess the user never took (same rule as Browse search).
+    predicted = "" if photo.get("species") else photo.get("predicted_species")
     return [
         photo.get("filename") or "",
         photo.get("folder_name") or "",
         photo.get("folder_path") or "",
         photo.get("keyword_names") or "",
         photo.get("species") or "",
-        photo.get("predicted_species") or "",
+        predicted or "",
         "unidentified" if photo.get("is_unidentified") else "",
     ]
 
