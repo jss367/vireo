@@ -6,9 +6,9 @@ random sequences of the real operations against a scratch filesystem and a
 scratch catalog, and after every step checks the promises a photo library has
 to keep no matter what order things happen in:
 
-1. **No photo is lost.** Every image whose bytes were on disk before a step is
-   still on disk somewhere afterwards (library, card, user folder or Trash),
-   unless that step was a permanent delete of a file with those bytes.
+1. **No photo copy is lost.** Each image copy on disk before a step remains
+   somewhere afterwards (library, card, user folder or Trash), unless that
+   step permanently deleted that copy. Identical copies count separately.
 2. **No file is silently overwritten.** A path that held an image before a
    step and still exists afterwards holds the same bytes.
 3. **The catalog tells the truth.** Every photo row points at a file that
@@ -53,6 +53,7 @@ import random
 import shutil
 import sys
 import tempfile
+from collections import Counter
 from datetime import datetime, timedelta
 
 import pytest
@@ -226,8 +227,8 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
         self.next_seed = 0
         self.next_job = 0
         self.capture_offset = 0
-        # Bytes that a step was allowed to remove from disk (permanent delete).
-        self.allowed_to_vanish = set()
+        # Number of copies of each digest a permanent delete may remove.
+        self.allowed_to_vanish = Counter()
         self.snapshot = self._disk_snapshot()
         self.visibility = self._workspace_visibility()
         # Set by steps built on ``move.move_photos``; see
@@ -565,7 +566,7 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
                 if row["id"] in chosen:
                     path = os.path.join(row["folder_path"], row["filename"])
                     if os.path.isfile(path):
-                        self.allowed_to_vanish.add(_sha256(path))
+                        self.allowed_to_vanish[_sha256(path)] += 1
         result = self._deleter().run_batch_delete(self.db, chosen, mode=mode)
         event(f"delete {mode}: ok={result.get('ok')}")
 
@@ -579,13 +580,13 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
             if p in now and now[p] != digest
         ]
         assert not overwritten, f"files overwritten in place: {overwritten}"
-        lost = set(self.snapshot.values()) - set(now.values()) - self.allowed_to_vanish
+        lost = Counter(self.snapshot.values()) - Counter(now.values()) - self.allowed_to_vanish
         assert not lost, (
-            f"{len(lost)} photo(s) vanished from disk without a permanent delete: "
+            f"{sum(lost.values())} photo copy/copies vanished from disk without a permanent delete: "
             + ", ".join(p for p, d in self.snapshot.items() if d in lost)
         )
         self.snapshot = now
-        self.allowed_to_vanish = set()
+        self.allowed_to_vanish = Counter()
 
     @invariant()
     def no_photo_drops_out_of_a_workspace(self):
@@ -672,3 +673,31 @@ def test_move_photos_keeps_photo_visible_in_sharing_workspaces(tmp_path):
         assert visible_to == {mine, theirs}
     finally:
         db.close()
+
+
+@pytest.mark.parametrize(
+    "remaining_paths,allowed_deletions,should_fail",
+    [
+        (["copy-a.jpg"], 0, True),
+        ([], 1, True),
+        (["copy-a.jpg"], 1, False),
+        (["moved-a.jpg", "moved-b.jpg"], 0, False),
+        (["copy-a.jpg", "copy-b.jpg", "new-copy.jpg"], 0, False),
+    ],
+    ids=["lost-duplicate", "delete-does-not-exempt-other-copy", "intentional-delete",
+         "moved-copies", "additional-copy"],
+)
+def test_loss_invariant_counts_identical_copies(remaining_paths, allowed_deletions, should_fail):
+    # Exercise the invariant itself without starting a random filesystem
+    # sequence. Both original files deliberately contain identical bytes.
+    machine = PhotoSafetyMachine.__new__(PhotoSafetyMachine)
+    machine.snapshot = {"copy-a.jpg": "same-bytes", "copy-b.jpg": "same-bytes"}
+    machine.allowed_to_vanish = Counter({"same-bytes": allowed_deletions})
+    machine._disk_snapshot = lambda: dict.fromkeys(remaining_paths, "same-bytes")
+    if should_fail:
+        with pytest.raises(AssertionError, match="vanished from disk"):
+            machine.no_photo_lost_or_overwritten()
+    else:
+        machine.no_photo_lost_or_overwritten()
+        assert machine.snapshot == dict.fromkeys(remaining_paths, "same-bytes")
+        assert not machine.allowed_to_vanish
