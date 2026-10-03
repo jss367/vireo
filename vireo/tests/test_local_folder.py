@@ -2225,7 +2225,8 @@ def test_move_folder_job_rejects_ancestor_of_local_folder(tmp_path, monkeypatch)
     assert "shared local copy" in blocked_child.get_json()["error"]
 
 
-def test_move_folders_ancestor_sweeps_descendant_local_rows(tmp_path):
+@pytest.mark.parametrize("folder_linked", [True, False])
+def test_move_folders_ancestor_sweeps_descendant_local_rows(tmp_path, folder_linked):
     """POST /api/workspaces/<id>/move-folders on an ancestor with a shared
     descendant local root must sweep the rebased descendant's workspace_folders
     rows from source to target. db.move_folders_to_workspace uses a folders.path
@@ -2254,6 +2255,10 @@ def test_move_folders_ancestor_sweeps_descendant_local_rows(tmp_path):
     setup._materialize_workspace_descendants(parent_ws)
     photo = setup.add_photo(folder_id=child_id, filename="bird.jpg", extension=".jpg",
                             file_size=8, file_mtime=1)
+    if not folder_linked:
+        # A photo-only grant is omitted from moved_folder_ids, even though
+        # this mapped descendant is swept by the API after the root move.
+        setup.remove_workspace_folder(parent_ws, child_id)
     setup.grant_workspace_photos(parent_ws, [photo])
     setup.grant_workspace_photos(child_ws, [photo])
     setup.conn.commit()
