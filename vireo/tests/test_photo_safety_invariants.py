@@ -8,7 +8,8 @@ to keep no matter what order things happen in:
 
 1. **No photo copy is lost.** Each image copy on disk before a step remains
    somewhere afterwards (library, card, user folder or Trash), unless that
-   step permanently deleted that copy. Identical copies count separately.
+   step permanently deleted that copy or a merge deliberately consolidated it
+   into an existing, byte-verified identical file. Other copies count separately.
 2. **No file is silently overwritten.** A path that held an image before a
    step and still exists afterwards holds the same bytes.
 3. **The catalog tells the truth.** Every photo row points at a file that
@@ -548,7 +549,12 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
             "route_merge": {"merge": True},
             "archive": {"merge": True, "allow_tracked_merge": True, "verify_contents": True},
         }[shape]
+        before_disk = self._disk_snapshot()
+        before_rows = self._catalog_rows()
         result = move.move_folder(self.db, folder["id"], dest, **kwargs)
+        if kwargs.get("merge"):
+            target = (result or {}).get("merged_into_existing") or os.path.join(dest, os.path.basename(folder["path"]))
+            self._record_verified_consolidations(folder["path"], target, before_disk, before_rows, result)
         event(f"move_folder: {sorted(k for k, v in (result or {}).items() if v)[:4]}")
         for error in (result or {}).get("errors") or []:
             event(f"move_folder error: {_error_kind(error)}")
@@ -588,7 +594,7 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
                 if row["id"] in chosen:
                     path = os.path.join(row["folder_path"], row["filename"])
                     if os.path.isfile(path):
-                        permanent_hashes[row["id"]] = _sha256(path)
+                        permanent_hashes[row["id"]] = (path, _sha256(path))
         result = self._deleter().run_batch_delete(self.db, chosen, mode=mode)
         self._record_successful_deletions(chosen, result, permanent_hashes)
         event(f"delete {mode}: ok={result.get('ok')}")
@@ -600,8 +606,42 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
         succeeded = set(chosen) - set(result.get("failed_photo_ids") or []) - remaining
         self.allowed_catalog_deletions.update(succeeded)
         self.allowed_to_vanish.update(
-            permanent_hashes[pid] for pid in succeeded if pid in permanent_hashes
+            permanent_hashes[pid][1]
+            for pid in succeeded
+            if pid in permanent_hashes and not os.path.lexists(permanent_hashes[pid][0])
         )
+
+    def _record_verified_consolidations(self, source_root, target_root, before_disk, before_rows, result):
+        if not result or result.get("errors") or source_root == target_root:
+            return
+        after_disk = self._disk_snapshot()
+        verified = {}
+        for source, digest in before_disk.items():
+            if os.path.commonpath([source_root, source]) != source_root:
+                continue
+            target = os.path.join(target_root, os.path.relpath(source, source_root))
+            # Only this exact source copy may be consolidated, into the exact
+            # receiver that already had identical bytes and still has them.
+            if source not in after_disk and before_disk.get(target) == digest and after_disk.get(target) == digest:
+                verified[source] = target
+                self.allowed_to_vanish[digest] += 1
+        # A tracked archive merge can also intentionally fold staged rows
+        # into surviving rows. Transfer their visibility obligations instead
+        # of silently forgetting the staged photo's prior workspace access.
+        after_rows = {
+            os.path.join(r["folder_path"], r["filename"]): r for r in self._catalog_rows()
+        }
+        dropped = set(result.get("dropped_photo_ids") or [])
+        remaining_ids = {row["id"] for row in after_rows.values()}
+        for row in before_rows:
+            source = os.path.join(row["folder_path"], row["filename"])
+            if row["id"] not in dropped or row["id"] in remaining_ids or source not in verified:
+                continue
+            receiver = after_rows.get(verified[source])
+            if receiver is None or receiver["file_hash"] != before_disk[source]:
+                continue
+            self.allowed_catalog_deletions.add(row["id"])
+            self.visibility.setdefault(receiver["id"], set()).update(self.visibility.get(row["id"], set()))
 
     # -- invariants ----------------------------------------------------------
 
@@ -615,7 +655,7 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
         assert not overwritten, f"files overwritten in place: {overwritten}"
         lost = Counter(self.snapshot.values()) - Counter(now.values()) - self.allowed_to_vanish
         assert not lost, (
-            f"{sum(lost.values())} photo copy/copies vanished from disk without a permanent delete: "
+            f"{sum(lost.values())} photo copy/copies vanished from disk without a permanent delete or verified consolidation: "
             + ", ".join(p for p, d in self.snapshot.items() if d in lost)
         )
         self.snapshot = now
@@ -902,22 +942,167 @@ def test_finished_import_checks_active_workspace_catalog(tmp_path, workspace, ok
 
 
 @pytest.mark.parametrize(
-    "ok,failed_ids,remaining_ids,allowed",
-    [(True, [1], [1], False), (False, [], [], False),
-     (True, [], [1], False), (True, [], [], True)],
-    ids=["failed-id", "failed-operation", "row-retained", "successful-delete"],
+    "ok,failed_ids,remaining_ids,selected_gone,allowed",
+    [(True, [1], [1], False, False), (False, [], [], True, False),
+     (True, [], [1], True, False), (True, [], [], False, False), (True, [], [], True, True)],
+    ids=["failed-id", "failed-operation", "row-retained", "wrong-copy-deleted", "successful-delete"],
 )
-def test_only_successful_deletions_allow_identical_copy_loss(ok, failed_ids, remaining_ids, allowed):
+def test_only_successful_deletions_allow_identical_copy_loss(
+    tmp_path, ok, failed_ids, remaining_ids, selected_gone, allowed,
+):
+    selected = tmp_path / "selected.jpg"
+    selected.write_bytes(b"same-bytes")
     machine = PhotoSafetyMachine.__new__(PhotoSafetyMachine)
     machine.allowed_catalog_deletions = set()
     machine.allowed_to_vanish = Counter()
     machine._catalog_rows = lambda: [{"id": pid} for pid in remaining_ids]
-    machine._record_successful_deletions([1], {"ok": ok, "failed_photo_ids": failed_ids}, {1: "same-bytes"})
-    assert machine.allowed_catalog_deletions == ({1} if allowed else set())
+    if selected_gone:
+        selected.unlink()
+    machine._record_successful_deletions(
+        [1], {"ok": ok, "failed_photo_ids": failed_ids}, {1: (str(selected), "same-bytes")},
+    )
+    assert machine.allowed_catalog_deletions == ({1} if ok and not failed_ids and not remaining_ids else set())
     machine.snapshot = {"selected.jpg": "same-bytes", "card-copy.jpg": "same-bytes"}
-    machine._disk_snapshot = lambda: {"selected.jpg": "same-bytes"}
+    machine._disk_snapshot = lambda: {"surviving-copy.jpg": "same-bytes"}
     if allowed:
         machine.no_photo_lost_or_overwritten()
     else:
         with pytest.raises(AssertionError, match="vanished from disk"):
             machine.no_photo_lost_or_overwritten()
+
+
+@pytest.mark.parametrize(
+    "extra_loss,should_fail", [(None, False), ("unique", True), ("unrelated-copy", True), ("receiver", True)],
+)
+def test_verified_consolidation_preserves_unique_bytes_and_unrelated_copies(tmp_path, extra_loss, should_fail):
+    source = str(tmp_path / "source")
+    target = str(tmp_path / "target")
+    staged = os.path.join(source, "duplicate.jpg")
+    receiver = os.path.join(target, "duplicate.jpg")
+    unique = os.path.join(source, "unique.jpg")
+    unique_receiver = os.path.join(target, "unique.jpg")
+    card = str(tmp_path / "card.jpg")
+    before = {staged: "same", receiver: "same", card: "same", unique: "unique"}
+    after = {receiver: "same", card: "same", unique_receiver: "unique"}
+    if extra_loss == "unique":
+        del after[unique_receiver]
+    elif extra_loss == "unrelated-copy":
+        del after[card]
+    elif extra_loss == "receiver":
+        del after[receiver]
+    machine = PhotoSafetyMachine.__new__(PhotoSafetyMachine)
+    machine.snapshot = before
+    machine.allowed_to_vanish = Counter()
+    machine.allowed_catalog_deletions = set()
+    machine.visibility = {}
+    machine._disk_snapshot = lambda: after
+    machine._catalog_rows = lambda: []
+    machine._record_verified_consolidations(source, target, before, [], {"moved": 1, "errors": []})
+    if should_fail:
+        with pytest.raises(AssertionError, match="vanished from disk"):
+            machine.no_photo_lost_or_overwritten()
+    else:
+        machine.no_photo_lost_or_overwritten()
+        assert set(before.values()) <= set(after.values())
+
+
+def test_reimport_moved_duplicate_is_visible_in_receiving_workspace(request):
+    import move
+
+    machine = PhotoSafetyMachine()
+    try:
+        machine.first_shoot(["DSC_0001.jpg"], 0)
+        first = machine._run_import(CARDS[0], _Runner())
+        assert first["ok"] and first["copied"] == 1
+        folder = machine._photo_folders()[0]
+        moved = move.move_folder(machine.db, folder["id"], machine.moved)
+        assert moved["moved"] == 1 and not moved["errors"]
+        machine.switch_workspace()
+        result = machine._run_import(CARDS[0], _Runner())
+        assert result["ok"] and not result["failed"]
+        # Mark only after setup and job-success assertions have passed. A
+        # broken setup or failed import must not become this known xfail.
+        request.node.add_marker(pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+            "Re-importing a moved duplicate reports success without making it visible "
+            "in the receiving workspace; photo-specific versus folder-wide access "
+            "requires a product decision."
+        )))
+        machine._check_finished_import(result, CARDS[0], {
+            _sha256(os.path.join(machine.cards[CARDS[0]], "DSC_0001.jpg")),
+        })
+    finally:
+        machine.teardown()
+
+
+def test_crashed_import_archive_merge_consolidates_verified_copy():
+    import gc
+
+    import move
+
+    machine = PhotoSafetyMachine()
+    try:
+        machine.first_shoot(["DSC_0001.jpg", "DSC_0002.jpg"], 0)
+        assert machine._run_import(CARDS[0], _Runner())["ok"]
+        machine.no_photo_lost_or_overwritten()
+        machine.no_photo_drops_out_of_a_workspace()
+        folder = machine._photo_folders()[0]
+        assert not move.move_folder(machine.db, folder["id"], machine.moved)["errors"]
+        machine.no_photo_lost_or_overwritten()
+        machine.no_photo_drops_out_of_a_workspace()
+        removed = machine._visible_photo_ids()[0]
+        result = machine._deleter().run_batch_delete(machine.db, [removed], mode="vireo")
+        machine._record_successful_deletions([removed], result, {})
+        machine.no_photo_lost_or_overwritten()
+        machine.no_photo_drops_out_of_a_workspace()
+        with pytest.raises(_SimulatedCrash):
+            machine._run_import(CARDS[0], _Runner(crash_after=4))
+        gc.collect()
+        machine.db.conn.rollback()
+        machine.no_photo_lost_or_overwritten()
+        machine.no_photo_drops_out_of_a_workspace()
+        folder = next(f for f in machine._photo_folders() if f["path"].startswith(machine.library + os.sep))
+        before_disk = machine._disk_snapshot()
+        before_rows = machine._catalog_rows()
+        result = move.move_folder(
+            machine.db, folder["id"], machine.moved,
+            merge=True, allow_tracked_merge=True, verify_contents=True,
+        )
+        assert not result["errors"]
+        machine._record_verified_consolidations(
+            folder["path"], result["merged_into_existing"], before_disk, before_rows, result,
+        )
+        assert sum(machine.allowed_to_vanish.values()) == 1
+        machine.no_photo_lost_or_overwritten()
+        machine.no_photo_drops_out_of_a_workspace()
+        machine.catalog_matches_disk()
+        assert set(before_disk.values()) <= set(machine.snapshot.values())
+    finally:
+        machine.teardown()
+
+
+@pytest.mark.parametrize("preserve_source_access", [True, False])
+def test_consolidated_catalog_identity_retains_old_workspace_access(tmp_path, preserve_source_access):
+    source = str(tmp_path / "source")
+    target = str(tmp_path / "target")
+    original = os.path.join(source, "photo.jpg")
+    receiver = os.path.join(target, "photo.jpg")
+    before_rows = [{"id": 1, "folder_path": source, "filename": "photo.jpg", "file_hash": "same"}]
+    after_rows = [{"id": 2, "folder_path": target, "filename": "photo.jpg", "file_hash": "same"}]
+    before_disk = {original: "same", receiver: "same"}
+    machine = PhotoSafetyMachine.__new__(PhotoSafetyMachine)
+    machine.allowed_to_vanish = Counter()
+    machine.allowed_catalog_deletions = set()
+    machine.known_move_visibility_losses = {}
+    machine.ws_id = 1
+    machine.visibility = {1: {1}, 2: {2}}
+    machine._disk_snapshot = lambda: {receiver: "same"}
+    machine._catalog_rows = lambda: after_rows
+    machine._workspace_visibility = lambda: {2: {1, 2} if preserve_source_access else {2}}
+    machine._record_verified_consolidations(
+        source, target, before_disk, before_rows, {"errors": [], "dropped_photo_ids": [1]},
+    )
+    if preserve_source_access:
+        machine.no_photo_drops_out_of_a_workspace()
+    else:
+        with pytest.raises(AssertionError, match="photos lost workspace visibility"):
+            machine.no_photo_drops_out_of_a_workspace()
