@@ -8,6 +8,8 @@ from flask import Blueprint, jsonify, request
 from jobs import WorkspaceBusyError
 from move_cleanup import cleanup_source, review_source
 
+CLEANUP_LABEL = "the cleanup of a moved folder's source"
+
 
 def create_move_cleanup_blueprint(get_db, get_runner, json_error, trash_paths,
                                   guard_move_folder):
@@ -40,7 +42,8 @@ def create_move_cleanup_blueprint(get_db, get_runner, json_error, trash_paths,
             return json_error("Cleanup requires a successfully completed date-organized move", 409)
         try:
             with cleanup_lock, ExitStack() as reservations:
-                reservations.enter_context(runner.workspace_mutation(db._active_workspace_id, exclusive=True))
+                reservations.enter_context(runner.workspace_mutation(
+                    db._active_workspace_id, exclusive=True, label=CLEANUP_LABEL))
                 if request.method == "POST":
                     # An import in any workspace can discover this source.
                     # Hold every workspace reservation through review and Trash,
@@ -48,7 +51,8 @@ def create_move_cleanup_blueprint(get_db, get_runner, json_error, trash_paths,
                     reserved = {db._active_workspace_id}
                     while pending := {item[0] for item in db.conn.execute("SELECT id FROM workspaces")} - reserved:
                         for workspace_id in sorted(pending):
-                            reservations.enter_context(runner.workspace_mutation(workspace_id, exclusive=True))
+                            reservations.enter_context(runner.workspace_mutation(
+                                workspace_id, exclusive=True, label=CLEANUP_LABEL))
                             reserved.add(workspace_id)
                 source = config["source_path"]
                 # A successful cleanup can retire the old ID. Resolve the

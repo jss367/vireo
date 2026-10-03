@@ -4,8 +4,10 @@ import json
 import logging
 import queue
 import sqlite3
+import sys
 import threading
 import time
+import traceback
 from collections import deque
 from contextlib import contextmanager
 from datetime import datetime
@@ -137,6 +139,44 @@ class WorkspaceBusyError(RuntimeError):
     """A transfer and another job cannot share the workspace's originals."""
 
 
+# A synchronous request that has held its workspace reservation this long is
+# hung, not slow: a busy rejection says so and logs the holder's stack.
+STALE_WORKSPACE_MUTATION_SECS = 60
+
+
+def format_duration(seconds):
+    """Short human duration for status text: "12 s", "4 min", "3 h 2 min"."""
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds} s"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes} min"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours} h {minutes} min" if minutes else f"{hours} h"
+
+
+def describe_job(job):
+    """Name a job for a busy message, e.g. "the export job (running for 4 min)"."""
+    kind = str(job.get("type") or "unknown").replace("-", " ").replace("_", " ")
+    status = job.get("status") or "running"
+    started = job.get("_start_time")
+    if status == "running" and isinstance(started, (int, float)):
+        status = f"running for {format_duration(time.time() - started)}"
+    return f"the {kind} job ({status})"
+
+
+def _join_blockers(items):
+    if len(items) <= 1:
+        return "".join(items)
+    return ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def describe_jobs(jobs):
+    """``describe_job`` for each job, joined into one phrase."""
+    return _join_blockers([describe_job(job) for job in jobs])
+
+
 class JobRunner:
     """Runs long operations in background threads with progress tracking.
 
@@ -181,8 +221,11 @@ class JobRunner:
         # promotes such rows to 'failed'.
         self._queued_pipelines = {}  # job_id -> dict(work_fn, config, ...)
         self._pipeline_admissions = {}  # workspace -> enqueues persisting outside the lock
-        self._workspace_mutations = {}  # workspace -> synchronous API requests
-        self._exclusive_workspace_mutations = set()
+        # workspace -> holders of synchronous reservations (API requests).
+        # Each holder records what it is, when it began and which thread holds
+        # it, so a rejected transfer can name it instead of "something".
+        self._workspace_mutations = {}
+        self._exclusive_workspace_mutations = {}  # workspace -> holder
         # Monotonic suffix so two enqueues landing in the same
         # millisecond don't collide on the PRIMARY KEY.
         self._enqueue_counter = 0
@@ -1129,22 +1172,36 @@ class JobRunner:
         return job, work_fn
 
     @contextmanager
-    def workspace_mutation(self, workspace_id, *, exclusive=False):
-        """Reserve synchronous mutations against transfers for their full duration."""
+    def workspace_mutation(self, workspace_id, *, exclusive=False, label=None):
+        """Reserve synchronous mutations against transfers for their full duration.
+
+        ``label`` names the holder in the message a blocked job gets back.
+        """
+        holder = {
+            "label": label or "a change in this workspace",
+            "started": time.monotonic(),
+            "thread": threading.get_ident(),
+        }
         with self._lock:
             self._check_workspace_admission_locked(workspace_id, exclusive=exclusive)
-            self._workspace_mutations[workspace_id] = self._workspace_mutations.get(workspace_id, 0) + 1
+            self._workspace_mutations.setdefault(workspace_id, []).append(holder)
             if exclusive:
-                self._exclusive_workspace_mutations.add(workspace_id)
+                self._exclusive_workspace_mutations[workspace_id] = holder
         try:
             yield
         finally:
             with self._lock:
-                self._workspace_mutations[workspace_id] -= 1
-                if not self._workspace_mutations[workspace_id]:
+                holders = [h for h in self._workspace_mutations[workspace_id] if h is not holder]
+                if holders:
+                    self._workspace_mutations[workspace_id] = holders
+                else:
                     del self._workspace_mutations[workspace_id]
-                if exclusive:
-                    self._exclusive_workspace_mutations.discard(workspace_id)
+                if self._exclusive_workspace_mutations.get(workspace_id) is holder:
+                    del self._exclusive_workspace_mutations[workspace_id]
+            held = time.monotonic() - holder["started"]
+            if held >= STALE_WORKSPACE_MUTATION_SECS:
+                log.warning("Workspace %s reservation for %s was held for %s",
+                            workspace_id, holder["label"], format_duration(held))
 
     def wait_for_workspace_transfer(self, job_id):
         """Reserve an automatic transfer batch after its producing jobs finish.
@@ -1186,21 +1243,77 @@ class JobRunner:
                 self._pause_condition.wait(timeout=0.1)
 
     def _check_workspace_admission_locked(self, workspace_id, blocking=True, exclusive=False):
-        """Check both sides of a transfer reservation under the registration lock."""
+        """Check both sides of a transfer reservation under the registration lock.
+
+        A rejection names what holds the workspace: the user cannot see a
+        synchronous reservation anywhere else, so "wait for running jobs"
+        with no job running leaves them nothing to wait for.
+        """
         if not blocking:
             return
-        if workspace_id in self._exclusive_workspace_mutations:
-            raise WorkspaceBusyError("Wait for the workspace operation to finish before starting another job or change")
+        exclusive_holder = self._exclusive_workspace_mutations.get(workspace_id)
+        if exclusive_holder is not None:
+            self._raise_workspace_busy_locked(
+                workspace_id,
+                "Wait for {blockers} to finish before starting another job or change in this workspace.",
+                [], [exclusive_holder],
+            )
         active = [j for j in self._jobs.values()
                   if j.get("workspace_id") == workspace_id
                   and j.get("status") in ("running", "queued", "pausing", "paused")
                   and j.get("blocks_local_transitions", True)]
-        if any(j.get("exclusive_workspace") for j in active):
-            raise WorkspaceBusyError("Wait for the NAS transfer to finish before starting another job in this workspace")
-        if exclusive and (active or self._pipeline_admissions.get(workspace_id)
-                          or self._workspace_mutations.get(workspace_id)
-                          or any(c.get("workspace_id") == workspace_id for c in self._queued_pipelines.values())):
-            raise WorkspaceBusyError("Wait for running jobs or changes in this workspace to finish")
+        transfers = [j for j in active if j.get("exclusive_workspace")]
+        if transfers:
+            self._raise_workspace_busy_locked(
+                workspace_id,
+                "Wait for the NAS transfer ({blockers}) to finish before starting another job in this workspace.",
+                transfers, [],
+            )
+        if not exclusive:
+            return
+        queued = sum(1 for c in self._queued_pipelines.values() if c.get("workspace_id") == workspace_id)
+        admitting = self._pipeline_admissions.get(workspace_id, 0)
+        holders = self._workspace_mutations.get(workspace_id, [])
+        if active or queued or admitting or holders:
+            extra = []
+            if queued:
+                extra.append("a queued pipeline" if queued == 1 else f"{queued} queued pipelines")
+            if admitting:
+                extra.append("a pipeline being added to the queue")
+            self._raise_workspace_busy_locked(
+                workspace_id,
+                "This workspace is busy with {blockers}. Wait for {it} to finish, then try again.",
+                active, holders, extra,
+            )
+
+    def _raise_workspace_busy_locked(self, workspace_id, template, jobs, holders, extra=()):
+        """Raise ``WorkspaceBusyError`` naming every blocker in ``template``.
+
+        A request that has held its reservation past
+        ``STALE_WORKSPACE_MUTATION_SECS`` is called out as probably stuck, and
+        its thread's stack goes to the log so the hang can be diagnosed
+        without attaching a debugger to the running app.
+        """
+        now = time.monotonic()
+        stale = [h for h in holders if now - h["started"] >= STALE_WORKSPACE_MUTATION_SECS]
+        parts = [describe_job(j) for j in jobs]
+        parts += [f"{h['label']} (running for {format_duration(now - h['started'])})" for h in holders]
+        parts += list(extra)
+        message = template.format(blockers=_join_blockers(parts), it="it" if len(parts) == 1 else "them")
+        if stale:
+            message += (" A request running that long is probably stuck;"
+                        " restarting Vireo releases it.")
+        log.warning("Workspace %s busy: %s", workspace_id, message)
+        frames = sys._current_frames() if stale else {}
+        for holder in stale:
+            frame = frames.get(holder["thread"])
+            if frame is None:
+                log.warning("Holder of %s (thread %s) has exited without releasing its reservation",
+                            holder["label"], holder["thread"])
+            else:
+                log.warning("Holder of %s (thread %s) is at:\n%s", holder["label"], holder["thread"],
+                            "".join(traceback.format_stack(frame)))
+        raise WorkspaceBusyError(message)
 
     def _find_singleton_locked(self, job_type, singleton_key):
         """Find an active singleton job by (job_type, singleton_key).
