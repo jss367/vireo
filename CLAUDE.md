@@ -51,6 +51,8 @@ python scripts/select_tests.py --explain             # just print what would run
 
 CI does the same: PRs (`test.yml`) run the selected subset on Linux and the complete unit suite on Windows, each split across four parallel jobs with `--shard K/4` (also usable locally; Windows-only tests and branches are absent from the Linux coverage map); every push to `main` (`test-main.yml`) runs the complete suite on Linux/macOS/Windows, enforces the coverage threshold, and publishes a fresh map to the Actions cache and as the `test-impact-map` artifact. The `ci-full-suite` PR label forces the full suite on a PR.
 
+`vireo/tests/test_photo_safety_invariants.py` is a Hypothesis state machine that runs random sequences of imports (including cancelled and crashed ones), scans, moves, deletes and workspace sharing against a scratch library, and checks after every step that no photo is lost or overwritten, the catalog matches disk, a finished import catalogs the whole card, and no photo drops out of a workspace. PRs run a small derandomized budget; `photo-safety-nightly.yml` runs a large random one (`VIREO_INVARIANTS_PROFILE=nightly` locally). When you add an operation that copies, moves or deletes originals, add it as a rule there. A failure prints the shrunk sequence of steps; keep it as a regression test.
+
 Do not monkeypatch `sqlite3.connect` globally in tests: coverage flushes per-test contexts to its own SQLite file at every test boundary, so a global fake crashes the xdist worker. Fake only the connection for the database path under test (see `test_pipeline_queue.py`).
 
 ### Browser tests
