@@ -56,7 +56,7 @@ class WorkspaceRepository:
             chunk = folder_ids[i:i + CHUNK]
             placeholders = ",".join("?" * len(chunk))
             rows = self.conn.execute(
-                f"SELECT DISTINCT workspace_id FROM workspace_folders "
+                f"SELECT DISTINCT workspace_id FROM workspace_visible_folders "
                 f"WHERE folder_id IN ({placeholders})",
                 tuple(chunk),
             ).fetchall()

@@ -229,7 +229,7 @@ def create_pipeline_blueprint(
             from db import _chunks  # noqa: PLC0415
             for fid in folder_ids:
                 linked = db.conn.execute(
-                    "SELECT 1 FROM workspace_folders "
+                    "SELECT 1 FROM workspace_visible_folders "
                     "WHERE workspace_id = ? AND folder_id = ?",
                     (ws_for_folders, fid),
                 ).fetchone()
@@ -242,7 +242,7 @@ def create_pipeline_blueprint(
                 for chunk in _chunks(db._folder_subtree_ids_by_path(fid)):
                     marks = ",".join("?" for _ in chunk)
                     rows = db.conn.execute(
-                        f"SELECT folder_id FROM workspace_folders "
+                        f"SELECT folder_id FROM workspace_visible_folders "
                         f"WHERE workspace_id = ? AND folder_id IN ({marks})",
                         [ws_for_folders] + list(chunk),
                     )
@@ -252,8 +252,9 @@ def create_pipeline_blueprint(
                 marks = ",".join("?" for _ in chunk)
                 scope_photo_ids.extend(
                     r["id"] for r in db.conn.execute(
-                        f"SELECT id FROM photos WHERE folder_id IN ({marks})",
-                        tuple(chunk),
+                        f"SELECT p.id FROM photos p JOIN photo_workspace_visibility pv ON pv.photo_id = p.id "
+                        f"WHERE p.folder_id IN ({marks}) AND pv.workspace_id = ?",
+                        [*chunk, ws_for_folders],
                     )
                 )
         # Expand a saved-process id the same way /api/jobs/pipeline does so
@@ -2270,7 +2271,7 @@ class _PipelineLaunch:
         from db import _chunks  # noqa: PLC0415
         for fid in self.folder_ids:
             linked = db.conn.execute(
-                "SELECT 1 FROM workspace_folders "
+                "SELECT 1 FROM workspace_visible_folders "
                 "WHERE workspace_id = ? AND folder_id = ?",
                 (ws_for_folders, fid),
             ).fetchone()
@@ -2294,7 +2295,7 @@ class _PipelineLaunch:
             for chunk in _chunks(db._folder_subtree_ids_by_path(fid)):
                 marks = ",".join("?" for _ in chunk)
                 rows = db.conn.execute(
-                    f"SELECT folder_id FROM workspace_folders "
+                    f"SELECT folder_id FROM workspace_visible_folders "
                     f"WHERE workspace_id = ? AND folder_id IN ({marks})",
                     [ws_for_folders] + list(chunk),
                 )
@@ -2346,9 +2347,10 @@ class _PipelineLaunch:
             # but there is no reason to bake them into the collection
             # membership.
             for r in db.conn.execute(
-                f"SELECT id, folder_id, filename FROM photos "
-                f"WHERE folder_id IN ({marks})",
-                tuple(chunk),
+                f"SELECT p.id, p.folder_id, p.filename FROM photos p "
+                f"JOIN photo_workspace_visibility pv ON pv.photo_id = p.id "
+                f"WHERE p.folder_id IN ({marks}) AND pv.workspace_id = ?",
+                [*chunk, db._active_workspace_id],
             ):
                 if r["id"] in excluded_photo_ids_set:
                     continue

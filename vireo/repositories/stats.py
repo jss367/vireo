@@ -24,7 +24,7 @@ class StatsRepository:
     def folder_linked(self, folder_id):
         """Return whether ``folder_id`` is linked to the workspace."""
         linked = self.conn.execute(
-            "SELECT 1 FROM workspace_folders "
+            "SELECT 1 FROM workspace_visible_folders "
             "WHERE workspace_id = ? AND folder_id = ?",
             (self.workspace_id, folder_id),
         ).fetchone()

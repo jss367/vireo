@@ -124,9 +124,9 @@ class FolderRepository:
                    UNION ALL
                    SELECT f.id FROM folders f
                    JOIN tree t ON f.parent_id = t.id
-                   JOIN workspace_folders wf_t
+                   JOIN workspace_visible_folders wf_t
                      ON wf_t.folder_id = t.id AND wf_t.workspace_id = ?
-                   JOIN workspace_folders wf_f
+                   JOIN workspace_visible_folders wf_f
                      ON wf_f.folder_id = f.id AND wf_f.workspace_id = ?
                )
                SELECT id FROM tree""",

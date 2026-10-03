@@ -399,3 +399,29 @@ def test_associated_workspaces_include_only_exact_photo_grant_folder(app_and_db,
     assert response.status_code == 200
     assert any(r['id'] == b and r['is_active'] for r in response.json['workspaces'])
     assert client.get(f'/api/folders/{child}/workspaces').status_code == 404
+
+
+def test_grant_only_folder_read_scopes_keep_siblings_hidden(app_and_db, tmp_path):
+    from services.missing_originals import resolve_folder_id
+
+    app, db = app_and_db
+    b = db.create_workspace('Other')
+    folder, photo = _photo(db, tmp_path / 'folder', 'photo.jpg')
+    _, sibling = _photo(db, tmp_path / 'folder', 'hidden.jpg', b'hidden')
+    db.grant_workspace_photos(b, [photo])
+    db.conn.commit()
+    db.set_active_workspace(b)
+    assert resolve_folder_id(db, folder) == folder
+    assert db.get_folder_coverage_stats(folder_id=folder)[0]['total'] == 1
+    assert db.query_photo_ids([], folder_id=folder) == [photo]
+    assert b in db._workspace_repository(scoped=False).ids_for_folders([folder])
+    from web.pipeline import _PipelineLaunch
+
+    launch = _PipelineLaunch({}, lambda: db, lambda *args: pytest.fail(str(args)))
+    assert launch._folder_scope_photo_ids({folder}) == [photo]
+    client = app.test_client()
+    assert client.post(f'/api/workspaces/{b}/activate').status_code == 200
+    response = client.post('/api/pipeline/plan', json={'folder_ids': [folder]})
+    assert response.status_code == 200, response.json
+    assert response.json['scope']['photo_count'] == 1
+    assert db.filter_photo_ids_in_workspace([photo, sibling]) == [photo]
