@@ -381,6 +381,11 @@ class FolderRepository:
         ``params`` starts with the workspace id; ``subtree_clause`` is the
         façade's optional folder restriction (inline ids or a staged
         temp table), with its ids appended to ``params``.
+
+        Scope through ``photo_workspace_visibility`` on ``p.id`` rather than
+        ``workspace_visible_folders`` on ``f.id`` so a photo-only grant in a
+        folder that also holds another workspace's photos does not pull every
+        sibling into this workspace's Missing Originals totals.
         """
         return self.conn.execute(
             f"""SELECT p.id, p.filename, p.extension, p.file_size,
@@ -388,7 +393,7 @@ class FolderRepository:
                       f.id AS folder_id, f.path AS folder_path
                FROM photos p
                JOIN folders f ON p.folder_id = f.id
-               JOIN workspace_visible_folders wf ON wf.folder_id = f.id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                WHERE wf.workspace_id = ? AND f.status != 'missing'{subtree_clause}
                ORDER BY f.path, p.filename""",
             params,

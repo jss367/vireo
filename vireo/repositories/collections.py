@@ -258,7 +258,15 @@ class CollectionRepository:
             folder_join = " JOIN folders f ON f.id = p.folder_id"
         else:
             folder_join = " JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')"
-        folder_join += " JOIN workspace_folders wf ON wf.folder_id = f.id AND wf.workspace_id = ?"
+        # Scope through photo-level visibility, not just workspace_folders, so
+        # a photo preserved for this workspace via ``workspace_photos`` after a
+        # move still participates in /api/photos/query, saved collections,
+        # select-all, and site export even though its new folder is not linked
+        # to the workspace.
+        folder_join += (
+            " JOIN photo_workspace_visibility wf"
+            " ON wf.photo_id = p.id AND wf.workspace_id = ?"
+        )
 
         # folder_join comes before join_clause in the query, so its param goes first
         params.insert(0, self.workspace_id)
