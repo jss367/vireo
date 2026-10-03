@@ -316,7 +316,16 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
                 workspaces.add(row[1])
         return visible
 
-    def _record_known_move_visibility_losses(self, before_rows, chosen):
+    def _folder_workspace_links(self):
+        linked = {}
+        for path, workspace in self.db.conn.execute(
+            "SELECT f.path, wf.workspace_id FROM folders f "
+            "JOIN workspace_folders wf ON wf.folder_id = f.id"
+        ):
+            linked.setdefault(os.path.normcase(path), set()).add(workspace)
+        return linked
+
+    def _record_known_move_visibility_losses(self, before_rows, chosen, before_links):
         # The pinned bug permits only a genuinely moved photo to lose its
         # old non-active workspace links. Active and unrelated access stays
         # checked, including after a partial or refused move.
@@ -326,7 +335,10 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
         }
         for pid in chosen:
             if pid in after_paths and before_paths[pid] != after_paths[pid]:
-                self.known_move_visibility_losses[pid] = self.visibility.get(pid, set()) - {self.ws_id}
+                destination = os.path.normcase(os.path.dirname(after_paths[pid]))
+                exempt = self.visibility.get(pid, set()) - {self.ws_id} - before_links.get(destination, set())
+                if exempt:
+                    self.known_move_visibility_losses[pid] = exempt
 
     def _photo_folders(self):
         """Folders with photos that the active workspace can see."""
@@ -523,8 +535,9 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
             self.own_folder,
         ]))
         os.makedirs(dest, exist_ok=True)
+        before_links = self._folder_workspace_links()
         result = move.move_photos(self.db, chosen, dest)
-        self._record_known_move_visibility_losses(rows, chosen)
+        self._record_known_move_visibility_losses(rows, chosen, before_links)
         event(f"move_photos: moved={bool(result.get('moved'))} errors={bool(result.get('errors'))}")
         for error in result.get("errors") or []:
             event(f"move_photos error: {_error_kind(error)}")
@@ -573,8 +586,9 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
         os.makedirs(dest, exist_ok=True)
         before_rows = self._catalog_rows()
         chosen = [r["id"] for r in before_rows if r["folder_path"] == folder["path"]]
+        before_links = self._folder_workspace_links()
         result = move.move_folder_by_date(self.db, folder["id"], dest, "%Y/%m")
-        self._record_known_move_visibility_losses(before_rows, chosen)
+        self._record_known_move_visibility_losses(before_rows, chosen, before_links)
         event(f"move_folder_by_date: {sorted(k for k, v in (result or {}).items() if v)[:4]}")
         for error in (result or {}).get("errors") or []:
             event(f"move_folder_by_date error: {_error_kind(error)}")
@@ -1106,3 +1120,47 @@ def test_consolidated_catalog_identity_retains_old_workspace_access(tmp_path, pr
     else:
         with pytest.raises(AssertionError, match="photos lost workspace visibility"):
             machine.no_photo_drops_out_of_a_workspace()
+
+
+@pytest.mark.parametrize("destination_was_shared,keeps_sharing_link", [(True, False), (True, True), (False, False)])
+def test_known_move_exception_preserves_existing_destination_links(
+    tmp_path, destination_was_shared, keeps_sharing_link,
+):
+    import sqlite3
+    from types import SimpleNamespace
+
+    source = str(tmp_path / "source")
+    destination = str(tmp_path / "destination")
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.executescript(
+            "CREATE TABLE photos (id INTEGER, folder_id INTEGER, filename TEXT, file_hash TEXT);"
+            "CREATE TABLE folders (id INTEGER, path TEXT);"
+            "CREATE TABLE workspace_folders (folder_id INTEGER, workspace_id INTEGER);"
+            "INSERT INTO photos VALUES (1, 10, 'photo.jpg', 'same');"
+            "INSERT INTO workspace_folders VALUES (10, 1), (10, 2);"
+        )
+        conn.executemany("INSERT INTO folders VALUES (?, ?)", [(10, source), (20, destination)])
+        if destination_was_shared:
+            conn.execute("INSERT INTO workspace_folders VALUES (20, 2)")
+        machine = PhotoSafetyMachine.__new__(PhotoSafetyMachine)
+        machine.db = SimpleNamespace(conn=conn)
+        machine.ws_id = 1
+        machine.visibility = machine._workspace_visibility()
+        machine.known_move_visibility_losses = {}
+        machine.allowed_catalog_deletions = set()
+        before_rows = machine._catalog_rows()
+        before_links = machine._folder_workspace_links()
+        conn.execute("UPDATE photos SET folder_id=20")
+        conn.execute("INSERT INTO workspace_folders VALUES (20, 1)")
+        if not keeps_sharing_link:
+            conn.execute("DELETE FROM workspace_folders WHERE folder_id=20 AND workspace_id=2")
+        machine._record_known_move_visibility_losses(before_rows, [1], before_links)
+        if destination_was_shared and not keeps_sharing_link:
+            with pytest.raises(AssertionError, match="photos lost workspace visibility"):
+                machine.no_photo_drops_out_of_a_workspace()
+        else:
+            machine.no_photo_drops_out_of_a_workspace()
+    finally:
+        conn.close()
