@@ -11806,7 +11806,7 @@ def test_local_snapshot_root_matches_thumb_cache_dir(tmp_path, monkeypatch):
     db.close()
 
 
-def test_edit_mask_preview_requires_local_recipe(client_with_photo):
+def test_edit_mask_preview_without_local_recipe_or_mask_404s(client_with_photo):
     app, db, photo_id = client_with_photo
     client = app.test_client()
 
@@ -11816,6 +11816,65 @@ def test_edit_mask_preview_requires_local_recipe(client_with_photo):
     )
     assert resp.status_code == 404
     assert client.get("/photos/999999/edit-mask-preview").status_code == 404
+
+
+def test_edit_mask_preview_without_local_recipe_shows_active_mask(
+    client_with_photo,
+):
+    """Show Mask works before any local slider moves.
+
+    With no local section the overlay previews the photo's active mask —
+    the one the first local slider would freeze — riding the recipe's
+    geometry and feathered by the ``feather`` arg.
+    """
+    import io
+    import json
+
+    import numpy as np
+    from PIL import Image as PILImage
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    folder = db.conn.execute("SELECT path FROM folders").fetchone()
+    _register_active_mask(db, photo_id, folder["path"])
+
+    def _alpha(recipe, **args):
+        resp = client.get(
+            f"/photos/{photo_id}/edit-mask-preview",
+            query_string={"size": "800", "recipe": json.dumps(recipe), **args},
+        )
+        assert resp.status_code == 200
+        with PILImage.open(io.BytesIO(resp.data)) as img:
+            assert img.size == (800, 600)
+            return np.asarray(img)[..., 3].astype(np.float32)
+
+    alpha = _alpha({})
+    assert np.mean(alpha[:, :360]) > 60
+    assert np.mean(alpha[:, 440:]) < 5
+
+    flipped = _alpha({"flip": {"horizontal": True}})
+    assert np.mean(flipped[:, 440:]) > 60
+    assert np.mean(flipped[:, :360]) < 5
+
+    def _transition_width(a):
+        row = a[300]
+        return int(np.count_nonzero((row > 5) & (row < 145)))
+
+    assert _transition_width(_alpha({}, feather="80")) > (
+        _transition_width(alpha) + 20
+    )
+
+    # No snapshot is written just to look at the mask.
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    edit_masks = os.path.join(vireo_dir, "edit-masks")
+    assert not os.path.isdir(edit_masks) or not os.listdir(edit_masks)
+
+    for bad in ("nope", "-1", "201", "nan"):
+        resp = client.get(
+            f"/photos/{photo_id}/edit-mask-preview",
+            query_string={"recipe": "{}", "feather": bad},
+        )
+        assert resp.status_code == 400, bad
 
 
 def test_edit_mask_preview_serves_transformed_weight_map(client_with_photo):
