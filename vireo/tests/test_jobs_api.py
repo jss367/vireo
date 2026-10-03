@@ -13237,7 +13237,10 @@ def test_import_only_collection_failure_leaves_chain_unpaid(app_and_db, tmp_path
         assert result["collection_error"] == "collection unavailable"
 
 
-def test_resume_rechecks_takeover_after_request_validation(app_and_db, tmp_path, monkeypatch):
+@pytest.mark.parametrize("chained", [True, False])
+def test_resume_rechecks_takeover_after_request_validation(app_and_db, tmp_path, monkeypatch, chained):
+    from unittest.mock import Mock
+
     from services.import_photos import _ImportPhotosRequest
 
     app, db = app_and_db
@@ -13252,14 +13255,27 @@ def test_resume_rechecks_takeover_after_request_validation(app_and_db, tmp_path,
                 "INSERT INTO job_history (id,type,status,started_at,config,result,workspace_id) VALUES (?,?,?,?,?,?,?)",
                 ("late-resume", "import", "completed", "2026-09-01T12:00:00",
                  json.dumps({"parent_import_job_id": parent_id, "root_import_job_id": parent_id}),
-                 json.dumps({"ok": True, "tags_applied": True, "chained": True}), request.active_ws),
+                 json.dumps({"ok": True, "tags_applied": True, "chained": chained,
+                             "landed_files": {"/archive/child.jpg": [12, 34, "hash"]}}), request.active_ws),
             )
             request.db.conn.commit()
             return failure
 
         monkeypatch.setattr(_ImportPhotosRequest, "prepare_workspace", finish_descendant)
         jobs_before = len(app._job_runner.list_jobs())
+        start_job = Mock(return_value="fresh-resume")
+        if not chained:
+            monkeypatch.setattr(app._job_runner, "start", start_job)
         response = client.post("/api/jobs/import-photos", json=body)
-        assert response.status_code == 409, response.get_json()
-        assert response.get_json()["taken_over_by_job_id"] == "late-resume"
+        if chained:
+            assert response.status_code == 409, response.get_json()
+            assert response.get_json()["taken_over_by_job_id"] == "late-resume"
+        else:
+            assert response.status_code == 200, response.get_json()
+            started_job = start_job.call_args.args[1].__self__
+            assert started_job.parent_resume["tags_applied"] is True
+            assert started_job.parent_resume["landed_files"]["/archive/child.jpg"] == [12, 34, "hash"]
+            config = start_job.call_args.kwargs["config"]
+            assert config["recover_landed_files"]["/archive/child.jpg"] == [12, 34, "hash"]
+            assert config["untagged_photo_ids"] == []
         assert len(app._job_runner.list_jobs()) == jobs_before

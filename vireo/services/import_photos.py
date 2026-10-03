@@ -68,11 +68,6 @@ def enqueue_import_photos(service: ImportService, db: Database, body: dict) -> d
     vireo_dir = os.path.dirname(thumb_cache_dir)
     remote_target = request.remote_transport()
     job_config = request.job_config()
-    import_job = _ImportPhotosJob(
-        request, runner, remote_target,
-        thumb_cache_dir=thumb_cache_dir, vireo_dir=vireo_dir,
-    )
-
     failure = _competing_retry_failure(runner, job_config)
     if failure is not None:
         return failure
@@ -88,14 +83,17 @@ def enqueue_import_photos(service: ImportService, db: Database, body: dict) -> d
         # takeover again immediately before admitting this request.
         parent_id = job_config.get("parent_import_job_id")
         if parent_id:
-            *_, failure = service._validate_parent_import_job(
-                parent_id, request.active_ws, db,
-            )
+            failure = request.validate_parent_import()
+            if failure is None:
+                failure = request.validate_carry_photo_ids()
             if failure is not None:
                 service._rollback_import_workspace(
                     db, request.created_workspace, request.previous_active_ws,
                 )
                 return failure
+        # Successful revalidation can change merged marks and landing scope.
+        # Persist and execute the same fresh snapshot.
+        job_config = request.job_config()
         failure = _competing_retry_failure(runner, job_config)
         if failure is not None:
             service._rollback_import_workspace(
@@ -113,6 +111,10 @@ def enqueue_import_photos(service: ImportService, db: Database, body: dict) -> d
                 db, request.created_workspace, request.previous_active_ws,
             )
             return ImportFailure(conflict, 409)
+        import_job = _ImportPhotosJob(
+            request, runner, remote_target,
+            thumb_cache_dir=thumb_cache_dir, vireo_dir=vireo_dir,
+        )
         job_id = runner.start(
             "import", import_job.work, config=job_config,
             workspace_id=request.active_ws, pausable=True,
