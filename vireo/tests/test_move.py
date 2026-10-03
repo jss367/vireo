@@ -90,6 +90,76 @@ def test_move_photos_copies_and_deletes(move_env):
     assert not (env["src"] / "bird1.xmp").exists()
 
 
+def test_move_photos_leaves_photos_already_in_destination_alone(move_env):
+    """A photo whose folder already is the destination is a no-op, not an
+    error. The collision check used to find the photo's own file and report
+    "already exists at destination", which failed the whole move job."""
+    from move import move_photos
+
+    env = move_env
+    db = env["db"]
+    (env["dst"] / "owl.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 50)
+    (env["dst"] / "owl.xmp").write_text("<xmp/>")
+    in_place = db.add_photo(folder_id=env["fid_dst"], filename="owl.jpg",
+                            extension=".jpg", file_size=52, file_mtime=3.0)
+
+    result = move_photos(
+        db=db, photo_ids=[in_place, env["p1"]], destination=str(env["dst"]),
+    )
+
+    assert result["errors"] == []
+    assert result["moved"] == 1
+    assert result["already_in_place"] == 1
+    assert (env["dst"] / "owl.jpg").exists()
+    assert (env["dst"] / "owl.xmp").exists()
+    assert db.get_photo(in_place)["folder_id"] == env["fid_dst"]
+    assert db.get_photo(env["p1"])["folder_id"] == env["fid_dst"]
+
+
+@pytest.mark.skipif(not _TMP_FOLDS_CASE, reason="needs a case-folding filesystem")
+def test_move_photos_in_place_check_matches_other_case_spelling(move_env):
+    """On a case-insensitive volume a destination typed in another case is
+    the photo's own folder; the photo stays put rather than "colliding"
+    with itself."""
+    from move import move_photos
+
+    env = move_env
+    result = move_photos(
+        db=env["db"], photo_ids=[env["p1"]],
+        destination=str(env["src"]).upper(),
+    )
+
+    assert result["errors"] == []
+    assert result["moved"] == 0
+    assert result["already_in_place"] == 1
+    assert (env["src"] / "bird1.jpg").exists()
+    assert env["db"].get_photo(env["p1"])["folder_id"] == env["fid_src"]
+
+
+def test_move_photos_in_place_check_matches_alias_folder_row(move_env):
+    """Two catalog rows can name one directory (a symlinked mount next to
+    its target). Moving to one of them a photo filed under the other is
+    still a no-op."""
+    from move import move_photos
+
+    env = move_env
+    alias = env["tmp_path"] / "src-alias"
+    try:
+        os.symlink(env["src"], alias, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+    env["db"].add_folder(str(alias), name="src-alias")
+
+    result = move_photos(
+        db=env["db"], photo_ids=[env["p1"]], destination=str(alias),
+    )
+
+    assert result["errors"] == []
+    assert result["moved"] == 0
+    assert result["already_in_place"] == 1
+    assert (env["src"] / "bird1.jpg").exists()
+
+
 def test_move_photos_updates_db(move_env):
     """move_photos updates folder_id in the database."""
     from move import move_photos
@@ -7122,3 +7192,47 @@ def test_thumbnail_lookup_is_chunked_under_the_sqlite_bind_limit(tmp_path):
         seen.append(len(chunk))
     assert max(seen) <= 999
     assert sum(seen) == 2500
+
+
+def test_missing_original_is_not_counted_already_in_place(move_env):
+    from move import move_photos
+
+    env = move_env
+    (env["src"] / "bird1.jpg").unlink()
+    result = move_photos(env["db"], [env["p1"]], str(env["src"]))
+    assert result["already_in_place"] == 0
+    assert result["moved"] == 0
+    assert any("source file missing" in error for error in result["errors"])
+
+
+def test_date_move_reports_photos_already_in_each_destination(tmp_path):
+    from move import move_folder_by_date
+
+    archive = tmp_path / "archive"
+    date = archive / "2026-07-12"
+    date.mkdir(parents=True)
+    (date / "bird.jpg").write_bytes(b"bird")
+    with Database(str(tmp_path / "catalog.db")) as db:
+        root_id = db.add_folder(str(archive))
+        date_id = db.add_folder(str(date), parent_id=root_id)
+        db.add_photo(date_id, "bird.jpg", ".jpg", 4, 1.0, timestamp="2026-07-12T09:30:00")
+        result = move_folder_by_date(db, root_id, str(archive), "%Y-%m-%d")
+        assert result["errors"] == []
+        assert result["moved"] == 0
+        assert result["already_in_place"] == 1
+        assert result["destinations"][0]["already_in_place"] == 1
+
+
+def test_photo_move_checks_directory_identity_once_per_folder(move_env, monkeypatch):
+    import move
+
+    calls = []
+    original = move._is_same_directory
+    def counted(*args):
+        calls.append(args)
+        return original(*args)
+    monkeypatch.setattr(move, "_is_same_directory", counted)
+    env = move_env
+    result = move.move_photos(env["db"], [env["p1"], env["p2"]], str(env["dst"]))
+    assert result["moved"] == 2
+    assert len(calls) == 1

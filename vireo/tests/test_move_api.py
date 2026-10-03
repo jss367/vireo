@@ -2,6 +2,8 @@
 
 import os
 
+import pytest
+
 
 def _seed_missing_originals_cache(app, db):
     key = (db._db_path, db._active_workspace_id, None)
@@ -201,6 +203,36 @@ def test_move_photos_job_starts(app_and_db, tmp_path):
     data = resp.get_json()
     assert "job_id" in data
     assert data["job_id"].startswith("move-photos-")
+
+
+def test_move_photos_job_with_photo_already_in_destination_completes(
+    app_and_db, tmp_path,
+):
+    """Moving a photo to the folder it already lives in completes, and the
+    summary says it was already there rather than "0 photos moved"."""
+    from wait import wait_for_job_via_client
+
+    app, db = app_and_db
+    folder = tmp_path / "already_here"
+    folder.mkdir()
+    (folder / "heron.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 50)
+    fid = db.add_folder(str(folder), name="already_here")
+    pid = db.add_photo(folder_id=fid, filename="heron.jpg", extension=".jpg",
+                       file_size=52, file_mtime=1.0)
+
+    client = app.test_client()
+    resp = client.post("/api/jobs/move-photos", json={
+        "photo_ids": [pid],
+        "destination": str(folder),
+    })
+    assert resp.status_code == 200, resp.get_json()
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+
+    assert job["status"] == "completed", job["errors"]
+    assert job["errors"] == []
+    assert job["result"]["moved"] == 0
+    assert job["result"]["already_in_place"] == 1
+    assert job["summary"] == "1 photo already in the destination"
 
 
 def test_move_photos_job_invalidates_missing_originals_cache(
@@ -1432,3 +1464,29 @@ def test_move_rule_preview(app_and_db):
     data = resp.get_json()
     assert "count" in data
     assert "photo_ids" in data
+
+
+@pytest.mark.parametrize("errors", [[], ["missing.jpg: source missing"]])
+def test_date_move_all_in_place_reports_successful_rerun(app_and_db, tmp_path, monkeypatch, errors):
+    import move
+    from wait import wait_for_job_via_client
+
+    app, db = app_and_db
+    source = tmp_path / "date-source"
+    source.mkdir()
+    fid = db.add_folder(str(source), name="date-source")
+    db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg",
+                 file_size=1, file_mtime=1, timestamp="2026-07-12T10:00:00")
+    monkeypatch.setattr(move, "move_folder_by_date", lambda *a, **kw: {
+        "moved": 0, "already_in_place": 3, "errors": errors,
+    })
+    response = app.test_client().post("/api/jobs/move-folder", json={
+        "folder_id": fid, "destination": str(tmp_path / "destination"),
+        "folder_template": "%Y-%m-%d",
+    })
+    assert response.status_code == 200, response.get_json()
+    job = wait_for_job_via_client(app.test_client(), response.get_json()["job_id"])
+    assert job["status"] == ("failed" if errors else "completed")
+    expected = "3 photos already in the destination" + (", 1 error(s)" if errors else "")
+    assert job["result"]["summary"] == expected
+    assert job["summary"] == expected

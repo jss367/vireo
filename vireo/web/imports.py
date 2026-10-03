@@ -12,6 +12,8 @@ import logging
 import os
 import threading
 import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
@@ -251,6 +253,812 @@ def _residual_staged_changes(db, photo_ids, undeliverable):
     except Exception:
         log.warning("Could not re-check the sync queue after a NAS transfer", exc_info=True)
         return None
+
+
+@dataclass
+class _RecoverySource:
+    """One source file checked against its planned destination's
+    candidates by ``_DuplicateCheckStream._recovery_candidate``."""
+
+    source_file: Path
+    compute_file_hash: Callable
+    src_hash_cache: list = field(default_factory=list)
+
+    def _src_hash(self):
+        if not self.src_hash_cache:
+            try:
+                self.src_hash_cache.append(self.compute_file_hash(
+                    str(self.source_file)))
+            except OSError:
+                self.src_hash_cache.append(None)
+        return self.src_hash_cache[0]
+
+    def _is_source(self, cand_path):
+        """Reject destination candidates that ARE the source file itself
+        — the run rejects that self-copy overlap (destination is an
+        ancestor of the source AND the folder template renders back onto
+        the source folder, e.g. importing /archive/2026/2026-07-03/IMG.jpg
+        into /archive with %Y/%Y-%m-%d) rather than adopting it, so the
+        preview must not promise "verified & adopted, not re-copied" and
+        subtract it from "to copy" for a file the run will fail. Mirrors
+        import_job's samefile guard with the same normalized-path fallback
+        for paths that can't be stat'd."""
+        try:
+            return (
+                os.path.exists(cand_path)
+                and os.path.samefile(str(self.source_file), cand_path)
+            )
+        except OSError:
+            return (
+                os.path.normpath(str(self.source_file))
+                == os.path.normpath(cand_path)
+            )
+
+    def _bytes_match(self, cand_path):
+        if self._is_source(cand_path):
+            return False
+        sh = self._src_hash()
+        if sh is None:
+            return False
+        try:
+            return self.compute_file_hash(cand_path) == sh
+        except OSError:
+            return False
+
+
+class _DuplicateCheckStream:
+    """One ``/api/import/check-duplicates`` SSE stream.
+
+    ``api_import_check_duplicates`` validates the body, then streams
+    ``generate()``: index the catalog, prepare metadata in bounded chunks,
+    check each path against the duplicate gate and the destination-recovery
+    walk, and finish with the totals. The ``import_dedup``, ``ingest`` and
+    ``scanner`` callables are the ones the view imported at request time.
+    """
+
+    def __init__(
+        self,
+        db_path,
+        paths,
+        *,
+        verify_by_hash,
+        include_capture_dates,
+        skip_duplicates,
+        recovery_base,
+        folder_template,
+        catalog_index,
+        duplicate_checker,
+        recover_companion_identities,
+        source_capture_timestamps,
+        build_destination_path,
+        compute_file_hash,
+    ):
+        self.db_path = db_path
+        self.paths = paths
+        self.verify_by_hash = verify_by_hash
+        self.include_capture_dates = include_capture_dates
+        self.skip_duplicates = skip_duplicates
+        self.recovery_base = recovery_base
+        self.folder_template = folder_template
+        self.catalog_index = catalog_index
+        self.duplicate_checker = duplicate_checker
+        self.recover_companion_identities = recover_companion_identities
+        self.source_capture_timestamps = source_capture_timestamps
+        self.build_destination_path = build_destination_path
+        self.compute_file_hash = compute_file_hash
+
+        # The checker still runs when skip_duplicates=False, but only for
+        # its EXIF-batching side effect (needed by _recovery_candidate in
+        # default mode). check_and_record() is skipped in the generator
+        # below so no library-dedup verdict is produced — matching the
+        # import job, which doesn't create the checker at all in that
+        # mode. It is built inside the stream (see generate()), because
+        # indexing the catalog can first have to hash paired JPEGs on a
+        # network share.
+        self.checker = None
+
+        # str(path) -> capture datetime for recovery planning and day summaries when
+        # verify_by_hash disables the checker's own EXIF batching.
+        self.recovery_times = {}
+
+        # name -> size per planned destination folder, one scandir each —
+        # the destination may be a network mount, so listings are batched
+        # rather than stat'ing per candidate file (count round trips).
+        self.dir_listings = {}
+
+        self.duplicate_count = 0
+        self.recovered_count = 0
+
+    def generate(self):
+        yield from self._index_catalog()
+        total = len(self.paths)
+        yield from self._prepare_metadata(total)
+        yield from self._check_paths(total)
+        yield f"data: {json.dumps({'done': True, 'duplicate_count': self.duplicate_count, 'recovered_count': self.recovered_count, 'checked': total, 'total': total})}\n\n"
+
+    def _index_catalog(self):
+        """Index the catalog before any per-file work. Companion
+        identities the catalog is missing are recovered here, a batch per
+        frame, instead of before the response starts: a catalog with a
+        thousand paired JPEGs on a NAS took minutes to hash, during which
+        the page showed nothing, a superseded preview could not be stopped
+        (no yield, so no disconnect), and every re-run started the whole
+        hash over. The request's own DB is closed once the view returns,
+        so the stream opens its own -- without re-running the schema pass,
+        which app startup already did (the request connection skips it the
+        same way)."""
+        with Database(
+            self.db_path, initialize_schema=(self.db_path == ":memory:"),
+        ) as index_db:
+            for checked, missing in self.recover_companion_identities(index_db):
+                yield f"data: {json.dumps({'catalog_recovery': {'checked': checked, 'total': missing}})}\n\n"
+            self.checker = self.duplicate_checker(
+                self.catalog_index.from_db(index_db, recover_companions=False),
+                verify_by_hash=self.verify_by_hash,
+            )
+
+    def _prepare_metadata(self, total):
+        """Batch the EXIF header reads up front in bounded chunks (no-op
+        in verify_by_hash mode). Intra-run duplicate tracking lives in the
+        checker: identical source files not yet in the DB are reported as
+        duplicates of each other, matching the actual import step.
+        Chunking with a yield between each chunk lets a superseded browser
+        request stop this phase within one chunk's worth of I/O — a single
+        upfront prepare() over tens of thousands of files would otherwise
+        ignore the disconnect entirely until the per-file loop begins."""
+        prep_paths = [Path(p) for p in self.paths]
+        prep_batch = DUPLICATE_CHECK_PREP_BATCH_SIZE
+        for prep_start in range(0, len(prep_paths), prep_batch):
+            chunk = prep_paths[prep_start:prep_start + prep_batch]
+            self.checker.prepare(chunk)
+            if (
+                (self.recovery_base or self.include_capture_dates)
+                and self.verify_by_hash
+            ):
+                # prepare() skipped the EXIF batch (verify mode's
+                # identity is the hash), but recovery planning or day
+                # summaries need capture times — resolve them alongside
+                # the same chunk so both prep paths share the same
+                # cancellation cadence.
+                self.recovery_times.update({
+                    str(f): dt
+                    for f, dt in self.source_capture_timestamps(chunk).items()
+                })
+            # Cheap heartbeat frame the client can render as
+            # "preparing metadata…" and, more importantly, the yield
+            # that lets the WSGI server notice a disconnected client
+            # between chunks instead of after the entire prep phase.
+            prepared = prep_start + len(chunk)
+            frame = {"preparing": prepared, "total": total}
+            if self.include_capture_dates:
+                # Share the metadata reads used for duplicate identity
+                # and recovery planning with the day summary. The
+                # discovery walk need not read these headers separately.
+                dates = {}
+                for source_file in chunk:
+                    timestamp = self._capture_time(source_file)
+                    dates[str(source_file)] = timestamp.date().isoformat() if timestamp else None
+                frame["capture_dates"] = dates
+            yield f"data: {json.dumps(frame)}\n\n"
+
+    def _capture_time(self, source_file):
+        if self.verify_by_hash:
+            return self.recovery_times.get(str(source_file))
+        return self.checker.capture_time(source_file)
+
+    def _check_paths(self, total):
+        batch_duplicates = []
+        batch_recovered = []
+        last_flush = time.monotonic()
+        for checked, path in enumerate(self.paths, 1):
+            # Zero-byte placeholders are non-duplicates (the checker
+            # gives them no identity), and unreadable/missing files
+            # are skipped; both fall through so the batch-yield block
+            # below still runs. A `continue` would swallow any
+            # already-queued `batch_duplicates` whenever such a file
+            # landed on the last path or on a batch boundary, leaving
+            # the UI unable to deselect those known dupes.
+            try:
+                # When skip_duplicates=False, the import run doesn't
+                # consult the library-dedup checker at all — every
+                # source file goes on to the recovery/adopt gate. Skip
+                # check_and_record() here so a cataloged twin that
+                # also sits at the destination is streamed as
+                # ``recovered`` (matching what the run will actually
+                # do) instead of ``duplicates`` (which the client
+                # would then not subtract from the transfer count).
+                if self.skip_duplicates and self.checker.check_and_record(
+                        Path(path)):
+                    batch_duplicates.append(path)
+                    self.duplicate_count += 1
+                elif self._recovery_candidate(path):
+                    # Duplicate gate first, recovery second — same
+                    # order as the import run, so a cataloged twin
+                    # that also sits at the destination stays a
+                    # duplicate here and a skip there.
+                    batch_recovered.append(path)
+                    self.recovered_count += 1
+            except OSError:
+                pass  # Skip unreadable/missing files
+
+            # The yield is both how the client learns progress and how
+            # the WSGI server notices that a superseded browser request
+            # disconnected — cheap checks may finish dozens of files
+            # inside one window (a single event covers them all), while
+            # a slow byte-for-byte hash spends longer than the window on
+            # one file (that file gets its own event and cancellation
+            # stops within the next check). ``checked == total``
+            # guarantees the last progress event always ships so the
+            # client sees ``checked == total`` before ``done``.
+            now = time.monotonic()
+            if (
+                checked == total
+                or now - last_flush
+                >= DUPLICATE_CHECK_FLUSH_INTERVAL_SECONDS
+            ):
+                yield f"data: {json.dumps({'duplicates': batch_duplicates, 'recovered': batch_recovered, 'checked': checked, 'total': total})}\n\n"
+                batch_duplicates = []
+                batch_recovered = []
+                last_flush = now
+
+    def _planned_folder_listing(self, folder):
+        if folder not in self.dir_listings:
+            entries = {}
+            try:
+                with os.scandir(folder) as it:
+                    for entry in it:
+                        try:
+                            # Symlinks are deliberately EXCLUDED, and
+                            # this is a considered trade, not an
+                            # oversight. The import walk follows them
+                            # (os.stat) and adopts a symlink to an
+                            # off-card regular file whose bytes match,
+                            # so excluding them makes the preview
+                            # UNDER-report recovery for that geometry
+                            # — it says "will copy" for a file the run
+                            # adopts. That is the safe direction to be
+                            # wrong in.
+                            #
+                            # Following them was tried (PR 7b) and
+                            # reverted: the walk refuses a candidate
+                            # resolving under ANY source root, while
+                            # this endpoint's ``_is_source`` can only
+                            # compare ``samefile`` against the CURRENT
+                            # source file. A symlink to a *different*
+                            # card file with identical bytes therefore
+                            # slipped through and was reported as
+                            # recovered — an OVER-claim, promising
+                            # "already safe at the destination" for
+                            # bytes that live only on the card. This
+                            # endpoint receives ``paths``, not the
+                            # import's source roots, so it cannot
+                            # reconstruct that guard; doing this right
+                            # needs the shared walk, i.e. the PR 8
+                            # de-mirror. Trading a safe under-report
+                            # for an unsafe over-report is not worth
+                            # it in the meantime.
+                            # Codex review of PR #1450, rounds 4-5.
+                            if entry.is_file(follow_symlinks=False):
+                                entries[entry.name] = entry.stat(
+                                    follow_symlinks=False).st_size
+                        except OSError:
+                            continue
+            except OSError:
+                pass  # missing/unreadable folder -> nothing to adopt
+            self.dir_listings[folder] = entries
+        return self.dir_listings[folder]
+
+    def _planned_folder(self, source_file):
+        """Folder planning mirrors ingest._source_file_timestamps: EXIF
+        capture time falling back to file mtime. In the default mode
+        checker.prepare() already batched the EXIF reads and
+        capture_time() is a cache hit; in verify mode prepare() is a
+        no-op, so the times come from this request's own batch
+        (``_prepare_metadata``) — never resolved lazily one file at a
+        time. None when the template cannot render a folder."""
+        ts = self._capture_time(source_file)
+        if ts is None:
+            with contextlib.suppress(OSError, ValueError,
+                                     OverflowError):
+                ts = datetime.fromtimestamp(
+                    source_file.stat().st_mtime)
+        try:
+            rel_folder = self.build_destination_path(
+                ts, self.folder_template, source_file)
+        except ValueError:
+            return None
+        return (
+            self.recovery_base if rel_folder in ("", ".")
+            else os.path.join(self.recovery_base, rel_folder)
+        )
+
+    def _recovery_candidate(self, path):
+        """True when the planned destination already holds a byte-
+        identical file at the primary name OR at any suffix slot the
+        run would adopt — mirrors ``import_job``'s adopt precondition
+        (size match then byte-verify). A size-matching candidate whose
+        bytes disagree advances the walk the same way a hash mismatch
+        does in the run: otherwise the preview would subtract the
+        file from "to copy" and promise "not re-copied" for a file
+        the run will suffix-copy under a numbered name."""
+        if not self.recovery_base:
+            return False
+        source_file = Path(path)
+        try:
+            size = source_file.stat().st_size
+        except OSError:
+            return False
+        # NOTE: zero-byte sources are NOT special-cased here. They
+        # used to return False on the reasoning that "the duplicate
+        # checker gives them no identity either" — but that conflates
+        # duplicate identity with crash-recovery adoption, which is
+        # what this preview is about. ``_resolve_dest_collision``
+        # adopts an empty candidate for an empty source at every
+        # candidate position on both transports (spec PR 7b flip A;
+        # the local primary-name case predates it), so returning
+        # False here left the preview counting those files as
+        # transfers the run would never perform. The generic path
+        # below gets this right on its own: ``_src_hash`` uses
+        # ``compute_file_hash``, so an empty source hashes to
+        # EMPTY_FILE_SHA256 rather than the checker's None, and it
+        # matches an empty candidate. Non-regular entries (FIFOs,
+        # device nodes) stay excluded because
+        # ``_planned_folder_listing`` only records
+        # ``is_file(follow_symlinks=False)`` entries — which is also
+        # what the run's own S_ISREG guard does. Codex review of
+        # PR #1450.
+        folder = self._planned_folder(source_file)
+        if folder is None:
+            return False
+        listing = self._planned_folder_listing(folder)
+        primary_name = source_file.name
+
+        # Lazy source-hash: only computed once, and only if we hit a
+        # size-matching candidate that needs verifying. A typical
+        # fresh import has no size collisions and skips hashing
+        # entirely.
+        source = _RecoverySource(source_file, self.compute_file_hash)
+
+        primary_size = listing.get(primary_name)
+        primary_path = os.path.join(folder, primary_name)
+        if primary_size == size and source._is_source(primary_path):
+            # Destination candidate at the primary slot IS the
+            # source file. The run fails this file entirely rather
+            # than walking suffixes; report as not recovered instead
+            # of falling through to the suffix walk (which could
+            # find a coincidental byte-identical sibling in the
+            # source folder and wrongly claim adoption).
+            return False
+        if primary_size == size:
+            if source._bytes_match(primary_path):
+                return True
+            # Same size, different bytes at the primary slot: the run
+            # will hash-mismatch and advance to the suffix walk.
+        elif primary_size is None:
+            # No collision on the primary name — the run copies to the
+            # primary slot without walking suffixes.
+            return False
+        return _suffix_slot_recovered(
+            source, folder, listing, primary_name, size)
+
+
+def _suffix_slot_recovered(source, folder, listing, primary_name, size):
+    """Primary slot is taken by a different-sized (or same-sized-
+    different-bytes) file. Mirror import_job's collision walk
+    (``name_1.ext``, ``name_2.ext``, ...): stop at the first free slot
+    (the run would land a fresh copy there — not recovered), or claim
+    recovery at the first byte-identical candidate (the run would adopt
+    it). Size-mismatched slots advance the counter; same-size-different-
+    bytes slots also advance, mirroring the run's hash-mismatch skip."""
+    stem, suffix_ext = os.path.splitext(primary_name)
+    counter = 1
+    while True:
+        candidate = f"{stem}_{counter}{suffix_ext}"
+        cand_size = listing.get(candidate)
+        if cand_size is None:
+            return False
+        if cand_size == size and source._bytes_match(
+                os.path.join(folder, candidate)):
+            return True
+        counter += 1
+
+
+@dataclass
+class _ImportFullRequest:
+    """The ``/api/jobs/import-full`` request body, read in the order the
+    view always read it."""
+
+    source: object
+    destination: object
+    file_types: object
+    folder_template: object
+    skip_duplicates: object
+    verify_by_hash: bool
+    copy: object
+    exclude_paths: set
+
+    @classmethod
+    def from_body(cls, body):
+        return cls(
+            source=body.get("source", ""),
+            destination=body.get("destination", ""),
+            file_types=body.get("file_types", "both"),
+            folder_template=body.get("folder_template", "%Y/%Y-%m-%d"),
+            skip_duplicates=body.get("skip_duplicates", True),
+            verify_by_hash=bool(body.get("verify_by_hash")),
+            copy=body.get("copy", True),
+            exclude_paths=set(body.get("exclude_paths", [])),
+        )
+
+    @property
+    def scan_path(self):
+        return self.destination if self.copy else self.source
+
+    def validation_error(self):
+        """The first 400 message for this request, or None when it is
+        valid."""
+        source = self.source
+        destination = self.destination
+        if not source:
+            return "source is required"
+        from image_loader import is_excluded_scan_path
+        # See api_job_scan for why this must run before os.path.isdir.
+        if is_excluded_scan_path(source):
+            return (
+                f"source is inside a macOS app-managed library and cannot "
+                f"be imported: {source}"
+            )
+        if not os.path.isdir(source):
+            return f"source directory not found: {source}"
+        if self.copy:
+            if not destination:
+                return "source and destination are required"
+            if not os.path.isabs(destination):
+                return "destination must be an absolute path"
+            from ingest import _is_unsafe_path
+            if self.folder_template and _is_unsafe_path(self.folder_template):
+                return "folder_template must be a relative path without '..' or backslashes"
+        return None
+
+
+def _import_scan_conflict(runner, db, scan_paths, workspace_id):
+    """The local-copy conflict for an import scanning ``scan_paths``, or
+    None. Callers hold ``stage_boundary_lock``."""
+    pending_sources = stage_pending_source_paths(
+        runner.list_jobs if runner is not None else None,
+        db,
+    )
+    return local_copy_scan_conflict(
+        db, scan_paths,
+        active_workspace_id=workspace_id,
+        pending_stage_sources=pending_sources,
+    )
+
+
+def _ingested_restrict_dirs(destination, copied_paths, duplicate_folders):
+    """Build restrict_dirs from the folders ingest actually touched
+    so the post-ingest scan doesn't re-walk the entire
+    destination tree. Without this, importing ~2k RAWs into a
+    populated library caused scanner.scan to enumerate tens of
+    thousands of already-indexed files (observed: 59k). Mirrors
+    the same pattern in pipeline_job.py. Only paths under the
+    normalized destination are included; ".." tricks cannot
+    escape. If nothing was copied and no duplicate folders were
+    reported, restrict_dirs stays an empty list — scanner.scan
+    then has no directories to enumerate, which matches intent
+    (there is nothing new to index)."""
+    dest_normalized = Path(os.path.normpath(destination))
+
+    def _under_destination(path_str):
+        try:
+            return Path(os.path.normpath(path_str)).is_relative_to(
+                dest_normalized
+            )
+        except ValueError:
+            return False
+
+    restrict_set = set()
+    for cp in copied_paths:
+        parent = str(Path(cp).parent)
+        if _under_destination(parent):
+            restrict_set.add(parent)
+    for folder in duplicate_folders:
+        if _under_destination(folder):
+            restrict_set.add(folder)
+    return sorted(restrict_set)
+
+
+class _ImportFullRun:
+    """One ``import-full`` job.
+
+    ``api_job_import_full`` validates the request and its ``work`` closure
+    runs one of these: copy files (when ``copy``), scan them into the
+    catalog, generate thumbnails, and collect the imported photos into a
+    new collection. ``config`` is the Flask app's config mapping, read at
+    job time.
+    """
+
+    def __init__(self, ctx, params, config, invalidate_missing_originals, job):
+        self.ctx = ctx
+        self.params = params
+        self.config = config
+        self.invalidate_missing_originals = invalidate_missing_originals
+        self.job = job
+        self.thread_db = None
+        self.scan_target = None
+        self.restrict_dirs = None
+        self.ingest_result = None
+        self.copied_paths = None
+        self.vireo_dir = None
+
+    def run(self):
+        from scanner import scan as do_scan
+        from thumbnails import generate_all
+
+        job = self.job
+        self.thread_db = self.ctx.thread_db()
+        # Check folder health before scanning to prevent duplicate imports
+        if self.thread_db.check_folder_health():
+            self.invalidate_missing_originals()
+        job["_start_time"] = time.time()
+
+        self.scan_target = str(Path(self.params.source))  # normalize (strips trailing slash)
+        # restrict_dirs narrows the post-ingest scan to just the subfolders
+        # that received files, instead of walking the full destination
+        # tree. Populated in the copy branch from ingest_result's
+        # copied_paths (parent dirs) and duplicate_folders. Left as None
+        # for copy=false so scan-in-place keeps its original full-tree
+        # behavior.
+        self.restrict_dirs = None
+
+        self._set_steps()
+        if self.params.copy:
+            self._ingest()
+        self._scan(do_scan)
+        self._generate_thumbnails(generate_all)
+        return self._create_collection()
+
+    def _set_steps(self):
+        # Define steps based on whether we're copying
+        steps = []
+        if self.params.copy:
+            steps.append({"id": "ingest", "label": "Import photos"})
+        steps.extend([
+            {"id": "scan", "label": "Scan photos"},
+            {"id": "thumbnails", "label": "Generate thumbnails"},
+            {"id": "collection", "label": "Create collection"},
+        ])
+        self.ctx.runner.set_steps(self.job["id"], steps)
+
+    def _ingest(self):
+        """Phase 1: Copy files."""
+        from ingest import ingest as do_ingest
+
+        ctx, job, params = self.ctx, self.job, self.params
+        ctx.runner.update_step(job["id"], "ingest", status="running")
+
+        def ingest_cb(current, total, filename):
+            job["progress"]["current"] = current
+            job["progress"]["total"] = total
+            job["progress"]["current_file"] = filename
+            ctx.runner.push_event(job["id"], "progress", {
+                "current": current, "total": total,
+                "current_file": filename,
+                "phase": "Importing photos",
+            })
+
+        ingest_result = do_ingest(
+            source_dir=params.source,
+            destination_dir=params.destination,
+            db=self.thread_db,
+            file_types=params.file_types,
+            folder_template=params.folder_template,
+            skip_duplicates=params.skip_duplicates,
+            verify_by_hash=params.verify_by_hash,
+            progress_callback=ingest_cb,
+            pause_callback=lambda: ctx.checkpoint(job),
+            skip_paths=params.exclude_paths or None,
+        )
+        self.ingest_result = ingest_result
+        self.copied_paths = ingest_result.get("copied_paths", [])
+        duplicate_folders = ingest_result.get("duplicate_folders", [])
+        self.scan_target = params.destination
+
+        self.restrict_dirs = _ingested_restrict_dirs(
+            params.destination, self.copied_paths, duplicate_folders,
+        )
+
+        ctx.runner.update_step(job["id"], "ingest", status="completed",
+                           summary=f"{ingest_result.get('copied', 0)} copied")
+
+    def _scan(self, do_scan):
+        """Phase 2: Scan to index into DB."""
+        ctx, job, thread_db = self.ctx, self.job, self.thread_db
+        scan_target = self.scan_target
+        ctx.checkpoint(job)
+        ctx.runner.update_step(job["id"], "scan", status="running")
+
+        def scan_cb(current, total):
+            job["progress"]["current"] = current
+            job["progress"]["total"] = total
+            ctx.runner.push_event(job["id"], "progress", {
+                "current": current, "total": total,
+                "current_file": "",
+                "phase": "Scanning photos",
+            })
+
+        # ``import-photos`` is a pausable job (registered as a
+        # pause participant by the runner). Without these probes
+        # the scan phase would keep hashing on its process pool
+        # and hold its CPU lease across the entire pause, ignoring
+        # the pause signal until the current source finishes.
+        # Same wiring the in-place import path picked up in
+        # 37e0e3a0 for the identical reason.
+        #
+        # ``ctx.runner.is_cancelled`` internally parks on Pause via
+        # ``wait_if_paused``. Wrap the parking call in
+        # ``suspend_resource_wait_timing`` so an hour-long pause
+        # while a scan is waiting for CPU permits does not persist
+        # as an hour of "resource contention" on the job's
+        # diagnostics. The context manager is a no-op when no
+        # ledger wait is active, so it's safe on non-pausable
+        # invocations too. Mirrors what ``_pause_checkpoint``
+        # does for pipeline participants (pipeline_job.py:1567).
+        def scan_cancel_check():
+            from resource_ledger import suspend_resource_wait_timing
+            with suspend_resource_wait_timing():
+                return ctx.runner.is_cancelled(job["id"])
+
+        def scan_pause_check():
+            return ctx.runner.pause_requested(job["id"])
+
+        def scan_cancel_only_check():
+            return ctx.runner.cancellation_requested(job["id"])
+
+        self.vireo_dir = os.path.dirname(self.config["THUMB_CACHE_DIR"])
+        try:
+            # copy=false: scan_target is the source and restrict_dirs is
+            #   None, so scanner walks the full source tree (unchanged).
+            # copy=true: scan_target is the destination (folder hierarchy
+            #   root, for parent-folder chain creation), but restrict_dirs
+            #   narrows enumeration to only the subfolders ingest wrote
+            #   into. An empty list means "nothing new to scan" — a no-op
+            #   inside scanner.scan.
+            do_scan(
+                scan_target, thread_db,
+                progress_callback=scan_cb,
+                skip_paths=self.params.exclude_paths or None,
+                vireo_dir=self.vireo_dir,
+                thumb_cache_dir=self.config["THUMB_CACHE_DIR"],
+                restrict_dirs=self.restrict_dirs,
+                cancel_check=scan_cancel_check,
+                pause_check=scan_pause_check,
+                cancel_only_check=scan_cancel_only_check,
+            )
+        finally:
+            # scanner.scan commits photo rows incrementally, so even a mid-scan
+            # failure can leave DB state that invalidates cached new-image counts.
+            invalidate_new_images_after_scan(thread_db, scan_target)
+            # scanner.scan touches disk and may reconcile ghost rows
+            # (e.g. a user restored an original before running import).
+            # The pre-scan health-check invalidation only fires when a
+            # folder flips missing/ok, so also drop the missing-originals
+            # cache once the scan itself has run — even on partial
+            # failure, since rows are committed incrementally.
+            try:
+                self.invalidate_missing_originals()
+            except Exception:
+                log.exception(
+                    "Failed to invalidate missing-originals cache after import scan of %s",
+                    scan_target,
+                )
+        scan_count = job["progress"].get("total", 0)
+        scan_summary = f"{scan_count} photos"
+        metadata_warning = scan_metadata_warning()
+        if metadata_warning:
+            scan_summary += f" — {metadata_warning}"
+        ctx.runner.update_step(job["id"], "scan", status="completed",
+                           summary=scan_summary)
+
+    def _generate_thumbnails(self, generate_all):
+        """Phase 3: Generate thumbnails."""
+        ctx, job = self.ctx, self.job
+        ctx.checkpoint(job)
+        ctx.runner.update_step(job["id"], "thumbnails", status="running")
+        ctx.runner.push_event(job["id"], "progress", {
+            "current": 0, "total": 0,
+            "current_file": "Checking for new thumbnails...",
+            "phase": "Generating thumbnails",
+        })
+
+        def thumb_cb(current, total):
+            job["progress"]["current"] = current
+            job["progress"]["total"] = total
+            ctx.runner.push_event(job["id"], "progress", {
+                "current": current, "total": total,
+                "current_file": "",
+                "phase": "Generating thumbnails",
+            })
+
+        thumb_result = generate_all(
+            self.thread_db, self.config["THUMB_CACHE_DIR"],
+            progress_callback=thumb_cb,
+            cancel_check=lambda: ctx.runner.is_cancelled(job["id"]),
+            vireo_dir=self.vireo_dir,
+        )
+        from thumbnails import format_summary as thumb_summary
+        ctx.runner.update_step(job["id"], "thumbnails", status="completed",
+                           summary=thumb_summary(thumb_result))
+
+    def _imported_photo_ids(self):
+        thread_db = self.thread_db
+        photo_ids = []
+        if self.params.copy:
+            # Collection from copied files (existing logic)
+            copied_paths = self.copied_paths
+            if copied_paths:
+                thread_db.conn.execute(
+                    "CREATE TEMP TABLE IF NOT EXISTS _imported_paths (dirpath TEXT, fname TEXT)"
+                )
+                thread_db.conn.execute("DELETE FROM _imported_paths")
+                thread_db.conn.executemany(
+                    "INSERT INTO _imported_paths (dirpath, fname) VALUES (?, ?)",
+                    [(os.path.dirname(p), os.path.basename(p)) for p in copied_paths],
+                )
+                rows = thread_db.conn.execute(
+                    """SELECT p.id FROM photos p
+                       JOIN folders f ON p.folder_id = f.id
+                       JOIN _imported_paths ip ON f.path = ip.dirpath
+                                               AND p.filename = ip.fname"""
+                ).fetchall()
+                photo_ids = [r["id"] for r in rows]
+                thread_db.conn.execute("DROP TABLE IF EXISTS _imported_paths")
+        else:
+            # Collection from all photos in the scanned folder
+            scan_target = self.scan_target
+            rows = thread_db.conn.execute(
+                """SELECT p.id FROM photos p
+                   JOIN folders f ON p.folder_id = f.id
+                   WHERE f.path = ? OR f.path LIKE ?""",
+                (scan_target, scan_target.rstrip("/") + "/%"),
+            ).fetchall()
+            photo_ids = [r["id"] for r in rows]
+        return photo_ids
+
+    def _create_collection(self):
+        """Phase 4: Create collection."""
+        ctx, job = self.ctx, self.job
+        ctx.checkpoint(job)
+        ctx.runner.update_step(job["id"], "collection", status="running")
+        photo_ids = self._imported_photo_ids()
+
+        collection_id = None
+        collection_name = None
+        if photo_ids:
+            from datetime import datetime as dt
+            collection_name = "Import " + dt.now().strftime("%Y-%m-%d %H:%M")
+            collection_id = self.thread_db.add_collection(
+                collection_name,
+                json.dumps([{"field": "photo_ids", "value": photo_ids}]),
+            )
+
+        col_summary = collection_name if collection_name else "no photos"
+        ctx.runner.update_step(job["id"], "collection", status="completed",
+                           summary=col_summary)
+
+        result = {
+            "photos_indexed": len(photo_ids),
+            "collection_id": collection_id,
+            "collection_name": collection_name,
+        }
+        if self.params.copy:
+            ingest_result = self.ingest_result
+            result["copied"] = ingest_result.get("copied", 0)
+            result["skipped_duplicate"] = ingest_result.get("skipped_duplicate", 0)
+            result["failed"] = ingest_result.get("failed", 0)
+            result["total"] = ingest_result.get("total", 0)
+
+        return result
 
 
 def create_imports_blueprint(
@@ -806,345 +1614,23 @@ def create_imports_blueprint(
                 "folder_template must be a relative path without '..' "
                 "or backslashes", 400)
 
-        # The checker still runs when skip_duplicates=False, but only for
-        # its EXIF-batching side effect (needed by _recovery_candidate in
-        # default mode). check_and_record() is skipped in the generator
-        # below so no library-dedup verdict is produced — matching the
-        # import job, which doesn't create the checker at all in that
-        # mode. It is built inside the stream (see generate()), because
-        # indexing the catalog can first have to hash paired JPEGs on a
-        # network share.
-        checker = None
-
-        # str(path) -> capture datetime for recovery planning and day summaries when
-        # verify_by_hash disables the checker's own EXIF batching.
-        recovery_times = {}
-
-        # name -> size per planned destination folder, one scandir each —
-        # the destination may be a network mount, so listings are batched
-        # rather than stat'ing per candidate file (count round trips).
-        dir_listings = {}
-
-        def _planned_folder_listing(folder):
-            if folder not in dir_listings:
-                entries = {}
-                try:
-                    with os.scandir(folder) as it:
-                        for entry in it:
-                            try:
-                                # Symlinks are deliberately EXCLUDED, and
-                                # this is a considered trade, not an
-                                # oversight. The import walk follows them
-                                # (os.stat) and adopts a symlink to an
-                                # off-card regular file whose bytes match,
-                                # so excluding them makes the preview
-                                # UNDER-report recovery for that geometry
-                                # — it says "will copy" for a file the run
-                                # adopts. That is the safe direction to be
-                                # wrong in.
-                                #
-                                # Following them was tried (PR 7b) and
-                                # reverted: the walk refuses a candidate
-                                # resolving under ANY source root, while
-                                # this endpoint's ``_is_source`` can only
-                                # compare ``samefile`` against the CURRENT
-                                # source file. A symlink to a *different*
-                                # card file with identical bytes therefore
-                                # slipped through and was reported as
-                                # recovered — an OVER-claim, promising
-                                # "already safe at the destination" for
-                                # bytes that live only on the card. This
-                                # endpoint receives ``paths``, not the
-                                # import's source roots, so it cannot
-                                # reconstruct that guard; doing this right
-                                # needs the shared walk, i.e. the PR 8
-                                # de-mirror. Trading a safe under-report
-                                # for an unsafe over-report is not worth
-                                # it in the meantime.
-                                # Codex review of PR #1450, rounds 4-5.
-                                if entry.is_file(follow_symlinks=False):
-                                    entries[entry.name] = entry.stat(
-                                        follow_symlinks=False).st_size
-                            except OSError:
-                                continue
-                except OSError:
-                    pass  # missing/unreadable folder -> nothing to adopt
-                dir_listings[folder] = entries
-            return dir_listings[folder]
-
-        def _recovery_candidate(path):
-            """True when the planned destination already holds a byte-
-            identical file at the primary name OR at any suffix slot the
-            run would adopt — mirrors ``import_job``'s adopt precondition
-            (size match then byte-verify). A size-matching candidate whose
-            bytes disagree advances the walk the same way a hash mismatch
-            does in the run: otherwise the preview would subtract the
-            file from "to copy" and promise "not re-copied" for a file
-            the run will suffix-copy under a numbered name."""
-            if not recovery_base:
-                return False
-            source_file = Path(path)
-            try:
-                size = source_file.stat().st_size
-            except OSError:
-                return False
-            # NOTE: zero-byte sources are NOT special-cased here. They
-            # used to return False on the reasoning that "the duplicate
-            # checker gives them no identity either" — but that conflates
-            # duplicate identity with crash-recovery adoption, which is
-            # what this preview is about. ``_resolve_dest_collision``
-            # adopts an empty candidate for an empty source at every
-            # candidate position on both transports (spec PR 7b flip A;
-            # the local primary-name case predates it), so returning
-            # False here left the preview counting those files as
-            # transfers the run would never perform. The generic path
-            # below gets this right on its own: ``_src_hash`` uses
-            # ``compute_file_hash``, so an empty source hashes to
-            # EMPTY_FILE_SHA256 rather than the checker's None, and it
-            # matches an empty candidate. Non-regular entries (FIFOs,
-            # device nodes) stay excluded because
-            # ``_planned_folder_listing`` only records
-            # ``is_file(follow_symlinks=False)`` entries — which is also
-            # what the run's own S_ISREG guard does. Codex review of
-            # PR #1450.
-            # Folder planning mirrors ingest._source_file_timestamps:
-            # EXIF capture time falling back to file mtime. In the default
-            # mode checker.prepare() already batched the EXIF reads and
-            # capture_time() is a cache hit; in verify mode prepare() is a
-            # no-op, so the times come from this request's own batch
-            # (below) — never resolved lazily one file at a time.
-            if verify_by_hash:
-                ts = recovery_times.get(str(source_file))
-            else:
-                ts = checker.capture_time(source_file)
-            if ts is None:
-                with contextlib.suppress(OSError, ValueError,
-                                         OverflowError):
-                    ts = datetime.fromtimestamp(
-                        source_file.stat().st_mtime)
-            try:
-                rel_folder = build_destination_path(ts, folder_template, source_file)
-            except ValueError:
-                return False
-            folder = (
-                recovery_base if rel_folder in ("", ".")
-                else os.path.join(recovery_base, rel_folder)
-            )
-            listing = _planned_folder_listing(folder)
-            primary_name = source_file.name
-
-            # Lazy source-hash: only computed once, and only if we hit a
-            # size-matching candidate that needs verifying. A typical
-            # fresh import has no size collisions and skips hashing
-            # entirely.
-            src_hash_cache = []
-
-            def _src_hash():
-                if not src_hash_cache:
-                    try:
-                        src_hash_cache.append(compute_file_hash(
-                            str(source_file)))
-                    except OSError:
-                        src_hash_cache.append(None)
-                return src_hash_cache[0]
-
-            def _is_source(cand_path):
-                # Reject destination candidates that ARE the source file
-                # itself — the run rejects that self-copy overlap
-                # (destination is an ancestor of the source AND the
-                # folder template renders back onto the source folder,
-                # e.g. importing /archive/2026/2026-07-03/IMG.jpg into
-                # /archive with %Y/%Y-%m-%d) rather than adopting it, so
-                # the preview must not promise "verified & adopted, not
-                # re-copied" and subtract it from "to copy" for a file
-                # the run will fail. Mirrors import_job's samefile guard
-                # with the same normalized-path fallback for paths that
-                # can't be stat'd.
-                try:
-                    return (
-                        os.path.exists(cand_path)
-                        and os.path.samefile(str(source_file), cand_path)
-                    )
-                except OSError:
-                    return (
-                        os.path.normpath(str(source_file))
-                        == os.path.normpath(cand_path)
-                    )
-
-            def _bytes_match(cand_path):
-                if _is_source(cand_path):
-                    return False
-                sh = _src_hash()
-                if sh is None:
-                    return False
-                try:
-                    return compute_file_hash(cand_path) == sh
-                except OSError:
-                    return False
-
-            primary_size = listing.get(primary_name)
-            primary_path = os.path.join(folder, primary_name)
-            if primary_size == size and _is_source(primary_path):
-                # Destination candidate at the primary slot IS the
-                # source file. The run fails this file entirely rather
-                # than walking suffixes; report as not recovered instead
-                # of falling through to the suffix walk (which could
-                # find a coincidental byte-identical sibling in the
-                # source folder and wrongly claim adoption).
-                return False
-            if primary_size == size:
-                if _bytes_match(primary_path):
-                    return True
-                # Same size, different bytes at the primary slot: the run
-                # will hash-mismatch and advance to the suffix walk.
-            elif primary_size is None:
-                # No collision on the primary name — the run copies to the
-                # primary slot without walking suffixes.
-                return False
-            # Primary slot is taken by a different-sized (or same-sized-
-            # different-bytes) file. Mirror import_job's collision walk
-            # (``name_1.ext``, ``name_2.ext``, ...): stop at the first
-            # free slot (the run would land a fresh copy there — not
-            # recovered), or claim recovery at the first byte-identical
-            # candidate (the run would adopt it). Size-mismatched slots
-            # advance the counter; same-size-different-bytes slots also
-            # advance, mirroring the run's hash-mismatch skip.
-            stem, suffix_ext = os.path.splitext(primary_name)
-            counter = 1
-            while True:
-                candidate = f"{stem}_{counter}{suffix_ext}"
-                cand_size = listing.get(candidate)
-                if cand_size is None:
-                    return False
-                if cand_size == size and _bytes_match(
-                        os.path.join(folder, candidate)):
-                    return True
-                counter += 1
-
-        def generate():
-            nonlocal checker
-            # Index the catalog before any per-file work. Companion
-            # identities the catalog is missing are recovered here, a batch
-            # per frame, instead of before the response starts: a catalog
-            # with a thousand paired JPEGs on a NAS took minutes to hash,
-            # during which the page showed nothing, a superseded preview
-            # could not be stopped (no yield, so no disconnect), and every
-            # re-run started the whole hash over. The request's own DB is
-            # closed once the view returns, so the stream opens its own --
-            # without re-running the schema pass, which app startup already
-            # did (the request connection skips it the same way).
-            with Database(
-                db_path, initialize_schema=(db_path == ":memory:"),
-            ) as index_db:
-                for checked, missing in recover_companion_identities(index_db):
-                    yield f"data: {json.dumps({'catalog_recovery': {'checked': checked, 'total': missing}})}\n\n"
-                checker = DuplicateChecker(
-                    CatalogIndex.from_db(index_db, recover_companions=False),
-                    verify_by_hash=verify_by_hash,
-                )
-            total = len(paths)
-            duplicate_count = 0
-            recovered_count = 0
-            batch_duplicates = []
-            batch_recovered = []
-            # Batch the EXIF header reads up front in bounded chunks (no-op
-            # in verify_by_hash mode). Intra-run duplicate tracking lives in
-            # the checker: identical source files not yet in the DB are
-            # reported as duplicates of each other, matching the actual
-            # import step. Chunking with a yield between each chunk lets a
-            # superseded browser request stop this phase within one chunk's
-            # worth of I/O — a single upfront prepare() over tens of
-            # thousands of files would otherwise ignore the disconnect
-            # entirely until the per-file loop begins.
-            prep_paths = [Path(p) for p in paths]
-            prep_batch = DUPLICATE_CHECK_PREP_BATCH_SIZE
-            for prep_start in range(0, len(prep_paths), prep_batch):
-                chunk = prep_paths[prep_start:prep_start + prep_batch]
-                checker.prepare(chunk)
-                if (recovery_base or include_capture_dates) and verify_by_hash:
-                    # prepare() skipped the EXIF batch (verify mode's
-                    # identity is the hash), but recovery planning or day
-                    # summaries need capture times — resolve them alongside
-                    # the same chunk so both prep paths share the same
-                    # cancellation cadence.
-                    recovery_times.update({
-                        str(f): dt
-                        for f, dt in source_capture_timestamps(chunk).items()
-                    })
-                # Cheap heartbeat frame the client can render as
-                # "preparing metadata…" and, more importantly, the yield
-                # that lets the WSGI server notice a disconnected client
-                # between chunks instead of after the entire prep phase.
-                prepared = prep_start + len(chunk)
-                frame = {"preparing": prepared, "total": total}
-                if include_capture_dates:
-                    # Share the metadata reads used for duplicate identity
-                    # and recovery planning with the day summary. The
-                    # discovery walk need not read these headers separately.
-                    dates = {}
-                    for source_file in chunk:
-                        timestamp = (recovery_times.get(str(source_file))
-                                     if verify_by_hash else checker.capture_time(source_file))
-                        dates[str(source_file)] = timestamp.date().isoformat() if timestamp else None
-                    frame["capture_dates"] = dates
-                yield f"data: {json.dumps(frame)}\n\n"
-
-            last_flush = time.monotonic()
-            for checked, path in enumerate(paths, 1):
-                # Zero-byte placeholders are non-duplicates (the checker
-                # gives them no identity), and unreadable/missing files
-                # are skipped; both fall through so the batch-yield block
-                # below still runs. A `continue` would swallow any
-                # already-queued `batch_duplicates` whenever such a file
-                # landed on the last path or on a batch boundary, leaving
-                # the UI unable to deselect those known dupes.
-                try:
-                    # When skip_duplicates=False, the import run doesn't
-                    # consult the library-dedup checker at all — every
-                    # source file goes on to the recovery/adopt gate. Skip
-                    # check_and_record() here so a cataloged twin that
-                    # also sits at the destination is streamed as
-                    # ``recovered`` (matching what the run will actually
-                    # do) instead of ``duplicates`` (which the client
-                    # would then not subtract from the transfer count).
-                    if skip_duplicates and checker.check_and_record(
-                            Path(path)):
-                        batch_duplicates.append(path)
-                        duplicate_count += 1
-                    elif _recovery_candidate(path):
-                        # Duplicate gate first, recovery second — same
-                        # order as the import run, so a cataloged twin
-                        # that also sits at the destination stays a
-                        # duplicate here and a skip there.
-                        batch_recovered.append(path)
-                        recovered_count += 1
-                except OSError:
-                    pass  # Skip unreadable/missing files
-
-                # The yield is both how the client learns progress and how
-                # the WSGI server notices that a superseded browser request
-                # disconnected — cheap checks may finish dozens of files
-                # inside one window (a single event covers them all), while
-                # a slow byte-for-byte hash spends longer than the window on
-                # one file (that file gets its own event and cancellation
-                # stops within the next check). ``checked == total``
-                # guarantees the last progress event always ships so the
-                # client sees ``checked == total`` before ``done``.
-                now = time.monotonic()
-                if (
-                    checked == total
-                    or now - last_flush
-                    >= DUPLICATE_CHECK_FLUSH_INTERVAL_SECONDS
-                ):
-                    yield f"data: {json.dumps({'duplicates': batch_duplicates, 'recovered': batch_recovered, 'checked': checked, 'total': total})}\n\n"
-                    batch_duplicates = []
-                    batch_recovered = []
-                    last_flush = now
-
-            yield f"data: {json.dumps({'done': True, 'duplicate_count': duplicate_count, 'recovered_count': recovered_count, 'checked': total, 'total': total})}\n\n"
-
+        stream = _DuplicateCheckStream(
+            db_path,
+            paths,
+            verify_by_hash=verify_by_hash,
+            include_capture_dates=include_capture_dates,
+            skip_duplicates=skip_duplicates,
+            recovery_base=recovery_base,
+            folder_template=folder_template,
+            catalog_index=CatalogIndex,
+            duplicate_checker=DuplicateChecker,
+            recover_companion_identities=recover_companion_identities,
+            source_capture_timestamps=source_capture_timestamps,
+            build_destination_path=build_destination_path,
+            compute_file_hash=compute_file_hash,
+        )
         return Response(
-            generate(),
+            stream.generate(),
             mimetype="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -1444,34 +1930,10 @@ def create_imports_blueprint(
         if ctx.workspace_id is None:
             return json_error("no active workspace", 400)
         body = request.get_json(silent=True) or {}
-        source = body.get("source", "")
-        destination = body.get("destination", "")
-        file_types = body.get("file_types", "both")
-        folder_template = body.get("folder_template", "%Y/%Y-%m-%d")
-        skip_duplicates = body.get("skip_duplicates", True)
-        verify_by_hash = bool(body.get("verify_by_hash"))
-        copy = body.get("copy", True)
-        exclude_paths = set(body.get("exclude_paths", []))
-
-        if not source:
-            return json_error("source is required")
-        from image_loader import is_excluded_scan_path
-        # See api_job_scan for why this must run before os.path.isdir.
-        if is_excluded_scan_path(source):
-            return json_error(
-                f"source is inside a macOS app-managed library and cannot "
-                f"be imported: {source}"
-            )
-        if not os.path.isdir(source):
-            return json_error(f"source directory not found: {source}")
-        if copy:
-            if not destination:
-                return json_error("source and destination are required")
-            if not os.path.isabs(destination):
-                return json_error("destination must be an absolute path")
-            from ingest import _is_unsafe_path
-            if folder_template and _is_unsafe_path(folder_template):
-                return json_error("folder_template must be a relative path without '..' or backslashes")
+        params = _ImportFullRequest.from_body(body)
+        error = params.validation_error()
+        if error is not None:
+            return json_error(error)
         # The scan below walks the destination (or, in place, the source); a
         # folder-level local copy of any part of that tree would be
         # catalogued a second time at its original path.
@@ -1490,14 +1952,8 @@ def create_imports_blueprint(
         db_for_conflict = get_db()
         runner = get_runner()
         with stage_boundary_lock():
-            pending_sources = stage_pending_source_paths(
-                runner.list_jobs if runner is not None else None,
-                db_for_conflict,
-            )
-            conflict = local_copy_scan_conflict(
-                db_for_conflict, [destination if copy else source],
-                active_workspace_id=ctx.workspace_id,
-                pending_stage_sources=pending_sources,
+            conflict = _import_scan_conflict(
+                runner, db_for_conflict, [params.scan_path], ctx.workspace_id,
             )
         if conflict:
             return json_error(conflict, 409)
@@ -1509,293 +1965,22 @@ def create_imports_blueprint(
         # register the job atomically under the boundary lock so a stage
         # racing the registration blocks on the same guard its admission
         # takes. See ``local_folder._busy_job`` for the reverse direction.
-        _scan_path = [destination if copy else source]
+        _scan_path = [params.scan_path]
 
         def work(job):
-            from scanner import scan as do_scan
-            from thumbnails import generate_all
-
-            thread_db = ctx.thread_db()
-            # Check folder health before scanning to prevent duplicate imports
-            if thread_db.check_folder_health():
-                invalidate_missing_originals()
-            job["_start_time"] = time.time()
-
-            scan_target = str(Path(source))  # normalize (strips trailing slash)
-            # restrict_dirs narrows the post-ingest scan to just the subfolders
-            # that received files, instead of walking the full destination
-            # tree. Populated in the copy branch from ingest_result's
-            # copied_paths (parent dirs) and duplicate_folders. Left as None
-            # for copy=false so scan-in-place keeps its original full-tree
-            # behavior.
-            restrict_dirs = None
-
-            # Define steps based on whether we're copying
-            steps = []
-            if copy:
-                steps.append({"id": "ingest", "label": "Import photos"})
-            steps.extend([
-                {"id": "scan", "label": "Scan photos"},
-                {"id": "thumbnails", "label": "Generate thumbnails"},
-                {"id": "collection", "label": "Create collection"},
-            ])
-            ctx.runner.set_steps(job["id"], steps)
-
-            if copy:
-                from ingest import ingest as do_ingest
-
-                # Phase 1: Copy files
-                ctx.runner.update_step(job["id"], "ingest", status="running")
-
-                def ingest_cb(current, total, filename):
-                    job["progress"]["current"] = current
-                    job["progress"]["total"] = total
-                    job["progress"]["current_file"] = filename
-                    ctx.runner.push_event(job["id"], "progress", {
-                        "current": current, "total": total,
-                        "current_file": filename,
-                        "phase": "Importing photos",
-                    })
-
-                ingest_result = do_ingest(
-                    source_dir=source,
-                    destination_dir=destination,
-                    db=thread_db,
-                    file_types=file_types,
-                    folder_template=folder_template,
-                    skip_duplicates=skip_duplicates,
-                    verify_by_hash=verify_by_hash,
-                    progress_callback=ingest_cb,
-                    pause_callback=lambda: ctx.checkpoint(job),
-                    skip_paths=exclude_paths or None,
-                )
-                copied_paths = ingest_result.get("copied_paths", [])
-                duplicate_folders = ingest_result.get("duplicate_folders", [])
-                scan_target = destination
-
-                # Build restrict_dirs from the folders ingest actually touched
-                # so the post-ingest scan doesn't re-walk the entire
-                # destination tree. Without this, importing ~2k RAWs into a
-                # populated library caused scanner.scan to enumerate tens of
-                # thousands of already-indexed files (observed: 59k). Mirrors
-                # the same pattern in pipeline_job.py. Only paths under the
-                # normalized destination are included; ".." tricks cannot
-                # escape. If nothing was copied and no duplicate folders were
-                # reported, restrict_dirs stays an empty list — scanner.scan
-                # then has no directories to enumerate, which matches intent
-                # (there is nothing new to index).
-                dest_normalized = Path(os.path.normpath(destination))
-
-                def _under_destination(path_str):
-                    try:
-                        return Path(os.path.normpath(path_str)).is_relative_to(
-                            dest_normalized
-                        )
-                    except ValueError:
-                        return False
-
-                restrict_set = set()
-                for cp in copied_paths:
-                    parent = str(Path(cp).parent)
-                    if _under_destination(parent):
-                        restrict_set.add(parent)
-                for folder in duplicate_folders:
-                    if _under_destination(folder):
-                        restrict_set.add(folder)
-                restrict_dirs = sorted(restrict_set)
-
-                ctx.runner.update_step(job["id"], "ingest", status="completed",
-                                   summary=f"{ingest_result.get('copied', 0)} copied")
-
-            # Phase 2: Scan to index into DB
-            ctx.checkpoint(job)
-            ctx.runner.update_step(job["id"], "scan", status="running")
-
-            def scan_cb(current, total):
-                job["progress"]["current"] = current
-                job["progress"]["total"] = total
-                ctx.runner.push_event(job["id"], "progress", {
-                    "current": current, "total": total,
-                    "current_file": "",
-                    "phase": "Scanning photos",
-                })
-
-            # ``import-photos`` is a pausable job (registered as a
-            # pause participant by the runner). Without these probes
-            # the scan phase would keep hashing on its process pool
-            # and hold its CPU lease across the entire pause, ignoring
-            # the pause signal until the current source finishes.
-            # Same wiring the in-place import path picked up in
-            # 37e0e3a0 for the identical reason.
-            #
-            # ``ctx.runner.is_cancelled`` internally parks on Pause via
-            # ``wait_if_paused``. Wrap the parking call in
-            # ``suspend_resource_wait_timing`` so an hour-long pause
-            # while a scan is waiting for CPU permits does not persist
-            # as an hour of "resource contention" on the job's
-            # diagnostics. The context manager is a no-op when no
-            # ledger wait is active, so it's safe on non-pausable
-            # invocations too. Mirrors what ``_pause_checkpoint``
-            # does for pipeline participants (pipeline_job.py:1567).
-            def scan_cancel_check():
-                from resource_ledger import suspend_resource_wait_timing
-                with suspend_resource_wait_timing():
-                    return ctx.runner.is_cancelled(job["id"])
-
-            def scan_pause_check():
-                return ctx.runner.pause_requested(job["id"])
-
-            def scan_cancel_only_check():
-                return ctx.runner.cancellation_requested(job["id"])
-
-            vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
-            try:
-                # copy=false: scan_target is the source and restrict_dirs is
-                #   None, so scanner walks the full source tree (unchanged).
-                # copy=true: scan_target is the destination (folder hierarchy
-                #   root, for parent-folder chain creation), but restrict_dirs
-                #   narrows enumeration to only the subfolders ingest wrote
-                #   into. An empty list means "nothing new to scan" — a no-op
-                #   inside scanner.scan.
-                do_scan(
-                    scan_target, thread_db,
-                    progress_callback=scan_cb,
-                    skip_paths=exclude_paths or None,
-                    vireo_dir=vireo_dir,
-                    thumb_cache_dir=config["THUMB_CACHE_DIR"],
-                    restrict_dirs=restrict_dirs,
-                    cancel_check=scan_cancel_check,
-                    pause_check=scan_pause_check,
-                    cancel_only_check=scan_cancel_only_check,
-                )
-            finally:
-                # scanner.scan commits photo rows incrementally, so even a mid-scan
-                # failure can leave DB state that invalidates cached new-image counts.
-                invalidate_new_images_after_scan(thread_db, scan_target)
-                # scanner.scan touches disk and may reconcile ghost rows
-                # (e.g. a user restored an original before running import).
-                # The pre-scan health-check invalidation only fires when a
-                # folder flips missing/ok, so also drop the missing-originals
-                # cache once the scan itself has run — even on partial
-                # failure, since rows are committed incrementally.
-                try:
-                    invalidate_missing_originals()
-                except Exception:
-                    log.exception(
-                        "Failed to invalidate missing-originals cache after import scan of %s",
-                        scan_target,
-                    )
-            scan_count = job["progress"].get("total", 0)
-            scan_summary = f"{scan_count} photos"
-            metadata_warning = scan_metadata_warning()
-            if metadata_warning:
-                scan_summary += f" — {metadata_warning}"
-            ctx.runner.update_step(job["id"], "scan", status="completed",
-                               summary=scan_summary)
-
-            # Phase 3: Generate thumbnails
-            ctx.checkpoint(job)
-            ctx.runner.update_step(job["id"], "thumbnails", status="running")
-            ctx.runner.push_event(job["id"], "progress", {
-                "current": 0, "total": 0,
-                "current_file": "Checking for new thumbnails...",
-                "phase": "Generating thumbnails",
-            })
-
-            def thumb_cb(current, total):
-                job["progress"]["current"] = current
-                job["progress"]["total"] = total
-                ctx.runner.push_event(job["id"], "progress", {
-                    "current": current, "total": total,
-                    "current_file": "",
-                    "phase": "Generating thumbnails",
-                })
-
-            thumb_result = generate_all(
-                thread_db, config["THUMB_CACHE_DIR"],
-                progress_callback=thumb_cb,
-                cancel_check=lambda: ctx.runner.is_cancelled(job["id"]),
-                vireo_dir=vireo_dir,
-            )
-            from thumbnails import format_summary as thumb_summary
-            ctx.runner.update_step(job["id"], "thumbnails", status="completed",
-                               summary=thumb_summary(thumb_result))
-
-            # Phase 4: Create collection
-            ctx.checkpoint(job)
-            ctx.runner.update_step(job["id"], "collection", status="running")
-            photo_ids = []
-            if copy:
-                # Collection from copied files (existing logic)
-                if copied_paths:
-                    thread_db.conn.execute(
-                        "CREATE TEMP TABLE IF NOT EXISTS _imported_paths (dirpath TEXT, fname TEXT)"
-                    )
-                    thread_db.conn.execute("DELETE FROM _imported_paths")
-                    thread_db.conn.executemany(
-                        "INSERT INTO _imported_paths (dirpath, fname) VALUES (?, ?)",
-                        [(os.path.dirname(p), os.path.basename(p)) for p in copied_paths],
-                    )
-                    rows = thread_db.conn.execute(
-                        """SELECT p.id FROM photos p
-                           JOIN folders f ON p.folder_id = f.id
-                           JOIN _imported_paths ip ON f.path = ip.dirpath
-                                                   AND p.filename = ip.fname"""
-                    ).fetchall()
-                    photo_ids = [r["id"] for r in rows]
-                    thread_db.conn.execute("DROP TABLE IF EXISTS _imported_paths")
-            else:
-                # Collection from all photos in the scanned folder
-                rows = thread_db.conn.execute(
-                    """SELECT p.id FROM photos p
-                       JOIN folders f ON p.folder_id = f.id
-                       WHERE f.path = ? OR f.path LIKE ?""",
-                    (scan_target, scan_target.rstrip("/") + "/%"),
-                ).fetchall()
-                photo_ids = [r["id"] for r in rows]
-
-            collection_id = None
-            collection_name = None
-            if photo_ids:
-                from datetime import datetime as dt
-                collection_name = "Import " + dt.now().strftime("%Y-%m-%d %H:%M")
-                collection_id = thread_db.add_collection(
-                    collection_name,
-                    json.dumps([{"field": "photo_ids", "value": photo_ids}]),
-                )
-
-            col_summary = collection_name if collection_name else "no photos"
-            ctx.runner.update_step(job["id"], "collection", status="completed",
-                               summary=col_summary)
-
-            result = {
-                "photos_indexed": len(photo_ids),
-                "collection_id": collection_id,
-                "collection_name": collection_name,
-            }
-            if copy:
-                result["copied"] = ingest_result.get("copied", 0)
-                result["skipped_duplicate"] = ingest_result.get("skipped_duplicate", 0)
-                result["failed"] = ingest_result.get("failed", 0)
-                result["total"] = ingest_result.get("total", 0)
-
-            return result
+            return _ImportFullRun(
+                ctx, params, config, invalidate_missing_originals, job,
+            ).run()
 
         with stage_boundary_lock():
-            pending_sources = stage_pending_source_paths(
-                runner.list_jobs if runner is not None else None,
-                db_for_conflict,
-            )
-            conflict = local_copy_scan_conflict(
-                db_for_conflict, _scan_path,
-                active_workspace_id=ctx.workspace_id,
-                pending_stage_sources=pending_sources,
+            conflict = _import_scan_conflict(
+                runner, db_for_conflict, _scan_path, ctx.workspace_id,
             )
             if conflict:
                 return json_error(conflict, 409)
             return ctx.start(
                 "import-full", work, pausable=True,
-                config={"source": source, "destination": destination, "copy": copy, "file_types": file_types},
+                config={"source": params.source, "destination": params.destination, "copy": params.copy, "file_types": params.file_types},
             )
 
     @blueprint.route("/api/jobs/import", methods=["POST"])

@@ -707,15 +707,56 @@ def test_api_inat_export_marks_wholly_unsuccessful_job_failed(
 
     assert response.status_code == 200
     assert job["status"] == "failed"
-    assert len(job["errors"]) == 1
-    assert str(pid) in job["errors"][0]
-    assert "render failed" in job["errors"][0]
+    assert job["errors"] == ["bird.jpg: render failed (photo 1)"]
     assert job["result"]["ok"] is False
     assert job["result"]["exported"] == []
     assert job["result"]["errors"] == [{
         "photo_id": pid,
+        "filename": "bird.jpg",
         "error": "render failed",
     }]
+
+
+def test_api_inat_export_partial_failure_fails_job_and_keeps_counts(
+    app_and_db, tmp_path,
+):
+    """Exporting some photos but not others failed the export. The verdict
+    was "ok if anything exported", so 1 of 2 read as "completed". Each
+    failure is listed by name, not as a raw dict, and the result keeps its
+    dict-shaped errors and the exported list for the modal."""
+    app, db, pid = app_and_db
+    from inat_export import InatExportError
+    from wait import wait_for_job_via_client
+
+    fid = db.get_photo(pid)["folder_id"]
+    other = db.add_photo(folder_id=fid, filename="heron.jpg", extension=".jpg",
+                         file_size=1000, file_mtime=2.0)
+    destination = str(tmp_path / "exports")
+
+    def export_one(_db, _vireo_dir, photo_id, dest, _metadata, **_kw):
+        if photo_id == other:
+            raise InatExportError("render failed")
+        return os.path.join(dest, "bird-iNaturalist.jpg")
+
+    with patch("inat_export.export_inat_photo", side_effect=export_one):
+        response = app.test_client().post("/api/inat/export", json={
+            "destination": destination,
+            "submissions": [{"photo_id": pid}, {"photo_id": other}],
+        })
+        job = wait_for_job_via_client(
+            app.test_client(), response.get_json()["job_id"],
+        )
+
+    assert response.status_code == 200
+    assert job["status"] == "failed"
+    assert job["errors"] == ["heron.jpg: render failed (photo 2)"]
+    result = job["result"]
+    assert result["ok"] is False
+    assert [item["photo_id"] for item in result["exported"]] == [pid]
+    assert result["errors"] == [{
+        "photo_id": other, "filename": "heron.jpg", "error": "render failed",
+    }]
+    assert job["summary"].startswith("1 exported, 1 error")
 
 
 @pytest.mark.parametrize("photo_id", [True, 1.9])

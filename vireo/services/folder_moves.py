@@ -342,14 +342,21 @@ class FolderMoves:
             if not result.get("needs_merge"):
                 errors = result.get("errors") or []
                 moved = result.get("moved", 0)
-                if errors and moved == 0:
+                in_place = int(result.get("already_in_place") or 0)
+                if errors and moved == 0 and in_place == 0:
                     result["ok"] = False
                     result["summary"] = f"Move failed — {errors[0]}"
                 else:
                     cleanup_error = result.get("cleanup_error")
                     result["ok"] = not errors
                     result["summary"] = (
-                        f"Moved {moved} photo{'s' if moved != 1 else ''}"
+                        (f"{in_place} photo{'s' if in_place != 1 else ''} already in the destination"
+                         if moved == 0 and in_place else
+                         f"Moved {moved} photo{'s' if moved != 1 else ''}")
+                        + (
+                            f", {in_place} already in the destination"
+                            if in_place and moved else ""
+                        )
                         + (f", {len(errors)} error(s)" if errors else "")
                         + (
                             f"; cleanup failed: {cleanup_error}"

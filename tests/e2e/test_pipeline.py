@@ -832,6 +832,69 @@ def test_pipeline_card_shows_actionable_error_not_the_last_one(
     expect(page.locator("#statusExtract")).to_contain_text("Reconnect the source")
 
 
+def test_pipeline_notes_render_as_skipped_not_failed(live_server, page):
+    """A note explains a stage that skipped without failing (every detection
+    below detector_confidence, an optional weight download that failed).
+    It is listed in result.errors and result.notes; the card must say
+    "Skipped", never "Failed", and the red failure banner stays hidden.
+    A real error in the same run still fails its own card."""
+    url = live_server["url"]
+    page.goto(f"{url}/pipeline")
+    page.evaluate("""
+        var note = '[extract_masks] 3 photo(s) have detections but every ' +
+          'detection is below the current detector_confidence threshold (0.2).';
+        var ekp = '[eye_keypoints] Failed to download superanimal-bird weights';
+        _onPipelineComplete({
+          status: 'completed',
+          result: {
+            ok: true,
+            stages: {
+              extract_masks: {masked: 0, skipped: 0, failed: 0, unreadable: 0,
+                              total: 0, subthreshold: 3, reason: 'all_subthreshold'},
+              eye_keypoints: {processed: 0, total: 2,
+                              skipped: 'weight_download_failed'},
+            },
+            errors: [note, ekp],
+            notes: [note, ekp],
+          },
+        });
+    """)
+    expect(page.locator("#pillExtract")).to_have_text("Skipped")
+    expect(page.locator("#statusExtract")).to_contain_text("Skipped: 3 photo(s)")
+    expect(page.locator("#statusExtract")).not_to_contain_text("Failed:")
+    expect(page.locator("#pillEyeKeypoints")).to_have_text("Skipped")
+    expect(page.locator("#statusEyeKeypoints")).to_contain_text(
+        "Skipped: Failed to download"
+    )
+    expect(page.locator("#statusEyeKeypoints")).to_have_class(re.compile("note"))
+    expect(page.get_by_test_id("pipeline-error-banner")).to_be_hidden()
+    expect(page.get_by_test_id("pipeline-note-banner")).to_be_visible()
+    expect(page.get_by_test_id("pipeline-note-banner")).to_contain_text(
+        "detector_confidence"
+    )
+    # A completed run with only notes stays here (no auto-redirect) so the
+    # notes are read, and the banner offers the way on to Review.
+    expect(page).to_have_url(re.compile(r"/pipeline$"))
+    expect(page.locator("#pipelineNoteReviewLink")).to_be_visible()
+
+    page.evaluate("""
+        _onPipelineComplete({
+          status: 'failed',
+          result: {
+            ok: false,
+            stages: {scan: {status: 'completed', photos_indexed: 4}},
+            errors: ['[scan] PERMISSION_DENIED: /Volumes/Card',
+                     '[eye_keypoints] Failed to download weights'],
+            notes: ['[eye_keypoints] Failed to download weights'],
+          },
+        });
+    """)
+    expect(page.locator("#pillScan")).to_have_text("Failed")
+    expect(page.locator("#statusScan")).to_contain_text("Failed: [scan] PERMISSION_DENIED")
+    expect(page.get_by_test_id("pipeline-error-banner")).to_be_visible()
+    expect(page.locator("#pipelineNoteReviewLink")).to_be_hidden()
+
+
 def test_pipeline_collection_failure_fails_scan_card_on_terminal_path(
     live_server, page,
 ):

@@ -1009,6 +1009,11 @@ def create_workspace_blueprint(
                     payload["phase"] = (
                         f"{len(unreachable)} folder(s) offline, not checked"
                     )
+                # Staged local-copy sources were left out on purpose; the
+                # banner names them, and so does the job.
+                local_copies = result.get("local_copy_excluded") or []
+                if local_copies:
+                    payload["local_copy_excluded"] = list(local_copies)
                 return payload
 
             job_id = runner.start(

@@ -108,7 +108,23 @@ def _item_text(item: Any) -> str:
     return _format_scalar(item)
 
 
-def _list_details(items: Any, heading: str) -> list[str]:
+def error_text(err: Any) -> str:
+    """One result error as the line the job's error list shows.
+
+    Jobs whose result carries structured errors (``{"photo_id": 12,
+    "error": "render failed"}``) keep that shape for their own UI; the
+    runner folds each into ``job["errors"]`` as this readable line rather
+    than the dict's repr.
+    """
+    if isinstance(err, dict):
+        text = _item_text(err) or str(err)
+        if err.get("photo_id") is not None:
+            text += f" (photo {err['photo_id']})"
+        return text
+    return str(err)
+
+
+def _list_details(items: Any, heading: str, formatter=_item_text) -> list[str]:
     """``heading`` line followed by up to MAX_DETAIL_ITEMS entries.
 
     Returns nothing at all when no entry renders as text, so a list of
@@ -118,7 +134,7 @@ def _list_details(items: Any, heading: str) -> list[str]:
         return []
     lines = []
     for item in items[:MAX_DETAIL_ITEMS]:
-        text = _item_text(item)
+        text = formatter(item)
         if text:
             lines.append(text)
     if not lines:
@@ -132,7 +148,7 @@ def _list_details(items: Any, heading: str) -> list[str]:
 def _error_details(result: dict, key: str = "errors") -> list[str]:
     items = result.get(key)
     if isinstance(items, list) and items:
-        return _list_details(items, _n(len(items), "error") + ":")
+        return _list_details(items, _n(len(items), "error") + ":", error_text)
     return []
 
 
@@ -734,14 +750,33 @@ def _duplicate_scan(result: dict, config: dict) -> tuple[str, list[str]]:
 
 def _move(result: dict, config: dict) -> tuple[str, list[str]]:
     moved = _int(result, "moved")
+    in_place = _int(result, "already_in_place")
     errors = result.get("errors") or []
-    summary = _n(moved, "photo") + " moved"
+    if in_place and not moved:
+        # Nothing needed moving; "0 photos moved" would read as a failure.
+        summary = _n(in_place, "photo") + " already in the destination"
+    else:
+        summary = _n(moved, "photo") + " moved"
+        if in_place:
+            summary += f", {in_place:,} already in the destination"
     if isinstance(errors, list) and errors:
         summary += f", {_n(len(errors), 'error')}"
     return summary, _error_details(result)
 
 
+def _pipeline(result: dict, config: dict) -> tuple[str, list[str]]:
+    # ``notes`` are the entries of ``errors`` that explain a benign skip
+    # (no detections to mask, an optional download that failed). List them
+    # as notes, not errors, so a green run's details don't claim it erred.
+    notes = result.get("notes")
+    errors = result.get("errors")
+    if isinstance(notes, list) and notes and isinstance(errors, list):
+        result = {**result, "errors": [e for e in errors if e not in notes]}
+    return _generic(result, config)
+
+
 _DESCRIBERS: dict[str, Callable[[dict, dict], tuple[str, list[str]]]] = {
+    "pipeline": _pipeline,
     "batch-delete": _batch_delete,
     "thumbnails": _thumbnails,
     "previews": _previews,
@@ -811,7 +846,10 @@ def _generic(result: dict, config: dict) -> tuple[str, list[str]]:
             heading = f"{count:,} {noun}:"
             if count > len(value):
                 heading = f"{count:,} {noun} (showing {len(value):,}):"
-            details += _list_details(value, heading)
+            details += _list_details(
+                value, heading,
+                error_text if key == "errors" or key.endswith("_errors") else _item_text,
+            )
             continue
         if value is None or value == "":
             continue

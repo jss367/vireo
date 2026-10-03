@@ -272,94 +272,22 @@ def _classify_plan(
     pipeline_cfg=None,
 ):
     if params.skip_classify:
-        return {
-            "state": "will-skip",
-            "summary": "Disabled — stage will be skipped",
-            "detail": {
-                "pending": 0, "eligible": 0,
-                "stale": 0, "fingerprint_outdated": False,
-            },
-        }
+        return _classify_skip_result("Disabled — stage will be skipped")
 
     models = _resolve_models(params.model_ids)
     if not models:
-        return {
-            "state": "will-skip",
-            "summary": "No models selected — stage will be skipped",
-            "detail": {
-                "pending": 0, "eligible": 0,
-                "stale": 0, "fingerprint_outdated": False,
-            },
-        }
+        return _classify_skip_result(
+            "No models selected — stage will be skipped",
+        )
 
     label_resolution = _resolve_labels_for_models(models, params.labels_files, db)
 
-    pipeline_cfg = pipeline_cfg or {}
-    scope_ids = (
-        list(db.get_photo_ids()) if photo_ids is None else list(photo_ids)
+    plan = _ClassifyPlan(
+        db, params, photo_ids, new_count, detector_confidence,
+        pipeline_cfg or {}, models, label_resolution,
     )
-    try:
-        from computation_cache import megadetector_runtime_fingerprint
-
-        detector_runtime = megadetector_runtime_fingerprint()
-    except (OSError, ValueError):
-        detector_runtime = None
-    current_detector_photo_ids = db.get_detector_run_photo_ids(
-        "megadetector-v6",
-        runtime_fingerprint=detector_runtime,
-    )
-    contextual_weak_ids = set()
-    weak_detection_confidence = pipeline_cfg.get(
-        "weak_detection_confidence", 0.12,
-    )
-    if (
-        pipeline_cfg.get("weak_detection_rescue_enabled", True)
-        and weak_detection_confidence < detector_confidence
-    ):
-        from weak_detections import contextual_weak_photo_ids
-
-        scoped_photos = db.get_photos_by_ids(scope_ids)
-        raw_mdv6_detections = db.get_detections_for_photos(
-            scope_ids,
-            min_conf=weak_detection_confidence,
-            detector_model="megadetector-v6",
-        )
-        contextual_weak_ids = contextual_weak_photo_ids(
-            scoped_photos.values(),
-            raw_mdv6_detections,
-            detector_confidence=detector_confidence,
-            weak_confidence=weak_detection_confidence,
-            max_gap=pipeline_cfg.get("burst_time_gap", 3.0),
-        )
-
-    det_counts = db.count_real_detections_in_scope(
-        photo_ids, min_conf=detector_confidence,
-    )
-    weak_det_counts = db.count_primary_detections_in_scope(
-        contextual_weak_ids, min_conf=weak_detection_confidence,
-    )
-    total_dets = det_counts["total_dets"] + weak_det_counts["total_dets"]
-    photos_with_dets = (
-        det_counts["photos_with_dets"]
-        + weak_det_counts["photos_with_dets"]
-    )
-    # ``detector_confidence`` mirrors the pipeline's runtime fallback gate
-    # so photos whose only MegaDetector rows are below the classification
-    # floor are counted as fallback candidates. Without it the plan would
-    # ignore noise-only photos even though classify_stage now sends them
-    # through the full-image fallback (PR #1484).
-    fallback_photo_ids = (
-        set(scope_ids) - contextual_weak_ids
-    ) & current_detector_photo_ids
-    full_image_fallbacks = db.count_full_image_fallback_photos(
-        fallback_photo_ids, min_conf=detector_confidence,
-    )
-    classifiable_units = total_dets + full_image_fallbacks
-
-    unblocked_count = sum(
-        1 for m in models if not label_resolution[m["id"]].get("blocked")
-    )
-    eligible = classifiable_units * unblocked_count
+    plan.resolve_scope()
+    plan.count_targets()
 
     # Every selected model is blocked on missing labels and can't run
     # label-free (Tree of Life). The classify stage cannot do any work for
@@ -369,8 +297,209 @@ def _classify_plan(
     # point the user at Settings > Labels, rather than letting the job crash
     # mid-pipeline at classify_job._load_labels (which is exactly the
     # fresh-install failure this guards against).
-    if unblocked_count == 0:
-        blocked_all = [m["name"] for m in models]
+    if plan.unblocked_count == 0:
+        return plan.all_models_blocked_result()
+
+    plan.count_stale()
+
+    if plan.classifiable_units == 0:
+        return plan.no_targets_result()
+
+    plan.count_pending()
+
+    if plan.blocked:
+        return plan.some_models_blocked_result()
+
+    if plan.pending_total == 0:
+        return plan.nothing_pending_result()
+
+    return plan.will_classify_result()
+
+
+def _classify_skip_result(summary):
+    """The "will-skip" plan for a classify stage that won't start."""
+    return {
+        "state": "will-skip",
+        "summary": summary,
+        "detail": {
+            "pending": 0, "eligible": 0,
+            "stale": 0, "fingerprint_outdated": False,
+        },
+    }
+
+
+class _ClassifyPlan:
+    """Scope, target counts and per-model tallies for one classify plan."""
+
+    def __init__(
+        self, db, params, photo_ids, new_count, detector_confidence,
+        pipeline_cfg, models, label_resolution,
+    ):
+        self.db = db
+        self.params = params
+        self.photo_ids = photo_ids
+        self.new_count = new_count
+        self.detector_confidence = detector_confidence
+        self.pipeline_cfg = pipeline_cfg
+        self.models = models
+        self.label_resolution = label_resolution
+
+    # -- scope and targets -------------------------------------------
+
+    def resolve_scope(self):
+        """Resolve the photo scope, current detector runs and weak rescues."""
+        db = self.db
+        pipeline_cfg = self.pipeline_cfg
+        self.scope_ids = (
+            list(db.get_photo_ids())
+            if self.photo_ids is None else list(self.photo_ids)
+        )
+        try:
+            from computation_cache import megadetector_runtime_fingerprint
+
+            detector_runtime = megadetector_runtime_fingerprint()
+        except (OSError, ValueError):
+            detector_runtime = None
+        self.current_detector_photo_ids = db.get_detector_run_photo_ids(
+            "megadetector-v6",
+            runtime_fingerprint=detector_runtime,
+        )
+        self.contextual_weak_ids = set()
+        self.weak_detection_confidence = pipeline_cfg.get(
+            "weak_detection_confidence", 0.12,
+        )
+        if (
+            pipeline_cfg.get("weak_detection_rescue_enabled", True)
+            and self.weak_detection_confidence < self.detector_confidence
+        ):
+            from weak_detections import contextual_weak_photo_ids
+
+            scoped_photos = db.get_photos_by_ids(self.scope_ids)
+            raw_mdv6_detections = db.get_detections_for_photos(
+                self.scope_ids,
+                min_conf=self.weak_detection_confidence,
+                detector_model="megadetector-v6",
+            )
+            self.contextual_weak_ids = contextual_weak_photo_ids(
+                scoped_photos.values(),
+                raw_mdv6_detections,
+                detector_confidence=self.detector_confidence,
+                weak_confidence=self.weak_detection_confidence,
+                max_gap=pipeline_cfg.get("burst_time_gap", 3.0),
+            )
+
+    def count_targets(self):
+        """Count the classifiable units and the runnable models' pairs."""
+        db = self.db
+        det_counts = db.count_real_detections_in_scope(
+            self.photo_ids, min_conf=self.detector_confidence,
+        )
+        weak_det_counts = db.count_primary_detections_in_scope(
+            self.contextual_weak_ids, min_conf=self.weak_detection_confidence,
+        )
+        self.total_dets = (
+            det_counts["total_dets"] + weak_det_counts["total_dets"]
+        )
+        self.photos_with_dets = (
+            det_counts["photos_with_dets"]
+            + weak_det_counts["photos_with_dets"]
+        )
+        # ``detector_confidence`` mirrors the pipeline's runtime fallback gate
+        # so photos whose only MegaDetector rows are below the classification
+        # floor are counted as fallback candidates. Without it the plan would
+        # ignore noise-only photos even though classify_stage now sends them
+        # through the full-image fallback (PR #1484).
+        self.fallback_photo_ids = (
+            set(self.scope_ids) - self.contextual_weak_ids
+        ) & self.current_detector_photo_ids
+        self.full_image_fallbacks = db.count_full_image_fallback_photos(
+            self.fallback_photo_ids, min_conf=self.detector_confidence,
+        )
+        self.classifiable_units = self.total_dets + self.full_image_fallbacks
+
+        self.unblocked_count = sum(
+            1 for m in self.models
+            if not self.label_resolution[m["id"]].get("blocked")
+        )
+        self.eligible = self.classifiable_units * self.unblocked_count
+
+    def _count_over_targets(
+        self, count_dets, count_primary, count_full_image, model_name, fp,
+    ):
+        """Sum one model's count over detections, weak rescues and fallbacks."""
+        n = count_dets(
+            classifier_model=model_name,
+            labels_fingerprint=fp,
+            photo_ids=self.photo_ids,
+            min_conf=self.detector_confidence,
+        )
+        n += count_primary(
+            classifier_model=model_name,
+            labels_fingerprint=fp,
+            photo_ids=self.contextual_weak_ids,
+            min_conf=self.weak_detection_confidence,
+        )
+        n += count_full_image(
+            classifier_model=model_name,
+            labels_fingerprint=fp,
+            photo_ids=self.fallback_photo_ids,
+            min_conf=self.detector_confidence,
+        )
+        return n
+
+    # -- per-model tallies -------------------------------------------
+
+    def count_stale(self):
+        """Count cached classifications made under a different label set."""
+        params = self.params
+        db = self.db
+        self.stale_total = 0
+        if self.classifiable_units > 0 and not (params.reclassify or params.raw_subject_analysis):
+            for m in self.models:
+                info = self.label_resolution[m["id"]]
+                if info.get("blocked"):
+                    continue
+                self.stale_total += self._count_over_targets(
+                    db.count_classify_stale,
+                    db.count_primary_classify_stale,
+                    db.count_full_image_classify_stale,
+                    m["name"], info["fingerprint"],
+                )
+        # Reclassify is a user override, not a settings-change signal.
+        self.fingerprint_outdated = self.stale_total > 0 and not (params.reclassify or params.raw_subject_analysis)
+        self.fingerprint_reason = (
+            "label_set_changed" if self.fingerprint_outdated else None
+        )
+
+    def count_pending(self):
+        """Count each runnable model's pending pairs; collect blocked models."""
+        params = self.params
+        db = self.db
+        self.blocked = []
+        self.pending_per_model = {}
+        self.pending_total = 0
+        for m in self.models:
+            info = self.label_resolution[m["id"]]
+            if info.get("blocked"):
+                self.blocked.append(m["name"])
+                continue
+            if params.reclassify or params.raw_subject_analysis:
+                pending = self.classifiable_units
+            else:
+                pending = self._count_over_targets(
+                    db.count_classify_pending_pairs,
+                    db.count_primary_classify_pending_pairs,
+                    db.count_full_image_classify_pending_pairs,
+                    m["name"], info["fingerprint"],
+                )
+            if pending:
+                self.pending_per_model[m["name"]] = pending
+                self.pending_total += pending
+
+    # -- results -----------------------------------------------------
+
+    def all_models_blocked_result(self):
+        blocked_all = [m["name"] for m in self.models]
         return {
             "state": "blocked",
             "summary": (
@@ -386,36 +515,10 @@ def _classify_plan(
             },
         }
 
-    stale_total = 0
-    if classifiable_units > 0 and not (params.reclassify or params.raw_subject_analysis):
-        for m in models:
-            info = label_resolution[m["id"]]
-            if info.get("blocked"):
-                continue
-            fp = info["fingerprint"]
-            stale_total += db.count_classify_stale(
-                classifier_model=m["name"],
-                labels_fingerprint=fp,
-                photo_ids=photo_ids,
-                min_conf=detector_confidence,
-            )
-            stale_total += db.count_primary_classify_stale(
-                classifier_model=m["name"],
-                labels_fingerprint=fp,
-                photo_ids=contextual_weak_ids,
-                min_conf=weak_detection_confidence,
-            )
-            stale_total += db.count_full_image_classify_stale(
-                classifier_model=m["name"],
-                labels_fingerprint=fp,
-                photo_ids=fallback_photo_ids,
-                min_conf=detector_confidence,
-            )
-    # Reclassify is a user override, not a settings-change signal.
-    fingerprint_outdated = stale_total > 0 and not (params.reclassify or params.raw_subject_analysis)
-    fingerprint_reason = "label_set_changed" if fingerprint_outdated else None
-
-    if classifiable_units == 0:
+    def no_targets_result(self):
+        """Plan for a scope with no classifiable targets cached yet."""
+        models = self.models
+        new_count = self.new_count
         # Mixed shape with no detections cached yet: some selected models
         # can run (label-free, or have labels) and others are blocked on
         # missing labels. The earlier unblocked_count==0 guard doesn't fire
@@ -427,7 +530,7 @@ def _classify_plan(
         # launching — same failure this PR is meant to prevent.
         blocked_now = [
             m["name"] for m in models
-            if label_resolution[m["id"]].get("blocked")
+            if self.label_resolution[m["id"]].get("blocked")
         ]
         if blocked_now:
             return {
@@ -446,14 +549,14 @@ def _classify_plan(
                     "pending": 0,
                     "eligible": 0,
                     "new_photos": new_count,
-                    "stale": stale_total,
-                    "fingerprint_outdated": fingerprint_outdated,
-                    "fingerprint_reason": fingerprint_reason,
+                    "stale": self.stale_total,
+                    "fingerprint_outdated": self.fingerprint_outdated,
+                    "fingerprint_reason": self.fingerprint_reason,
                 },
             }
         if (
-            scope_ids
-            and set(scope_ids).issubset(current_detector_photo_ids)
+            self.scope_ids
+            and set(self.scope_ids).issubset(self.current_detector_photo_ids)
             and new_count == 0
         ):
             return {
@@ -467,12 +570,14 @@ def _classify_plan(
                     "pending": 0,
                     "eligible": 0,
                     "new_photos": 0,
-                    "stale": stale_total,
-                    "fingerprint_outdated": fingerprint_outdated,
-                    "fingerprint_reason": fingerprint_reason,
+                    "stale": self.stale_total,
+                    "fingerprint_outdated": self.fingerprint_outdated,
+                    "fingerprint_reason": self.fingerprint_reason,
                 },
             }
-        import_no_new = _import_without_new_files(params, photo_ids, new_count)
+        import_no_new = _import_without_new_files(
+            self.params, self.photo_ids, new_count,
+        )
         if new_count > 0:
             summary = (
                 f"Will run — {new_count} new photo{_plural(new_count)} "
@@ -501,58 +606,28 @@ def _classify_plan(
                 "pending": new_count,
                 "eligible": new_count,
                 "new_photos": new_count,
-                "stale": stale_total,
-                "fingerprint_outdated": fingerprint_outdated,
-                "fingerprint_reason": fingerprint_reason,
+                "stale": self.stale_total,
+                "fingerprint_outdated": self.fingerprint_outdated,
+                "fingerprint_reason": self.fingerprint_reason,
                 "import_no_new": import_no_new,
             },
         }
 
-    blocked = []
-    pending_per_model = {}
-    pending_total = 0
-    for m in models:
-        info = label_resolution[m["id"]]
-        if info.get("blocked"):
-            blocked.append(m["name"])
-            continue
-        fp = info["fingerprint"]
-        if params.reclassify or params.raw_subject_analysis:
-            pending = classifiable_units
-        else:
-            pending = db.count_classify_pending_pairs(
-                classifier_model=m["name"],
-                labels_fingerprint=fp,
-                photo_ids=photo_ids,
-                min_conf=detector_confidence,
-            )
-            pending += db.count_primary_classify_pending_pairs(
-                classifier_model=m["name"],
-                labels_fingerprint=fp,
-                photo_ids=contextual_weak_ids,
-                min_conf=weak_detection_confidence,
-            )
-            pending += db.count_full_image_classify_pending_pairs(
-                classifier_model=m["name"],
-                labels_fingerprint=fp,
-                photo_ids=fallback_photo_ids,
-                min_conf=detector_confidence,
-            )
-        if pending:
-            pending_per_model[m["name"]] = pending
-            pending_total += pending
+    def some_models_blocked_result(self):
+        """Plan when any selected model is blocked on missing labels.
 
-    if blocked:
-        # Any selected model that's blocked on missing labels prevents
-        # launching the stage: pipeline_job.classify_stage iterates every
-        # selected resolved spec, and the blocked model fails at
-        # classify_job._load_labels. Emit "blocked" (gates Start) whether or
-        # not the other unblocked models have pending work — returning
-        # "will-run" in the mixed pending case left Start enabled and let the
-        # missing-labels failure through on launch. The user fixes labels or
-        # deselects the blocked model before the rest can run. eligible=0
-        # (not eligible>0 with pending=0, which would render "Resume (0
-        # left)" against a stage that's actually blocked).
+        Any selected model that's blocked on missing labels prevents
+        launching the stage: pipeline_job.classify_stage iterates every
+        selected resolved spec, and the blocked model fails at
+        classify_job._load_labels. Emit "blocked" (gates Start) whether or
+        not the other unblocked models have pending work — returning
+        "will-run" in the mixed pending case left Start enabled and let the
+        missing-labels failure through on launch. The user fixes labels or
+        deselects the blocked model before the rest can run. eligible=0
+        (not eligible>0 with pending=0, which would render "Resume (0
+        left)" against a stage that's actually blocked).
+        """
+        blocked = self.blocked
         return {
             "state": "blocked",
             "summary": (
@@ -563,13 +638,17 @@ def _classify_plan(
                 "blocked_models": blocked,
                 "pending": 0,
                 "eligible": 0,
-                "stale": stale_total,
-                "fingerprint_outdated": fingerprint_outdated,
-                "fingerprint_reason": fingerprint_reason,
+                "stale": self.stale_total,
+                "fingerprint_outdated": self.fingerprint_outdated,
+                "fingerprint_reason": self.fingerprint_reason,
             },
         }
 
-    if pending_total == 0:
+    def nothing_pending_result(self):
+        """Plan when every existing target is already classified."""
+        models = self.models
+        new_count = self.new_count
+        classifiable_units = self.classifiable_units
         if new_count > 0:
             # Existing scope is fully classified, but the import will pull
             # in N new photos that need detector + classify. Honest answer
@@ -583,16 +662,16 @@ def _classify_plan(
                     f"{_plural(classifiable_units)} already classified)"
                 ),
                 "detail": {
-                    "total_dets": total_dets,
-                    "photos_with_dets": photos_with_dets,
-                    "full_image_fallbacks": full_image_fallbacks,
+                    "total_dets": self.total_dets,
+                    "photos_with_dets": self.photos_with_dets,
+                    "full_image_fallbacks": self.full_image_fallbacks,
                     "models": [m["name"] for m in models],
                     "pending": new_count,
-                    "eligible": eligible + new_count,
+                    "eligible": self.eligible + new_count,
                     "new_photos": new_count,
-                    "stale": stale_total,
-                    "fingerprint_outdated": fingerprint_outdated,
-                    "fingerprint_reason": fingerprint_reason,
+                    "stale": self.stale_total,
+                    "fingerprint_outdated": self.fingerprint_outdated,
+                    "fingerprint_reason": self.fingerprint_reason,
                 },
             }
         return {
@@ -603,62 +682,68 @@ def _classify_plan(
                 f"{len(models)} model{_plural(len(models))}"
             ),
             "detail": {
-                "total_dets": total_dets,
-                "photos_with_dets": photos_with_dets,
-                "full_image_fallbacks": full_image_fallbacks,
+                "total_dets": self.total_dets,
+                "photos_with_dets": self.photos_with_dets,
+                "full_image_fallbacks": self.full_image_fallbacks,
                 "models": [m["name"] for m in models],
                 "pending": 0,
-                "eligible": eligible,
-                "stale": stale_total,
-                "fingerprint_outdated": fingerprint_outdated,
-                "fingerprint_reason": fingerprint_reason,
+                "eligible": self.eligible,
+                "stale": self.stale_total,
+                "fingerprint_outdated": self.fingerprint_outdated,
+                "fingerprint_reason": self.fingerprint_reason,
             },
         }
 
-    if params.reclassify or params.raw_subject_analysis:
-        summary = (
-            f"Re-classify — {pending_total} "
-            f"target-model pair{_plural(pending_total)} "
-            f"({classifiable_units} target{_plural(classifiable_units)} × "
-            f"{len(models)} model{_plural(len(models))})"
-        )
-    else:
-        breakdown = ", ".join(
-            f"{n} for {name}" for name, n in pending_per_model.items()
-        )
-        if fingerprint_outdated:
+    def will_classify_result(self):
+        """Plan when existing targets still have pending pairs."""
+        params = self.params
+        new_count = self.new_count
+        pending_total = self.pending_total
+        classifiable_units = self.classifiable_units
+        if params.reclassify or params.raw_subject_analysis:
             summary = (
-                f"Current label set differs from cached classifications — "
-                f"will classify {pending_total} "
-                f"pair{_plural(pending_total)} ({breakdown})"
+                f"Re-classify — {pending_total} "
+                f"target-model pair{_plural(pending_total)} "
+                f"({classifiable_units} target{_plural(classifiable_units)} × "
+                f"{len(self.models)} model{_plural(len(self.models))})"
             )
         else:
-            summary = (
-                f"Will classify {pending_total} new "
-                f"pair{_plural(pending_total)} ({breakdown})"
+            breakdown = ", ".join(
+                f"{n} for {name}" for name, n in self.pending_per_model.items()
             )
-    if new_count > 0:
-        # Mixed scope: some existing detections still to classify *and*
-        # N new photos coming in (each will get its own detections + class).
-        summary += (
-            f" + {new_count} new photo{_plural(new_count)} "
-            f"to detect & classify"
-        )
-    detail = {
-        "pending_pairs": pending_total,
-        "per_model": pending_per_model,
-        "total_dets": total_dets,
-        "photos_with_dets": photos_with_dets,
-        "full_image_fallbacks": full_image_fallbacks,
-        "pending": pending_total + new_count,
-        "eligible": eligible + new_count,
-        "stale": stale_total,
-        "fingerprint_outdated": fingerprint_outdated,
-        "fingerprint_reason": fingerprint_reason,
-    }
-    if new_count > 0:
-        detail["new_photos"] = new_count
-    return {"state": "will-run", "summary": summary, "detail": detail}
+            if self.fingerprint_outdated:
+                summary = (
+                    f"Current label set differs from cached classifications — "
+                    f"will classify {pending_total} "
+                    f"pair{_plural(pending_total)} ({breakdown})"
+                )
+            else:
+                summary = (
+                    f"Will classify {pending_total} new "
+                    f"pair{_plural(pending_total)} ({breakdown})"
+                )
+        if new_count > 0:
+            # Mixed scope: some existing detections still to classify *and*
+            # N new photos coming in (each will get its own detections + class).
+            summary += (
+                f" + {new_count} new photo{_plural(new_count)} "
+                f"to detect & classify"
+            )
+        detail = {
+            "pending_pairs": pending_total,
+            "per_model": self.pending_per_model,
+            "total_dets": self.total_dets,
+            "photos_with_dets": self.photos_with_dets,
+            "full_image_fallbacks": self.full_image_fallbacks,
+            "pending": pending_total + new_count,
+            "eligible": self.eligible + new_count,
+            "stale": self.stale_total,
+            "fingerprint_outdated": self.fingerprint_outdated,
+            "fingerprint_reason": self.fingerprint_reason,
+        }
+        if new_count > 0:
+            detail["new_photos"] = new_count
+        return {"state": "will-run", "summary": summary, "detail": detail}
 
 
 def _extract_plan(db, params, photo_ids, pipeline_cfg, new_count=0):

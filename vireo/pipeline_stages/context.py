@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -124,6 +124,12 @@ class PipelineRun:
     ``database_factory`` creates worker-owned connections; it is never a
     connection shared between threads. The progress callbacks preserve the
     public entry module's event format.
+
+    ``notes`` holds the entries of ``errors`` that explain a benign skip
+    rather than a failure (no qualifying detections for masks, an optional
+    weight download that failed). They stay in ``errors`` so every surface
+    that lists the run's messages still shows them; the run's verdict
+    leaves them out.
     """
 
     job: dict
@@ -140,3 +146,9 @@ class PipelineRun:
     emit_progress: Callable[..., None]
     update_stages: Callable[..., None]
     control: PipelineControl
+    notes: list[str] = field(default_factory=list)
+
+    def note(self, message: str) -> None:
+        """Record why a stage skipped without counting it as a failure."""
+        self.errors.append(message)
+        self.notes.append(message)
