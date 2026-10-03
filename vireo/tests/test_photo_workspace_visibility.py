@@ -309,3 +309,29 @@ def test_grants_reach_browse_collections_but_not_missing_siblings(tmp_path):
         db.conn.commit()
         assert db.get_missing_folders()[0]['photo_count'] == 1
         assert db.filter_photo_ids_in_workspace([visible, hidden]) == [visible]
+
+
+@pytest.mark.parametrize('keep_visible', [True, False])
+def test_date_move_preview_includes_detached_physical_descendants(app_and_db, tmp_path, keep_visible):
+    from move import move_folder_by_date, plan_folder_date_moves
+
+    app, db = app_and_db
+    a = db._active_workspace_id
+    b = db.create_workspace('Hidden descendant owner')
+    root, visible = _photo(db, tmp_path / 'root', 'visible.jpg')
+    child, hidden = _photo(db, tmp_path / 'root' / 'detached', 'hidden.jpg', b'hidden')
+    db.add_workspace_folder(b, child)
+    db.remove_workspace_folder(a, child)
+    assert db.filter_photo_ids_in_workspace([visible, hidden]) == [visible]
+    destination = str(tmp_path / 'destination')
+    plans = plan_folder_date_moves(db, root, destination, '%Y/%m/%d')
+    assert {pid for plan in plans for pid in plan['photo_ids']} == {visible, hidden}
+    client = app.test_client()
+    preview = client.post('/api/move-photos/visibility', json={'folder_id': root})
+    assert preview.status_code == 200
+    assert preview.json == {'workspaces': [{'id': b, 'name': 'Hidden descendant owner', 'photo_count': 1}]}
+    assert client.post('/api/move-photos/visibility', json={'folder_id': child}).status_code == 404
+    result = move_folder_by_date(db, root, destination, '%Y/%m/%d', keep_visible=keep_visible)
+    assert result['moved'] == 2 and not result['errors'], result
+    db.set_active_workspace(b)
+    assert bool(db.filter_photo_ids_in_workspace([hidden])) == keep_visible

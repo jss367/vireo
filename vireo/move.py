@@ -1994,6 +1994,16 @@ def _folder_subtree_photos(db, folder_id):
     ).fetchall()
 
 
+def folder_date_move_photo_ids(db, folder_id):
+    """The same physical subtree the date-move planner will process.
+
+    A linked root can contain detached descendants. Preview their impact too,
+    since moving a physical tree affects photos beyond workspace browse scope.
+    Callers must validate access to the selected root before using this helper.
+    """
+    return [row["id"] for row in _folder_subtree_photos(db, folder_id)]
+
+
 def plan_folder_date_moves(db, folder_id, destination, folder_template):
     """Plan a folder's tracked photos into capture-date destinations.
 

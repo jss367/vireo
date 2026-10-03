@@ -89,14 +89,19 @@ def create_moves_blueprint(get_db, json_error):
             folder_id = body["folder_id"]
             if isinstance(folder_id, bool) or not isinstance(folder_id, int):
                 return json_error("folder_id must be an integer")
-            folder_ids = db.get_folder_subtree_ids(folder_id)
-            ids = []
-            for fid in folder_ids:
-                ids.extend(row[0] for row in db.conn.execute(
-                    "SELECT photo_id FROM photo_workspace_visibility "
-                    "WHERE folder_id = ? AND workspace_id = ?", (fid, db._active_workspace_id),
-                ))
-            body = {"photo_ids": ids}
+            # Date moves act on the physical subtree, including detached
+            # descendants. Validate the linked root, then preview that exact
+            # planner scope rather than filtering it through Browse membership.
+            linked = db.conn.execute(
+                "SELECT 1 FROM workspace_folders WHERE folder_id = ? AND workspace_id = ?",
+                (folder_id, db._active_workspace_id),
+            ).fetchone()
+            if not linked:
+                return json_error("folder not found", 404)
+            from move import folder_date_move_photo_ids
+
+            photo_ids = folder_date_move_photo_ids(db, folder_id)
+            return jsonify({"workspaces": db.photo_move_affected_workspaces(photo_ids)})
         photo_ids, err = parse_selection_photo_ids(db, body, json_error=json_error, limit=None)
         if err is not None:
             return err

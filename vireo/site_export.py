@@ -110,7 +110,7 @@ def _capture_metadata(db, build_life_list, resolve_visual, include_locations,
     # missing sources are reported (or a developed/working copy can be used).
     folders = {f["id"]: f["path"] for f in db.conn.execute(
         "SELECT f.id, f.path FROM folders f "
-        "JOIN workspace_folders wf ON wf.folder_id = f.id WHERE wf.workspace_id = ?",
+        "JOIN workspace_visible_folders wf ON wf.folder_id = f.id WHERE wf.workspace_id = ?",
         (db._ws_id(),),
     )}
     for offset in range(0, total, 200):

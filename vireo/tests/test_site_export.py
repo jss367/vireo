@@ -405,3 +405,33 @@ def test_visual_album_never_silently_exports_metadata_only_matches(tmp_path, mon
         assert result['ok'] is False
         assert 'no_model' in result['errors'][0]
     db.close()
+
+
+def test_site_export_renders_preserved_photo_without_destination_siblings(tmp_path, monkeypatch):
+    from move import move_photos
+
+    app, db, meta = _seed_publish_app(tmp_path, monkeypatch)
+    b = db.create_workspace('Receiving')
+    photo = meta['p1']
+    source = db.get_photo(photo)['folder_id']
+    db.add_workspace_folder(b, source)
+    destination = tmp_path / 'moved'
+    destination.mkdir()
+    Image.new('RGB', (16, 16)).save(destination / 'hidden.jpg')
+    fid = db.add_folder(str(destination))
+    hidden = db.add_photo(folder_id=fid, filename='hidden.jpg', extension='.jpg', file_size=1, file_mtime=1)
+    result = move_photos(db, [photo], str(destination))
+    assert result['moved'] == 1, result
+    db.set_active_workspace(b)
+    client = app.test_client()
+    assert client.post(f'/api/workspaces/{b}/activate').status_code == 200
+    job = _run_export(app, tmp_path / 'exports')
+    assert job['status'] == 'completed', job
+    output = Path(job['result']['destination'])
+    photos = _read(output, 'photos.json')
+    exported = {row['id']: row for row in photos}
+    assert photo in exported and hidden not in exported
+    assert exported[photo]['image'] is not None
+    assert (output / exported[photo]['image']).is_file()
+    assert not db.conn.execute('SELECT 1 FROM workspace_folders WHERE workspace_id=? AND folder_id=?', (b, fid)).fetchone()
+    db.close()
