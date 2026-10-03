@@ -184,6 +184,7 @@ def test_reimport_visibility_failure_reports_failure(tmp_path, monkeypatch):
         def fail(self, workspace_id, rows):
             raise RuntimeError("cannot persist visibility")
         monkeypatch.setattr(Database, "grant_verified_twin_photos", fail)
+        monkeypatch.setattr(Database, "grant_verified_twin_photos_tracked", fail)
         second = run_import_job(_make_job("reimport"), FakeRunner(), db_path, b, params)
         assert not second["ok"] and second["failed"] == 1
         assert second["skipped_duplicate"] == 0
@@ -425,3 +426,175 @@ def test_grant_only_folder_read_scopes_keep_siblings_hidden(app_and_db, tmp_path
     assert response.status_code == 200, response.json
     assert response.json['scope']['photo_count'] == 1
     assert db.filter_photo_ids_in_workspace([photo, sibling]) == [photo]
+
+
+def test_grant_only_folder_is_excluded_from_audit_roots(app_and_db, tmp_path):
+    """A grant-only folder must not appear as a storage root to the audit
+    scans: ``/api/audit/untracked`` would otherwise enumerate hidden sibling
+    files, and ``/api/audit/import-untracked`` would create a real
+    workspace_folders link that expands the grant-only visibility to every
+    sibling photo. Regression for Codex P1 (latest-head review of
+    ``fix/photo-workspace-visibility``).
+    """
+    app, db = app_and_db
+    b = db.create_workspace('Other')
+    linked_dir = tmp_path / 'linked'
+    linked_dir.mkdir()
+    linked_folder = db.add_folder(str(linked_dir))
+    db.add_workspace_folder(b, linked_folder)
+    grant_dir = tmp_path / 'grant-only'
+    grant_folder, granted = _photo(db, grant_dir, 'granted.jpg')
+    _, hidden_sibling = _photo(db, grant_dir, 'hidden.jpg', b'hidden')
+    db.grant_workspace_photos(b, [granted])
+    (grant_dir / 'untracked.jpg').write_bytes(b'untracked')
+    db.conn.commit()
+    db.set_active_workspace(b)
+    # Direct repository check: the audit root paths exclude the grant-only
+    # folder even though ``get_folder_tree`` surfaces it as a parentless
+    # entry (its own synthetic root).
+    audit_roots = db.get_audit_root_paths()
+    assert str(linked_dir) in audit_roots
+    assert str(grant_dir) not in audit_roots
+    assert any(not row['parent_id'] and row['path'] == str(grant_dir)
+               for row in db.get_folder_tree()), \
+        'tree still carries the synthetic grant-only entry for folder reads'
+    client = app.test_client()
+    assert client.post(f'/api/workspaces/{b}/activate').status_code == 200
+    response = client.get('/api/audit/untracked')
+    assert response.status_code == 200
+    untracked_paths = {entry['path'] for entry in response.json}
+    # The untracked scan now walks only the linked directory, so the
+    # hidden sibling and the stray file in the grant-only folder are both
+    # out of scope -- and import-untracked rejects them.
+    assert str(grant_dir / 'untracked.jpg') not in untracked_paths
+    assert str(grant_dir / 'hidden.jpg') not in untracked_paths
+    import_response = client.post(
+        '/api/audit/import-untracked',
+        json={'paths': [str(grant_dir / 'untracked.jpg')]},
+    )
+    assert import_response.status_code == 400
+    # Grant-only folder gained no real workspace_folders link.
+    assert not db.conn.execute(
+        'SELECT 1 FROM workspace_folders WHERE workspace_id=? AND folder_id=?',
+        (b, grant_folder),
+    ).fetchone()
+    # Hidden sibling is still invisible to b.
+    assert db.filter_photo_ids_in_workspace([granted, hidden_sibling]) == [granted]
+
+
+def test_folder_relocate_requires_real_folder_link_not_photo_grant(app_and_db, tmp_path):
+    """``/api/folders/<id>/relocate`` rewrites the folder's global path for
+    every workspace, so a workspace holding only a ``workspace_photos``
+    grant must not be able to invoke it: otherwise the grant-only workspace
+    could silently rewrite paths for the hidden sibling photos owned by
+    other workspaces. Regression for Codex P1 (latest-head review).
+    """
+    app, db = app_and_db
+    owner = db._active_workspace_id
+    guest = db.create_workspace('Guest')
+    folder_dir = tmp_path / 'owned-folder'
+    folder, owned_photo = _photo(db, folder_dir, 'owned.jpg')
+    _, sibling = _photo(db, folder_dir, 'sibling.jpg', b'sibling')
+    db.add_workspace_folder(owner, folder)
+    db.grant_workspace_photos(guest, [owned_photo])
+    db.conn.commit()
+    new_location = tmp_path / 'moved-folder'
+    new_location.mkdir()
+    client = app.test_client()
+    assert client.post(f'/api/workspaces/{guest}/activate').status_code == 200
+    # ``get_folder_workspaces`` still reports the guest workspace -- the
+    # listing endpoint keeps the read-only association -- but the mutation
+    # route rejects the request.
+    assert guest in {row['id'] for row in db.get_folder_workspaces(folder)}
+    assert not db.workspace_has_folder_link(folder, guest)
+    response = client.post(
+        f'/api/folders/{folder}/relocate', json={'path': str(new_location)},
+    )
+    assert response.status_code == 404
+    # The folder row still points at its original location.
+    assert db.get_folder(folder)['path'] == str(folder_dir)
+    # The owner still has mutation rights.
+    assert client.post(f'/api/workspaces/{owner}/activate').status_code == 200
+    assert db.workspace_has_folder_link(folder, owner)
+    # Sibling and owned_photo both remain owned by owner.
+    db.set_active_workspace(owner)
+    assert db.filter_photo_ids_in_workspace([owned_photo, sibling]) == [owned_photo, sibling]
+
+
+def test_mount_loss_rollback_revokes_duplicate_grants_and_demotes_promotion(tmp_path):
+    """A mount-loss detection must undo exactly the ``workspace_photos``
+    grants and missing->ok folder promotions this batch inserted via
+    ``grant_verified_twin_photos_tracked``. Pre-existing grants and
+    unrelated folders are left alone. Regression for Codex P2
+    (latest-head review).
+    """
+    from import_job import _ImportBatchState, _rollback_on_mount_loss
+
+    with Database(str(tmp_path / 'db')) as db:
+        workspace = db._active_workspace_id
+        _, pre_existing_photo = _photo(db, tmp_path / 'pre', 'pre.jpg')
+        folder, batch_photo = _photo(db, tmp_path / 'batch', 'batch.jpg')
+        _, other_photo = _photo(db, tmp_path / 'other', 'other.jpg')
+        unrelated_dir = tmp_path / 'unrelated'
+        unrelated = db.add_folder(str(unrelated_dir))
+        # Pre-existing grant that must survive the rollback.
+        db.grant_workspace_photos(workspace, [pre_existing_photo])
+        # Mark the batch's folder missing and the unrelated folder missing,
+        # so we can prove the rollback demotes the one promoted this batch
+        # and leaves the pre-existing missing folder alone.
+        db.conn.execute("UPDATE folders SET status='missing' WHERE id IN (?, ?)",
+                        (folder, unrelated))
+        db.conn.commit()
+        new_grants, promoted = db.grant_verified_twin_photos_tracked(
+            workspace,
+            [{'id': batch_photo, 'folder_status': 'missing',
+              'folder_path': str(tmp_path / 'batch'), 'filename': 'batch.jpg'}],
+        )
+        # Re-granting the pre-existing photo in the same tracked call must
+        # not report it as new (so the rollback does not revoke it).
+        pre_grants, _ = db.grant_verified_twin_photos_tracked(
+            workspace,
+            [{'id': pre_existing_photo, 'folder_status': 'ok',
+              'folder_path': str(tmp_path / 'pre'), 'filename': 'pre.jpg'}],
+        )
+        assert pre_grants == []
+        assert new_grants == [batch_photo]
+        assert promoted == [folder]
+        db.conn.commit()
+        # Simulate the batch state after the tracked grants.
+        from types import SimpleNamespace
+
+        batch_st = _ImportBatchState(rel='batch', dest_folder='')
+        batch_st.dup_granted_photo_ids = list(new_grants)
+        batch_st.dup_promoted_folder_ids = list(promoted)
+        batch_st.mount_lost = '/mnt/archive'
+        state = SimpleNamespace(
+            skipped_duplicate=0, unverified_duplicate=0,
+            failed=0, unsafe_files=[], log_label='test',
+            copied=0, verified=0, landed_files={},
+            folder_counts={}, mount_ever_lost=None,
+        )
+        _rollback_on_mount_loss(
+            state, batch_st, attests_bytes=False,
+            db=db, workspace_id=workspace,
+        )
+        # Grant inserted this batch is gone.
+        assert not db.conn.execute(
+            'SELECT 1 FROM workspace_photos WHERE workspace_id=? AND photo_id=?',
+            (workspace, batch_photo),
+        ).fetchone()
+        # Pre-existing grant and unrelated grants survive.
+        assert db.conn.execute(
+            'SELECT 1 FROM workspace_photos WHERE workspace_id=? AND photo_id=?',
+            (workspace, pre_existing_photo),
+        ).fetchone()
+        # Promoted folder is back to 'missing'.
+        assert db.get_folder(folder)['status'] == 'missing'
+        # Unrelated missing folder also stays 'missing' -- the demotion
+        # list only touches ids the tracked grant promoted.
+        assert db.get_folder(unrelated)['status'] == 'missing'
+        # Unrelated photo in another folder is untouched.
+        assert not db.conn.execute(
+            'SELECT 1 FROM workspace_photos WHERE workspace_id=? AND photo_id=?',
+            (workspace, other_photo),
+        ).fetchone()

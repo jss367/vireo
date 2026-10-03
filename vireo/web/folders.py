@@ -188,11 +188,12 @@ def create_folders_blueprint(
     def api_folder_relocate(folder_id):
         db = get_db()
         # Folders are global; relocating rewrites the path for every
-        # workspace, so only a workspace that can see the folder may do it.
-        if not any(
-            workspace["id"] == db._active_workspace_id
-            for workspace in db.get_folder_workspaces(folder_id)
-        ):
+        # workspace, so only a workspace that owns the folder as a real or
+        # inherited link may do it. ``workspace_photos`` grants let a
+        # workspace see one photo in a folder owned by others; permitting
+        # relocation on that basis would rewrite paths for every hidden
+        # sibling the grant-only workspace has no claim to.
+        if not db.workspace_has_folder_link(folder_id):
             return json_error("folder not found", 404)
         body = request.get_json(silent=True) or {}
         if not isinstance(body, dict):

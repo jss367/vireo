@@ -751,6 +751,16 @@ class _ImportBatchState:
     # landed member took, which later members try first.
     companion_siblings: dict = field(default_factory=dict)
     companion_slots: dict = field(default_factory=dict)
+    # Workspace-photo grants this batch newly inserted via
+    # ``grant_verified_twin_photos_tracked``, with the folders it promoted
+    # from ``status='missing'`` to ``'ok'`` in the same call. A mount-loss
+    # rollback reverts both — the twins the grants rested on may be shadow
+    # files on the detached mount stub, so a failed batch must not change
+    # workspace visibility or folder reachability. Pre-existing grants
+    # from an earlier batch (or an earlier run) are deliberately excluded
+    # by the tracked grant path. See ``_rollback_on_mount_loss``.
+    dup_granted_photo_ids: list = field(default_factory=list)
+    dup_promoted_folder_ids: list = field(default_factory=list)
 
 
 def _companion_key(source_file):
@@ -1290,7 +1300,7 @@ def _reject_source_backed_dest(state, ctx, *, rel, source_file, dest_file):
 
 
 def _rollback_on_mount_loss(state, batch_st, attests_bytes,
-                            extra_rollback=None):
+                            extra_rollback=None, *, db=None, workspace_id=None):
     """Undo this batch's bookings after a mount-loss detection.
 
     The caller keeps the final post-loop probe at its own call site and
@@ -1300,14 +1310,22 @@ def _rollback_on_mount_loss(state, batch_st, attests_bytes,
     rather than a real object on the archive — and everything landed
     before the detach may sit in the local shadow too.
 
-    ORDER IS LOAD-BEARING: dup_skips rollback → ``extra_rollback`` (both
-    paths pass it — it drops the queued-but-untransferred ``to_transfer``
-    entries; a no-op locally) → landed rollback →
-    ``state.mount_ever_lost`` LAST.
+    ORDER IS LOAD-BEARING: dup_skips rollback → grant/promotion rollback
+    (same proof as the dup_skips: a detached mount invalidates the twin
+    the grant rested on) → ``extra_rollback`` (both paths pass it — it
+    drops the queued-but-untransferred ``to_transfer`` entries; a no-op
+    locally) → landed rollback → ``state.mount_ever_lost`` LAST.
     The run-wide sticky flag asserts "this batch's bookings were rolled
     back", so it must not trip until every rollback above has run — an
     exception partway through must not leave later batches refused
     while this batch's counts still stand.
+
+    ``db`` and ``workspace_id`` are passed by the batch loop and used to
+    revoke the ``workspace_photos`` grants (and demote the
+    status-promoted folders) this batch's accepted duplicates created
+    via :meth:`Database.grant_verified_twin_photos_tracked`. Pre-existing
+    grants are deliberately not touched: the tracked grant path recorded
+    only the ids this batch inserted anew.
     """
     # Accepted duplicate skips rest on a twin that may live in the
     # local shadow rather than on the share, so a detach invalidates
@@ -1331,6 +1349,24 @@ def _rollback_on_mount_loss(state, batch_st, attests_bytes,
         )
     batch_st.dup_skips = []
     batch_st.dup_dirs = set()
+    # The accepted duplicate skips above also committed workspace_photos
+    # grants (and may have promoted folders out of ``'missing'``) for
+    # verified twins. The mount detach invalidates the proof those rested
+    # on — a shadow file on the detached mount stub can match the source
+    # bytes just as a real archive object can — so a failed batch must
+    # not leave workspace visibility expanded or make a missing folder
+    # read as present. Revoke only what the tracked grant path inserted
+    # this batch, leaving pre-existing grants and prior promotions
+    # untouched.
+    if db is not None and workspace_id is not None:
+        if batch_st.dup_granted_photo_ids:
+            db.revoke_photo_grants(workspace_id, batch_st.dup_granted_photo_ids)
+        if batch_st.dup_promoted_folder_ids:
+            db.demote_folders_to_missing(batch_st.dup_promoted_folder_ids)
+        if batch_st.dup_granted_photo_ids or batch_st.dup_promoted_folder_ids:
+            db.conn.commit()
+    batch_st.dup_granted_photo_ids = []
+    batch_st.dup_promoted_folder_ids = []
     if extra_rollback is not None:
         extra_rollback()
     # Anything that landed BEFORE the detach is sitting in the local
@@ -1418,13 +1454,17 @@ def _duplicate_gate(state, batch_st, *, source_file, rel, checker, db,
         )
         if likely_rows:
             try:
-                db.grant_verified_twin_photos(db._active_workspace_id, likely_rows)
+                new_grants, promoted = db.grant_verified_twin_photos_tracked(
+                    db._active_workspace_id, likely_rows,
+                )
                 db.conn.commit()
             except Exception as exc:
                 log.exception("Duplicate photo workspace visibility failed")
                 db.conn.rollback()
                 _fail(state, rel, source_file, f"duplicate photo workspace visibility failed: {exc}")
                 return _GATE_SKIPPED
+            batch_st.dup_granted_photo_ids.extend(new_grants)
+            batch_st.dup_promoted_folder_ids.extend(promoted)
             state.skipped_duplicate += 1
             state.unverified_duplicate += 1
             _counts(state, rel)["skipped_duplicate"] += 1
@@ -1546,13 +1586,17 @@ def _duplicate_gate(state, batch_st, *, source_file, rel, checker, db,
         return _GATE_CANCELLED
     if accept:
         try:
-            db.grant_verified_twin_photos(db._active_workspace_id, verified_twin_rows)
+            new_grants, promoted = db.grant_verified_twin_photos_tracked(
+                db._active_workspace_id, verified_twin_rows,
+            )
             db.conn.commit()
         except Exception as exc:
             log.exception("Duplicate photo workspace visibility failed")
             db.conn.rollback()
             _fail(state, rel, source_file, f"duplicate photo workspace visibility failed: {exc}")
             return _GATE_SKIPPED
+        batch_st.dup_granted_photo_ids.extend(new_grants)
+        batch_st.dup_promoted_folder_ids.extend(promoted)
         state.skipped_duplicate += 1
         _counts(state, rel)["skipped_duplicate"] += 1
         batch_st.dup_skips.append((source_file, False))
@@ -4887,6 +4931,8 @@ class _ImportBatchLoop:
                 # always empty).
                 extra_rollback=functools.partial(
                     _drop_queued_transfers, self._state, batch_st, rel),
+                db=self._db,
+                workspace_id=self._workspace_id,
             )
 
     def _catalog_batch(self, batch_st, rel):

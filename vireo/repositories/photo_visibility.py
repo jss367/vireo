@@ -37,6 +37,78 @@ class PhotoVisibilityRepository:
                     "(SELECT folder_id FROM photos WHERE id = ?)", (row["id"],),
                 )
 
+    def grant_verified_twins_tracked(self, workspace_id, rows):
+        """Like :meth:`grant_verified_twins`, but report what this call changed.
+
+        Returns ``(new_grant_ids, promoted_folder_ids)``:
+        - ``new_grant_ids``: photo ids where this call inserted a fresh
+          ``workspace_photos`` row (a grant that already existed is not
+          included).
+        - ``promoted_folder_ids``: folder ids whose ``status`` this call
+          flipped from ``'missing'`` to ``'ok'``.
+
+        Lets a caller that may still have to roll the batch back on a
+        mount-loss detection (``import_job._rollback_on_mount_loss``) undo
+        exactly what it created without disturbing grants or folder
+        statuses that existed before.
+        """
+        new_grant_ids = []
+        for photo_id in dict.fromkeys(row["id"] for row in rows):
+            cur = self.conn.execute(
+                "INSERT OR IGNORE INTO workspace_photos (workspace_id, photo_id) VALUES (?, ?)",
+                (workspace_id, photo_id),
+            )
+            if cur.rowcount > 0:
+                new_grant_ids.append(photo_id)
+        promoted_folder_ids = []
+        for row in rows:
+            if row["folder_status"] == "missing":
+                cur = self.conn.execute(
+                    "UPDATE folders SET status = 'ok' WHERE status = 'missing' AND id = "
+                    "(SELECT folder_id FROM photos WHERE id = ?)", (row["id"],),
+                )
+                if cur.rowcount > 0:
+                    folder_row = self.conn.execute(
+                        "SELECT folder_id FROM photos WHERE id = ?", (row["id"],),
+                    ).fetchone()
+                    if folder_row is not None and folder_row["folder_id"] is not None:
+                        promoted_folder_ids.append(folder_row["folder_id"])
+        return new_grant_ids, list(dict.fromkeys(promoted_folder_ids))
+
+    def revoke_grants(self, workspace_id, photo_ids):
+        """Delete ``workspace_photos`` rows for exactly these photo ids.
+
+        Unlike :meth:`revoke_for_folders`, this does not expand to siblings
+        in the same folder — the caller passes the exact ids it wants to
+        revoke. Used by the import rollback to undo grants that
+        :meth:`grant_verified_twins_tracked` just created.
+        """
+        ids = list(dict.fromkeys(photo_ids))
+        for start in range(0, len(ids), 800):
+            chunk = ids[start:start + 800]
+            marks = ",".join("?" for _ in chunk)
+            self.conn.execute(
+                f"DELETE FROM workspace_photos WHERE workspace_id = ? AND photo_id IN ({marks})",
+                [workspace_id, *chunk],
+            )
+
+    def demote_folders_to_missing(self, folder_ids):
+        """Revert folders to ``status = 'missing'``.
+
+        Only used by the import rollback to undo a status promotion that
+        :meth:`grant_verified_twins_tracked` applied earlier in the batch
+        on the assumption that an on-archive twin confirmed the folder
+        bytes were still reachable; a mount loss invalidates that proof.
+        """
+        ids = list(dict.fromkeys(folder_ids))
+        for start in range(0, len(ids), 800):
+            chunk = ids[start:start + 800]
+            marks = ",".join("?" for _ in chunk)
+            self.conn.execute(
+                f"UPDATE folders SET status = 'missing' WHERE id IN ({marks})",
+                chunk,
+            )
+
     def affected_workspaces(self, photo_ids, active_workspace):
         counts = {}
         ids = list(dict.fromkeys(photo_ids))

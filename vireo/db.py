@@ -1393,6 +1393,24 @@ class Database:
     def grant_verified_twin_photos(self, workspace_id, rows):
         self._photo_visibility_repository().grant_verified_twins(workspace_id, rows)
 
+    def grant_verified_twin_photos_tracked(self, workspace_id, rows):
+        """Grant twins and report the fresh grants and promoted folders.
+
+        Returns ``(new_grant_ids, promoted_folder_ids)``. See
+        :meth:`PhotoVisibilityRepository.grant_verified_twins_tracked`.
+        """
+        return self._photo_visibility_repository().grant_verified_twins_tracked(
+            workspace_id, rows,
+        )
+
+    def revoke_photo_grants(self, workspace_id, photo_ids):
+        """Revoke the specified ``workspace_photos`` rows (no sibling expansion)."""
+        self._photo_visibility_repository().revoke_grants(workspace_id, photo_ids)
+
+    def demote_folders_to_missing(self, folder_ids):
+        """Revert folders to ``status='missing'`` (import mount-loss rollback)."""
+        self._photo_visibility_repository().demote_folders_to_missing(folder_ids)
+
     def photo_move_affected_workspaces(self, photo_ids):
         return self._photo_visibility_repository().affected_workspaces(photo_ids, self._ws_id())
 
@@ -1685,6 +1703,37 @@ class Database:
         """
         self._materialize_workspace_descendants(workspace_id)
         return self._workspace_folder_repository().roots(workspace_id)
+
+    def workspace_has_folder_link(self, folder_id, workspace_id=None):
+        """True iff the workspace has a real or inherited folder link.
+
+        Excludes ``workspace_photos`` grants, which only make a photo
+        visible, not the whole folder. Folder-wide mutations such as
+        ``/api/folders/<id>/relocate`` must gate on this view so a workspace
+        holding only a photo-specific grant for one photo cannot rewrite
+        paths for the hidden sibling photos owned by other workspaces.
+        """
+        if workspace_id is None:
+            workspace_id = self._ws_id()
+        return self._workspace_folder_repository().has_folder_link(
+            workspace_id, folder_id,
+        )
+
+    def get_audit_root_paths(self, workspace_id=None):
+        """Paths of the active workspace's audit scan roots.
+
+        Returns real ``workspace_folders`` roots only -- folders a workspace
+        reaches solely through a ``workspace_photos`` grant are excluded,
+        even when they would otherwise appear parentless in
+        ``get_folder_tree``. The audit treats the result as storage roots to
+        walk the filesystem under, and including a grant-only folder would
+        let ``/api/audit/untracked`` surface hidden sibling files that
+        ``/api/audit/import-untracked`` would then import under a real
+        workspace link.
+        """
+        if workspace_id is None:
+            workspace_id = self._ws_id()
+        return self._workspace_folder_repository().audit_root_paths(workspace_id)
 
     def get_workspace_extensions(self):
         """Return distinct lowercased file extensions for photos in the

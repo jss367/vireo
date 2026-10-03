@@ -291,6 +291,56 @@ class WorkspaceFolderRepository:
             (folder_id, folder_id),
         ).fetchall()
 
+    def has_folder_link(self, workspace_id, folder_id):
+        """True iff ``workspace_id`` has a real or inherited folder link.
+
+        A real folder link is a ``workspace_folders`` row for the exact
+        folder, or a recursive-root row for an ancestor whose path (or
+        rebased ``local_folder_mappings.source_path``) contains the target.
+        ``workspace_photos`` grants, which make
+        :meth:`list_workspaces_for_folder` report the workspace as
+        associated, are deliberately excluded. Folder-wide mutations like
+        relocate must gate on this stricter view so a workspace holding only
+        a photo-specific grant cannot rewrite paths for the hidden sibling
+        photos owned by other workspaces.
+        """
+        row = self.conn.execute(
+            """SELECT 1
+               FROM workspace_folders wf
+               JOIN folders root ON root.id = wf.folder_id
+               JOIN folders target ON target.id = ?
+               LEFT JOIN local_folder_mappings target_lfm
+                 ON target_lfm.folder_id = target.id
+               WHERE wf.workspace_id = ?
+                 AND (wf.folder_id = target.id
+                    OR (
+                      wf.is_root = 1
+                      AND (
+                        REPLACE(target.path, '\\', '/') = REPLACE(root.path, '\\', '/')
+                        OR substr(
+                             REPLACE(target.path, '\\', '/'),
+                             1,
+                             length(RTRIM(REPLACE(root.path, '\\', '/'), '/') || '/')
+                           ) = RTRIM(REPLACE(root.path, '\\', '/'), '/') || '/'
+                        OR REPLACE(target_lfm.source_path, '\\', '/') = REPLACE(root.path, '\\', '/')
+                        OR substr(
+                             REPLACE(target_lfm.source_path, '\\', '/'),
+                             1,
+                             length(RTRIM(REPLACE(root.path, '\\', '/'), '/') || '/')
+                           ) = RTRIM(REPLACE(root.path, '\\', '/'), '/') || '/'
+                      )
+                    )
+                 )
+                 AND NOT EXISTS (
+                     SELECT 1 FROM workspace_removed_folders removed
+                     WHERE removed.workspace_id = wf.workspace_id
+                       AND removed.folder_id = target.id
+                 )
+               LIMIT 1""",
+            (folder_id, workspace_id),
+        ).fetchone()
+        return row is not None
+
     def root_ids(self, workspace_id):
         """Return the ids of the workspace's user-facing roots, by path."""
         rows = self.conn.execute(
@@ -334,6 +384,47 @@ class WorkspaceFolderRepository:
                ORDER BY f.path""",
             (workspace_id,),
         ).fetchall()
+
+    def audit_root_paths(self, workspace_id):
+        """Return paths of the workspace's audit scan roots.
+
+        An audit root is a ``workspace_folders`` row whose nearest linked
+        ancestor does not exist in the active workspace, so the audit treats
+        its path as a storage root to walk the filesystem under. Folders a
+        workspace reaches only through ``workspace_photos`` grants are
+        deliberately excluded even when they would otherwise appear
+        parentless in ``get_folder_tree``, since the workspace does not own
+        them as scan roots: including a grant-only folder here would let
+        ``/api/audit/untracked`` enumerate hidden sibling files and
+        ``/api/audit/import-untracked`` create a real ``workspace_folders``
+        link that expands visibility to every photo in the directory.
+        """
+        rows = self.conn.execute(
+            """WITH RECURSIVE
+               linked(id) AS (
+                   SELECT wf.folder_id FROM workspace_folders wf
+                   WHERE wf.workspace_id = ?
+               ),
+               walk(start_id, current_id) AS (
+                   SELECT l.id, f.parent_id
+                   FROM linked l
+                   JOIN folders f ON f.id = l.id
+                   WHERE f.status IN ('ok', 'partial')
+                   UNION ALL
+                   SELECT w.start_id, f.parent_id
+                   FROM walk w
+                   JOIN folders f ON f.id = w.current_id
+                   WHERE w.current_id IS NOT NULL
+                     AND w.current_id NOT IN (SELECT id FROM linked)
+               )
+               SELECT DISTINCT f.path
+               FROM folders f
+               JOIN walk w ON w.start_id = f.id
+               WHERE w.current_id IS NULL
+               ORDER BY f.path""",
+            (workspace_id,),
+        ).fetchall()
+        return [row["path"] for row in rows]
 
     def extensions(self, workspace_id):
         """Distinct lowercased extensions of the workspace's visible photos."""
