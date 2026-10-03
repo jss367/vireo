@@ -1024,6 +1024,9 @@ class _ImportPhotosRequest:
             "untagged_photo_ids": (
                 parent_resume["untagged_ids"] if parent_resume else []
             ),
+            "paid_tag_photo_ids": (
+                parent_resume["paid_tag_photo_ids"] if parent_resume else []
+            ),
             # Fingerprint sidecar to carry_photo_ids so a retry-of-retry
             # can still verify the inherited scope by stable identity
             # even after the grandparent's job has aged out of history.
@@ -1274,7 +1277,7 @@ class _ImportPhotosJob:
             if pid in carried
         ]
         if parent_resume and not parent_resume["tags_applied"]:
-            owed += sorted(parent_landings)
+            owed += sorted(parent_landings - set(parent_resume.get("paid_tag_photo_ids", [])))
         for pid in owed:
             if pid not in seen:
                 seen.add(pid)

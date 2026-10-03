@@ -843,7 +843,8 @@
       var cfg = jobConfig(row) || {};
       var entry = {id: row.id, status: row.status,
                    startedAt: row.started_at || '', result: result,
-                   root: cfg.root_import_job_id};
+                   root: cfg.root_import_job_id, config: cfg,
+                   parent: cfg.parent_import_job_id};
       candidates.push(entry);
       var parentKey = String(cfg.parent_import_job_id);
       (children[parentKey] = children[parentKey] || []).push(entry);
@@ -892,8 +893,67 @@
       e.hasFailedFiles = hasFailedImportFiles(r);
     });
     // What a Resume replays: the parent's marks plus what descendants paid.
-    var tagsApplied = !!parentResult.tags_applied ||
-      descendants.some(function(e) { return e.tagsApplied; });
+    function tagScope(cfg, result) {
+      var scope = new Set(), identities = new Map();
+      var fingerprints = Object.assign({}, cfg.carry_photo_fingerprints || {},
+        result.photo_fingerprints || {}, result.carried_photo_fingerprints || {});
+      [result.photo_ids, result.carried_photo_ids, result.recovered_photo_ids,
+       cfg.carry_photo_ids, cfg.untagged_photo_ids].forEach(function(values) {
+        (values || []).forEach(function(pid) {
+          if (!Number.isInteger(pid) || pid <= 0) return;
+          var fp = fingerprints[pid];
+          var identity = typeof fp === 'string' ? fp.substring(fp.lastIndexOf('|s=') + 3) : '';
+          if (typeof fp === 'string' && fp.indexOf('|s=') < 0) identity = fp;
+          var token = JSON.stringify(['photo', pid, identity]);
+          scope.add(token);
+          identities.set(pid, token);
+        });
+      });
+      [cfg.recover_landed_files, result.landed_files].forEach(function(files) {
+        if (!files || typeof files !== 'object') return;
+        Object.keys(files).forEach(function(path) {
+          var identity = files[path];
+          if (Array.isArray(identity) && identity.length >= 3)
+            scope.add(JSON.stringify(['file', identity[2] || path]));
+        });
+      });
+      return {scope: scope, identities: identities};
+    }
+    function paidCarriedScope(cfg, identities) {
+      var paid = new Set(), carried = new Set(cfg.carry_photo_ids || []);
+      (cfg.untagged_photo_ids || []).forEach(function(pid) { carried.delete(pid); });
+      (cfg.paid_tag_photo_ids || []).forEach(function(pid) { carried.add(pid); });
+      carried.forEach(function(pid) {
+        if (!identities.has(pid)) return;
+        var token = identities.get(pid);
+        paid.add(token);
+        var identity = JSON.parse(token)[2], index = identity.lastIndexOf('|h=');
+        if (index >= 0 && identity.substring(index + 3))
+          paid.add(JSON.stringify(['file', identity.substring(index + 3)]));
+      });
+      return paid;
+    }
+    var parentCfg = jobConfig(parent) || {};
+    var parentScope = tagScope(parentCfg, parentResult);
+    var tagIdentities = new Map(parentScope.identities);
+    var paidScope = new Set(parentResult.tags_applied ? parentScope.scope : []);
+    paidCarriedScope(parentCfg, tagIdentities).forEach(function(token) { paidScope.add(token); });
+    var allScope = new Set(parentScope.scope);
+    var inheritedScopes = new Map([[parent.id, parentScope.scope]]);
+    descendants.slice().sort(function(a, b) { return a.startedAt.localeCompare(b.startedAt); }).forEach(function(e) {
+      var own = tagScope(e.config, e.result);
+      (inheritedScopes.get(e.parent) || inheritedScopes.get(e.root) || new Set()).forEach(function(token) { own.scope.add(token); });
+      inheritedScopes.set(e.id, own.scope);
+      own.identities.forEach(function(token, pid) { tagIdentities.set(pid, token); });
+      own.scope.forEach(function(token) {
+        allScope.add(token);
+        if (e.tagsApplied) paidScope.add(token);
+      });
+      paidCarriedScope(e.config, own.identities).forEach(function(token) { paidScope.add(token); });
+    });
+    var unpaidScope = Array.from(allScope).some(function(token) { return !paidScope.has(token); });
+    var tagsApplied = (!!parentResult.tags_applied ||
+      descendants.some(function(e) { return e.tagsApplied; })) && !unpaidScope;
     // The parent's chain step marks after a failed import too, but then
     // skips the collection and processing; apply the same ``ok`` filter
     // to the parent's own mark as to a descendant's (above). That is also
@@ -901,7 +961,7 @@
     var chained = (!!parentResult.chained && parentResult.ok !== false) ||
       descendants.some(function(e) { return e.chained; });
     // A Retry of a parent that was not interrupted replays no tags.
-    var tagsPaid = tagsApplied || !parentInterrupted;
+    var tagsPaid = (tagsApplied || !parentInterrupted) && !unpaidScope;
     var marked = descendants.filter(function(e) { return e.tagsApplied || e.chained; });
     // Failing files after its tag pass makes a descendant's own Retry the
     // next step; one cancelled or crashed before that did none of the work.

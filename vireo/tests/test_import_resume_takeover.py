@@ -57,6 +57,21 @@ FAILED_FILES = {"ok": False, "failed": 1, "photo_ids": [],
 
 def _scenarios():
     return {
+        "old tag mark does not pay newly landed tags": (
+            _parent(tags_applied=True),
+            [_row("d", "2026-09-01T11:00:00", {
+                "ok": True, "photo_ids": [3], "tags_applied": False, "chained": True,
+                "tagging": {"errors": ["temporary lock"]},
+            })],
+        ),
+        "tag-only descendant pays expanded scope": (
+            _parent(tags_applied=True),
+            [_row("d", "2026-09-01T11:00:00", {
+                "ok": True, "photo_ids": [3], "tags_applied": False, "chained": True,
+            }), _row("d2", "2026-09-01T12:00:00", {
+                "ok": True, "photo_ids": [], "tags_applied": True, "chained": False,
+            }, parent="d")],
+        ),
         "no descendants": (_parent(), []),
         "finished resume": (
             _parent(), [_row("d", "2026-09-01T11:00:00", DONE)],
@@ -268,7 +283,7 @@ def _scenarios():
 
 
 def _server(parent, rows):
-    takeover = import_resume_takeover(parent["id"], parent["result"], rows)
+    takeover = import_resume_takeover(parent["id"], parent["result"], rows, parent["config"])
     resume = ImportService._interrupted_parent_resume(
         parent["config"], parent["result"], takeover,
     )
@@ -293,6 +308,8 @@ def _server(parent, rows):
 
 # (by, kind, offers Resume, offers Retry)
 EXPECTED = {
+    "old tag mark does not pay newly landed tags": (None, None, True, False),
+    "tag-only descendant pays expanded scope": ("d2", "done", False, False),
     "no descendants": (None, None, True, False),
     "finished resume": ("d", "done", False, False),
     "resume interrupted too": ("d", "resume", False, False),
@@ -553,3 +570,14 @@ def test_moved_descendant_recovers_only_matching_bytes(current):
     service._recover_relocated_descendant_landings(Mock(), takeover)
     resume = service._interrupted_parent_resume(_parent()["config"], _parent()["result"], takeover)
     assert ("/nas/child.jpg" in resume["landed_files"]) == current.endswith("h=original")
+
+
+
+def test_expanded_tag_debt_excludes_already_paid_parent_ids():
+    parent, rows = _scenarios()["old tag mark does not pay newly landed tags"]
+    takeover = import_resume_takeover(PARENT_ID, parent["result"], rows, parent["config"])
+    assert takeover["paid_tag_photo_ids"] == [1, 2]
+    assert takeover["unpaid_tag_photo_ids"] == [3]
+    resume = ImportService._interrupted_parent_resume(parent["config"], parent["result"], takeover)
+    assert resume["untagged_ids"] == [3]
+    assert resume["chain_already_ran"] is True

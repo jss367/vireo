@@ -144,7 +144,7 @@ def _has_failed_files(result):
     )
 
 
-def import_resume_takeover(parent_id, parent_result, rows):
+def import_resume_takeover(parent_id, parent_result, rows, parent_config=None):
     """Whether a later run took over an import's Resume or Retry.
 
     Two rows offer to continue an import: one a Vireo restart interrupted
@@ -274,9 +274,65 @@ def import_resume_takeover(parent_id, parent_result, rows):
 
     # What a Resume of the parent replays: its own marks plus what
     # descendants paid (``_interrupted_parent_resume``).
-    tags_applied = bool(parent_result.get("tags_applied")) or any(
+    def tag_scope(config, result):
+        scope, identities = set(), {}
+        fingerprints = {}
+        for value in (config.get("carry_photo_fingerprints"),
+                      result.get("photo_fingerprints"), result.get("carried_photo_fingerprints")):
+            if isinstance(value, dict):
+                fingerprints.update(value)
+        for values in (result.get("photo_ids"), result.get("carried_photo_ids"),
+                       result.get("recovered_photo_ids"), config.get("carry_photo_ids"),
+                       config.get("untagged_photo_ids")):
+            for pid in values or []:
+                if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
+                    fp = fingerprints.get(str(pid)) or fingerprints.get(pid)
+                    identity = fp.rsplit("|s=", 1)[-1] if isinstance(fp, str) else ""
+                    token = ("photo", pid, identity)
+                    scope.add(token)
+                    identities[pid] = token
+        for value in (config.get("recover_landed_files"), result.get("landed_files")):
+            if isinstance(value, dict):
+                for path, identity in value.items():
+                    if isinstance(identity, list) and len(identity) >= 3:
+                        scope.add(("file", identity[2] or path))
+        return scope, identities
+
+    def paid_carried_scope(config, identities):
+        paid = set()
+        carried = set(config.get("carry_photo_ids") or [])
+        carried -= set(config.get("untagged_photo_ids") or [])
+        carried |= set(config.get("paid_tag_photo_ids") or [])
+        for pid in carried:
+            if pid not in identities:
+                continue
+            token = identities[pid]
+            paid.add(token)
+            if "|h=" in token[2] and token[2].rsplit("|h=", 1)[1]:
+                paid.add(("file", token[2].rsplit("|h=", 1)[1]))
+        return paid
+
+    parent_config = parent_config or {}
+    parent_scope, tag_identities = tag_scope(parent_config, parent_result)
+    paid_scope = set(parent_scope) if parent_result.get("tags_applied") else set()
+    paid_scope |= paid_carried_scope(parent_config, tag_identities)
+    all_scope = set(parent_scope)
+    inherited_scopes = {parent_id: parent_scope}
+    for entry in sorted(descendants, key=lambda e: e["started_at"]):
+        scope, identities = tag_scope(entry["config"], entry["result"])
+        scope |= inherited_scopes.get(entry["parent"], inherited_scopes.get(entry["root"], set()))
+        inherited_scopes[entry["id"]] = scope
+        tag_identities.update(identities)
+        all_scope |= scope
+        if entry["tags_applied"]:
+            paid_scope |= scope
+        paid_scope |= paid_carried_scope(entry["config"], identities)
+    unpaid_scope = all_scope - paid_scope
+    tags_applied = (bool(parent_result.get("tags_applied")) or any(
         e["tags_applied"] for e in descendants
-    )
+    )) and not unpaid_scope
+    paid_tag_ids = sorted(pid for pid, token in tag_identities.items() if token in paid_scope)
+    unpaid_tag_ids = sorted(pid for pid, token in tag_identities.items() if token not in paid_scope)
     # The parent's chain step marks after a failed import too, but then
     # skips the collection and processing; apply the same ``ok`` filter to
     # the parent's own mark as to a descendant's (above) so a crash between
@@ -289,7 +345,7 @@ def import_resume_takeover(parent_id, parent_result, rows):
     ) or any(e["chained"] for e in descendants)
     # A Retry of a parent that was not interrupted replays no tags, so only
     # processing is owed there.
-    tags_paid = tags_applied or not parent_interrupted
+    tags_paid = (tags_applied or not parent_interrupted) and not unpaid_scope
     marked = [e for e in descendants if e["tags_applied"] or e["chained"]]
     # A descendant that failed files after its tag pass offers its own
     # Retry, which carries the parent's photos to processing. One that was
@@ -330,6 +386,8 @@ def import_resume_takeover(parent_id, parent_result, rows):
         "parent_interrupted": parent_interrupted,
         "descendant_landed_files": descendant_landings,
         "descendant_photo_fingerprints": descendant_fingerprints,
+        "paid_tag_photo_ids": paid_tag_ids,
+        "unpaid_tag_photo_ids": unpaid_tag_ids,
     }
 
 
@@ -1048,7 +1106,7 @@ class ImportService:
                 parent_id, parent_result,
                 self._import_resume_rows(
                     db, parent_id, parent_config, parent_workspace,
-                ),
+                ), parent_config,
             )
             if takeover["by"] is not None:
                 return None, None, None, None, None, ImportFailure(
@@ -1070,7 +1128,10 @@ class ImportService:
                 "takeover": json.loads(json.dumps(takeover)),
             })
         if takeover and relocate_landings:
-            self._recover_relocated_descendant_landings(db, takeover)
+            rebased = self._recover_relocated_descendant_landings(
+                db, takeover, allowed_fingerprints,
+            )
+            allowed_fingerprints.update({pid: fp for pid, fp in rebased.items() if pid in allowed_ids})
         parent_resume = self._interrupted_parent_resume(
             parent_config, parent_result, takeover,
         )
@@ -1123,7 +1184,7 @@ class ImportService:
             (parent_id,),
         ).fetchone() is not None
 
-    def _recover_relocated_descendant_landings(self, db, takeover):
+    def _recover_relocated_descendant_landings(self, db, takeover, carry_fingerprints=None):
         """Keep a moved descendant's scope only when its bytes still match."""
         expected = {}
         for key, fingerprint in takeover.get("descendant_photo_fingerprints", {}).items():
@@ -1133,7 +1194,10 @@ class ImportService:
                 continue
             if pid > 0 and isinstance(fingerprint, str):
                 expected[pid] = fingerprint
+        # The selected parent's expected bytes stay authoritative for its IDs.
+        expected.update(carry_fingerprints or {})
         current = self._capture_photo_fingerprints_for_ids(db, list(expected))
+        rebased = {}
         for pid, fingerprint in current.items():
             old_parts = expected[pid].rsplit("|s=", 1)
             new_parts = fingerprint.rsplit("|s=", 1)
@@ -1145,6 +1209,13 @@ class ImportService:
             file_hash = identity.rsplit("|h=", 1)[1]
             if file_hash:
                 takeover["descendant_landed_files"][new_parts[0]] = [-1, -1, file_hash]
+                rebased[pid] = fingerprint
+            elif identity == "0|h=":
+                with contextlib.suppress(OSError):
+                    stat = os.stat(new_parts[0])
+                    takeover["descendant_landed_files"][new_parts[0]] = [0, stat.st_mtime_ns, ""]
+                    rebased[pid] = fingerprint
+        return rebased
 
     def _import_resume_rows(self, db, parent_id, parent_config, workspace_id):
         """Finished import rows that may descend from ``parent_id``, for
@@ -1305,6 +1376,7 @@ class ImportService:
             },
             # Its tag/GPS pass covered everything it owed once it ran.
             "tags_applied": tags_applied,
+            "paid_tag_photo_ids": takeover.get("paid_tag_photo_ids", []),
             # The chain already ran (collection created, processing
             # child enqueued) — the resume must not re-chain, only
             # replay the owed tag pass.
@@ -1314,11 +1386,11 @@ class ImportService:
             # photo_ids, but their own import already tagged them), plus
             # what it inherited as untagged.
             "untagged_ids": [] if tags_applied else sorted(
-                (
-                    set(ids(parent_result.get("photo_ids")))
-                    - set(ids(parent_config.get("carry_photo_ids")))
-                )
-                | set(ids(parent_config.get("untagged_photo_ids")))
+                ((set(ids(parent_result.get("photo_ids")))
+                  - set(ids(parent_config.get("carry_photo_ids"))))
+                 | set(ids(parent_config.get("untagged_photo_ids")))
+                 | set(ids(takeover.get("unpaid_tag_photo_ids"))))
+                - set(ids(takeover.get("paid_tag_photo_ids")))
             ),
         }
 
