@@ -1303,7 +1303,7 @@ class JobRunner:
         if stale:
             message += (" A request running that long is probably stuck;"
                         " restarting Vireo releases it.")
-        log.warning("Workspace %s busy: %s", workspace_id, message)
+        (log.warning if stale else log.info)("Workspace %s busy: %s", workspace_id, message)
         frames = sys._current_frames() if stale else {}
         for holder in stale:
             frame = frames.get(holder["thread"])
