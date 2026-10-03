@@ -55,10 +55,8 @@ def test_hidden_window_stops_background_polls_and_catches_up_when_shown(live_ser
     page.clock.install()
     page.goto(live_server['url'] + '/browse')
     expect(page.locator('.grid-card').first).to_be_visible()
-    # Let the page-load new-images check settle, then take job-poll ticks
-    # until the navbar has seen no live job: a live job keeps the job poll
-    # running while hidden, for the dock progress.
-    page.wait_for_function('() => !_newImagesInFlight && _newImagesPendingTimer === null')
+    # Take job-poll ticks until the navbar has seen no live job: a live job
+    # keeps the job poll running while hidden, for the dock progress.
     for _ in range(20):
         with page.expect_response('**/api/jobs') as response:
             page.clock.fast_forward(15000)
@@ -66,6 +64,14 @@ def test_hidden_window_stops_background_polls_and_catches_up_when_shown(live_ser
             break
     else:
         raise AssertionError('a job stayed live')
+    # Then let the pending-answer retries drain. Each re-asks after 3s while
+    # the server is still working, and stops once it answers. One armed just
+    # before the work finished would fire while hidden. Under load the ticks
+    # above can reach the automatic missing-originals check (due 180s in).
+    # Its scan then lags the job list by one retry.
+    page.wait_for_function(
+        '() => !_newImagesInFlight && _newImagesPendingTimer === null'
+        ' && !_missingPhotosBannerInFlight && _missingPhotosBannerStatusPoll === null')
     page.wait_for_timeout(300)
 
     requested = []

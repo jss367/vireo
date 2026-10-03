@@ -234,8 +234,10 @@ def test_unreserved_bare_navigation_shortcut_navigates(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/cull", timeout=15000)
     page.wait_for_load_state("networkidle")
-    page.keyboard.press("d")
-    page.wait_for_url(f"{url}/dashboard", timeout=3000)
+    # The shortcut's job ends once the browser asks for the page. Waiting
+    # for the server to answer as well only measures how busy the machine is.
+    with page.expect_request(f"{url}/dashboard", timeout=3000):
+        page.keyboard.press("d")
 
 
 def test_modified_navigation_shortcut_still_navigates(live_server, page):
@@ -249,8 +251,8 @@ def test_modified_navigation_shortcut_still_navigates(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/cull", timeout=15000)
     page.wait_for_load_state("networkidle")
-    page.keyboard.press("Control+B")
-    page.wait_for_url(f"{url}/browse", timeout=3000)
+    with page.expect_request(f"{url}/browse", timeout=3000):
+        page.keyboard.press("Control+B")
 
 
 def test_nav_shortcut_suppressed_when_overlay_open(live_server, page):
