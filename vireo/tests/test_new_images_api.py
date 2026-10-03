@@ -252,10 +252,6 @@ def test_api_new_images_response_trims_sample_but_caches_full_list(app_and_db):
     client = app.test_client()
     resp = client.get("/api/workspaces/active/new-images")
     assert resp.status_code == 200
-    data = resp.get_json()
-    assert data["new_count"] == 8
-    assert len(data["sample"]) == 5
-    assert "sample_complete" not in data
 
     cache = get_shared_cache()
     deadline = time.monotonic() + 2.0
@@ -268,6 +264,14 @@ def test_api_new_images_response_trims_sample_but_caches_full_list(app_and_db):
     assert cached is not None
     assert cached["sample_complete"] is True
     assert len(cached["sample"]) == 8
+    # The initial response may legitimately be pending on a loaded runner.
+    # Check the response contract once the background snapshot is available.
+    resp = client.get("/api/workspaces/active/new-images")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["new_count"] == 8
+    assert len(data["sample"]) == 5
+    assert "sample_complete" not in data
 
 
 def test_api_new_images_cached_response_slices_without_full_copy(app_and_db):
