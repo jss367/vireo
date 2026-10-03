@@ -1218,7 +1218,10 @@ class ImportService:
             if len(new_parts) != 2 or "|h=" not in new_parts[1]:
                 continue
             new_identity = new_parts[1]
-            new_path = new_parts[0]
+            # Fingerprints retain a slash before the filename on every
+            # platform. Recovery indexes paths built by os.path.join, so
+            # use native separators here without changing stored identities.
+            new_path = os.path.normpath(new_parts[0])
             file_hash = new_identity.rsplit("|h=", 1)[1]
             # Descendant moved: keep its scope under the current path.
             expected_descendant = descendant_expected.get(pid)
