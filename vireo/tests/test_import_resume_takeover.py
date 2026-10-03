@@ -564,8 +564,17 @@ def test_takeover_fetches_transitive_legacy_descendants(tmp_path, unpersisted_ch
 @pytest.mark.parametrize("current", [
     "/nas/child.jpg|s=12|h=original", "/nas/child.jpg|s=12|h=replaced",
 ])
-def test_moved_descendant_recovers_only_matching_bytes(current):
+@pytest.mark.parametrize("path_style", ["windows", "posix"])
+def test_moved_descendant_recovers_only_matching_bytes(current, path_style, monkeypatch):
+    import ntpath
+    import posixpath
+    from types import SimpleNamespace
     from unittest.mock import Mock
+
+    import services.imports as imports
+
+    path = ntpath if path_style == "windows" else posixpath
+    monkeypatch.setattr(imports, "os", SimpleNamespace(path=path))
 
     service = ImportService(lambda: Mock(), "unused", {},
                             invalidate_missing_originals=Mock(), enqueue_process_job=Mock(),
@@ -578,7 +587,7 @@ def test_moved_descendant_recovers_only_matching_bytes(current):
     service._capture_photo_fingerprints_for_ids = Mock(return_value={3: current})
     service._recover_relocated_descendant_landings(Mock(), takeover)
     resume = service._interrupted_parent_resume(_parent()["config"], _parent()["result"], takeover)
-    assert ("/nas/child.jpg" in resume["landed_files"]) == current.endswith("h=original")
+    assert (path.normpath("/nas/child.jpg") in resume["landed_files"]) == current.endswith("h=original")
 
 
 
@@ -703,12 +712,21 @@ def test_rebase_moved_parent_fingerprint_rejects_replaced_bytes():
     assert allowed_fingerprints == {7: "/local/carry.jpg|s=42|h=hash-original"}
 
 
-def test_rebase_covers_both_descendant_and_parent_carry_in_one_pass():
+@pytest.mark.parametrize("path_style", ["windows", "posix"])
+def test_rebase_covers_both_descendant_and_parent_carry_in_one_pass(path_style, monkeypatch):
     """A single after_process_move can relocate both the parent's carried
     photos and the descendant's new landings. One fingerprint capture
     recovers both: descendant_landed_files gains the new path, and
     allowed_fingerprints is rebased for carried IDs with matching bytes."""
+    import ntpath
+    import posixpath
+    from types import SimpleNamespace
     from unittest.mock import Mock
+
+    import services.imports as imports
+
+    path = ntpath if path_style == "windows" else posixpath
+    monkeypatch.setattr(imports, "os", SimpleNamespace(path=path))
 
     service = ImportService(lambda: Mock(), "unused", {},
                             invalidate_missing_originals=Mock(), enqueue_process_job=Mock(),
@@ -729,6 +747,6 @@ def test_rebase_covers_both_descendant_and_parent_carry_in_one_pass():
     )
     assert service._capture_photo_fingerprints_for_ids.call_count == 1
     assert takeover["descendant_landed_files"] == {
-        "/nas/child.jpg": [-1, -1, "hash-child"],
+        path.normpath("/nas/child.jpg"): [-1, -1, "hash-child"],
     }
     assert allowed_fingerprints == {7: "/nas/carry.jpg|s=42|h=hash-carry"}
