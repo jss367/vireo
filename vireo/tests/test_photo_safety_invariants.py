@@ -307,9 +307,11 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
         visible = {}
         for row in self.db.conn.execute(
             "SELECT p.id, wf.workspace_id FROM photos p "
-            "JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
+            "LEFT JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
         ):
-            visible.setdefault(row[0], set()).add(row[1])
+            workspaces = visible.setdefault(row[0], set())
+            if row[1] is not None:
+                workspaces.add(row[1])
         return visible
 
     def _photo_folders(self):
@@ -701,3 +703,34 @@ def test_loss_invariant_counts_identical_copies(remaining_paths, allowed_deletio
         machine.no_photo_lost_or_overwritten()
         assert machine.snapshot == dict.fromkeys(remaining_paths, "same-bytes")
         assert not machine.allowed_to_vanish
+
+
+@pytest.mark.parametrize("delete_catalog_row", [False, True], ids=["linkless-photo", "deleted-photo"])
+def test_visibility_invariant_distinguishes_linkless_from_deleted(delete_catalog_row):
+    import sqlite3
+    from types import SimpleNamespace
+
+    # Use real SQL to exercise the visibility query as well as the invariant.
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.executescript(
+            "CREATE TABLE photos (id INTEGER, folder_id INTEGER);"
+            "CREATE TABLE workspace_folders (folder_id INTEGER, workspace_id INTEGER);"
+            "INSERT INTO photos VALUES (1, 10);"
+            "INSERT INTO workspace_folders VALUES (10, 1);"
+        )
+        machine = PhotoSafetyMachine.__new__(PhotoSafetyMachine)
+        machine.db = SimpleNamespace(conn=conn)
+        machine.visibility_known_broken = False
+        machine.visibility = machine._workspace_visibility()
+        assert machine.visibility == {1: {1}}
+        conn.execute("DELETE FROM workspace_folders")
+        if delete_catalog_row:
+            conn.execute("DELETE FROM photos")
+            machine.no_photo_drops_out_of_a_workspace()
+            assert machine.visibility == {}
+        else:
+            with pytest.raises(AssertionError, match="photos lost workspace visibility"):
+                machine.no_photo_drops_out_of_a_workspace()
+    finally:
+        conn.close()
