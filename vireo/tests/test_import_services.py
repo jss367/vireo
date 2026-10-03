@@ -10,6 +10,57 @@ from services.imports import ImportFailure, ImportService
 from wait import wait_for_job_via_runner
 
 
+@pytest.mark.parametrize("path_style", ["windows", "posix"])
+@pytest.mark.parametrize("same_bytes", [True, False])
+def test_relocated_descendant_landings_use_native_paths(monkeypatch, path_style, same_bytes):
+    """A moved descendant remains recoverable across native path separators."""
+    import ntpath
+    import posixpath
+    from types import SimpleNamespace
+
+    import import_job
+    import services.imports as imports
+
+    path = ntpath if path_style == "windows" else posixpath
+    folder = r"C:\Photos\NAS" if path_style == "windows" else "/photos/nas"
+    old_folder = r"C:\Photos\archive" if path_style == "windows" else "/photos/archive"
+    old_fingerprint = f"{old_folder}/bird.jpg|s=123|h=original"
+    current_hash = "original" if same_bytes else "replacement"
+    fingerprint = f"{folder}/bird.jpg|s=123|h={current_hash}"
+    service = Mock()
+    service._capture_photo_fingerprints_for_ids.return_value = {5: fingerprint}
+    takeover = {
+        "descendant_photo_fingerprints": {"5": old_fingerprint},
+        "descendant_landed_files": {},
+    }
+    parent_fingerprints = {5: old_fingerprint}
+    # Replace only each module's os reference, leaving pytest and the host
+    # filesystem on their real platform while exercising Windows semantics.
+    monkeypatch.setattr(imports, "os", SimpleNamespace(path=path))
+    monkeypatch.setattr(import_job, "os", SimpleNamespace(path=path))
+    ImportService._recover_relocated_descendant_landings(
+        service, Mock(), takeover, parent_fingerprints,
+    )
+    catalog = Mock()
+    catalog.conn.execute.return_value.fetchall.return_value = [{
+        "id": 5, "filename": "bird.jpg", "companion_path": None,
+        "file_hash": current_hash,
+    }]
+    state = SimpleNamespace(recovered_photo_ids=set())
+    import_job._recover_parent_landings(
+        state, SimpleNamespace(recover_landed_files=takeover["descendant_landed_files"]),
+        catalog,
+    )
+    assert state.recovered_photo_ids == ({5} if same_bytes else set())
+    if same_bytes:
+        catalog.conn.execute.assert_called_once()
+        assert catalog.conn.execute.call_args.args[1] == (folder,)
+        # Persisted fingerprint strings retain their existing format.
+        assert parent_fingerprints[5] == fingerprint
+    else:
+        assert parent_fingerprints[5] == old_fingerprint
+
+
 @pytest.fixture
 def import_service(tmp_path, monkeypatch):
     import config as cfg
