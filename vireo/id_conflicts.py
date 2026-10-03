@@ -912,6 +912,7 @@ EXCLUDES = [
     ("unflagged", "Hide unflagged"),
     ("not_wildlife", "Hide not wildlife"),
     ("misses", "Hide marked misses"),
+    ("multi_species", "Hide multi-species"),
 ]
 
 EXCLUDE_IDS = [item[0] for item in EXCLUDES]
@@ -965,6 +966,19 @@ def _exclude_mask(photo):
     if photo.get("miss_no_subject") or photo.get("miss_clipped") or photo.get("miss_oof"):
         mask |= _EXCLUDE_BIT["misses"]
     return mask
+
+
+def _is_multi_species(photo, assessment):
+    """Whether the photo holds, or is suggested to hold, two or more species.
+
+    Two distinct species keywords make it multi-species outright; so does a
+    subject the shown models read as an additional species, because that
+    photo is a second-species decision rather than a one-species one.
+    """
+    species = {
+        name.casefold() for name in photo.get("species_keywords") or [] if name
+    }
+    return len(species) > 1 or assessment["signal"]["additional_subject_count"] > 0
 
 
 def _filter_mask(record):
@@ -1065,6 +1079,8 @@ def index_record(photo, assessment):
             counts[item["category"]] += 1
     record.tile_counts = tuple(counts[name] for name in _TILE_CATEGORIES)
     record.exclude_mask = _exclude_mask(photo)
+    if _is_multi_species(photo, assessment):
+        record.exclude_mask |= _EXCLUDE_BIT["multi_species"]
     # ``reviewed`` reads every stored prediction, not just the shown models:
     # the filter answers "has this photo been dealt with", which does not
     # change because the user narrowed the comparison to one model.

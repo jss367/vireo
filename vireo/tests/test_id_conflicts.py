@@ -273,6 +273,35 @@ def test_exclusions_hide_rows_but_still_report_what_they_would_hide():
     assert selection.filter_counts["all"] == 2
 
 
+def test_hide_multi_species_keeps_only_single_species_photos():
+    """Two species keywords, or a suggested second species, make a photo
+    multi-species; one keyword with several same-species subjects does not."""
+    one_keyword = _photo(
+        [_subject({"a": [_pred("Cardinal")]})],
+        photo_id=1, species_keywords=["Cardinal"],
+    )
+    two_keywords = _photo(
+        [_subject({"a": [_pred("Cardinal")]})],
+        photo_id=2, species_keywords=["Cardinal", "Blue Jay"],
+    )
+    suggested_second = _photo([
+        _subject({"a": [_pred("Red-tailed Hawk", category="match", pred_id=1)]},
+                 detection_id=1),
+        _subject({"a": [_pred("Cooper's Hawk", category="conflict", pred_id=2)]},
+                 detection_id=2),
+    ], photo_id=3, species_keywords=["Red-tailed Hawk"])
+    two_of_one_species = _photo([
+        _subject({"a": [_pred("Mallard", pred_id=1)]}, detection_id=1),
+        _subject({"a": [_pred("Mallard", pred_id=2)]}, detection_id=2),
+    ], photo_id=4, species_keywords=["Mallard"])
+    records = _records([one_keyword, two_keywords, suggested_second, two_of_one_species])
+
+    selection = ic.select(records, ["a"], filter_id="all", excludes=["multi_species"])
+
+    assert selection.photo_ids == [1, 4]
+    assert selection.exclusion_counts["multi_species"] == 2
+
+
 def test_summary_tiles_describe_the_collection_not_the_page():
     photos = [
         _photo([_subject({"a": [_pred("Cardinal", category="conflict")]})], photo_id=i)
