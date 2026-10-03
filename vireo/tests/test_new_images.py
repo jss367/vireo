@@ -2108,24 +2108,26 @@ def test_a_walk_that_stalls_during_the_recheck_does_not_block_it(
         wedged.join(5)
 
 
-def test_staged_exclusion_resolves_an_alias_below_a_mount(monkeypatch):
+def test_staged_exclusion_resolves_an_alias_below_a_mount(monkeypatch, tmp_path):
     import new_images
     import volume_reachability
 
-    root = "/Volumes/NAS/archive-alias"
-    source = "/Volumes/NAS/archive/day"
+    root = str(tmp_path / "NAS" / "archive-alias")
+    source = str(tmp_path / "NAS" / "archive" / "day")
     monkeypatch.setattr(volume_reachability, "resolve_alias_lexically", lambda path: path)
     probes = []
 
     def target(path):
         probes.append(path)
-        return "archive" if path == root else None
+        return "archive" if new_images._path_key(path) == new_images._path_key(root) else None
 
     monkeypatch.setattr(volume_reachability, "_bounded_link_target", target)
-    covering, excluded = new_images._staged_exclusions_for_root(root, [(source, {source})])
+    covering, excluded = new_images._staged_exclusions_for_root(
+        root, [(source, {new_images._path_key(source)})],
+    )
     assert covering is None
-    assert root + "/day" in excluded
-    assert root in probes
+    assert new_images._path_key(os.path.join(root, "day")) in excluded
+    assert any(new_images._path_key(path) == new_images._path_key(root) for path in probes)
 
 
 def test_staged_alias_probe_timeout_leaves_the_root_unchecked(monkeypatch):
