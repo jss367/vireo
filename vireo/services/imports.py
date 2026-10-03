@@ -1128,10 +1128,9 @@ class ImportService:
                 "takeover": json.loads(json.dumps(takeover)),
             })
         if takeover and relocate_landings:
-            rebased = self._recover_relocated_descendant_landings(
+            self._recover_relocated_descendant_landings(
                 db, takeover, allowed_fingerprints,
             )
-            allowed_fingerprints.update({pid: fp for pid, fp in rebased.items() if pid in allowed_ids})
         parent_resume = self._interrupted_parent_resume(
             parent_config, parent_result, takeover,
         )
@@ -1184,38 +1183,70 @@ class ImportService:
             (parent_id,),
         ).fetchone() is not None
 
-    def _recover_relocated_descendant_landings(self, db, takeover, carry_fingerprints=None):
-        """Keep a moved descendant's scope only when its bytes still match."""
-        expected = {}
+    def _recover_relocated_descendant_landings(
+        self, db, takeover, allowed_fingerprints=None,
+    ):
+        """Keep a moved descendant's scope only when its bytes still match.
+
+        Also rebases ``allowed_fingerprints`` (the parent-carried IDs'
+        expected fingerprints) in place when a descendant's
+        ``after_process_move`` relocated a photo the parent carried: the
+        current fingerprint uses the new path, but its size+hash still
+        match the parent's old-path record, so comparing the parent's
+        stored value in ``validate_carry_photo_ids`` would reject the
+        carry as stale and strand the remaining processing work after
+        the move. Point ``allowed_fingerprints`` at the current path so
+        the carry re-validates. Both lookups share one fingerprint
+        capture; this hashing already runs outside the admission lock.
+        """
+        descendant_expected = {}
         for key, fingerprint in takeover.get("descendant_photo_fingerprints", {}).items():
             try:
                 pid = int(key)
             except (TypeError, ValueError):
                 continue
             if pid > 0 and isinstance(fingerprint, str):
-                expected[pid] = fingerprint
-        # The selected parent's expected bytes stay authoritative for its IDs.
-        expected.update(carry_fingerprints or {})
-        current = self._capture_photo_fingerprints_for_ids(db, list(expected))
-        rebased = {}
+                descendant_expected[pid] = fingerprint
+        all_pids = set(descendant_expected)
+        if allowed_fingerprints:
+            all_pids.update(allowed_fingerprints)
+        if not all_pids:
+            return
+        current = self._capture_photo_fingerprints_for_ids(db, list(all_pids))
         for pid, fingerprint in current.items():
-            old_parts = expected[pid].rsplit("|s=", 1)
             new_parts = fingerprint.rsplit("|s=", 1)
-            if len(old_parts) != 2 or len(new_parts) != 2:
+            if len(new_parts) != 2 or "|h=" not in new_parts[1]:
                 continue
-            identity = old_parts[1]
-            if identity != new_parts[1] or "|h=" not in identity:
-                continue
-            file_hash = identity.rsplit("|h=", 1)[1]
-            if file_hash:
-                takeover["descendant_landed_files"][new_parts[0]] = [-1, -1, file_hash]
-                rebased[pid] = fingerprint
-            elif identity == "0|h=":
-                with contextlib.suppress(OSError):
-                    stat = os.stat(new_parts[0])
-                    takeover["descendant_landed_files"][new_parts[0]] = [0, stat.st_mtime_ns, ""]
-                    rebased[pid] = fingerprint
-        return rebased
+            new_identity = new_parts[1]
+            new_path = new_parts[0]
+            file_hash = new_identity.rsplit("|h=", 1)[1]
+            # Descendant moved: keep its scope under the current path.
+            expected_descendant = descendant_expected.get(pid)
+            if expected_descendant is not None:
+                old_parts = expected_descendant.rsplit("|s=", 1)
+                if (
+                    len(old_parts) == 2
+                    and old_parts[1] == new_identity
+                    and file_hash
+                ):
+                    takeover["descendant_landed_files"][new_path] = [
+                        -1, -1, file_hash,
+                    ]
+            # Parent-carried moved: rebase the expected fingerprint to
+            # the current path so the carry validates after the move.
+            if allowed_fingerprints is not None:
+                expected_parent = allowed_fingerprints.get(pid)
+                if (
+                    expected_parent is not None
+                    and expected_parent != fingerprint
+                ):
+                    old_parts = expected_parent.rsplit("|s=", 1)
+                    if (
+                        len(old_parts) == 2
+                        and old_parts[1] == new_identity
+                        and file_hash
+                    ):
+                        allowed_fingerprints[pid] = fingerprint
 
     def _import_resume_rows(self, db, parent_id, parent_config, workspace_id):
         """Finished import rows that may descend from ``parent_id``, for
