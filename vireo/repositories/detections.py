@@ -380,7 +380,7 @@ class DetectionsRepository:
             f"       p.miss_no_subject, p.miss_clipped, p.miss_oof, "
             f"       p.miss_computed_at, p.flag "
             f"FROM photos p "
-            f"JOIN workspace_folders wf ON wf.folder_id = p.folder_id "
+            f"JOIN photo_workspace_visibility wf ON wf.photo_id = p.id "
             f"WHERE wf.workspace_id = ? "
             f"  AND ({where}) "
             f"  AND (p.flag IS NULL OR p.flag != 'rejected') "
@@ -462,7 +462,7 @@ class DetectionsRepository:
         params.extend(scope_params)
         rows = self.conn.execute(
             f"SELECT p.id, p.flag FROM photos p "
-            f"JOIN workspace_folders wf ON wf.folder_id = p.folder_id "
+            f"JOIN photo_workspace_visibility wf ON wf.photo_id = p.id "
             f"WHERE wf.workspace_id = ? "
             f"  AND p.{col}=1 "
             f"  AND (p.flag IS NULL OR p.flag != 'rejected') "

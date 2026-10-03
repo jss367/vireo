@@ -15,6 +15,7 @@ Workspace-folder membership lives in ``repositories/workspace_folders.py``.
 import os
 
 from repositories.collections import remap_collection_photo_ids
+from repositories.photo_visibility import remap_photo_visibility
 
 
 class FolderRepository:
@@ -82,7 +83,7 @@ class FolderRepository:
             """WITH RECURSIVE
                visible(id, is_workspace_root) AS (
                    SELECT f.id, wf.is_root FROM folders f
-                   JOIN workspace_folders wf ON wf.folder_id = f.id
+                   JOIN workspace_visible_folders wf ON wf.folder_id = f.id
                    WHERE wf.workspace_id = ? AND f.status IN ('ok', 'partial')
                ),
                walk(start_id, current_id) AS (
@@ -104,13 +105,14 @@ class FolderRepository:
                )
                SELECT f.id, f.path, f.name,
                       e.parent_id AS parent_id,
-                      f.photo_count, f.status,
-                      v.is_workspace_root
+                      (SELECT COUNT(*) FROM photo_workspace_visibility pv
+                       WHERE pv.folder_id = f.id AND pv.workspace_id = ?) AS photo_count,
+                      f.status, v.is_workspace_root
                FROM folders f
                JOIN visible v ON v.id = f.id
                JOIN effective e ON e.start_id = f.id
                ORDER BY f.path""",
-            (ws,),
+            (ws, ws),
         ).fetchall()
 
     def subtree_ids(self, folder_id):
@@ -173,7 +175,7 @@ class FolderRepository:
         """Return the number of ok/partial folders linked to the workspace."""
         return self.conn.execute(
             """SELECT COUNT(*) FROM folders f
-               JOIN workspace_folders wf ON wf.folder_id = f.id
+               JOIN workspace_visible_folders wf ON wf.folder_id = f.id
                WHERE wf.workspace_id = ? AND f.status IN ('ok', 'partial')""",
             (self.workspace_id,),
         ).fetchone()[0]
@@ -190,8 +192,8 @@ class FolderRepository:
                    SELECT p.id, p.folder_id, p.timestamp
                    FROM photos p
                    JOIN folders f0 ON f0.id = p.folder_id AND f0.status IN ('ok', 'partial')
-                   JOIN workspace_folders wf0
-                     ON wf0.folder_id = p.folder_id AND wf0.workspace_id = ?
+                   JOIN photo_workspace_visibility wf0
+                     ON wf0.photo_id = p.id AND wf0.workspace_id = ?
                    WHERE p.quality_score IS NOT NULL
                    UNION ALL
                    SELECT a.photo_id, f.parent_id, a.timestamp
@@ -205,7 +207,7 @@ class FolderRepository:
                       COUNT(a.photo_id) as photo_count,
                       MAX(a.timestamp) as latest_photo
                FROM folders f
-               JOIN workspace_folders wf ON wf.folder_id = f.id
+               JOIN workspace_visible_folders wf ON wf.folder_id = f.id
                JOIN ancestors a ON a.folder_id = f.id
                WHERE wf.workspace_id = ?
                  AND f.status IN ('ok', 'partial')
@@ -365,7 +367,7 @@ class FolderRepository:
             """SELECT f.id, f.path, f.name, f.parent_id,
                       COUNT(p.id) as photo_count
                FROM folders f
-               JOIN workspace_folders wf ON wf.folder_id = f.id
+               JOIN workspace_visible_folders wf ON wf.folder_id = f.id
                LEFT JOIN photos p ON p.folder_id = f.id
                WHERE wf.workspace_id = ? AND f.status = 'missing'
                GROUP BY f.id
@@ -386,7 +388,7 @@ class FolderRepository:
                       f.id AS folder_id, f.path AS folder_path
                FROM photos p
                JOIN folders f ON p.folder_id = f.id
-               JOIN workspace_folders wf ON wf.folder_id = f.id
+               JOIN workspace_visible_folders wf ON wf.folder_id = f.id
                WHERE wf.workspace_id = ? AND f.status != 'missing'{subtree_clause}
                ORDER BY f.path, p.filename""",
             params,
@@ -539,6 +541,7 @@ class FolderRepository:
 
         # Delete duplicate photos and their associated data
         if drop_ids:
+            remap_photo_visibility(self.conn, collection_remap)
             ph = ",".join("?" for _ in drop_ids)
             self.conn.execute(f"DELETE FROM photo_keywords WHERE photo_id IN ({ph})", drop_ids)
             self.conn.execute(f"DELETE FROM pending_changes WHERE photo_id IN ({ph})", drop_ids)
@@ -661,7 +664,7 @@ class FolderRepository:
         for chunk in self._chunks(folder_ids):
             placeholders = ",".join("?" for _ in chunk)
             sql = (
-                f"SELECT DISTINCT folder_id FROM workspace_folders "
+                f"SELECT DISTINCT folder_id FROM workspace_visible_folders "
                 f"WHERE folder_id IN ({placeholders})"
             )
             params = list(chunk)
@@ -785,6 +788,11 @@ class FolderRepository:
                 remember_removals(active_ws, kept_subtree_ids, recursive=True)
                 for chunk in self._chunks(kept_subtree_ids):
                     placeholders = ",".join("?" for _ in chunk)
+                    self.conn.execute(
+                        f"DELETE FROM workspace_photos WHERE workspace_id = ? AND photo_id IN "
+                        f"(SELECT id FROM photos WHERE folder_id IN ({placeholders}))",
+                        [active_ws] + chunk,
+                    )
                     self.conn.execute(
                         f"DELETE FROM workspace_folders WHERE workspace_id = ? "
                         f"AND folder_id IN ({placeholders})",

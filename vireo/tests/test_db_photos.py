@@ -181,8 +181,8 @@ def test_get_photo_sql_is_byte_identical(db, lib):
     assert statements == [
         f"SELECT {detail} FROM photos WHERE id = {lib['a']}",
         f"""SELECT {detail} FROM photos
-                    WHERE id = {lib['a']} AND folder_id IN (
-                        SELECT folder_id FROM workspace_folders
+                    WHERE id = {lib['a']} AND id IN (
+                        SELECT photo_id FROM photo_workspace_visibility
                         WHERE workspace_id = {db._active_workspace_id})""",
     ]
 

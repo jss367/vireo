@@ -174,7 +174,7 @@ def _fetch_workspace_miss_rows(db, detector_confidence=None):
         "        WHERE d2.photo_id = p.id) "
         "         AS max_prediction_conf "
         "FROM photos p "
-        "JOIN workspace_folders wf ON wf.folder_id = p.folder_id "
+        "JOIN photo_workspace_visibility wf ON wf.photo_id = p.id "
         "WHERE wf.workspace_id = ?",
         (detector_confidence, ws_id),
     ).fetchall()

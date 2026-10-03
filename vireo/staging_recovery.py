@@ -125,7 +125,7 @@ def _catalog_candidates(db, filename: str, size: int, staging_root: str) -> list
         """SELECT p.id AS photo_id, p.filename, p.file_size, f.path AS folder_path
              FROM photos p
              JOIN folders f ON f.id = p.folder_id
-             JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+             JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                                       AND wf.workspace_id = ?
             WHERE p.filename = ? AND p.file_size = ?
             ORDER BY f.path, p.id""",

@@ -1793,4 +1793,7 @@ class CanonicalSchema:
                 "INSERT INTO db_meta(key, value) "
                 "VALUES ('duplicate_rejections_backfill_v1', '1')"
             )
+        from photo_visibility_schema import create_photo_visibility_schema
+
+        create_photo_visibility_schema(self.conn)
         self.conn.commit()

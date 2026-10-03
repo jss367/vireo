@@ -1379,6 +1379,23 @@ class Database:
         """
         return self._workspace_repository().unpin_tab(nav_id)
 
+    def _photo_visibility_repository(self):
+        from repositories.photo_visibility import PhotoVisibilityRepository
+
+        return PhotoVisibilityRepository(self.conn)
+
+    def grant_workspace_photos(self, workspace_id, photo_ids):
+        self._photo_visibility_repository().grant(workspace_id, photo_ids)
+
+    def grant_verified_twin_photos(self, workspace_id, rows):
+        self._photo_visibility_repository().grant_verified_twins(workspace_id, rows)
+
+    def photo_move_affected_workspaces(self, photo_ids):
+        return self._photo_visibility_repository().affected_workspaces(photo_ids, self._ws_id())
+
+    def preserve_photo_visibility_for_move(self, photo_id, keep_visible):
+        self._photo_visibility_repository().preserve_for_move(photo_id, self._ws_id(), keep_visible)
+
     def _workspace_repository(self, *, scoped=True):
         """Build the workspace repository on this connection.
 

@@ -316,12 +316,12 @@ def test_import_eta_no_preview_measures_only_copied_files_in_mixed_batch():
     assert fields["eta_seconds"] == 2002.0
 
 
-def _ws_linked_folder_paths(db, ws_id):
+def _ws_visible_folder_paths(db, ws_id):
     return {
         row["path"]
         for row in db.conn.execute(
             """SELECT f.path FROM folders f
-               JOIN workspace_folders wf ON wf.folder_id = f.id
+               JOIN workspace_visible_folders wf ON wf.folder_id = f.id
                WHERE wf.workspace_id = ?""",
             (ws_id,),
         )
@@ -375,14 +375,14 @@ def test_run_import_job_copies_verifies_and_catalogs(tmp_path):
     assert result["failed"] == 0
 
     # The date folders are linked to the active workspace.
-    linked = _ws_linked_folder_paths(db, ws_id)
+    linked = _ws_visible_folder_paths(db, ws_id)
     assert str(archive / "2026" / "2026-07-03") in linked
     assert str(archive / "2026" / "2026-07-04") in linked
 
 
 def test_duplicate_only_import_links_matched_folders(tmp_path):
     """Importing a card of only already-cataloged duplicates must still
-    link the matched destination folders to the active workspace without
+    grant visibility to the matched photos without sharing their folders,
     scanning them or copying fresh files."""
     from import_dedup import compute_file_hash
     from import_job import ImportParams
@@ -413,7 +413,7 @@ def test_duplicate_only_import_links_matched_folders(tmp_path):
         ),
     )
     db.conn.commit()
-    assert str(dest_dir) not in _ws_linked_folder_paths(db, ws_id)
+    assert str(dest_dir) not in _ws_visible_folder_paths(db, ws_id)
 
     # Card holds a byte-identical copy of the cataloged photo.
     card = tmp_path / "card"
@@ -432,7 +432,7 @@ def test_duplicate_only_import_links_matched_folders(tmp_path):
     assert result["skipped_duplicate"] == 1
     assert result["failed"] == 0
     # The matched folder was linked despite zero fresh copies.
-    assert str(dest_dir) in _ws_linked_folder_paths(db, ws_id)
+    assert str(dest_dir) in _ws_visible_folder_paths(db, ws_id)
     # Still exactly one photo row — no re-import of known bytes.
     assert len(_photo_rows(db)) == 1
 
@@ -516,7 +516,7 @@ def test_duplicate_only_import_does_not_reread_unchanged_twins(
     assert result["skipped_duplicate"] == 3
     assert result["failed"] == 0
     # The folder is still linked without archive reads.
-    assert str(twin_dir) in _ws_linked_folder_paths(db, ws_id)
+    assert str(twin_dir) in _ws_visible_folder_paths(db, ws_id)
     assert read_paths == [], (
         "duplicate-only import re-read already-cataloged, unchanged twins: "
         f"{read_paths}"
@@ -560,7 +560,7 @@ def test_duplicate_only_import_does_not_scan_matched_folder(
     )
     assert result["skipped_duplicate"] == 1
     assert result["failed"] == 0
-    assert str(twin_dir) in _ws_linked_folder_paths(db, ws_id)
+    assert str(twin_dir) in _ws_visible_folder_paths(db, ws_id)
 
 
 def test_duplicate_only_import_leaves_stray_for_explicit_rescan(
@@ -658,11 +658,11 @@ def test_duplicate_only_import_skips_twins_cataloged_in_other_workspace(
     scanner.scan(str(archive), db)
     _mark_exif_extracted(db)
     assert len(_photo_rows(db)) == 3
-    assert str(twin_dir) in _ws_linked_folder_paths(db, seed_ws)
+    assert str(twin_dir) in _ws_visible_folder_paths(db, seed_ws)
 
     # A fresh workspace has never seen this folder.
     fresh_ws = db.create_workspace("Fresh")
-    assert str(twin_dir) not in _ws_linked_folder_paths(db, fresh_ws)
+    assert str(twin_dir) not in _ws_visible_folder_paths(db, fresh_ws)
 
     card = tmp_path / "card"
     card.mkdir()
@@ -679,7 +679,7 @@ def test_duplicate_only_import_skips_twins_cataloged_in_other_workspace(
     assert result["skipped_duplicate"] == 3, result
     assert result["failed"] == 0, result
     # The folder is now linked to the fresh workspace without archive reads.
-    assert str(twin_dir) in _ws_linked_folder_paths(db, fresh_ws)
+    assert str(twin_dir) in _ws_visible_folder_paths(db, fresh_ws)
     assert read_paths == [], (
         "duplicate-only import re-read twins whose folder was cataloged "
         "but not yet linked to the active workspace: "
@@ -741,7 +741,7 @@ def test_duplicate_only_import_links_alias_spelled_twin(tmp_path):
         ),
     )
     db.conn.commit()
-    assert str(alias_dest_dir) not in _ws_linked_folder_paths(db, ws_id)
+    assert str(alias_dest_dir) not in _ws_visible_folder_paths(db, ws_id)
 
     # Card has a byte-identical copy. Import to the REAL destination.
     card = tmp_path / "card"
@@ -761,7 +761,7 @@ def test_duplicate_only_import_links_alias_spelled_twin(tmp_path):
     # The alias-spelled twin folder is now workspace-linked (via the
     # direct-link path, bypassing scan which would have infinite-
     # recursed in _ensure_folder).
-    assert str(alias_dest_dir) in _ws_linked_folder_paths(db, ws_id)
+    assert str(alias_dest_dir) in _ws_visible_folder_paths(db, ws_id)
     # Still exactly one photo row — no double-catalog of the twin.
     assert len(_photo_rows(db)) == 1
     # And the run is safe to format the card.
@@ -2344,31 +2344,28 @@ def test_dup_workspace_link_failure_marks_unsafe(tmp_path, monkeypatch):
     import shutil
     shutil.copy2(str(dest_file), str(card / "IMG_0A80.jpg"))
 
-    real_link = Database.add_workspace_folder
+    def flaky_link(self, workspace_id, rows):
+        raise OSError("simulated photo visibility write failure")
 
-    def flaky_link(self, workspace_id, folder_id, *, is_root=True):
-        if folder_id == fid:
-            raise OSError("simulated workspace-link failure")
-        return real_link(self, workspace_id, folder_id, is_root=is_root)
-
-    monkeypatch.setattr(Database, "add_workspace_folder", flaky_link)
+    monkeypatch.setattr(Database, "grant_verified_twin_photos", flaky_link)
 
     result = run_import_job(
         _make_job(), FakeRunner(), db_path, ws_id,
         ImportParams(sources=[str(card)], destination=str(archive)),
     )
 
-    assert result["skipped_duplicate"] == 1
+    assert result["skipped_duplicate"] == 0
+    assert result["failed"] == 1
     assert result["safe_to_format"] is False
     assert result["ok"] is False
     assert any(
-        str(dest_dir) in u["path"] for u in result["unsafe_files"]
+        str(card) in u["path"] for u in result["unsafe_files"]
     ), (
         "expected the failing dup-link folder in unsafe_files; got "
         f"{result['unsafe_files']!r}"
     )
     # The seeded folder still isn't linked (that was the whole point).
-    assert str(dest_dir) not in _ws_linked_folder_paths(db, ws_id)
+    assert str(dest_dir) not in _ws_visible_folder_paths(db, ws_id)
 
 
 def test_dup_workspace_link_runtime_error_marks_unsafe(
@@ -2408,32 +2405,29 @@ def test_dup_workspace_link_runtime_error_marks_unsafe(
     import shutil
     shutil.copy2(str(dest_file), str(card / "IMG_0B81.jpg"))
 
-    real_link = Database.add_workspace_folder
+    def flaky_link(self, workspace_id, rows):
+        raise OSError("simulated photo visibility write failure")
 
-    def flaky_link(self, workspace_id, folder_id, *, is_root=True):
-        if folder_id == fid:
-            raise RuntimeError("database link exploded")
-        return real_link(self, workspace_id, folder_id, is_root=is_root)
-
-    monkeypatch.setattr(Database, "add_workspace_folder", flaky_link)
+    monkeypatch.setattr(Database, "grant_verified_twin_photos", flaky_link)
 
     result = run_import_job(
         _make_job(), FakeRunner(), db_path, ws_id,
         ImportParams(sources=[str(card)], destination=str(archive)),
     )
 
-    assert result["skipped_duplicate"] == 1
+    assert result["skipped_duplicate"] == 0
+    assert result["failed"] == 1
     # Direct-link errors are not cancellation sentinels.
     assert result["cancelled"] is False
     assert result["safe_to_format"] is False
     assert result["ok"] is False
     assert any(
-        str(dest_dir) in u["path"] for u in result["unsafe_files"]
+        str(card) in u["path"] for u in result["unsafe_files"]
     ), (
         "expected the failing dup-link folder in unsafe_files; got "
         f"{result['unsafe_files']!r}"
     )
-    assert str(dest_dir) not in _ws_linked_folder_paths(db, ws_id)
+    assert str(dest_dir) not in _ws_visible_folder_paths(db, ws_id)
 
 
 def test_wc_extraction_falls_back_to_archive_when_card_vanishes(
@@ -3689,7 +3683,7 @@ def test_zero_byte_destination_collision_is_adopted_and_cataloged(tmp_path):
     ).fetchone()
     assert row is not None
     assert row["hash_status"] == "ok"
-    assert str(dest_dir) in _ws_linked_folder_paths(db, ws_id)
+    assert str(dest_dir) in _ws_visible_folder_paths(db, ws_id)
 
 
 def test_import_promotes_missing_destination_folder_to_ok(tmp_path):
@@ -3845,7 +3839,7 @@ def test_duplicate_only_import_promotes_missing_twin_folder(tmp_path):
         "twin folder to 'ok' as part of its direct workspace link"
     )
     # And the folder is linked to the active workspace.
-    assert str(twin_dir) in _ws_linked_folder_paths(db, ws_id)
+    assert str(twin_dir) in _ws_visible_folder_paths(db, ws_id)
 
 
 def test_duplicate_only_import_links_twin_folder_when_destination_is_symlink(tmp_path):
@@ -3894,7 +3888,7 @@ def test_duplicate_only_import_links_twin_folder_when_destination_is_symlink(tmp
     )
     db.conn.commit()
     # Nothing linked before the run: proves the run must do the linking.
-    assert str(twin_dir) not in _ws_linked_folder_paths(db, ws_id)
+    assert str(twin_dir) not in _ws_visible_folder_paths(db, ws_id)
 
     card = tmp_path / "card"
     card.mkdir()
@@ -3912,7 +3906,7 @@ def test_duplicate_only_import_links_twin_folder_when_destination_is_symlink(tmp
     assert result["safe_to_format"] is True
     # The twin folder was scanned + linked despite the destination being
     # a symlink to (not literally equal to) the twin's cataloged root.
-    assert str(twin_dir) in _ws_linked_folder_paths(db, ws_id)
+    assert str(twin_dir) in _ws_visible_folder_paths(db, ws_id)
 
 
 def test_import_invalidates_derived_caches_on_content_change(tmp_path):
@@ -4483,7 +4477,7 @@ def test_key_duplicate_links_only_byte_verified_twin_folder(tmp_path):
     ws_folder_is_root = {
         row["path"]: row["is_root"]
         for row in db.conn.execute(
-            "SELECT f.path, wf.is_root FROM workspace_folders wf "
+            "SELECT f.path, wf.is_root FROM workspace_visible_folders wf "
             "JOIN folders f ON f.id = wf.folder_id "
             "WHERE wf.workspace_id = ?",
             (ws_id,),
@@ -4600,7 +4594,7 @@ def test_hash_duplicate_links_only_byte_verified_twin_folder(tmp_path):
     ws_folder_is_root = {
         row["path"]: row["is_root"]
         for row in db.conn.execute(
-            "SELECT f.path, wf.is_root FROM workspace_folders wf "
+            "SELECT f.path, wf.is_root FROM workspace_visible_folders wf "
             "JOIN folders f ON f.id = wf.folder_id "
             "WHERE wf.workspace_id = ?",
             (ws_id,),
@@ -4669,7 +4663,7 @@ def test_restricted_scan_does_not_link_unrelated_archive_subtrees(tmp_path):
     db.conn.commit()
     unrelated_paths = {str(unrelated_a), str(unrelated_b)}
     # Precondition: neither pre-existing folder is workspace-linked yet.
-    assert unrelated_paths.isdisjoint(_ws_linked_folder_paths(db, ws_id))
+    assert unrelated_paths.isdisjoint(_ws_visible_folder_paths(db, ws_id))
 
     # Run the import into ONE new templated dest_folder.
     from import_job import run_import_job
@@ -4680,7 +4674,7 @@ def test_restricted_scan_does_not_link_unrelated_archive_subtrees(tmp_path):
     assert result["copied"] == 1
     assert result["failed"] == 0
 
-    linked = _ws_linked_folder_paths(db, ws_id)
+    linked = _ws_visible_folder_paths(db, ws_id)
     # The newly-imported dest_folder must be linked (that's the whole
     # point of the import).
     dest_folder = archive / "2026" / "2026-07-05"
@@ -4891,7 +4885,7 @@ def test_remote_import_rsyncs_to_remote_and_catalogs_at_mount(
     for r in row_paths:
         assert "/volume1/Photography" not in r
     # The mount folder is linked to the active workspace.
-    assert mount_dir in _ws_linked_folder_paths(db, ws_id)
+    assert mount_dir in _ws_visible_folder_paths(db, ws_id)
 
 
 def test_remote_import_per_batch_rsync_invocation(tmp_path, monkeypatch):
@@ -5568,7 +5562,7 @@ def test_remote_import_promotes_missing_destination_folder_to_ok(
     )
 
     # And the imported photo is visible in the active workspace.
-    linked = _ws_linked_folder_paths(db, ws_id)
+    linked = _ws_visible_folder_paths(db, ws_id)
     assert mount_dir in linked, linked
 
 
@@ -6503,7 +6497,7 @@ def test_remote_import_dup_only_batch_does_not_scan_mount(
     _scanner.scan(str(archive_twin_dir), db)
     # Run from a fresh workspace so the import must perform the link.
     ws_id = db.create_workspace("Fresh")
-    assert str(archive_twin_dir) not in _ws_linked_folder_paths(db, ws_id)
+    assert str(archive_twin_dir) not in _ws_visible_folder_paths(db, ws_id)
     # Sanity: the twin row is present with the right hash.
     twin_rows = db.conn.execute(
         "SELECT p.file_hash, f.path FROM photos p "
@@ -6532,7 +6526,7 @@ def test_remote_import_dup_only_batch_does_not_scan_mount(
     assert result["failed"] == 0, result
     assert result["safe_to_format"] is True, result
     assert result["skipped_duplicate"] == 1, result
-    assert str(archive_twin_dir) in _ws_linked_folder_paths(db, ws_id)
+    assert str(archive_twin_dir) in _ws_visible_folder_paths(db, ws_id)
 
 
 def test_remote_import_links_verified_twin_folder_in_other_layout(
@@ -6583,7 +6577,7 @@ def test_remote_import_links_verified_twin_folder_in_other_layout(
         (fid, "DSC_0001.jpg", os.path.getsize(twin_path), src_hash),
     )
     db.conn.commit()
-    linked_before = _ws_linked_folder_paths(db, ws_id)
+    linked_before = _ws_visible_folder_paths(db, ws_id)
     assert twin_folder not in linked_before, linked_before
 
     result = run_import_job(
@@ -6603,7 +6597,7 @@ def test_remote_import_links_verified_twin_folder_in_other_layout(
     # even though it lives in a different sub-folder than the run's own
     # dest_folder (%Y/%Y-%m-%d template would have produced
     # ``2026/2026-07-03``, not ``unsorted``).
-    linked_after = _ws_linked_folder_paths(db, ws_id)
+    linked_after = _ws_visible_folder_paths(db, ws_id)
     assert twin_folder in linked_after, {
         "before": sorted(linked_before), "after": sorted(linked_after),
         "twin_folder": twin_folder,
@@ -6652,7 +6646,7 @@ def test_remote_import_direct_dup_link_does_not_read_unchanged_twins(
     assert calls["rsync"] == [], calls["rsync"]
     assert result["skipped_duplicate"] == 2, result
     assert result["failed"] == 0, result
-    assert twin_folder in _ws_linked_folder_paths(db, ws_id)
+    assert twin_folder in _ws_visible_folder_paths(db, ws_id)
     assert read_paths == [], (
         "remote duplicate-only import re-read already-cataloged, unchanged "
         f"twins: {read_paths}"
@@ -6703,7 +6697,7 @@ def test_remote_import_dup_only_batch_does_not_read_dest_folder_twins(
     assert result["skipped_duplicate"] == 2, result
     assert result["copied"] == 0, result
     assert result["failed"] == 0, result
-    assert dest_folder in _ws_linked_folder_paths(db, ws_id)
+    assert dest_folder in _ws_visible_folder_paths(db, ws_id)
     assert read_paths == [], (
         "remote duplicate-only import re-read already-cataloged, unchanged "
         f"twins in the destination folder: {read_paths}"
@@ -7495,7 +7489,7 @@ def test_remote_import_links_alias_spelled_twin_folder(tmp_path, monkeypatch):
         (fid, "DSC_0001.jpg", os.path.getsize(twin_path_real), src_hash),
     )
     db.conn.commit()
-    assert alias_twin_folder not in _ws_linked_folder_paths(db, ws_id)
+    assert alias_twin_folder not in _ws_visible_folder_paths(db, ws_id)
 
     result = run_import_job(
         _make_job(), FakeRunner(), db_path, ws_id,
@@ -7512,7 +7506,7 @@ def test_remote_import_links_alias_spelled_twin_folder(tmp_path, monkeypatch):
     # workspace through its existing catalog row.
     assert result["failed"] == 0, result
     assert result["safe_to_format"] is True, result
-    linked_after = _ws_linked_folder_paths(db, ws_id)
+    linked_after = _ws_visible_folder_paths(db, ws_id)
     assert alias_twin_folder in linked_after, sorted(linked_after)
 
 
@@ -7596,7 +7590,7 @@ def test_remote_import_links_case_only_twin_folder(tmp_path, monkeypatch):
         (fid, "DSC_0001.jpg", os.path.getsize(twin_path_case), src_hash),
     )
     db.conn.commit()
-    assert twin_folder_case not in _ws_linked_folder_paths(db, ws_id)
+    assert twin_folder_case not in _ws_visible_folder_paths(db, ws_id)
 
     result = run_import_job(
         _make_job(), FakeRunner(), db_path, ws_id,
@@ -7613,7 +7607,7 @@ def test_remote_import_links_case_only_twin_folder(tmp_path, monkeypatch):
     # workspace via the direct-link path, independent of path case.
     assert result["failed"] == 0, result
     assert result["safe_to_format"] is True, result
-    linked_after = _ws_linked_folder_paths(db, ws_id)
+    linked_after = _ws_visible_folder_paths(db, ws_id)
     assert twin_folder_case in linked_after, sorted(linked_after)
 
 

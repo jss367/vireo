@@ -663,8 +663,8 @@ def create_system_blueprint(
                 """SELECT COUNT(*) FROM predictions pr
                    JOIN detections d ON d.id = pr.detection_id
                    JOIN photos p ON p.id = d.photo_id
-                   JOIN workspace_folders wf
-                     ON wf.folder_id = p.folder_id AND wf.workspace_id = ?""",
+                   JOIN photo_workspace_visibility wf
+                     ON wf.photo_id = p.id AND wf.workspace_id = ?""",
                 (db._ws_id(),)
             ).fetchone()[0]
         except Exception:

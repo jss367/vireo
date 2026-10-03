@@ -424,7 +424,7 @@ def create_locations_blueprint(
                FROM keywords k
                JOIN photo_keywords pk ON pk.keyword_id = k.id
                JOIN photos p ON p.id = pk.photo_id
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                WHERE wf.workspace_id = ? AND k.type = 'location'
                  AND k.latitude IS NOT NULL AND k.longitude IS NOT NULL
                GROUP BY k.id""",
@@ -633,7 +633,7 @@ def create_locations_blueprint(
             """SELECT DISTINCT pk.photo_id, wf.workspace_id
                FROM photo_keywords pk
                JOIN photos p ON p.id = pk.photo_id
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                WHERE pk.keyword_id = ?""",
             (result["keyword_id"],),
         ).fetchall()

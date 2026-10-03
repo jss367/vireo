@@ -1417,13 +1417,17 @@ def _duplicate_gate(state, batch_st, *, source_file, rel, checker, db,
             db, token, source_file, ctx.path_under_any_source,
         )
         if likely_rows:
+            try:
+                db.grant_verified_twin_photos(db._active_workspace_id, likely_rows)
+                db.conn.commit()
+            except Exception as exc:
+                db.conn.rollback()
+                _fail(state, rel, source_file, f"duplicate photo workspace visibility failed: {exc}")
+                return _GATE_SKIPPED
             state.skipped_duplicate += 1
             state.unverified_duplicate += 1
             _counts(state, rel)["skipped_duplicate"] += 1
             batch_st.dup_skips.append((source_file, True))
-            batch_st.dup_dirs.update(_linkable_twin_dirs(
-                likely_rows, ctx.path_under_destination,
-            ))
             return _GATE_SKIPPED
     accept = False
     # verified_twin_rows records only the twin(s) whose
@@ -1540,29 +1544,18 @@ def _duplicate_gate(state, batch_st, *, source_file, rel, checker, db,
         # the same (possibly dead) mount.
         return _GATE_CANCELLED
     if accept:
+        try:
+            db.grant_verified_twin_photos(db._active_workspace_id, verified_twin_rows)
+            db.conn.commit()
+        except Exception as exc:
+            db.conn.rollback()
+            _fail(state, rel, source_file, f"duplicate photo workspace visibility failed: {exc}")
+            return _GATE_SKIPPED
         state.skipped_duplicate += 1
         _counts(state, rel)["skipped_duplicate"] += 1
         batch_st.dup_skips.append((source_file, False))
-        # verified_twin_rows carries only twins whose
-        # bytes we re-hashed and matched this run — the
-        # only rows whose folders are safe to link. For
-        # a 'hash' token, other twin_rows entries share
-        # the token's stored hash by construction but
-        # that column can be stale (the archive file
-        # changed or was deleted between scans); for a
-        # 'key' token, other twin_rows entries share
-        # only filename+size+capture-second and may
-        # hold unrelated bytes. Linking either category
-        # would pull unrelated/missing archive folders
-        # into the active workspace on a duplicate-only
-        # import. verified_twin_rows is empty when the
-        # intra-run branch accepted above (run_dest is
-        # added separately below). See PR #1107 review.
-        batch_st.dup_dirs.update(
-            _linkable_twin_dirs(
-                verified_twin_rows, ctx.path_under_destination,
-            ),
-        )
+        # Existing verified twins receive photo-only membership, including
+        # moved twins outside the current destination. Never share siblings.
         run_dest = state.run_dest_folders.get(token)
         if run_dest is not None:
             batch_st.dup_dirs.add(run_dest)

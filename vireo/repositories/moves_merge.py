@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from keyword_normalization import keyword_match_key
 from repositories import UNSET
 from repositories.collections import remap_collection_photo_ids
+from repositories.photo_visibility import remap_photo_visibility
 
 log = logging.getLogger(__name__)
 
@@ -194,7 +195,7 @@ class MovesMergeRepository:
         """
         conditions = ["wf.workspace_id = ?"]
         params = [workspace_id]
-        joins = ["JOIN workspace_folders wf ON wf.folder_id = p.folder_id",
+        joins = ["JOIN photo_workspace_visibility wf ON wf.photo_id = p.id",
                  "JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')"]
 
         if "rating_min" in criteria:
@@ -1452,6 +1453,7 @@ class _StagedTreeMerge:
                 else None)
             survivor_off_staging = collision is not None
         if survivor_id is not None:
+            remap_photo_visibility(self.conn, {pid: survivor_id})
             self._carry_staged_state_to_survivor(
                 pid, survivor_id, survivor_off_staging)
         self.conn.execute(
@@ -1631,6 +1633,7 @@ class _StagedTreeMerge:
         # deferred to the end of the merge, after the
         # survivor has been reparented into the
         # archive folder.
+        remap_photo_visibility(self.conn, {collision["id"]: pid})
         self._defer_sibling_links(collision["id"], pid)
         self._remap_pending_changes(collision["id"], pid)
         # No ``preserved_off_staging_identities``

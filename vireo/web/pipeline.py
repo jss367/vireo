@@ -1708,7 +1708,7 @@ def create_pipeline_blueprint(
             SELECT pm.photo_id
               FROM photo_masks pm
               JOIN photos p ON p.id = pm.photo_id
-              JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+              JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
              WHERE wf.workspace_id = ? AND pm.variant = ?
             """,
             (ws, variant),

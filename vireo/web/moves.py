@@ -77,6 +77,31 @@ def create_moves_blueprint(get_db, json_error):
     """
     blueprint = Blueprint("moves", __name__)
 
+    @blueprint.route("/api/move-photos/visibility", methods=["POST"])
+    def api_photo_move_visibility():
+        from web.request_args import parse_selection_photo_ids
+
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return json_error("request body must be a JSON object")
+        db = get_db()
+        if "folder_id" in body:
+            folder_id = body["folder_id"]
+            if isinstance(folder_id, bool) or not isinstance(folder_id, int):
+                return json_error("folder_id must be an integer")
+            folder_ids = db.get_folder_subtree_ids(folder_id)
+            ids = []
+            for fid in folder_ids:
+                ids.extend(row[0] for row in db.conn.execute(
+                    "SELECT photo_id FROM photo_workspace_visibility "
+                    "WHERE folder_id = ? AND workspace_id = ?", (fid, db._active_workspace_id),
+                ))
+            body = {"photo_ids": ids}
+        photo_ids, err = parse_selection_photo_ids(db, body, json_error=json_error, limit=None)
+        if err is not None:
+            return err
+        return jsonify({"workspaces": db.photo_move_affected_workspaces(photo_ids)})
+
     @blueprint.route("/api/move-rules", methods=["GET"])
     def api_list_move_rules():
         db = get_db()

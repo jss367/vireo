@@ -143,7 +143,7 @@ def create_keywords_blueprint(get_db, json_error):
                FROM keywords k
                JOIN photo_keywords pk ON pk.keyword_id = k.id
                JOIN photos p ON p.id = pk.photo_id
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                WHERE wf.workspace_id = ?
                GROUP BY LOWER(k.name), k.parent_id, k.type,
                         CASE WHEN k.type = 'taxonomy' OR k.is_species = 1
@@ -162,7 +162,7 @@ def create_keywords_blueprint(get_db, json_error):
                        FROM keywords k
                        JOIN photo_keywords pk ON pk.keyword_id = k.id
                        JOIN photos p ON p.id = pk.photo_id
-                       JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                       JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                        WHERE k.id = ? AND wf.workspace_id = ?""",
                     (kid, ws),
                 ).fetchone()
@@ -212,7 +212,7 @@ def create_keywords_blueprint(get_db, json_error):
                 """SELECT pk.photo_id, wf.workspace_id
                    FROM photo_keywords pk
                    JOIN photos p ON p.id = pk.photo_id
-                   JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                   JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                    WHERE pk.keyword_id = ?""",
                 (keyword_id,),
             ).fetchall()
@@ -244,7 +244,7 @@ def create_keywords_blueprint(get_db, json_error):
                    SELECT DISTINCT p.id AS photo_id, wf.workspace_id
                    FROM photos p
                    JOIN photo_keywords pk ON pk.photo_id = p.id
-                   JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                   JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                    JOIN tree t ON t.id = pk.keyword_id""",
                 (keyword_id,),
             ).fetchall()
@@ -422,7 +422,7 @@ def create_keywords_blueprint(get_db, json_error):
                 """SELECT pk.photo_id, wf.workspace_id
                    FROM photo_keywords pk
                    JOIN photos p ON p.id = pk.photo_id
-                   JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                   JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                    WHERE pk.keyword_id = ?""",
                 (keyword_id,),
             ).fetchall()
@@ -453,7 +453,7 @@ def create_keywords_blueprint(get_db, json_error):
                        SELECT DISTINCT p.id AS photo_id, wf.workspace_id
                        FROM photos p
                        JOIN photo_keywords pk ON pk.photo_id = p.id
-                       JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                       JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                        JOIN tree t ON t.id = pk.keyword_id""",
                     (keyword_id,),
                 ).fetchall()

@@ -34,7 +34,7 @@ class WorkspaceFolderRepository:
         """True if the photo's folder is linked to ``workspace_id``."""
         row = self.conn.execute(
             """SELECT 1 FROM photos p
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                WHERE p.id = ? AND wf.workspace_id = ?""",
             (photo_id, workspace_id),
         ).fetchone()
@@ -146,6 +146,10 @@ class WorkspaceFolderRepository:
     def remove(self, workspace_id, folder_id):
         """Unlink a single folder and commit."""
         self.conn.execute(
+            "DELETE FROM workspace_photos WHERE workspace_id = ? AND photo_id IN "
+            "(SELECT id FROM photos WHERE folder_id = ?)", (workspace_id, folder_id),
+        )
+        self.conn.execute(
             "DELETE FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
             (workspace_id, folder_id),
         )
@@ -155,6 +159,10 @@ class WorkspaceFolderRepository:
         """Unlink ``folder_ids`` (a folder's subtree) and commit."""
         for chunk in self._chunks(folder_ids):
             placeholders = ",".join("?" for _ in chunk)
+            self.conn.execute(
+                f"DELETE FROM workspace_photos WHERE workspace_id = ? AND photo_id IN "
+                f"(SELECT id FROM photos WHERE folder_id IN ({placeholders}))", [workspace_id] + chunk,
+            )
             self.conn.execute(
                 f"""DELETE FROM workspace_folders
                     WHERE workspace_id = ? AND folder_id IN ({placeholders})""",
@@ -293,8 +301,8 @@ class WorkspaceFolderRepository:
                    SELECT COUNT(*)
                    FROM photos p
                    JOIN folders cf ON cf.id = p.folder_id
-                   JOIN workspace_folders cwf
-                     ON cwf.folder_id = cf.id
+                   JOIN photo_workspace_visibility cwf
+                     ON cwf.photo_id = p.id
                     AND cwf.workspace_id = wf.workspace_id
                    LEFT JOIN local_folder_mappings lfm
                      ON lfm.folder_id = cf.id
@@ -312,7 +320,7 @@ class WorkspaceFolderRepository:
                          ) = RTRIM(REPLACE(f.path, '\\', '/'), '/') || '/'
                ) AS workspace_photo_count
                FROM folders f
-               JOIN workspace_folders wf ON wf.folder_id = f.id
+               JOIN workspace_visible_folders wf ON wf.folder_id = f.id
                WHERE wf.workspace_id = ? AND wf.is_root = 1
                ORDER BY f.path""",
             (workspace_id,),
@@ -323,7 +331,7 @@ class WorkspaceFolderRepository:
         rows = self.conn.execute(
             """SELECT DISTINCT LOWER(p.extension) AS ext
                FROM photos p
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                JOIN folders f ON f.id = p.folder_id
                               AND f.status IN ('ok', 'partial')
                WHERE wf.workspace_id = ?

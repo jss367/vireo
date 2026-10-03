@@ -55,6 +55,11 @@ CATEGORIES = (
 # Each entry: type, category, scope, label, desc (required) + optional
 # min/max/step/enum/enum_labels/items_enum.
 SCHEMA = {
+    "move_keep_visible_in_other_workspaces": {
+        "type": "bool", "category": "Behavior", "scope": "global",
+        "label": "Keep moved photos visible in other workspaces",
+        "desc": "Remembers the checkbox on the Move page. Only the moved photos retain visibility.",
+    },
     # --- Detection / classification --------------------------------------
     "classification_threshold": {
         "type": "float", "min": 0.0, "max": 1.0, "step": 0.01,

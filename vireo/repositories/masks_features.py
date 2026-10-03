@@ -233,7 +233,7 @@ class MasksFeaturesRepository:
                             THEN 1 ELSE 0 END) AS active_count
               FROM photo_masks pm
               JOIN photos p ON p.id = pm.photo_id
-              JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+              JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
              WHERE wf.workspace_id = ?
              GROUP BY pm.variant
              ORDER BY pm.variant
@@ -265,8 +265,8 @@ class MasksFeaturesRepository:
         target_row = self.conn.execute(
             f"""SELECT COUNT(DISTINCT p.id) AS n
                   FROM photos p
-                  JOIN workspace_folders wf
-                    ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                  JOIN photo_workspace_visibility wf
+                    ON wf.photo_id = p.id AND wf.workspace_id = ?
                   JOIN detections d
                     ON d.photo_id = p.id
                    AND d.detector_model != 'full-image'
@@ -282,8 +282,8 @@ class MasksFeaturesRepository:
             f"""SELECT pm.variant, COUNT(DISTINCT pm.photo_id) AS count
                   FROM photo_masks pm
                   JOIN photos p ON p.id = pm.photo_id
-                  JOIN workspace_folders wf
-                    ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                  JOIN photo_workspace_visibility wf
+                    ON wf.photo_id = p.id AND wf.workspace_id = ?
                   JOIN detections d
                     ON d.photo_id = p.id
                    AND d.detector_model != 'full-image'
@@ -504,8 +504,8 @@ class MasksFeaturesRepository:
                            d.box_x, d.box_y, d.box_w, d.box_h,
                            d.detector_confidence
                     FROM photos p
-                    JOIN workspace_folders wf
-                      ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                    JOIN photo_workspace_visibility wf
+                      ON wf.photo_id = p.id AND wf.workspace_id = ?
                     JOIN detections d ON d.photo_id = p.id
                     WHERE p.folder_id IN ({placeholders})
                       AND p.mask_path IS NULL
@@ -519,7 +519,7 @@ class MasksFeaturesRepository:
                           d.box_x, d.box_y, d.box_w, d.box_h,
                           d.detector_confidence
                    FROM photos p
-                   JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                   JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                    JOIN detections d ON d.photo_id = p.id
                    WHERE wf.workspace_id = ?
                      AND p.mask_path IS NULL
@@ -595,8 +595,8 @@ class MasksFeaturesRepository:
                       pr.scientific_name,
                       pr.species
                FROM photos p
-               JOIN workspace_folders wf
-                 ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+               JOIN photo_workspace_visibility wf
+                 ON wf.photo_id = p.id AND wf.workspace_id = ?
                JOIN detections d
                  ON d.photo_id = p.id
                 AND d.detector_model != 'full-image'
@@ -717,8 +717,8 @@ class MasksFeaturesRepository:
             "SELECT pe.photo_id, pe.embedding FROM photo_embeddings pe "
             "JOIN photos p ON p.id = pe.photo_id "
             f"{folder_join} "
-            "JOIN workspace_folders wf "
-            "  ON wf.folder_id = p.folder_id AND wf.workspace_id = ? "
+            "JOIN photo_workspace_visibility wf "
+            "  ON wf.photo_id = p.id AND wf.workspace_id = ? "
             "WHERE pe.model = ? AND pe.variant = ?"
         )
         params = [ws, model, variant]

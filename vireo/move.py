@@ -2140,7 +2140,7 @@ def plan_folder_date_moves_with_capture_dates(
 
 
 def move_folder_by_date(db, folder_id, destination, folder_template,
-                        progress_cb=None, developed_dir=""):
+                        progress_cb=None, developed_dir="", keep_visible=True):
     """Move a folder's tracked photos into capture-date subfolders.
 
     Each photo uses ``move_photos``' copy/verify/catalog-update/delete order,
@@ -2204,6 +2204,7 @@ def move_folder_by_date(db, folder_id, destination, folder_template,
             progress_cb=group_progress,
             developed_dir=developed_dir,
             developed_listing_cache=developed_listing_cache,
+            keep_visible=keep_visible,
         )
         group_moved = int(result.get("moved", 0))
         moved += group_moved
@@ -2342,7 +2343,7 @@ def _is_same_directory(folder_id, folder_path, dest_folder_id, destination):
 
 def move_photos(db, photo_ids, destination, progress_cb=None,
                 developed_dir="", developed_listing_cache=None, cancel_check=None,
-                pause_requested=None, pause_callback=None):
+                pause_requested=None, pause_callback=None, keep_visible=True):
     """Move individual photos to a destination directory.
 
     Args:
@@ -2397,6 +2398,7 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
         )
     total = len(photo_ids)
     move = _PhotoMove(db, destination, developed_dir, developed_listing_cache)
+    move.keep_visible = keep_visible
     move.ensure_destination_folder()
     move.load_destination_stem_origins()
     move.load_source_stem_counts(photo_ids)
@@ -2770,12 +2772,20 @@ class _PhotoMove:
 
         # Update DB before deleting originals
         # This ensures a crash leaves duplicates (safe) rather than orphans
-        db.conn.execute(
-            "UPDATE photos SET folder_id = ?, "
-            "last_move_source_folder_path = ? WHERE id = ?",
-            (self.dest_folder_id, item.src_dir, item.pid),
-        )
-        db.conn.commit()
+        db.conn.execute("SAVEPOINT photo_move_visibility")
+        try:
+            db.preserve_photo_visibility_for_move(item.pid, self.keep_visible)
+            db.conn.execute(
+                "UPDATE photos SET folder_id = ?, "
+                "last_move_source_folder_path = ? WHERE id = ?",
+                (self.dest_folder_id, item.src_dir, item.pid),
+            )
+            db.conn.execute("RELEASE photo_move_visibility")
+            db.conn.commit()
+        except BaseException:
+            db.conn.execute("ROLLBACK TO photo_move_visibility")
+            db.conn.execute("RELEASE photo_move_visibility")
+            raise
         # Pin the stem to the proven source folder path so a same-source
         # sibling can follow in this call while a distinct source is
         # still rejected. Using the path (not folders.id) survives a

@@ -885,7 +885,7 @@ def _root_records(db, workspace_id: int, local_base: Path) -> tuple[list[dict], 
     shared = db.conn.execute(
         """SELECT f.path
            FROM workspace_folders current_wf
-           JOIN workspace_folders other_wf
+           JOIN workspace_visible_folders other_wf
              ON other_wf.folder_id = current_wf.folder_id
             AND other_wf.workspace_id != current_wf.workspace_id
            JOIN folders f ON f.id = current_wf.folder_id
