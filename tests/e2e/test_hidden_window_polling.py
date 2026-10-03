@@ -7,6 +7,7 @@ library folder and the automatic missing-originals check stats every photo.
 
 from urllib.parse import urlparse
 
+import pytest
 from playwright.sync_api import expect
 
 # Polls that must go quiet while hidden.
@@ -50,7 +51,10 @@ def _set_hidden(page, hidden):
     }""", hidden)
 
 
-def test_hidden_window_stops_background_polls_and_catches_up_when_shown(live_server, page):
+@pytest.mark.parametrize('late_missing_retry', [False, True])
+def test_hidden_window_stops_background_polls_and_catches_up_when_shown(
+    live_server, page, late_missing_retry,
+):
     page.add_init_script(_FAKE_VISIBILITY)
     page.clock.install()
     page.goto(live_server['url'] + '/browse')
@@ -80,10 +84,22 @@ def test_hidden_window_stops_background_polls_and_catches_up_when_shown(live_ser
     # before the work finished would fire while hidden. Under load the ticks
     # above can reach the automatic missing-originals check (due 180s in).
     # Its scan then lags the job list by one retry.
-    page.wait_for_function(
+    if late_missing_retry:
+        # Force the late-response case with a paused clock: a wall-clock wait
+        # cannot fire the retry, so settling must advance mocked timer time.
+        page.clock.pause_at(page.evaluate('Date.now() / 1000 + 1'))
+        page.evaluate('_scheduleMissingPhotosPoll(null, false)')
+    settled = (
         '() => !_newImagesInFlight && _newImagesPendingTimer === null'
         ' && window.__missingPhotosChecksInFlight === 0'
         ' && !_missingPhotosBannerInFlight && _missingPhotosBannerStatusPoll === null')
+    for _ in range(300):
+        if page.evaluate(settled):
+            break
+        page.clock.fast_forward(3000)
+        page.wait_for_timeout(100)
+    else:
+        raise AssertionError('banner retry chains did not settle')
     page.wait_for_timeout(300)
 
     requested = []
