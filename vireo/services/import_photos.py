@@ -94,14 +94,12 @@ def _admit_import_job(service, db, request):
     # registration would otherwise see no import job and be admitted,
     # letting the stage rebase the destination this import is about to
     # copy into and scan.
-    with stage_boundary_lock():
+    with stage_boundary_lock(), runner.admission_guard():
         # Snapshot validation can outlast a sibling import. Consult terminal
         # takeover again immediately before admitting this request.
         parent_id = job_config.get("parent_import_job_id")
         if parent_id:
-            failure = request.validate_parent_import()
-            if failure is None:
-                failure = request.validate_carry_photo_ids()
+            failure = request.recheck_parent_takeover()
             if failure is not None:
                 return failure
         # Successful revalidation can change merged marks and landing scope.
@@ -501,6 +499,7 @@ class _ImportPhotosRequest:
         self.parent_allowed_ids = None
         self.parent_allowed_fingerprints = None
         self.parent_source_snapshots = None
+        self.parent_takeover_snapshot = {}
         if parent_id_raw is not None:
             if not isinstance(parent_id_raw, str) or not parent_id_raw.strip():
                 return ImportFailure(
@@ -521,9 +520,31 @@ class _ImportPhotosRequest:
                 parent_err,
             ) = self.service._validate_parent_import_job(
                 parent_id_raw.strip(), self.db._active_workspace_id, self.db,
+                snapshot_out=self.parent_takeover_snapshot,
             )
             if parent_err is not None:
                 return parent_err
+        return None
+
+    def recheck_parent_takeover(self):
+        """Cheap DB/runner evidence only; caller holds the admission guard."""
+        fresh = {}
+        *_, failure = self.service._validate_parent_import_job(
+            self.parent_id_raw.strip(), self.active_ws, self.db,
+            relocate_landings=False, snapshot_out=fresh,
+        )
+        if failure is not None:
+            return failure
+        if fresh != self.parent_takeover_snapshot:
+            # The earlier scope/identity validation may have read files.
+            # Refuse changed evidence instead of repeating that I/O while
+            # global admission and terminal transitions are locked.
+            return ImportFailure(
+                "A later import changed this retry's remaining work while "
+                "it was being checked. Refresh Jobs and retry from its "
+                "current state.", 409,
+                details={"code": "import_retry_state_changed"},
+            )
         return None
 
     def validate_after_import_process(self):

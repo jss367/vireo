@@ -907,7 +907,8 @@ class ImportService:
                 fingerprints[row["id"]] = fp
         return fingerprints
 
-    def _validate_parent_import_job(self, parent_id, active_ws, db):
+    def _validate_parent_import_job(self, parent_id, active_ws, db, *,
+                                    relocate_landings=True, snapshot_out=None):
         """Resolve a retry's parent_import_job_id into the scope this
         retry is allowed to inherit.
 
@@ -1062,7 +1063,13 @@ class ImportService:
                         "takeover": takeover["kind"],
                     },
                 )
-        if takeover:
+        if snapshot_out is not None:
+            # Freeze the cheap evidence before any disk-based path recovery.
+            snapshot_out.update({
+                "parent_result": parent_result,
+                "takeover": json.loads(json.dumps(takeover)),
+            })
+        if takeover and relocate_landings:
             self._recover_relocated_descendant_landings(db, takeover)
         parent_resume = self._interrupted_parent_resume(
             parent_config, parent_result, takeover,
@@ -1240,14 +1247,17 @@ class ImportService:
 
     @staticmethod
     def _interrupted_parent_resume(parent_config, parent_result, takeover=None):
-        """What a resume inherits from an interrupted parent (see
-        ``_validate_parent_import_job``); None for any other parent.
+        """Remaining work/scope inherited from an interrupted parent or a
+        failed-files parent whose descendants landed additional photos.
 
         ``takeover`` (from ``import_resume_takeover``) supplies the
         parent's post-import marks merged with its descendants', so work
         an earlier resume already did is not replayed.
         """
-        if not parent_result.get("interrupted"):
+        if not parent_result.get("interrupted") and not (
+            _has_failed_files(parent_result)
+            and takeover and takeover.get("descendant_landed_files")
+        ):
             return None
         if takeover is None:
             takeover = {

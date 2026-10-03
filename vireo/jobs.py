@@ -148,7 +148,7 @@ class JobRunner:
         self._jobs = {}
         self._events = {}  # job_id -> deque of events
         self._subscribers = {}  # job_id -> list of queues
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._pause_condition = threading.Condition(self._lock)
         self._cancelled = set()  # job ids that have been cancelled
         # Cooperative pause requests. Pausable work reaches these through
@@ -988,6 +988,16 @@ class JobRunner:
             self._jobs[job_id] = job
             self._events.setdefault(job_id, deque(maxlen=1000))
             self._subscribers.setdefault(job_id, [])
+
+    @contextmanager
+    def admission_guard(self):
+        """Keep a cheap admission check and registration atomic with finalization.
+
+        The condition uses the same reentrant lock as start/list_jobs and
+        terminal status transitions. Never perform file I/O inside this guard.
+        """
+        with self._pause_condition:
+            yield
 
     def start(self, job_type, work_fn, config=None, workspace_id=None,
               ephemeral=False, runtime_warning=None, counts_for_badge=True,

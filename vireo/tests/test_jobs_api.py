@@ -13171,7 +13171,8 @@ def test_failed_processing_handoff_does_not_mark_chain_paid(app_and_db, tmp_path
         assert "chained" not in app._job_runner.get(job_id).get("partial_result", {})
 
 
-def test_parent_resume_recovers_photos_landed_by_unpaid_descendant(app_and_db, tmp_path, monkeypatch):
+@pytest.mark.parametrize("interrupted", [True, False])
+def test_parent_resume_recovers_photos_landed_by_unpaid_descendant(app_and_db, tmp_path, monkeypatch, interrupted):
     from services.import_photos import _ImportPhotosJob
 
     app, db = app_and_db
@@ -13193,6 +13194,12 @@ def test_parent_resume_recovers_photos_landed_by_unpaid_descendant(app_and_db, t
         )
         db.conn.commit()
         body = _resume_body(client, parent_id)
+        if not interrupted:
+            db.conn.execute(
+                "UPDATE job_history SET result=json_set(result, '$.interrupted', json('false'), '$.failed', 1, '$.ok', json('false')) WHERE id=?",
+                (parent_id,),
+            )
+            db.conn.commit()
         body["after_import"] = _process_id(db, "Cull-ready")
         original_chain = _ImportPhotosJob._chain_after_import
         handoffs = []
@@ -13247,12 +13254,20 @@ def test_resume_rechecks_takeover_after_request_validation(app_and_db, tmp_path,
     with app.test_client() as client:
         parent_id, _ = _interrupted_tagged_import(app, db, client, tmp_path, "trip")
         body = _resume_body(client, parent_id)
+        from services.imports import ImportService
+        original_capture = ImportService._capture_photo_fingerprints_for_ids
+
+        def capture_without_admission_lock(service, catalog, ids):
+            assert not service.get_runner()._lock._is_owned()
+            return original_capture(service, catalog, ids)
+
+        monkeypatch.setattr(ImportService, "_capture_photo_fingerprints_for_ids", capture_without_admission_lock)
         original = _ImportPhotosRequest.prepare_workspace
 
         def finish_descendant(request):
             failure = original(request)
             request.db.conn.execute(
-                "INSERT INTO job_history (id,type,status,started_at,config,result,workspace_id) VALUES (?,?,?,?,?,?,?)",
+                "INSERT OR REPLACE INTO job_history (id,type,status,started_at,config,result,workspace_id) VALUES (?,?,?,?,?,?,?)",
                 ("late-resume", "import", "completed", "2026-09-01T12:00:00",
                  json.dumps({"parent_import_job_id": parent_id, "root_import_job_id": parent_id}),
                  json.dumps({"ok": True, "tags_applied": True, "chained": chained,
@@ -13271,6 +13286,11 @@ def test_resume_rechecks_takeover_after_request_validation(app_and_db, tmp_path,
             assert response.status_code == 409, response.get_json()
             assert response.get_json()["taken_over_by_job_id"] == "late-resume"
         else:
+            assert response.status_code == 409, response.get_json()
+            assert response.get_json()["code"] == "import_retry_state_changed"
+            start_job.assert_not_called()
+            # A fresh request validates the new partial scope outside locks.
+            response = client.post("/api/jobs/import-photos", json=body)
             assert response.status_code == 200, response.get_json()
             started_job = start_job.call_args.args[1].__self__
             assert started_job.parent_resume["tags_applied"] is True

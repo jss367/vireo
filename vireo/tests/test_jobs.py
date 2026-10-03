@@ -2113,3 +2113,32 @@ def test_structured_errors_keep_distinct_photo_identity(tmp_path):
         row = db.conn.execute("SELECT error_count FROM job_history WHERE id=?", (job_id,)).fetchone()
         assert row["error_count"] == 2
         assert runner.shutdown()
+
+
+
+def test_admission_guard_blocks_terminal_transition_and_allows_registration():
+    from jobs import JobRunner
+
+    runner = JobRunner()
+    release = threading.Event()
+    returning = threading.Event()
+
+    def work(job):
+        assert release.wait(5)
+        returning.set()
+        return {"ok": True}
+
+    job_id = runner.start("import", work)
+    try:
+        with runner.admission_guard():
+            release.set()
+            assert returning.wait(5)
+            # Even after the work returns, terminal publication uses this lock.
+            assert runner.get(job_id)["status"] == "running"
+            other_id = runner.start("import", lambda job: {"ok": True})
+            assert {j["id"] for j in runner.list_jobs()} >= {job_id, other_id}
+        assert wait_for_job_via_runner(runner, job_id)["status"] == "completed"
+        assert wait_for_job_via_runner(runner, other_id)["status"] == "completed"
+    finally:
+        release.set()
+        assert runner.shutdown(timeout=5)
