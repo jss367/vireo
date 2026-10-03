@@ -356,19 +356,22 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
         return bool(self._visible_photo_ids())
 
     def _card_roots(self):
-        """Resolved card source directories; rows under these do not count as a
-        library copy because formatting the card would remove the bytes."""
-        return tuple(os.path.normpath(p) for p in getattr(self, "cards", {}).values())
+        """Resolved card source directories whose bytes are not library copies."""
+        return tuple(
+            os.path.normcase(os.path.realpath(p))
+            for p in getattr(self, "cards", {}).values()
+        )
 
     @staticmethod
-    def _folder_under_any_root(folder_path, roots):
-        if not roots:
-            return False
-        normalized = os.path.normpath(folder_path)
-        return any(
-            normalized == root or normalized.startswith(root + os.sep)
-            for root in roots
-        )
+    def _path_under_any_root(path, roots):
+        resolved = os.path.normcase(os.path.realpath(path))
+        for root in roots:
+            try:
+                if os.path.commonpath((resolved, root)) == root:
+                    return True
+            except ValueError:  # Different Windows drives cannot share a root.
+                continue
+        return False
 
     def _cataloged_hashes(self):
         hashes = set()
@@ -377,9 +380,9 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
         for row in self._catalog_rows():
             if row["id"] not in visible:
                 continue
-            if self._folder_under_any_root(row["folder_path"], card_roots):
-                continue
             path = os.path.join(row["folder_path"], row["filename"])
+            if self._path_under_any_root(path, card_roots):
+                continue
             if os.path.isfile(path):
                 hashes.add(_sha256(path))
         return hashes
@@ -392,9 +395,9 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
         for row in self._catalog_rows():
             if row["id"] in visible:
                 continue
-            if self._folder_under_any_root(row["folder_path"], card_roots):
-                continue
             path = os.path.join(row["folder_path"], row["filename"])
+            if self._path_under_any_root(path, card_roots):
+                continue
             if os.path.isfile(path):
                 hashes.add(_sha256(path))
         return hashes
@@ -1023,11 +1026,13 @@ def test_finished_import_checks_active_workspace_catalog(
 
 
 @pytest.mark.parametrize(
-    "folder_in_card,should_fail",
-    [(True, True), (False, False)],
-    ids=["card-cataloged", "library-cataloged"],
+    "location,should_fail",
+    [("card", True), ("nested", True), ("other-card", True),
+     ("folder-symlink", True), ("file-symlink", True),
+     ("prefix-sibling", False), ("library", False)],
 )
-def test_finished_import_requires_offcard_catalog_row(tmp_path, folder_in_card, should_fail):
+@pytest.mark.parametrize("workspace", [1, 2], ids=["active", "duplicate-exception"])
+def test_finished_import_requires_offcard_catalog_row(tmp_path, location, should_fail, workspace):
     """A row whose file lives on the card itself does not count: formatting
     the card would remove the only bytes, so the invariant must demand a copy
     outside every card root."""
@@ -1038,9 +1043,31 @@ def test_finished_import_requires_offcard_catalog_row(tmp_path, folder_in_card, 
     card_root.mkdir()
     library = tmp_path / "library"
     library.mkdir()
-    folder_path = card_root if folder_in_card else library
+    other_card = tmp_path / "other-card"
+    other_card.mkdir()
+    source = card_root / "photo.jpg"
+    source.write_bytes(b"imported-photo")
+    if location == "folder-symlink":
+        folder_path = tmp_path / "alias"
+        try:
+            folder_path.symlink_to(card_root, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"Directory symlinks unavailable: {exc}")
+    else:
+        folder_path = {
+            "card": card_root, "nested": card_root / "nested",
+            "other-card": other_card, "file-symlink": library,
+            "prefix-sibling": tmp_path / "card-extra", "library": library,
+        }[location]
+        folder_path.mkdir(exist_ok=True)
     path = folder_path / "photo.jpg"
-    path.write_bytes(b"imported-photo")
+    if location == "file-symlink":
+        try:
+            path.symlink_to(source)
+        except OSError as exc:
+            pytest.skip(f"File symlinks unavailable: {exc}")
+    elif not path.exists():
+        path.write_bytes(b"imported-photo")
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     try:
@@ -1051,12 +1078,12 @@ def test_finished_import_requires_offcard_catalog_row(tmp_path, folder_in_card, 
             "INSERT INTO photos VALUES (1, 10, 'photo.jpg', NULL);"
         )
         conn.execute("INSERT INTO folders VALUES (10, ?)", (str(folder_path),))
-        conn.execute("INSERT INTO workspace_folders VALUES (10, 1)")
+        conn.execute("INSERT INTO workspace_folders VALUES (10, ?)", (workspace,))
         machine = PhotoSafetyMachine.__new__(PhotoSafetyMachine)
         machine.db = SimpleNamespace(conn=conn)
         machine.ws_id = 1
-        machine.cards = {"C1": str(card_root)}
-        result = {"ok": True, "copied": 1, "skipped_duplicate": 0, "failed": 0}
+        machine.cards = {"C1": str(card_root), "C2": str(other_card)}
+        result = {"ok": True, "copied": 1, "skipped_duplicate": 1, "failed": 0}
         hashes = {_sha256(path)}
         if should_fail:
             with pytest.raises(AssertionError, match="not visible in the active workspace"):
