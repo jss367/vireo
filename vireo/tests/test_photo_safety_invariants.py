@@ -355,11 +355,29 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
     def _has_visible_photos(self):
         return bool(self._visible_photo_ids())
 
+    def _card_roots(self):
+        """Resolved card source directories; rows under these do not count as a
+        library copy because formatting the card would remove the bytes."""
+        return tuple(os.path.normpath(p) for p in getattr(self, "cards", {}).values())
+
+    @staticmethod
+    def _folder_under_any_root(folder_path, roots):
+        if not roots:
+            return False
+        normalized = os.path.normpath(folder_path)
+        return any(
+            normalized == root or normalized.startswith(root + os.sep)
+            for root in roots
+        )
+
     def _cataloged_hashes(self):
         hashes = set()
         visible = set(self._visible_photo_ids())
+        card_roots = self._card_roots()
         for row in self._catalog_rows():
             if row["id"] not in visible:
+                continue
+            if self._folder_under_any_root(row["folder_path"], card_roots):
                 continue
             path = os.path.join(row["folder_path"], row["filename"])
             if os.path.isfile(path):
@@ -370,8 +388,11 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
         """Hashes present in the catalog but invisible to the active workspace."""
         hashes = set()
         visible = set(self._visible_photo_ids())
+        card_roots = self._card_roots()
         for row in self._catalog_rows():
             if row["id"] in visible:
+                continue
+            if self._folder_under_any_root(row["folder_path"], card_roots):
                 continue
             path = os.path.join(row["folder_path"], row["filename"])
             if os.path.isfile(path):
@@ -997,6 +1018,51 @@ def test_finished_import_checks_active_workspace_catalog(
                 machine._check_finished_import(result, "card", hashes)
         else:
             machine._check_finished_import(result, "card", hashes)
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize(
+    "folder_in_card,should_fail",
+    [(True, True), (False, False)],
+    ids=["card-cataloged", "library-cataloged"],
+)
+def test_finished_import_requires_offcard_catalog_row(tmp_path, folder_in_card, should_fail):
+    """A row whose file lives on the card itself does not count: formatting
+    the card would remove the only bytes, so the invariant must demand a copy
+    outside every card root."""
+    import sqlite3
+    from types import SimpleNamespace
+
+    card_root = tmp_path / "card"
+    card_root.mkdir()
+    library = tmp_path / "library"
+    library.mkdir()
+    folder_path = card_root if folder_in_card else library
+    path = folder_path / "photo.jpg"
+    path.write_bytes(b"imported-photo")
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.executescript(
+            "CREATE TABLE photos (id INTEGER, folder_id INTEGER, filename TEXT, file_hash TEXT);"
+            "CREATE TABLE folders (id INTEGER, path TEXT);"
+            "CREATE TABLE workspace_folders (folder_id INTEGER, workspace_id INTEGER);"
+            "INSERT INTO photos VALUES (1, 10, 'photo.jpg', NULL);"
+        )
+        conn.execute("INSERT INTO folders VALUES (10, ?)", (str(folder_path),))
+        conn.execute("INSERT INTO workspace_folders VALUES (10, 1)")
+        machine = PhotoSafetyMachine.__new__(PhotoSafetyMachine)
+        machine.db = SimpleNamespace(conn=conn)
+        machine.ws_id = 1
+        machine.cards = {"C1": str(card_root)}
+        result = {"ok": True, "copied": 1, "skipped_duplicate": 0, "failed": 0}
+        hashes = {_sha256(path)}
+        if should_fail:
+            with pytest.raises(AssertionError, match="not visible in the active workspace"):
+                machine._check_finished_import(result, "C1", hashes)
+        else:
+            machine._check_finished_import(result, "C1", hashes)
     finally:
         conn.close()
 
