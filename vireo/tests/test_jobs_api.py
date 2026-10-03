@@ -728,8 +728,11 @@ def test_jobs_page_returns_200(app_and_db):
     assert b'result.interrupted && Array.isArray(result.photo_ids)' in resp.data
     # A parent with both post-import steps done has nothing to resume;
     # a parent whose chain ran but still owes tag/GPS work stays
-    # resumable as a tag-only replay.
-    assert b'result.chained && result.tags_applied' in resp.data
+    # resumable as a tag-only replay. ``ok !== false`` discounts a
+    # ``chained`` mark on a failed row — ``_chain_after_import`` returns
+    # early via its "import failed" branch without actually enqueueing
+    # processing.
+    assert b'result.chained && result.ok !== false && result.tags_applied' in resp.data
     # Resume must force ``skip_duplicates=true`` — a parent import
     # configured with ``skip_duplicates=false`` would otherwise carry
     # that false through ``importRetryBody`` and the collision resolver
@@ -11881,6 +11884,327 @@ def test_resume_allows_a_parent_whose_chained_pipeline_never_started(
         assert resp.status_code == 200, resp.get_json()
 
 
+def _interrupted_tagged_import(app, db, client, tmp_path, tag_name):
+    """Run a tagged import and replay a restart that cut it short before
+    its tag pass; return ``(parent_id, its photo ids)``."""
+    card = _chain_card(tmp_path)
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [str(card)],
+        "destination": str(tmp_path / "arch"),
+        "tags": [tag_name],
+    })
+    assert resp.status_code == 200, resp.get_json()
+    parent_id = resp.get_json()["job_id"]
+    parent = wait_for_job_via_client(client, parent_id)["result"]
+    own = parent["photo_ids"]
+    assert own
+    _interrupt_import_row(app, db, parent_id, {
+        "landed_files": parent["landed_files"],
+        "photo_ids": own,
+        "photo_fingerprints": parent["photo_fingerprints"],
+        "source_snapshots": parent["source_snapshots"],
+    })
+    return parent_id, own
+
+
+def _tagged_count(db, photo_ids):
+    return db.conn.execute(
+        "SELECT COUNT(*) FROM photo_keywords WHERE photo_id IN (%s)"
+        % ",".join("?" * len(photo_ids)),
+        photo_ids,
+    ).fetchone()[0]
+
+
+def test_resume_refuses_a_parent_its_finished_resume_took_over(
+    app_and_db, tmp_path,
+):
+    """Regression for #1842: the interrupted row never changes after its
+    resume finishes (the resume's marks and its processing run's
+    ``chained_from`` name the resume, not the parent), so a second Resume
+    passed validation. It replayed the tag/GPS pass over the parent's
+    photos, overwriting what the user corrected since, and created a
+    second collection and processing run. It must be refused."""
+    app, db = app_and_db
+    tag_name = "Kenya trip"
+    with app.test_client() as client:
+        parent_id, own = _interrupted_tagged_import(
+            app, db, client, tmp_path, tag_name)
+
+        resp = client.post(
+            "/api/jobs/import-photos", json=_resume_body(client, parent_id),
+        )
+        assert resp.status_code == 200, resp.get_json()
+        resume_id = resp.get_json()["job_id"]
+        resumed = wait_for_job_via_client(
+            client, resume_id, wait_for_history=True)["result"]
+        if resumed.get("process_job_id"):
+            wait_for_job_via_client(
+                client, resumed["process_job_id"], wait_for_history=True)
+        assert _tagged_count(db, own) == len(own)
+        # The marks reach the finished row, not just the checkpoint.
+        row = next(
+            h for h in client.get("/api/jobs/history").get_json()
+            if h["id"] == resume_id
+        )
+        assert row["result"]["tags_applied"] is True
+        assert row["result"]["chained"] is True
+
+        # The user removes the tag after the resume.
+        db.conn.execute(
+            "DELETE FROM photo_keywords WHERE photo_id IN (%s)"
+            % ",".join("?" * len(own)),
+            own,
+        )
+        db.conn.commit()
+        collections = db.conn.execute(
+            "SELECT COUNT(*) FROM collections").fetchone()[0]
+        jobs_before = len(app._job_runner.list_jobs())
+
+        resp = client.post(
+            "/api/jobs/import-photos", json=_resume_body(client, parent_id),
+        )
+        assert resp.status_code == 409, resp.get_json()
+        body = resp.get_json()
+        assert body["code"] == "import_already_resumed"
+        assert body["taken_over_by_job_id"] == resume_id
+        assert body["takeover"] == "done"
+        assert "already resumed" in body["error"]
+        assert "nothing left to resume" in body["error"]
+        assert len(app._job_runner.list_jobs()) == jobs_before
+        assert db.conn.execute(
+            "SELECT COUNT(*) FROM collections").fetchone()[0] == collections
+        assert _tagged_count(db, own) == 0
+
+
+def test_resume_of_a_parent_whose_resume_was_interrupted_goes_through_it(
+    app_and_db, tmp_path,
+):
+    """When the resume is interrupted too, the way forward is resuming the
+    resume (it inherits the parent's carried, untagged and landed photos).
+    Resuming the original as well would fork the chain, and whichever ran
+    second would redo the other's tags and processing."""
+    app, db = app_and_db
+    tag_name = "Kenya trip"
+    with app.test_client() as client:
+        parent_id, own = _interrupted_tagged_import(
+            app, db, client, tmp_path, tag_name)
+        resp = client.post(
+            "/api/jobs/import-photos", json=_resume_body(client, parent_id),
+        )
+        assert resp.status_code == 200, resp.get_json()
+        resume_id = resp.get_json()["job_id"]
+        resumed = wait_for_job_via_client(client, resume_id)["result"]
+        # A restart cuts the resume short before its tag pass.
+        _interrupt_import_row(app, db, resume_id, {
+            "landed_files": {},
+            "photo_ids": [],
+            "photo_fingerprints": {},
+            "source_snapshots": resumed["source_snapshots"],
+        })
+        db.conn.execute(
+            "DELETE FROM photo_keywords WHERE photo_id IN (%s)"
+            % ",".join("?" * len(own)),
+            own,
+        )
+        db.conn.commit()
+
+        resp = client.post(
+            "/api/jobs/import-photos", json=_resume_body(client, parent_id),
+        )
+        assert resp.status_code == 409, resp.get_json()
+        body = resp.get_json()
+        assert body["taken_over_by_job_id"] == resume_id
+        assert body["takeover"] == "resume"
+        assert "Resume that import" in body["error"]
+
+        # The interrupted resume still resumes, and pays the parent's tags.
+        retry_body = _resume_body(client, resume_id)
+        retry_body["carry_photo_ids"] = own
+        resp = client.post("/api/jobs/import-photos", json=retry_body)
+        assert resp.status_code == 200, resp.get_json()
+        wait_for_job_via_client(client, resp.get_json()["job_id"])
+        assert _tagged_count(db, own) == len(own)
+
+
+def test_resume_stays_available_when_the_resume_failed_before_any_work(
+    app_and_db, tmp_path,
+):
+    """A resume that crashed before its tag pass or chain did none of the
+    parent's owed work, and has no Retry or Resume of its own; the parent
+    is still the way forward."""
+    app, db = app_and_db
+    with app.test_client() as client:
+        parent_id, own = _interrupted_tagged_import(
+            app, db, client, tmp_path, "Kenya trip")
+        db.conn.execute(
+            "INSERT INTO job_history "
+            "(id, type, status, started_at, config, result, workspace_id) "
+            "VALUES (?, 'import', 'failed', ?, ?, ?, ?)",
+            (
+                f"crashed-resume-{parent_id}",
+                "2999-01-01T00:00:00",
+                json.dumps({
+                    "parent_import_job_id": parent_id,
+                    "root_import_job_id": parent_id,
+                }),
+                json.dumps({"error": "disk vanished"}),
+                db._active_workspace_id,
+            ),
+        )
+        db.conn.commit()
+        resp = client.post(
+            "/api/jobs/import-photos", json=_resume_body(client, parent_id),
+        )
+        assert resp.status_code == 200, resp.get_json()
+        wait_for_job_via_client(client, resp.get_json()["job_id"])
+        assert _tagged_count(db, own) == len(own)
+
+
+def _import_with_failed_files(client, tmp_path, monkeypatch):
+    """Run an import whose run reports one failed file (so its row offers
+    Retry); return ``(parent_id, its result, the retry body)``. Later runs
+    are real."""
+    import import_job
+
+    run_import = import_job.run_import_job
+
+    def one_failed(*args, **kwargs):
+        result = run_import(*args, **kwargs)
+        result.update(failed=1, ok=False)
+        return result
+
+    monkeypatch.setattr(import_job, "run_import_job", one_failed)
+    card = _chain_card(tmp_path)
+    body = {
+        "sources": [str(card)],
+        "destination": str(tmp_path / "arch"),
+        "skip_duplicates": True,
+    }
+    resp = client.post("/api/jobs/import-photos", json=body)
+    assert resp.status_code == 200, resp.get_json()
+    parent_id = resp.get_json()["job_id"]
+    parent = wait_for_job_via_client(
+        client, parent_id, wait_for_history=True)
+    assert parent["status"] == "failed"
+    result = parent["result"]
+    assert result["failed"] == 1
+    assert result.get("process_job_id") is None
+    monkeypatch.setattr(import_job, "run_import_job", run_import)
+    # The body the Jobs page's importRetryBody builds for this row.
+    retry_body = {
+        **body,
+        "after_import": parent["config"]["after_import"],
+        "parent_import_job_id": parent_id,
+        "carry_photo_ids": result["photo_ids"],
+    }
+    return parent_id, result, retry_body
+
+
+def test_retry_refuses_a_failed_import_its_finished_retry_took_over(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """The failed row never changes after its retry succeeds, so "Retry 1
+    failed file" stayed offered, and a second click made another
+    collection and processing run over the same photos. It must be
+    refused, pointing at the retry that finished the work."""
+    app, db = app_and_db
+    with app.test_client() as client:
+        parent_id, parent, retry_body = _import_with_failed_files(
+            client, tmp_path, monkeypatch)
+
+        resp = client.post("/api/jobs/import-photos", json=retry_body)
+        assert resp.status_code == 200, resp.get_json()
+        retry_id = resp.get_json()["job_id"]
+        retried = wait_for_job_via_client(
+            client, retry_id, wait_for_history=True)
+        assert retried["status"] == "completed", retried
+        assert retried["result"]["chained"] is True
+        if retried["result"].get("process_job_id"):
+            wait_for_job_via_client(
+                client, retried["result"]["process_job_id"],
+                wait_for_history=True)
+
+        collections = db.conn.execute(
+            "SELECT COUNT(*) FROM collections").fetchone()[0]
+        jobs_before = len(app._job_runner.list_jobs())
+        resp = client.post("/api/jobs/import-photos", json=retry_body)
+        assert resp.status_code == 409, resp.get_json()
+        body = resp.get_json()
+        assert body["code"] == "import_already_retried"
+        assert body["taken_over_by_job_id"] == retry_id
+        assert body["takeover"] == "done"
+        assert "already retried" in body["error"]
+        assert "nothing left to retry" in body["error"]
+        assert len(app._job_runner.list_jobs()) == jobs_before
+        assert db.conn.execute(
+            "SELECT COUNT(*) FROM collections").fetchone()[0] == collections
+
+
+def test_retry_of_a_failed_import_goes_through_a_retry_that_failed_too(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """A retry that failed files of its own offers its own Retry, which
+    carries the original's photos; the original points there. A retry that
+    crashed before doing anything leaves the original retryable."""
+    import import_job
+
+    app, db = app_and_db
+    with app.test_client() as client:
+        parent_id, parent, retry_body = _import_with_failed_files(
+            client, tmp_path, monkeypatch)
+
+        # A retry that crashed before its tag pass: the original stays
+        # the place to retry from.
+        db.conn.execute(
+            "INSERT INTO job_history "
+            "(id, type, status, started_at, config, result, workspace_id) "
+            "VALUES (?, 'import', 'failed', ?, ?, ?, ?)",
+            (
+                f"crashed-retry-{parent_id}",
+                "2999-01-01T00:00:00",
+                json.dumps({
+                    "parent_import_job_id": parent_id,
+                    "root_import_job_id": parent_id,
+                }),
+                json.dumps({"error": "disk vanished"}),
+                db._active_workspace_id,
+            ),
+        )
+        db.conn.commit()
+
+        run_import = import_job.run_import_job
+
+        def one_failed(*args, **kwargs):
+            result = run_import(*args, **kwargs)
+            result.update(failed=1, ok=False)
+            return result
+
+        monkeypatch.setattr(import_job, "run_import_job", one_failed)
+        resp = client.post("/api/jobs/import-photos", json=retry_body)
+        assert resp.status_code == 200, resp.get_json()
+        retry_id = resp.get_json()["job_id"]
+        retried = wait_for_job_via_client(
+            client, retry_id, wait_for_history=True)
+        assert retried["status"] == "failed"
+        monkeypatch.setattr(import_job, "run_import_job", run_import)
+
+        resp = client.post("/api/jobs/import-photos", json=retry_body)
+        assert resp.status_code == 409, resp.get_json()
+        body = resp.get_json()
+        assert body["taken_over_by_job_id"] == retry_id
+        assert body["takeover"] == "retry"
+        assert "Retry its failed files" in body["error"]
+
+        # The failed retry's own Retry still goes through.
+        resp = client.post("/api/jobs/import-photos", json={
+            **retry_body,
+            "parent_import_job_id": retry_id,
+            "carry_photo_ids": parent["photo_ids"],
+        })
+        assert resp.status_code == 200, resp.get_json()
+        wait_for_job_via_client(client, resp.get_json()["job_id"])
+
+
 def test_resume_replays_tags_when_chain_ran_but_tags_owed(
     app_and_db, tmp_path, monkeypatch,
 ):
@@ -11933,7 +12257,7 @@ def test_resume_replays_tags_when_chain_ran_but_tags_owed(
         # The chain ran, but tags are owed — the row is resumable via the
         # tag-only path.
         assert "tags_applied" not in marks
-        assert "chained" not in marks
+        assert marks["chained"] is True
         own = parent["photo_ids"]
         assert own
 
@@ -12797,3 +13121,265 @@ def test_file_type_template_mount_check_still_blocks_used_categories(
     })
     assert resp.status_code == 400, resp.get_json()
     assert "mount" in resp.get_json()["error"]
+
+
+def test_failed_import_with_tag_errors_does_not_mark_chain_paid(app_and_db, tmp_path, monkeypatch):
+    import import_job
+    from services.imports import ImportService
+
+    monkeypatch.setattr(import_job, "run_import_job", lambda *a, **k: {
+        "ok": False, "failed": 1, "photo_ids": [], "errors": ["copy failed"],
+    })
+
+    def failed_tags(self, workspace_id, photo_ids, tags, location_from_gps, result, **kw):
+        result["tagging"] = {"errors": ["tag write failed"]}
+
+    monkeypatch.setattr(ImportService, "_apply_import_tags", failed_tags)
+    app, _db = app_and_db
+    card = _chain_card(tmp_path)
+    with app.test_client() as client:
+        job_id = _post_import(client, card, tmp_path / "archive")
+        result = wait_for_job_via_client(client, job_id)["result"]
+        assert result["chained"] is False
+        assert result["tags_applied"] is False
+        assert "chained" not in app._job_runner.get(job_id).get("partial_result", {})
+
+
+def test_failed_processing_handoff_does_not_mark_chain_paid(app_and_db, tmp_path, monkeypatch):
+    from services.import_photos import _ImportPhotosJob
+
+    def failed_handoff(*args, **kwargs):
+        raise RuntimeError("process handoff failed")
+
+    original_chain = _ImportPhotosJob._chain_after_import
+
+    def chain_with_failed_handoff(self, job, result):
+        monkeypatch.setattr(self.service, "enqueue_process_job", failed_handoff)
+        return original_chain(self, job, result)
+
+    monkeypatch.setattr(_ImportPhotosJob, "_chain_after_import", chain_with_failed_handoff)
+    app, db = app_and_db
+    card = _chain_card(tmp_path)
+    with app.test_client() as client:
+        job_id = _post_import(client, card, tmp_path / "archive",
+                              after_import=_process_id(db, "Cull-ready"))
+        result = wait_for_job_via_client(client, job_id)["result"]
+        assert result["ok"] is True
+        assert result["tags_applied"] is True
+        assert result["chained"] is False
+        assert "failed to enqueue processing" in result["after_import_skipped"]
+        assert "chained" not in app._job_runner.get(job_id).get("partial_result", {})
+
+
+@pytest.mark.parametrize("interrupted", [True, False])
+@pytest.mark.parametrize("move_all", [False, True])
+def test_parent_resume_recovers_photos_landed_by_unpaid_descendant(app_and_db, tmp_path, monkeypatch, interrupted, move_all):
+    from services.import_photos import _ImportPhotosJob
+
+    app, db = app_and_db
+    with app.test_client() as client:
+        parent_id, own = _interrupted_tagged_import(app, db, client, tmp_path, "trip")
+        Image.new("RGB", (16, 16), "green").save(tmp_path / "chain-card" / "new.jpg")
+        # Model original discovery of a third file that the interrupted
+        # parent had not copied. Its source fingerprint stays unchanged
+        # through both real resume runs below.
+        from import_job import _capture_source_snapshots
+        from ingest import discover_source_files
+        card = str(tmp_path / "chain-card")
+        snapshots = _capture_source_snapshots(
+            discover_source_files(card, "both", recursive=True), [card],
+        )
+        db.conn.execute(
+            "UPDATE job_history SET result=json_set(result, '$.source_snapshots', json(?)) WHERE id=?",
+            (json.dumps(snapshots), parent_id),
+        )
+        db.conn.commit()
+        body = _resume_body(client, parent_id)
+        if not interrupted:
+            db.conn.execute(
+                "UPDATE job_history SET result=json_set(result, '$.interrupted', json('false'), '$.failed', 1, '$.ok', json('false')) WHERE id=?",
+                (parent_id,),
+            )
+            db.conn.commit()
+        body["after_import"] = _process_id(db, "Cull-ready")
+        original_chain = _ImportPhotosJob._chain_after_import
+        handoffs = []
+
+        def chain_with_stubbed_handoff(self, job, result):
+            def handoff(*args, **kwargs):
+                handoffs.append(kwargs["collection_id"])
+                if len(handoffs) == 1:
+                    raise RuntimeError("temporary handoff failure")
+                return "stub-process", None, None
+            monkeypatch.setattr(self.service, "enqueue_process_job", handoff)
+            return original_chain(self, job, result)
+
+        monkeypatch.setattr(_ImportPhotosJob, "_chain_after_import", chain_with_stubbed_handoff)
+        response = client.post("/api/jobs/import-photos", json=body)
+        assert response.status_code == 200, response.get_json()
+        first = wait_for_job_via_client(client, response.get_json()["job_id"], wait_for_history=True)["result"]
+        assert first["photo_ids"] and first["chained"] is False
+        child_ids = set(first["photo_ids"])
+        if move_all:
+            from pathlib import Path
+            nas = tmp_path / "nas"
+            nas.mkdir()
+            folder_id = db.add_folder(str(nas), name="NAS")
+            for pid in set(own) | child_ids:
+                row = db.conn.execute(
+                    "SELECT p.filename, f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?", (pid,),
+                ).fetchone()
+                Path(row["path"], row["filename"]).rename(nas / row["filename"])
+                db.conn.execute("UPDATE photos SET folder_id=? WHERE id=?", (folder_id, pid))
+            db.conn.commit()
+        response = client.post("/api/jobs/import-photos", json=body)
+        assert response.status_code == 200, response.get_json()
+        second = wait_for_job_via_client(client, response.get_json()["job_id"])["result"]
+        assert child_ids <= set(second["recovered_photo_ids"])
+        assert second["chained"] is True
+        collected = {p["id"] for p in db.get_collection_photos(handoffs[-1], per_page=999999)}
+        assert set(own) | child_ids <= collected
+
+
+def test_import_only_collection_failure_leaves_chain_unpaid(app_and_db, tmp_path, monkeypatch):
+    from services.imports import ImportService
+
+    def failed_collection(self, result, workspace_id, chain_photo_ids=None):
+        result["collection_error"] = "collection unavailable"
+        return None, None
+    monkeypatch.setattr(ImportService, "_record_import_collection", failed_collection)
+    app, _db = app_and_db
+    with app.test_client() as client:
+        job_id = _post_import(client, _chain_card(tmp_path), tmp_path / "archive", after_import=None)
+        result = wait_for_job_via_client(client, job_id)["result"]
+        assert result["photo_ids"]
+        assert result["chained"] is False
+        assert result["collection_error"] == "collection unavailable"
+
+
+@pytest.mark.parametrize("chained", [True, False])
+def test_resume_rechecks_takeover_after_request_validation(app_and_db, tmp_path, monkeypatch, chained):
+    from unittest.mock import Mock
+
+    from services.import_photos import _ImportPhotosRequest
+
+    app, db = app_and_db
+    with app.test_client() as client:
+        parent_id, _ = _interrupted_tagged_import(app, db, client, tmp_path, "trip")
+        body = _resume_body(client, parent_id)
+        from services.imports import ImportService
+        original_capture = ImportService._capture_photo_fingerprints_for_ids
+
+        def capture_without_admission_lock(service, catalog, ids):
+            assert not service.get_runner()._lock._is_owned()
+            return original_capture(service, catalog, ids)
+
+        monkeypatch.setattr(ImportService, "_capture_photo_fingerprints_for_ids", capture_without_admission_lock)
+        original = _ImportPhotosRequest.prepare_workspace
+
+        def finish_descendant(request):
+            failure = original(request)
+            request.db.conn.execute(
+                "INSERT OR REPLACE INTO job_history (id,type,status,started_at,config,result,workspace_id) VALUES (?,?,?,?,?,?,?)",
+                ("late-resume", "import", "completed", "2026-09-01T12:00:00",
+                 json.dumps({"parent_import_job_id": parent_id, "root_import_job_id": parent_id}),
+                 json.dumps({"ok": True, "tags_applied": True, "chained": chained,
+                             "landed_files": {"/archive/child.jpg": [12, 34, "hash"]}}), request.active_ws),
+            )
+            request.db.conn.commit()
+            return failure
+
+        monkeypatch.setattr(_ImportPhotosRequest, "prepare_workspace", finish_descendant)
+        jobs_before = len(app._job_runner.list_jobs())
+        start_job = Mock(return_value="fresh-resume")
+        if not chained:
+            monkeypatch.setattr(app._job_runner, "start", start_job)
+        response = client.post("/api/jobs/import-photos", json=body)
+        if chained:
+            assert response.status_code == 409, response.get_json()
+            assert response.get_json()["taken_over_by_job_id"] == "late-resume"
+        else:
+            assert response.status_code == 409, response.get_json()
+            assert response.get_json()["code"] == "import_retry_state_changed"
+            start_job.assert_not_called()
+            # A fresh request validates the new partial scope outside locks.
+            response = client.post("/api/jobs/import-photos", json=body)
+            assert response.status_code == 200, response.get_json()
+            started_job = start_job.call_args.args[1].__self__
+            assert started_job.parent_resume["tags_applied"] is True
+            assert started_job.parent_resume["landed_files"]["/archive/child.jpg"] == [12, 34, "hash"]
+            config = start_job.call_args.kwargs["config"]
+            assert config["recover_landed_files"]["/archive/child.jpg"] == [12, 34, "hash"]
+            assert config["untagged_photo_ids"] == []
+        assert len(app._job_runner.list_jobs()) == jobs_before
+
+
+def test_expanded_scope_tag_retry_preserves_paid_parent_tags(app_and_db, tmp_path, monkeypatch):
+    from services.import_photos import _ImportPhotosJob
+
+    interrupted = True
+    app, db = app_and_db
+    with app.test_client() as client:
+        parent_id, own = _interrupted_tagged_import(app, db, client, tmp_path, "trip")
+        Image.new("RGB", (16, 16), "green").save(tmp_path / "chain-card" / "new.jpg")
+        # Model original discovery of a third file that the interrupted
+        # parent had not copied. Its source fingerprint stays unchanged
+        # through both real resume runs below.
+        from import_job import _capture_source_snapshots
+        from ingest import discover_source_files
+        card = str(tmp_path / "chain-card")
+        snapshots = _capture_source_snapshots(
+            discover_source_files(card, "both", recursive=True), [card],
+        )
+        db.conn.execute(
+            "UPDATE job_history SET result=json_set(result, '$.source_snapshots', json(?)) WHERE id=?",
+            (json.dumps(snapshots), parent_id),
+        )
+        db.conn.commit()
+        body = _resume_body(client, parent_id)
+        if not interrupted:
+            db.conn.execute(
+                "UPDATE job_history SET result=json_set(result, '$.interrupted', json('false'), '$.failed', 1, '$.ok', json('false')) WHERE id=?",
+                (parent_id,),
+            )
+            db.conn.commit()
+        body["after_import"] = _process_id(db, "Cull-ready")
+
+        from services.imports import ImportService
+        db.conn.execute("UPDATE job_history SET result=json_set(result, '$.tags_applied', json('true')) WHERE id=?", (parent_id,))
+        db.conn.execute("DELETE FROM photo_keywords WHERE photo_id IN (%s)" % ",".join("?" * len(own)), own)
+        db.conn.commit()
+        original_apply = ImportService._apply_import_tags
+        original_chain = _ImportPhotosJob._chain_after_import
+        tag_calls, handoffs = [], []
+
+        def failing_then_successful_tags(self, active_ws, ids, tags, gps, result, **kwargs):
+            tag_calls.append(set(ids))
+            if len(tag_calls) == 1:
+                result["tagging"] = {"errors": ["temporary tag write failure"]}
+            else:
+                return original_apply(self, active_ws, ids, tags, gps, result, **kwargs)
+
+        def successful_chain(self, job, result):
+            def handoff(*args, **kwargs):
+                handoffs.append(kwargs["collection_id"])
+                return "stub-process", None, None
+            monkeypatch.setattr(self.service, "enqueue_process_job", handoff)
+            return original_chain(self, job, result)
+
+        monkeypatch.setattr(ImportService, "_apply_import_tags", failing_then_successful_tags)
+        monkeypatch.setattr(_ImportPhotosJob, "_chain_after_import", successful_chain)
+        response = client.post("/api/jobs/import-photos", json=body)
+        assert response.status_code == 200, response.get_json()
+        first = wait_for_job_via_client(client, response.get_json()["job_id"], wait_for_history=True)["result"]
+        child_ids = set(first["photo_ids"])
+        assert child_ids and first["tags_applied"] is False and first["chained"] is True
+        response = client.post("/api/jobs/import-photos", json=body)
+        assert response.status_code == 200, response.get_json()
+        second = wait_for_job_via_client(client, response.get_json()["job_id"], wait_for_history=True)["result"]
+        assert second["tags_applied"] is True
+        assert second["after_import_skipped"] == "chain already ran on the interrupted parent"
+        assert tag_calls == [child_ids, child_ids]
+        assert len(handoffs) == 1
+        assert _tagged_count(db, own) == 0
+        assert _tagged_count(db, list(child_ids)) == len(child_ids)

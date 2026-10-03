@@ -84,11 +84,6 @@ def _admit_import_job(service, db, request):
     vireo_dir = os.path.dirname(thumb_cache_dir)
     remote_target = request.remote_transport()
     job_config = request.job_config()
-    import_job = _ImportPhotosJob(
-        request, runner, remote_target,
-        thumb_cache_dir=thumb_cache_dir, vireo_dir=vireo_dir,
-    )
-
     failure = _competing_retry_failure(runner, job_config)
     if failure is not None:
         return failure
@@ -99,12 +94,29 @@ def _admit_import_job(service, db, request):
     # registration would otherwise see no import job and be admitted,
     # letting the stage rebase the destination this import is about to
     # copy into and scan.
-    with stage_boundary_lock():
+    with stage_boundary_lock(), runner.admission_guard():
+        # Snapshot validation can outlast a sibling import. Consult terminal
+        # takeover again immediately before admitting this request.
+        parent_id = job_config.get("parent_import_job_id")
+        if parent_id:
+            failure = request.recheck_parent_takeover()
+            if failure is not None:
+                return failure
+        # Successful revalidation can change merged marks and landing scope.
+        # Persist and execute the same fresh snapshot.
+        job_config = request.job_config()
+        failure = _competing_retry_failure(runner, job_config)
+        if failure is not None:
+            return failure
         conflict = _local_copy_conflict(
             runner, db, request.conflict_paths,
         )
         if conflict:
             return ImportFailure(conflict, 409)
+        import_job = _ImportPhotosJob(
+            request, runner, remote_target,
+            thumb_cache_dir=thumb_cache_dir, vireo_dir=vireo_dir,
+        )
         return runner.start(
             "import", import_job.work, config=job_config,
             workspace_id=request.active_ws, pausable=True,
@@ -487,6 +499,7 @@ class _ImportPhotosRequest:
         self.parent_allowed_ids = None
         self.parent_allowed_fingerprints = None
         self.parent_source_snapshots = None
+        self.parent_takeover_snapshot = {}
         if parent_id_raw is not None:
             if not isinstance(parent_id_raw, str) or not parent_id_raw.strip():
                 return ImportFailure(
@@ -507,9 +520,31 @@ class _ImportPhotosRequest:
                 parent_err,
             ) = self.service._validate_parent_import_job(
                 parent_id_raw.strip(), self.db._active_workspace_id, self.db,
+                snapshot_out=self.parent_takeover_snapshot,
             )
             if parent_err is not None:
                 return parent_err
+        return None
+
+    def recheck_parent_takeover(self):
+        """Cheap DB/runner evidence only; caller holds the admission guard."""
+        fresh = {}
+        *_, failure = self.service._validate_parent_import_job(
+            self.parent_id_raw.strip(), self.active_ws, self.db,
+            relocate_landings=False, snapshot_out=fresh,
+        )
+        if failure is not None:
+            return failure
+        if fresh != self.parent_takeover_snapshot:
+            # The earlier scope/identity validation may have read files.
+            # Refuse changed evidence instead of repeating that I/O while
+            # global admission and terminal transitions are locked.
+            return ImportFailure(
+                "A later import changed this retry's remaining work while "
+                "it was being checked. Refresh Jobs and retry from its "
+                "current state.", 409,
+                details={"code": "import_retry_state_changed"},
+            )
         return None
 
     def validate_after_import_process(self):
@@ -989,6 +1024,9 @@ class _ImportPhotosRequest:
             "untagged_photo_ids": (
                 parent_resume["untagged_ids"] if parent_resume else []
             ),
+            "paid_tag_photo_ids": (
+                parent_resume["paid_tag_photo_ids"] if parent_resume else []
+            ),
             # Fingerprint sidecar to carry_photo_ids so a retry-of-retry
             # can still verify the inherited scope by stable identity
             # even after the grandparent's job has aged out of history.
@@ -1141,7 +1179,7 @@ class _ImportPhotosJob:
                 result["local_processing"] = True
                 result["final_destination"] = self.destination
                 result["staging_destination"] = import_destination
-            tag_errors = self._apply_tags(job, result)
+            self._apply_tags(job, result)
             # Atomically honor a pending pause/cancel before collection
             # publication and child-job handoff. The shared runner gate
             # rejects new requests once this final phase begins.
@@ -1152,17 +1190,22 @@ class _ImportPhotosJob:
             # ``_interrupted_parent_resume``): the collection and
             # processing child are already there.
             if not (parent_resume and parent_resume.get("chain_already_ran")):
-                self._chain_after_import(job, result)
+                chain_paid = self._chain_after_import(job, result)
             else:
+                chain_paid = True
                 result["after_import_skipped"] = (
                     "chain already ran on the interrupted parent"
                 )
-            # A cancelled run skipped the chain (and may owe tags), so it
-            # stays resumable; a chain that ran with owed tag work also
-            # stays resumable — the mark is a promise both post-import
-            # steps landed.
-            if not result.get("cancelled") and not tag_errors:
+            # Record the chain independently of the tag pass: a tag-only
+            # resume must not publish a second collection or processing job.
+            # A cancelled run skipped the chain and still owes it.
+            if chain_paid and not result.get("cancelled") and result.get("ok") is not False:
                 self._mark_post_import_step(job, "chained", result)
+                result["chained"] = True
+            # Both marks land on the final row either way, so a row that
+            # has neither key predates them (``import_resume_takeover``).
+            result.setdefault("tags_applied", False)
+            result.setdefault("chained", False)
             return result
         finally:
             # run_import_job can flip destination folders from
@@ -1234,7 +1277,7 @@ class _ImportPhotosJob:
             if pid in carried
         ]
         if parent_resume and not parent_resume["tags_applied"]:
-            owed += sorted(parent_landings)
+            owed += sorted(parent_landings - set(parent_resume.get("paid_tag_photo_ids", [])))
         for pid in owed:
             if pid not in seen:
                 seen.add(pid)
@@ -1248,6 +1291,7 @@ class _ImportPhotosJob:
         # still owes work; leave it unmarked so a resume replays it.
         if not result.get("cancelled") and not tag_errors:
             self._mark_post_import_step(job, "tags_applied")
+            result["tags_applied"] = True
         return tag_errors
 
     def _mark_post_import_step(self, job, step, result=None):
@@ -1259,6 +1303,11 @@ class _ImportPhotosJob:
         tag, collect or chain the same photos twice. ``result``, once the
         run is otherwise done, rides along so the row still carries what
         an ordinary retry needs (``failed`` and the rest).
+
+        Callers also set the mark on the returned result, so the final row
+        keeps it: once this run is a resume, its marks are how a later
+        Resume of the interrupted import it descends from learns the work
+        was already done (``import_resume_takeover``).
         """
         job["partial_result"] = {
             **(job.get("partial_result") or {}), **(result or {}), step: True,
@@ -1270,7 +1319,9 @@ class _ImportPhotosJob:
 
         Every skip is written to the result as ``after_import_skipped``
         so the jobs panel shows exactly why processing did not run.  The
-        collection is independent: every successful import with new
+        Returns whether the requested chain was paid: a failed handoff
+        remains resumable even when importing and tagging succeeded.
+        The collection is independent: every successful import with new
         photos gets one, including the import-only choice.
         """
         service = self.service
@@ -1314,21 +1365,21 @@ class _ImportPhotosJob:
 
         if after_import is None:
             result["after_import_skipped"] = "import-only"
-            return
+            return not chain_scope or col_id is not None
         if not result.get("ok"):
             result["after_import_skipped"] = "import failed"
-            return
+            return False
         if result.get("cancelled"):
             result["after_import_skipped"] = "import cancelled"
-            return
+            return False
         if not chain_scope:
             result["after_import_skipped"] = "no new photos"
-            return
+            return True
         if col_id is None:
             result["after_import_skipped"] = (
                 "failed to create import collection"
             )
-            return
+            return False
         try:
             after_move = None
             if move_target_snapshot is not None and not self.defer_nas_transfer:
@@ -1364,7 +1415,7 @@ class _ImportPhotosJob:
                     # visible either way.
                     service.chain_after_move(
                         job, result, after_move, active_ws)
-                return
+                return False
             result["process_job_id"] = process_job_id
             if after_move is not None:
                 # Surface the planned move on the import's result card so
@@ -1380,6 +1431,7 @@ class _ImportPhotosJob:
                         after_move["skip_note"])
             if model_warning:
                 result["model_warning"] = model_warning
+            return process_job_id is not None
         except Exception as e:
             # The import itself succeeded — record the chaining failure
             # rather than flipping the whole job red, but never
@@ -1389,6 +1441,7 @@ class _ImportPhotosJob:
             result["after_import_skipped"] = (
                 f"failed to enqueue processing: {e}"
             )
+            return False
 
     def _plan_after_move(self, thread_db, chain_scope):
         """Which imported folders must the chained NAS move relocate?
