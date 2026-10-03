@@ -745,17 +745,7 @@ PhotoSafetyMachine.TestCase.settings = settings.get_profile(PROFILE)
 TestPhotoSafetyInvariants = PhotoSafetyMachine.TestCase
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "move_photos links its destination folder only to the active "
-        "workspace, so a photo in a folder shared with another workspace "
-        "drops out of that workspace when moved (Move Photos, move rules, "
-        "Move Folder with a date template). Found by PhotoSafetyMachine. When "
-        "this passes, drop the xfail and the known_move_visibility_losses carve-out."
-    ),
-)
-def test_move_photos_keeps_photo_visible_in_sharing_workspaces(tmp_path):
+def test_move_photos_keeps_photo_visible_in_sharing_workspaces(tmp_path, request):
     import move
     from db import Database
 
@@ -778,6 +768,15 @@ def test_move_photos_keeps_photo_visible_in_sharing_workspaces(tmp_path):
         result = move.move_photos(db, [photo_id], str(picked))
 
         assert result["moved"] == 1
+        # Mark only after setup and move-success assertions have passed. A
+        # broken setup or failed move must not become this known xfail.
+        request.node.add_marker(pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+            "move_photos links its destination folder only to the active "
+            "workspace, so a photo in a folder shared with another workspace "
+            "drops out of that workspace when moved (Move Photos, move rules, "
+            "Move Folder with a date template). Found by PhotoSafetyMachine. When "
+            "this passes, drop the xfail and the known_move_visibility_losses carve-out."
+        )))
         visible_to = {
             row[0] for row in db.conn.execute(
                 "SELECT wf.workspace_id FROM photos p JOIN workspace_folders wf "
