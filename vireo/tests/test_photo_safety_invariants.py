@@ -233,7 +233,8 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
         self.visibility = self._workspace_visibility()
         # Set by steps built on ``move.move_photos``; see
         # ``test_move_photos_keeps_photo_visible_in_sharing_workspaces``.
-        self.visibility_known_broken = False
+        self.known_move_visibility_losses = {}
+        self.allowed_catalog_deletions = set()
 
     def teardown(self):
         try:
@@ -313,6 +314,18 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
             if row[1] is not None:
                 workspaces.add(row[1])
         return visible
+
+    def _record_known_move_visibility_losses(self, before_rows, chosen):
+        # The pinned bug permits only a genuinely moved photo to lose its
+        # old non-active workspace links. Active and unrelated access stays
+        # checked, including after a partial or refused move.
+        before_paths = {r["id"]: os.path.join(r["folder_path"], r["filename"]) for r in before_rows}
+        after_paths = {
+            r["id"]: os.path.join(r["folder_path"], r["filename"]) for r in self._catalog_rows()
+        }
+        for pid in chosen:
+            if pid in after_paths and before_paths[pid] != after_paths[pid]:
+                self.known_move_visibility_losses[pid] = self.visibility.get(pid, set()) - {self.ws_id}
 
     def _photo_folders(self):
         """Folders with photos that the active workspace can see."""
@@ -491,8 +504,6 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
     def move_some_photos(self, data):
         import move
 
-        self.visibility_known_broken = True
-
         visible = self._visible_photo_ids()
         if not visible:
             return
@@ -506,6 +517,7 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
         ]))
         os.makedirs(dest, exist_ok=True)
         result = move.move_photos(self.db, chosen, dest)
+        self._record_known_move_visibility_losses(rows, chosen)
         event(f"move_photos: moved={bool(result.get('moved'))} errors={bool(result.get('errors'))}")
         for error in result.get("errors") or []:
             event(f"move_photos error: {_error_kind(error)}")
@@ -541,15 +553,16 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
         """Move Folder with a date template: photos re-sorted by capture date."""
         import move
 
-        self.visibility_known_broken = True
-
         folders = self._photo_folders()
         if not folders:
             return
         folder = data.draw(st.sampled_from(folders))
         dest = os.path.join(self.moved, "by-date")
         os.makedirs(dest, exist_ok=True)
+        before_rows = self._catalog_rows()
+        chosen = [r["id"] for r in before_rows if r["folder_path"] == folder["path"]]
         result = move.move_folder_by_date(self.db, folder["id"], dest, "%Y/%m")
+        self._record_known_move_visibility_losses(before_rows, chosen)
         event(f"move_folder_by_date: {sorted(k for k, v in (result or {}).items() if v)[:4]}")
         for error in (result or {}).get("errors") or []:
             event(f"move_folder_by_date error: {_error_kind(error)}")
@@ -570,6 +583,8 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
                     if os.path.isfile(path):
                         self.allowed_to_vanish[_sha256(path)] += 1
         result = self._deleter().run_batch_delete(self.db, chosen, mode=mode)
+        if result.get("ok"):
+            self.allowed_catalog_deletions.update(set(chosen) - set(result.get("failed_photo_ids") or []))
         event(f"delete {mode}: ok={result.get('ok')}")
 
     # -- invariants ----------------------------------------------------------
@@ -601,21 +616,17 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
         assert not new_invisible, (
             f"newly cataloged photos invisible to active workspace {self.ws_id}: {new_invisible}"
         )
-        if self.visibility_known_broken:
-            # move_photos links its destination only to the active workspace.
-            # Remove this once the strict xfail below starts passing.
-            self.visibility = now
-            self.visibility_known_broken = False
-            return
+        disappeared = set(self.visibility) - set(now) - self.allowed_catalog_deletions
+        assert not disappeared, f"catalog photos disappeared without a successful delete: {sorted(disappeared)}"
         dropped = {
-            pid: sorted(before - now.get(pid, set()))
+            pid: sorted(before - now[pid] - self.known_move_visibility_losses.get(pid, set()))
             for pid, before in self.visibility.items()
-            if pid in now and before - now[pid]
+            if pid in now and before - now[pid] - self.known_move_visibility_losses.get(pid, set())
         }
         assert not dropped, f"photos lost workspace visibility: {dropped}"
-        # A row that disappeared was deleted; catalog_matches_disk and the
-        # loss check cover whether that was allowed.
         self.visibility = now
+        self.known_move_visibility_losses = {}
+        self.allowed_catalog_deletions = set()
 
     @invariant()
     def catalog_matches_disk(self):
@@ -625,10 +636,10 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
             assert os.path.isfile(path), (
                 f"photo {row['id']} points at {path}, which does not exist"
             )
-            if row["file_hash"]:
-                assert _sha256(path) == row["file_hash"], (
-                    f"photo {row['id']} records a hash that does not match {path}"
-                )
+            assert row["file_hash"], f"photo {row['id']} has no recorded file hash"
+            assert _sha256(path) == row["file_hash"], (
+                f"photo {row['id']} records a hash that does not match {path}"
+            )
             key = os.path.normcase(os.path.normpath(path))
             assert key not in seen, (
                 f"photos {seen[key]} and {row['id']} both claim {path}"
@@ -647,7 +658,7 @@ TestPhotoSafetyInvariants = PhotoSafetyMachine.TestCase
         "workspace, so a photo in a folder shared with another workspace "
         "drops out of that workspace when moved (Move Photos, move rules, "
         "Move Folder with a date template). Found by PhotoSafetyMachine. When "
-        "this passes, drop the xfail and the visibility_known_broken carve-out."
+        "this passes, drop the xfail and the known_move_visibility_losses carve-out."
     ),
 )
 def test_move_photos_keeps_photo_visible_in_sharing_workspaces(tmp_path):
@@ -729,13 +740,15 @@ def test_visibility_invariant_distinguishes_linkless_from_deleted(delete_catalog
         )
         machine = PhotoSafetyMachine.__new__(PhotoSafetyMachine)
         machine.db = SimpleNamespace(conn=conn)
-        machine.visibility_known_broken = False
+        machine.known_move_visibility_losses = {}
+        machine.allowed_catalog_deletions = set()
         machine.ws_id = 1
         machine.visibility = machine._workspace_visibility()
         assert machine.visibility == {1: {1}}
         conn.execute("DELETE FROM workspace_folders")
         if delete_catalog_row:
             conn.execute("DELETE FROM photos")
+            machine.allowed_catalog_deletions = {1}
             machine.no_photo_drops_out_of_a_workspace()
             assert machine.visibility == {}
         else:
@@ -759,7 +772,8 @@ def test_new_catalog_photo_must_be_visible_to_active_workspace(linked_workspace)
         machine = PhotoSafetyMachine.__new__(PhotoSafetyMachine)
         machine.db = SimpleNamespace(conn=conn)
         machine.ws_id = 1
-        machine.visibility_known_broken = False
+        machine.known_move_visibility_losses = {}
+        machine.allowed_catalog_deletions = set()
         machine.visibility = machine._workspace_visibility()
         conn.execute("INSERT INTO photos VALUES (1, 10)")
         if linked_workspace is not None:
@@ -772,3 +786,64 @@ def test_new_catalog_photo_must_be_visible_to_active_workspace(linked_workspace)
                 machine.no_photo_drops_out_of_a_workspace()
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize(
+    "loss,should_fail",
+    [("moved-sharing", False), ("moved-active", True), ("unrelated-sharing", True),
+     ("undeclared-row-delete", True), ("declared-row-delete", False)],
+)
+def test_visibility_exemptions_are_limited_to_declared_ids_and_workspaces(loss, should_fail):
+    import sqlite3
+    from types import SimpleNamespace
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.executescript(
+            "CREATE TABLE photos (id INTEGER, folder_id INTEGER);"
+            "CREATE TABLE workspace_folders (folder_id INTEGER, workspace_id INTEGER);"
+            "INSERT INTO photos VALUES (1, 10), (2, 20);"
+            "INSERT INTO workspace_folders VALUES (10, 1), (10, 2), (20, 1), (20, 2);"
+        )
+        machine = PhotoSafetyMachine.__new__(PhotoSafetyMachine)
+        machine.db = SimpleNamespace(conn=conn)
+        machine.ws_id = 1
+        machine.visibility = machine._workspace_visibility()
+        machine.known_move_visibility_losses = {1: {2}}
+        machine.allowed_catalog_deletions = set()
+        if loss == "moved-sharing":
+            conn.execute("DELETE FROM workspace_folders WHERE folder_id=10 AND workspace_id=2")
+        elif loss == "moved-active":
+            conn.execute("DELETE FROM workspace_folders WHERE folder_id=10 AND workspace_id=1")
+        elif loss == "unrelated-sharing":
+            conn.execute("DELETE FROM workspace_folders WHERE folder_id=20 AND workspace_id=2")
+        else:
+            conn.execute("DELETE FROM photos WHERE id=1")
+            if loss == "declared-row-delete":
+                machine.allowed_catalog_deletions = {1}
+        if should_fail:
+            with pytest.raises(AssertionError, match="photos (lost|disappeared)"):
+                machine.no_photo_drops_out_of_a_workspace()
+        else:
+            machine.no_photo_drops_out_of_a_workspace()
+            assert not machine.known_move_visibility_losses
+            assert not machine.allowed_catalog_deletions
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("stored_hash", [None, "", "wrong-hash", "correct"],
+                         ids=["null-hash", "empty-hash", "wrong-hash", "matching-hash"])
+def test_catalog_invariant_requires_matching_hash(tmp_path, stored_hash):
+    path = tmp_path / "photo.jpg"
+    path.write_bytes(b"readable-photo-bytes")
+    machine = PhotoSafetyMachine.__new__(PhotoSafetyMachine)
+    recorded = _sha256(path) if stored_hash == "correct" else stored_hash
+    machine._catalog_rows = lambda: [
+        {"id": 1, "folder_path": str(tmp_path), "filename": path.name, "file_hash": recorded}
+    ]
+    if stored_hash == "correct":
+        machine.catalog_matches_disk()
+    else:
+        with pytest.raises(AssertionError, match="(no recorded file hash|hash that does not match)"):
+            machine.catalog_matches_disk()
