@@ -97,7 +97,7 @@ jobs:
               ])
               .write();
 
-  # Impact-selected unit tests on Linux and Windows. ``scripts/select_tests.py``
+  # Impact-selected unit tests on Linux. ``scripts/select_tests.py``
   # maps the PR's diff onto the per-test coverage recorded by the last
   # post-merge "Full tests" run (test-main.yml) and runs just the tests
   # that executed the changed functions. The complete suite on all three
@@ -110,9 +110,10 @@ jobs:
   # ``scripts/selected_tests_plugin.py``): every shard makes the same
   # selection and runs every fourth test of it, so a full-suite fallback
   # takes about a quarter of the wall time. The ``test`` gate below
-  # requires all of them.
+  # requires all of them. Windows always runs the full unit suite because
+  # Linux coverage cannot record tests or branches that only run on Windows.
   #
-  # Windows runs the same Linux-recorded selection. Most red runs of Full
+  # Windows verifies the complete suite before merge. Most red runs of Full
   # tests on main have come from the Windows leg alone: POSIX paths in a new
   # test, CRLF checkouts of harnessed JS, a file held open across
   # ``os.replace``. In most of them the failing test was new or edited in
@@ -152,21 +153,14 @@ jobs:
       # ``key`` hits exactly when main hasn't moved since the map was built;
       # ``restore-keys`` otherwise picks the newest map published by any
       # merge. Cache keys are immutable, so a SHA suffix is what makes each
-      # merge's map distinct. The map is saved on Linux; without
-      # ``enableCrossOsArchive`` a Windows runner looks the key up under a
-      # Windows-only cache version, misses, and falls back to the full suite.
-      # (The flag only changes the version on Windows, so Linux lookups are
-      # unaffected.) The map records the Linux checkout root and
-      # ``select_tests.py`` strips it after normalizing separators, so the
-      # same map resolves on both.
+      # merge's map distinct. Only Linux uses this map; Windows runs in full.
       - name: Restore test-impact map
-        if: needs.changes.outputs.python == 'true' && needs.changes.outputs.full != 'true'
+        if: needs.changes.outputs.python == 'true' && needs.changes.outputs.full != 'true' && runner.os == 'Linux'
         uses: actions/cache/restore@v5
         with:
           path: .test-impact
           key: test-impact-map-${{ github.event.pull_request.base.sha }}
           restore-keys: test-impact-map-
-          enableCrossOsArchive: true
 
       - name: Select tests for this change
         id: select
@@ -176,9 +170,9 @@ jobs:
           FORCE_FULL: ${{ needs.changes.outputs.full }}
         run: |
           mkdir -p .test-impact
-          if [ "$FORCE_FULL" = "true" ]; then
+          if [ "$FORCE_FULL" = "true" ] || [ "$RUNNER_OS" = "Windows" ]; then
             mode=full
-            echo "mode: full (ci-full-suite label)" | tee .test-impact/select.log
+            echo "mode: full (full-suite override or Windows platform coverage)" | tee .test-impact/select.log
           else
             set +e
             python scripts/select_tests.py --explain --output .test-impact/selected.txt \
