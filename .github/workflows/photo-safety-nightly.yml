@@ -1,0 +1,55 @@
+name: Photo safety search
+
+# A large random search over sequences of the operations that touch original
+# photos (import, interrupted and crashed imports, scans, moves, deletes,
+# workspace sharing), checking after every step that no photo is lost or
+# overwritten and that the catalog matches disk. See
+# vireo/tests/test_photo_safety_invariants.py.
+#
+# PRs run the same state machine with a small, derandomized budget as part of
+# the unit suite. This run uses a fresh random seed each night, so over time it
+# explores sequences the PR budget never reaches. A failure prints the shrunk
+# sequence of steps and a ``@reproduce_failure`` blob in the log; paste the
+# steps into a regression test.
+
+on:
+  schedule:
+    - cron: "17 8 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: photo-safety-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  search:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      # No model weights or tokens: the search touches files and the catalog
+      # only.
+      - name: Install Vireo and the test tools
+        run: pip install -e . pytest "hypothesis>=6.100"
+
+      - name: Run the nightly search
+        env:
+          VIREO_INVARIANTS_PROFILE: nightly
+        run: >-
+          python -m pytest vireo/tests/test_photo_safety_invariants.py
+          -p no:cacheprovider -q --tb=long --hypothesis-show-statistics
