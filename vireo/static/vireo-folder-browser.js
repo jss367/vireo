@@ -297,11 +297,20 @@
     return path + '\n' + normalized;
   };
 
-  FolderBrowser.prototype._applyCount = function (path, count) {
-    if (!count) return;
+  // ``entry`` is ``{count, incomplete}``. An incomplete count ran out of the
+  // server's time budget, so the number is only what was found before it
+  // stopped: show it as a lower bound and say why.
+  FolderBrowser.prototype._applyCount = function (path, entry) {
+    if (!entry.count && !entry.incomplete) return;
+    var text = entry.incomplete
+      ? (entry.count ? Number(entry.count).toLocaleString() + '+ photos' : 'Not counted')
+      : formatPhotoCount(entry.count);
     this.list.querySelectorAll('.folder-browser-count').forEach(function (badge) {
       if (badge.getAttribute('data-count-path') === path) {
-        badge.textContent = formatPhotoCount(count);
+        badge.textContent = text;
+        if (entry.incomplete) {
+          badge.title = 'Stopped counting: this folder holds too many files to count quickly.';
+        }
       }
     });
   };
@@ -332,9 +341,11 @@
       var data = await response.json();
       if (seq !== this.seq) return;
       var counts = data.counts || {};
+      var incomplete = data.incomplete || [];
       Object.keys(counts).forEach(function (path) {
-        this.countCache[this._countKey(path, fileTypes)] = counts[path];
-        this._applyCount(path, counts[path]);
+        var entry = {count: counts[path], incomplete: incomplete.indexOf(path) !== -1};
+        this.countCache[this._countKey(path, fileTypes)] = entry;
+        this._applyCount(path, entry);
       }, this);
     } catch (error) {
       if (error.name !== 'AbortError') { /* Counts are helpful but non-blocking. */ }
