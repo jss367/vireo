@@ -236,7 +236,12 @@ def test_unreserved_bare_navigation_shortcut_navigates(live_server, page):
     page.wait_for_load_state("networkidle")
     # The shortcut's job ends once the browser asks for the page. Waiting
     # for the server to answer as well only measures how busy the machine is.
-    with page.expect_request(f"{url}/dashboard", timeout=3000):
+    with page.expect_request(
+        lambda request: (
+            request.url == f"{url}/dashboard" and request.is_navigation_request()
+        ),
+        timeout=3000,
+    ):
         page.keyboard.press("d")
 
 
@@ -251,7 +256,12 @@ def test_modified_navigation_shortcut_still_navigates(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/cull", timeout=15000)
     page.wait_for_load_state("networkidle")
-    with page.expect_request(f"{url}/browse", timeout=3000):
+    with page.expect_request(
+        lambda request: (
+            request.url == f"{url}/browse" and request.is_navigation_request()
+        ),
+        timeout=3000,
+    ):
         page.keyboard.press("Control+B")
 
 

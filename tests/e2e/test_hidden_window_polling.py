@@ -55,6 +55,17 @@ def test_hidden_window_stops_background_polls_and_catches_up_when_shown(live_ser
     page.clock.install()
     page.goto(live_server['url'] + '/browse')
     expect(page.locator('.grid-card').first).to_be_visible()
+    # A visible tick starts the automatic POST without awaiting it. Its
+    # response can arm a status retry after the job list has gone idle.
+    page.evaluate("""() => {
+      window.__missingPhotosChecksInFlight = 0;
+      const startCheck = startMissingPhotosCheck;
+      startMissingPhotosCheck = async function(...args) {
+        window.__missingPhotosChecksInFlight++;
+        try { return await startCheck.apply(this, args); }
+        finally { window.__missingPhotosChecksInFlight--; }
+      };
+    }""")
     # Take job-poll ticks until the navbar has seen no live job: a live job
     # keeps the job poll running while hidden, for the dock progress.
     for _ in range(20):
@@ -71,6 +82,7 @@ def test_hidden_window_stops_background_polls_and_catches_up_when_shown(live_ser
     # Its scan then lags the job list by one retry.
     page.wait_for_function(
         '() => !_newImagesInFlight && _newImagesPendingTimer === null'
+        ' && window.__missingPhotosChecksInFlight === 0'
         ' && !_missingPhotosBannerInFlight && _missingPhotosBannerStatusPoll === null')
     page.wait_for_timeout(300)
 
