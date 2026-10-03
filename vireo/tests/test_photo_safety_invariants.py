@@ -494,14 +494,15 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
         card_hashes = {
             _sha256(os.path.join(self.cards[card], n)) for n in self._card_images(card)
         }
+        prior_invisible_hashes = self._cataloged_hashes_outside_active()
         result = self._run_import(card, _Runner())
         event(f"import: copied={bool(result.get('copied'))} "
               f"failed={bool(result.get('failed'))} cancelled={bool(result.get('cancelled'))}")
-        exempted_count = self._check_finished_import(result, card, card_hashes)
+        exempted_count = self._check_finished_import(result, card, card_hashes, prior_invisible_hashes)
         if exempted_count:
             event(f"known product defect: {exempted_count} skipped duplicate(s) invisible in receiving workspace")
 
-    def _check_finished_import(self, result, card, card_hashes):
+    def _check_finished_import(self, result, card, card_hashes, prior_invisible_hashes):
         if not result.get("ok") or result.get("cancelled") or result.get("failed"):
             return
         missing = card_hashes - self._cataloged_hashes()
@@ -517,7 +518,7 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
             # (``test_reimport_moved_duplicate_is_visible_in_receiving_workspace``),
             # alongside the Move Photos defect. When this passes, drop the
             # xfail and this carve-out.
-            exempted = missing & self._cataloged_hashes_outside_active()
+            exempted = missing & prior_invisible_hashes & self._cataloged_hashes_outside_active()
             missing = missing - exempted
         assert not missing, (
             f"import of {card} reported success (copied={result.get('copied')}, "
@@ -1018,9 +1019,9 @@ def test_finished_import_checks_active_workspace_catalog(
         hashes = {_sha256(path)}
         if should_fail:
             with pytest.raises(AssertionError, match="not visible in the active workspace"):
-                machine._check_finished_import(result, "card", hashes)
+                machine._check_finished_import(result, "card", hashes, machine._cataloged_hashes_outside_active())
         else:
-            machine._check_finished_import(result, "card", hashes)
+            machine._check_finished_import(result, "card", hashes, machine._cataloged_hashes_outside_active())
     finally:
         conn.close()
 
@@ -1087,9 +1088,54 @@ def test_finished_import_requires_offcard_catalog_row(tmp_path, location, should
         hashes = {_sha256(path)}
         if should_fail:
             with pytest.raises(AssertionError, match="not visible in the active workspace"):
-                machine._check_finished_import(result, "C1", hashes)
+                machine._check_finished_import(result, "C1", hashes, machine._cataloged_hashes_outside_active())
         else:
-            machine._check_finished_import(result, "C1", hashes)
+            machine._check_finished_import(result, "C1", hashes, machine._cataloged_hashes_outside_active())
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("already_invisible", [False, True], ids=["newly-copied", "known-duplicate"])
+def test_duplicate_skip_cannot_exempt_newly_invisible_copy(tmp_path, already_invisible):
+    import sqlite3
+    from types import SimpleNamespace
+
+    visible = tmp_path / "visible"
+    invisible = tmp_path / "invisible"
+    visible.mkdir()
+    invisible.mkdir()
+    (visible / "duplicate.jpg").write_bytes(b"already-visible-duplicate")
+    (invisible / "copied.jpg").write_bytes(b"different-photo")
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.executescript(
+            "CREATE TABLE photos (id INTEGER, folder_id INTEGER, filename TEXT, file_hash TEXT);"
+            "CREATE TABLE folders (id INTEGER, path TEXT);"
+            "CREATE TABLE workspace_folders (folder_id INTEGER, workspace_id INTEGER);"
+            "INSERT INTO photos VALUES (1, 10, 'duplicate.jpg', NULL);"
+            "INSERT INTO workspace_folders VALUES (10, 1);"
+            "INSERT INTO workspace_folders VALUES (20, 2);"
+        )
+        conn.executemany("INSERT INTO folders VALUES (?, ?)", [(10, str(visible)), (20, str(invisible))])
+        machine = PhotoSafetyMachine.__new__(PhotoSafetyMachine)
+        machine.db = SimpleNamespace(conn=conn)
+        machine.ws_id = 1
+        machine.cards = {"card": str(tmp_path / "card")}
+        if already_invisible:
+            conn.execute("INSERT INTO photos VALUES (2, 20, 'copied.jpg', NULL)")
+        prior = machine._cataloged_hashes_outside_active()
+        if not already_invisible:
+            # The duplicate was skipped; a different copied photo was linked
+            # to the wrong workspace during the import.
+            conn.execute("INSERT INTO photos VALUES (2, 20, 'copied.jpg', NULL)")
+        hashes = {_sha256(visible / "duplicate.jpg"), _sha256(invisible / "copied.jpg")}
+        result = {"ok": True, "copied": 1, "skipped_duplicate": 1, "failed": 0}
+        if already_invisible:
+            assert machine._check_finished_import(result, "card", hashes, prior) == 1
+        else:
+            with pytest.raises(AssertionError, match="not visible in the active workspace"):
+                machine._check_finished_import(result, "card", hashes, prior)
     finally:
         conn.close()
 
