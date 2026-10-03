@@ -96,6 +96,11 @@ def test_lightbox_export_resolves_photo_when_action_is_invoked(live_server, page
             window.__rejectPreflight = true;
             window.safeFetch = async function(url, options) {
                 if (url === '/api/jobs/export/preflight') {
+                    // The modal's live filename check sends only naming
+                    // settings; the check Export runs also carries quality.
+                    if (!('quality' in JSON.parse(options.body))) {
+                        return {rename_count: 0, renames: []};
+                    }
                     if (window.__rejectPreflight) {
                         window.__rejectPreflight = false;
                         throw new Error('probe denied');

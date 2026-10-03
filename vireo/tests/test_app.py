@@ -105,7 +105,7 @@ def test_browse_export_offers_embedded_metadata_checkboxes(app_and_db):
         assert control in html
     assert "Capture date &amp; time" in html
     assert "fields.push('capture_date', 'capture_time')" in html
-    assert "metadata_fields: selectedExportMetadataFields()" in html
+    assert "exportRequest.metadata_fields = selectedExportMetadataFields();" in html
     assert "Unchecked details are left out." in html
 
 
@@ -113,11 +113,19 @@ def test_browse_export_warns_before_numbering_collision_names(app_and_db):
     app, _ = app_and_db
     html = _page_with_scripts(app.test_client(), "/browse")
 
-    assert "Existing files are never overwritten." in html
-    assert "Vireo adds a number" in html
+    # The collision notice is empty and hidden until the live preflight finds
+    # a name that would change; there is no always-on policy paragraph and
+    # no native confirm (the desktop webview never shows one).
+    assert (
+        '<div id="exportCollisionNotice" class="export-collision-notice" '
+        'role="status" aria-live="polite" hidden></div>'
+    ) in html
+    assert "Existing files are never overwritten." not in html
+    assert "window.confirm(renameMessage)" not in html
     assert "'/api/jobs/export/preflight'" in html
-    assert "Continue with export?" in html
-    assert "requested_name + ' → ' + rename.export_name" in html
+    assert "function buildExportPreflightRequest()" in html
+    assert "VireoExportCollisions.acknowledged(preflight)" in html
+    assert "filenameSpan(rename.export_name)" in html
     assert "var exportRequestGeneration = 0;" in html
     assert "requestGeneration !== exportRequestGeneration" in html
     assert "function setExportControlsBusy(busy)" in html
@@ -131,7 +139,10 @@ def test_browse_export_offers_reveal_after_export(app_and_db):
 
     assert 'id="exportRevealAfter"' in html
     assert "Show exported files in the file manager when finished" in html
-    assert "reveal_after_export: revealAfterExport" in html
+    assert (
+        "exportRequest.reveal_after_export = "
+        "document.getElementById('exportRevealAfter').checked;"
+    ) in html
 
 
 def test_shared_context_menu_scrolls_within_viewport(app_and_db):

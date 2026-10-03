@@ -5311,10 +5311,12 @@ def test_photo_editor_page_renders(client_with_photo):
     assert "Save Changes" in html
     assert "Export&hellip;" in html
     assert "Export Photo" in html
-    assert "Existing files are never overwritten." in html
+    assert 'id="exportCollisionNotice"' in html
+    assert "Existing files are never overwritten." not in html
+    assert "window.confirm(renameMessage)" not in html
     assert "'/api/jobs/export/preflight'" in html
-    assert "Continue with export?" in html
-    assert "rename.requested_name + ' → ' + rename.export_name" in html
+    assert "function buildExportPreflightRequest()" in html
+    assert "VireoExportCollisions.acknowledged(preflight)" in html
     assert "var editorExportRequestGeneration = 0;" in html
     assert "requestGeneration !== editorExportRequestGeneration" in html
     assert "function setExportControlsBusy(busy)" in html

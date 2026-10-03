@@ -2125,9 +2125,7 @@ body.sidebar-resizing {
           <aside class="export-summary" aria-labelledby="exportSummaryTitle">
             <h4 id="exportSummaryTitle">Output preview</h4>
             <div id="exportPreview" style="font-size:11px;color:var(--text-muted);margin-bottom:12px;font-family:monospace;"></div>
-            <div id="exportCollisionPolicy" style="font-size:11px;color:var(--text-secondary);margin-bottom:12px;padding:8px 10px;border:1px solid var(--border-secondary);border-radius:4px;background:var(--bg-tertiary);line-height:1.45;">
-              Existing files are never overwritten. If an export name is already in use, Vireo adds a number such as <code>_2</code>. You’ll be shown the filename changes before export starts.
-            </div>
+            <div id="exportCollisionNotice" class="export-collision-notice" role="status" aria-live="polite" hidden></div>
           </aside>
           <section class="export-settings" aria-label="Export settings">
             <label for="exportPreset" style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Preset</label>
@@ -2576,6 +2574,7 @@ body.sidebar-resizing {
 <script src="/static/vireo-work-locally.js"></script>
 <script src="/static/vireo-folder-browser.js"></script>
 <script src="/static/vireo-export-presets.js"></script>
+<script src="/static/vireo-export-collisions.js"></script>
 <link rel="stylesheet" href="/static/vireo-batch-edits.css">
 <script src="/static/vireo-batch-edits.js"></script>
 <script src="/static/vireo-thumbnail-queue.js"></script>

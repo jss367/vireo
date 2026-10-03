@@ -106,6 +106,11 @@ def test_photo_editor_export_saves_current_edits_and_exports_current_photo(
           const originalSafeFetch = window.safeFetch;
           window.safeFetch = async function(url, options, config) {
             if (url === '/api/jobs/export/preflight') {
+              // The modal's live filename check sends only naming settings;
+              // the check Export runs also carries quality.
+              if (!('quality' in JSON.parse(options.body))) {
+                return {rename_count: 0, renames: []};
+              }
               window.__editorPreflightRequest = JSON.parse(options.body);
               return new Promise(function(resolve) {
                 window.__resolveEditorPreflight = function() {
