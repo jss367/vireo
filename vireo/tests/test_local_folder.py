@@ -2127,6 +2127,11 @@ def test_unlink_ancestor_of_shared_local_session_cleans_phantom_rows(tmp_path):
     # Materialize descendants so the parent workspace inherits the child row
     # the same way get_workspace_folders/materialize would have from the UI.
     setup._materialize_workspace_descendants(parent_ws)
+    photo = setup.add_photo(folder_id=child_id, filename="bird.jpg", extension=".jpg",
+                            file_size=8, file_mtime=1)
+    setup.grant_workspace_photos(parent_ws, [photo])
+    setup.grant_workspace_photos(child_ws, [photo])
+    setup.conn.commit()
     stage_folder(setup, child_id, str(tmp_path / "vireo"))
     assert affected_workspace_ids(setup, child_id) == sorted([parent_ws, child_ws])
     setup.close()
@@ -2140,6 +2145,14 @@ def test_unlink_ancestor_of_shared_local_session_cleans_phantom_rows(tmp_path):
 
     check_db = Database(db_path)
     try:
+        check_db.set_active_workspace(parent_ws)
+        assert check_db.filter_photo_ids_in_workspace([photo]) == []
+        assert not check_db.conn.execute(
+            "SELECT 1 FROM workspace_photos WHERE workspace_id=? AND photo_id=?",
+            (parent_ws, photo),
+        ).fetchone()
+        check_db.set_active_workspace(child_ws)
+        assert check_db.filter_photo_ids_in_workspace([photo]) == [photo]
         row = check_db.conn.execute(
             "SELECT 1 FROM workspace_folders WHERE workspace_id=? AND folder_id=?",
             (parent_ws, child_id),
@@ -2239,6 +2252,11 @@ def test_move_folders_ancestor_sweeps_descendant_local_rows(tmp_path):
     setup.add_workspace_folder(parent_ws, parent_id)
     setup.add_workspace_folder(child_ws, child_id)
     setup._materialize_workspace_descendants(parent_ws)
+    photo = setup.add_photo(folder_id=child_id, filename="bird.jpg", extension=".jpg",
+                            file_size=8, file_mtime=1)
+    setup.grant_workspace_photos(parent_ws, [photo])
+    setup.grant_workspace_photos(child_ws, [photo])
+    setup.conn.commit()
     stage_folder(setup, child_id, str(tmp_path / "vireo"))
     assert affected_workspace_ids(setup, child_id) == sorted([parent_ws, child_ws])
     setup.close()
@@ -2255,6 +2273,16 @@ def test_move_folders_ancestor_sweeps_descendant_local_rows(tmp_path):
 
     check_db = Database(db_path)
     try:
+        check_db.set_active_workspace(parent_ws)
+        assert check_db.filter_photo_ids_in_workspace([photo]) == []
+        assert not check_db.conn.execute(
+            "SELECT 1 FROM workspace_photos WHERE workspace_id=? AND photo_id=?",
+            (parent_ws, photo),
+        ).fetchone()
+        check_db.set_active_workspace(child_ws)
+        assert check_db.filter_photo_ids_in_workspace([photo]) == [photo]
+        check_db.set_active_workspace(target_ws)
+        assert check_db.filter_photo_ids_in_workspace([photo]) == [photo]
         source_row = check_db.conn.execute(
             "SELECT 1 FROM workspace_folders WHERE workspace_id=? AND folder_id=?",
             (parent_ws, child_id),

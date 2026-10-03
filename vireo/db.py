@@ -1387,6 +1387,9 @@ class Database:
     def grant_workspace_photos(self, workspace_id, photo_ids):
         self._photo_visibility_repository().grant(workspace_id, photo_ids)
 
+    def revoke_workspace_photo_grants_for_folders(self, workspace_id, folder_ids):
+        self._photo_visibility_repository().revoke_for_folders(workspace_id, folder_ids)
+
     def grant_verified_twin_photos(self, workspace_id, rows):
         self._photo_visibility_repository().grant_verified_twins(workspace_id, rows)
 

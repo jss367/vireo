@@ -16,6 +16,18 @@ class PhotoVisibilityRepository:
                 (workspace_id, photo_id),
             )
 
+    def revoke_for_folders(self, workspace_id, folder_ids):
+        """Revoke only this workspace's grants in the caller's transaction."""
+        ids = list(dict.fromkeys(folder_ids))
+        for start in range(0, len(ids), 800):
+            chunk = ids[start:start + 800]
+            marks = ",".join("?" for _ in chunk)
+            self.conn.execute(
+                "DELETE FROM workspace_photos WHERE workspace_id = ? AND photo_id IN "
+                f"(SELECT id FROM photos WHERE folder_id IN ({marks}))",
+                [workspace_id, *chunk],
+            )
+
     def grant_verified_twins(self, workspace_id, rows):
         self.grant(workspace_id, [row["id"] for row in rows])
         for row in rows:
