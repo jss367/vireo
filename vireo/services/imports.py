@@ -273,10 +273,22 @@ def import_resume_takeover(parent_id, parent_result, rows):
         e["has_failed_files"] = _has_failed_files(result)
 
     # What a Resume of the parent replays: its own marks plus what
-    # descendants paid (``_interrupted_parent_resume``).
-    tags_applied = bool(parent_result.get("tags_applied")) or any(
-        e["tags_applied"] for e in descendants
-    )
+    # descendants paid (``_interrupted_parent_resume``). The parent's own
+    # ``tags_applied`` mark covers only the parent's own scope; a later
+    # descendant that landed new photos but failed to tag them (tag
+    # errors, a Stop before the pass finished, a crash) left those
+    # newly landed photos' tag/GPS work owed, even if the parent had
+    # checkpointed its own tag pass before the crash. The newest
+    # descendant in the chain inherited every earlier descendant's
+    # untagged scope, so its own ``tags_applied`` is authoritative for
+    # the accumulated scope: a later success retags prior untagged
+    # photos, and a later failure means the newly introduced ones are
+    # still owed.
+    if descendants:
+        newest_descendant = max(descendants, key=lambda e: e["started_at"])
+        tags_applied = newest_descendant["tags_applied"]
+    else:
+        tags_applied = bool(parent_result.get("tags_applied"))
     # The parent's chain step marks after a failed import too, but then
     # skips the collection and processing; apply the same ``ok`` filter to
     # the parent's own mark as to a descendant's (above) so a crash between
@@ -1070,7 +1082,9 @@ class ImportService:
                 "takeover": json.loads(json.dumps(takeover)),
             })
         if takeover and relocate_landings:
-            self._recover_relocated_descendant_landings(db, takeover)
+            self._recover_relocated_descendant_landings(
+                db, takeover, allowed_fingerprints,
+            )
         parent_resume = self._interrupted_parent_resume(
             parent_config, parent_result, takeover,
         )
@@ -1123,28 +1137,70 @@ class ImportService:
             (parent_id,),
         ).fetchone() is not None
 
-    def _recover_relocated_descendant_landings(self, db, takeover):
-        """Keep a moved descendant's scope only when its bytes still match."""
-        expected = {}
+    def _recover_relocated_descendant_landings(
+        self, db, takeover, allowed_fingerprints=None,
+    ):
+        """Keep a moved descendant's scope only when its bytes still match.
+
+        Also rebases ``allowed_fingerprints`` (the parent-carried IDs'
+        expected fingerprints) in place when a descendant's
+        ``after_process_move`` relocated a photo the parent carried: the
+        current fingerprint uses the new path, but its size+hash still
+        match the parent's old-path record, so comparing the parent's
+        stored value in ``validate_carry_photo_ids`` would reject the
+        carry as stale and strand the remaining processing work after
+        the move. Point ``allowed_fingerprints`` at the current path so
+        the carry re-validates. Both lookups share one fingerprint
+        capture; this hashing already runs outside the admission lock.
+        """
+        descendant_expected = {}
         for key, fingerprint in takeover.get("descendant_photo_fingerprints", {}).items():
             try:
                 pid = int(key)
             except (TypeError, ValueError):
                 continue
             if pid > 0 and isinstance(fingerprint, str):
-                expected[pid] = fingerprint
-        current = self._capture_photo_fingerprints_for_ids(db, list(expected))
+                descendant_expected[pid] = fingerprint
+        all_pids = set(descendant_expected)
+        if allowed_fingerprints:
+            all_pids.update(allowed_fingerprints)
+        if not all_pids:
+            return
+        current = self._capture_photo_fingerprints_for_ids(db, list(all_pids))
         for pid, fingerprint in current.items():
-            old_parts = expected[pid].rsplit("|s=", 1)
             new_parts = fingerprint.rsplit("|s=", 1)
-            if len(old_parts) != 2 or len(new_parts) != 2:
+            if len(new_parts) != 2 or "|h=" not in new_parts[1]:
                 continue
-            identity = old_parts[1]
-            if identity != new_parts[1] or "|h=" not in identity:
-                continue
-            file_hash = identity.rsplit("|h=", 1)[1]
-            if file_hash:
-                takeover["descendant_landed_files"][new_parts[0]] = [-1, -1, file_hash]
+            new_identity = new_parts[1]
+            new_path = new_parts[0]
+            file_hash = new_identity.rsplit("|h=", 1)[1]
+            # Descendant moved: keep its scope under the current path.
+            expected_descendant = descendant_expected.get(pid)
+            if expected_descendant is not None:
+                old_parts = expected_descendant.rsplit("|s=", 1)
+                if (
+                    len(old_parts) == 2
+                    and old_parts[1] == new_identity
+                    and file_hash
+                ):
+                    takeover["descendant_landed_files"][new_path] = [
+                        -1, -1, file_hash,
+                    ]
+            # Parent-carried moved: rebase the expected fingerprint to
+            # the current path so the carry validates after the move.
+            if allowed_fingerprints is not None:
+                expected_parent = allowed_fingerprints.get(pid)
+                if (
+                    expected_parent is not None
+                    and expected_parent != fingerprint
+                ):
+                    old_parts = expected_parent.rsplit("|s=", 1)
+                    if (
+                        len(old_parts) == 2
+                        and old_parts[1] == new_identity
+                        and file_hash
+                    ):
+                        allowed_fingerprints[pid] = fingerprint
 
     def _import_resume_rows(self, db, parent_id, parent_config, workspace_id):
         """Finished import rows that may descend from ``parent_id``, for

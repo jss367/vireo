@@ -553,3 +553,145 @@ def test_moved_descendant_recovers_only_matching_bytes(current):
     service._recover_relocated_descendant_landings(Mock(), takeover)
     resume = service._interrupted_parent_resume(_parent()["config"], _parent()["result"], takeover)
     assert ("/nas/child.jpg" in resume["landed_files"]) == current.endswith("h=original")
+
+
+def test_descendant_lands_but_fails_tags_leaves_parent_resumable():
+    """The parent checkpointed its tag pass before a crash. A later resume
+    lands new photos but its tag pass fails (``tags_applied: false``) even
+    though its chain runs (``chained: true``). The parent's own
+    ``tags_applied: true`` only covered its own scope; the newly landed
+    photos remain owed. The parent must stay resumable so a Resume replays
+    the tag pass over the newly-landed scope — the old OR aggregation hid
+    those unpaid tags behind the parent's older, narrower mark."""
+    parent = {
+        "id": PARENT_ID, "type": "import", "status": "failed",
+        "started_at": "2026-09-01T10:00:00",
+        "config": {"sources": ["/card"], "destination": "/arch"},
+        "result": {
+            "interrupted": True, "photo_ids": [1, 2],
+            "tags_applied": True, "chained": False,
+        },
+    }
+    child = _row("d", "2026-09-01T11:00:00", {
+        "ok": True, "photo_ids": [3],
+        "landed_files": {"/arch/child.jpg": [1, 2, "hash-child"]},
+        "tags_applied": False, "chained": True,
+        "tagging": {"errors": ["couldn't write tag"]},
+    })
+    takeover = import_resume_takeover(PARENT_ID, parent["result"], [child])
+    # tags are NOT paid: the descendant landed scope but didn't tag it.
+    assert takeover["tags_applied"] is False
+    assert takeover["chained"] is True
+    assert takeover["by"] is None
+    resume = ImportService._interrupted_parent_resume(
+        parent["config"], parent["result"], takeover,
+    )
+    # A Resume is offered, replaying only owed tags over the merged scope.
+    assert resume is not None
+    assert resume["tags_applied"] is False
+    assert resume["chain_already_ran"] is True
+    assert resume["landed_files"] == {"/arch/child.jpg": [1, 2, "hash-child"]}
+
+
+def test_newest_descendant_tag_success_supersedes_older_untagged_landing():
+    """A later tag-only replay that succeeds pays off an earlier
+    descendant's untagged landings; the chain classifies as done."""
+    parent = _parent(chained=True)
+    older = _row("d1", "2026-09-01T11:00:00", {
+        "ok": True, "photo_ids": [3],
+        "landed_files": {"/arch/child.jpg": [1, 2, "hash-child"]},
+        "tags_applied": False, "chained": True,
+        "tagging": {"errors": ["temporary lock"]},
+    })
+    newer = _row("d2", "2026-09-01T12:00:00", {
+        "ok": True, "photo_ids": [], "tags_applied": True, "chained": True,
+        "after_import_skipped": "chain already ran on the interrupted parent",
+    }, parent="d1")
+    takeover = import_resume_takeover(PARENT_ID, parent["result"], [older, newer])
+    # Newest descendant tagged successfully → tags paid despite older untagged.
+    assert takeover["tags_applied"] is True
+    assert takeover["chained"] is True
+    assert takeover["by"] == "d2"
+    assert takeover["kind"] == "done"
+
+
+def test_rebase_moved_parent_fingerprint_when_descendant_move_relocated_carry():
+    """A partial resume's after_process_move relocated a photo the parent
+    carried. The current fingerprint uses the new path; comparing the
+    parent's old-path fingerprint would reject the carry as stale. The
+    recovery step rebases the parent's expected fingerprint to the
+    current path when size+hash still match, so validate_carry_photo_ids
+    accepts the carry and the remaining processing can resume."""
+    from unittest.mock import Mock
+
+    service = ImportService(lambda: Mock(), "unused", {},
+                            invalidate_missing_originals=Mock(), enqueue_process_job=Mock(),
+                            chain_after_move=Mock(), bulk_gps_location_payload=Mock())
+    takeover = {
+        "descendant_photo_fingerprints": {},
+        "descendant_landed_files": {},
+    }
+    allowed_fingerprints = {7: "/local/carry.jpg|s=42|h=hash-carry"}
+    # Move preserved bytes, only path changed.
+    service._capture_photo_fingerprints_for_ids = Mock(
+        return_value={7: "/nas/carry.jpg|s=42|h=hash-carry"},
+    )
+    service._recover_relocated_descendant_landings(
+        Mock(), takeover, allowed_fingerprints,
+    )
+    assert allowed_fingerprints == {7: "/nas/carry.jpg|s=42|h=hash-carry"}
+
+
+def test_rebase_moved_parent_fingerprint_rejects_replaced_bytes():
+    """A different-hash current fingerprint is NOT rebased: the move was
+    not what changed the file. The stale fingerprint stands so
+    validate_carry_photo_ids rejects an imposter at the carried path."""
+    from unittest.mock import Mock
+
+    service = ImportService(lambda: Mock(), "unused", {},
+                            invalidate_missing_originals=Mock(), enqueue_process_job=Mock(),
+                            chain_after_move=Mock(), bulk_gps_location_payload=Mock())
+    takeover = {
+        "descendant_photo_fingerprints": {},
+        "descendant_landed_files": {},
+    }
+    allowed_fingerprints = {7: "/local/carry.jpg|s=42|h=hash-original"}
+    service._capture_photo_fingerprints_for_ids = Mock(
+        return_value={7: "/nas/carry.jpg|s=42|h=hash-replaced"},
+    )
+    service._recover_relocated_descendant_landings(
+        Mock(), takeover, allowed_fingerprints,
+    )
+    # Different hash: do not rebase; the carry stays rejected as stale.
+    assert allowed_fingerprints == {7: "/local/carry.jpg|s=42|h=hash-original"}
+
+
+def test_rebase_covers_both_descendant_and_parent_carry_in_one_pass():
+    """A single after_process_move can relocate both the parent's carried
+    photos and the descendant's new landings. One fingerprint capture
+    recovers both: descendant_landed_files gains the new path, and
+    allowed_fingerprints is rebased for carried IDs with matching bytes."""
+    from unittest.mock import Mock
+
+    service = ImportService(lambda: Mock(), "unused", {},
+                            invalidate_missing_originals=Mock(), enqueue_process_job=Mock(),
+                            chain_after_move=Mock(), bulk_gps_location_payload=Mock())
+    takeover = {
+        "descendant_photo_fingerprints": {
+            "3": "/local/child.jpg|s=12|h=hash-child",
+        },
+        "descendant_landed_files": {},
+    }
+    allowed_fingerprints = {7: "/local/carry.jpg|s=42|h=hash-carry"}
+    service._capture_photo_fingerprints_for_ids = Mock(return_value={
+        3: "/nas/child.jpg|s=12|h=hash-child",
+        7: "/nas/carry.jpg|s=42|h=hash-carry",
+    })
+    service._recover_relocated_descendant_landings(
+        Mock(), takeover, allowed_fingerprints,
+    )
+    assert service._capture_photo_fingerprints_for_ids.call_count == 1
+    assert takeover["descendant_landed_files"] == {
+        "/nas/child.jpg": [-1, -1, "hash-child"],
+    }
+    assert allowed_fingerprints == {7: "/nas/carry.jpg|s=42|h=hash-carry"}

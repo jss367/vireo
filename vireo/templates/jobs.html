@@ -892,8 +892,16 @@
       e.hasFailedFiles = hasFailedImportFiles(r);
     });
     // What a Resume replays: the parent's marks plus what descendants paid.
-    var tagsApplied = !!parentResult.tags_applied ||
-      descendants.some(function(e) { return e.tagsApplied; });
+    // The parent's ``tags_applied`` only covers its own scope; a later
+    // descendant that landed new photos but failed to tag them left those
+    // photos' tag/GPS work owed. The newest descendant in the chain
+    // inherited every earlier descendant's untagged scope, so its own
+    // tagsApplied is authoritative for the accumulated scope.
+    var newestDescendant = descendants.length ? descendants.reduce(function(best, e) {
+      return e.startedAt > best.startedAt ? e : best;
+    }) : null;
+    var tagsApplied = newestDescendant ? newestDescendant.tagsApplied
+      : !!parentResult.tags_applied;
     // The parent's chain step marks after a failed import too, but then
     // skips the collection and processing; apply the same ``ok`` filter
     // to the parent's own mark as to a descendant's (above). That is also
