@@ -3396,8 +3396,18 @@ def test_import_folder_browser_marks_counts_that_stopped_early(live_server, page
     expect(photos).to_have_text("1,234+ photos")
     expect(photos).to_have_attribute(
         "title", "Stopped counting: this folder holds too many files to count quickly.")
-    expect(rows.nth(1).locator(".folder-browser-count")).to_have_text("Not counted")
-    expect(rows.nth(2).locator(".folder-browser-count")).to_have_text("Not counted")
+    macintosh = rows.nth(1).locator(".folder-browser-count")
+    expect(macintosh).to_have_text("Not counted")
+    # The walker reached Macintosh HD but ran out of its per-folder budget
+    # before finding a photo: that's still "too many files to count quickly".
+    expect(macintosh).to_have_attribute(
+        "title", "Stopped counting: this folder holds too many files to count quickly.")
+    skipped = rows.nth(2).locator(".folder-browser-count")
+    expect(skipped).to_have_text("Not counted")
+    # The request deadline passed before this folder got its turn, so the
+    # server never looked at it — don't blame its size.
+    expect(skipped).to_have_attribute(
+        "title", "Not reached before the counting deadline.")
 
 
 def test_import_folder_browser_selects_multiple_source_folders(live_server, page):

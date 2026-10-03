@@ -297,18 +297,28 @@
     return path + '\n' + normalized;
   };
 
-  // ``entry`` is ``{count, incomplete}``. An incomplete count ran out of the
-  // server's time budget, so the number is only what was found before it
-  // stopped: show it as a lower bound and say why.
+  // ``entry`` is ``{count, incomplete, skipped}``. ``incomplete`` means the
+  // server started scanning this folder but ran out of its per-folder time
+  // budget, so the number is a lower bound. ``skipped`` means the request
+  // budget ran out before this folder got its turn, so the server never
+  // looked at it — the folder may be small and merely ordered after a slow
+  // sibling, so don't claim it holds too many files.
   FolderBrowser.prototype._applyCount = function (path, entry) {
-    if (!entry.count && !entry.incomplete) return;
-    var text = entry.incomplete
-      ? (entry.count ? Number(entry.count).toLocaleString() + '+ photos' : 'Not counted')
-      : formatPhotoCount(entry.count);
+    if (!entry.count && !entry.incomplete && !entry.skipped) return;
+    var text;
+    if (entry.skipped) {
+      text = 'Not counted';
+    } else if (entry.incomplete) {
+      text = entry.count ? Number(entry.count).toLocaleString() + '+ photos' : 'Not counted';
+    } else {
+      text = formatPhotoCount(entry.count);
+    }
     this.list.querySelectorAll('.folder-browser-count').forEach(function (badge) {
       if (badge.getAttribute('data-count-path') === path) {
         badge.textContent = text;
-        if (entry.incomplete) {
+        if (entry.skipped) {
+          badge.title = 'Not reached before the counting deadline.';
+        } else if (entry.incomplete) {
           badge.title = 'Stopped counting: this folder holds too many files to count quickly.';
         }
       }
@@ -345,8 +355,10 @@
       uncached.forEach(function (path) {
         if (!Object.prototype.hasOwnProperty.call(counts, path)) {
           // The request deadline can skip this folder entirely. Keep it
-          // uncached so reopening the picker retries it.
-          this._applyCount(path, {count: 0, incomplete: true});
+          // uncached so reopening the picker retries it, and mark it as
+          // ``skipped`` so the badge says it wasn't reached rather than
+          // claiming it holds too many files.
+          this._applyCount(path, {count: 0, skipped: true});
           return;
         }
         var entry = {count: counts[path], incomplete: incomplete.indexOf(path) !== -1};
