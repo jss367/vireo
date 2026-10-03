@@ -92,7 +92,9 @@ class StatsRepository:
                 {select_fragment}
             FROM folders f
             JOIN workspace_visible_folders wf ON wf.folder_id = f.id
-            LEFT JOIN photos p ON p.folder_id = f.id{photo_scope_sql}
+            LEFT JOIN photo_workspace_visibility pv
+              ON pv.folder_id = f.id AND pv.workspace_id = wf.workspace_id
+            LEFT JOIN photos p ON p.id = pv.photo_id{photo_scope_sql}
             WHERE wf.workspace_id = ? AND f.status IN ('ok', 'partial'){folder_filter_sql}
             GROUP BY f.id
             ORDER BY f.path""",

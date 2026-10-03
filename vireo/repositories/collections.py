@@ -1474,7 +1474,7 @@ class CollectionRepository:
         query = f"""
             SELECT ff.path AS value, COUNT(DISTINCT matched.pid) AS count
             FROM folders ff
-            JOIN workspace_folders ff_wf
+            JOIN workspace_visible_folders ff_wf
               ON ff_wf.folder_id = ff.id AND ff_wf.workspace_id = ?
             JOIN ({inner}) matched ON (
                 {norm_photo} = {norm_folder}

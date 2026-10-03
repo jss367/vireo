@@ -16689,6 +16689,11 @@ def test_migration_adds_miss_columns_to_existing_photos_table(tmp_path):
         definitions.append(definition)
     column_list = ", ".join(f'"{row["name"]}"' for row in keep)
 
+    # This fixture deliberately reconstructs a pre-photo-grant catalog.
+    # Drop newer views/FKs before SQLite rewrites them to photos_current.
+    db.conn.execute("DROP VIEW workspace_visible_folders")
+    db.conn.execute("DROP VIEW photo_workspace_visibility")
+    db.conn.execute("DROP TABLE workspace_photos")
     db.conn.execute("ALTER TABLE photos RENAME TO photos_current")
     db.conn.execute(f"CREATE TABLE photos ({', '.join(definitions)})")
     db.conn.execute(

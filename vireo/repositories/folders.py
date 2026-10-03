@@ -368,7 +368,9 @@ class FolderRepository:
                       COUNT(p.id) as photo_count
                FROM folders f
                JOIN workspace_visible_folders wf ON wf.folder_id = f.id
-               LEFT JOIN photos p ON p.folder_id = f.id
+               LEFT JOIN photo_workspace_visibility pv
+                 ON pv.folder_id = f.id AND pv.workspace_id = wf.workspace_id
+               LEFT JOIN photos p ON p.id = pv.photo_id
                WHERE wf.workspace_id = ? AND f.status = 'missing'
                GROUP BY f.id
                ORDER BY f.path""",

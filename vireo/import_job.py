@@ -1421,6 +1421,7 @@ def _duplicate_gate(state, batch_st, *, source_file, rel, checker, db,
                 db.grant_verified_twin_photos(db._active_workspace_id, likely_rows)
                 db.conn.commit()
             except Exception as exc:
+                log.exception("Duplicate photo workspace visibility failed")
                 db.conn.rollback()
                 _fail(state, rel, source_file, f"duplicate photo workspace visibility failed: {exc}")
                 return _GATE_SKIPPED
@@ -1548,6 +1549,7 @@ def _duplicate_gate(state, batch_st, *, source_file, rel, checker, db,
             db.grant_verified_twin_photos(db._active_workspace_id, verified_twin_rows)
             db.conn.commit()
         except Exception as exc:
+            log.exception("Duplicate photo workspace visibility failed")
             db.conn.rollback()
             _fail(state, rel, source_file, f"duplicate photo workspace visibility failed: {exc}")
             return _GATE_SKIPPED

@@ -137,7 +137,7 @@ def create_folders_blueprint(
         if not folder:
             return json_error("folder not found", 404)
         linked = db.conn.execute(
-            "SELECT 1 FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+            "SELECT 1 FROM workspace_visible_folders WHERE workspace_id = ? AND folder_id = ?",
             (db._active_workspace_id, folder_id),
         ).fetchone()
         if not linked:

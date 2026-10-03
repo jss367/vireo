@@ -37,6 +37,8 @@ def test_move_preserves_only_selected_photo_when_checked(tmp_path, keep_visible)
         assert (destination in visible_folders) == keep_visible
         if keep_visible:
             assert next(row for row in db.get_folder_tree() if row["id"] == destination)["photo_count"] == 1
+            coverage = db.get_folder_coverage_stats()
+            assert next(row for row in coverage if row["folder_id"] == destination)["total"] == 1
         db.set_active_workspace(a)
     with Database(path) as reopened:
         reopened.set_active_workspace(b)
@@ -262,3 +264,48 @@ def test_move_job_uses_remembered_choice_or_explicit_override(app_and_db, tmp_pa
     db.set_active_workspace(b)
     assert bool(db.filter_photo_ids_in_workspace([photo])) == expected
     assert cfg.load()["move_keep_visible_in_other_workspaces"] == saved
+
+
+def test_grant_only_folder_path_is_readable_but_cannot_be_rescanned(app_and_db, tmp_path):
+    app, db = app_and_db
+    a = db._active_workspace_id
+    b = db.create_workspace("Other")
+    folder, photo = _photo(db, tmp_path / "grant-folder", "photo.jpg")
+    db.grant_workspace_photos(b, [photo])
+    db.conn.commit()
+    db.set_active_workspace(b)
+    client = app.test_client()
+    assert client.post(f"/api/workspaces/{b}/activate").status_code == 200
+    response = client.get(f"/api/folders/{folder}")
+    assert response.status_code == 200
+    assert response.json["path"] == str(tmp_path / "grant-folder")
+    response = client.post(f"/api/folders/{folder}/rescan", json={})
+    assert response.status_code == 404
+    db.set_active_workspace(a)
+
+
+def test_grants_reach_browse_collections_but_not_missing_siblings(tmp_path):
+    import json
+
+    with Database(str(tmp_path / 'db')) as db:
+        b = db.create_workspace('Other')
+        folder, visible = _photo(db, tmp_path / 'folder', 'visible.jpg')
+        _, hidden = _photo(db, tmp_path / 'folder', 'hidden.jpg', b'hidden')
+        db.grant_workspace_photos(b, [visible])
+        db.conn.commit()
+        db.set_active_workspace(b)
+        assert [r['id'] for r in db.query_photos([])] == [visible]
+        assert db.query_photo_ids([]) == [visible]
+        assert db.count_photos_for_rules([]) == 1
+        cid = db.add_collection('Granted', json.dumps([]))
+        assert db.get_collection_photo_ids(cid) == [visible]
+        assert [r['id'] for r in db.get_collection_photos(cid)] == [visible]
+        (tmp_path / 'folder' / 'visible.jpg').unlink()
+        (tmp_path / 'folder' / 'hidden.jpg').unlink()
+        progress = []
+        assert [r['id'] for r in db.get_missing_photos(progress_callback=progress.append)] == [visible]
+        assert progress[-1]['total_photos'] == 1
+        db.conn.execute("UPDATE folders SET status='missing' WHERE id=?", (folder,))
+        db.conn.commit()
+        assert db.get_missing_folders()[0]['photo_count'] == 1
+        assert db.filter_photo_ids_in_workspace([visible, hidden]) == [visible]

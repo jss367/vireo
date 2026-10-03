@@ -841,7 +841,7 @@ def test_folders_linked_in_other_workspace_chunks(db):
     db.conn.set_trace_callback(statements.append)
     assert db._folders_linked_in_other_workspace(ids, db._ws_id()) == {b}
     db.conn.set_trace_callback(None)
-    assert len([s for s in statements if "FROM workspace_folders" in s]) == 2
+    assert len([s for s in statements if "FROM workspace_visible_folders" in s]) == 2
 
 
 def test_delete_folder_removes_subtree_photos_and_provenance(db, cache, monkeypatch):

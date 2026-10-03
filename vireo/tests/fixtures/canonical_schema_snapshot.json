@@ -902,6 +902,36 @@
   ],
   [
    "table",
+   "workspace_photos",
+   "workspace_photos",
+   "CREATE TABLE workspace_photos (\n        workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,\n        photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,\n        PRIMARY KEY (workspace_id, photo_id)\n    )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_workspace_photos_1",
+   "workspace_photos",
+   null
+  ],
+  [
+   "index",
+   "idx_workspace_photos_photo",
+   "workspace_photos",
+   "CREATE INDEX idx_workspace_photos_photo ON workspace_photos(photo_id)"
+  ],
+  [
+   "view",
+   "photo_workspace_visibility",
+   "photo_workspace_visibility",
+   "CREATE VIEW photo_workspace_visibility AS\n        SELECT p.id AS photo_id, p.folder_id, wf.workspace_id\n        FROM photos p JOIN workspace_folders wf ON wf.folder_id = p.folder_id\n        UNION\n        SELECT p.id, p.folder_id, wp.workspace_id\n        FROM photos p JOIN workspace_photos wp ON wp.photo_id = p.id"
+  ],
+  [
+   "view",
+   "workspace_visible_folders",
+   "workspace_visible_folders",
+   "CREATE VIEW workspace_visible_folders AS\n        SELECT folder_id, workspace_id, is_root FROM workspace_folders\n        UNION\n        SELECT DISTINCT p.folder_id, wp.workspace_id, 1 AS is_root\n        FROM workspace_photos wp JOIN photos p ON p.id = wp.photo_id\n        WHERE NOT EXISTS (SELECT 1 FROM workspace_folders wf\n            WHERE wf.folder_id = p.folder_id AND wf.workspace_id = wp.workspace_id)"
+  ],
+  [
+   "table",
    "species_identity_repairs",
    "species_identity_repairs",
    "CREATE TABLE species_identity_repairs (\n        id INTEGER PRIMARY KEY, prediction_id INTEGER NOT NULL,\n        resolution_identity TEXT NOT NULL, before_json TEXT NOT NULL,\n        after_json TEXT NOT NULL, reason TEXT NOT NULL,\n        repaired_at TEXT NOT NULL DEFAULT (datetime('now'))\n    )"
