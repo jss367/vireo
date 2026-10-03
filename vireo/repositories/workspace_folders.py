@@ -244,7 +244,7 @@ class WorkspaceFolderRepository:
     def list_workspaces_for_folder(self, folder_id):
         """Return every workspace in which ``folder_id`` is visible."""
         return self.conn.execute(
-            """SELECT w.id, w.name,
+            """WITH folder_links AS (SELECT w.id, w.name,
                       MAX(CASE
                             WHEN wf.folder_id = target.id AND wf.is_root = 1
                             THEN 1 ELSE 0
@@ -278,8 +278,17 @@ class WorkspaceFolderRepository:
                    WHERE removed.workspace_id = w.id AND removed.folder_id = target.id
                )
                GROUP BY w.id, w.name, w.pinned_at
+               )
+               SELECT w.id, w.name, MAX(m.is_root) AS is_root
+               FROM workspaces w JOIN (
+                   SELECT id, is_root FROM folder_links
+                   UNION ALL
+                   SELECT wp.workspace_id, 0 FROM workspace_photos wp
+                   JOIN photos p ON p.id = wp.photo_id WHERE p.folder_id = ?
+               ) m ON m.id = w.id
+               GROUP BY w.id, w.name, w.pinned_at
                ORDER BY (w.pinned_at IS NULL), LOWER(w.name), w.id""",
-            (folder_id,),
+            (folder_id, folder_id),
         ).fetchall()
 
     def root_ids(self, workspace_id):
@@ -542,6 +551,13 @@ class WorkspaceFolderRepository:
             # Move workspace_folders: remove from source, add to target
             for chunk in self._chunks(moved_folder_ids):
                 placeholders = ",".join("?" for _ in chunk)
+                # Moving ownership removes both kinds of source membership.
+                # Other workspaces' grants and all target sharing stay intact.
+                self.conn.execute(
+                    f"DELETE FROM workspace_photos WHERE workspace_id = ? AND photo_id IN "
+                    f"(SELECT id FROM photos WHERE folder_id IN ({placeholders}))",
+                    [source_ws_id] + chunk,
+                )
                 self.conn.execute(
                     f"""DELETE FROM workspace_folders
                         WHERE workspace_id = ? AND folder_id IN ({placeholders})""",

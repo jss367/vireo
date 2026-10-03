@@ -335,3 +335,67 @@ def test_date_move_preview_includes_detached_physical_descendants(app_and_db, tm
     assert result['moved'] == 2 and not result['errors'], result
     db.set_active_workspace(b)
     assert bool(db.filter_photo_ids_in_workspace([hidden])) == keep_visible
+
+
+@pytest.mark.parametrize('abort_transfer', [False, True])
+def test_workspace_folder_transfer_removes_source_grants_atomically(tmp_path, abort_transfer):
+    import sqlite3
+
+    with Database(str(tmp_path / 'db')) as db:
+        source = db._active_workspace_id
+        target = db.create_workspace('Target')
+        other = db.create_workspace('Other')
+        folder, photo = _photo(db, tmp_path / 'folder', 'photo.jpg')
+        db.grant_workspace_photos(source, [photo])
+        db.grant_workspace_photos(other, [photo])
+        db.conn.commit()
+        if abort_transfer:
+            db.conn.execute(f"CREATE TRIGGER reject_folder_transfer BEFORE DELETE ON workspace_folders WHEN OLD.workspace_id={source} BEGIN SELECT RAISE(ABORT, 'transfer rejected'); END")
+            db.conn.commit()
+            with pytest.raises(sqlite3.IntegrityError, match='transfer rejected'):
+                db.move_folders_to_workspace(source, target, [folder])
+        else:
+            db.move_folders_to_workspace(source, target, [folder])
+        db.set_active_workspace(source)
+        assert bool(db.filter_photo_ids_in_workspace([photo])) == abort_transfer
+        assert bool(db.conn.execute('SELECT 1 FROM workspace_photos WHERE workspace_id=? AND photo_id=?', (source, photo)).fetchone()) == abort_transfer
+        db.set_active_workspace(target)
+        assert bool(db.filter_photo_ids_in_workspace([photo])) != abort_transfer
+        db.set_active_workspace(other)
+        assert db.filter_photo_ids_in_workspace([photo]) == [photo]
+
+
+def test_raw_jpeg_fold_preserves_photo_grants_without_sibling_access(tmp_path):
+    from scanner import _pair_raw_jpeg_companions
+
+    with Database(str(tmp_path / 'db')) as db:
+        b = db.create_workspace('Other')
+        folder, jpeg = _photo(db, tmp_path / 'folder', 'IMG_001.jpg')
+        raw = db.add_photo(folder_id=folder, filename='IMG_001.cr3', extension='.cr3', file_size=2000, file_mtime=1)
+        _, sibling = _photo(db, tmp_path / 'folder', 'unrelated.jpg', b'unrelated')
+        db.grant_workspace_photos(b, [jpeg])
+        db.conn.commit()
+        _pair_raw_jpeg_companions(db)
+        db.conn.commit()
+        assert db.get_photo(jpeg) is None
+        db.set_active_workspace(b)
+        assert db.filter_photo_ids_in_workspace([raw, sibling]) == [raw]
+        assert not db.conn.execute('SELECT 1 FROM workspace_folders WHERE workspace_id=? AND folder_id=?', (b, folder)).fetchone()
+
+
+def test_associated_workspaces_include_only_exact_photo_grant_folder(app_and_db, tmp_path):
+    app, db = app_and_db
+    b = db.create_workspace('Other')
+    folder, photo = _photo(db, tmp_path / 'folder', 'photo.jpg')
+    child, _ = _photo(db, tmp_path / 'folder' / 'child', 'hidden.jpg')
+    db.grant_workspace_photos(b, [photo])
+    db.conn.commit()
+    associated = {r['id']: r for r in db.get_folder_workspaces(folder)}
+    assert b in associated and not associated[b]['is_root']
+    assert b not in {r['id'] for r in db.get_folder_workspaces(child)}
+    client = app.test_client()
+    assert client.post(f'/api/workspaces/{b}/activate').status_code == 200
+    response = client.get(f'/api/folders/{folder}/workspaces')
+    assert response.status_code == 200
+    assert any(r['id'] == b and r['is_active'] for r in response.json['workspaces'])
+    assert client.get(f'/api/folders/{child}/workspaces').status_code == 404
