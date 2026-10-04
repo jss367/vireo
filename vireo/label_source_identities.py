@@ -103,6 +103,20 @@ def _source_snapshot(metas):
     return snapshot
 
 
+
+def _snapshot_metadata(meta):
+    """Parse query provenance between matching content snapshots."""
+    snapshot = _source_snapshot([meta])
+    sidecar = os.path.splitext(meta["labels_file"])[0] + ".json"
+    with open(sidecar, encoding="utf-8") as source:
+        current = json.load(source)
+    if not isinstance(current, dict) or current.get("labels_file") != meta["labels_file"]:
+        raise RuntimeError("Label source metadata changed; retry required")
+    if _source_snapshot([meta]) != snapshot:
+        raise RuntimeError("Label source files changed while reading metadata; retry required")
+    return current, snapshot
+
+
 def pending_label_sets(db, saved_metas=None):
     """Label sets whose predictions lack identities a list query can supply.
 
@@ -150,7 +164,12 @@ def pending_label_sets(db, saved_metas=None):
         # The list as today's merge reads it, or, for one file, as it was
         # read before merging folded case-only duplicates. Either rebuilding
         # the recorded fingerprint proves the file is the one classified.
-        source_snapshot = _source_snapshot(metas)
+        try:
+            captured = [_snapshot_metadata(meta) for meta in metas]
+        except (OSError, ValueError, RuntimeError):
+            continue
+        metas = [meta for meta, _ in captured]
+        source_snapshot = [entry for _, snapshot in captured for entry in snapshot]
         candidates = [load_merged_labels(metas)]
         if len(metas) == 1:
             candidates.append(read_label_file(metas[0]["labels_file"]))
@@ -348,7 +367,9 @@ def consensus_identities(db, saved_metas, *, fetch=None, identities_by_file=None
         path = meta.get("labels_file")
         if not path or not os.path.exists(path):
             continue
-        snapshot = source_snapshots.setdefault(path, _source_snapshot([meta]))
+        if path not in source_snapshots:
+            meta, source_snapshots[path] = _snapshot_metadata(meta)
+        snapshot = source_snapshots[path]
         if _source_snapshot([meta]) != snapshot:
             raise RuntimeError("Label source files changed before legacy consensus; retry required")
         names = read_label_file(path)
@@ -444,7 +465,10 @@ def backfill(db, fetch=None, progress=None, cancel_check=None):
             for meta in label_set["metas"]:
                 path = meta["labels_file"]
                 if path not in identities_by_file:
-                    source_snapshots[path] = _source_snapshot([meta])
+                    source_snapshots[path] = [entry for entry in label_set["source_snapshot"]
+                                              if entry[0] in (path, os.path.splitext(path)[0] + ".json")]
+                    if _source_snapshot([meta]) != source_snapshots[path]:
+                        raise RuntimeError("Label source files changed before lookup; retry required")
                     identities_by_file[path] = source_identities(meta, fetch)
         except Exception as exc:
             log.warning("Could not re-query label list for %s", label_set["fingerprint"], exc_info=True)

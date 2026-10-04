@@ -581,3 +581,32 @@ def test_legacy_only_source_change_during_lookup_leaves_consensus_retryable(db, 
     assert result['ok'] is False
     assert db.get_meta(LEGACY_MARKER) is None
     assert _row(db, _prediction_id(db, old, 'BioCLIP-2.5', 'legacy'))['source_taxon_id'] is None
+
+
+@pytest.mark.parametrize("tracked", [False, True])
+def test_replaced_sidecar_after_catalog_read_uses_current_query(db, tmp_path, legacy_list, monkeypatch, tracked):
+    """A catalog read never pairs its old query with a newer sidecar digest."""
+    from label_source_identities import LEGACY_MARKER
+    from labels import get_saved_labels
+
+    det = _detection(db, tmp_path, "old-query.jpg")
+    fingerprint = legacy_list["fingerprint"] if tracked else "legacy"
+    db.add_prediction(det, "Redhead", .51, "BioCLIP-2.5", labels_fingerprint=fingerprint)
+    original = get_saved_labels
+
+    def replace_after_read():
+        metas = original()
+        path = legacy_list["path"].with_suffix(".json")
+        current = json.loads(path.read_text())
+        current["place_id"] = 1
+        path.write_text(json.dumps(current))
+        return metas
+
+    monkeypatch.setattr("labels.get_saved_labels", replace_after_read)
+    fetch = _fetch(["Redhead"], {"Redhead": POCHARD})
+    result = backfill(db, fetch=fetch)
+    assert result["ok"] is True
+    assert fetch.calls and all(call[0] == 1 for call in fetch.calls)
+    assert _row(db, _prediction_id(db, det, "BioCLIP-2.5", fingerprint))["source_taxon_id"] == 7054
+    if not tracked:
+        assert db.get_meta(LEGACY_MARKER) is not None
