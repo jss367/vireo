@@ -1059,9 +1059,7 @@ body {
       <aside class="export-summary" aria-labelledby="exportSummaryTitle">
         <h4 id="exportSummaryTitle">Output preview</h4>
         <div id="exportPreview" style="font-size:11px;color:var(--text-muted);margin-bottom:12px;font-family:monospace;"></div>
-        <div id="exportCollisionPolicy" style="font-size:11px;color:var(--text-secondary);margin-bottom:12px;padding:8px 10px;border:1px solid var(--border-secondary);border-radius:4px;background:var(--bg-tertiary);line-height:1.45;">
-          Existing files are never overwritten. If an export name is already in use, Vireo adds a number such as <code>_2</code>. You&rsquo;ll be shown the filename change before export starts.
-        </div>
+        <div id="exportCollisionNotice" class="export-collision-notice" role="status" aria-live="polite" hidden></div>
       </aside>
       <section class="export-settings" aria-label="Export settings">
         <label for="exportPreset" style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Preset</label>
@@ -1170,6 +1168,7 @@ body {
 
 <script src="/static/vireo-folder-browser.js"></script>
 <script src="/static/vireo-export-presets.js"></script>
+<script src="/static/vireo-export-collisions.js"></script>
 <link rel="stylesheet" href="/static/vireo-batch-edits.css">
 <script src="/static/vireo-batch-edits.js"></script>
 
@@ -3660,6 +3659,7 @@ const exportFolderBrowser = new VireoFolderBrowser({
       onSelect: function(path) {
         document.getElementById('exportDest').value = path;
         VireoExportPresets.markCustom();
+        VireoExportCollisions.schedule();
       },
     },
   },
@@ -3693,6 +3693,7 @@ async function openExportModal() {
   document.getElementById('exportSubfolderName').value = 'exported';
   document.getElementById('exportRevealAfter').checked = false;
   editorExportRequestGeneration++;
+  VireoExportCollisions.reset();
   setExportControlsBusy(false);
   setExportDismissible(true);
   document.getElementById('exportSubmitBtn').disabled = false;
@@ -3707,6 +3708,7 @@ async function openExportModal() {
 function closeExportModal() {
   if (!editorExportDismissible) return;
   editorExportRequestGeneration++;
+  VireoExportCollisions.reset();
   setExportControlsBusy(false);
   document.getElementById('exportOverlay').classList.remove('open');
 }
@@ -3721,6 +3723,7 @@ async function browseForExportDestination() {
     if (result) {
       destination.value = Array.isArray(result) ? result[0] : result;
       VireoExportPresets.markCustom();
+      VireoExportCollisions.schedule();
       return;
     }
     if (typeof isTauri === 'function' && isTauri()) return;
@@ -3791,6 +3794,9 @@ function sanitizeExportFilenamePart(value) {
 }
 
 function updateExportPreview() {
+  // Programmatic control changes (presets, inserted template variables)
+  // repaint through here without firing input events.
+  VireoExportCollisions.schedule();
   var template = document.getElementById('exportTemplate').value;
   var photo = editorState.photo;
   if (!template || !photo) {
@@ -3828,18 +3834,42 @@ function selectedExportMetadataFields() {
     .map(function(input) { return input.value; });
 }
 
-async function startExport() {
-  if (!editorState.photoId) return;
-  var requestGeneration = ++editorExportRequestGeneration;
-  var exportPhotoId = editorState.photoId;
-  var button = document.getElementById('exportSubmitBtn');
-  var buttonLabel = 'Export Photo';
+function validCustomExportSize(value) {
+  var size = Number(value);
+  return Number.isInteger(size) && size >= 100 && size <= 20000;
+}
+
+// The settings that decide where the file lands and what it is called:
+// everything the filename-collision preflight needs. Null while the custom
+// size is out of range, which startExport reports.
+function buildExportPreflightRequest() {
+  if (!editorState.photoId) return null;
   var resizeValue = document.getElementById('exportResize').value;
   var maxSize = resizeValue ? parseInt(resizeValue, 10) : null;
   if (resizeValue === 'custom') {
+    var customValue = document.getElementById('exportResizeCustom').value;
+    if (!validCustomExportSize(customValue)) return null;
+    maxSize = Number(customValue);
+  }
+  return {
+    photo_ids: [editorState.photoId],
+    destination: document.getElementById('exportDest').value.trim(),
+    export_to_subfolder: document.getElementById('exportSubfolder').checked,
+    subfolder_name: VireoExportPresets.subfolderName(),
+    naming_template: document.getElementById('exportTemplate').value || '{original}',
+    max_size: maxSize,
+    format: document.getElementById('exportFormat').value || 'jpg',
+  };
+}
+
+async function startExport() {
+  if (!editorState.photoId) return;
+  var requestGeneration = ++editorExportRequestGeneration;
+  var button = document.getElementById('exportSubmitBtn');
+  var buttonLabel = 'Export Photo';
+  if (document.getElementById('exportResize').value === 'custom') {
     var customResizeInput = document.getElementById('exportResizeCustom');
-    maxSize = Number(customResizeInput.value);
-    if (!Number.isInteger(maxSize) || maxSize < 100 || maxSize > 20000) {
+    if (!validCustomExportSize(customResizeInput.value)) {
       if (typeof showToast === 'function') {
         showToast('Enter a custom size from 100 to 20000 pixels.', 'error');
       } else {
@@ -3849,21 +3879,14 @@ async function startExport() {
       return;
     }
   }
-  var exportRequest = {
-    photo_ids: [exportPhotoId],
-    destination: document.getElementById('exportDest').value.trim(),
-    export_to_subfolder: document.getElementById('exportSubfolder').checked,
-    subfolder_name: VireoExportPresets.subfolderName(),
-    naming_template: document.getElementById('exportTemplate').value || '{original}',
-    max_size: maxSize,
-    quality: parseInt(document.getElementById('exportQuality').value, 10) || 92,
-    format: document.getElementById('exportFormat').value || 'jpg',
-    metadata_fields: selectedExportMetadataFields(),
-    reveal_after_export: document.getElementById('exportRevealAfter').checked,
-  };
+  var exportRequest = buildExportPreflightRequest();
+  exportRequest.quality = parseInt(document.getElementById('exportQuality').value, 10) || 92;
+  exportRequest.metadata_fields = selectedExportMetadataFields();
+  exportRequest.reveal_after_export = document.getElementById('exportRevealAfter').checked;
   button.disabled = true;
   button.textContent = 'Checking filename…';
   setExportControlsBusy(true);
+  VireoExportCollisions.cancelPending();
   var preflight;
   try {
     preflight = await safeFetch('/api/jobs/export/preflight', {
@@ -3890,24 +3913,13 @@ async function startExport() {
     button.textContent = buttonLabel;
     return;
   }
-  if (preflight.rename_count > 0) {
-    var renameLines = (preflight.renames || []).slice(0, 5).map(function(rename) {
-      return rename.requested_name + ' → ' + rename.export_name;
-    });
-    if (preflight.rename_count > renameLines.length) {
-      renameLines.push('…and ' + (preflight.rename_count - renameLines.length) + ' more');
-    }
-    var renameMessage = preflight.rename_count + ' export filename' +
-      (preflight.rename_count === 1 ? ' is' : 's are') +
-      ' already in use. Existing files will be kept, and Vireo will save the new export' +
-      (preflight.rename_count === 1 ? '' : 's') + ' with numbered names:\n\n' +
-      renameLines.join('\n') + '\n\nContinue with export?';
-    if (!window.confirm(renameMessage)) {
-      setExportControlsBusy(false);
-      button.disabled = false;
-      button.textContent = buttonLabel;
-      return;
-    }
+  // A numbered name the notice did not already show stops the export here
+  // so the user reads it first; clicking Export again accepts it.
+  if (!VireoExportCollisions.acknowledged(preflight)) {
+    setExportControlsBusy(false);
+    button.disabled = false;
+    button.textContent = buttonLabel;
+    return;
   }
 
   try {
