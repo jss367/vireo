@@ -434,3 +434,85 @@ def test_camera_denoise_retains_float_precision_and_16_bit_export(local):
     exported = tifffile.imread(stream)
     assert exported.dtype == np.uint16
     assert len(np.unique(exported)) > 256
+
+
+def test_late_follower_joins_during_uncacheable_snapshot_copy(dng, monkeypatch):
+    """A reader arriving during snapshot construction must not decode again."""
+    import threading
+
+    monkeypatch.setattr(image_loader, '_linear_cache', image_loader.OrderedDict())
+    monkeypatch.setattr(image_loader, '_linear_inflight', {})
+    monkeypatch.setattr(image_loader, '_LINEAR_CACHE_MAX_ENTRY_BYTES', 1)
+    decoded, release_decode = threading.Event(), threading.Event()
+    copying, release_copy = threading.Event(), threading.Event()
+    calls, copies, results, errors = [], [], [], []
+    original_copy = FloatImage.copy
+
+    def decode(path, max_size):
+        calls.append(True)
+        decoded.set()
+        assert release_decode.wait(10)
+        return FloatImage(np.ones((2, 2, 3), dtype=np.float32))
+
+    def copy(image):
+        copies.append(True)
+        if len(copies) == 1:
+            copying.set()
+            assert release_copy.wait(10)
+        return original_copy(image)
+
+    monkeypatch.setattr(image_loader, '_decode_linear_sized', decode)
+    monkeypatch.setattr(FloatImage, 'copy', copy)
+    # Reuse the fixture's parking hook, observing each join individually.
+    first_waiter = _signal_when_flight_has_waiters(monkeypatch, 1)
+    first_flight = image_loader._LinearDecodeFlight
+    second_waiter = threading.Event()
+
+    class Flight(first_flight):
+        def __init__(self):
+            super().__init__()
+            original_wait = self.done.wait
+
+            def wait(timeout=None):
+                if self.waiters == 2:
+                    second_waiter.set()
+                return original_wait(timeout)
+
+            self.done.wait = wait
+
+    monkeypatch.setattr(image_loader, '_LinearDecodeFlight', Flight)
+
+    def load():
+        try:
+            results.append(image_loader._load_linear_cached(dng, 128))
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = []
+    try:
+        leader = threading.Thread(target=load)
+        threads.append(leader)
+        leader.start()
+        assert decoded.wait(10)
+        first = threading.Thread(target=load)
+        threads.append(first)
+        first.start()
+        assert first_waiter.wait(10)
+        release_decode.set()
+        assert copying.wait(10)
+        late = threading.Thread(target=load)
+        threads.append(late)
+        late.start()
+        assert second_waiter.wait(3)
+    finally:
+        release_decode.set()
+        release_copy.set()
+        for thread in threads:
+            thread.join(10)
+    assert not errors
+    assert all(not thread.is_alive() for thread in threads)
+    assert len(calls) == 1
+    assert len(results) == 3
+    assert len({id(image.pixels) for image in results}) == 3
+    assert not image_loader._linear_cache
+    assert not image_loader._linear_inflight

@@ -142,24 +142,28 @@ def _load_linear_cached(path, max_size):
     finally:
         try:
             with _linear_cache_lock:
-                # Popping under the lock closes the flight: no follower can
-                # join after ``waiters`` is read.
-                _linear_inflight.pop(key, None)
-                waiters = flight.waiters
-            if (
-                not flight.failed and image is not None
-                and flight.image is None and waiters
-            ):
-                # Uncacheable result (a JPEG fallback, or a decode above the
-                # per-entry ceiling): copy it for followers only when someone
-                # is actually waiting, so a lone oversized decode is never
-                # duplicated.
+                snapshot_needed = (
+                    not flight.failed and image is not None
+                    and flight.image is None and flight.waiters
+                )
+                if not snapshot_needed:
+                    # Close lone uncacheable results immediately: a later
+                    # reader cannot share a source already owned by its caller.
+                    _linear_inflight.pop(key, None)
+            if snapshot_needed:
+                # Keep the flight discoverable during this potentially large
+                # copy so later readers park on the same independent snapshot.
                 flight.image = image.copy()
         except BaseException:
             flight.failed = True
             raise
         finally:
-            flight.done.set()
+            with _linear_cache_lock:
+                # A lone result may already have closed its flight and a new
+                # request may now own the key. Never remove that newer flight.
+                if _linear_inflight.get(key) is flight:
+                    _linear_inflight.pop(key)
+                flight.done.set()
     return image
 
 
