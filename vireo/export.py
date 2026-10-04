@@ -814,7 +814,8 @@ def export_photos(db, vireo_dir, photo_ids, destination=None, options=None,
                 if exported_files is not None:
                     exported_files.append(out_path)
             if out_path != requested_out_path:
-                renamed_outputs.append({"requested_name": os.path.basename(requested_out_path),
+                renamed_outputs.append({"path": out_path,
+                                        "requested_name": os.path.basename(requested_out_path),
                                         "export_name": os.path.basename(out_path)})
         except Exception as exc:
             if claimed_out_path:
@@ -853,10 +854,12 @@ def export_photos(db, vireo_dir, photo_ids, destination=None, options=None,
         if len(resolved_destinations) == 1
         else destination
     )
+    renamed_outputs = [rename for rename in renamed_outputs if os.path.isfile(rename["path"])]
     result = {
         "exported": exported,
         "renamed": len(renamed_outputs),
-        "renames": renamed_outputs[:20],
+        "renames": [{key: value for key, value in rename.items() if key != "path"}
+                    for rename in renamed_outputs[:20]],
         "errors": errors,
         "destination": result_destination,
         "destinations": resolved_destinations,

@@ -3838,3 +3838,21 @@ def test_export_reports_collision_created_after_preflight(export_env):
     visible = describe_result("export", result)
     assert "1 file renamed to avoid overwriting" in visible["summary"]
     assert "bird1.jpg → bird1_2.jpg" in visible["details"]
+
+
+@pytest.mark.parametrize("reason", ["metadata failed", "export cancelled"])
+def test_export_does_not_report_renames_for_failed_metadata(export_env, monkeypatch, reason):
+    env = export_env
+    occupied = Path(env["dest"]) / "bird1.jpg"
+    occupied.parent.mkdir(parents=True, exist_ok=True)
+    occupied.write_bytes(b"existing")
+    monkeypatch.setattr(export_mod, "_write_export_metadata_batch",
+                        lambda jobs, **_: export_mod._fail_export_metadata_jobs(jobs, reason))
+    result = export_photos(env["db"], env["vireo_dir"], [env["p1"]], env["dest"],
+                           {"naming_template": "{original}", "metadata_fields": ["species"]})
+    assert result["exported"] == 0
+    assert result["errors"]
+    assert result["renamed"] == 0
+    assert result["renames"] == []
+    assert not (occupied.parent / "bird1_2.jpg").exists()
+    assert occupied.read_bytes() == b"existing"
