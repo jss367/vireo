@@ -1392,3 +1392,96 @@ def test_download_and_request_repairs_serialize_and_recheck_marker(db, tmp_path,
     finally:
         release.set()
         peer.close()
+
+
+def test_repair_defers_when_completed_import_has_no_common_names(db, tmp_path):
+    from species_identity_repair import INFERRED_TAXONOMY_MARKER, repair_on_upgrade
+
+    _, detection = _photo(db, tmp_path)
+    row = _inferred_row(db, detection, "Lilac-crowned Parrot", BROWED["scientific_name"])
+    db.conn.execute("DELETE FROM taxa_common_names")
+    db.conn.execute("UPDATE taxa SET common_name=NULL")
+    db.conn.commit()
+    db.set_meta(INFERRED_TAXONOMY_MARKER, "0")
+    assert db.get_meta("common_name_identity_version") == "1"
+    assert repair_on_upgrade(db) == 0
+    assert db.get_meta(INFERRED_TAXONOMY_MARKER) == "0"
+    assert db.conn.execute("SELECT scientific_name FROM predictions WHERE id=?", (row["id"],)).fetchone()[0] == BROWED["scientific_name"]
+    db.conn.execute("UPDATE taxa SET common_name=? WHERE inat_id=?", (LILAC["common_name"], LILAC["taxon_id"]))
+    db.conn.commit()
+    assert repair_on_upgrade(db) == 1
+    assert db.get_meta(INFERRED_TAXONOMY_MARKER) == "1"
+
+
+def test_repair_rechecks_marker_after_another_process_commits(db, tmp_path, monkeypatch):
+    import sys
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    import species_identity_repair as repair
+
+    _, detection = _photo(db, tmp_path)
+    db.add_prediction(detection, "Lilac-crowned Parrot", .9, "BioCLIP", labels_fingerprint="custom",
+                      taxonomy={"scientific_name": BROWED["scientific_name"]})
+    db.set_meta(repair.INFERRED_TAXONOMY_MARKER, "0")
+    entered = threading.Event()
+    release = threading.Event()
+    ready = tmp_path / "peer-ready"
+    original = repair.plan_inferred_taxonomy_repairs
+
+    def slow_plan(database):
+        result = original(database)
+        entered.set()
+        assert release.wait(10)
+        return result
+
+    monkeypatch.setattr(repair, "plan_inferred_taxonomy_repairs", slow_plan)
+    script = """
+import sys, sqlite3
+from pathlib import Path
+sys.path.insert(0, sys.argv[2])
+import species_identity_repair as repair
+conn = sqlite3.connect(sys.argv[1], timeout=10)
+conn.row_factory = sqlite3.Row
+class Catalog:
+    def __init__(self): self.conn = conn
+    def get_meta(self, key):
+        row = conn.execute('SELECT value FROM db_meta WHERE key=?', (key,)).fetchone()
+        return row[0] if row else None
+    def set_meta(self, key, value, _commit=False):
+        conn.execute('INSERT OR REPLACE INTO db_meta(key,value) VALUES(?,?)', (key,value))
+def forbidden_plan(db):
+    raise AssertionError('The other process already repaired these rows')
+repair.plan_inferred_taxonomy_repairs = forbidden_plan
+Path(sys.argv[3]).write_text('ready')
+print(repair.repair_on_upgrade(Catalog()), flush=True)
+"""
+    peer = None
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            first = pool.submit(repair.repair_on_upgrade, db)
+            try:
+                assert entered.wait(5)
+                peer = subprocess.Popen(
+                    [sys.executable, "-c", script, db._db_path, str(Path(__file__).parents[1]), str(ready)],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                )
+                deadline = time.monotonic() + 5
+                while not ready.exists() and time.monotonic() < deadline and peer.poll() is None:
+                    time.sleep(.01)
+                assert ready.exists()
+                time.sleep(.2)
+                assert peer.poll() is None
+            finally:
+                release.set()
+            assert first.result(timeout=5) == 1
+        out, err = peer.communicate(timeout=10)
+        assert peer.returncode == 0, err
+        assert out.strip() == "0"
+        assert db.conn.execute("SELECT COUNT(*) FROM species_identity_repairs").fetchone()[0] == 1
+    finally:
+        release.set()
+        if peer is not None and peer.poll() is None:
+            peer.kill()
+            peer.communicate()

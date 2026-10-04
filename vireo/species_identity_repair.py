@@ -194,8 +194,10 @@ def _repair_on_upgrade_locked(db):
     marker = "species_identity_repair:" + resolution_identity()
     if db.get_meta(marker) != "1":
         with db.conn:
-            count += apply_repairs(db.conn, plan_repairs(db.conn))
-            db.set_meta(marker, "1", _commit=False)
+            db.conn.execute("BEGIN IMMEDIATE")
+            if db.get_meta(marker) != "1":
+                count += apply_repairs(db.conn, plan_repairs(db.conn))
+                db.set_meta(marker, "1", _commit=False)
     # Planned after the verified corrections commit, so rows they just gave a
     # source taxon are out of scope here. An empty ``taxa`` table is a
     # supported first-run state (the taxonomy download is optional and runs
@@ -207,10 +209,19 @@ def _repair_on_upgrade_locked(db):
 
     if (db.get_meta(INFERRED_TAXONOMY_MARKER) != "1"
             and db.get_meta("common_name_identity_version") == str(COMMON_NAME_IDENTITY_VERSION)
-            and _local_taxonomy_populated(db.conn)):
+            and _local_taxonomy_populated(db.conn)
+            and _common_names_populated(db.conn)):
         with db.conn:
-            count += apply_repairs(db.conn, plan_inferred_taxonomy_repairs(db))
-            db.set_meta(INFERRED_TAXONOMY_MARKER, "1", _commit=False)
+            # Serialize independent CLI/server processes too. Recheck after
+            # acquiring the writer lock: the waiting process may find that
+            # the other one has already repaired and committed the marker.
+            db.conn.execute("BEGIN IMMEDIATE")
+            if (db.get_meta(INFERRED_TAXONOMY_MARKER) != "1"
+                    and db.get_meta("common_name_identity_version") == str(COMMON_NAME_IDENTITY_VERSION)
+                    and _local_taxonomy_populated(db.conn)
+                    and _common_names_populated(db.conn)):
+                count += apply_repairs(db.conn, plan_inferred_taxonomy_repairs(db))
+                db.set_meta(INFERRED_TAXONOMY_MARKER, "1", _commit=False)
     return count
 
 
@@ -218,3 +229,11 @@ def _local_taxonomy_populated(conn):
     """True once the local ``taxa`` table has rows to verify labels against."""
     row = conn.execute("SELECT 1 FROM taxa LIMIT 1").fetchone()
     return row is not None
+
+
+def _common_names_populated(conn):
+    """A completion version alone is insufficient for scientific-only DWCA."""
+    return conn.execute(
+        "SELECT 1 FROM taxa WHERE TRIM(COALESCE(common_name, '')) != '' "
+        "UNION ALL SELECT 1 FROM taxa_common_names WHERE TRIM(name) != '' LIMIT 1",
+    ).fetchone() is not None

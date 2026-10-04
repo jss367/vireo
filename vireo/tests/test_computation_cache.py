@@ -100,6 +100,10 @@ def classification_artifact(candidates=None, classifier_runtime=None,
         "runtime_fingerprint": classifier_runtime,
         "input_fingerprint": input_fp,
         "input": input_block,
+        "output_enrichment": {
+            "taxonomy_identity": "no-tax",
+            "inferred_taxonomy_repair": "inferred_taxonomy_repair:v1",
+        },
         "completed": True,
         "subjects": subjects,
     }
@@ -2356,7 +2360,9 @@ def test_pre_identity_repair_artifact_cannot_restore_wrong_binomial(tmp_path, mo
         "species": "Lilac-crowned Amazon", "confidence": .9,
         "taxonomy": {"scientific_name": "Amazona rhodocorytha"},
     }])
-    result = materialize_artifacts(db, [detection_artifact(), artifact], known_runtimes={RUNTIME})
+    artifact.pop("output_enrichment", None)
+    result = materialize_artifacts(db, [detection_artifact(), artifact], known_runtimes={RUNTIME},
+                                   known_classifier_runtimes={obsolete_runtime})
     assert result["unknown_classifier_runtime"] == 1
     assert result["classifier_runs_applied"] == 0
     assert db.conn.execute("SELECT COUNT(*) FROM predictions").fetchone()[0] == 0
@@ -2371,3 +2377,25 @@ def test_pre_identity_repair_artifact_cannot_restore_wrong_binomial(tmp_path, mo
     applied = materialize_artifacts(db, [detection_artifact(), current], known_runtimes={RUNTIME})
     assert applied["classifier_runs_applied"] == 1
     assert db.conn.execute("SELECT scientific_name FROM predictions").fetchone()[0] == "Amazona finschi"
+
+
+def test_persisted_trust_cannot_restore_pre_repair_binomial(tmp_path):
+    from computation_cache import materialize_local_store
+    from species_identity_repair import INFERRED_TAXONOMY_MARKER
+
+    db, _, _ = _database_with_photo(tmp_path / "db.db", "bird.jpg")
+    db.upsert_labels_fingerprint("3" * 12, "L", [], 1, full_fingerprint="3" * 64)
+    db.set_meta(INFERRED_TAXONOMY_MARKER, "1")
+    store = ArtifactStore(tmp_path / "cache")
+    artifact = classification_artifact(candidates=[{
+        "species": "Lilac-crowned Amazon", "confidence": .9,
+        "taxonomy": {"scientific_name": "Amazona rhodocorytha"},
+    }])
+    artifact.pop("output_enrichment", None)
+    store.put(detection_artifact())
+    store.put(artifact)
+    store.record_trusted_runtimes({RUNTIME}, {artifact["runtime_fingerprint"]})
+    result = materialize_local_store(db, store)
+    assert result["unknown_classifier_runtime"] == 1
+    assert result["classifier_runs_applied"] == 0
+    assert db.conn.execute("SELECT COUNT(*) FROM predictions").fetchone()[0] == 0
