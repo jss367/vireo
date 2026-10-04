@@ -130,11 +130,13 @@ def test_retry_after_library_commit_does_not_repeat_or_overwrite_later_edits(wri
     assert len(db.get_edit_history()) == 2
 
 
-@pytest.mark.parametrize('change', ['identity', 'workspace'])
+@pytest.mark.parametrize('change', ['identity', 'hash_cleared', 'workspace'])
 def test_tag_updates_reject_changed_photo_or_workspace(writable_queue, change):
     queue, db, pid, old, preserved = writable_queue
     if change == 'identity':
         db.conn.execute("UPDATE photos SET file_hash='replacement' WHERE id=?", (pid,))
+    elif change == 'hash_cleared':
+        db.conn.execute('UPDATE photos SET file_hash=NULL WHERE id=?', (pid,))
     else:
         db.conn.execute('DELETE FROM workspace_folders')
     db.conn.commit()

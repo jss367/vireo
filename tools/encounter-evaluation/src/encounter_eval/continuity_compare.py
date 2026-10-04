@@ -82,11 +82,23 @@ def _preview(pid, presentation):
     return next((p.as_uri() for p in candidates if p.is_file()), None)
 
 
-def run(output, db, *, baseline_revision='HEAD', scopes):
+def run(output, db, *, baseline_revision='HEAD', scopes, split_registries=None):
     repo = configure_repo()
     from bursts import detect_bursts
     from pipeline import load_photo_features
 
+    registries = {}
+    for workspace, _ in scopes:
+        supplied = (split_registries or {}).get(workspace)
+        if supplied is None:
+            raise ValueError(f'Choose the established split registry for workspace {workspace}')
+        path = Path(supplied).expanduser().resolve()
+        if not path.is_file():
+            raise ValueError(f'Established split registry does not exist: {path}')
+        data = json.loads(path.read_text())
+        if type(data.get('seed')) is not int or not isinstance(data.get('days'), dict):
+            raise ValueError(f'Invalid established split registry: {path}')
+        registries[workspace] = path, data['seed']
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=False)
     revision = subprocess.check_output(['git','rev-parse',baseline_revision],cwd=repo,text=True).strip()
@@ -123,12 +135,14 @@ def run(output, db, *, baseline_revision='HEAD', scopes):
             _baseline_files[str(key)] = {'path':filename,'digest':digest(old)}
             return load_photo_features(reader, **kwargs)
 
-        # Reuse the existing live-library split registry, not one under this
-        # new nested output directory. Partition exclusion precedes all loads.
-        namespace = digest([str(Path(db).expanduser().resolve()),workspace])[:16]
-        registry = Path.home()/'.vireo/encounter-evaluation/runs'/f'split-membership-{namespace}.json'
+        # Explicit established registries preserve held-out membership even
+        # when earlier runs used custom output directories or custom seeds.
+        registry, seed = registries[workspace]
+        if not registry.is_file():
+            raise ValueError(f'Established split registry disappeared: {registry}')
         manifest = prepare(db,scope,workspace=workspace,capture_date=capture_date,
-                           split_registry=registry,included_partitions=('train','development'),feature_loader=paired_loader)
+                           split_registry=registry,seed=seed,
+                           included_partitions=('train','development'),feature_loader=paired_loader)
         write_json(scope/'baseline-manifest.json', {'revision':revision,'source_sha256':hashlib.sha256(source).hexdigest(),
                                                    'files':baseline_files})
         inventories.append({'workspace':workspace,'capture_date':capture_date,'inventory':manifest['inventory']})
@@ -212,10 +226,19 @@ def main():
     p.add_argument('--db',type=Path,default=Path.home()/'.vireo/vireo.db')
     p.add_argument('--baseline-revision',default='HEAD')
     p.add_argument('--scope',action='append',required=True,help='Workspace ID, optionally followed by :YYYY-MM-DD; repeatable')
+    p.add_argument('--split-registry', action='append', required=True,
+                   help='Established registry as WORKSPACE_ID=PATH; repeat for each workspace')
     args=p.parse_args()
     scopes = [value.split(':',1) for value in args.scope]
+    registries = {}
+    for value in args.split_registry:
+        workspace, separator, path = value.partition('=')
+        if not separator or not path or int(workspace) in registries:
+            p.error('Use one --split-registry WORKSPACE_ID=PATH per workspace')
+        registries[int(workspace)] = Path(path)
     run(args.output,args.db,baseline_revision=args.baseline_revision,
-        scopes=[(int(parts[0]),parts[1] if len(parts)>1 else None) for parts in scopes])
+        scopes=[(int(parts[0]),parts[1] if len(parts)>1 else None) for parts in scopes],
+        split_registries=registries)
 
 
 if __name__=='__main__':

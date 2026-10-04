@@ -414,7 +414,8 @@ def prepare(db_path, output, *, workspace=None, seed=42, max_sessions=None,
             if (i + 1) % 10 == 0:
                 print(f"Prepared {i + 1}/{len(selected)} sessions", flush=True)
         manifest = {"format_version": 1, "created_at": datetime.now(UTC).isoformat(), "code": source_identity,
-                    "workspace": workspace, "seed": seed, "config": cfg, "grouping_config": grouping,
+                    "workspace": workspace, "source_library": str(Path(db_path).expanduser().resolve()),
+                    "seed": seed, "config": cfg, "grouping_config": grouping,
                     "label_source": label_source, "complete_folders": sorted(complete_folders),
                     "capture_date": capture_date,
                     "included_partitions": sorted(included_partitions) if included_partitions else None,

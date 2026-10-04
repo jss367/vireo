@@ -120,6 +120,8 @@ def test_identity_guard_uses_hashes_when_available():
     before = {'filename':'a.jpg','folder':'/a','file_hash':'aaa'}
     assert same_photo(before, {'filename':'b.jpg','folder':'/b','file_hash':'aaa'})
     assert not same_photo(before, {**before,'file_hash':'bbb'})
+    assert not same_photo(before, {**before,'file_hash':None})
+    assert not same_photo(before, {k:v for k,v in before.items() if k != 'file_hash'})
     assert not same_photo(before, {'filename':'b.jpg','folder':'/a','file_hash':None})
 
 
@@ -151,3 +153,19 @@ def test_review_http_persistence_and_cross_origin_protection(queue):
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+@pytest.mark.parametrize('missing_identity', [False, True])
+def test_queue_rejects_wrong_or_unrecorded_source_library(queue, tmp_path, missing_identity):
+    import shutil
+
+    _, library, run, manifest = queue
+    other = tmp_path / 'other.db'
+    shutil.copy2(library, other)
+    if missing_identity:
+        manifest.pop('source_library')
+        write_json(run / 'manifest.json', manifest)
+    output = tmp_path / 'wrong-library-review.sqlite'
+    with pytest.raises(ValueError, match='source library'):
+        build_queue(run, output, library if missing_identity else other)
+    assert not output.exists()

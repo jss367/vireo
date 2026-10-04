@@ -120,10 +120,15 @@ development sessions only; held-out feature bundles are never loaded.
 ```sh
 python -m encounter_eval.continuity_compare --baseline-revision REVISION_BEFORE_REPAIR \
   --scope 22 --scope 5:2026-10-03 \
+  --split-registry 22=/path/to/established-workspace-22-splits.json \
+  --split-registry 5=/path/to/established-workspace-5-splits.json \
   --output ~/.vireo/encounter-evaluation/runs/encounter-continuity-comparison
 ```
 
 Replace the example workspace IDs and optional capture date with your scopes.
+Supply each workspace’s established registry explicitly; missing files are
+rejected, and each registry’s original seed and held-out memberships are reused.
+Use the `split_registry_path` recorded by the earlier evaluation manifest.
 The baseline revision must precede the full-image continuity repair. Retained
 baseline source, paired input bundles, hashes, split membership, and separate
 training/development metrics make the comparison inspectable. Fully overlapping
@@ -390,3 +395,8 @@ claim that the current rules recover all valid encounters.
 The reviewed sequence dataset measures grouping behavior. Keep species-label
 corrections in the species review queue, with Vireo tag updates enabled when
 requested; neither kind of review should silently substitute for the other.
+
+Review queues validate the source-library path recorded in the run manifest.
+Use that library with `review build --db`; older runs without this identity must
+be rebuilt before creating a queue. A captured file hash must still be present
+and match in the live library before tag updates or live replay can proceed.

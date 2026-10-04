@@ -22,8 +22,8 @@ def connect(path):
 
 
 def same_photo(before, after):
-    if before.get('file_hash') and after.get('file_hash'):
-        return before['file_hash'] == after['file_hash']
+    if before.get('file_hash'):
+        return before['file_hash'] == after.get('file_hash')
     return (before['filename'], before['folder']) == (after['filename'], after['folder'])
 
 
@@ -64,6 +64,8 @@ def build_queue(run, output, library, *, agreement_sample=200, seed=42):
     if agreement_sample < 0:
         raise ValueError('Agreement sample must be nonnegative')
     manifest = json.loads((run / 'manifest.json').read_text())
+    if manifest.get('source_library') != str(library):
+        raise ValueError('Run source library is missing or differs; rebuild the run or use its source library')
     if output.exists():
         raise ValueError('Review database already exists; serve it to resume your reviews')
     output.parent.mkdir(parents=True, exist_ok=True)
