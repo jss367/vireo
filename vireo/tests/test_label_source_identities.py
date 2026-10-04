@@ -633,3 +633,18 @@ def test_cancel_during_final_lookup_does_not_commit_repairs(db, tmp_path, legacy
     assert db.get_meta(LEGACY_MARKER) is None
     assert _row(db, _prediction_id(db, det, "BioCLIP-2.5", fingerprint))["source_taxon_id"] is None
     assert db.conn.execute("SELECT COUNT(*) FROM label_source_identities").fetchone()[0] == 0
+
+
+def test_null_legacy_species_does_not_block_consensus(db, tmp_path, legacy_list):
+    from label_source_identities import LEGACY_MARKER
+
+    det = _detection(db, tmp_path, "nullable.jpg")
+    db.add_prediction(det, None, .2, "BioCLIP-2.5")
+    db.add_prediction(det, "Redhead", .8, "BioCLIP-2.5")
+    result = backfill(db, fetch=_fetch(["Redhead"], {"Redhead": REDHEAD}))
+    assert result["ok"] is True
+    assert result["legacy_predictions_updated"] == 1
+    assert db.get_meta(LEGACY_MARKER) is not None
+    assert _row(db, _prediction_id(db, det, "BioCLIP-2.5", "legacy"))["source_taxon_id"] is None
+    identified = db.conn.execute("SELECT source_taxon_id FROM predictions WHERE species='Redhead'").fetchone()
+    assert identified[0] == 7056

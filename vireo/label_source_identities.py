@@ -402,7 +402,7 @@ def consensus_identities(db, saved_metas, *, fetch=None, identities_by_file=None
             else:
                 vetoed.add(keyword_match_key(species))
     spellings.update(row["species"] for row in db.conn.execute(
-        "SELECT DISTINCT species FROM predictions WHERE source_taxon_id IS NULL AND "
+        "SELECT DISTINCT species FROM predictions WHERE species IS NOT NULL AND source_taxon_id IS NULL AND "
         + _UNSTAMPED_LEGACY_WHERE,
     ))
     return {
