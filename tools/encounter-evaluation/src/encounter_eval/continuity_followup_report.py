@@ -11,7 +11,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 from .algorithms import run_algorithm
-from .common import configure_repo, digest, encode, write_json
+from .common import code_identity, configure_repo, digest, encode, write_json
 from .continuity_compare import _preview
 from .continuity_experiments import apply_candidate, prepare_baseline
 from .library import read_bundle
@@ -22,6 +22,15 @@ def build(comparison, output):
     from bursts import detect_bursts
 
     comparison, output = Path(comparison), Path(output)
+    frozen_source = json.loads((comparison / "search-design.json").read_text())["source"]
+    current_source = code_identity(repo)
+    # The report pairs the frozen revision with a hash of the live source: both
+    # must come from the same checkout, or the recorded provenance lies.
+    if current_source["source_digest"] != frozen_source["source_digest"]:
+        raise ValueError(
+            "Current checkout differs from the frozen comparison; check out the comparison's "
+            "revision before regenerating the report or rerun the comparison"
+        )
     selection = json.loads((comparison / "summary.json").read_text())
     changed = json.loads((comparison / "changed-cases.json").read_text())["cases"]
     cases = [c for c in changed if c["needs_review"]]
@@ -152,7 +161,7 @@ def build(comparison, output):
         write_json(
             stored["path"] / "baseline-manifest.json",
             {
-                "revision": json.loads((comparison / "search-design.json").read_text())["source"]["revision"],
+                "revision": frozen_source["revision"],
                 "source_sha256": hashlib.sha256((repo / "vireo/encounter_continuity.py").read_bytes()).hexdigest(),
                 "files": stored["baseline_files"],
             },

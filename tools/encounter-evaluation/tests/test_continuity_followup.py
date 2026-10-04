@@ -268,3 +268,37 @@ def test_ambiguous_report_exports_a_replayable_snapshot(tmp_path):
     assert import_reviews(dataset, report, export)["imported"] == 1
     replay = check(dataset)
     assert replay["counts"]["passed_cases"] == 1
+
+
+def test_report_rejects_source_drifted_from_frozen_comparison(tmp_path):
+    from encounter_eval.common import code_identity, write_json
+    from encounter_eval.continuity_followup_report import build
+
+    scope = retained_scope(tmp_path)
+    manifest = json.loads((scope / "manifest.json").read_text())
+    entry = manifest["sessions"][0]
+    comparison = tmp_path / "comparison"
+    comparison.mkdir()
+    measured = {"train": {"counts": {"photos": 1}}, "development": {"counts": {"photos": 0}}}
+    write_json(
+        comparison / "summary.json",
+        {"selected": spec("weak-lower-confidence"), "baseline": measured, "selected_metrics": measured},
+    )
+    cases = [
+        {
+            "id": "case-0",
+            "needs_review": True,
+            "scope": str(scope),
+            "session": entry["id"],
+            "input_digest": entry["digest"],
+            "ids": [0],
+            "before": [],
+            "after": [],
+        }
+    ]
+    write_json(comparison / "changed-cases.json", {"cases": cases})
+    drifted = dict(code_identity(configure_repo()))
+    drifted["source_digest"] = "0" * 64
+    write_json(comparison / "search-design.json", {"source": drifted})
+    with pytest.raises(ValueError, match="Current checkout differs"):
+        build(comparison, tmp_path / "report")
