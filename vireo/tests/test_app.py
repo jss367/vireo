@@ -4964,6 +4964,7 @@ def test_browse_reads_run_while_a_nas_send_holds_the_workspace(app_and_db):
         "browse.api_selection_prediction_suggestions": {"photo_ids": [1]},
         "browse.api_selection_wildlife_state": {"photo_ids": [1]},
         "photo_edit_recipes.api_photo_edit_recipe_summary": {"photo_ids": [1]},
+        "collections.api_collection_preview": {"rules": []},
     }
     rules = {r.endpoint: r for r in app.url_map.iter_rules()}
     client = app.test_client()
