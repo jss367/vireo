@@ -321,6 +321,7 @@ def test_old_predictions_alone_start_the_startup_job(db, tmp_path, monkeypatch, 
     old = _detection(db, tmp_path, "old.jpg")
     db.add_prediction(old, "Redhead", .51, "BioCLIP-2.5")
     assert pending_label_sets(db) == []
+    monkeypatch.setattr("labels.fetch_species_list", _fetch(["Redhead"], {"Redhead": REDHEAD}))
     app = _app(tmp_path, monkeypatch, db)
 
     app._kickoff_label_identity_backfill()
@@ -406,3 +407,89 @@ def test_startup_job_is_not_started_without_work(db, tmp_path, monkeypatch, lega
     app._kickoff_label_identity_backfill()
 
     assert [j for j in app._job_runner.list_jobs() if j["type"] == "label-list-species-ids"] == []
+
+
+def test_legacy_only_predictions_query_their_saved_lists(db, tmp_path, legacy_list):
+    """Pre-fingerprint rows recover without any newer prediction to trigger lookup."""
+    from label_source_identities import LEGACY_MARKER
+
+    old = _detection(db, tmp_path, "old.jpg")
+    db.add_prediction(old, "Redhead", .51, "BioCLIP-2.5")
+    fetch = _fetch(["Redhead"], {"Redhead": REDHEAD})
+    assert pending_label_sets(db) == []
+    result = backfill(db, fetch=fetch)
+    assert len(fetch.calls) == 1
+    assert result["legacy_predictions_updated"] == 1
+    assert db.get_meta(LEGACY_MARKER) is not None
+    assert _row(db, _prediction_id(db, old, "BioCLIP-2.5", "legacy"))["source_taxon_id"] == 7056
+
+
+def test_failed_legacy_only_lookup_is_retried(db, tmp_path, legacy_list):
+    """An unavailable legacy-only list never creates a completed-consensus marker."""
+    from label_source_identities import LEGACY_MARKER
+
+    old = _detection(db, tmp_path, "old.jpg")
+    db.add_prediction(old, "Redhead", .51, "BioCLIP-2.5")
+
+    def offline(*args, **kwargs):
+        raise RuntimeError("offline")
+
+    result = backfill(db, fetch=offline)
+    assert result["ok"] is False
+    assert db.get_meta(LEGACY_MARKER) is None
+    assert _row(db, _prediction_id(db, old, "BioCLIP-2.5", "legacy"))["source_taxon_id"] is None
+    assert backfill(db, fetch=_fetch(["Redhead"], {"Redhead": REDHEAD}))["legacy_predictions_updated"] == 1
+
+
+def test_failed_pending_list_defers_legacy_consensus_until_retry(db, tmp_path, legacy_list):
+    """A successful list cannot stamp old rows while a conflicting list is offline."""
+    from label_source_identities import LEGACY_MARKER
+
+    path = legacy_list["path"].parent / "europe.txt"
+    path.write_text("Redhead\n")
+    path.with_suffix(".json").write_text(json.dumps({
+        "name": "Europe", "labels_file": str(path), "place_id": 1, "taxon_groups": ["birds"],
+    }))
+    fingerprint = compute_fingerprint(load_merged_labels([{"labels_file": str(path)}]))
+    db.upsert_labels_fingerprint(fingerprint, path.name, [str(path)], 1)
+    old = _detection(db, tmp_path, "old.jpg")
+    db.add_prediction(old, "Redhead", .51, "BioCLIP-2.5")
+    current = _detection(db, tmp_path, "current.jpg")
+    for fp in (fingerprint, legacy_list["fingerprint"]):
+        db.add_prediction(current, "Redhead", .51, "BioCLIP-2.5", labels_fingerprint=fp)
+
+    def fetch(place_id, *args, **kwargs):
+        if place_id == 1:
+            raise RuntimeError("offline")
+        return SpeciesLabels(["Redhead"], {"Redhead": REDHEAD})
+
+    result = backfill(db, fetch=fetch)
+    assert result["ok"] is False
+    assert db.get_meta(LEGACY_MARKER) is None
+    assert _row(db, _prediction_id(db, old, "BioCLIP-2.5", "legacy"))["source_taxon_id"] is None
+
+    def retry(place_id, *args, **kwargs):
+        return SpeciesLabels(["Redhead"], {"Redhead": POCHARD if place_id == 1 else REDHEAD})
+
+    result = backfill(db, fetch=retry)
+    assert result["ok"] is True
+    assert result["legacy_predictions_updated"] == 0
+    assert db.get_meta(LEGACY_MARKER) is not None
+    assert _row(db, _prediction_id(db, old, "BioCLIP-2.5", "legacy"))["source_taxon_id"] is None
+
+
+@pytest.mark.parametrize("other,identified", [(POCHARD, False), (REDHEAD, True)])
+def test_merged_prompt_checks_case_folded_sources(tmp_path, other, identified):
+    """Every source of a folded prompt contributes to its identity decision."""
+    from label_source_identities import plan_label_set
+
+    paths = [tmp_path / "one.txt", tmp_path / "two.txt"]
+    for path, name in zip(paths, ["Redhead", "redhead"], strict=True):
+        path.write_text(name + "\n")
+    metas = [{"labels_file": str(path)} for path in paths]
+    planned, unidentified = plan_label_set(
+        {"metas": metas, "labels": load_merged_labels(metas)},
+        {str(paths[0]): {"Redhead": REDHEAD}, str(paths[1]): {"redhead": other}},
+    )
+    assert bool(planned) == identified
+    assert bool(unidentified) != identified

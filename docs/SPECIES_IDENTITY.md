@@ -109,3 +109,10 @@ with reason `label-list-source-identity`. Triggers on `predictions` stamp
 rows written later under that fingerprint. The run appears in the bottom panel
 as "Label List Species Ids". A list that cannot be reached is reported and
 retried at the next startup.
+
+Predictions older than label fingerprints use consensus across all saved lists,
+including legacy lists that have no newer predictions. Those lists are queried
+using their own provenance before consensus is marked complete. Any lookup
+failure defers this pass and leaves it retryable. Case-only prompt variants
+participate in the same conflict check; agreeing sources identify the prompt,
+and conflicting source taxa leave it unresolved.

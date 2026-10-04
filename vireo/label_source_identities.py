@@ -178,7 +178,7 @@ def source_identities(meta, fetch):
             continue
         key = keyword_match_key(name)
         previous = by_key.get(key)
-        if previous is not None and previous["taxon_id"] != entry["taxon_id"]:
+        if previous is not None and (previous.get("conflict") or previous["taxon_id"] != entry["taxon_id"]):
             by_key[key] = {"conflict": True}
         elif previous is None:
             by_key[key] = entry
@@ -200,18 +200,23 @@ def plan_label_set(label_set, identities_by_file):
     """
     from labels import read_label_file
 
-    file_names = {
-        meta["labels_file"]: set(read_label_file(meta["labels_file"]))
-        for meta in label_set["metas"]
-    }
+    file_names = {}
+    for meta in label_set["metas"]:
+        path = meta["labels_file"]
+        folded = {}
+        for source_name in read_label_file(path):
+            folded.setdefault(keyword_match_key(source_name), []).append(source_name)
+        file_names[path] = folded
     planned = {}
     unidentified = []
     for name in label_set["labels"]:
         taxa = {}
+        key = keyword_match_key(name)
         for path, names in file_names.items():
-            entry = identities_by_file.get(path, {}).get(name)
-            if name in names and entry:
-                taxa[entry["taxon_id"]] = entry
+            for source_name in names.get(key, []):
+                entry = identities_by_file.get(path, {}).get(source_name)
+                if entry:
+                    taxa[entry["taxon_id"]] = entry
         species = normalize_keyword_display(name)
         if len(taxa) != 1 or not species:
             unidentified.append(name)
@@ -263,7 +268,7 @@ def legacy_pass_needed(db):
     ).fetchone() is not None
 
 
-def consensus_identities(db, saved_metas):
+def consensus_identities(db, saved_metas, *, fetch=None, identities_by_file=None):
     """Identity per species spelling that every known list agrees on.
 
     Predictions older than label fingerprints (``labels_fingerprint =
@@ -279,9 +284,16 @@ def consensus_identities(db, saved_metas):
 
     votes = {}
     vetoed = set()
+    spellings = set()
+    if fetch is None:
+        from labels import fetch_species_list as fetch
+    if identities_by_file is None:
+        identities_by_file = {}
+
 
     def vote(species, taxon_id, identity):
-        votes.setdefault(species, {}).setdefault(taxon_id, identity)
+        spellings.add(species)
+        votes.setdefault(keyword_match_key(species), {}).setdefault(taxon_id, identity)
 
     for row in db.conn.execute(
         "SELECT species, source_taxon_id, scientific_name FROM label_source_identities",
@@ -293,7 +305,7 @@ def consensus_identities(db, saved_metas):
         (MARKER_PREFIX + "%", LEGACY_MARKER),
     ).fetchall():
         try:
-            vetoed.update(normalize_keyword_display(n) for n in json.loads(value).get("unidentified", []))
+            vetoed.update(keyword_match_key(n) for n in json.loads(value).get("unidentified", []))
         except (ValueError, AttributeError):
             continue
     for meta in saved_metas:
@@ -301,24 +313,34 @@ def consensus_identities(db, saved_metas):
         if not path or not os.path.exists(path):
             continue
         names = read_label_file(path)
-        if not names.identities:
-            continue  # A legacy list votes through its fingerprint's rows above.
+        # Include legacy-only lists too: they may never have produced a
+        # tracked fingerprint, but still constrain older predictions.
+        if path not in identities_by_file:
+            try:
+                identities_by_file[path] = source_identities(meta, fetch)
+            except Exception as exc:
+                raise RuntimeError(f"{os.path.basename(path)}: {exc}") from exc
+        identities = identities_by_file[path]
         for name in names:
-            entry = names.identities.get(name)
+            entry = identities.get(name)
             species = normalize_keyword_display(name)
             if _valid_identity(entry):
                 vote(species, entry["taxon_id"],
                      _identity(entry["taxon_id"], entry["scientific_name"]))
             else:
-                vetoed.add(species)
+                vetoed.add(keyword_match_key(species))
+    spellings.update(row["species"] for row in db.conn.execute(
+        "SELECT DISTINCT species FROM predictions WHERE source_taxon_id IS NULL AND "
+        + _UNSTAMPED_LEGACY_WHERE,
+    ))
     return {
-        species: next(iter(taxa.values()))
-        for species, taxa in votes.items()
-        if species not in vetoed and len(taxa) == 1
+        species: next(iter(votes[key].values()))
+        for species in spellings
+        if (key := keyword_match_key(species)) not in vetoed and len(votes.get(key, {})) == 1
     }
 
 
-def apply_legacy(db, saved_metas=None):
+def apply_legacy(db, saved_metas=None, *, fetch=None, identities_by_file=None):
     """Stamp pre-fingerprint text-label predictions from the lists' consensus.
 
     Returns the number of predictions changed. Model-native rows (iNat21)
@@ -328,7 +350,7 @@ def apply_legacy(db, saved_metas=None):
 
     if saved_metas is None:
         saved_metas = get_saved_labels()
-    identities = consensus_identities(db, saved_metas)
+    identities = consensus_identities(db, saved_metas, fetch=fetch, identities_by_file=identities_by_file)
     conn = db.conn
     with conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -388,11 +410,18 @@ def backfill(db, fetch=None, progress=None, cancel_check=None):
         result["unidentified_labels_total"] += len(unidentified)
         room = 20 - len(result["unidentified_labels"])
         result["unidentified_labels"].extend(unidentified[:max(room, 0)])
-    if not result.get("cancelled") and (result["label_sets"] or legacy_pass_needed(db)):
+    if not result.get("cancelled") and not result["errors"] and (result["label_sets"] or legacy_pass_needed(db)):
         if progress is not None:
             progress(len(pending), len(pending), "Matching older predictions across label lists")
-        result["legacy_predictions_updated"] = apply_legacy(db)
-        result["predictions_updated"] += result["legacy_predictions_updated"]
+        try:
+            result["legacy_predictions_updated"] = apply_legacy(
+                db, fetch=fetch, identities_by_file=identities_by_file,
+            )
+        except Exception as exc:
+            log.warning("Could not complete legacy label-list consensus", exc_info=True)
+            result["errors"].append(f"Legacy label-list consensus: {exc}")
+        else:
+            result["predictions_updated"] += result["legacy_predictions_updated"]
     # A list that could not be re-queried leaves its species split, so the
     # run failed even though every other list was handled.
     result["ok"] = not result["errors"]
