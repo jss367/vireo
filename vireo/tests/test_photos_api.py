@@ -4382,6 +4382,25 @@ def test_auto_tone_meters_on_active_mask_then_detection(
     assert (data["metering"], data["subject_source"]) == ("subject", "mask")
 
 
+@pytest.mark.parametrize("category,model", [
+    ("person", "MDV6"), ("vehicle", "MDV6"), ("animal", "full-image"),
+])
+def test_auto_tone_ignores_non_animal_and_full_image_boxes(client_with_photo, category, model):
+    """Only a real animal detection can provide fallback subject metering."""
+    app, db, photo_id = client_with_photo
+    db.conn.execute(
+        "INSERT INTO detections (photo_id, box_x, box_y, box_w, box_h, "
+        "detector_confidence, category, detector_model) VALUES (?, 0.4, 0.4, 0.2, 0.2, 0.9, ?, ?)",
+        (photo_id, category, model),
+    )
+    db.conn.commit()
+    response = app.test_client().get(f"/api/photos/{photo_id}/auto-tone")
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["metering"] == "frame"
+    assert data["subject_source"] is None
+
+
 def test_auto_tone_rejects_bad_requests(client_with_photo):
     app, _db, photo_id = client_with_photo
     client = app.test_client()

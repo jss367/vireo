@@ -55,6 +55,12 @@ def test_auto_tone_button_sets_sliders_and_reports_metering(live_server, page, d
         assert adjustments.get(key, 0) == value
     assert adjustments['white_balance'] == {'temperature': 25}
     expect(page.locator('#saveBtn')).to_be_enabled()
+    # Repeating a nonzero fit is a no-op, even though its source-based notes
+    # still describe the first fit's brightening and other tonal changes.
+    with page.expect_response('**/api/photos/*/auto-tone?*'):
+        page.locator('#autoToneBtn').click()
+    expect(toast).to_contain_text('already balanced, nothing changed')
+    assert page.evaluate('recipeForSave(editorState.recipe).adjustments') == adjustments
 
 
 def test_auto_tone_reports_resetting_previous_controls(live_server, page, dark_photo):

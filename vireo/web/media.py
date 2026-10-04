@@ -3832,7 +3832,10 @@ def create_media_blueprint(
             return json_error("Could not load image", 500)
         box = None
         if (mask := _load_active_mask(db, photo_id)) is None:
-            detections = db.get_detections(photo_id)
+            detections = [
+                detection for detection in db.get_detections(photo_id)
+                if detection["category"] == "animal" and detection["detector_model"] != "full-image"
+            ]
             if detections:
                 primary = detections[0]
                 box = {

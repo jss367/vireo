@@ -3350,10 +3350,9 @@ function autoToneMessage(result, changedControls) {
       ? ' (metered on the detected subject)'
       : ' (metered on the subject mask)';
   }
+  if (!changedControls) return 'Auto Tone' + metering + ': already balanced, nothing changed';
   if (!notes.length) {
-    return changedControls
-      ? 'Auto Tone' + metering + ': Reset previous tone adjustments; source already balanced. White balance left unchanged.'
-      : 'Auto Tone' + metering + ': already balanced, nothing changed';
+    return 'Auto Tone' + metering + ': Reset previous tone adjustments; source already balanced. White balance left unchanged.';
   }
   var text = notes.join(', ');
   return 'Auto Tone' + metering + ': ' + text.charAt(0).toUpperCase() + text.slice(1) +
