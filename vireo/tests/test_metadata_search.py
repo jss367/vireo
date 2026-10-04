@@ -124,6 +124,72 @@ def test_quoted_escapes_and_literal_paths():
     assert values == ['say "hello"', r'C:\Photos\bird.jpg', r'C:\Photos\bird.jpg']
 
 
+def test_number_search_matches_where_a_number_starts(catalog):
+    """``7688`` finds file number 7688, not every value with 7688 buried in
+    its digits: hashes, scores, byte counts, coefficients, shutter counts."""
+    db, ids = catalog
+    folder = db.add_folder("/photos/20240712", name="20240712")
+    filename = db.add_photo(folder_id=folder, filename="_D857688.NEF", extension=".nef",
+                            file_size=1, file_mtime=1.0)
+    file_number = db.add_photo(folder_id=folder, filename="a.nef", extension=".nef",
+                               file_size=1, file_mtime=1.0)
+    noise = db.add_photo(folder_id=folder, filename="b.nef", extension=".nef",
+                         file_size=31837688, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET exif_data=? WHERE id=?", (json.dumps({
+        "MakerNotes": {"FileNumber": "100-7688"},
+        "Composite": {"LensSpec": "180 600 5.6 6.3", "GPSPosition": "32.853585 -117.006978"},
+    }), file_number))
+    db.conn.execute(
+        "UPDATE photos SET file_hash='a104b76885', quality_score=0.7688, "
+        "subject_size=0.1768838, burst_id='B7688', exif_data=? WHERE id=?", (json.dumps({
+            "Composite": {"FOV": "2.85582458251892 0.176888033540145"},
+            "MakerNotes": {"ShutterCount": 157688, "VignetteCoefficient1": 0.002911567688},
+            "EXIF": {"ThumbnailLength": 7688, "StripOffsets": "7688 9000",
+                     "JpgFromRaw": "(Binary data 7688 bytes, use -b option to extract)"},
+        }), noise))
+    db.conn.commit()
+
+    def search(term):
+        return set(db.query_photo_ids([{"field": "metadata", "op": "contains", "value": term}]))
+
+    assert search("7688") == {filename, file_number}
+    assert search("0712") == {filename, file_number, noise}  # folder names are text
+    for term in ("5.6", "6.3", "180 600", "117", "-117.0", "32.853585 -117"):
+        assert search(term) == {file_number}, term
+    assert search("157688") == {noise}
+    assert search("0.0029") == {noise}
+    assert search("Binary") == set()
+
+
+def test_metadata_search_excludes_exiftool_file_size(catalog):
+    """Raw and formatted ExifTool byte counts never answer metadata searches."""
+    db, ids = catalog
+    db.conn.execute("UPDATE photos SET exif_data=? WHERE id=?", (json.dumps({
+        "System": {"FileSize": 31837688}, "File": {"FileSize": "31 MB"},
+    }), ids["empty"]))
+    for term in ("3183", "31837688", "31 MB"):
+        rule = {"field": "metadata", "op": "contains", "value": term}
+        assert ids["empty"] not in db.query_photo_ids([rule])
+
+
+@pytest.mark.parametrize("number,term,expected", [
+    (1e-10, "10", False), (-1e-10, "10", False),
+    (1e-10, "1", True), (-1e-10, "1", True),
+    (-117.006978, "117", True), (-117.006978, "-117", True),
+])
+@pytest.mark.parametrize("source", ["photo", "exif"])
+def test_scalar_numbers_do_not_match_inside_exponents(catalog, number, term, expected, source):
+    """Scalar prefixes include an optional sign, never an exponent's digits."""
+    db, ids = catalog
+    if source == "photo":
+        db.conn.execute("UPDATE photos SET latitude=? WHERE id=?", (number, ids["empty"]))
+    else:
+        db.conn.execute("UPDATE photos SET exif_data=? WHERE id=?",
+                        (json.dumps({"EXIF": {"Number": number}}), ids["empty"]))
+    rule = {"field": "metadata", "op": "contains", "value": term}
+    assert (ids["empty"] in db.query_photo_ids([rule])) == expected
+
+
 @pytest.mark.parametrize("op,value", [("is", "hawk"), ("contains", ""), ("contains", None),
                                     ("contains", 123), pytest.param("contains", "x" * 4097, id="too-long")])
 def test_invalid_metadata_rules_are_rejected(catalog, op, value):

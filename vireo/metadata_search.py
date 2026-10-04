@@ -5,19 +5,62 @@ fields or JSON syntax. Read the catalog directly so scans, renames and edits
 are searchable in the same transaction, without a second index to rebuild.
 """
 
+# Values a person reads and might type. Byte counts, the content hash, burst
+# ids and computed scores are left out: nobody searches for them, and their
+# long digit and hex runs answered short number searches by accident.
 PHOTO_COLUMNS = (
-    "filename", "extension", "file_size", "timestamp", "width", "height",
+    "filename", "extension", "timestamp", "width", "height",
     "rating", "flag", "camera_make", "camera_model", "lens",
     "focal_length", "aperture", "shutter_speed", "iso", "latitude", "longitude",
-    "sharpness", "subject_sharpness", "quality_score", "noise_estimate",
-    "subject_size", "detection_conf", "burst_id", "file_hash", "companion_path",
+    "companion_path",
 )
 
 PREDICTION_COLUMNS = (
-    "species", "scientific_name", "classifier_model", "confidence", "category",
+    "species", "scientific_name", "classifier_model", "category",
     "taxonomy_kingdom", "taxonomy_phylum", "taxonomy_class", "taxonomy_order",
     "taxonomy_family", "taxonomy_genus",
 )
+
+
+# File size and layout tags: where embedded previews and image data sit
+# in the file and how many bytes they take. Exiftool also reports the previews
+# themselves as "(Binary data N bytes, ...)" placeholders.
+LAYOUT_TAGS = (
+    "FileSize", "StripOffsets", "StripByteCounts", "TileOffsets", "TileByteCounts",
+    "ThumbnailOffset", "ThumbnailLength", "JpgFromRawStart", "JpgFromRawLength",
+    "OtherImageStart", "OtherImageLength", "PreviewImageStart", "PreviewImageLength",
+    "MPImageStart", "MPImageLength",
+)
+
+
+def value_matches(value, value_type, number_text=False):
+    """Whether one rendered value matches the term; binds ``term_binds``.
+
+    Text matches anywhere, so ``7688`` finds ``_D857688.NEF`` and a folder
+    named ``20240712`` answers ``0712``. A number matches only where it
+    starts with the term: ``7688`` finds file number 7688, not shutter count
+    157688 or a coefficient of 0.0029115676880. With ``number_text``, file
+    tags written as text made only of numbers ("2.86 0.177", "180 600 5.6
+    6.3") count as numbers too, matching where any of them starts. Scalar
+    numbers may omit their leading sign, but never match within an exponent.
+    """
+    scalar_number = f"{value_type} IN ('integer', 'real')"
+    number_text_like = "0"
+    if number_text:
+        number_text_like = f"{value_type} = 'text' AND {value} NOT GLOB '*[^0-9 .,+-]*'"
+    return (
+        f"(CASE WHEN {scalar_number} OR ({number_text_like}) "
+        f"THEN lower({value}) GLOB ? "
+        f"OR ({scalar_number} AND lower(ltrim({value}, '+-')) GLOB ?) "
+        f"OR ({number_text_like} AND lower({value}) GLOB ?) "
+        f"ELSE {value} LIKE ? ESCAPE '\\' END)"
+    )
+
+
+def term_binds(like, term):
+    """The binds for one ``value_matches``: number-start GLOBs, then LIKE."""
+    glob = "".join(f"[{ch}]" if ch in "*?[" else ch for ch in term.lower())
+    return [f"{glob}*", f"{glob}*", f"*[^0-9.]{glob}*", like]
 
 
 def prediction_search_values(alias):
@@ -40,11 +83,13 @@ def prediction_search_values(alias):
 
 
 def values_contain(columns):
-    """Columns are trusted SQL expressions, never user input. Bind one LIKE."""
+    """Columns are trusted SQL expressions, never user input. Binds ``term_binds``."""
     return (
         "EXISTS (SELECT 1 FROM json_each(json_array("
         + ", ".join(columns)
-        + ")) search_value WHERE CAST(search_value.atom AS TEXT) LIKE ? ESCAPE '\\')"
+        + ")) search_value WHERE "
+        + value_matches("CAST(search_value.atom AS TEXT)", "search_value.type")
+        + ")"
     )
 
 
@@ -99,14 +144,22 @@ def photo_metadata_predicates(like, term):
         "$.File.FileName", "$.File.Directory", "$.System.FileName", "$.System.Directory",
     )
     paths_sql = ", ".join(f"'{path}'" for path in managed_paths)
+    layout_sql = ", ".join(f"'{tag}'" for tag in LAYOUT_TAGS)
+    tag_value = (
+        "(CASE WHEN search_tag.type IN ('true', 'false') "
+        "THEN search_tag.type ELSE CAST(search_tag.atom AS TEXT) END)"
+    )
     tags = (
         "EXISTS (SELECT 1 FROM json_tree(json_remove("
         "CASE WHEN json_valid(p.exif_data) THEN p.exif_data ELSE '{}' END, "
         + paths_sql
-        + ")) search_tag WHERE (CASE WHEN search_tag.type IN ('true', 'false') "
-        "THEN search_tag.type ELSE CAST(search_tag.atom AS TEXT) END) LIKE ? ESCAPE '\\')"
+        + f")) search_tag WHERE search_tag.key NOT IN ({layout_sql}) "
+        f"AND {tag_value} NOT LIKE '(Binary data %' AND "
+        + value_matches(tag_value, "search_tag.type", number_text=True)
+        + ")"
     )
-    tag_params = [like]
+    binds = term_binds(like, term)
+    tag_params = list(binds)
     if raw_text_rules_out(term):
         # Parsing and walking every photo's EXIF is nearly all of a search's
         # cost; one pass over the raw text skips the photos that cannot match.
@@ -114,5 +167,5 @@ def photo_metadata_predicates(like, term):
             "((typeof(p.exif_data) != 'text' OR p.exif_data LIKE ? ESCAPE '\\' "
             "OR instr(p.exif_data, char(92)) > 0) AND " + tags + ")"
         )
-        tag_params = [like, like]
-    return [photo, folder, keyword, tags], [like, like, like, *tag_params]
+        tag_params = [like, *binds]
+    return [photo, folder, keyword, tags], [*binds, *binds, *binds, *tag_params]
