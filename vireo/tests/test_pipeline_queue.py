@@ -254,10 +254,54 @@ def test_paused_pipeline_keeps_its_scheduler_slot(tmp_path):
     assert runner.resume_job(paused_id) is True
     release.set()
     for occupant_id in occupant_ids:
-        wait_for_job_via_runner(runner, occupant_id)
-    assert extra_started.wait(timeout=2)
-    wait_for_job_via_runner(runner, extra_id)
+        wait_for_job_via_runner(runner, occupant_id, wait_for_history=True)
+    # Terminal status precedes persistence and the scheduler's promotion pass.
+    # Wait for the queued job itself, with diagnostic state on a real hang,
+    # rather than starting a two-second clock at the earlier status boundary.
+    wait_for_job_via_runner(runner, extra_id, wait_for_history=True)
+    assert extra_started.is_set()
 
+
+
+def test_terminal_pipeline_status_can_precede_queue_promotion(tmp_path, monkeypatch):
+    """A blocked history write exposes the status/promotion gap without sleeps."""
+    runner, _ = _make_runner_with_db(tmp_path)
+    occupant_ids, release_work = _fill_slots(runner)
+    persistence_entered = {jid: threading.Event() for jid in occupant_ids}
+    release_persistence = threading.Event()
+    original = runner._persist_job
+
+    def blocked_persistence(job, duration):
+        if job["id"] in persistence_entered and job["status"] == "completed":
+            persistence_entered[job["id"]].set()
+            assert release_persistence.wait(timeout=30), "test did not release persistence"
+        return original(job, duration)
+
+    monkeypatch.setattr(runner, "_persist_job", blocked_persistence)
+    extra_started = threading.Event()
+
+    def extra_work(job):
+        extra_started.set()
+        return {}
+
+    extra_id = runner.enqueue_pipeline(work_fn=extra_work, config={}, workspace_id=1)
+    try:
+        release_work.set()
+        for occupant_id in occupant_ids:
+            _wait_for_event(persistence_entered[occupant_id], "terminal history write", timeout=10)
+            terminal = wait_for_job_via_runner(runner, occupant_id)
+            assert terminal["status"] == "completed"
+            assert not terminal["_persisted"]
+        assert runner.get(extra_id)["status"] == "queued"
+        assert not extra_started.is_set()
+        release_persistence.set()
+        promoted = wait_for_job_via_runner(runner, extra_id, wait_for_history=True)
+        assert promoted["status"] == "completed"
+        assert extra_started.is_set()
+    finally:
+        release_work.set()
+        release_persistence.set()
+        assert runner.shutdown()
 
 def test_two_pipelines_run_concurrently_when_slot_cap_at_least_two(tmp_path):
     """Two enqueued pipelines must both reach the running state at the
