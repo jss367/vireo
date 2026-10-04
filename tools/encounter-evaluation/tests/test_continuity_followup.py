@@ -54,6 +54,40 @@ def spec(name):
     return next(s for s in candidates() if s["id"] == name)
 
 
+def test_native_evidence_preserves_taxon_namespaces():
+    from encounter_eval.continuity import native_evidence
+
+    p = photos()
+    predictions = p[1]["evidence"][0]["sources"][0]["predictions"]
+    predictions.append({"name": "Local bird", "score": 0.9, "taxon": "taxon:1"})
+    evidence, identities = native_evidence(p)
+    assert [entry[3] for entry in evidence[1][0]["predictions"]] == ["inat:1", "taxon:1"]
+    assert identities == {"inat:1": "inat:1", "taxon:1": "taxon:1"}
+
+
+def test_local_taxon_with_same_number_cannot_support_inaturalist_anchors():
+    p = photos()
+    p[1]["evidence"][0]["sources"][0]["predictions"] = [
+        {"name": "Local bird", "score": 0.99, "taxon": "taxon:1"}
+    ]
+    original = digest(p)
+    prepared = prepare_baseline(p, {})
+    assert prepared[0][1]["subject_absent"]
+    after = apply_candidate(prepared, {}, spec("weak-lower-confidence"))
+    assert after[1]["subject_absent"]
+    assert digest(p) == original
+
+
+def test_continuity_restores_canonical_identity_after_recovery():
+    p = photos()
+    p[1]["evidence"][0]["sources"][0]["predictions"][0]["score"] = 0.99
+    original = digest(p)
+    recovered = prepare_baseline(p, {})[0][1]
+    assert not recovered["subject_absent"]
+    assert recovered["species_keys"][recovered["species_top5"][0][3]] == "inat:1"
+    assert digest(p) == original
+
+
 def test_lower_matching_confidence_recovers_without_mutating_evidence():
     p = photos()
     original = digest(p)

@@ -13,7 +13,7 @@ def native_evidence(photos):
             entries = []
             for source in d["sources"]:
                 for q in source["predictions"]:
-                    key = "taxon:" + q["taxon"][5:] if q["taxon"].startswith("inat:") else q["taxon"]
+                    key = q["taxon"]
                     identities[key] = q["taxon"]
                     entries.append((q["name"], q["score"], source["model"], key))
             detections.append(
@@ -34,7 +34,19 @@ def apply_continuity(photos, config, *, repair_isolated=True):
     from encounter_continuity import apply_encounter_continuity
 
     evidence, identities = native_evidence(photos)
-    restored = restore_features([dict(p) for p in photos])
+    restored = []
+    for photo in photos:
+        translated = dict(photo)
+        keys = photo.get("species_keys", {})
+        for field in ("species_top5", "grouping_species_top5"):
+            if field in photo:
+                translated[field] = [
+                    (*entry[:3], keys.get(entry[3], entry[3]), *entry[4:]) if len(entry) > 3 else entry
+                    for entry in photo[field]
+                ]
+        translated["species_keys"] = {**keys, **{value: value for value in keys.values()}}
+        restored.append(translated)
+    restored = restore_features(restored)
     after = apply_encounter_continuity(restored, evidence, config, repair_isolated=repair_isolated)
     return [
         {
