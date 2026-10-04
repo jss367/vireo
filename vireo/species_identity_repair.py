@@ -61,13 +61,15 @@ def _taxon_lineage(conn, taxon_id):
         "SELECT name, rank, parent_id FROM taxa WHERE inat_id = ?", (taxon_id,),
     ).fetchone()
     seen = set()
-    while row is not None and row["parent_id"] is not None and row["parent_id"] not in seen:
+    while row is not None:
+        if row["rank"] in TAXONOMY_RANKS:
+            lineage["taxonomy_" + row["rank"]] = row["name"]
+        if row["parent_id"] is None or row["parent_id"] in seen:
+            break
         seen.add(row["parent_id"])
         row = conn.execute(
             "SELECT name, rank, parent_id FROM taxa WHERE id = ?", (row["parent_id"],),
         ).fetchone()
-        if row is not None and row["rank"] in TAXONOMY_RANKS:
-            lineage["taxonomy_" + row["rank"]] = row["name"]
     return lineage
 
 

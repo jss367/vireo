@@ -581,6 +581,10 @@ def create_jobs_blueprint(
                     bg_db, TAXONOMY_JSON_PATH, progress_callback=progress_cb,
                 )
                 seed_informal_groups(bg_db)
+                from species_identity_repair import repair_on_upgrade
+
+                progress_cb("Repairing legacy prediction taxonomy...")
+                repair_on_upgrade(bg_db)
             except Exception:
                 log.error("Post-download taxa DB population failed", exc_info=True)
                 bg_db.conn.rollback()

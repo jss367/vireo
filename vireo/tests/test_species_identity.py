@@ -1292,3 +1292,45 @@ def test_inferred_repair_waits_for_verified_common_name_import(db, tmp_path, ide
     assert repair_on_upgrade(db) == 1
     assert db.get_meta(INFERRED_TAXONOMY_MARKER) == "1"
     assert db.conn.execute("SELECT scientific_name FROM predictions WHERE id=?", (row["id"],)).fetchone()[0] == LILAC["scientific_name"]
+
+
+def test_inferred_repair_includes_resolved_taxons_own_rank(db, tmp_path):
+    db.conn.execute("INSERT INTO taxa(inat_id,name,rank) VALUES(1,'Aves','class')")
+    db.conn.execute("INSERT INTO taxa(inat_id,name,rank,parent_id) SELECT 2,'Amazona','genus',id FROM taxa WHERE inat_id=1")
+    db.conn.commit()
+    _, det = _photo(db, tmp_path)
+    row = _inferred_row(db, det, "Amazona", BROWED["scientific_name"])
+    with db.conn:
+        apply_repairs(db.conn, plan_inferred_taxonomy_repairs(db))
+    repaired = db.conn.execute("SELECT scientific_name,taxonomy_genus,taxonomy_class FROM predictions WHERE id=?", (row["id"],)).fetchone()
+    assert tuple(repaired) == ("Amazona", "Amazona", "Aves")
+
+
+def test_download_job_retries_deferred_taxonomy_repair_without_restart(app_and_db, tmp_path, monkeypatch):
+    import taxonomy as tax_mod
+    from species_identity_repair import INFERRED_TAXONOMY_MARKER
+    from wait import wait_for_job_via_client
+
+    app, database = app_and_db
+    pid = database.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()[0]
+    det = database.save_detections(pid, [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+                                        "confidence": 0.9, "category": "animal"}], "MDV6")[0]
+    row = _inferred_row(database, det, "Lilac-crowned Parrot", BROWED["scientific_name"], fingerprint="legacy")
+    database.set_meta(INFERRED_TAXONOMY_MARKER, "0")
+    database.set_meta("common_name_identity_version", "")
+    entries = [{**entry, "lineage_names": ["Animalia", "Aves", "Amazona", entry["scientific_name"]],
+                "lineage_ranks": ["kingdom", "class", "genus", "species"]} for entry in (RED, BROWED, LILAC)]
+    path = tmp_path / "verified-taxonomy.json"
+    payload = {"source": "iNaturalist DWCA", "common_name_identity_version": 1,
+               "ambiguous_common_names": [],
+               "taxa_by_scientific": {entry["scientific_name"].lower(): entry for entry in entries},
+               "taxa_by_common": {entry["common_name"].lower(): entry for entry in entries}}
+    monkeypatch.setattr(tax_mod, "TAXONOMY_JSON_PATH", str(path))
+    monkeypatch.setattr(tax_mod, "download_taxonomy", lambda target, **_: Path(target).write_text(json.dumps(payload)))
+    client = app.test_client()
+    response = client.post("/api/jobs/download-taxonomy", json={})
+    assert response.status_code == 200
+    job = wait_for_job_via_client(client, response.get_json()["job_id"])
+    assert job["status"] == "completed", job
+    assert database.get_meta(INFERRED_TAXONOMY_MARKER) == "1"
+    assert database.conn.execute("SELECT scientific_name FROM predictions WHERE id=?", (row["id"],)).fetchone()[0] == LILAC["scientific_name"]
