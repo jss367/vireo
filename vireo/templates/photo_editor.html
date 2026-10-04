@@ -3342,7 +3342,7 @@ function resetDetail() {
 
 var AUTO_TONE_KEYS = ['exposure', 'highlights', 'shadows', 'contrast', 'whites', 'blacks', 'vibrance', 'saturation'];
 
-function autoToneMessage(result) {
+function autoToneMessage(result, changedControls) {
   var notes = (result && result.notes) || [];
   var metering = '';
   if (result && result.metering === 'subject') {
@@ -3350,7 +3350,11 @@ function autoToneMessage(result) {
       ? ' (metered on the detected subject)'
       : ' (metered on the subject mask)';
   }
-  if (!notes.length) return 'Auto Tone' + metering + ': already balanced, nothing changed';
+  if (!notes.length) {
+    return changedControls
+      ? 'Auto Tone' + metering + ': Reset previous tone adjustments; source already balanced. White balance left unchanged.'
+      : 'Auto Tone' + metering + ': already balanced, nothing changed';
+  }
   var text = notes.join(', ');
   return 'Auto Tone' + metering + ': ' + text.charAt(0).toUpperCase() + text.slice(1) +
     '. White balance left unchanged.';
@@ -3391,8 +3395,10 @@ async function autoTone() {
     // Replace the fitted controls; keep every other choice (white balance,
     // presence, detail, curves, HSL, grading, denoise mode) as it was.
     var adj = cloneRecipe(editorState.recipe.adjustments || {});
+    var changedControls = false;
     AUTO_TONE_KEYS.forEach(function(k) {
       var value = Number(auto[k] || 0);
+      if (Math.abs(Number(adj[k] || 0) - value) > 0.000001) changedControls = true;
       if (Math.abs(value) > 0.000001) adj[k] = value;
       else delete adj[k];
     });
@@ -3401,7 +3407,7 @@ async function autoTone() {
 
     syncControls();
     markChanged(true);
-    if (typeof showToast === 'function') showToast(autoToneMessage(result), 'success');
+    if (typeof showToast === 'function') showToast(autoToneMessage(result, changedControls), 'success');
   } catch (e) {
     if (typeof showToast === 'function') {
       showToast('Could not analyze this photo for Auto Tone' +

@@ -55,3 +55,25 @@ def test_auto_tone_button_sets_sliders_and_reports_metering(live_server, page, d
         assert adjustments.get(key, 0) == value
     assert adjustments['white_balance'] == {'temperature': 25}
     expect(page.locator('#saveBtn')).to_be_enabled()
+
+
+def test_auto_tone_reports_resetting_previous_controls(live_server, page, dark_photo):
+    """A zero fit can visibly clear manual edits; only a second click is a no-op."""
+    page.goto(f"{live_server['url']}/edit/{dark_photo}")
+    expect(page.locator('#editorFilename')).to_have_text('dim-meadow.png')
+    page.wait_for_function('!editorState.loading')
+    page.locator('#exposureRange').evaluate(
+        "el => { el.value = '1'; el.dispatchEvent(new Event('input', {bubbles: true})); }"
+    )
+    page.route('**/api/photos/*/auto-tone?*', lambda route: route.fulfill(json={
+        'adjustments': {key: 0 for key in (
+            'exposure', 'highlights', 'shadows', 'contrast', 'whites', 'blacks', 'vibrance', 'saturation',
+        )}, 'notes': [], 'metering': 'frame',
+    }))
+    page.locator('#autoToneBtn').click()
+    toast = page.locator('#toastContainer')
+    expect(toast).to_contain_text('Reset previous tone adjustments; source already balanced.')
+    expect(toast).not_to_contain_text('nothing changed')
+    expect(page.locator('#exposureValue')).to_have_text('0.0')
+    page.locator('#autoToneBtn').click()
+    expect(toast).to_contain_text('already balanced, nothing changed')
