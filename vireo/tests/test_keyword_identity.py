@@ -349,13 +349,13 @@ def test_linking_a_place_to_an_existing_place_preserves_import_aliases(catalog):
     assert {k['id'] for k in db.get_photo_keywords(photos[0])} == {survivor}
 
 
-@pytest.mark.parametrize('reader', ['scanner', 'sync', 'catalog'])
+@pytest.mark.parametrize('reader', ['scanner', 'embedded', 'sync', 'catalog'])
 @pytest.mark.parametrize('existing_place', [False, True])
 def test_import_rejects_conflicting_confirmed_locations_before_changing_tags(catalog, monkeypatch, reader, existing_place):
     from pathlib import Path
 
     from importer import execute_import
-    from scanner import _import_keywords_for_photo
+    from scanner import _import_embedded_keywords_for_photo, _import_keywords_for_photo
     from sync import sync_from_xmp
     from xmp import write_sidecar
 
@@ -389,6 +389,11 @@ def test_import_rejects_conflicting_confirmed_locations_before_changing_tags(cat
         result = execute_import(['dummy.lrcat'], db, write_xmp=False)
         assert result['failed'] == 1
         assert result['imported'] == 0
+    elif reader == 'embedded':
+        # Keywords inside the file are a second, older copy: a conflict skips
+        # this photo's embedded keywords instead of failing the whole scan.
+        file_meta = {'XMP': {'Subject': sorted(flat), 'HierarchicalSubject': sorted(hierarchy)}}
+        assert _import_embedded_keywords_for_photo(db, photos[2], file_meta) is False
     else:
         with pytest.raises(ValueError, match='different linked places'):
             if reader == 'scanner':

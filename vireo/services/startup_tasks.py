@@ -104,6 +104,23 @@ class StartupTasks:
                 "Restored %d location hierarchy nodes misclassified as taxonomy",
                 repaired_location_ancestors,
             )
+        # Import the keywords Lightroom wrote into JPEG/DNG files that were
+        # scanned before scans read embedded keywords, from the ExifTool
+        # output already stored per photo. Runs after keyword normalization
+        # so imported names meet the cleaned rows, and before the background
+        # species pass so imported species leaves get marked. A failure
+        # leaves the marker unset and retries next boot.
+        from scanner import backfill_embedded_keywords
+        try:
+            embedded = backfill_embedded_keywords(init_db)
+        except Exception:
+            log.exception("Embedded keyword backfill failed; will retry next start")
+            init_db.conn.rollback()
+        else:
+            if embedded:
+                log.info(
+                    "Imported embedded keywords onto %d photos", embedded,
+                )
         # Ungroup legacy bursts whose stored votes span more than one species.
         # Those rows display one species and, through accept_prediction's
         # vote-winner lookup, tag another; the repair makes them read as the

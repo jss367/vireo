@@ -952,6 +952,148 @@ def test_scan_skips_empty_normalized_keywords(tmp_path):
     assert 'Birds' in tree_names
 
 
+def _embed_keywords(path, flat, hierarchical):
+    """Write keywords into an image file the way Lightroom does for JPEGs."""
+    import subprocess
+
+    args = ["exiftool", "-q", "-overwrite_original"]
+    args += [f"-XMP-dc:Subject={kw}" for kw in flat]
+    args += [f"-IPTC:Keywords={kw}" for kw in flat]
+    args += [f"-XMP-lr:HierarchicalSubject={kw}" for kw in hierarchical]
+    subprocess.run([*args, path], check=True)
+
+
+@requires_exiftool
+def test_scan_imports_keywords_embedded_in_jpeg(tmp_path):
+    """A JPEG with keywords inside the file, and no sidecar, gets them."""
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    path = os.path.join(root, "motmot.jpg")
+    Image.new("RGB", (100, 100)).save(path)
+    _embed_keywords(
+        path,
+        flat=["1Locations", "Chichén Itzá", "2Birds", "Turquoise-browed motmot"],
+        hierarchical=["1Locations|Chichén Itzá", "2Birds|Turquoise-browed motmot"],
+    )
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(root, db)
+
+    photo = db.get_photos()[0]
+    assert {k["name"] for k in db.get_photo_keywords(photo["id"])} == {
+        "1Locations", "Chichén Itzá", "2Birds", "Turquoise-browed motmot",
+    }
+    tree = {k["name"]: k for k in db.get_keyword_tree()}
+    assert tree["Turquoise-browed motmot"]["parent_id"] == tree["2Birds"]["id"]
+
+
+@requires_exiftool
+def test_incremental_scan_imports_keywords_written_into_jpeg_later(tmp_path):
+    """Keywords Lightroom writes into an already-scanned JPEG land on rescan.
+
+    Lightroom rewrites the JPEG itself rather than a sidecar, so the file's
+    own mtime/size change is the signal, not ``xmp_mtime``.
+    """
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    path = os.path.join(root, "warbler.jpg")
+    Image.new("RGB", (100, 100)).save(path)
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(root, db)
+    photo = db.get_photos()[0]
+    assert db.get_photo_keywords(photo["id"]) == []
+
+    time.sleep(0.05)
+    _embed_keywords(
+        path, flat=["2Birds", "Magnolia warbler"],
+        hierarchical=["2Birds|Magnolia warbler"],
+    )
+    scan(root, db, incremental=True)
+
+    assert {k["name"] for k in db.get_photo_keywords(photo["id"])} == {
+        "2Birds", "Magnolia warbler",
+    }
+
+
+def test_scan_merges_embedded_keywords_with_sidecar(tmp_path, monkeypatch):
+    """A file with both a sidecar and in-file keywords gets the union."""
+    import scanner
+    from db import Database
+    from scanner import scan
+    from xmp import write_sidecar
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    Image.new("RGB", (100, 100)).save(os.path.join(root, "bird.jpg"))
+    write_sidecar(
+        os.path.join(root, "bird.xmp"),
+        flat_keywords={"Dyke Marsh"},
+        hierarchical_keywords={"Dyke Marsh"},
+    )
+    monkeypatch.setattr(
+        scanner, "extract_metadata",
+        lambda paths, **_kw: {p: {"XMP": {
+            "Subject": ["8Landscape", "Sunrise"],
+            "HierarchicalSubject": ["8Landscape|Sunrise"],
+        }} for p in paths},
+    )
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(root, db)
+
+    photo = db.get_photos()[0]
+    assert {k["name"] for k in db.get_photo_keywords(photo["id"])} == {
+        "Dyke Marsh", "8Landscape", "Sunrise",
+    }
+
+
+def test_backfill_embedded_keywords_imports_stored_exiftool_output(tmp_path):
+    """Photos scanned before scans read embedded keywords get them once."""
+    from db import Database
+    from scanner import EMBEDDED_KEYWORDS_BACKFILL_KEY, backfill_embedded_keywords
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
+    tagged, already, raw = (
+        db.add_photo(folder_id=folder_id, filename=name, extension=ext,
+                     file_size=100, file_mtime=1.0)
+        for name, ext in (("a.jpg", ".jpg"), ("b.jpg", ".jpg"), ("c.nef", ".nef"))
+    )
+    stored = {
+        tagged: {"XMP": {"Subject": ["2Birds", "Heron"],
+                         "HierarchicalSubject": ["2Birds|Heron"]}},
+        already: {"IPTC": {"Keywords": ["Egret"]}},
+        # Camera RAW output: SubjectDistance must not read as a keyword tag.
+        raw: {"EXIF": {"SubjectDistance": 12.5, "Make": "Nikon"}},
+    }
+    for photo_id, meta in stored.items():
+        db.conn.execute(
+            "UPDATE photos SET exif_data = ? WHERE id = ?",
+            (json.dumps(meta), photo_id),
+        )
+    db.tag_photo(already, db.add_keyword("Egret"))
+    db.conn.commit()
+
+    assert backfill_embedded_keywords(db) == 1
+    assert {k["name"] for k in db.get_photo_keywords(tagged)} == {"2Birds", "Heron"}
+    assert {k["name"] for k in db.get_photo_keywords(already)} == {"Egret"}
+    assert db.get_photo_keywords(raw) == []
+    assert db.get_meta(EMBEDDED_KEYWORDS_BACKFILL_KEY) == "1"
+
+    # One-shot: keywords the user removes afterwards are not re-imported.
+    db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (tagged,))
+    db.conn.commit()
+    assert backfill_embedded_keywords(db) == 0
+    assert db.get_photo_keywords(tagged) == []
+
+
 def test_scan_imports_hierarchical_keywords(tmp_path):
     """scan() creates keyword hierarchy from lr:hierarchicalSubject."""
     from db import Database
