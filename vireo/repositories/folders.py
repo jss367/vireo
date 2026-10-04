@@ -15,6 +15,7 @@ Workspace-folder membership lives in ``repositories/workspace_folders.py``.
 import os
 
 from repositories.collections import remap_collection_photo_ids
+from repositories.photo_visibility import remap_photo_visibility
 
 
 class FolderRepository:
@@ -82,7 +83,7 @@ class FolderRepository:
             """WITH RECURSIVE
                visible(id, is_workspace_root) AS (
                    SELECT f.id, wf.is_root FROM folders f
-                   JOIN workspace_folders wf ON wf.folder_id = f.id
+                   JOIN workspace_visible_folders wf ON wf.folder_id = f.id
                    WHERE wf.workspace_id = ? AND f.status IN ('ok', 'partial')
                ),
                walk(start_id, current_id) AS (
@@ -104,17 +105,24 @@ class FolderRepository:
                )
                SELECT f.id, f.path, f.name,
                       e.parent_id AS parent_id,
-                      f.photo_count, f.status,
-                      v.is_workspace_root
+                      (SELECT COUNT(*) FROM photo_workspace_visibility pv
+                       WHERE pv.folder_id = f.id AND pv.workspace_id = ?) AS photo_count,
+                      f.status, v.is_workspace_root
                FROM folders f
                JOIN visible v ON v.id = f.id
                JOIN effective e ON e.start_id = f.id
                ORDER BY f.path""",
-            (ws,),
+            (ws, ws),
         ).fetchall()
 
     def subtree_ids(self, folder_id):
-        """Return folder_id plus descendants reached through workspace-linked nodes."""
+        """Return the seed plus visible descendants, skipping hidden ancestors.
+
+        The folder tree reparents a visible descendant to its nearest visible
+        ancestor. Walk physical nodes first so selecting that displayed parent
+        reaches the same descendants, without returning hidden folders.
+        A seed outside this workspace never expands.
+        """
         ws = self.workspace_id
         rows = self.conn.execute(
             """WITH RECURSIVE tree(id) AS (
@@ -122,13 +130,17 @@ class FolderRepository:
                    UNION ALL
                    SELECT f.id FROM folders f
                    JOIN tree t ON f.parent_id = t.id
-                   JOIN workspace_folders wf_t
-                     ON wf_t.folder_id = t.id AND wf_t.workspace_id = ?
-                   JOIN workspace_folders wf_f
-                     ON wf_f.folder_id = f.id AND wf_f.workspace_id = ?
+                   WHERE EXISTS (
+                       SELECT 1 FROM workspace_visible_folders seed
+                       WHERE seed.folder_id = ? AND seed.workspace_id = ?
+                   )
                )
-               SELECT id FROM tree""",
-            (folder_id, ws, ws),
+               SELECT t.id FROM tree t
+               WHERE t.id = ? OR EXISTS (
+                   SELECT 1 FROM workspace_visible_folders wf
+                   WHERE wf.folder_id = t.id AND wf.workspace_id = ?
+               )""",
+            (folder_id, folder_id, ws, folder_id, ws),
         ).fetchall()
         return [r["id"] for r in rows]
 
@@ -173,7 +185,7 @@ class FolderRepository:
         """Return the number of ok/partial folders linked to the workspace."""
         return self.conn.execute(
             """SELECT COUNT(*) FROM folders f
-               JOIN workspace_folders wf ON wf.folder_id = f.id
+               JOIN workspace_visible_folders wf ON wf.folder_id = f.id
                WHERE wf.workspace_id = ? AND f.status IN ('ok', 'partial')""",
             (self.workspace_id,),
         ).fetchone()[0]
@@ -181,37 +193,34 @@ class FolderRepository:
     def with_quality_data(self):
         """Return workspace folders with scored photos in their subtree."""
         ws = self.workspace_id
-        # The recursive step also joins workspace_folders on the current
-        # folder: propagation stops at any ancestor that is not in the active
-        # workspace, which matches get_folder_subtree_ids and keeps the
-        # dropdown counts aligned with get_highlights_candidates.
+        # Traverse physical ancestors and emit only visible ones, matching
+        # the effective-parent folder tree and get_folder_subtree_ids even
+        # when a granted descendant lies below an invisible intermediate.
         return self.conn.execute(
             """WITH RECURSIVE ancestors(photo_id, folder_id, timestamp) AS (
                    SELECT p.id, p.folder_id, p.timestamp
                    FROM photos p
                    JOIN folders f0 ON f0.id = p.folder_id AND f0.status IN ('ok', 'partial')
-                   JOIN workspace_folders wf0
-                     ON wf0.folder_id = p.folder_id AND wf0.workspace_id = ?
+                   JOIN photo_workspace_visibility wf0
+                     ON wf0.photo_id = p.id AND wf0.workspace_id = ?
                    WHERE p.quality_score IS NOT NULL
                    UNION ALL
                    SELECT a.photo_id, f.parent_id, a.timestamp
                    FROM ancestors a
                    JOIN folders f ON f.id = a.folder_id
-                   JOIN workspace_folders wf_step
-                     ON wf_step.folder_id = f.id AND wf_step.workspace_id = ?
                    WHERE f.parent_id IS NOT NULL
                )
                SELECT f.id, f.path, f.name,
                       COUNT(a.photo_id) as photo_count,
                       MAX(a.timestamp) as latest_photo
                FROM folders f
-               JOIN workspace_folders wf ON wf.folder_id = f.id
+               JOIN workspace_visible_folders wf ON wf.folder_id = f.id
                JOIN ancestors a ON a.folder_id = f.id
                WHERE wf.workspace_id = ?
                  AND f.status IN ('ok', 'partial')
                GROUP BY f.id
                ORDER BY latest_photo DESC""",
-            (ws, ws, ws),
+            (ws, ws),
         ).fetchall()
 
     def update_counts(self):
@@ -365,8 +374,10 @@ class FolderRepository:
             """SELECT f.id, f.path, f.name, f.parent_id,
                       COUNT(p.id) as photo_count
                FROM folders f
-               JOIN workspace_folders wf ON wf.folder_id = f.id
-               LEFT JOIN photos p ON p.folder_id = f.id
+               JOIN workspace_visible_folders wf ON wf.folder_id = f.id
+               LEFT JOIN photo_workspace_visibility pv
+                 ON pv.folder_id = f.id AND pv.workspace_id = wf.workspace_id
+               LEFT JOIN photos p ON p.id = pv.photo_id
                WHERE wf.workspace_id = ? AND f.status = 'missing'
                GROUP BY f.id
                ORDER BY f.path""",
@@ -379,6 +390,11 @@ class FolderRepository:
         ``params`` starts with the workspace id; ``subtree_clause`` is the
         façade's optional folder restriction (inline ids or a staged
         temp table), with its ids appended to ``params``.
+
+        Scope through ``photo_workspace_visibility`` on ``p.id`` rather than
+        ``workspace_visible_folders`` on ``f.id`` so a photo-only grant in a
+        folder that also holds another workspace's photos does not pull every
+        sibling into this workspace's Missing Originals totals.
         """
         return self.conn.execute(
             f"""SELECT p.id, p.filename, p.extension, p.file_size,
@@ -386,7 +402,7 @@ class FolderRepository:
                       f.id AS folder_id, f.path AS folder_path
                FROM photos p
                JOIN folders f ON p.folder_id = f.id
-               JOIN workspace_folders wf ON wf.folder_id = f.id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                WHERE wf.workspace_id = ? AND f.status != 'missing'{subtree_clause}
                ORDER BY f.path, p.filename""",
             params,
@@ -539,6 +555,7 @@ class FolderRepository:
 
         # Delete duplicate photos and their associated data
         if drop_ids:
+            remap_photo_visibility(self.conn, collection_remap)
             ph = ",".join("?" for _ in drop_ids)
             self.conn.execute(f"DELETE FROM photo_keywords WHERE photo_id IN ({ph})", drop_ids)
             self.conn.execute(f"DELETE FROM pending_changes WHERE photo_id IN ({ph})", drop_ids)
@@ -661,7 +678,7 @@ class FolderRepository:
         for chunk in self._chunks(folder_ids):
             placeholders = ",".join("?" for _ in chunk)
             sql = (
-                f"SELECT DISTINCT folder_id FROM workspace_folders "
+                f"SELECT DISTINCT folder_id FROM workspace_visible_folders "
                 f"WHERE folder_id IN ({placeholders})"
             )
             params = list(chunk)
@@ -785,6 +802,11 @@ class FolderRepository:
                 remember_removals(active_ws, kept_subtree_ids, recursive=True)
                 for chunk in self._chunks(kept_subtree_ids):
                     placeholders = ",".join("?" for _ in chunk)
+                    self.conn.execute(
+                        f"DELETE FROM workspace_photos WHERE workspace_id = ? AND photo_id IN "
+                        f"(SELECT id FROM photos WHERE folder_id IN ({placeholders}))",
+                        [active_ws] + chunk,
+                    )
                     self.conn.execute(
                         f"DELETE FROM workspace_folders WHERE workspace_id = ? "
                         f"AND folder_id IN ({placeholders})",

@@ -849,6 +849,14 @@ body { padding-bottom: 48px; }
     </div>
   </div>
 
+  <div class="move-section" id="moveVisibilityPanel">
+    <label><input type="checkbox" id="moveKeepVisible" checked disabled
+      onchange="rememberMoveVisibility()"> Keep visible in other workspaces</label>
+    <p class="desc">Applies when moving individual photos, including capture-date moves and rules.
+      Your choice is remembered. Keeping visibility shares only the moved photos.</p>
+    <p id="moveAffectedWorkspaces" role="status">Select photos to see affected workspaces.</p>
+  </div>
+
   <!-- Photo Move Tab -->
   <div class="tab-panel" id="tab-photo">
     <div class="move-section">
@@ -982,6 +990,7 @@ document.addEventListener('DOMContentLoaded', function() {
   loadRemoteTargets();
   loadRules();
   loadRecentDestinations();
+  loadMoveVisibilityPreference();
 });
 
 /* ---------- Remote (SSH) move targets ---------- */
@@ -1792,12 +1801,25 @@ async function startQuickMove() {
       showToast('No tracked photos were found in this folder.', 'error');
       return;
     }
+    if (!moveVisibilityReady) return;
+    var affected;
+    try {
+      var visibility = await safeFetch('/api/move-photos/visibility', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({folder_id: fid}),
+      });
+      affected = (visibility.workspaces || []).map(function(ws) { return ws.name + ' (' + ws.photo_count + ' photos)'; });
+    } catch (e) { return; }
+    var keepVisible = document.getElementById('moveKeepVisible').checked;
+    destBody.keep_visible = keepVisible;
+    document.getElementById('moveAffectedWorkspaces').textContent = 'Affected workspaces: ' + (affected.join(', ') || 'none');
     var dateSummary = 'Move ' + pf.photo_count.toLocaleString() + ' photo' +
       (pf.photo_count !== 1 ? 's' : '') + ' into ' +
       pf.destination_count.toLocaleString() + ' capture-date folder' +
       (pf.destination_count !== 1 ? 's' : '') + ' inside ' + finalPath +
       '? Files are copied and verified before originals are removed. ' +
-      'Existing same-name files are left untouched.';
+      'Existing same-name files are left untouched. Other workspaces: ' + (affected.join(', ') || 'none') +
+      (keepVisible ? '. Keep moved photos visible there.' : '. Allow removal of their visibility there.');
     showConfirm('Organize by Capture Date', dateSummary, function() {
       executeQuickMove(Object.assign({folder_id: fid, merge: false}, destBody));
     });
@@ -1978,29 +2000,98 @@ function updatePhotoSelectionUI() {
   }
 
   var dest = document.getElementById('photoDestInput').value.trim();
-  btn.disabled = !(count > 0 && dest);
+  btn.disabled = !(count > 0 && dest && moveVisibilityReady);
+  refreshMoveVisibility(Array.from(selectedPhotos)).catch(function() {});
 }
 
-function startPhotoMove() {
+var moveVisibilityRequest = 0;
+var moveVisibilityReady = false;
+
+async function loadMoveVisibilityPreference() {
+  try {
+    var cfg = await safeFetch('/api/config');
+    var checkbox = document.getElementById('moveKeepVisible');
+    checkbox.checked = cfg.move_keep_visible_in_other_workspaces !== false;
+    checkbox.disabled = false;
+    moveVisibilityReady = true;
+    updatePhotoSelectionUI();
+  } catch (e) {
+    document.getElementById('moveAffectedWorkspaces').textContent = 'Could not load the remembered move choice. Reload before moving photos.';
+  }
+}
+
+async function rememberMoveVisibility() {
+  var checkbox = document.getElementById('moveKeepVisible');
+  var choice = checkbox.checked;
+  checkbox.disabled = true;
+  moveVisibilityReady = false;
+  try {
+    await safeFetch('/api/config', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({move_keep_visible_in_other_workspaces: choice}),
+    });
+  } catch (e) {
+    checkbox.checked = !choice;
+  } finally {
+    checkbox.disabled = false;
+    moveVisibilityReady = true;
+    refreshMoveVisibility(Array.from(selectedPhotos)).catch(function() {});
+  }
+}
+
+async function refreshMoveVisibility(ids) {
+  var seq = ++moveVisibilityRequest;
+  var status = document.getElementById('moveAffectedWorkspaces');
+  if (!ids.length) {
+    status.textContent = 'Select photos to see affected workspaces.';
+    return [];
+  }
+  status.textContent = 'Checking affected workspaces…';
+  try {
+    var data = await safeFetch('/api/move-photos/visibility', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: ids}),
+    });
+    var names = (data.workspaces || []).map(function(ws) {
+      return ws.name + ' (' + ws.photo_count + ' photo' + (ws.photo_count === 1 ? '' : 's') + ')';
+    });
+    if (seq === moveVisibilityRequest) {
+      status.textContent = names.length ? 'Affected workspaces: ' + names.join(', ') +
+        (document.getElementById('moveKeepVisible').checked ? '. Visibility will be kept for the moved photos.' : '. Moving permits removal of their visibility here; existing destination sharing still applies.') :
+        'No other workspaces currently see these photos.';
+    }
+    return names;
+  } catch (e) {
+    if (seq === moveVisibilityRequest) status.textContent = 'Could not check affected workspaces. Try again before moving.';
+    throw e;
+  }
+}
+
+async function startPhotoMove() {
   var ids = Array.from(selectedPhotos);
   var dest = document.getElementById('photoDestInput').value.trim();
-  if (ids.length === 0 || !dest) return;
+  if (ids.length === 0 || !dest || !moveVisibilityReady) return;
+  var names;
+  try { names = await refreshMoveVisibility(ids); } catch (e) { return; }
+  var keepVisible = document.getElementById('moveKeepVisible').checked;
+  var visibilityText = names.length ? ' Other workspaces: ' + names.join(', ') +
+    (keepVisible ? '. Keep moved photos visible there.' : '. Allow removal of their visibility there.') : '';
 
   showConfirm(
     'Move Photos',
-    'Move ' + ids.length + ' photo' + (ids.length !== 1 ? 's' : '') + ' to "' + dest + '"? Companion files will be included automatically.',
+    'Move ' + ids.length + ' photo' + (ids.length !== 1 ? 's' : '') + ' to "' + dest + '"? Companion files will be included automatically.' + visibilityText,
     function() {
-      executePhotoMove(ids, dest);
+      executePhotoMove(ids, dest, keepVisible);
     }
   );
 }
 
-async function executePhotoMove(photoIds, destination) {
+async function executePhotoMove(photoIds, destination, keepVisible) {
   try {
     var resp = await safeFetch('/api/jobs/move-photos', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({photo_ids: photoIds, destination: destination}),
+      body: JSON.stringify({photo_ids: photoIds, destination: destination, keep_visible: keepVisible}),
     });
     showToast('Move started (job ' + resp.job_id + ') — track progress in the bottom panel', 'info');
     // Clear selection after starting
@@ -2276,15 +2367,19 @@ async function runRule(ruleId) {
       return;
     }
 
+    if (!moveVisibilityReady) return;
+    var names = await refreshMoveVisibility(photoIds);
+    var keepVisible = document.getElementById('moveKeepVisible').checked;
     showConfirm(
       'Run Rule: ' + rule.name,
-      'Move ' + photoIds.length + ' matching photo' + (photoIds.length !== 1 ? 's' : '') + ' to "' + rule.destination + '"?',
+      'Move ' + photoIds.length + ' matching photo' + (photoIds.length !== 1 ? 's' : '') + ' to "' + rule.destination + '"? Other workspaces: ' + (names.join(', ') || 'none') +
+        (keepVisible ? '. Keep moved photos visible there.' : '. Allow removal of their visibility there.'),
       async function() {
         try {
           var resp = await safeFetch('/api/jobs/move-photos', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({photo_ids: photoIds, destination: rule.destination, rule_id: ruleId}),
+            body: JSON.stringify({photo_ids: photoIds, destination: rule.destination, rule_id: ruleId, keep_visible: keepVisible}),
           });
           showToast('Rule running (job ' + resp.job_id + ') — track progress in the bottom panel', 'info');
         } catch (e) {

@@ -128,8 +128,8 @@ class PhotoRepository:
         if verify_workspace:
             return self.conn.execute(
                 f"""SELECT {self.photo_detail_cols} FROM photos
-                    WHERE id = ? AND folder_id IN (
-                        SELECT folder_id FROM workspace_folders
+                    WHERE id = ? AND id IN (
+                        SELECT photo_id FROM photo_workspace_visibility
                         WHERE workspace_id = ?)""",
                 (photo_id, self.workspace_id),
             ).fetchone()
@@ -190,7 +190,7 @@ class PhotoRepository:
         """Return the workspace's photo count, skipping missing folders."""
         return self.conn.execute(
             """SELECT COUNT(*) FROM photos p
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
                WHERE wf.workspace_id = ?""",
             (self.workspace_id,),
@@ -200,7 +200,7 @@ class PhotoRepository:
         """Return the workspace's photo count, including missing folders."""
         return self.conn.execute(
             """SELECT COUNT(*) FROM photos p
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                WHERE wf.workspace_id = ?""",
             (self.workspace_id,),
         ).fetchone()[0]
@@ -282,7 +282,7 @@ class PhotoRepository:
             conditions.append(f"p.id IN ({coll_subquery})")
             where_params.extend(coll_params)
 
-        join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
+        join_clause = ("JOIN photo_workspace_visibility wf ON wf.photo_id = p.id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
 
         if folder_id is not None:
@@ -309,7 +309,7 @@ class PhotoRepository:
             """SELECT MIN(substr(p.timestamp, 1, 4)) as min_y,
                       MAX(substr(p.timestamp, 1, 4)) as max_y
             FROM photos p
-            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+            JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
             JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
             WHERE wf.workspace_id = ? AND p.timestamp IS NOT NULL""",
             (ws,),
@@ -379,7 +379,7 @@ class PhotoRepository:
             where_params.append(flag)
         append_location_status_filter(conditions, location_status)
 
-        join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
+        join_clause = ("JOIN photo_workspace_visibility wf ON wf.photo_id = p.id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
         if keyword is not None:
             kw_clause, kw_params = self.keyword_token_clause(
@@ -476,7 +476,7 @@ class PhotoRepository:
             where_params.append(flag)
         append_location_status_filter(conditions, location_status)
 
-        join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
+        join_clause = ("JOIN photo_workspace_visibility wf ON wf.photo_id = p.id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
         if keyword is not None:
             kw_clause, kw_params = self.keyword_token_clause(
@@ -552,7 +552,7 @@ class PhotoRepository:
                 SELECT p.id,
                        ROW_NUMBER() OVER (ORDER BY {order}) - 1 AS position
                 FROM photos p
-                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                 JOIN folders f ON f.id = p.folder_id
                     AND f.status IN ('ok', 'partial')
                 {where}
@@ -616,7 +616,7 @@ class PhotoRepository:
             where_params.append(flag)
         append_location_status_filter(conditions, location_status)
 
-        join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
+        join_clause = ("JOIN photo_workspace_visibility wf ON wf.photo_id = p.id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
         if keyword is not None:
             kw_clause, kw_params = self.keyword_token_clause(
@@ -711,7 +711,7 @@ class PhotoRepository:
             conditions.append(f"p.id IN ({rules_subquery})")
             where_params.extend(r_params)
 
-        join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
+        join_clause = ("JOIN photo_workspace_visibility wf ON wf.photo_id = p.id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
         # join_params must precede where_params because JOIN placeholders appear
         # in the SQL before the WHERE placeholders.
@@ -722,7 +722,7 @@ class PhotoRepository:
         # Total (unfiltered) count
         total = self.conn.execute(
             """SELECT COUNT(*) FROM photos p
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
                WHERE wf.workspace_id = ?""",
             (ws,),
@@ -842,7 +842,7 @@ class PhotoRepository:
             placeholders = ",".join("?" for _ in chunk)
             row = self.conn.execute(
                 f"SELECT COUNT(*) AS n FROM photos p "
-                f"JOIN workspace_folders wf ON wf.folder_id = p.folder_id "
+                f"JOIN photo_workspace_visibility wf ON wf.photo_id = p.id "
                 f"WHERE p.id IN ({placeholders}) "
                 f"AND wf.workspace_id = ? "
                 f"AND NULLIF(p.companion_path, '') IS NOT NULL",

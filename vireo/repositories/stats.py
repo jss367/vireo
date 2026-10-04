@@ -24,7 +24,7 @@ class StatsRepository:
     def folder_linked(self, folder_id):
         """Return whether ``folder_id`` is linked to the workspace."""
         linked = self.conn.execute(
-            "SELECT 1 FROM workspace_folders "
+            "SELECT 1 FROM workspace_visible_folders "
             "WHERE workspace_id = ? AND folder_id = ?",
             (self.workspace_id, folder_id),
         ).fetchone()
@@ -38,7 +38,7 @@ class StatsRepository:
                 COUNT(*) AS total,
                 {select_fragment}
             FROM photos p
-            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+            JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
             JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
             WHERE wf.workspace_id = ?{scope_sql}""",
             (ws, *scope_params),
@@ -47,7 +47,7 @@ class StatsRepository:
             f"""SELECT COUNT(DISTINCT d.photo_id)
                FROM detections d
                JOIN photos p ON p.id = d.photo_id
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
                WHERE wf.workspace_id = ?
                  AND d.detector_confidence >= ?{scope_sql}""",
@@ -58,7 +58,7 @@ class StatsRepository:
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
                JOIN photos p ON p.id = d.photo_id
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
                WHERE wf.workspace_id = ?
                  AND d.detector_confidence >= ?{scope_sql}""",
@@ -91,8 +91,10 @@ class StatsRepository:
                 COUNT(p.id) AS total,
                 {select_fragment}
             FROM folders f
-            JOIN workspace_folders wf ON wf.folder_id = f.id
-            LEFT JOIN photos p ON p.folder_id = f.id{photo_scope_sql}
+            JOIN workspace_visible_folders wf ON wf.folder_id = f.id
+            LEFT JOIN photo_workspace_visibility pv
+              ON pv.folder_id = f.id AND pv.workspace_id = wf.workspace_id
+            LEFT JOIN photos p ON p.id = pv.photo_id{photo_scope_sql}
             WHERE wf.workspace_id = ? AND f.status IN ('ok', 'partial'){folder_filter_sql}
             GROUP BY f.id
             ORDER BY f.path""",
@@ -103,7 +105,7 @@ class StatsRepository:
                       COUNT(DISTINCT d.photo_id) AS detected
                FROM detections d
                JOIN photos p ON p.id = d.photo_id
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
                WHERE wf.workspace_id = ?
                  AND d.detector_confidence >= ?{scope_sql}
@@ -116,7 +118,7 @@ class StatsRepository:
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
                JOIN photos p ON p.id = d.photo_id
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
                WHERE wf.workspace_id = ?
                  AND d.detector_confidence >= ?{scope_sql}
@@ -168,8 +170,8 @@ class StatsRepository:
                        COUNT(DISTINCT d.photo_id) AS photos_with_dets
                 FROM detections d
                 JOIN photos p ON p.id = d.photo_id
-                JOIN workspace_folders wf
-                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                JOIN photo_workspace_visibility wf
+                  ON wf.photo_id = p.id AND wf.workspace_id = ?
                 WHERE d.detector_model != 'full-image' AND COALESCE(d.category, 'animal') = 'animal'
                   AND d.detector_confidence >= ?{scope_sql}""",
             (ws, min_conf, *scope_params),
@@ -191,8 +193,8 @@ class StatsRepository:
                            ) AS rn
                       FROM detections d
                       JOIN photos p ON p.id = d.photo_id
-                      JOIN workspace_folders wf
-                        ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                      JOIN photo_workspace_visibility wf
+                        ON wf.photo_id = p.id AND wf.workspace_id = ?
                      WHERE d.detector_model != 'full-image'
                        AND COALESCE(d.category, 'animal') = 'animal'
                        AND d.detector_confidence >= ?{scope_sql}
@@ -218,8 +220,8 @@ class StatsRepository:
             f"""SELECT COUNT(*) AS pending
                 FROM detections d
                 JOIN photos p ON p.id = d.photo_id
-                JOIN workspace_folders wf
-                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                JOIN photo_workspace_visibility wf
+                  ON wf.photo_id = p.id AND wf.workspace_id = ?
                 LEFT JOIN classifier_runs cr
                   ON cr.detection_id = d.id
                  AND cr.classifier_model = ?
@@ -247,8 +249,8 @@ class StatsRepository:
                            ) AS rn
                       FROM detections d
                       JOIN photos p ON p.id = d.photo_id
-                      JOIN workspace_folders wf
-                        ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                      JOIN photo_workspace_visibility wf
+                        ON wf.photo_id = p.id AND wf.workspace_id = ?
                      WHERE d.detector_model != 'full-image'
                        AND COALESCE(d.category, 'animal') = 'animal'
                        AND d.detector_confidence >= ?{scope_sql}
@@ -276,8 +278,8 @@ class StatsRepository:
             f"""SELECT COUNT(DISTINCT d.id) AS n
                 FROM detections d
                 JOIN photos p ON p.id = d.photo_id
-                JOIN workspace_folders wf
-                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                JOIN photo_workspace_visibility wf
+                  ON wf.photo_id = p.id AND wf.workspace_id = ?
                WHERE d.detector_model != 'full-image' AND COALESCE(d.category, 'animal') = 'animal'
                  AND d.detector_confidence >= ?
                  AND EXISTS (
@@ -312,8 +314,8 @@ class StatsRepository:
                            ) AS rn
                       FROM detections d
                       JOIN photos p ON p.id = d.photo_id
-                      JOIN workspace_folders wf
-                        ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                      JOIN photo_workspace_visibility wf
+                        ON wf.photo_id = p.id AND wf.workspace_id = ?
                      WHERE d.detector_model != 'full-image'
                        AND COALESCE(d.category, 'animal') = 'animal'
                        AND d.detector_confidence >= ?{scope_sql}
@@ -346,8 +348,8 @@ class StatsRepository:
         row = self.conn.execute(
             f"""SELECT COUNT(*) AS n
                   FROM photos p
-                  JOIN workspace_folders wf
-                    ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                  JOIN photo_workspace_visibility wf
+                    ON wf.photo_id = p.id AND wf.workspace_id = ?
                  JOIN detector_runs dr
                     ON dr.photo_id = p.id
                    AND dr.detector_model = ?
@@ -382,8 +384,8 @@ class StatsRepository:
                   fallback AS (
                     SELECT p.id AS photo_id, fa.detection_id
                       FROM photos p
-                      JOIN workspace_folders wf
-                        ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                      JOIN photo_workspace_visibility wf
+                        ON wf.photo_id = p.id AND wf.workspace_id = ?
                       JOIN detector_runs dr
                         ON dr.photo_id = p.id
                        AND dr.detector_model = ?
@@ -432,8 +434,8 @@ class StatsRepository:
                   fallback AS (
                     SELECT p.id AS photo_id, fa.detection_id
                       FROM photos p
-                      JOIN workspace_folders wf
-                        ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                      JOIN photo_workspace_visibility wf
+                        ON wf.photo_id = p.id AND wf.workspace_id = ?
                       JOIN detector_runs dr
                         ON dr.photo_id = p.id
                        AND dr.detector_model = ?
@@ -484,8 +486,8 @@ class StatsRepository:
             """SELECT COUNT(*) AS n
                FROM detections d
                JOIN photos p ON p.id = d.photo_id
-               JOIN workspace_folders wf
-                 ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+               JOIN photo_workspace_visibility wf
+                 ON wf.photo_id = p.id AND wf.workspace_id = ?
                WHERE d.detector_model != 'full-image'
                  AND d.detector_confidence >= ?""",
             (workspace_id, min_conf),
@@ -502,8 +504,8 @@ class StatsRepository:
                FROM classifier_runs cr
                JOIN detections d ON d.id = cr.detection_id
                JOIN photos p ON p.id = d.photo_id
-               JOIN workspace_folders wf
-                 ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+               JOIN photo_workspace_visibility wf
+                 ON wf.photo_id = p.id AND wf.workspace_id = ?
                WHERE d.detector_model != 'full-image'
                  AND d.detector_confidence >= ?
                GROUP BY cr.classifier_model, cr.labels_fingerprint""",
@@ -518,8 +520,8 @@ class StatsRepository:
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
                JOIN photos p ON p.id = d.photo_id
-               JOIN workspace_folders wf
-                 ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+               JOIN photo_workspace_visibility wf
+                 ON wf.photo_id = p.id AND wf.workspace_id = ?
                WHERE d.detector_model != 'full-image'
                  AND d.detector_confidence >= ?
                GROUP BY pr.classifier_model, pr.labels_fingerprint""",
@@ -566,8 +568,8 @@ class StatsRepository:
                    FROM predictions pr
                    JOIN detections d ON d.id = pr.detection_id
                    JOIN photos p ON p.id = d.photo_id
-                   JOIN workspace_folders wf
-                     ON wf.folder_id = p.folder_id
+                   JOIN photo_workspace_visibility wf
+                     ON wf.photo_id = p.id
                     AND wf.workspace_id = ?
                    WHERE d.detector_model != 'full-image'
                      AND d.detector_confidence >= ?
@@ -617,8 +619,8 @@ class StatsRepository:
                           OR pm.path = ''
                         THEN p.id END) AS pending
                     FROM photos p
-                    JOIN workspace_folders wf
-                      ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                    JOIN photo_workspace_visibility wf
+                      ON wf.photo_id = p.id AND wf.workspace_id = ?
                     JOIN detections d
                       ON d.photo_id = p.id
                      AND d.detector_model != 'full-image'
@@ -635,8 +637,8 @@ class StatsRepository:
                       COUNT(DISTINCT CASE WHEN p.mask_path IS NULL THEN p.id END)
                         AS pending
                     FROM photos p
-                    JOIN workspace_folders wf
-                      ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                    JOIN photo_workspace_visibility wf
+                      ON wf.photo_id = p.id AND wf.workspace_id = ?
                     JOIN detections d
                       ON d.photo_id = p.id
                      AND d.detector_model != 'full-image'
@@ -658,8 +660,8 @@ class StatsRepository:
                   SUM(CASE WHEN p.thumb_path IS NULL THEN 1 ELSE 0 END)
                     AS pending
                 FROM photos p
-                JOIN workspace_folders wf
-                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                JOIN photo_workspace_visibility wf
+                  ON wf.photo_id = p.id AND wf.workspace_id = ?
                 WHERE 1=1{scope_sql}""",
             (ws, *scope_params),
         ).fetchone()
@@ -677,8 +679,8 @@ class StatsRepository:
                   SUM(CASE WHEN pc.photo_id IS NULL THEN 1 ELSE 0 END)
                     AS pending
                 FROM photos p
-                JOIN workspace_folders wf
-                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                JOIN photo_workspace_visibility wf
+                  ON wf.photo_id = p.id AND wf.workspace_id = ?
                 LEFT JOIN preview_cache pc
                   ON pc.photo_id = p.id AND pc.size = ?
                 WHERE 1=1{scope_sql}""",
@@ -699,8 +701,8 @@ class StatsRepository:
                         WHEN p.thumb_path IS NULL OR pc.photo_id IS NULL
                         THEN 1 ELSE 0 END) AS pending
                 FROM photos p
-                JOIN workspace_folders wf
-                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                JOIN photo_workspace_visibility wf
+                  ON wf.photo_id = p.id AND wf.workspace_id = ?
                 LEFT JOIN preview_cache pc
                   ON pc.photo_id = p.id AND pc.size = ?
                 WHERE 1=1{scope_sql}""",
@@ -721,8 +723,8 @@ class StatsRepository:
             f"""SELECT COUNT(DISTINCT pm.photo_id) AS n
                 FROM photo_masks pm
                 JOIN photos p ON p.id = pm.photo_id
-                JOIN workspace_folders wf
-                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                JOIN photo_workspace_visibility wf
+                  ON wf.photo_id = p.id AND wf.workspace_id = ?
                WHERE pm.variant = ?
                  AND p.mask_path IS NOT NULL
                  AND pm.path IS NOT NULL
@@ -762,8 +764,8 @@ class StatsRepository:
         row = self.conn.execute(
             f"""SELECT COUNT(DISTINCT p.id) AS n
                 FROM photos p
-                JOIN workspace_folders wf
-                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                JOIN photo_workspace_visibility wf
+                  ON wf.photo_id = p.id AND wf.workspace_id = ?
                 JOIN detections d
                   ON d.photo_id = p.id
                  AND d.detector_model != 'full-image'
@@ -799,8 +801,8 @@ class StatsRepository:
         row = self.conn.execute(
             f"""SELECT COUNT(DISTINCT p.id) AS n
                 FROM photos p
-                JOIN workspace_folders wf
-                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                JOIN photo_workspace_visibility wf
+                  ON wf.photo_id = p.id AND wf.workspace_id = ?
                 JOIN detections d
                   ON d.photo_id = p.id
                  AND d.detector_model != 'full-image'
@@ -865,8 +867,8 @@ class StatsRepository:
                                  pr.confidence DESC
                            ) AS rn
                     FROM photos p
-                    JOIN workspace_folders wf
-                      ON wf.folder_id = p.folder_id
+                    JOIN photo_workspace_visibility wf
+                      ON wf.photo_id = p.id
                      AND wf.workspace_id = ?
                     JOIN detections d
                       ON d.photo_id = p.id
@@ -929,8 +931,8 @@ class StatsRepository:
                          WHEN f.status NOT IN ('ok', 'partial') THEN f.id END
                        ) AS missing_folder_count
                 FROM photos p
-                JOIN workspace_folders wf
-                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                JOIN photo_workspace_visibility wf
+                  ON wf.photo_id = p.id AND wf.workspace_id = ?
                 JOIN folders f ON f.id = p.folder_id
                 LEFT JOIN photo_keywords pk ON pk.photo_id = p.id
                 LEFT JOIN keywords k ON k.id = pk.keyword_id
@@ -949,7 +951,7 @@ class StatsRepository:
             f"""WITH scoped_tags AS (
                  SELECT pk.keyword_id, pk.photo_id FROM photo_keywords pk
                  JOIN photos p ON p.id = pk.photo_id
-                 JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                 JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                  WHERE wf.workspace_id = ?{scope_sql}
                ), identified AS (
                  SELECT k.*, {identity_sql()} AS identity FROM keywords k
@@ -974,7 +976,7 @@ class StatsRepository:
         photos_by_month = self.conn.execute(
             f"""SELECT substr(p.timestamp, 1, 7) as month, COUNT(*) as count
             FROM photos p
-            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+            JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
             WHERE p.timestamp IS NOT NULL AND wf.workspace_id = ?{scope_sql}
             GROUP BY month
             ORDER BY month""",
@@ -984,7 +986,7 @@ class StatsRepository:
         rating_dist = self.conn.execute(
             f"""SELECT p.rating, COUNT(*) as count
             FROM photos p
-            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+            JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
             WHERE wf.workspace_id = ?{scope_sql}
             GROUP BY p.rating
             ORDER BY p.rating""",
@@ -994,7 +996,7 @@ class StatsRepository:
         flag_dist = self.conn.execute(
             f"""SELECT p.flag, COUNT(*) as count
             FROM photos p
-            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+            JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
             WHERE wf.workspace_id = ?{scope_sql}
             GROUP BY p.flag""",
             (ws, *scope_params),
@@ -1015,8 +1017,8 @@ class StatsRepository:
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
                JOIN photos p ON p.id = d.photo_id
-               JOIN workspace_folders wf
-                 ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+               JOIN photo_workspace_visibility wf
+                 ON wf.photo_id = p.id AND wf.workspace_id = ?
                LEFT JOIN prediction_review pr_rev
                  ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
                WHERE d.detector_confidence >= ?
@@ -1039,8 +1041,8 @@ class StatsRepository:
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
                JOIN photos p ON p.id = d.photo_id
-               JOIN workspace_folders wf
-                 ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+               JOIN photo_workspace_visibility wf
+                 ON wf.photo_id = p.id AND wf.workspace_id = ?
                WHERE d.detector_confidence >= ?
                  AND pr.labels_fingerprint = (
                     SELECT pr2.labels_fingerprint FROM predictions pr2
@@ -1060,8 +1062,8 @@ class StatsRepository:
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
                JOIN photos p ON p.id = d.photo_id
-               JOIN workspace_folders wf
-                 ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+               JOIN photo_workspace_visibility wf
+                 ON wf.photo_id = p.id AND wf.workspace_id = ?
                JOIN folders f
                  ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
                WHERE d.detector_confidence >= ?
@@ -1080,7 +1082,7 @@ class StatsRepository:
         photos_by_hour = self.conn.execute(
             f"""SELECT CAST(substr(p.timestamp, 12, 2) AS INTEGER) as hour, COUNT(*) as count
             FROM photos p
-            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+            JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
             WHERE p.timestamp IS NOT NULL AND length(p.timestamp) >= 13
               AND wf.workspace_id = ?{scope_sql}
             GROUP BY hour
@@ -1096,7 +1098,7 @@ class StatsRepository:
                 END as bucket,
                 COUNT(*) as count
             FROM photos p
-            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+            JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
             WHERE wf.workspace_id = ?{scope_sql}
             GROUP BY bucket
             ORDER BY bucket""",
@@ -1113,7 +1115,7 @@ class StatsRepository:
             f"""SELECT COUNT(DISTINCT d.photo_id)
                FROM detections d
                JOIN photos p ON p.id = d.photo_id
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                WHERE wf.workspace_id = ?
                  AND d.detector_confidence >= ?{scope_sql}""",
             (ws, min_conf, *scope_params),
@@ -1122,8 +1124,8 @@ class StatsRepository:
         missing_location = self.conn.execute(
             f"""SELECT COUNT(DISTINCT p.id)
                 FROM photos p
-                JOIN workspace_folders wf
-                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                JOIN photo_workspace_visibility wf
+                  ON wf.photo_id = p.id AND wf.workspace_id = ?
                 JOIN folders f
                   ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
                 WHERE {' AND '.join(location_conditions)}{scope_sql}""",
@@ -1134,8 +1136,8 @@ class StatsRepository:
             f"""SELECT COUNT(*)
                 FROM pending_changes pc
                 JOIN photos p ON p.id = pc.photo_id
-                JOIN workspace_folders wf
-                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                JOIN photo_workspace_visibility wf
+                  ON wf.photo_id = p.id AND wf.workspace_id = ?
                 WHERE pc.workspace_id = ?{scope_sql}""",
             (ws, ws, *scope_params),
         ).fetchone()[0]
@@ -1144,8 +1146,8 @@ class StatsRepository:
             missing_previews = self.conn.execute(
                 f"""SELECT COUNT(DISTINCT p.id)
                     FROM photos p
-                    JOIN workspace_folders wf
-                      ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                    JOIN photo_workspace_visibility wf
+                      ON wf.photo_id = p.id AND wf.workspace_id = ?
                     JOIN folders f
                       ON f.id = p.folder_id
                      AND f.status IN ('ok', 'partial')
@@ -1161,8 +1163,8 @@ class StatsRepository:
             f"""SELECT COUNT(*) FROM (
                   SELECT p.file_hash
                   FROM photos p
-                  JOIN workspace_folders wf
-                    ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                  JOIN photo_workspace_visibility wf
+                    ON wf.photo_id = p.id AND wf.workspace_id = ?
                   JOIN folders f
                     ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
                   WHERE p.file_hash IS NOT NULL

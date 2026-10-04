@@ -77,6 +77,36 @@ def create_moves_blueprint(get_db, json_error):
     """
     blueprint = Blueprint("moves", __name__)
 
+    @blueprint.route("/api/move-photos/visibility", methods=["POST"])
+    def api_photo_move_visibility():
+        from web.request_args import parse_selection_photo_ids
+
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return json_error("request body must be a JSON object")
+        db = get_db()
+        if "folder_id" in body:
+            folder_id = body["folder_id"]
+            if isinstance(folder_id, bool) or not isinstance(folder_id, int):
+                return json_error("folder_id must be an integer")
+            # Date moves act on the physical subtree, including detached
+            # descendants. Validate the linked root, then preview that exact
+            # planner scope rather than filtering it through Browse membership.
+            linked = db.conn.execute(
+                "SELECT 1 FROM workspace_folders WHERE folder_id = ? AND workspace_id = ?",
+                (folder_id, db._active_workspace_id),
+            ).fetchone()
+            if not linked:
+                return json_error("folder not found", 404)
+            from move import folder_date_move_photo_ids
+
+            photo_ids = folder_date_move_photo_ids(db, folder_id)
+            return jsonify({"workspaces": db.photo_move_affected_workspaces(photo_ids)})
+        photo_ids, err = parse_selection_photo_ids(db, body, json_error=json_error, limit=None)
+        if err is not None:
+            return err
+        return jsonify({"workspaces": db.photo_move_affected_workspaces(photo_ids)})
+
     @blueprint.route("/api/move-rules", methods=["GET"])
     def api_list_move_rules():
         db = get_db()
@@ -186,10 +216,11 @@ def create_moves_blueprint(get_db, json_error):
         except ValueError as exc:
             return json_error(str(exc))
 
-        folder = get_db().conn.execute(
+        request_db = get_db()
+        folder = request_db.conn.execute(
             "SELECT path, name FROM folders WHERE id = ?", (folder_id,)
         ).fetchone()
-        if not folder:
+        if not folder or not request_db.workspace_has_folder_link(folder_id):
             return json_error("Folder not found", status=404)
 
         # Remote target: resolve the NAS-side dest and probe it over SSH.

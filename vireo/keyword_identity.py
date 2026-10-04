@@ -261,7 +261,7 @@ def grouped_keywords(db):
         FROM descendants d JOIN photo_keywords pk ON pk.keyword_id = d.id
         JOIN keywords k ON k.id = pk.keyword_id
         JOIN photos p ON p.id = pk.photo_id
-        JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+        JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
         WHERE wf.workspace_id = ? GROUP BY d.identity""", (db._ws_id(),),
     )}
     aliases = defaultdict(list)
@@ -369,7 +369,7 @@ def reconcile_location(db, source_id, target_id):
         affected = db.conn.execute(
             'SELECT pk.photo_id, wf.workspace_id FROM photo_keywords pk '
             'JOIN photos p ON p.id = pk.photo_id '
-            'JOIN workspace_folders wf ON wf.folder_id = p.folder_id '
+            'JOIN photo_workspace_visibility wf ON wf.photo_id = p.id '
             'WHERE pk.keyword_id = ?', (source_id,),
         ).fetchall()
         db._merge_keyword_into(source_id, target_id)
@@ -1174,7 +1174,7 @@ def merge_keywords(db, keyword_ids, target_id, preview_token, overrides=None):
             affected.extend((dict(r), source) for r in db.conn.execute(
                 'SELECT pk.photo_id, wf.workspace_id FROM photo_keywords pk '
                 'JOIN photos p ON p.id = pk.photo_id '
-                'JOIN workspace_folders wf ON wf.folder_id = p.folder_id WHERE pk.keyword_id = ?',
+                'JOIN photo_workspace_visibility wf ON wf.photo_id = p.id WHERE pk.keyword_id = ?',
                 (source['id'],),
             ))
             # Remember every merged path, including same-name leaves under
@@ -1226,7 +1226,7 @@ def merge_keywords(db, keyword_ids, target_id, preview_token, overrides=None):
             for row in db.conn.execute(
                 'SELECT pk.photo_id, wf.workspace_id FROM photo_keywords pk '
                 'JOIN photos p ON p.id = pk.photo_id '
-                'JOIN workspace_folders wf ON wf.folder_id = p.folder_id '
+                'JOIN photo_workspace_visibility wf ON wf.photo_id = p.id '
                 'WHERE pk.keyword_id = ?', (folded_id,),
             ).fetchall():
                 db.remove_pending_changes(row['photo_id'], 'location',
@@ -1245,7 +1245,7 @@ def merge_keywords(db, keyword_ids, target_id, preview_token, overrides=None):
             for row in db.conn.execute(
                 'SELECT pk.photo_id, wf.workspace_id FROM photo_keywords pk '
                 'JOIN photos p ON p.id = pk.photo_id '
-                'JOIN workspace_folders wf ON wf.folder_id = p.folder_id WHERE pk.keyword_id = ?',
+                'JOIN photo_workspace_visibility wf ON wf.photo_id = p.id WHERE pk.keyword_id = ?',
                 (target_id,),
             ).fetchall():
                 db.remove_pending_changes(row['photo_id'], 'location', workspace_id=row['workspace_id'], _commit=False)
@@ -1262,7 +1262,7 @@ def merge_keywords(db, keyword_ids, target_id, preview_token, overrides=None):
             for row in db.conn.execute(
                 'SELECT pk.photo_id, wf.workspace_id FROM photo_keywords pk '
                 'JOIN photos p ON p.id = pk.photo_id '
-                'JOIN workspace_folders wf ON wf.folder_id = p.folder_id '
+                'JOIN photo_workspace_visibility wf ON wf.photo_id = p.id '
                 'WHERE pk.keyword_id = ?', (target_id,),
             ).fetchall():
                 db.queue_change(row['photo_id'], 'keyword_add', resolved['name'],
@@ -1287,7 +1287,7 @@ def merge_keywords(db, keyword_ids, target_id, preview_token, overrides=None):
                    FROM photo_keywords pk
                    JOIN keywords k ON k.id = pk.keyword_id
                    JOIN photos p ON p.id = pk.photo_id
-                   JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                   JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                    WHERE pk.keyword_id IN (SELECT id FROM subtree)
                      AND k.type = 'location' ''',
                 (target_id,),
@@ -1374,7 +1374,7 @@ def _queue_survivor_rename(db, target_id, old_name, new_name, keyword_type, sett
     rows = db.conn.execute(
         'SELECT pk.photo_id, wf.workspace_id FROM photo_keywords pk '
         'JOIN photos p ON p.id = pk.photo_id '
-        'JOIN workspace_folders wf ON wf.folder_id = p.folder_id '
+        'JOIN photo_workspace_visibility wf ON wf.photo_id = p.id '
         'WHERE pk.keyword_id = ?', (target_id,),
     ).fetchall()
     for row in rows:
@@ -1405,7 +1405,7 @@ def _collapsing_child_tags(db, preview):
         'FROM photo_keywords pk '
         'JOIN keywords k ON k.id = pk.keyword_id '
         'JOIN photos p ON p.id = pk.photo_id '
-        'JOIN workspace_folders wf ON wf.folder_id = p.folder_id '
+        'JOIN photo_workspace_visibility wf ON wf.photo_id = p.id '
         f'WHERE pk.keyword_id IN ({placeholders})', list(collapsing),
     ).fetchall()
     return [(dict(row), collapsing[row['keyword_id']]) for row in rows]
@@ -1422,7 +1422,7 @@ def _renamed_child_tags(db, preview):
     rows = db.conn.execute(
         'SELECT pk.keyword_id, pk.photo_id, wf.workspace_id FROM photo_keywords pk '
         'JOIN photos p ON p.id = pk.photo_id '
-        'JOIN workspace_folders wf ON wf.folder_id = p.folder_id '
+        'JOIN photo_workspace_visibility wf ON wf.photo_id = p.id '
         f'WHERE pk.keyword_id IN ({placeholders})', list(renamed),
     ).fetchall()
     return [(dict(row), renamed[row['keyword_id']]) for row in rows]
@@ -1508,7 +1508,7 @@ def _queue_moved_subtree_changes(db, preview, target_id, collapsed, ambiguous_ke
             'FROM photo_keywords pk '
             'JOIN keywords k ON k.id = pk.keyword_id '
             'JOIN photos p ON p.id = pk.photo_id '
-            'JOIN workspace_folders wf ON wf.folder_id = p.folder_id '
+            'JOIN photo_workspace_visibility wf ON wf.photo_id = p.id '
             f'WHERE pk.keyword_id IN ({placeholders})', surviving,
         ).fetchall()]
     rows.extend((row, child['id']) for row, child in collapsed)

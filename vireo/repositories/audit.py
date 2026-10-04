@@ -58,7 +58,7 @@ class AuditRepository:
             """SELECT p.id, p.filename, p.file_hash, p.file_mtime,
                       p.hash_status, p.hash_checked_at, f.path AS folder_path
                FROM photos p
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                     AND wf.workspace_id = ?
                JOIN folders f ON f.id = p.folder_id
                     AND f.status IN ('ok', 'partial')
@@ -73,7 +73,7 @@ class AuditRepository:
             """SELECT p.id AS photo_id, p.filename, p.hash_status,
                       p.hash_checked_at, f.path AS folder_path
                FROM photos p
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                     AND wf.workspace_id = ?
                JOIN folders f ON f.id = p.folder_id
                     AND f.status IN ('ok', 'partial')
@@ -98,7 +98,7 @@ class AuditRepository:
                           ('modified', 'corrupt', 'unreadable')
                           THEN 1 ELSE 0 END) AS flagged
                FROM photos p
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                     AND wf.workspace_id = ?
                JOIN folders f ON f.id = p.folder_id
                     AND f.status IN ('ok', 'partial')""",

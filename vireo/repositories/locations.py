@@ -125,7 +125,7 @@ class LocationRepository:
         """
 
         join_clause = (
-            "JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
+            "JOIN photo_workspace_visibility wf ON wf.photo_id = p.id"
             "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')"
             f"\n{location_subquery}"
         )
@@ -285,7 +285,7 @@ class LocationRepository:
         return self.conn.execute(
             """SELECT COUNT(DISTINCT p.id)
                FROM photos p
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                JOIN photo_keywords pk ON pk.photo_id = p.id
                JOIN keywords k ON k.id = pk.keyword_id
                WHERE wf.workspace_id = ? AND k.type = 'location'""",
@@ -304,7 +304,7 @@ class LocationRepository:
             row[0] for row in self.conn.execute(
                 """SELECT DISTINCT p.id
                    FROM photos p
-                   JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                   JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                    JOIN photo_keywords pk ON pk.photo_id = p.id
                    JOIN keywords k ON k.id = pk.keyword_id
                    WHERE wf.workspace_id = ? AND k.type = 'location'
@@ -343,8 +343,8 @@ class LocationRepository:
             params = list(chunk)
             if verify_workspace:
                 workspace_join = """
-                    JOIN workspace_folders wf
-                      ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                    JOIN photo_workspace_visibility wf
+                      ON wf.photo_id = p.id AND wf.workspace_id = ?
                 """
                 params.append(self.workspace_id_fn())
             rows = self.conn.execute(
@@ -421,7 +421,7 @@ class LocationRepository:
         row = self.conn.execute(
             """
             SELECT COUNT(*) FROM photos p
-            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+            JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
             JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
             WHERE wf.workspace_id = ?
               AND (p.latitude IS NULL OR p.longitude IS NULL)
@@ -453,7 +453,7 @@ class LocationRepository:
         rows = self.conn.execute(
             f"""
             SELECT p.id FROM photos p
-            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+            JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
             JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
             WHERE wf.workspace_id = ?
               {folder_clause}

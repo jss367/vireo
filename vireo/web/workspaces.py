@@ -612,6 +612,9 @@ def create_workspace_blueprint(
                     "SELECT folder_id FROM local_folder_mappings WHERE root_folder_id = ?",
                     (descendant_id,),
                 ).fetchall()
+                db.revoke_workspace_photo_grants_for_folders(
+                    ws_id, [int(row["folder_id"]) for row in rows],
+                )
                 for row in rows:
                     db.conn.execute(
                         "DELETE FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
@@ -730,6 +733,9 @@ def create_workspace_blueprint(
                             "SELECT folder_id FROM local_folder_mappings WHERE root_folder_id = ?",
                             (descendant_id,),
                         ).fetchall()
+                        db.revoke_workspace_photo_grants_for_folders(
+                            ws_id, [int(row["folder_id"]) for row in rows],
+                        )
                         for row in rows:
                             mapped_fid = int(row["folder_id"])
                             db.conn.execute(

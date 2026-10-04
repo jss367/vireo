@@ -981,6 +981,9 @@ def create_job_launchers_blueprint(
             return json_error("destination must be an absolute path")
 
         import config as cfg
+        keep_visible = body.get("keep_visible", cfg.load().get("move_keep_visible_in_other_workspaces", True))
+        if not isinstance(keep_visible, bool):
+            return json_error("keep_visible must be a boolean")
         effective_cfg = get_db().get_effective_config(cfg.load())
         developed_dir = effective_cfg.get("darktable_output_dir", "") or ""
 
@@ -1010,6 +1013,7 @@ def create_job_launchers_blueprint(
                 db=thread_db,
                 photo_ids=photo_ids,
                 destination=destination,
+                keep_visible=keep_visible,
                 progress_cb=progress_cb,
                 developed_dir=developed_dir,
                 cancel_check=lambda: ctx.runner.cancellation_requested(job["id"]),
@@ -1034,7 +1038,7 @@ def create_job_launchers_blueprint(
 
         return ctx.start(
             "move-photos", work, pausable=True,
-            config={"photo_ids": photo_ids, "destination": destination},
+            config={"photo_ids": photo_ids, "destination": destination, "keep_visible": keep_visible},
         )
 
     @blueprint.route("/api/jobs/offline-cache", methods=["POST"])
@@ -1082,7 +1086,7 @@ def create_job_launchers_blueprint(
             placeholders = ",".join("?" for _ in chunk)
             rows = db.conn.execute(
                 f"""SELECT p.id FROM photos p
-                    JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                    JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                     WHERE wf.workspace_id = ? AND p.id IN ({placeholders})""",
                 [ctx.workspace_id, *chunk],
             ).fetchall()
@@ -1210,7 +1214,7 @@ def create_job_launchers_blueprint(
             placeholders = ",".join("?" for _ in chunk)
             rows = db.conn.execute(
                 f"""SELECT p.id FROM photos p
-                    JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                    JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                     WHERE wf.workspace_id = ? AND p.id IN ({placeholders})""",
                 [ctx.workspace_id, *chunk],
             ).fetchall()
@@ -1419,7 +1423,7 @@ def create_job_launchers_blueprint(
         folder = request_db.conn.execute(
             "SELECT path, name FROM folders WHERE id = ?", (folder_id,)
         ).fetchone()
-        if not folder:
+        if not folder or not request_db.workspace_has_folder_link(folder_id):
             return json_error("Folder not found", status=404)
 
         guard_err = guard_move_folder(request_db, folder_id)
@@ -1428,6 +1432,9 @@ def create_job_launchers_blueprint(
 
         import config as cfg
         import move as move_mod
+        keep_visible = body.get("keep_visible", cfg.load().get("move_keep_visible_in_other_workspaces", True))
+        if not isinstance(keep_visible, bool):
+            return json_error("keep_visible must be a boolean")
         try:
             destination_name = move_mod.normalize_destination_name(
                 destination_name_raw)
@@ -1562,6 +1569,7 @@ def create_job_launchers_blueprint(
             remote=remote,
             developed_dir=developed_dir,
             folder_template=folder_template,
+            keep_visible=keep_visible,
             date_destinations=date_destinations,
         )
         return jsonify({"job_id": job_id})
@@ -2134,8 +2142,8 @@ class _MaskExtractionRun:
                       d.box_x, d.box_y, d.box_w, d.box_h,
                       d.detector_confidence
                  FROM photos p
-                 JOIN workspace_folders wf
-                      ON wf.folder_id = p.folder_id
+                 JOIN photo_workspace_visibility wf
+                      ON wf.photo_id = p.id
                  JOIN detections d ON d.photo_id = p.id
                 WHERE wf.workspace_id = ?
                   AND d.detector_model != 'full-image'

@@ -171,8 +171,8 @@ def collection_covers_workspace(db, workspace_id, collection_id,
         r["id"] for r in db.conn.execute(
             """SELECT p.id
                  FROM photos p
-                 JOIN workspace_folders wf
-                   ON wf.folder_id = p.folder_id
+                 JOIN photo_workspace_visibility wf
+                   ON wf.photo_id = p.id
                 WHERE wf.workspace_id = ?""",
             (workspace_id,),
         ).fetchall()
@@ -329,7 +329,7 @@ class _FeatureLoad:
             self.rows = db.conn.execute(
                 f"""SELECT {_PIPELINE_PHOTO_COLS}
                     FROM photos p
-                    JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                    JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                     WHERE wf.workspace_id = ?
                       AND p.id IN (SELECT id FROM pipeline_scope_ids)
                     ORDER BY p.timestamp, p.filename ASC, p.id ASC""",
@@ -339,7 +339,7 @@ class _FeatureLoad:
             self.rows = db.conn.execute(
                 f"""SELECT {_PIPELINE_PHOTO_COLS}
                     FROM photos p
-                    JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                    JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                     WHERE wf.workspace_id = ?
                     ORDER BY p.timestamp, p.filename ASC, p.id ASC""",
                 (self.ws_id,),
@@ -456,7 +456,7 @@ class _FeatureLoad:
                 FROM detections d
                 LEFT JOIN detection_subjects ds ON ds.detection_id=d.id
                 JOIN photos p ON p.id = d.photo_id
-                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                 WHERE wf.workspace_id = ?
                   {self.detection_floor_sql}
                   AND d.detector_model != 'full-image'
@@ -515,7 +515,7 @@ class _FeatureLoad:
                    FROM predictions pr
                    JOIN detections d ON d.id = pr.detection_id
                    JOIN photos p ON p.id = d.photo_id
-                   JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                   JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                    WHERE wf.workspace_id = ?
                      {self.detection_floor_sql}
                      AND pr.labels_fingerprint = ?
@@ -534,7 +534,7 @@ class _FeatureLoad:
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
                JOIN photos p ON p.id = d.photo_id
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                WHERE wf.workspace_id = ?
                  {self.detection_floor_sql}
                  {self.scope_sql}
@@ -1675,7 +1675,7 @@ def prune_missing_photos(cache_dir, workspace_id, db):
         placeholders = ",".join("?" * len(chunk))
         rows = db.conn.execute(
             f"""SELECT p.id FROM photos p
-                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                 WHERE wf.workspace_id = ? AND p.id IN ({placeholders})""",
             (workspace_id, *chunk),
         ).fetchall()
@@ -1894,7 +1894,7 @@ def _count_stage_targets(db):
     row = db.conn.execute(
         """SELECT COUNT(DISTINCT p.id) AS n
            FROM photos p
-           JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+           JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
            JOIN folders f ON f.id = p.folder_id
                          AND f.status IN ('ok', 'partial')
            JOIN detections d ON d.photo_id = p.id
@@ -1933,7 +1933,7 @@ def _count_usable_embeddings(db, expected_variant, detected_only=False):
         row = db.conn.execute(
             f"""SELECT COUNT(DISTINCT p.id) AS n
                FROM photos p
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                JOIN folders f ON f.id = p.folder_id
                              AND f.status IN ('ok', 'partial')
                {join_detection}
@@ -1951,7 +1951,7 @@ def _count_usable_embeddings(db, expected_variant, detected_only=False):
         row = db.conn.execute(
             f"""SELECT COUNT(DISTINCT p.id) AS n
                FROM photos p
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                JOIN folders f ON f.id = p.folder_id
                              AND f.status IN ('ok', 'partial')
                {join_detection}
@@ -1965,7 +1965,7 @@ def _count_usable_embeddings(db, expected_variant, detected_only=False):
     row = db.conn.execute(
         f"""SELECT COUNT(DISTINCT p.id) AS n
            FROM photos p
-           JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+           JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
            JOIN folders f ON f.id = p.folder_id
                          AND f.status IN ('ok', 'partial')
            {join_detection}
@@ -1995,8 +1995,8 @@ def _count_eye_keypoint_attempts(db):
     row = db.conn.execute(
         """SELECT COUNT(DISTINCT p.id) AS n
            FROM photos p
-           JOIN workspace_folders wf
-             ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+           JOIN photo_workspace_visibility wf
+             ON wf.photo_id = p.id AND wf.workspace_id = ?
            JOIN folders f ON f.id = p.folder_id
                          AND f.status IN ('ok', 'partial')
            JOIN detections d

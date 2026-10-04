@@ -180,7 +180,7 @@ class FolderMoves:
                   chained_from=None, serialize_lock=None,
                   allow_tracked_merge=False,
                   managed_staging_root=None, mount_baseline=None,
-                  mount_identities=None):
+                  mount_identities=None, keep_visible=None):
         """Enqueue a move-folder job and return its job id.
 
         Shared by the move-folder endpoint and the chained
@@ -204,6 +204,10 @@ class FolderMoves:
         the job config so the jobs panel can name the folders photos actually
         land in rather than only the selected root.
         """
+        if keep_visible is None:
+            import config as cfg
+            keep_visible = cfg.load().get("move_keep_visible_in_other_workspaces", True)
+
         def work(job):
             from move import move_folder, move_folder_by_date
 
@@ -308,6 +312,7 @@ class FolderMoves:
                         folder_id=folder_id,
                         destination=destination,
                         folder_template=folder_template,
+                        keep_visible=keep_visible,
                         progress_cb=progress_cb,
                         developed_dir=developed_dir,
                     )

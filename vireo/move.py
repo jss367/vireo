@@ -1994,6 +1994,16 @@ def _folder_subtree_photos(db, folder_id):
     ).fetchall()
 
 
+def folder_date_move_photo_ids(db, folder_id):
+    """The same physical subtree the date-move planner will process.
+
+    A linked root can contain detached descendants. Preview their impact too,
+    since moving a physical tree affects photos beyond workspace browse scope.
+    Callers must validate access to the selected root before using this helper.
+    """
+    return [row["id"] for row in _folder_subtree_photos(db, folder_id)]
+
+
 def plan_folder_date_moves(db, folder_id, destination, folder_template):
     """Plan a folder's tracked photos into capture-date destinations.
 
@@ -2140,7 +2150,7 @@ def plan_folder_date_moves_with_capture_dates(
 
 
 def move_folder_by_date(db, folder_id, destination, folder_template,
-                        progress_cb=None, developed_dir=""):
+                        progress_cb=None, developed_dir="", keep_visible=True):
     """Move a folder's tracked photos into capture-date subfolders.
 
     Each photo uses ``move_photos``' copy/verify/catalog-update/delete order,
@@ -2204,6 +2214,7 @@ def move_folder_by_date(db, folder_id, destination, folder_template,
             progress_cb=group_progress,
             developed_dir=developed_dir,
             developed_listing_cache=developed_listing_cache,
+            keep_visible=keep_visible,
         )
         group_moved = int(result.get("moved", 0))
         moved += group_moved
@@ -2342,7 +2353,7 @@ def _is_same_directory(folder_id, folder_path, dest_folder_id, destination):
 
 def move_photos(db, photo_ids, destination, progress_cb=None,
                 developed_dir="", developed_listing_cache=None, cancel_check=None,
-                pause_requested=None, pause_callback=None):
+                pause_requested=None, pause_callback=None, keep_visible=True):
     """Move individual photos to a destination directory.
 
     Args:
@@ -2397,6 +2408,7 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
         )
     total = len(photo_ids)
     move = _PhotoMove(db, destination, developed_dir, developed_listing_cache)
+    move.keep_visible = keep_visible
     move.ensure_destination_folder()
     move.load_destination_stem_origins()
     move.load_source_stem_counts(photo_ids)
@@ -2763,19 +2775,31 @@ class _PhotoMove:
     def update_catalog(self, item):
         """Repoint the verified photo's row at the destination folder."""
         db = self.db
-        # Verification passed — link destination folder to workspace on first success
-        if not self.workspace_linked and db._active_workspace_id is not None:
-            db.add_workspace_folder(db._active_workspace_id, self.dest_folder_id)
+        link_destination = not self.workspace_linked and db._active_workspace_id is not None
+        # Link destination and repoint the photo together, before deleting
+        # originals. A failed visibility write must not leave a folder-wide
+        # link exposing unrelated destination siblings after a failed move.
+        db.conn.execute("SAVEPOINT photo_move_visibility")
+        try:
+            if link_destination:
+                db._add_workspace_folder_no_commit(
+                    db._active_workspace_id, self.dest_folder_id, restore_removed=True,
+                )
+            db.preserve_photo_visibility_for_move(item.pid, self.keep_visible)
+            db.conn.execute(
+                "UPDATE photos SET folder_id = ?, "
+                "last_move_source_folder_path = ? WHERE id = ?",
+                (self.dest_folder_id, item.src_dir, item.pid),
+            )
+            db.conn.execute("RELEASE photo_move_visibility")
+            db.conn.commit()
+        except BaseException:
+            db.conn.execute("ROLLBACK TO photo_move_visibility")
+            db.conn.execute("RELEASE photo_move_visibility")
+            raise
+        if link_destination:
             self.workspace_linked = True
-
-        # Update DB before deleting originals
-        # This ensures a crash leaves duplicates (safe) rather than orphans
-        db.conn.execute(
-            "UPDATE photos SET folder_id = ?, "
-            "last_move_source_folder_path = ? WHERE id = ?",
-            (self.dest_folder_id, item.src_dir, item.pid),
-        )
-        db.conn.commit()
+            db._new_images_cache.invalidate_workspaces(db._db_path, [db._active_workspace_id])
         # Pin the stem to the proven source folder path so a same-source
         # sibling can follow in this call while a distinct source is
         # still rejected. Using the path (not folders.id) survives a

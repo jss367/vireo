@@ -1932,8 +1932,8 @@ def create_predictions_blueprint(
                         AND pr_rev.workspace_id = ?
                        JOIN detections d ON d.id = pr.detection_id
                        JOIN photos ph ON ph.id = d.photo_id
-                       JOIN workspace_folders wf
-                         ON wf.folder_id = ph.folder_id AND wf.workspace_id = ?
+                       JOIN photo_workspace_visibility wf
+                         ON wf.photo_id = ph.id AND wf.workspace_id = ?
                        WHERE pr_rev.group_id = ? AND pr.classifier_model = ?
                          AND pr.id != ?
                        ORDER BY pr.id""",

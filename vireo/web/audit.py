@@ -104,10 +104,16 @@ def create_audit_blueprint(
         scope the scan with ``root`` params would let a subset (or
         empty) request certify the whole workspace. Stray ``root``
         query params are tolerated and ignored.
+
+        Uses :meth:`Database.get_audit_root_paths`, which returns only real
+        ``workspace_folders`` roots. Folders a workspace sees solely through
+        a ``workspace_photos`` grant are excluded, because the whole-folder
+        audit workflows (``/api/audit/untracked``,
+        ``/api/audit/import-untracked``, stray-sidecar scans) would
+        otherwise enumerate and permit importing hidden sibling files that
+        the workspace has no claim to.
         """
-        return [
-            f["path"] for f in db.get_folder_tree() if not f["parent_id"]
-        ]
+        return db.get_audit_root_paths()
 
     @blueprint.route("/api/audit/untracked")
     def api_audit_untracked():

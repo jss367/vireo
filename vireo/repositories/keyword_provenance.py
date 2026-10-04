@@ -406,7 +406,7 @@ class KeywordProvenanceRepository:
                         """SELECT DISTINCT pk.photo_id, wf.workspace_id
                            FROM photo_keywords pk
                            JOIN photos p ON p.id = pk.photo_id
-                           JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                           JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                            WHERE pk.keyword_id IN (?, ?)""",
                         (src_id, dst_id),
                     ).fetchall()
@@ -1586,8 +1586,8 @@ class KeywordProvenanceRepository:
                         for row in self.conn.execute(
                             """SELECT wf.workspace_id
                                FROM photos p
-                               JOIN workspace_folders wf
-                                 ON wf.folder_id = p.folder_id
+                               JOIN photo_workspace_visibility wf
+                                 ON wf.photo_id = p.id
                                WHERE p.id = ?""",
                             (photo_id,),
                         ).fetchall()
@@ -2662,8 +2662,8 @@ class KeywordProvenanceRepository:
                          ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
                        JOIN detections d ON d.id = pr.detection_id
                        JOIN photos ph ON ph.id = d.photo_id
-                       JOIN workspace_folders wf
-                         ON wf.folder_id = ph.folder_id AND wf.workspace_id = ?
+                       JOIN photo_workspace_visibility wf
+                         ON wf.photo_id = ph.id AND wf.workspace_id = ?
                        WHERE pr_rev.group_id = ? AND pr.classifier_model = ?""",
                     (ws, ws, pred["group_id"], pred["model"]),
                 ).fetchall()

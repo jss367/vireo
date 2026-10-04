@@ -191,7 +191,7 @@ def create_photos_blueprint(
                 """SELECT p.filename, f.path AS folder_path
                    FROM photos p
                    JOIN folders f ON p.folder_id = f.id
-                   JOIN workspace_folders wf ON wf.folder_id = f.id
+                   JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                    WHERE p.id = ? AND wf.workspace_id = ?""",
                 (pid, ws_id),
             ).fetchone()
@@ -311,7 +311,7 @@ def create_photos_blueprint(
                 """SELECT p.filename, f.path AS folder_path
                    FROM photos p
                    JOIN folders f ON p.folder_id = f.id
-                   JOIN workspace_folders wf ON wf.folder_id = f.id
+                   JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                    WHERE p.id = ? AND wf.workspace_id = ?""",
                 (pid, ws_id),
             ).fetchone()
@@ -884,7 +884,7 @@ def create_photos_blueprint(
             f"""SELECT p.id, p.folder_id, p.filename, p.extension, p.timestamp,
                       p.flag, p.rating, p.quality_score, p.sharpness
                FROM photos p
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
                WHERE wf.workspace_id = ? AND p.id IN ({placeholders})""",
             (db._ws_id(), *photo_ids),

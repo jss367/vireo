@@ -742,8 +742,8 @@ def test_collection_queries_sql_shape(db, folder):
     assert [" ".join(s.split()) for s in statements] == [
         f"SELECT rules FROM collections WHERE id = {cid} AND workspace_id = {ws}",
         "SELECT COUNT(DISTINCT p.id) FROM photos p JOIN folders f ON f.id = p.folder_id "
-        "AND f.status IN ('ok', 'partial') JOIN workspace_folders wf ON "
-        f"wf.folder_id = f.id AND wf.workspace_id = {ws}",
+        "AND f.status IN ('ok', 'partial') JOIN photo_workspace_visibility wf ON "
+        f"wf.photo_id = p.id AND wf.workspace_id = {ws}",
     ]
 
 

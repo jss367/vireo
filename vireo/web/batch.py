@@ -538,8 +538,8 @@ def create_batch_blueprint(
                     FROM photos p
                     WHERE p.id IN ({placeholders})
                       AND EXISTS (
-                          SELECT 1 FROM workspace_folders wf
-                          WHERE wf.folder_id = p.folder_id
+                          SELECT 1 FROM photo_workspace_visibility wf
+                          WHERE wf.photo_id = p.id
                             AND wf.workspace_id = ?
                       )""",
                 [*chunk, ws_id],

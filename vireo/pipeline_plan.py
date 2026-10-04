@@ -760,7 +760,7 @@ def _extract_plan(db, params, photo_ids, pipeline_cfg, new_count=0):
         }
     scope_sql, scope_params = db._scope_clause(photo_ids)
     prior_raw_analysis = db.conn.execute(
-        "SELECT 1 FROM photos p JOIN workspace_folders wf ON wf.folder_id=p.folder_id "
+        "SELECT 1 FROM photos p JOIN photo_workspace_visibility wf ON wf.photo_id=p.id "
         "WHERE wf.workspace_id=? AND p.quality_input_recipe IS NOT NULL"
         + scope_sql + " LIMIT 1", [db._ws_id(), *scope_params],
     ).fetchone()
