@@ -626,3 +626,28 @@ def test_grant_only_workspace_cannot_preflight_or_launch_whole_folder_move(app_a
     assert db.get_photo(sibling) is not None
     assert client.post(f"/api/workspaces/{owner}/activate").status_code == 200
     assert client.post("/api/move-folder/preflight", json=body).status_code == 200
+
+
+def test_grant_only_folder_cannot_become_a_workspace_scan_or_local_copy_root(app_and_db, tmp_path):
+    from services.local_workspace import LocalWorkspaceError, _root_records
+
+    app, db = app_and_db
+    owner = db._active_workspace_id
+    guest = db.create_workspace("Photo-only guest")
+    folder, shared = _photo(db, tmp_path / "root", "shared.jpg")
+    _, sibling = _photo(db, tmp_path / "root", "private.jpg", b"private")
+    db.grant_workspace_photos(guest, [shared])
+    db.conn.commit()
+    assert folder in {row["id"] for row in db.get_workspace_folder_roots(owner)}
+    assert db.get_workspace_folder_roots(guest) == []
+    db.set_active_workspace(guest)
+    client = app.test_client()
+    assert client.post(f"/api/workspaces/{guest}/activate").status_code == 200
+    response = client.post("/api/jobs/scan-workspace", json={})
+    assert response.status_code == 400
+    assert "no folders to rescan" in response.json["error"]
+    with pytest.raises(LocalWorkspaceError, match="Add at least one folder"):
+        _root_records(db, guest, tmp_path / "local")
+    assert db.filter_photo_ids_in_workspace([shared, sibling]) == [shared]
+    assert not db.workspace_has_folder_link(folder)
+    assert not (tmp_path / "local").exists()

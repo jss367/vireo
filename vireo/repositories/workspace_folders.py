@@ -354,7 +354,11 @@ class WorkspaceFolderRepository:
         return [int(row["id"]) for row in rows]
 
     def roots(self, workspace_id):
-        """Return root folder rows with their linked-subtree photo count."""
+        """Return real scan/storage roots with their visible photo count.
+
+        Photo-only grants make a folder browsable, but never authorize
+        whole-directory scanning or local workspace copying.
+        """
         return self.conn.execute(
             """SELECT f.*, (
                    SELECT COUNT(*)
@@ -379,7 +383,7 @@ class WorkspaceFolderRepository:
                          ) = RTRIM(REPLACE(f.path, '\\', '/'), '/') || '/'
                ) AS workspace_photo_count
                FROM folders f
-               JOIN workspace_visible_folders wf ON wf.folder_id = f.id
+               JOIN workspace_folders wf ON wf.folder_id = f.id
                WHERE wf.workspace_id = ? AND wf.is_root = 1
                ORDER BY f.path""",
             (workspace_id,),
