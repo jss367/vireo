@@ -43,6 +43,34 @@ def candidates():
     return specs
 
 
+def combination_candidates():
+    """Fixed second-round recipes; compare incremental gains over the prior winner."""
+    direct = {"span": 10.0, "frames": 8}
+    short = {"anchor_only": True, "overlap": 0.2, "box_floor": 0.03}
+    lower = {**direct, "confidence": 0.6, "margin": 0.2}
+    specs = [
+        {
+            "id": "current",
+            "family": "current",
+            "params": direct,
+            "label": "Previous experimental winner: matching predictions over eight frames and ten seconds",
+        }
+    ]
+    for name, family, stages in (
+        (
+            "combined-single-context",
+            "context",
+            [direct, {**short, "frames": 1, "span": 1.0, "overlap": 0.5, "box_floor": 0.05}],
+        ),
+        ("combined-short-context", "context", [direct, short]),
+        ("combined-long-context", "context", [direct, {**short, **direct}]),
+        ("combined-lower-classifier", "classifier", [direct, lower]),
+        ("combined-lower-short-context", "classifier-context", [direct, lower, short]),
+    ):
+        specs.append({"id": name, "family": family, "params": {"stages": stages}})
+    return specs
+
+
 def _winner(entries, confidence, margin):
     from encounters import _confident_species_prediction
 
@@ -91,7 +119,9 @@ def _weak(photos, evidence, animals, config, params):
         # Even an anchor's secondary subject or hidden classifier may veto;
         # evaluate at the candidate's own thresholds so lowering support
         # does not make contradictory evidence asymmetric.
-        if any(_conflicts_with(d["predictions"], target, confidence, margin) for a in anchors for d in evidence[a["id"]]):
+        if any(
+            _conflicts_with(d["predictions"], target, confidence, margin) for a in anchors for d in evidence[a["id"]]
+        ):
             continue
         selected = {}
         for pid in ids:
@@ -202,11 +232,20 @@ def prepare_baseline(photos, config):
 
 def apply_candidate(prepared, config, spec):
     photos, evidence, identities, animals = prepared
-    if spec["id"] == "current":
-        return photos
     params = spec["params"]
-    transform = _isolated if params.get("kind") == "isolated" else _weak
-    adjusted = transform(photos, evidence, animals, config, params)
+    if spec["id"] == "current" and not params:
+        return photos
+    # Every stage sees the same unmodified production features. A recovered
+    # frame can never become an anchor for another stage, and the first
+    # qualifying rule (direct classifier evidence first) retains precedence.
+    stages = params.get("stages", [params])
+    changes = {}
+    for stage in stages:
+        transform = _isolated if stage.get("kind") == "isolated" else _weak
+        for photo in transform(photos, evidence, animals, config, stage):
+            if photo.get("experimental_continuity"):
+                changes.setdefault(photo["id"], photo)
+    adjusted = [changes.get(p["id"], p) for p in photos]
     result = []
     for photo in adjusted:
         keys = dict(photo.get("species_keys", {}))

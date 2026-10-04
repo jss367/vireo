@@ -66,7 +66,14 @@ def build(comparison, output):
             bundle = read_bundle(source, entry)
             prepared = prepare_baseline(bundle["photos"], manifest["config"])
             after = apply_candidate(prepared, manifest["config"], selection["selected"])
-            baseline = prepared[0]
+            baseline = apply_candidate(
+                prepared,
+                manifest["config"],
+                selection.get(
+                    "baseline_candidate",
+                    {"id": "current", "params": {}},
+                ),
+            )
             proposed_bundle = {**bundle, "photos": after}
             relative = f"inputs/{entry['id']}.json.gz"
             (scope / relative).write_bytes(gzip.compress(encode(proposed_bundle).encode(), mtime=0))
@@ -190,6 +197,7 @@ def build(comparison, output):
         "remaining_interruption_candidates": 0,
         "automatically_supported_cases": len(changed) - len(review),
         "selection": selection["selected"],
+        "baseline_candidate": selection.get("baseline_candidate"),
         "test_sessions_evaluated": 0,
     }
     write_json(output / "comparison-summary.json", summary)
@@ -200,6 +208,9 @@ def build(comparison, output):
     )
     template = Path(__file__).with_name("continuity_review.html").read_text()
     template = template.replace("Review encounter grouping changes", "Review uncertain encounter sequences")
+    if selection.get("experiment") == "combined":
+        template = template.replace("<h2>Before</h2>", "<h2>Previous experiment</h2>")
+        template = template.replace("<h2>Proposed</h2>", "<h2>Combined rules</h2>")
     start = template.index("$('scope').textContent=")
     end = template.index("\nfor(const", start)
     template = (

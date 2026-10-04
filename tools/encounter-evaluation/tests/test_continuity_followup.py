@@ -67,9 +67,7 @@ def test_native_evidence_preserves_taxon_namespaces():
 
 def test_local_taxon_with_same_number_cannot_support_inaturalist_anchors():
     p = photos()
-    p[1]["evidence"][0]["sources"][0]["predictions"] = [
-        {"name": "Local bird", "score": 0.99, "taxon": "taxon:1"}
-    ]
+    p[1]["evidence"][0]["sources"][0]["predictions"] = [{"name": "Local bird", "score": 0.99, "taxon": "taxon:1"}]
     original = digest(p)
     prepared = prepare_baseline(p, {})
     assert prepared[0][1]["subject_absent"]
@@ -531,3 +529,81 @@ def test_code_identity_covers_review_html_templates(tmp_path):
     (src / "continuity_review.html").write_bytes(b"<!-- template identity fixture -->\n")
     after = code_identity(repo)["source_digest"]
     assert before != after
+
+
+def test_combined_plan_preserves_previous_winner_as_its_baseline():
+    from encounter_eval.continuity_experiments import combination_candidates
+
+    specs = combination_candidates()
+    assert len(specs) == 6
+    assert specs[0]["params"] == {"span": 10.0, "frames": 8}
+    p = photos()
+    p[2]["timestamp"] = "2026-01-01T00:00:04"
+    p[1]["evidence"][0]["sources"][0]["predictions"][0]["score"] = 0.99
+    prepared = prepare_baseline(p, {})
+    assert prepared[0][1]["subject_absent"]
+    baseline = apply_candidate(prepared, {}, specs[0])
+    assert baseline[1]["subject_uncertain"]
+
+
+def test_combined_rules_add_context_without_overwriting_direct_evidence():
+    from encounter_eval.continuity_experiments import combination_candidates
+
+    p = photos()
+    prepared = prepare_baseline(p, {})
+    specs = {s["id"]: s for s in combination_candidates()}
+    assert apply_candidate(prepared, {}, specs["current"])[1]["subject_absent"]
+    combined = apply_candidate(prepared, {}, specs["combined-short-context"])
+    assert combined[1]["subject_uncertain"]
+    assert combined[1]["grouping_species_top5"] == []
+    with_classifier = apply_candidate(prepared, {}, specs["combined-lower-short-context"])
+    assert with_classifier[1]["grouping_species_top5"][0][1] == 0.65
+    assert prepared[0][1]["subject_absent"]
+
+
+def test_combined_stages_never_receive_previous_stage_repaired_features(monkeypatch):
+    import encounter_eval.continuity_experiments as experiments
+
+    p = photos()
+    prepared = prepare_baseline(p, {})
+    observed = []
+
+    def transform(features, evidence, animals, config, params):
+        observed.append(features[1]["subject_absent"])
+        if len(observed) == 1:
+            return [
+                features[0],
+                {**features[1], "subject_absent": False, "experimental_continuity": {"stage": 1}},
+                features[2],
+            ]
+        return [
+            features[0],
+            {**features[1], "subject_absent": False, "experimental_continuity": {"stage": 2}},
+            features[2],
+        ]
+
+    monkeypatch.setattr(experiments, "_weak", transform)
+    result = apply_candidate(prepared, {}, {"id": "combined", "params": {"stages": [{}, {}]}})
+    assert observed == [True, True]
+    assert result[1]["experimental_continuity"]["stage"] == 1
+
+
+def test_combined_run_scores_the_experimental_baseline_not_production(tmp_path, monkeypatch):
+    import encounter_eval.continuity_followup as followup
+
+    scope = retained_scope(tmp_path)
+    original = followup.run_algorithm
+
+    def candidate(prepared, config, spec):
+        return [{**p, "test_baseline_marker": True} for p in prepared[0]]
+
+    def algorithm(name, p, **kwargs):
+        assert all(x.get("test_baseline_marker") for x in p)
+        return original(name, p, **kwargs)
+
+    monkeypatch.setattr(followup, "apply_candidate", candidate)
+    monkeypatch.setattr(followup, "run_algorithm", algorithm)
+    result = followup.run([scope], tmp_path / "combined", experiment="combined")
+    assert result["baseline_candidate"]["params"]["frames"] == 8
+    assert result["status"] == "retain-previous-experimental-winner"
+    assert not result["test_evaluated"]
