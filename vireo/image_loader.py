@@ -94,6 +94,9 @@ class _LinearDecodeFlight:
         self.done = threading.Event()
         self.image = None
         self.failed = False
+        # Followers parked on this decode; only read or changed under
+        # _linear_cache_lock.
+        self.waiters = 0
 
 
 def _load_linear_cached(path, max_size):
@@ -111,6 +114,8 @@ def _load_linear_cached(path, max_size):
                 leader = flight is None
                 if leader:
                     flight = _linear_inflight[key] = _LinearDecodeFlight()
+                else:
+                    flight.waiters += 1
         if cached is not None:
             # Copy outside the lock: cached entries are never mutated, and a
             # native-size copy takes long enough to stall other readers.
@@ -119,31 +124,42 @@ def _load_linear_cached(path, max_size):
             break
         flight.done.wait()
         if flight.failed:
-            # The leader raised or could not retain an independent source.
-            # Decode ourselves so errors and mutable images stay per-request.
+            # The leader failed; decode ourselves so this request reports its
+            # own error rather than a shared one.
             continue
         return None if flight.image is None else flight.image.copy()
+    image = None
     try:
         image = _decode_linear_sized(path, max_size)
-        flight.image = image
-        if image is not None:
-            if _linear_cache_eligible(image):
-                # Retain an independent source only within the entry ceiling.
-                # The leader's image belongs to its caller, who may mutate it.
-                flight.image = image.copy()
-                _store_linear_cache(key, flight.image)
-            else:
-                # Do not duplicate a giant decode just to reject it from the
-                # cache. Followers must decode independent request sources.
-                flight.image = None
-                flight.failed = True
+        if _linear_cacheable(image):
+            # ``image`` goes to this caller, who may mutate it; the cache and
+            # any followers read this copy.
+            flight.image = image.copy()
+            _store_linear_cache(key, flight.image)
     except BaseException:
         flight.failed = True
         raise
     finally:
-        with _linear_cache_lock:
-            _linear_inflight.pop(key, None)
-        flight.done.set()
+        try:
+            with _linear_cache_lock:
+                # Popping under the lock closes the flight: no follower can
+                # join after ``waiters`` is read.
+                _linear_inflight.pop(key, None)
+                waiters = flight.waiters
+            if (
+                not flight.failed and image is not None
+                and flight.image is None and waiters
+            ):
+                # Uncacheable result (a JPEG fallback, or a decode above the
+                # per-entry ceiling): copy it for followers only when someone
+                # is actually waiting, so a lone oversized decode is never
+                # duplicated.
+                flight.image = image.copy()
+        except BaseException:
+            flight.failed = True
+            raise
+        finally:
+            flight.done.set()
     return image
 
 
@@ -156,18 +172,19 @@ def _decode_linear_sized(path, max_size):
     return image
 
 
-def _linear_cache_eligible(image):
+def _linear_cacheable(image):
     # Never cache a JPEG fallback as though the RAW decoded successfully.
     try:
         from .float_image import FloatImage
     except ImportError:
         from float_image import FloatImage
-    return isinstance(image, FloatImage) and image.pixels.nbytes <= _LINEAR_CACHE_MAX_ENTRY_BYTES
+    return (
+        isinstance(image, FloatImage)
+        and image.pixels.nbytes <= _LINEAR_CACHE_MAX_ENTRY_BYTES
+    )
 
 
 def _store_linear_cache(key, image):
-    if not _linear_cache_eligible(image):
-        return
     with _linear_cache_lock:
         _linear_cache[key] = image
         _linear_cache.move_to_end(key)
