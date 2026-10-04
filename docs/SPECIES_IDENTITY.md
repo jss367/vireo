@@ -84,3 +84,28 @@ same source ID do not make the prompt ambiguous.
 Process Review compares each prediction's identity key, and confirmed keywords
 carry their own keys into both review views. Different taxa that share a display
 name remain separate in conflict evidence and mixed-species detection.
+
+## Label lists saved before identities
+
+Lists downloaded before label sets recorded taxon IDs hold names only. Their
+BioCLIP predictions are identified by name lookup, so a name the taxonomy
+cannot assign to one taxon stays unresolved. For example, "Redhead" is also an
+alternate English name of the Common Pochard, so that label and the iNat21
+prediction of the same bird appear as two review rows. Preferring
+iNaturalist's first-listed English name does not fix this: "Terciopelo" is
+listed first for a plant and as an alternate for the fer-de-lance.
+
+At startup, Vireo re-runs each legacy list's own iNaturalist query (its saved
+place, taxon groups and observation filter) and identifies a prompt only when
+exactly one fetched taxon has that name. Before that, it rebuilds the label
+set from its source files and checks that it still matches the recorded
+fingerprint; a list edited or re-downloaded since classification is not
+matched. Identities are stored in `label_source_identities` under the label
+set's fingerprint, not written into the list. Writing them into the list would
+change the fingerprint and mark every photo classified with it as needing
+reclassification. Existing predictions are stamped with `source_taxon_id` and
+the source binomial, and each change is recorded in `species_identity_repairs`
+with reason `label-list-source-identity`. Triggers on `predictions` stamp
+rows written later under that fingerprint. The run appears in the bottom panel
+as "Label List Species Ids". A list that cannot be reached is reported and
+retried at the next startup.

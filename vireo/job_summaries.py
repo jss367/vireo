@@ -366,6 +366,35 @@ def _fetch_labels(result: dict, config: dict) -> tuple[str, list[str]]:
     return _n(count, "species label") + " fetched", details
 
 
+def _label_list_species_ids(result: dict, config: dict) -> tuple[str, list[str]]:
+    labels = _int(result, "labels")
+    summary = (
+        f"Species IDs found for {_int(result, 'labels_identified'):,} of "
+        f"{_n(labels, 'label')} in {_n(_int(result, 'label_sets'), 'label list')}; "
+        f"{_n(_int(result, 'predictions_updated'), 'prediction')} updated"
+    )
+    if result.get("cancelled"):
+        summary += " before cancel"
+    errors = result.get("errors") or []
+    if errors:
+        summary += f"; {_n(len(errors), 'list')} failed to reach iNaturalist"
+    details = _list_details(errors, "Failed, will retry at next start:", error_text)
+    legacy = _int(result, "legacy_predictions_updated")
+    if legacy:
+        details.append(
+            f"{_n(legacy, 'prediction')} older than label-list tracking matched by "
+            "a name every one of your label lists agrees on"
+        )
+    unidentified = result.get("unidentified_labels") or []
+    total = _int(result, "unidentified_labels_total") or len(unidentified)
+    if unidentified:
+        heading = f"{_n(total, 'label')} without a single matching iNaturalist species"
+        if total > len(unidentified):
+            heading += f" (showing {len(unidentified):,})"
+        details += _list_details(unidentified, heading + ":")
+    return summary, details
+
+
 def _extract_masks(result: dict, config: dict) -> tuple[str, list[str]]:
     masked = _int(result, "masked")
     skipped = _int(result, "skipped")
@@ -795,6 +824,7 @@ _DESCRIBERS: dict[str, Callable[[dict, dict], tuple[str, list[str]]]] = {
     "prepare-full-resolution": _prepare_full_resolution,
     "verify-models": _verify_models,
     "fetch-labels": _fetch_labels,
+    "label-list-species-ids": _label_list_species_ids,
     "extract-masks": _extract_masks,
     "develop": _develop,
     "ingest": _ingest,

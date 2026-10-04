@@ -92,11 +92,14 @@ def plan_repairs(conn):
     return changes
 
 
-def apply_repairs(conn, changes):
+def apply_repairs(conn, changes, retire_artifacts=True):
     """Apply the plan atomically, retaining an in-database before/after audit.
 
     Optimistic row checks reject a plan if predictions changed after preview.
     The caller owns the transaction; no partial commit can escape here.
+    ``retire_artifacts`` keeps corrected runs out of portable exports; pass
+    False only when a fresh run in this catalog would write the corrected
+    values itself, so the cached output still matches its fingerprint.
     """
     conn.execute("""CREATE TABLE IF NOT EXISTS species_identity_repairs (
         id INTEGER PRIMARY KEY, prediction_id INTEGER NOT NULL,
@@ -129,11 +132,12 @@ def apply_repairs(conn, changes):
             }), json.dumps(after), change["reason"]),
         )
         # Do not export corrected rows under an old artifact fingerprint.
-        conn.execute(
-            "UPDATE classifier_runs SET runtime_fingerprint = 'legacy' "
-            "WHERE detection_id = ? AND classifier_model = ? AND labels_fingerprint = ?",
-            (change["detection_id"], change["classifier_model"], change["labels_fingerprint"]),
-        )
+        if retire_artifacts:
+            conn.execute(
+                "UPDATE classifier_runs SET runtime_fingerprint = 'legacy' "
+                "WHERE detection_id = ? AND classifier_model = ? AND labels_fingerprint = ?",
+                (change["detection_id"], change["classifier_model"], change["labels_fingerprint"]),
+            )
         count += 1
     if count:
         conn.execute("UPDATE workspaces SET last_group_fingerprint = NULL")

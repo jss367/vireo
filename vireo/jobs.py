@@ -64,6 +64,7 @@ CATALOG_INDEPENDENT_JOB_TYPES = frozenset({
     "download-megadetector",
     "download-model",
     "fetch-labels",
+    "label-list-species-ids",
     "new_images_walk",
     "precompute-embeddings",
     "verify-models",
