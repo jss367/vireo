@@ -93,7 +93,13 @@ class _LinearDecodeFlight:
     def __init__(self):
         self.done = threading.Event()
         self.image = None
-        self.failed = False
+        # Set when the decode (or the followers' snapshot) raised. Followers
+        # re-raise it, as concurrent.futures waiters do, rather than retrying:
+        # a retry from N parked followers would run N more decodes one after
+        # another, each likely to fail the same way. load_image turns it into
+        # a logged None per request, and the editor's next slider move asks
+        # again.
+        self.error = None
         # Followers parked on this decode; only read or changed under
         # _linear_cache_lock.
         self.waiters = 0
@@ -123,10 +129,8 @@ def _load_linear_cached(path, max_size):
         if leader:
             break
         flight.done.wait()
-        if flight.failed:
-            # Retry independently: rejoining the flight loop would serialize
-            # all followers behind repeated slow failures.
-            return _decode_linear_sized(path, max_size)
+        if flight.error is not None:
+            raise flight.error
         return None if flight.image is None else flight.image.copy()
     image = None
     try:
@@ -136,14 +140,14 @@ def _load_linear_cached(path, max_size):
             # any followers read this copy.
             flight.image = image.copy()
             _store_linear_cache(key, flight.image)
-    except BaseException:
-        flight.failed = True
+    except BaseException as exc:
+        flight.error = exc
         raise
     finally:
         try:
             with _linear_cache_lock:
                 snapshot_needed = (
-                    not flight.failed and image is not None
+                    flight.error is None and image is not None
                     and flight.image is None and flight.waiters
                 )
                 if not snapshot_needed:
@@ -154,8 +158,8 @@ def _load_linear_cached(path, max_size):
                 # Keep the flight discoverable during this potentially large
                 # copy so later readers park on the same independent snapshot.
                 flight.image = image.copy()
-        except BaseException:
-            flight.failed = True
+        except BaseException as exc:
+            flight.error = exc
             raise
         finally:
             with _linear_cache_lock:

@@ -218,43 +218,48 @@ def test_concurrent_sized_raw_misses_share_one_decode(dng, monkeypatch):
     assert image_loader._linear_inflight == {}
 
 
-def test_sized_raw_follower_decodes_itself_when_leader_raises(dng, monkeypatch):
+def test_sized_raw_followers_share_the_leader_failure(dng, monkeypatch):
+    """Parked followers must not retry a failed decode one after another."""
     import threading
 
     monkeypatch.setattr(image_loader, '_linear_cache', image_loader.OrderedDict())
     monkeypatch.setattr(image_loader, '_linear_inflight', {})
-    original = image_loader._postprocess_raw_linear
     calls = []
     started = threading.Event()
     release = threading.Event()
 
     def decode(raw):
         calls.append(True)
-        if len(calls) == 1:
-            started.set()
-            assert release.wait(10)
-            raise MemoryError('leader decode failed')
-        return original(raw)
+        started.set()
+        assert release.wait(10)
+        raise MemoryError('leader decode failed')
 
     monkeypatch.setattr(image_loader, '_postprocess_raw_linear', decode)
-    waiting = _signal_when_flight_has_waiters(monkeypatch, 1)
-    results = {}
+    waiting = _signal_when_flight_has_waiters(monkeypatch, 3)
+    results = [object()] * 4
 
-    def load(name):
-        results[name] = load_image(dng, max_size=128, raw_decode=RAW_DECODE_LINEAR)
+    def load(i):
+        results[i] = load_image(dng, max_size=128, raw_decode=RAW_DECODE_LINEAR)
 
-    leader = threading.Thread(target=load, args=('leader',))
+    leader = threading.Thread(target=load, args=(0,))
     leader.start()
     assert started.wait(10)
-    follower = threading.Thread(target=load, args=('follower',))
-    follower.start()
+    followers = [threading.Thread(target=load, args=(i,)) for i in range(1, 4)]
+    for t in followers:
+        t.start()
     assert waiting.wait(10)
     release.set()
-    leader.join(10)
-    follower.join(10)
-    assert results['leader'] is None  # load_image logs the failure
-    assert isinstance(results['follower'], FloatImage)
+    for t in [leader, *followers]:
+        t.join(10)
+        assert not t.is_alive()
+    assert len(calls) == 1
+    assert results == [None] * 4  # load_image logs each request's failure
     assert image_loader._linear_inflight == {}
+
+    # The failure is not cached: the next request decodes again.
+    release.set()
+    load(0)
+    assert len(calls) == 2
 
 
 def test_lone_decode_above_the_entry_ceiling_is_not_duplicated(dng, monkeypatch):
@@ -515,58 +520,4 @@ def test_late_follower_joins_during_uncacheable_snapshot_copy(dng, monkeypatch):
     assert len(results) == 3
     assert len({id(image.pixels) for image in results}) == 3
     assert not image_loader._linear_cache
-    assert not image_loader._linear_inflight
-
-
-def test_failed_flight_followers_retry_independently(dng, monkeypatch):
-    """All failed-flight followers can retry together without a new flight queue."""
-    import threading
-
-    monkeypatch.setattr(image_loader, '_linear_cache', image_loader.OrderedDict())
-    monkeypatch.setattr(image_loader, '_linear_inflight', {})
-    started, release = threading.Event(), threading.Event()
-    retry_barrier = threading.Barrier(3)
-    calls, results, errors = [], {}, {}
-    call_lock = threading.Lock()
-
-    def decode(path, max_size):
-        with call_lock:
-            calls.append(True)
-            leader = len(calls) == 1
-        if leader:
-            started.set()
-            assert release.wait(10)
-            raise MemoryError('leader failed')
-        retry_barrier.wait(timeout=3)
-        return FloatImage(np.ones((2, 2, 3), dtype=np.float32))
-
-    monkeypatch.setattr(image_loader, '_decode_linear_sized', decode)
-    waiting = _signal_when_flight_has_waiters(monkeypatch, 3)
-
-    def load(name):
-        try:
-            results[name] = image_loader._load_linear_cached(dng, 128)
-        except BaseException as exc:
-            errors[name] = exc
-
-    threads = []
-    try:
-        leader = threading.Thread(target=load, args=('leader',))
-        threads.append(leader)
-        leader.start()
-        assert started.wait(10)
-        for name in ('one', 'two', 'three'):
-            follower = threading.Thread(target=load, args=(name,))
-            threads.append(follower)
-            follower.start()
-        assert waiting.wait(10)
-    finally:
-        release.set()
-        for thread in threads:
-            thread.join(10)
-    assert all(not thread.is_alive() for thread in threads)
-    assert set(errors) == {'leader'}
-    assert isinstance(errors['leader'], MemoryError)
-    assert set(results) == {'one', 'two', 'three'}
-    assert len(calls) == 4
     assert not image_loader._linear_inflight
