@@ -50,7 +50,17 @@ def test_partition_exclusion_happens_before_feature_loading(library,tmp_path):
 
 
 def test_paired_run_uses_identical_read_only_scope(library,tmp_path,monkeypatch):
+    from encounter_eval import continuity_compare
     from encounter_eval.common import digest
+
+    # A self-contained baseline keeps the test independent of Git history depth
+    # and of whether the proposed feature loader has already been committed.
+    original_output = continuity_compare.subprocess.check_output
+    def source_output(command, **kwargs):
+        if command[:2] == ['git', 'show']:
+            return b'from pipeline import load_photo_features\n'
+        return original_output(command, **kwargs)
+    monkeypatch.setattr(continuity_compare.subprocess, 'check_output', source_output)
 
     monkeypatch.setenv('HOME',str(tmp_path))
     registry=tmp_path/'.vireo/encounter-evaluation/runs'/f'split-membership-{digest([str(library.resolve()),1])[:16]}.json'

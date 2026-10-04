@@ -118,7 +118,7 @@ rules and the same existing reference labels. It materializes training and
 development sessions only; held-out feature bundles are never loaded.
 
 ```sh
-python -m encounter_eval.continuity_compare --baseline-revision HEAD \
+python -m encounter_eval.continuity_compare --baseline-revision REVISION_BEFORE_REPAIR \
   --scope 22 --scope 5:2026-10-03 \
   --output ~/.vireo/encounter-evaluation/runs/encounter-continuity-comparison
 ```
@@ -308,3 +308,85 @@ drop, duplicate, or reorder photos. Keep scoring in `scoring.py` and search in
 `runner.py`. Once a candidate is ready to ship, move the inference code into
 `vireo/` and have the tool call that shared implementation; retain search and
 reporting here.
+
+## Preserve grouping reviews and check future changes
+
+Export decisions from the grouping comparison page, then import them into a
+private, cumulative dataset outside Git:
+
+```sh
+python -m encounter_eval.grouping_dataset import \
+  --dataset ~/.vireo/encounter-evaluation/review/grouping-reviews.sqlite \
+  --run /path/to/paired-comparison \
+  --decisions ~/Downloads/'Encounter grouping review decisions.json'
+python -m encounter_eval.grouping_dataset check \
+  --dataset ~/.vireo/encounter-evaluation/review/grouping-reviews.sqlite \
+  --features after --output /path/to/grouping-regression-results.json
+```
+
+The SQLite dataset retains the exact browser export, review timestamps and
+history, photo identities, full session evidence before and after feature
+loading, reference labels, partition assignments, and algorithm/configuration
+provenance. It does not depend on the source run remaining on disk. Reimporting
+an identical export is a no-op; importing an older review preserves history
+without replacing the newer judgment. Only training/development cases qualify.
+
+A “Grouping looks right” review specifies joins and splits **inside** the
+reviewed sequence. Neither outside boundary is inferred. “Needs a split”,
+“Should join more”, and “Unsure” are retained but require exact boundary review
+before becoming scored reference answers. Grouping approval does not confirm
+species labels or establish individual bird identity. Overlapping review cases
+are reported as cases, not as independent accuracy samples.
+
+Use `--features before` to replay grouping on the original feature snapshot;
+`after` replays the proposed snapshot. Both modes run the current grouping code
+with captured settings. Use `--params overrides.json` for explicit production
+grouping parameter experiments. These frozen checks isolate grouping changes;
+they do not rerun detector/classifier models or feature preparation.
+
+To also exercise the current native feature loader on the same photo identities:
+
+```sh
+python -m encounter_eval.grouping_dataset check \
+  --dataset ~/.vireo/encounter-evaluation/review/grouping-reviews.sqlite \
+  --features live --db ~/.vireo/vireo.db \
+  --output /path/to/live-grouping-regression-results.json
+```
+
+Live mode is read-only, excludes photo tags from model features, verifies photo
+identity/workspace membership, and uses the captured settings. Cached model
+predictions may have changed since capture; this is explicitly distinguished
+from frozen replay. Checks exit unsuccessfully on any violated reviewed
+boundary, or when no cases can be scored. Outputs record the current source
+signature. Keep this curated regression dataset separate from estimates of
+library-wide accuracy and from a final untouched test set.
+
+## Next continuity experiment
+
+The first reviewed comparison covered 54,739 photos: all 21 changed sequences
+were accepted by the photographer, while 348 short unresolved interruptions
+remained candidates for inspection. This supports the narrow repair, not a
+claim that the current rules recover all valid encounters.
+
+1. Diagnose the remaining candidates using their retained evidence: absent
+   whole-image predictions, classifier disagreement or weak confidence, absent
+   animal boxes, motion that fails box overlap, and ambiguous multiple subjects.
+   Record every failed condition; a case can fail more than one.
+2. Sample across species, capture days, and failure conditions. Include sequences
+   that must remain separate and a seeded sample of unchanged groups. Obtain
+   explicit internal boundaries; do not convert an imprecise “join more” or
+   “needs a split” judgment into invented reference boundaries.
+3. Test one relaxation at a time on training/development data. Start with motion
+   tolerance when independent species evidence is strong, then confidence/margin
+   sensitivity; longer time spans and longer dropout runs are separate trials.
+   Preserve confident conflicting-species and multiple-subject protections.
+4. Require the accepted-grouping regression checks to pass, and report both
+   recovered joins and incorrect merges on the newly reviewed cases. Review
+   newly changed sequences before accepting a broader variant. Do not optimize
+   for fewer groups alone.
+5. Freeze the selected algorithm and settings before final held-out evaluation.
+   Record any final-test use and reserve fresh untouched data for later releases.
+
+The reviewed sequence dataset measures grouping behavior. Keep species-label
+corrections in the species review queue, with Vireo tag updates enabled when
+requested; neither kind of review should silently substitute for the other.
