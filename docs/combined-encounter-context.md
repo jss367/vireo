@@ -92,7 +92,9 @@ The selected combination now runs by default in `load_photo_features`, with
 no new setting or opt-in. The existing ability to disable weak-detection rescue
 still applies. It reuses cached model evidence; no new photos or model runs are
 required. Grouping cache version 3 makes the next grouping run recompute results
-under these rules. Normal burst segmentation remains unchanged.
+under these rules. Normal burst segmentation remains unchanged: the burst
+time slider controls bursts within an encounter, while the new encounter
+continuity window stays at ten seconds.
 
 The implementation preserves the earlier narrow repairs, then evaluates the
 longer classifier-supported rule and the neighboring-context rule against the
