@@ -125,6 +125,8 @@ def test_browse_export_warns_before_numbering_collision_names(app_and_db):
     assert "'/api/jobs/export/preflight'" in html
     assert "function buildExportPreflightRequest()" in html
     assert "VireoExportCollisions.acknowledged(preflight)" in html
+    # The modal follows the job so a failure reaches the user, not just the jobs panel.
+    assert "VireoExportJob.watch(data.job_id);" in html
     assert "filenameSpan(rename.export_name)" in html
     assert "var exportRequestGeneration = 0;" in html
     assert "requestGeneration !== exportRequestGeneration" in html

@@ -397,6 +397,29 @@ def test_export_photos_defaults_to_original_folder(export_env):
     assert os.path.isfile(env["src"] / "bird1_2.jpg")
 
 
+def test_export_beside_unreachable_original_folder_names_the_folder(export_env):
+    """An offline original folder fails the photo with the folder's path, so
+    the toast the user reads says which drive to reconnect, and the export
+    does not recreate the folder on the local disk."""
+    env = export_env
+    offline = env["tmp_path"] / "offline-src"
+    os.rename(env["src"], offline)
+
+    result = export_photos(
+        db=env["db"],
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination="",
+        options={"naming_template": "{original}"},
+    )
+
+    assert result["exported"] == 0
+    assert result["errors"] == [
+        f"bird1.jpg: original folder is not reachable ({env['src']})"
+    ]
+    assert not env["src"].exists()
+
+
 def test_export_photos_reports_every_original_folder(export_env):
     """Beside-original exports expose every resolved output directory."""
     env = export_env

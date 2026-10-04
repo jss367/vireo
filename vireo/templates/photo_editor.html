@@ -1169,6 +1169,7 @@ body {
 <script src="/static/vireo-folder-browser.js"></script>
 <script src="/static/vireo-export-presets.js"></script>
 <script src="/static/vireo-export-collisions.js"></script>
+<script src="/static/vireo-export-job.js"></script>
 <link rel="stylesheet" href="/static/vireo-batch-edits.css">
 <script src="/static/vireo-batch-edits.js"></script>
 
@@ -3828,6 +3829,7 @@ async function startExport() {
     setExportDismissible(true);
     closeExportModal();
     if (typeof showToast === 'function') showToast('Export started', 'info');
+    VireoExportJob.watch(data.job_id);
   } catch (error) {
     if (requestGeneration !== editorExportRequestGeneration) return;
     setExportDismissible(true);

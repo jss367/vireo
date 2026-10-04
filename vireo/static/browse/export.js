@@ -451,6 +451,7 @@ async function startExport() {
     setExportDismissible(true);
     closeExportModal();
     showToast('Export started (' + count + ' photos)', 'info');
+    VireoExportJob.watch(data.job_id);
   } catch(err) {
     if (requestGeneration !== exportRequestGeneration) return;
     setExportDismissible(true);

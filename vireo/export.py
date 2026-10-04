@@ -721,7 +721,10 @@ def export_photos(db, vireo_dir, photo_ids, destination=None, options=None,
         if not destination and not os.path.isdir(destination_base):
             # Do not recreate an offline volume's catalog path on the local
             # filesystem merely because a working copy can still be read.
-            errors.append(f"{photo['filename']}: original folder unavailable")
+            errors.append(
+                f"{photo['filename']}: original folder is not reachable "
+                f"({destination_base})"
+            )
             if progress_cb:
                 progress_cb(i + 1, len(photo_ids), photo["filename"])
             continue
