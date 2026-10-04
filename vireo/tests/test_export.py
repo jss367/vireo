@@ -711,12 +711,13 @@ def test_export_metadata_batch_uses_utf8_input(tmp_path, monkeypatch):
 
     monkeypatch.setattr(export_module.subprocess, "run", fake_run)
 
-    exported, errors = export_module._write_export_metadata_batch([
+    exported, errors, successes = export_module._write_export_metadata_batch([
         (str(out_path), out_path.name, ["-XMP-dc:Subject=Mésange bleue"]),
     ])
 
     assert exported == 1
     assert errors == []
+    assert successes == [str(out_path)]
     assert out_path.exists()
 
 
@@ -748,13 +749,14 @@ def test_export_metadata_batch_cleans_up_process_failures(
 
     monkeypatch.setattr(export_module.subprocess, "run", fail_run)
 
-    exported, errors = export_module._write_export_metadata_batch([
+    exported, errors, successes = export_module._write_export_metadata_batch([
         (str(out_path), out_path.name, ["-XMP-dc:Subject=Bird"]),
     ])
 
     assert exported == 0
     assert len(errors) == 1
     assert expected_detail in errors[0]
+    assert successes == []
     assert not out_path.exists()
 
 
@@ -3758,7 +3760,7 @@ def test_export_metadata_subprocess_can_be_cancelled(tmp_path, monkeypatch, canc
     monkeypatch.setattr(metadata, "find_exiftool", lambda: "test-exiftool")
     monkeypatch.setattr(metadata, "_exiftool_command", lambda _: [sys.executable, "-c", script])
     started = time.monotonic()
-    count, errors = export_module._write_export_metadata_batch(
+    count, errors, successes = export_module._write_export_metadata_batch(
         [(str(output), output.name, ["-XMP-dc:Subject=Bird"])],
         cancel_check=lambda: cancel and ready.exists(),
     )
@@ -3766,6 +3768,7 @@ def test_export_metadata_subprocess_can_be_cancelled(tmp_path, monkeypatch, canc
     assert time.monotonic() - started < 10
     assert count == (0 if cancel else 1)
     assert bool(errors) == cancel
+    assert successes == ([] if cancel else [str(output)])
     assert output.exists() != cancel
 
 
@@ -3792,7 +3795,7 @@ def test_export_keeps_metadata_subprocess_polling_cancel_only(export_env, monkey
         assert cancel_check() is False
         assert cancel_check() is False
         metadata_running = False
-        return len(jobs), []
+        return len(jobs), [], [out_path for out_path, _f, _a in jobs]
 
     monkeypatch.setattr(export_module, "_write_export_metadata_batch", write_metadata)
     result = export_photos(
@@ -3855,4 +3858,29 @@ def test_export_does_not_report_renames_for_failed_metadata(export_env, monkeypa
     assert result["renamed"] == 0
     assert result["renames"] == []
     assert not (occupied.parent / "bird1_2.jpg").exists()
+    assert occupied.read_bytes() == b"existing"
+
+
+def test_export_does_not_report_renames_when_failed_cleanup_leaves_file(export_env, monkeypatch):
+    """A failed-metadata output whose cleanup unlink was swallowed (e.g.
+    Windows file lock) must still be excluded from reported renames so
+    the summary never reads '0 photos exported, 1 file renamed'."""
+    env = export_env
+    occupied = Path(env["dest"]) / "bird1.jpg"
+    occupied.parent.mkdir(parents=True, exist_ok=True)
+    occupied.write_bytes(b"existing")
+
+    def failing_batch(jobs, cancel_check=None):
+        # Metadata failed, but every unlink was swallowed, so the renamed
+        # output still exists on disk when export_photos builds the summary.
+        return 0, [f"{f}: metadata failed" for _p, f, _a in jobs], []
+
+    monkeypatch.setattr(export_mod, "_write_export_metadata_batch", failing_batch)
+    result = export_photos(env["db"], env["vireo_dir"], [env["p1"]], env["dest"],
+                           {"naming_template": "{original}", "metadata_fields": ["species"]})
+    assert result["exported"] == 0
+    assert result["errors"]
+    assert result["renamed"] == 0
+    assert result["renames"] == []
+    assert (occupied.parent / "bird1_2.jpg").exists()
     assert occupied.read_bytes() == b"existing"

@@ -828,7 +828,7 @@ def export_photos(db, vireo_dir, photo_ids, destination=None, options=None,
             progress_cb(i + 1, len(photo_ids), photo["filename"])
 
     if metadata_jobs:
-        metadata_exported, metadata_errors = _write_export_metadata_batch(
+        metadata_exported, metadata_errors, metadata_success_paths = _write_export_metadata_batch(
             metadata_jobs, cancel_check=cancel_only_check or cancel_check,
         )
         # The subprocess has exited, so a pending pause can now park safely.
@@ -837,11 +837,19 @@ def export_photos(db, vireo_dir, photo_ids, destination=None, options=None,
             cancel_check()
         exported += metadata_exported
         errors.extend(metadata_errors)
+        success_set = set(metadata_success_paths)
+        # A failed metadata job's output cannot be reported as a rename even
+        # when its cleanup unlink was silently swallowed (locked file on
+        # Windows, destination permissions change). Track metadata success
+        # explicitly rather than relying on os.path.isfile as a proxy.
+        failed_metadata_paths = {out_path for out_path, _f, _a in metadata_jobs} - success_set
+        if failed_metadata_paths:
+            renamed_outputs = [r for r in renamed_outputs if r["path"] not in failed_metadata_paths]
         if exported_files is not None:
             exported_files.extend(
                 out_path
                 for out_path, _filename, _args in metadata_jobs
-                if os.path.isfile(out_path)
+                if out_path in success_set
             )
 
     # For the common one-directory case, make the long-standing singular field
@@ -854,7 +862,6 @@ def export_photos(db, vireo_dir, photo_ids, destination=None, options=None,
         if len(resolved_destinations) == 1
         else destination
     )
-    renamed_outputs = [rename for rename in renamed_outputs if os.path.isfile(rename["path"])]
     result = {
         "exported": exported,
         "renamed": len(renamed_outputs),
@@ -1167,10 +1174,12 @@ def _write_export_metadata_batch(jobs, cancel_check=None):
     error_lines = [line.strip() for line in result.stderr.splitlines() if line.strip()]
     exported = 0
     errors = []
+    successful_paths = []
     for index, (out_path, filename, _args) in enumerate(jobs, start=1):
         status = statuses.get(index)
         if not invocation_failed and status == 0:
             exported += 1
+            successful_paths.append(out_path)
             continue
         detail = next(
             (line for line in error_lines if out_path in line),
@@ -1179,7 +1188,7 @@ def _write_export_metadata_batch(jobs, cancel_check=None):
         with contextlib.suppress(OSError):
             os.unlink(out_path)
         errors.append(f"{filename}: {detail}")
-    return exported, errors
+    return exported, errors, successful_paths
 
 
 def _fail_export_metadata_jobs(jobs, detail):
@@ -1189,7 +1198,7 @@ def _fail_export_metadata_jobs(jobs, detail):
         with contextlib.suppress(OSError):
             os.unlink(out_path)
         errors.append(f"{filename}: {detail}")
-    return 0, errors
+    return 0, errors, []
 
 
 def _recipe_result_dimensions(width, height, recipe):

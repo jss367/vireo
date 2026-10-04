@@ -854,7 +854,7 @@ def test_export_observes_pause_after_metadata_finishes(
         # The live subprocess's probe must not park its parent.
         assert cancel_check() is False
         reaped.set()
-        return len(jobs), []
+        return len(jobs), [], [out_path for out_path, _f, _a in jobs]
 
     monkeypatch.setattr(export, "_write_export_metadata_batch", metadata_batch)
     response = client.post("/api/jobs/export", json={
