@@ -261,6 +261,12 @@ def _suppress_isolated(photos, evidence, animals, config):
         ]
         if any(d is None for d in detections):
             continue
+        # Display-level top K can hide an agreeing second classifier. Keep
+        # corroborated crop classifications using the complete detection rows.
+        middle_models = {entry[2] if len(entry) > 2 else "unknown"
+                         for entry in detections[1].get("predictions", [])}
+        if len(middle_models) != 1:
+            continue
         overlaps = [
             _overlap(detections[0], detections[1]),
             _overlap(detections[1], detections[2]),

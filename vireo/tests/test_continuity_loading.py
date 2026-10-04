@@ -98,6 +98,21 @@ def test_additional_evidence_respects_latest_and_pinned_label_sets(sequence_db):
     assert load_photo_features(db, effective_config={}, labels_fingerprint="legacy")[1]["subject_uncertain"]
 
 
+@pytest.mark.parametrize("top_k", [1, 5])
+def test_hidden_agreeing_crop_model_vetoes_isolated_repair(sequence_db, top_k):
+    from pipeline import load_photo_features, run_grouping
+
+    db, ids = sequence_db
+    for i, pid in enumerate(ids):
+        did = classify(db, pid, 0.7, "Chickadee" if i == 1 else "Nuthatch", 0.828 if i == 1 else 0.99)
+        if i == 1:
+            db.add_prediction(did, "Chickadee", 0.827, "independent-classifier")
+    photos = load_photo_features(db, config={"top_k_predictions": top_k}, effective_config={})
+    assert "isolated_species_context" not in photos[1]
+    assert photos[1]["species_top5"][0][0] == "Chickadee"
+    assert len(run_grouping(photos)) == 3
+
+
 def test_partial_scope_never_borrows_an_out_of_scope_anchor(sequence_db):
     from pipeline import load_photo_features
 
