@@ -66,11 +66,20 @@ def test_show_mask_before_any_local_adjustment(live_server, page, masked_photo):
     expect(overlay).to_be_hidden()
 
 
-def test_feather_only_does_not_freeze_an_obsolete_active_mask(live_server, page, masked_photo, tmp_path):
+@pytest.mark.parametrize('zero_region_first', [False, True])
+def test_feather_only_does_not_freeze_an_obsolete_active_mask(
+    live_server, page, masked_photo, tmp_path, zero_region_first,
+):
     page.goto(f"{live_server['url']}/edit/{masked_photo}")
     page.wait_for_function('!editorState.loading')
     expect(page.locator('#localBand')).to_be_visible()
     page.locator('#maskOverlayBtn').click()
+    if zero_region_first:
+        page.evaluate("setLocalAdjustment('subject', 'exposure', 1, true)")
+        page.wait_for_function('!!editorState.recipe.local')
+        page.evaluate("setLocalAdjustment('subject', 'exposure', 0, true)")
+        assert page.evaluate('editorState.localMask') is None
+        assert not page.evaluate('!!editorState.recipe.local')
     with page.expect_response(lambda r: '/edit-mask-preview?' in r.url and 'feather=60' in r.url):
         page.locator('#featherRange').evaluate("el => {el.value='60'; el.dispatchEvent(new Event('input', {bubbles:true}));}")
     assert page.evaluate('editorState.localMask') is None
@@ -92,3 +101,23 @@ def test_feather_only_does_not_freeze_an_obsolete_active_mask(live_server, page,
         page.evaluate("setLocalAdjustment('subject', 'exposure', 1, true)")
     frozen_alpha = np.asarray(Image.open(io.BytesIO(frozen.value.body())))[..., 3]
     assert np.array_equal(live_alpha, frozen_alpha)
+
+
+def test_feather_drag_debounces_live_overlay_requests(live_server, page, masked_photo):
+    page.goto(f"{live_server['url']}/edit/{masked_photo}")
+    page.wait_for_function('!editorState.loading')
+    with page.expect_response('**/edit-mask-preview?*'):
+        page.locator('#maskOverlayBtn').click()
+    requests = []
+    page.on('request', lambda request: requests.append(request.url)
+            if '/edit-mask-preview?' in request.url else None)
+    with page.expect_response(lambda r: '/edit-mask-preview?' in r.url and 'feather=80' in r.url):
+        page.locator('#featherRange').evaluate("""el => {
+            for (let v = 1; v <= 80; v++) {
+                el.value = String(v);
+                el.dispatchEvent(new Event('input', {bubbles: true}));
+            }
+        }""")
+    assert len(requests) == 1
+    assert 'feather=80' in requests[0]
+    assert page.evaluate('editorState.localMask') is None

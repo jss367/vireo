@@ -3029,7 +3029,17 @@ function rebuildLocalSection() {
   // Mirror normalize_recipe's canonical region order so the dirty-state
   // comparison stays stable against the server's saved form.
   regions.sort(function(a, b) { return a.region < b.region ? -1 : 1; });
-  if (!regions.length || !editorState.localMask) {
+  if (!regions.length) {
+    delete editorState.recipe.local;
+    // No adjustment retains this snapshot. Preview and the next adjustment
+    // must both use the current active generation, including after zeroing
+    // the last region while a snapshot request is still in flight.
+    editorState.localMask = null;
+    editorState.localMaskPromise = null;
+    editorState.localMaskUpdateSeq++;
+    return;
+  }
+  if (!editorState.localMask) {
     delete editorState.recipe.local;
     return;
   }
@@ -3156,7 +3166,7 @@ function setLocalFeather(raw) {
   // Feather alone previews the live mask. Freeze it only when a region
   // adjustment begins, so the overlay and that adjustment use the same mask.
   if (!editorState.recipe.local && !editorState.localMask) {
-    refreshMaskOverlay();
+    scheduleMaskOverlayRefresh();
     return;
   }
   if (editorState.localMask) {
