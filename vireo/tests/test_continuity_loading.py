@@ -158,3 +158,27 @@ def test_conflicting_independent_evidence_vetoes_new_weak_crop_rescue(sequence_d
         db.add_prediction(did, "Bluebird", 0.99, "classifier")
         db.add_prediction(second, "Other bird", 0.99, "classifier")
     assert load_photo_features(db, effective_config={})[1]["subject_absent"]
+
+
+def test_default_long_context_loads_real_evidence_and_preserves_tags(sequence_db):
+    from pipeline import load_photo_features, run_grouping, serialize_results
+
+    db, ids = sequence_db
+    # Five seconds is beyond the old three-second evidence preselection.
+    db.conn.execute("UPDATE photos SET timestamp=? WHERE id=?", ("2026-01-01T00:00:05", ids[-1]))
+    db.conn.commit()
+    for i, pid in enumerate(ids):
+        classify(db, pid, 0.06 if i == 1 else 0.8, score=0.4 if i == 1 else 0.99)
+    original = db.conn.execute("SELECT * FROM predictions ORDER BY id").fetchall()
+    photos = load_photo_features(db, effective_config={})
+    middle = photos[1]
+    assert middle["subject_uncertain"] and not middle["subject_absent"]
+    assert middle["weak_detection_context"]["support"] == "anchor_context"
+    assert middle["grouping_species_top5"] == []
+    groups = run_grouping(photos, emit_trace=True)
+    assert len(groups) == 1 and groups[0]["species"][0] == "Bluebird"
+    saved = serialize_results({"photos": photos, "encounters": groups, "summary": {}})
+    assert saved["photos"][1]["weak_detection_context"] == middle["weak_detection_context"]
+    assert db.conn.execute("SELECT * FROM predictions ORDER BY id").fetchall() == original
+    assert all(not db.get_photo_keywords(pid) for pid in ids)
+    assert load_photo_features(db, effective_config={}, photo_ids=ids[1:])[0]["subject_absent"]

@@ -1,6 +1,6 @@
 """Offline continuity challengers; these rules are never loaded by the app.
 
-Start with the merged production repairs, then test one bounded relaxation.
+Start with the version 2 production repairs, then test one bounded relaxation.
 No reference labels are accepted by this module.
 """
 
@@ -222,8 +222,8 @@ def _isolated(photos, evidence, animals, config, params):
 
 
 def prepare_baseline(photos, config):
-    """Apply the exact merged rules to a retained pre-merge feature snapshot."""
-    baseline = apply_continuity(photos, config)
+    """Keep the version 2 baseline fixed even after a challenger ships."""
+    baseline = apply_continuity(photos, config, historical_baseline=True)
     evidence, identities = native_evidence(photos)
     from encounter_continuity import _animal_detections
 
