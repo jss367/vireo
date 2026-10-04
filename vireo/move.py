@@ -3810,6 +3810,10 @@ class _FolderMove:
             ]}
         if returncode != 0:
             return {"moved": 0, "errors": [f"rsync failed: {stderr.strip()}"]}
+        # rsync emits only transferred files. A successful merge also handled
+        # the already-present files (and deliberately excluded Finder metadata),
+        # so finish the phase's source-file count before entering verification.
+        self.progress(total_files, total_files, "", "Copying files")
         return None
 
     def plan_mtime_corrections(self):

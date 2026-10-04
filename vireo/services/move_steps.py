@@ -66,6 +66,7 @@ class MoveSteps:
         self._job_id = job["id"]
         self._order = [step["id"] for step in steps]
         self._status = {step_id: "pending" for step_id in self._order}
+        self._errors = {}
         self._phases = phases
         self._active = None
         self._last_event = 0.0
@@ -110,16 +111,27 @@ class MoveSteps:
                     fields["summary"] = summary
                 if error:
                     fields.update(error=error, error_count=1)
+                    self._errors[step_id] = error
                 if fields:
                     self._runner.update_step(self._job_id, step_id, **fields)
 
     def fail(self, message, *, status="failed"):
-        """Mark the step that was running (or the next one due) failed, or
-        ``status``."""
+        """Mark the active step failed, or retain a visible post-transfer error.
+
+        Completed physical work stays completed if later bookkeeping fails;
+        attach that error to the last step without losing its cleanup warning.
+        """
         with self._lock:
             step_id = self._active or next(
                 (s for s in self._order if self._status[s] == "pending"), None)
             if step_id is None:
+                if self._order:
+                    last = self._order[-1]
+                    prior = self._errors.get(last)
+                    error = (prior + "\n" if prior else "") + message
+                    self._runner.update_step(self._job_id, last, error=error,
+                                             error_count=2 if prior else 1)
+                    self._errors[last] = error
                 return
             if self._status[step_id] == "pending":
                 self._set_status(step_id, "running")

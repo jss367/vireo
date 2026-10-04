@@ -5878,6 +5878,39 @@ def test_move_folder_counts_files_through_verification(move_env, merge):
     assert set(counts("Removing originals")) == {(0, 0)}
 
 
+@pytest.mark.parametrize("existing", [1, 3])
+def test_merge_copy_progress_finishes_with_skipped_files(move_env, monkeypatch, existing):
+    import shutil
+
+    import move
+
+    env = move_env
+    destination = env["dst"] / "src"
+    destination.mkdir()
+    files = sorted(env["src"].iterdir())
+    for path in files[:existing]:
+        shutil.copy2(path, destination / path.name)
+
+    def resume(src, dest, flags, total, progress, **kwargs):
+        assert "--ignore-existing" in flags
+        copied = 0
+        for path in files:
+            if not (destination / path.name).exists():
+                shutil.copy2(path, destination / path.name)
+                copied += 1
+                progress(copied, total, path.name, "Copying files")
+        return 0, "", False
+
+    monkeypatch.setattr(move, "_run_rsync_streamed", resume)
+    calls = []
+    result = move.move_folder(env["db"], env["fid_src"], str(env["dst"]), merge=True,
+                              progress_cb=lambda *args: calls.append(args))
+    assert not result["errors"]
+    copy = [(cur, total) for cur, total, _, phase in calls if phase == "Copying files"]
+    assert copy[0] == (0, 3) and copy[-1] == (3, 3)
+    assert not env["src"].exists()
+
+
 def test_move_folder_progress_shutil_fallback(move_env, monkeypatch):
     """When rsync is unavailable, the shutil fallback still reports per-file
     copy progress through the same phase contract."""

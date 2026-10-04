@@ -1306,6 +1306,9 @@ def create_imports_blueprint(
                                 thread_db, progress, sync_job_lock,
                                 folder_ids) if sync_first else (0, set())
 
+                            # Transfer preflight can fail before move_folder's
+                            # first callback. The successful sync is already over.
+                            progress(0, 0, "", "Checking destination")
                             result = send_pending_archive(
                                 thread_db, archive, vireo_dir=os.path.dirname(config["THUMB_CACHE_DIR"]),
                                 guard_folder=guard_move_folder, progress_cb=progress,
