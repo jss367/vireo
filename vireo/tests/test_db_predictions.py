@@ -443,9 +443,10 @@ def test_top_prediction_for_photo(db, cat):
     db.add_prediction(high, "Robin", 0.6, "m1", taxonomy={"scientific_name": "T. m."})
     db.add_prediction(low, "Hawk", 0.95, "m1")
     top = db.get_top_prediction_for_photo(p0)
-    assert tuple(top) == ("Hawk", None, 0.95, low)
+    # Provenance rides along so readers can tell a guessed binomial from evidence.
+    assert tuple(top) == ("Hawk", None, 0.95, low, "m1", "legacy", None)
     top = db.get_top_prediction_for_photo(p0, min_detector_confidence=0.5)
-    assert tuple(top) == ("Robin", "T. m.", 0.6, high)
+    assert tuple(top) == ("Robin", "T. m.", 0.6, high, "m1", "legacy", None)
     assert db.get_top_prediction_for_photo(cat["p"][1]) is None
 
 

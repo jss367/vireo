@@ -100,10 +100,6 @@ def classification_artifact(candidates=None, classifier_runtime=None,
         "runtime_fingerprint": classifier_runtime,
         "input_fingerprint": input_fp,
         "input": input_block,
-        "output_enrichment": {
-            "taxonomy_identity": "no-tax",
-            "inferred_taxonomy_repair": "inferred_taxonomy_repair:v1",
-        },
         "completed": True,
         "subjects": subjects,
     }
@@ -2331,71 +2327,3 @@ def test_concurrent_trust_records_keep_every_runtime(tmp_path, monkeypatch):
         thread.join()
     detector, _classifier = real_read(ArtifactStore(root))
     assert detector == set(runtimes)
-
-
-def test_pre_identity_repair_artifact_cannot_restore_wrong_binomial(tmp_path, monkeypatch):
-    import computation_cache
-    from species_identity_repair import INFERRED_TAXONOMY_MARKER
-
-    db, _, _ = _database_with_photo(tmp_path / "db.db", "bird.jpg")
-    db.upsert_labels_fingerprint("3" * 12, "L", [], 1, full_fingerprint="3" * 64)
-    db.set_meta(INFERRED_TAXONOMY_MARKER, "1")
-    identity = {"model": "bioclip-2.5", "weights_sha256": "4" * 64}
-    monkeypatch.setattr(computation_cache, "_local_classifier_runtimes",
-                        lambda *args: [identity])
-    monkeypatch.setattr(computation_cache, "local_taxonomy_identity", lambda: "no-tax")
-    fingerprint = computation_cache.runtime_fingerprint
-
-    def pre_repair_fingerprint(recipe):
-        recipe["output_enrichment"].pop("inferred_taxonomy_repair", None)
-        return fingerprint(recipe)
-
-    # Build the actual prior enrichment identity, which lacked this version.
-    with monkeypatch.context() as old:
-        old.setattr(computation_cache, "runtime_fingerprint", pre_repair_fingerprint)
-        obsolete_runtime = computation_cache.classifier_runtime_fingerprint(
-            identity, "3" * 64, RUNTIME,
-        )
-    artifact = classification_artifact(classifier_runtime=obsolete_runtime, candidates=[{
-        "species": "Lilac-crowned Amazon", "confidence": .9,
-        "taxonomy": {"scientific_name": "Amazona rhodocorytha"},
-    }])
-    artifact.pop("output_enrichment", None)
-    result = materialize_artifacts(db, [detection_artifact(), artifact], known_runtimes={RUNTIME},
-                                   known_classifier_runtimes={obsolete_runtime})
-    assert result["unknown_classifier_runtime"] == 1
-    assert result["classifier_runs_applied"] == 0
-    assert db.conn.execute("SELECT COUNT(*) FROM predictions").fetchone()[0] == 0
-    assert db.get_meta(INFERRED_TAXONOMY_MARKER) == "1"
-
-    # The same installed classifier's new enrichment identity is recognized.
-    current_runtime = computation_cache.classifier_runtime_fingerprint(identity, "3" * 64, RUNTIME)
-    current = classification_artifact(classifier_runtime=current_runtime, candidates=[{
-        "species": "Lilac-crowned Amazon", "confidence": .9,
-        "taxonomy": {"scientific_name": "Amazona finschi"},
-    }])
-    applied = materialize_artifacts(db, [detection_artifact(), current], known_runtimes={RUNTIME})
-    assert applied["classifier_runs_applied"] == 1
-    assert db.conn.execute("SELECT scientific_name FROM predictions").fetchone()[0] == "Amazona finschi"
-
-
-def test_persisted_trust_cannot_restore_pre_repair_binomial(tmp_path):
-    from computation_cache import materialize_local_store
-    from species_identity_repair import INFERRED_TAXONOMY_MARKER
-
-    db, _, _ = _database_with_photo(tmp_path / "db.db", "bird.jpg")
-    db.upsert_labels_fingerprint("3" * 12, "L", [], 1, full_fingerprint="3" * 64)
-    db.set_meta(INFERRED_TAXONOMY_MARKER, "1")
-    store = ArtifactStore(tmp_path / "cache")
-    artifact = classification_artifact(candidates=[{
-        "species": "Lilac-crowned Amazon", "confidence": .9,
-        "taxonomy": {"scientific_name": "Amazona rhodocorytha"},
-    }])
-    artifact.pop("output_enrichment", None)
-    store.put(detection_artifact())
-    store.put(artifact)
-    store.record_trusted_runtimes({RUNTIME}, {artifact["runtime_fingerprint"]})
-    result = materialize_local_store(db, store)
-    assert result["unknown_classifier_runtime"] == 1
-    assert result["classifier_runs_applied"] == 0
-    assert db.conn.execute("SELECT COUNT(*) FROM predictions").fetchone()[0] == 0

@@ -190,6 +190,9 @@ def create_predictions_blueprint(
         except ValueError as e:
             return json_error(str(e), 400)
 
+        from species_identity import SpeciesResolver, resolved_prediction_taxonomy
+        resolver = SpeciesResolver(db=db)
+
         # Index alternatives by (detection_id, model)
         alts_by_key = {}
         for a in alt_preds:
@@ -199,13 +202,7 @@ def create_predictions_blueprint(
                 "id": ad["id"],
                 "species": ad["species"],
                 "confidence": ad["confidence"],
-                "taxonomy_kingdom": ad.get("taxonomy_kingdom"),
-                "taxonomy_phylum": ad.get("taxonomy_phylum"),
-                "taxonomy_class": ad.get("taxonomy_class"),
-                "taxonomy_order": ad.get("taxonomy_order"),
-                "taxonomy_family": ad.get("taxonomy_family"),
-                "taxonomy_genus": ad.get("taxonomy_genus"),
-                "scientific_name": ad.get("scientific_name"),
+                **resolved_prediction_taxonomy(ad, resolver),
             })
 
         # Enrich predictions and attach alternatives
@@ -229,8 +226,6 @@ def create_predictions_blueprint(
         effective_category_of = effective_category_resolver(
             db, pending_photo_ids,
         )
-        from species_identity import SpeciesResolver
-        resolver = SpeciesResolver(db=db)
         for d in pred_dicts:
             if d.get("status") == "alternative":
                 continue  # alternatives are nested, not top-level
@@ -248,6 +243,9 @@ def create_predictions_blueprint(
             d["consensus_species"] = identity.display_name
             d["consensus_species_key"] = identity.key
             d["species_key"] = resolver.prediction(d).key
+            # A custom-label row's stored taxonomy may be another species'
+            # guess; the payload carries the label's resolved binomial.
+            d.update(resolved_prediction_taxonomy(d, resolver))
             effective_category = (
                 effective_category_of(
                     d.get("photo_id"), d.get("consensus_species"), identity,

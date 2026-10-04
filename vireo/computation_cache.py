@@ -420,17 +420,11 @@ def local_synonyms_identity():
         return "no-synonyms"
 
 
-def _inferred_taxonomy_repair_version():
-    from species_identity_repair import INFERRED_TAXONOMY_MARKER
-    return INFERRED_TAXONOMY_MARKER
-
-
 def classifier_runtime_fingerprint(
     model_identity, labels_fingerprint_full, detector_runtime,
     taxonomy_identity="no-tax",
 ):
     from species_identity import resolution_identity
-    from species_identity_repair import INFERRED_TAXONOMY_MARKER
     if (
         not isinstance(model_identity, dict)
         or not _is_sha256(labels_fingerprint_full)
@@ -455,9 +449,6 @@ def classifier_runtime_fingerprint(
         # replaces raw binomials with current names (Codex #1560 P2).
         "output_enrichment": {
             "species_resolution": resolution_identity(),
-            # Pre-repair artifacts may contain another species' binomial.
-            # Quarantine them even after the one-shot catalog repair is done.
-            "inferred_taxonomy_repair": INFERRED_TAXONOMY_MARKER,
             "taxonomy_identity": taxonomy_identity,
             "scientific_synonyms_identity": local_synonyms_identity(),
         },
@@ -690,10 +681,7 @@ def promote_and_publish_classifier_run(
             "display_name": label_meta["display_name"] if label_meta else None,
             "count": label_meta["label_count"] if label_meta else None,
         },
-        "output_enrichment": {
-            "taxonomy_identity": taxonomy_identity,
-            "inferred_taxonomy_repair": _inferred_taxonomy_repair_version(),
-        },
+        "output_enrichment": {"taxonomy_identity": taxonomy_identity},
         "completed": True,
         "subjects": [subject],
     }
@@ -2133,20 +2121,6 @@ class _ArtifactMaterialization:
         self.matched_photo_ids = set()
 
     def _classifier_runtime_recognized(self, artifact):
-        # Explicit/persisted trust authenticates a runtime, not obsolete
-        # inferred species enrichment. Old custom BioCLIP artifacts carrying
-        # unsourced binomials must stay quarantined even when trust.json
-        # contains their fingerprint. Source-backed and raw-only artifacts
-        # do not carry this legacy inferred-taxonomy risk.
-        if (artifact["classifier_model"].lower().startswith("bioclip")
-                and artifact["labels"]["short_fingerprint"] != "tol"
-                and (artifact.get("output_enrichment") or {}).get("inferred_taxonomy_repair")
-                    != _inferred_taxonomy_repair_version()
-                and any((candidate.get("taxonomy") or {}).get("scientific_name")
-                        and not (candidate.get("taxonomy") or {}).get("taxon_id")
-                        for subject in artifact["subjects"]
-                        for candidate in subject["candidates"])):
-            return False
         return _is_recognized_classifier_runtime(
             artifact["classifier_model"],
             artifact["labels"]["fingerprint"],

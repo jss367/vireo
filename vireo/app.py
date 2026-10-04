@@ -2318,10 +2318,6 @@ def main():
         log.info("Seeding informal groups...")
         ig_stats = seed_informal_groups(db)
         log.info("  Informal groups: %d groups created", ig_stats['groups_created'])
-        from species_identity_repair import repair_on_upgrade
-        repaired = repair_on_upgrade(db)
-        if repaired:
-            log.info("  Corrected species identity for %d predictions", repaired)
         log.info("Done.")
         raise SystemExit(0)
 

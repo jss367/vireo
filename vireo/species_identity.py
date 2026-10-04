@@ -26,6 +26,60 @@ COMMON_NAME_CORRECTIONS = {
 COMMON_NAME_CORRECTIONS["red-crowned parrot"] = COMMON_NAME_CORRECTIONS["red-crowned amazon"]
 
 
+PREDICTION_TAXONOMY_COLUMNS = (
+    "scientific_name", "taxonomy_kingdom", "taxonomy_phylum", "taxonomy_class",
+    "taxonomy_order", "taxonomy_family", "taxonomy_genus",
+)
+
+
+def stored_taxonomy_is_evidence(row):
+    """Whether a prediction row's stored scientific name and ranks are evidence.
+
+    A fixed-head model (``tol`` labels, iNat timm heads) names the taxon it
+    predicted, and a source-backed custom label carries its source taxon. Any
+    other custom-label row stored a name guessed from its label text, and
+    legacy burst grouping stamped the consensus species' guess on every frame:
+    "Lilac-crowned Amazon" can sit next to Amazona rhodocorytha. Readers must
+    not show, search or submit those columns; ``SpeciesResolver.prediction``
+    resolves the label instead. ``stored_taxonomy_evidence_sql`` is the same
+    rule for SQL.
+    """
+    row = dict(row)
+    model = row.get("classifier_model", row.get("model", "")) or ""
+    return (row.get("source_taxon_id") is not None
+            or row.get("labels_fingerprint") == "tol" or model.startswith("iNat"))
+
+
+def stored_taxonomy_evidence_sql(alias):
+    """``stored_taxonomy_is_evidence`` for a ``predictions`` row aliased ``alias``.
+
+    GLOB, unlike LIKE, is case-sensitive, matching ``str.startswith``.
+    """
+    return (f"({alias}.source_taxon_id IS NOT NULL OR {alias}.labels_fingerprint = 'tol' "
+            f"OR {alias}.classifier_model GLOB 'iNat*')")
+
+
+def resolved_prediction_taxonomy(row, resolver):
+    """Taxonomy columns a reader may show for ``row``.
+
+    Evidence rows keep what they stored. Otherwise the scientific name comes
+    from resolving the label, and the stored ranks survive only when the
+    stored guess named that same taxon: a neighbour's guess
+    (Petrochelidon on "Northern Rough-winged Swallow") must not put its genus
+    next to the label's own binomial.
+    """
+    row = dict(row)
+    stored = {column: row.get(column) for column in PREDICTION_TAXONOMY_COLUMNS}
+    if stored_taxonomy_is_evidence(row):
+        return stored
+    resolved = resolver.prediction(row).scientific_name
+    if resolved and (stored["scientific_name"] or "").casefold() == resolved.casefold():
+        return stored
+    taxonomy = dict.fromkeys(PREDICTION_TAXONOMY_COLUMNS)
+    taxonomy["scientific_name"] = resolved
+    return taxonomy
+
+
 def resolution_identity():
     return hashlib.sha256(json.dumps(
         [RESOLUTION_VERSION, COMMON_NAME_CORRECTIONS], sort_keys=True,

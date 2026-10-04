@@ -1133,13 +1133,18 @@ class PredictionRepository:
         effective threshold so they don't surface a species from a now-
         hidden detection.
 
-        Returns a dict with ``species``, ``scientific_name``, ``confidence``,
-        ``detection_id`` or None if no eligible prediction exists.
+        Returns a row with ``species``, ``scientific_name``, ``confidence``,
+        ``detection_id`` and the provenance columns
+        (``classifier_model``, ``labels_fingerprint``, ``source_taxon_id``)
+        or None if no eligible prediction exists. The stored scientific name
+        is raw: resolve it with ``species_identity.resolved_prediction_taxonomy``
+        before showing or submitting it.
         """
         if min_detector_confidence is None:
             return self.conn.execute(
                 """SELECT pr.species, pr.scientific_name, pr.confidence,
-                          pr.detection_id
+                          pr.detection_id, pr.classifier_model,
+                          pr.labels_fingerprint, pr.source_taxon_id
                    FROM predictions pr
                    JOIN detections d ON d.id = pr.detection_id
                    JOIN photos p ON p.id = d.photo_id
@@ -1158,7 +1163,8 @@ class PredictionRepository:
             ).fetchone()
         return self.conn.execute(
             """SELECT pr.species, pr.scientific_name, pr.confidence,
-                      pr.detection_id
+                      pr.detection_id, pr.classifier_model,
+                      pr.labels_fingerprint, pr.source_taxon_id
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
                JOIN photos p ON p.id = d.photo_id

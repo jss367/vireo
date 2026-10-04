@@ -158,8 +158,8 @@ def test_metadata_search_uses_current_visible_predictions(catalog):
                                             ("new", "New species", "2026-01-01")]:
         db.conn.execute(
             "INSERT INTO predictions (detection_id, classifier_model, labels_fingerprint, species, "
-            "scientific_name, taxonomy_family, confidence, created_at) VALUES (?, 'test', ?, ?, "
-            "'Strix nebulosa', 'Strigidae', 0.9, ?)", (det, fingerprint, species, timestamp),
+            "scientific_name, source_taxon_id, taxonomy_family, confidence, created_at) VALUES (?, 'test', "
+            "?, ?, 'Strix nebulosa', 19893, 'Strigidae', 0.9, ?)", (det, fingerprint, species, timestamp),
         )
     db.conn.commit()
     def search(value):
@@ -175,6 +175,28 @@ def test_metadata_search_uses_current_visible_predictions(catalog):
     assert search("reviewed") == [ids["empty"]]
     db.conn.execute("UPDATE detections SET detector_confidence=0.01 WHERE id=?", (det,))
     assert search("New species") == []
+
+
+def test_metadata_search_ignores_guessed_binomials_on_custom_labels(catalog):
+    """A custom-label row without a source taxon stored a binomial guessed from
+    text, sometimes another species' (legacy burst enrichment). Its label and
+    ranks answer a search; the guessed binomial does not. A fixed-head row's
+    binomial is the model's own output and does."""
+    db, ids = catalog
+    det = db.save_detections(ids["empty"], [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"},
+    ], detector_model="test")[0]
+    db.add_prediction(det, "Lilac-crowned Amazon", 0.9, "BioCLIP-2.5", labels_fingerprint="custom",
+                      taxonomy={"scientific_name": "Amazona rhodocorytha", "genus": "Amazona"})
+    db.add_prediction(det, "Red-crowned Parrot", 0.8, "iNat21 (EVA-02 Large)", labels_fingerprint="tol",
+                      taxonomy={"scientific_name": "Amazona viridigenalis"})
+
+    def search(value):
+        return db.query_photo_ids([{"field": "metadata", "op": "contains", "value": value}])
+    assert search("rhodocorytha") == []
+    assert search("Lilac-crowned") == [ids["empty"]]
+    assert search("Amazona") == [ids["empty"]]
+    assert search("viridigenalis") == [ids["empty"]]
 
 
 def test_metadata_search_ignores_predictions_on_identified_photos(catalog):
@@ -194,7 +216,7 @@ def test_metadata_search_ignores_predictions_on_identified_photos(catalog):
         ], detector_model="test")[0]
         db.conn.execute(
             "INSERT INTO predictions (detection_id, classifier_model, labels_fingerprint, species, "
-            "scientific_name, confidence) VALUES (?, 'test', 'fp', 'Least Grebe', "
+            "scientific_name, confidence) VALUES (?, 'test', 'tol', 'Least Grebe', "
             "'Tachybaptus dominicus', 0.9)", (det,),
         )
     db.conn.commit()

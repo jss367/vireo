@@ -586,20 +586,6 @@ def create_jobs_blueprint(
                 bg_db.conn.rollback()
                 raise
 
-            # The inferred-taxonomy repair defers while the catalog has no
-            # verified taxonomy and otherwise runs only at startup; run it now
-            # that one exists, so wrong legacy binomials do not stay visible
-            # until a restart. A failure leaves its marker unset, and startup
-            # retries it, so it must not fail the download.
-            from species_identity_repair import repair_on_upgrade
-            progress_cb("Repairing legacy prediction taxonomy...")
-            try:
-                repaired = repair_on_upgrade(bg_db)
-                if repaired:
-                    log.info("Corrected species identity for %d predictions after taxonomy download", repaired)
-            except Exception:
-                log.warning("Post-download species identity repair failed; will retry at startup", exc_info=True)
-
             # Retype existing keywords that match the new taxonomy so the
             # user sees the effect immediately, without restarting the app.
             # Roll back and fail the job on error: mark_species_keywords
