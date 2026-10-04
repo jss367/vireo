@@ -83,3 +83,36 @@ def test_auto_tone_reports_resetting_previous_controls(live_server, page, dark_p
     expect(page.locator('#exposureValue')).to_have_text('0.0')
     page.locator('#autoToneBtn').click()
     expect(toast).to_contain_text('already balanced, nothing changed')
+
+
+@pytest.mark.parametrize('reload_same_photo', [False, True])
+def test_stale_auto_tone_response_does_not_edit_loaded_photo(live_server, page, dark_photo, reload_same_photo):
+    """A response belongs to its photo and load, even when recipes are identical."""
+    db = live_server['db']
+    photo = db.get_photo(dark_photo)
+    other = db.add_photo(
+        folder_id=photo['folder_id'], filename='other.png', extension='.png',
+        file_size=photo['file_size'], file_mtime=photo['file_mtime'], width=300, height=200,
+    )
+    folder = db.conn.execute('SELECT path FROM folders WHERE id=?', (photo['folder_id'],)).fetchone()[0]
+    from pathlib import Path
+    Image.new('RGB', (300, 200), (100, 100, 100)).save(Path(folder) / 'other.png')
+    db.conn.commit()
+    page.goto(f"{live_server['url']}/edit/{dark_photo}")
+    page.wait_for_function('!editorState.loading')
+    intercepted = []
+    page.route('**/api/photos/*/auto-tone?*', lambda route: intercepted.append(route))
+    with page.expect_request('**/api/photos/*/auto-tone?*'):
+        page.locator('#autoToneBtn').click()
+    target = dark_photo if reload_same_photo else other
+    page.evaluate('id => loadPhoto(id)', target)
+    page.wait_for_function('!editorState.loading')
+    expect(page.locator('#editorFilename')).to_have_text('dim-meadow.png' if reload_same_photo else 'other.png')
+    intercepted[0].fulfill(json={
+        'adjustments': {'exposure': 2}, 'notes': ['brightened 2 EV'], 'metering': 'frame',
+    })
+    page.wait_for_function('!document.getElementById("autoToneBtn").disabled')
+    assert page.evaluate('editorState.photoId') == target
+    expect(page.locator('#exposureValue')).to_have_text('0.0')
+    assert not page.evaluate('recipeForSave(editorState.recipe).adjustments')
+    expect(page.locator('#saveBtn')).to_be_disabled()

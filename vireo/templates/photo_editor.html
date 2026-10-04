@@ -3370,6 +3370,8 @@ function _loadImage(src) {
 
 async function autoTone() {
   if (!editorState.photoId) return;
+  var photoId = editorState.photoId;
+  var loadSeq = editorState.loadSeq;
   var btn = document.getElementById('autoToneBtn');
   if (btn && btn.disabled) return;
   var prevLabel = btn ? btn.textContent : '';
@@ -3386,9 +3388,10 @@ async function autoTone() {
     var startKey = recipeKey(editorState.recipe);
     var analysed = previewRecipeFor(editorState.recipe, true);
     delete analysed.local;
-    var result = await safeFetch('/api/photos/' + editorState.photoId + '/auto-tone?recipe=' +
+    var result = await safeFetch('/api/photos/' + photoId + '/auto-tone?recipe=' +
       encodeURIComponent(JSON.stringify(analysed)), {}, {toast: false});
-    if (recipeKey(editorState.recipe) !== startKey) return;
+    if (editorState.photoId !== photoId || editorState.loadSeq !== loadSeq ||
+        recipeKey(editorState.recipe) !== startKey) return;
     var auto = result.adjustments || {};
 
     // Replace the fitted controls; keep every other choice (white balance,
@@ -3408,6 +3411,7 @@ async function autoTone() {
     markChanged(true);
     if (typeof showToast === 'function') showToast(autoToneMessage(result, changedControls), 'success');
   } catch (e) {
+    if (editorState.photoId !== photoId || editorState.loadSeq !== loadSeq) return;
     if (typeof showToast === 'function') {
       showToast('Could not analyze this photo for Auto Tone' +
         (e && e.message ? ': ' + e.message : ''), 'error');
