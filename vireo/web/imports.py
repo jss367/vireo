@@ -21,6 +21,7 @@ from urllib.parse import quote
 import source_discovery
 from db import Database, _chunks
 from flask import Blueprint, Response, abort, jsonify, make_response, request
+from jobs import describe_jobs
 from metadata import scan_metadata_warning
 from new_images import invalidate_new_images_after_scan
 from services.imports import ImportFailure, ImportService
@@ -1169,8 +1170,10 @@ def create_imports_blueprint(
             archive = get_pending_archive(db, archive_id)
             if archive is None:
                 return json_error("Pending NAS transfer not found in this workspace", 404)
-            if active_archive_jobs(get_runner(), db._ws_id()):
-                return json_error("Wait for running jobs to finish before removing this transfer record", 409)
+            blocking = active_archive_jobs(get_runner(), db._ws_id())
+            if blocking:
+                return json_error(
+                    f"Wait for {describe_jobs(blocking)} to finish before removing this transfer record", 409)
             if os.path.isdir(archive["staging_destination"]):
                 return json_error("Local originals are available. Send them to NAS before removing this transfer", 409)
             # Forget only the transfer, never files or catalog entries. This is
@@ -1232,7 +1235,8 @@ def create_imports_blueprint(
                     )
                 return jsonify({"job_id": existing["id"]})
             if active:
-                return json_error("Wait for running jobs to finish before sending these photos to NAS", 409)
+                return json_error(
+                    f"Wait for {describe_jobs(active)} to finish before sending these photos to NAS", 409)
 
             def work(job):
                 with Database(db_path) as thread_db:

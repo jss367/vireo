@@ -386,6 +386,7 @@ def register_app_hooks(app, *, get_db, reservation_exempt_endpoints):
                         request.endpoint == "workspaces.api_delete_workspace"
                         and workspace_id == target_ws
                     ),
+                    label=f"the request {request.method} {request.path}",
                 ))
             g.nas_workspace_mutation = reservation.pop_all()
         return None
