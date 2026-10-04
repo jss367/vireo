@@ -116,7 +116,13 @@ class FolderRepository:
         ).fetchall()
 
     def subtree_ids(self, folder_id):
-        """Return folder_id plus descendants reached through workspace-linked nodes."""
+        """Return the seed plus visible descendants, skipping hidden ancestors.
+
+        The folder tree reparents a visible descendant to its nearest visible
+        ancestor. Walk physical nodes first so selecting that displayed parent
+        reaches the same descendants, without returning hidden folders.
+        A seed outside this workspace never expands.
+        """
         ws = self.workspace_id
         rows = self.conn.execute(
             """WITH RECURSIVE tree(id) AS (
@@ -124,13 +130,17 @@ class FolderRepository:
                    UNION ALL
                    SELECT f.id FROM folders f
                    JOIN tree t ON f.parent_id = t.id
-                   JOIN workspace_visible_folders wf_t
-                     ON wf_t.folder_id = t.id AND wf_t.workspace_id = ?
-                   JOIN workspace_visible_folders wf_f
-                     ON wf_f.folder_id = f.id AND wf_f.workspace_id = ?
+                   WHERE EXISTS (
+                       SELECT 1 FROM workspace_visible_folders seed
+                       WHERE seed.folder_id = ? AND seed.workspace_id = ?
+                   )
                )
-               SELECT id FROM tree""",
-            (folder_id, ws, ws),
+               SELECT t.id FROM tree t
+               WHERE t.id = ? OR EXISTS (
+                   SELECT 1 FROM workspace_visible_folders wf
+                   WHERE wf.folder_id = t.id AND wf.workspace_id = ?
+               )""",
+            (folder_id, folder_id, ws, folder_id, ws),
         ).fetchall()
         return [r["id"] for r in rows]
 
@@ -183,10 +193,9 @@ class FolderRepository:
     def with_quality_data(self):
         """Return workspace folders with scored photos in their subtree."""
         ws = self.workspace_id
-        # The recursive step also joins workspace_visible_folders on the current
-        # folder: propagation stops at any ancestor that is not in the active
-        # workspace, which matches get_folder_subtree_ids and keeps the
-        # dropdown counts aligned with get_highlights_candidates.
+        # Traverse physical ancestors and emit only visible ones, matching
+        # the effective-parent folder tree and get_folder_subtree_ids even
+        # when a granted descendant lies below an invisible intermediate.
         return self.conn.execute(
             """WITH RECURSIVE ancestors(photo_id, folder_id, timestamp) AS (
                    SELECT p.id, p.folder_id, p.timestamp
@@ -199,8 +208,6 @@ class FolderRepository:
                    SELECT a.photo_id, f.parent_id, a.timestamp
                    FROM ancestors a
                    JOIN folders f ON f.id = a.folder_id
-                   JOIN workspace_visible_folders wf_step
-                     ON wf_step.folder_id = f.id AND wf_step.workspace_id = ?
                    WHERE f.parent_id IS NOT NULL
                )
                SELECT f.id, f.path, f.name,
@@ -213,7 +220,7 @@ class FolderRepository:
                  AND f.status IN ('ok', 'partial')
                GROUP BY f.id
                ORDER BY latest_photo DESC""",
-            (ws, ws, ws),
+            (ws, ws),
         ).fetchall()
 
     def update_counts(self):

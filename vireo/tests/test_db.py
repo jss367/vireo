@@ -276,12 +276,10 @@ def test_folder_subtree_does_not_expand_when_root_is_inactive(tmp_path):
     assert db.get_photos(folder_id=a) == []
 
 
-def test_folder_subtree_does_not_cross_workspace_boundary(tmp_path):
-    """Expansion stops at folders removed from the active workspace.
+def test_folder_subtree_matches_effective_tree_without_exposing_hidden_nodes(tmp_path):
+    """Visible C is displayed beneath A when physical parent B is hidden.
 
-    Tree: A (active) -> B (not active) -> C (active). Filtering by A should
-    NOT include C even though C is in the active workspace, because the
-    intermediate B is detached from A in the active workspace's tree.
+    Selecting A includes its displayed descendant C, excluding B's photos.
     """
     from db import Database
     db = Database(str(tmp_path / "test.db"))
@@ -299,10 +297,15 @@ def test_folder_subtree_does_not_cross_workspace_boundary(tmp_path):
     db.add_photo(folder_id=c, filename='c.jpg', extension='.jpg',
                  file_size=100, file_mtime=2.0)
 
-    assert db.get_folder_subtree_ids(a) == [a]
+    db.add_photo(folder_id=b, filename='hidden.jpg', extension='.jpg',
+                 file_size=100, file_mtime=3.0)
+    # add_photo does not grant visibility back to the detached intermediate.
+    assert db.get_folder_subtree_ids(a) == [a, c]
+    tree = {row['id']: row for row in db.get_folder_tree()}
+    assert b not in tree
+    assert tree[c]['parent_id'] == a
     results = db.get_photos(folder_id=a)
-    assert len(results) == 1
-    assert results[0]['filename'] == 'a.jpg'
+    assert {row['filename'] for row in results} == {'a.jpg', 'c.jpg'}
 
 
 def test_get_photos_folder_filter_includes_descendants(tmp_path):
@@ -15864,12 +15867,10 @@ def test_get_folders_with_quality_data_scopes_to_active_workspace(tmp_path):
     assert db.get_highlights_candidates(folder_id=root, min_quality=0.0) == []
 
 
-def test_get_folders_with_quality_data_stops_at_inactive_ancestor(tmp_path):
-    """Rollup cannot propagate across an inactive intermediate folder.
+def test_get_folders_with_quality_data_rolls_up_across_hidden_ancestor(tmp_path):
+    """Visible C is displayed beneath A when intermediate B is hidden.
 
-    Tree: A(active) -> B(inactive) -> C(active with scored photo). A must
-    NOT show a rolled-up count sourced from C, since get_folder_subtree_ids
-    stops at B and get_highlights_candidates(A) returns nothing.
+    The parent count and candidates must agree with that effective tree.
     """
     from db import Database
     db = Database(str(tmp_path / "test.db"))
@@ -15890,10 +15891,9 @@ def test_get_folders_with_quality_data_stops_at_inactive_ancestor(tmp_path):
     by_name = {f["name"]: f for f in folders}
     # C still shows up (its own photo counts).
     assert by_name["c"]["photo_count"] == 1
-    # A must NOT inherit C's count through the inactive B.
-    assert "a" not in by_name
-    # Sanity: candidate API agrees.
-    assert db.get_highlights_candidates(folder_id=a, min_quality=0.0) == []
+    assert "b" not in by_name
+    assert by_name["a"]["photo_count"] == 1
+    assert [row["id"] for row in db.get_highlights_candidates(folder_id=a, min_quality=0.0)] == [pid]
 
 
 def test_get_folders_with_quality_data_skips_missing_descendants(tmp_path):

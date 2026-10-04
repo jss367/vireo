@@ -725,3 +725,32 @@ def test_highlights_parent_count_includes_granted_child_without_hidden_siblings(
         assert [row["id"] for row in candidates] == [shared]
         counts = {row["id"]: row["photo_count"] for row in db.get_folders_with_quality_data()}
         assert counts[parent] == counts[child] == len(candidates) == 1
+
+
+def test_parent_scope_reaches_granted_descendant_through_hidden_intermediate(tmp_path):
+    with Database(str(tmp_path / "db")) as db:
+        active = db._active_workspace_id
+        owner = db.create_workspace("Hidden subtree owner")
+        parent, root_photo = _photo(db, tmp_path / "root", "root.jpg")
+        gap, hidden = _photo(db, tmp_path / "root" / "detached", "private.jpg", b"private")
+        day, shared = _photo(db, tmp_path / "root" / "detached" / "day", "shared.jpg")
+        _, sibling = _photo(db, tmp_path / "root" / "detached" / "day", "sibling.jpg", b"sibling")
+        db.conn.execute("UPDATE folders SET parent_id=? WHERE id=?", (parent, gap))
+        db.conn.execute("UPDATE folders SET parent_id=? WHERE id=?", (gap, day))
+        db.conn.execute("UPDATE photos SET timestamp='2026-05-01',quality_score=.8 WHERE id IN (?,?,?)", (shared, hidden, sibling))
+        db.conn.commit()
+        db.add_workspace_folder(owner, gap)
+        db.delete_folder(gap)  # Unlink the subtree from active, preserving the owner's catalog.
+        db.grant_workspace_photos(active, [shared])
+        db.conn.commit()
+        tree = {row["id"]: row for row in db.get_folder_tree()}
+        assert tree[day]["parent_id"] == parent
+        assert gap not in tree
+        assert set(db.get_folder_subtree_ids(parent)) == {parent, day}
+        assert set(db.get_photo_ids(folder_id=parent)) == {root_photo, shared}
+        assert {row["id"] for row in db.get_photos(folder_id=parent)} == {root_photo, shared}
+        assert db.get_browse_summary(folder_id=parent)["filtered_total"] == 2
+        assert db.get_calendar_data(2026, folder_id=parent)["days"] == {"2026-05-01": 1}
+        assert [row["id"] for row in db.get_highlights_candidates(parent, min_quality=.1)] == [shared]
+        counts = {row["id"]: row["photo_count"] for row in db.get_folders_with_quality_data()}
+        assert counts[parent] == counts[day] == 1

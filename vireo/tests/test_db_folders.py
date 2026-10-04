@@ -241,7 +241,7 @@ def test_get_folder_tree_filters_status_and_rewrites_parents(db):
         db.get_folder_tree()
 
 
-def test_get_folder_subtree_ids_walks_only_linked_nodes(db):
+def test_get_folder_subtree_ids_walks_hidden_nodes_but_returns_only_visible_descendants(db):
     ws = db._ws_id()
     root = db.add_folder("/s")
     a = db.add_folder("/s/a", parent_id=root, workspace_root=False)
@@ -249,9 +249,9 @@ def test_get_folder_subtree_ids_walks_only_linked_nodes(db):
     gap = _raw_folder(db, "/s/gap", root)
     below_gap = _raw_folder(db, "/s/gap/b", gap)
     _link(db, ws, below_gap, 0)
-    assert sorted(db.get_folder_subtree_ids(root)) == sorted([root, a, a1])
+    assert sorted(db.get_folder_subtree_ids(root)) == sorted([root, a, a1, below_gap])
     assert db.get_folder_subtree_ids(root)[0] == root
-    # An unlinked root is returned as-is but never expands.
+    # A stale unlinked seed still cannot expand into visible descendants.
     assert db.get_folder_subtree_ids(gap) == [gap]
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError):
@@ -996,11 +996,11 @@ def test_get_folders_with_quality_data(db):
     _photo(db, empty, "unscored.jpg", timestamp="2027-01-01T00:00:00")
     db.conn.commit()
     rows = db.get_folders_with_quality_data()
-    assert [(r["id"], r["photo_count"], r["latest_photo"]) for r in rows] == [
-        (below_gap, 1, "2025-01-01T00:00:00"),
-        (sub, 1, "2024-06-01T00:00:00"),
-        (root, 2, "2024-06-01T00:00:00"),
-    ]
+    assert {r["id"]: (r["photo_count"], r["latest_photo"]) for r in rows} == {
+        below_gap: (1, "2025-01-01T00:00:00"),
+        sub: (1, "2024-06-01T00:00:00"),
+        root: (3, "2025-01-01T00:00:00"),
+    }
     assert set(rows[0].keys()) == {"id", "path", "name", "photo_count", "latest_photo"}
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError):
