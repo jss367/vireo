@@ -495,3 +495,29 @@ def test_verified_name_refresh_unifies_sources_and_reference_labels(library, tmp
     for algorithm in ('production', 'independent', 'sequence'):
         groups = run_algorithm(algorithm, bundle['photos'], grouping_config=manifest['grouping_config'])
         assert groups[0].roster == ('inat:101',)
+
+
+def test_capture_date_selects_whole_sessions_without_changing_splits(library, tmp_path):
+    import sqlite3
+
+    with sqlite3.connect(library) as conn:
+        conn.execute("INSERT INTO photos(id,folder_id,filename,timestamp,file_hash) VALUES(13,1,'next-day.jpg','2026-01-02T12:00:00','duplicate')")
+        conn.execute("UPDATE photos SET file_hash='duplicate' WHERE id=1")
+        conn.execute("INSERT INTO photo_keywords VALUES(13,1,'manual')")
+    registry = tmp_path/'splits.json'
+    # The cross-date duplicate must preserve existing held-out membership even
+    # when the requested day's photos are the only materialized session.
+    registry.write_text(json.dumps({'seed':42, 'days':{'2026-01-02':'test'}}))
+    manifest = prepare(library, tmp_path/'dated', capture_date='2026-01-01', split_registry=registry)
+    assert manifest['capture_date'] == '2026-01-01'
+    assert len(manifest['sessions']) == 1
+    assert manifest['sessions'][0]['partition'] == 'test'
+    assert manifest['sessions'][0]['photo_count'] == 12
+    assert manifest['inventory']['workspace_photos'] == 13
+    assert json.loads(registry.read_text())['days']['2026-01-01'] == 'test'
+    bundle = read_bundle(tmp_path/'dated', manifest['sessions'][0])
+    assert {p['id'] for p in bundle['photos']} == set(range(1,13))
+    empty = prepare(library, tmp_path/'empty-date', capture_date='2026-01-03', split_registry=registry)
+    assert empty['sessions'] == []
+    with pytest.raises(ValueError):
+        prepare(library, tmp_path/'invalid-date', capture_date='2026-99-99')

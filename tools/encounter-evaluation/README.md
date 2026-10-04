@@ -2,7 +2,7 @@
 
 Compare and tune Vireo's encounter grouping using cached classifier evidence and
 current human species labels. Each new run reads the latest library data. The
-tool never writes to the library, runs image models, or changes app settings.
+comparison and tuning commands never write to the library, run image models, or change app settings. The review server can also apply human corrections to Vireo tags when explicitly enabled.
 
 This developer package lives outside the application package and has its own
 dependencies. Full-library experiments are not part of application builds.
@@ -34,6 +34,108 @@ printed `report.html` locally. It contains comparative scores, the largest
 session improvements and regressions, photo context around changed boundaries,
 human labels, and existing thumbnails where their absolute paths are available.
 Images are not uploaded or copied into the repository.
+
+Use `--capture-date YYYY-MM-DD` to limit a new comparison to complete sessions
+on a particular capture day. This uses the evaluator's timestamp normalization
+(UTC for timezone-aware timestamps; stored calendar date for camera timestamps
+without an offset). Date selection preserves day split membership and duplicate
+checks across the workspace. It never moves an existing test day into review.
+
+## Review disagreements and correct reference labels
+
+Build a browser review queue from retained comparison inputs, then open it:
+
+```sh
+vireo-review-encounters build --run /path/to/run \
+  --output ~/.vireo/encounter-evaluation/review/species-review.sqlite
+vireo-review-encounters serve \
+  --queue ~/.vireo/encounter-evaluation/review/species-review.sqlite --open
+```
+
+The queue recomputes the three default algorithms on retained training and
+development evidence and records the current source signature separately from
+the original run. Test sessions are never loaded. All disagreements are retained;
+representatives of repeated sequences come first, with 200 seeded random photos
+whose species suggestions agree interleaved for checking shared mistakes. Use
+`--agreement-sample` to change that sample size. Identity-only differences have
+their own view and are never silently merged by matching display names.
+
+Inspect the large cached preview and neighboring frames, choose species from
+the catalog, and explicitly confirm when every target species has been labeled.
+An explicitly confirmed empty list records no target species; a missing model
+prediction never does. Partial labels remain positive-only. Each save applies
+to one photo, persists in the review database with revision history, and does
+not edit Vireo tags or sidecars. Model suggestions are hidden until revealed.
+Missing previews are shown explicitly; the tool does not decode originals.
+Close and reopen the server with the same queue to resume reviewing.
+
+To also update Vireo's photo tags on each save, start the server with:
+
+```sh
+vireo-review-encounters serve \
+  --queue ~/.vireo/encounter-evaluation/review/species-review.sqlite \
+  --update-vireo-tags --open
+```
+
+With this option, complete reviews replace species tags (including removing all
+species tags for a confirmed empty photo); partial reviews only add the selected
+species. Other keywords and higher-rank taxonomy tags are preserved. The writer
+uses Vireo's identity-aware keyword methods, manual provenance, per-keyword edit
+history, and normal pending-XMP queue. Sync from Vireo to write the sidecars.
+Existing evaluation-only reviews are not retroactively applied; open and save
+one to apply it. Vireo's undo changes its tags, not the separate reference answer.
+
+Tag updates verify the photo still matches the captured identity and workspace.
+If an update fails, the reference answer remains saved and the photo stays in
+“Not yet reviewed” with an explicit pending-tag warning and retry button.
+Library-side receipts make retries safe after a crash between the two database
+commits. Restart with the same option to retry pending updates. Unresolved
+name-only identities must be replaced with a resolved catalog selection.
+
+Load those corrections into a **new** comparison or tuning run:
+
+```sh
+vireo-evaluate-encounters compare --workspace 22 \
+  --review-labels ~/.vireo/encounter-evaluation/review/species-review.sqlite
+```
+
+Reviews replace reference answers only, never algorithm features. Import checks
+the library, workspace, photo identity, and stable partition; a changed identity
+or partition requires reconciliation. Retained runs stay immutable, so resume
+does not pick up new reviews. The queue is deliberately enriched for difficult
+cases; its reviewed subset is not a representative library-accuracy estimate.
+Keep the final test partition untouched until candidate selection is complete.
+The server binds only to loopback and prints an access-token URL; keep that link
+and the private review database local. `--media-root` overrides `~/.vireo` when
+cached previews and thumbnails are stored elsewhere.
+
+## Compare the encounter continuity repair at larger scale
+
+The paired comparison captures the previous feature loader from a specified
+Git revision and runs it alongside the proposed loader on the same read-only
+SQLite snapshot for each scope. Both versions use the same grouping and burst
+rules and the same existing reference labels. It materializes training and
+development sessions only; held-out feature bundles are never loaded.
+
+```sh
+python -m encounter_eval.continuity_compare --baseline-revision HEAD \
+  --scope 22 --scope 5:2026-10-03 \
+  --output ~/.vireo/encounter-evaluation/runs/encounter-continuity-comparison
+```
+
+Replace the example workspace IDs and optional capture date with your scopes.
+The baseline revision must precede the full-image continuity repair. Retained
+baseline source, paired input bundles, hashes, split membership, and separate
+training/development metrics make the comparison inspectable. Fully overlapping
+sessions are counted once; partial overlaps are rejected.
+
+Open `Review encounter grouping changes.html` in the output directory. It shows
+whole before/after encounters, burst counts, frames supported by sequence
+context, and existing species tags. Changed groups that lose known species or
+combine different reference-tag sets are prioritized for inspection. A separate
+view lists short unresolved interruptions between matching species suggestions;
+these are candidates for review, not proven missed merges. Browser-local grouping
+judgments can be exported as JSON. This report does not edit photo tags.
 
 ## Algorithms and tuning
 

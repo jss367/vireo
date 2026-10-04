@@ -594,7 +594,9 @@ SCHEMA = {
         "label": "Rescue weak detections in sequences",
         "desc": (
             "Classify and group weak animal detections only when strong "
-            "detections bracket the same short photo sequence."
+            "detections bracket the same short photo sequence. Cached full-image "
+            "predictions can also bridge brief detector dropouts when species "
+            "and animal-box positions agree with both surrounding frames."
         ),
     },
     "pipeline.weak_detection_confidence": {
@@ -602,8 +604,10 @@ SCHEMA = {
         "category": "Pipeline", "scope": "both",
         "label": "Weak-detection confidence",
         "desc": (
-            "Lower confidence floor used only for contextually rescued "
-            "frames; the normal detector threshold is unchanged."
+            "Lower confidence floor for classifying weak boxes in sequences; "
+            "the normal detector threshold is unchanged. A lower-confidence "
+            "box can still be grouped when a confident full-image prediction "
+            "and nearby matching subjects independently support it."
         ),
     },
     "pipeline.eye_detect_enabled": {

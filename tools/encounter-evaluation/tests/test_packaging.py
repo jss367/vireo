@@ -64,3 +64,17 @@ def test_build_always_excludes_tool():
                 and any(isinstance(t, ast.Name) and t.id == "pyinstaller_args" for t in node.targets))
     values = [node.value if isinstance(node, ast.Constant) else None for node in args.elts]
     assert any(a == "--exclude-module" and b == "encounter_eval" for a, b in zip(values, values[1:], strict=False))
+
+
+def test_evaluation_wheel_includes_review_page_and_command(tmp_path):
+    source = tmp_path / 'source'
+    shutil.copytree(REPO / 'tools' / 'encounter-evaluation', source,
+                    ignore=shutil.ignore_patterns('__pycache__', '*.egg-info', '.pytest_cache', 'build'))
+    result = subprocess.run([sys.executable, '-m', 'build', '--wheel', '--no-isolation',
+                             '--outdir', str(tmp_path), str(source)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    with zipfile.ZipFile(next(tmp_path.glob('*.whl'))) as archive:
+        assert 'encounter_eval/review.html' in archive.namelist()
+        assert 'encounter_eval/continuity_review.html' in archive.namelist()
+        entrypoints = next(name for name in archive.namelist() if name.endswith('/entry_points.txt'))
+        assert 'vireo-review-encounters = encounter_eval.review_server:main' in archive.read(entrypoints).decode()

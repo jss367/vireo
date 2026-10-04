@@ -6,7 +6,7 @@ import gzip
 import json
 import sqlite3
 from collections import Counter, defaultdict
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from .common import code_identity, configure_repo, digest, encode, write_json
@@ -251,14 +251,40 @@ def _raw_evidence(reader, taxonomy):
     return by_photo
 
 
+
+def inference_features(photo, taxonomy, evidence=()):
+    """Serialize only inference inputs; never carry labels into experiments."""
+    allowed = {"id", "folder_id", "filename", "timestamp", "latitude", "longitude", "focal_length",
+               "burst_id", "dino_subject_embedding", "dino_global_embedding", "species_top5",
+               "subjects", "detection_box", "detection_conf", "subject_absent", "subject_present",
+               "subject_uncertain", "weak_detection_context"}
+    result = {k: v for k, v in photo.items() if k in allowed}
+    captured = timestamp(photo['timestamp'])
+    result['timestamp'] = captured.isoformat() if captured else None
+    result['evidence'] = list(evidence)
+    result['species_keys'] = {}
+    for entry in photo['species_top5']:
+        identity = entry[3] if len(entry) > 3 else None
+        result['species_keys'][identity or entry[0]] = taxonomy.prediction_key(entry[0], identity)
+    return result
+
 def prepare(db_path, output, *, workspace=None, seed=42, max_sessions=None,
-            complete_folders=(), label_source="all", config=None, split_registry=None, repo=None):
+            complete_folders=(), label_source="all", config=None, split_registry=None, repo=None, review_labels=None, capture_date=None,
+            included_partitions=None, feature_loader=None):
     """Materialize a consistent comparison, then close the live DB before trials."""
     source_identity = code_identity(configure_repo(repo))
+    if capture_date is not None:
+        capture_date = date.fromisoformat(capture_date).isoformat()
 
     from config import DEFAULTS
     from encounters import DEFAULTS as GROUP_DEFAULTS
     from pipeline import load_photo_features
+
+    loader = feature_loader or load_photo_features
+    if included_partitions is not None:
+        included_partitions = set(included_partitions)
+        if not included_partitions or not included_partitions <= {'train', 'development', 'test'}:
+            raise ValueError('Choose valid nonempty included partitions')
 
     cfg = {"detector_confidence": DEFAULTS["detector_confidence"],
            "classification_threshold": DEFAULTS["classification_threshold"],
@@ -328,10 +354,24 @@ def prepare(db_path, output, *, workspace=None, seed=42, max_sessions=None,
                 registry["days"][day] = partition
         for session in sessions:
             session["partition"] = registry["days"][session["photos"][0]["day"]]
+        reviewed = {}
+        if review_labels:
+            from .review import load_review_labels
+
+            reviewed = load_review_labels(review_labels, db_path, workspace, rows)
+            photo_partitions = {p["id"]: s["partition"] for s in sessions for p in s["photos"]}
+            for pid, answer in reviewed.items():
+                if photo_partitions[pid] != answer["review_partition"]:
+                    raise ValueError(f"Reviewed photo {pid} changed partition; reconcile the split registry first")
+                labels[pid] = answer
         eligible = [s for s in sessions if any(p["id"] in labels for p in s["photos"])
                     and s["partition"] != "quarantined"]
         # Limits select whole sessions by a seeded hash, never by label outcome.
         eligible.sort(key=lambda s: digest([seed, s["id"]]))
+        if capture_date:
+            eligible = [s for s in eligible if s['photos'][0]['day'] == capture_date]
+        if included_partitions is not None:
+            eligible = [s for s in eligible if s['partition'] in included_partitions]
         selected = eligible[:max_sessions] if max_sessions is not None else eligible
         inventory = {"workspace_photos": len(rows), "tagged_photos": len(labels),
                      "total_sessions": len(sessions), "eligible_sessions": len(eligible),
@@ -341,45 +381,26 @@ def prepare(db_path, output, *, workspace=None, seed=42, max_sessions=None,
         reader = FeatureReader(conn, workspace)
         for i, session in enumerate(selected):
             metadata = {p["id"]: p for p in session["photos"]}
-            photos = load_photo_features(reader, config=cfg, photo_ids=list(metadata), effective_config=cfg)
+            photos = loader(reader, config=cfg, photo_ids=list(metadata), effective_config=cfg)
             order = {pid: index for index, pid in enumerate(metadata)}
             photos.sort(key=lambda p: order[p["id"]])
             raw = _raw_evidence(reader, taxonomy)
+            photos = [inference_features(photo, taxonomy, raw.get(photo['id'], [])) for photo in photos]
             answers, presentation = {}, {}
             for photo in photos:
                 pid = photo["id"]
-                # Allowlist the inference contract: no flags, ratings, keywords,
-                # review status, file paths, or other label-derived information.
-                allowed = {"id", "folder_id", "filename", "timestamp", "latitude", "longitude", "focal_length",
-                           "burst_id", "dino_subject_embedding", "dino_global_embedding", "species_top5",
-                           "subjects", "detection_box", "detection_conf", "subject_absent", "subject_present",
-                           "subject_uncertain", "weak_detection_context"}
-                for key in list(photo):
-                    if key not in allowed:
-                        del photo[key]
-                photo["timestamp"] = timestamp(photo["timestamp"]).isoformat() if timestamp(photo["timestamp"]) else None
-                photo["evidence"] = raw.get(pid, [])
-                # A static taxonomy lookup is independent of per-photo answers.
-                # Key by the identity production distinguishes (source taxon id
-                # first, display name only when no identity is carried), so two
-                # source taxa that share a display name each keep their own key.
-                photo["species_keys"] = {}
-                for entry in photo["species_top5"]:
-                    identity = entry[3] if len(entry) > 3 else None
-                    key = taxonomy.prediction_key(entry[0], identity)
-                    photo["species_keys"][identity or entry[0]] = key
                 meta = metadata[pid]
                 presentation[str(pid)] = {"filename": meta["filename"], "folder": meta["folder_path"],
                                            "thumbnail": meta["thumb_path"], "file_hash": meta["file_hash"]}
                 if pid in labels:
                     label = labels[pid]
                     answers[str(pid)] = {"taxa": sorted(label["taxa"]), "sources": sorted(label["sources"]),
-                                         "complete": meta["folder_id"] in complete_folders}
+                                         "complete": label.get("complete", meta["folder_id"] in complete_folders)}
                     counts["labeled_photos"] += 1
                     counts["manual_only_label_photos"] += label["sources"] == {"manual"}
                     counts["unknown_or_mixed_provenance_photos"] += label["sources"] != {"manual"}
                     counts["multiple_species_label_photos"] += len(label["taxa"]) > 1
-                    counts["complete_roster_photos"] += meta["folder_id"] in complete_folders
+                    counts["complete_roster_photos"] += answers[str(pid)]["complete"]
                     counts["labeled_photos_with_predictions"] += any(d["sources"] for d in raw.get(pid, []))
                 counts["photos"] += 1
                 counts["photos_with_predictions"] += any(d["sources"] for d in raw.get(pid, []))
@@ -395,6 +416,10 @@ def prepare(db_path, output, *, workspace=None, seed=42, max_sessions=None,
         manifest = {"format_version": 1, "created_at": datetime.now(UTC).isoformat(), "code": source_identity,
                     "workspace": workspace, "seed": seed, "config": cfg, "grouping_config": grouping,
                     "label_source": label_source, "complete_folders": sorted(complete_folders),
+                    "capture_date": capture_date,
+                    "included_partitions": sorted(included_partitions) if included_partitions else None,
+                    "review_labels": str(Path(review_labels).resolve()) if review_labels else None,
+                    "reviewed_photo_count": len(reviewed),
                     "inventory": {**inventory, **dict(counts)}, "sessions": entries,
                     "taxonomy_display": taxonomy.display, "split_registry_digest": digest(registry),
                     "split_registry_path": str(registry_path.resolve()),
