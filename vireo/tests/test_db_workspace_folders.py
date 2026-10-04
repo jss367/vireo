@@ -579,6 +579,46 @@ def test_get_workspace_folder_roots_hides_non_root_links(db, tree):
     assert db.get_workspace_folder_roots(ws) == []
 
 
+def test_get_workspace_folder_roots_excludes_photo_only_grants(db, tree):
+    """A workspace that reaches a folder only through a ``workspace_photos``
+    grant must not see that folder as a scan root. Callers of
+    ``get_workspace_folder_roots`` treat each row as a whole-directory
+    source — ``/api/jobs/scan-workspace`` scans every path (creating real
+    ``workspace_folders`` links and exposing hidden sibling photos),
+    ``services/local_workspace.py::_root_records`` copies every file under
+    each root, and ``/api/jobs/repair-metadata`` rescans each one. A
+    grant-only workspace must not be able to drive those over a folder it
+    does not own, so the roots query is scoped to ``workspace_folders``
+    directly rather than the ``workspace_visible_folders`` view, which
+    synthesizes an ``is_root = 1`` row for every grant.
+    """
+    ws, p, a, b, q = tree
+    other = db.create_workspace("Other")
+    # Owner workspace links /p as a root; granted sibling and granted photo
+    # sit in /p/a and /q respectively — neither folder is linked to ``ws``.
+    db.add_workspace_folder(other, p)
+    db.add_workspace_folder(other, q)
+    granted_photo = _photo(db, a, "shared.jpg")
+    _photo(db, a, "sibling.jpg")  # hidden sibling: must not be reachable
+    _photo(db, q, "q1.jpg")
+    db.conn.execute(
+        "INSERT INTO workspace_photos (workspace_id, photo_id) VALUES (?, ?)",
+        (ws, granted_photo),
+    )
+    db.conn.commit()
+    # The grant surfaces the photo through ``photo_workspace_visibility``,
+    # but ``get_workspace_folder_roots`` must not promote its physical
+    # folder to a workspace root.
+    visible = db.conn.execute(
+        "SELECT 1 FROM photo_workspace_visibility WHERE workspace_id=? AND photo_id=?",
+        (ws, granted_photo),
+    ).fetchone()
+    assert visible is not None
+    assert db.get_workspace_folder_roots(ws) == []
+    # The ids-only accessor must agree, as its contract test requires.
+    assert db.get_workspace_root_folder_ids(ws) == []
+
+
 # -- get_workspace_extensions ------------------------------------------------------
 
 
