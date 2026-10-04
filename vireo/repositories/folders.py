@@ -183,7 +183,7 @@ class FolderRepository:
     def with_quality_data(self):
         """Return workspace folders with scored photos in their subtree."""
         ws = self.workspace_id
-        # The recursive step also joins workspace_folders on the current
+        # The recursive step also joins workspace_visible_folders on the current
         # folder: propagation stops at any ancestor that is not in the active
         # workspace, which matches get_folder_subtree_ids and keeps the
         # dropdown counts aligned with get_highlights_candidates.
@@ -199,7 +199,7 @@ class FolderRepository:
                    SELECT a.photo_id, f.parent_id, a.timestamp
                    FROM ancestors a
                    JOIN folders f ON f.id = a.folder_id
-                   JOIN workspace_folders wf_step
+                   JOIN workspace_visible_folders wf_step
                      ON wf_step.folder_id = f.id AND wf_step.workspace_id = ?
                    WHERE f.parent_id IS NOT NULL
                )

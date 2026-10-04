@@ -706,3 +706,22 @@ def test_failed_move_rolls_back_destination_subtree_membership(tmp_path, monkeyp
         assert (tmp_path / "source" / "moving.jpg").read_bytes() == b"photo"
         assert db.workspace_has_folder_link(destination) == already_linked
         assert db.workspace_has_folder_link(child) == already_linked
+
+
+def test_highlights_parent_count_includes_granted_child_without_hidden_siblings(tmp_path):
+    with Database(str(tmp_path / "db")) as db:
+        guest = db.create_workspace("Photo-only guest")
+        parent, parent_photo = _photo(db, tmp_path / "parent", "parent.jpg")
+        child, shared = _photo(db, tmp_path / "parent" / "child", "shared.jpg")
+        _, hidden = _photo(db, tmp_path / "parent" / "child", "hidden.jpg", b"private")
+        db.conn.execute("UPDATE folders SET parent_id=? WHERE id=?", (parent, child))
+        db.conn.execute("UPDATE photos SET quality_score=.8 WHERE id IN (?,?)", (shared, hidden))
+        db.grant_workspace_photos(guest, [parent_photo, shared])
+        db.conn.commit()
+        db.set_active_workspace(guest)
+        assert not db.workspace_has_folder_link(parent)
+        assert not db.workspace_has_folder_link(child)
+        candidates = db.get_highlights_candidates(parent, min_quality=.1)
+        assert [row["id"] for row in candidates] == [shared]
+        counts = {row["id"]: row["photo_count"] for row in db.get_folders_with_quality_data()}
+        assert counts[parent] == counts[child] == len(candidates) == 1
