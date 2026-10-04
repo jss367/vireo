@@ -4696,8 +4696,15 @@ async function loadPhoto(photoId, opts) {
     safeFetch('/api/photos/' + photoId + '/masks', {}, {toast: false})
       .then(function(d) {
         if (editorState.photoId !== photoId) return;
+        var becameAvailable = !editorState.localAvailable && !!d.active;
         editorState.localAvailable = !!d.active;
         updateLocalBandVisibility();
+        // If the user already clicked Show Mask before this resolved,
+        // the overlay was cleared because availability was still false.
+        // Retry the overlay now that we know an active mask exists.
+        if (becameAvailable && editorState.maskOverlay) {
+          refreshMaskOverlay();
+        }
       }).catch(function() {});
     if (photo.edit_recipe && photo.edit_recipe.local) {
       var localStaleSavedRecipeSeq = editorState.savedRecipeSeq;
