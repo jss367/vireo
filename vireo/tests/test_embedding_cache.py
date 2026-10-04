@@ -565,8 +565,11 @@ def test_concurrent_manifest_updates_do_not_lose_entries(tmp_path):
             pool.submit(cache.get_or_compute, identity, _payload)
             for identity in identities
         ]
+        # Deadlock guard: eight concurrent manifest writes on a Windows CI
+        # runner under xdist contention finish well inside this budget; a
+        # tighter window flaked on 3s without any producer getting stuck.
         for future in futures:
-            future.result(timeout=3)
+            future.result(timeout=30)
 
     with open(tmp_path / "cache" / "manifest.json", encoding="utf-8") as handle:
         manifest = json.load(handle)
