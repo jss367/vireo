@@ -1,0 +1,270 @@
+import copy
+import json
+
+import pytest
+from test_label_benchmark import retained_scope
+
+from encounter_eval.common import Group, configure_repo, digest
+from encounter_eval.continuity_experiments import apply_candidate, candidates, prepare_baseline
+from encounter_eval.continuity_followup import comparison_counts, pair_references, run
+
+configure_repo()
+
+
+def photos(*, weak=True):
+    result = []
+    for i in range(3):
+        middle = i == 1
+        name, taxon, confidence = (
+            ("Other", "2", 0.85) if middle and not weak else ("Bird", "1", 0.65 if middle else 0.99)
+        )
+        detection = {
+            "id": i,
+            "detector_model": "megadetector-v6",
+            "category": "animal",
+            "detector_confidence": 0.05 if middle and weak else 0.9,
+            "box_x": 0.2,
+            "box_y": 0.2,
+            "box_w": 0.3,
+            "box_h": 0.3,
+            "sources": [
+                {
+                    "model": "one",
+                    "mode": "exclusive",
+                    "predictions": [{"name": name, "score": confidence, "taxon": "inat:" + taxon}],
+                }
+            ],
+        }
+        result.append(
+            {
+                "id": i,
+                "folder_id": 1,
+                "timestamp": f"2026-01-01T00:00:00.{i * 3}00",
+                "subject_present": not (middle and weak),
+                "subject_absent": middle and weak,
+                "species_top5": [] if middle and weak else [(name, confidence, "one", "taxon:" + taxon)],
+                "species_keys": {"taxon:" + taxon: "inat:" + taxon},
+                "evidence": [detection],
+            }
+        )
+    return result
+
+
+def spec(name):
+    return next(s for s in candidates() if s["id"] == name)
+
+
+def test_lower_matching_confidence_recovers_without_mutating_evidence():
+    p = photos()
+    original = digest(p)
+    prepared = prepare_baseline(p, {})
+    assert prepared[0][1]["subject_absent"]
+    after = apply_candidate(prepared, {}, spec("weak-lower-confidence"))
+    assert after[1]["subject_uncertain"] and not after[1]["subject_absent"]
+    assert after[1]["species_top5"] == []
+    assert after[1]["grouping_species_top5"][0][1] == 0.65
+    assert digest(p) == original
+    assert prepared[0][1]["subject_absent"]
+
+
+@pytest.mark.parametrize(
+    "change", ["conflicting_model", "folder", "empty_box", "too_long", "visual_conflict", "disabled"]
+)
+def test_relaxed_weak_rules_keep_independent_guards(change):
+    p = photos()
+    config = {}
+    if change == "conflicting_model":
+        p[1]["evidence"][0]["sources"].append(
+            {"model": "two", "mode": "exclusive", "predictions": [{"name": "Other", "taxon": "inat:2", "score": 0.99}]}
+        )
+    elif change == "folder":
+        p[1]["folder_id"] = 2
+    elif change == "empty_box":
+        p[1]["evidence"] = []
+    elif change == "too_long":
+        p[2]["timestamp"] = "2026-01-01T00:01:00"
+    elif change == "visual_conflict":
+        p[0]["dino_global_embedding"] = [1.0, 0.0]
+        p[1]["dino_global_embedding"] = [0.0, 1.0]
+    else:
+        config = {"pipeline": {"weak_detection_rescue_enabled": False}}
+    after = apply_candidate(prepare_baseline(p, config), config, spec("weak-lower-confidence"))
+    assert after[1]["subject_absent"]
+
+
+def test_anchor_only_abstains_and_does_not_manufacture_classifier_scores():
+    p = photos()
+    p[1]["evidence"][0]["sources"] = []
+    after = apply_candidate(prepare_baseline(p, {}), {}, spec("weak-anchor-context"))
+    assert after[1]["subject_uncertain"]
+    assert after[1]["grouping_species_top5"] == []
+    assert after[1]["experimental_continuity"]["support"] == "anchor_context"
+
+
+def test_larger_isolated_window_preserves_original_prediction_and_model_veto():
+    p = photos(weak=False)
+    prepared = prepare_baseline(p, {})
+    assert "grouping_species_top5" not in prepared[0][1]
+    after = apply_candidate(prepared, {}, spec("isolated-longer-span"))
+    assert after[1]["grouping_species_top5"] == []
+    assert after[1]["species_top5"][0][0] == "Other"
+    p[1]["evidence"][0]["sources"].append({**copy.deepcopy(p[1]["evidence"][0]["sources"][0]), "model": "two"})
+    after = apply_candidate(prepare_baseline(p, {}), {}, spec("isolated-longer-span"))
+    assert "experimental_continuity" not in after[1]
+
+
+def test_known_labels_do_not_change_candidate_decisions():
+    p = photos()
+    after = apply_candidate(prepare_baseline(p, {}), {}, spec("weak-lower-confidence"))
+    p[1]["confirmed_species"] = "Something completely different"
+    changed = apply_candidate(prepare_baseline(p, {}), {}, spec("weak-lower-confidence"))
+    assert after[1]["grouping_species_top5"] == changed[1]["grouping_species_top5"]
+
+
+def test_same_label_references_do_not_claim_human_review_or_animal_identity():
+    p = photos()
+    answers = {str(i): {"taxa": ["inat:1"], "sources": ["manual"], "complete": False} for i in range(3)}
+    refs = pair_references(p, answers)
+    assert len(refs) == 2 and all(not r["human_reviewed"] for r in refs)
+    answers["1"]["taxa"].append("inat:2")
+    assert pair_references(p, answers) == []
+
+
+def test_safety_counts_catch_losses_hidden_by_gains_and_longer_boundary_joins():
+    p = photos()
+    p[1]["timestamp"] = "2026-01-01T00:00:05"
+    p[2]["timestamp"] = "2026-01-01T00:00:06"
+    answers = {
+        str(i): {"taxa": ["inat:1" if i == 0 else "inat:2"], "sources": ["manual"], "complete": False} for i in range(3)
+    }
+    baseline = [Group((0,), ("inat:1",), ""), Group((1, 2), None, "")]
+    candidate = [Group((0, 1, 2), ("inat:2",), "")]
+    counts = comparison_counts(p, answers, candidate, baseline, pair_references(p, answers))
+    assert counts["lost_previously_recovered_labels"] == 1
+    assert counts["new_differing_label_joins"] == 1
+
+
+def test_followup_never_reads_consumed_test_partition_and_preserves_inputs(tmp_path, monkeypatch):
+    import encounter_eval.continuity_followup as followup
+
+    scope = retained_scope(tmp_path)
+    hashes = {p: p.read_bytes() for p in scope.rglob("*") if p.is_file()}
+    original = followup.read_bundle
+
+    def read(path, entry):
+        assert entry["partition"] != "test"
+        return original(path, entry)
+
+    monkeypatch.setattr(followup, "read_bundle", read)
+    output = tmp_path / "result"
+    result = run([scope], output)
+    assert result["selected"]["id"] == "current" and not result["test_evaluated"]
+    assert all(p.read_bytes() == v for p, v in hashes.items())
+    checks = json.loads((output / "inferred-regression-checks.json").read_text())
+    assert not checks["human_reviews"] and len(checks["references"]) == 4
+    with pytest.raises(FileExistsError):
+        run([scope], output)
+
+
+def test_missing_review_case_cannot_silently_pass(tmp_path):
+    scope = retained_scope(tmp_path)
+    with pytest.raises(ValueError, match="every reviewed"):
+        run(
+            [scope],
+            tmp_path / "result",
+            constraints=[
+                {
+                    "id": "unknown",
+                    "workspace": 1,
+                    "session": "missing",
+                    "ids": [99],
+                    "expected_groups": [[99]],
+                }
+            ],
+        )
+
+
+def test_final_test_constraints_are_rejected(tmp_path):
+    scope = retained_scope(tmp_path)
+    with pytest.raises(ValueError, match="final-test"):
+        run([scope], tmp_path / "result", constraints=[{"id": "test", "partition": "test"}])
+
+
+def test_new_split_of_same_labels_requires_review():
+    from encounter_eval.continuity_followup import _changed_cases
+
+    p = photos()
+    answers = {str(i): {"taxa": ["inat:1"], "sources": ["manual"], "complete": False} for i in range(3)}
+    before = [Group((0, 1, 2), ("inat:1",), "")]
+    after = [Group((0,), ("inat:1",), ""), Group((1, 2), ("inat:1",), "")]
+    cases = _changed_cases(p, answers, before, after, {"session": "test"}, set())
+    assert cases[0]["needs_review"]
+
+
+def test_ambiguous_report_exports_a_replayable_snapshot(tmp_path):
+    import gzip
+
+    from encounter_eval.algorithms import run_algorithm
+    from encounter_eval.common import code_identity, encode, write_json
+    from encounter_eval.continuity_followup import _changed_cases
+    from encounter_eval.continuity_followup_report import build
+    from encounter_eval.grouping_dataset import check, import_reviews
+    from encounter_eval.library import read_bundle
+
+    scope = retained_scope(tmp_path)
+    manifest = json.loads((scope / "manifest.json").read_text())
+    entry = manifest["sessions"][0]
+    bundle = read_bundle(scope, entry)
+    middle = bundle["photos"][1]
+    middle.update(subject_present=False, subject_absent=True, species_top5=[])
+    middle["evidence"][0]["detector_confidence"] = 0.05
+    middle["evidence"][0]["sources"][0]["predictions"][0]["score"] = 0.65
+    del bundle["answers"][str(middle["id"])]
+    (scope / entry["path"]).write_bytes(gzip.compress(encode(bundle).encode()))
+    entry["digest"] = digest(bundle)
+    write_json(scope / "manifest.json", manifest)
+    prepared = prepare_baseline(bundle["photos"], {})
+    selected = spec("weak-lower-confidence")
+    after = apply_candidate(prepared, {}, selected)
+    before_groups = run_algorithm("production", prepared[0])
+    after_groups = run_algorithm("production", after)
+    context = {
+        "workspace": 1,
+        "session": entry["id"],
+        "partition": "train",
+        "scope": str(scope),
+        "input_digest": entry["digest"],
+    }
+    cases = _changed_cases(after, bundle["answers"], before_groups, after_groups, context, set())
+    assert len(cases) == 1 and cases[0]["needs_review"]
+    comparison = tmp_path / "comparison"
+    comparison.mkdir()
+    measured = {"train": {"counts": {"photos": 3}}, "development": {"counts": {"photos": 0}}}
+    write_json(comparison / "summary.json", {"selected": selected, "baseline": measured, "selected_metrics": measured})
+    write_json(comparison / "changed-cases.json", {"cases": cases})
+    write_json(comparison / "search-design.json", {"source": code_identity(configure_repo())})
+    report = tmp_path / "review"
+    result = build(comparison, report)
+    assert result["cases"] == 1
+    content = (report / "Review uncertain encounter sequences.html").read_text()
+    assert "__COMPARISON_DATA__" not in content
+    created = json.loads((report / "comparison-summary.json").read_text())["created_at"]
+    export = tmp_path / "decisions.json"
+    write_json(
+        export,
+        {
+            "comparison_created_at": created,
+            "decisions": [
+                {
+                    "case_id": cases[0]["id"],
+                    "decision": "good",
+                    "notes": "fixture",
+                    "updated_at": "2026-10-04T18:00:00+00:00",
+                }
+            ],
+        },
+    )
+    dataset = tmp_path / "reviews.sqlite"
+    assert import_reviews(dataset, report, export)["imported"] == 1
+    replay = check(dataset)
+    assert replay["counts"]["passed_cases"] == 1

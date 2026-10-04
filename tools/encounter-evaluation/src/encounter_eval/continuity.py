@@ -3,9 +3,8 @@
 from .common import restore_features
 
 
-def apply_continuity(photos, config, *, repair_isolated=True):
-    from encounter_continuity import apply_encounter_continuity
-
+def native_evidence(photos):
+    """Translate frozen raw evidence without consulting reference labels."""
     evidence = {}
     identities = {}
     for photo in photos:
@@ -28,6 +27,13 @@ def apply_continuity(photos, config, *, repair_isolated=True):
                 }
             )
         evidence[photo["id"]] = detections
+    return evidence, identities
+
+
+def apply_continuity(photos, config, *, repair_isolated=True):
+    from encounter_continuity import apply_encounter_continuity
+
+    evidence, identities = native_evidence(photos)
     restored = restore_features([dict(p) for p in photos])
     after = apply_encounter_continuity(restored, evidence, config, repair_isolated=repair_isolated)
     return [
