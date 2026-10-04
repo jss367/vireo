@@ -93,7 +93,7 @@ def test_workspace_transfer_reservation_covers_pipeline_persistence(monkeypatch)
     thread.start()
     try:
         assert entered.wait(10)
-        with pytest.raises(WorkspaceBusyError, match="running jobs"):
+        with pytest.raises(WorkspaceBusyError, match="a pipeline being added to the queue"):
             runner.start_singleton("send-to-nas", lambda job: None, singleton_key="archive",
                                    workspace_id=1, exclusive_workspace=True)
     finally:
@@ -192,6 +192,86 @@ def test_exclusive_workspace_mutation_blocks_job_admission_and_releases():
     assert not runner._exclusive_workspace_mutations
     assert not runner._workspace_mutations
     runner.shutdown()
+
+
+def test_busy_rejection_names_the_request_holding_the_workspace():
+    """A transfer refused for a synchronous reservation names it.
+
+    Nothing else in the UI shows such a reservation, so "wait for running
+    jobs" with no job running gave the user nothing to wait for.
+    """
+    from jobs import JobRunner, WorkspaceBusyError
+
+    runner = JobRunner()
+    with runner.workspace_mutation(1, label="the request POST /api/batch/flag"):
+        with pytest.raises(WorkspaceBusyError) as excinfo:
+            runner.start_singleton("send-to-nas", lambda job: None, singleton_key="archive",
+                                   workspace_id=1, exclusive_workspace=True)
+    message = str(excinfo.value)
+    assert "the request POST /api/batch/flag (running for 0 s)" in message
+    assert "stuck" not in message
+    runner.shutdown()
+
+
+def test_busy_rejection_names_long_running_request_and_logs_its_stack(monkeypatch, caplog):
+    import jobs
+    from jobs import JobRunner, WorkspaceBusyError
+
+    runner = JobRunner()
+    holder_entered, release = threading.Event(), threading.Event()
+
+    def hold():
+        with runner.workspace_mutation(1, label="the request POST /api/hung"):
+            holder_entered.set()
+            release.wait(10)
+
+    thread = threading.Thread(target=hold)
+    thread.start()
+    try:
+        assert holder_entered.wait(10)
+        monkeypatch.setattr(jobs, "STALE_WORKSPACE_MUTATION_SECS", 0)
+        with caplog.at_level("WARNING", logger="jobs"):
+            with pytest.raises(WorkspaceBusyError, match="taking longer than usual") as excinfo:
+                runner.start_singleton("send-to-nas", lambda job: None, singleton_key="archive",
+                                       workspace_id=1, exclusive_workspace=True)
+    finally:
+        release.set()
+        thread.join(timeout=10)
+    assert "stuck" not in str(excinfo.value)
+    assert "restart" not in str(excinfo.value)
+    # The holder's current stack remains available for diagnosis.
+    assert any("in hold" in r.getMessage() and "/api/hung" in r.getMessage() for r in caplog.records)
+    assert not runner._workspace_mutations
+    runner.shutdown()
+
+
+def test_busy_rejection_names_running_jobs():
+    from jobs import JobRunner, WorkspaceBusyError
+
+    runner = JobRunner()
+    release = threading.Event()
+    export = runner.start("export", lambda job: release.wait(10), workspace_id=1)
+    try:
+        with pytest.raises(WorkspaceBusyError, match=r"busy with the export job \(running"):
+            runner.start_singleton("send-to-nas", lambda job: None, singleton_key="archive",
+                                   workspace_id=1, exclusive_workspace=True)
+    finally:
+        release.set()
+        wait_for_job_via_runner(runner, export)
+        runner.shutdown()
+
+
+def test_describe_job_and_durations():
+    from jobs import describe_job, describe_jobs, format_duration
+
+    assert format_duration(5) == "5 s"
+    assert format_duration(240) == "4 min"
+    assert format_duration(3 * 3600 + 120) == "3 h 2 min"
+    assert format_duration(7200) == "2 h"
+    assert describe_job({"type": "missing_originals_scan", "status": "queued"}) == (
+        "the missing originals scan job (queued)")
+    assert describe_jobs([{"type": "export", "status": "paused"}, {"type": "batch-delete", "status": "queued"}]) == (
+        "the export job (paused) and the batch delete job (queued)")
 
 
 def test_job_runner_shutdown_cancels_and_joins_workers():

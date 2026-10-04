@@ -4916,9 +4916,9 @@ def test_shutdown_endpoints_take_no_workspace_mutation_reservation(
     calls = []
     original = app._job_runner.workspace_mutation
 
-    def spy(workspace_id, *, exclusive=False):
+    def spy(workspace_id, *, exclusive=False, **kwargs):
         calls.append((workspace_id, exclusive))
-        return original(workspace_id, exclusive=exclusive)
+        return original(workspace_id, exclusive=exclusive, **kwargs)
 
     monkeypatch.setattr(app._job_runner, "workspace_mutation", spy)
     client = app.test_client()

@@ -985,9 +985,9 @@ def _record_workspace_mutations(app, monkeypatch):
     calls = []
     original = app._job_runner.workspace_mutation
 
-    def spy(workspace_id, *, exclusive=False):
+    def spy(workspace_id, *, exclusive=False, **kwargs):
         calls.append((workspace_id, exclusive))
-        return original(workspace_id, exclusive=exclusive)
+        return original(workspace_id, exclusive=exclusive, **kwargs)
 
     monkeypatch.setattr(app._job_runner, "workspace_mutation", spy)
     return calls
