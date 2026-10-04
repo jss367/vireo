@@ -3029,7 +3029,12 @@ class Database:
         'files': []}.
         """
         active_ws = self._ws_id()
-        if active_ws is not None and not self.workspace_has_folder_link(folder_id, active_ws):
+        if (active_ws is not None
+                and not self.workspace_has_folder_link(folder_id, active_ws)
+                and any(row["id"] == active_ws for row in self.get_folder_workspaces(folder_id))):
+            # Synthetic photo-grant membership cannot authorize a cascade.
+            # Preserve catalog cleanup/unlink callers with no visible claim,
+            # including physical ancestor aliases protected by foreign links.
             raise ValueError("Folder is not linked to the active workspace")
         deleted_ids, files = self._folder_repository(scoped=False).delete(
             folder_id,

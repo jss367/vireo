@@ -677,3 +677,32 @@ def test_grant_only_missing_folder_cannot_delete_hidden_siblings(app_and_db, tmp
     assert db.get_photo(sibling) is not None
     assert db.filter_photo_ids_in_workspace([shared, sibling]) == [shared]
     assert (tmp_path / "missing-root" / "private.jpg").read_bytes() == b"private"
+
+
+@pytest.mark.parametrize("already_linked", [False, True])
+def test_failed_move_rolls_back_destination_subtree_membership(tmp_path, monkeypatch, already_linked):
+    with Database(str(tmp_path / "db")) as db:
+        active = db._active_workspace_id
+        owner = db.create_workspace("Destination owner")
+        source, photo = _photo(db, tmp_path / "source", "moving.jpg")
+        destination, sibling = _photo(db, tmp_path / "destination", "private.jpg", b"private")
+        child, nested = _photo(db, tmp_path / "destination" / "nested", "hidden.jpg", b"nested")
+        db.add_workspace_folder(owner, destination)
+        if not already_linked:
+            db.remove_workspace_folder(active, destination)
+            db.remove_workspace_folder(active, child)
+        before = [tuple(row) for row in db.conn.execute("SELECT * FROM workspace_folders ORDER BY workspace_id,folder_id")]
+        before_visible = db.filter_photo_ids_in_workspace([photo, sibling, nested])
+
+        def fail(*args):
+            raise RuntimeError("visibility write failed")
+
+        monkeypatch.setattr(db, "preserve_photo_visibility_for_move", fail)
+        with pytest.raises(RuntimeError, match="visibility write failed"):
+            move_photos(db, [photo], str(tmp_path / "destination"))
+        assert [tuple(row) for row in db.conn.execute("SELECT * FROM workspace_folders ORDER BY workspace_id,folder_id")] == before
+        assert db.filter_photo_ids_in_workspace([photo, sibling, nested]) == before_visible
+        assert db.get_photo(photo)["folder_id"] == source
+        assert (tmp_path / "source" / "moving.jpg").read_bytes() == b"photo"
+        assert db.workspace_has_folder_link(destination) == already_linked
+        assert db.workspace_has_folder_link(child) == already_linked
