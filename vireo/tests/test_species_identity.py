@@ -1334,3 +1334,61 @@ def test_download_job_retries_deferred_taxonomy_repair_without_restart(app_and_d
     assert job["status"] == "completed", job
     assert database.get_meta(INFERRED_TAXONOMY_MARKER) == "1"
     assert database.conn.execute("SELECT scientific_name FROM predictions WHERE id=?", (row["id"],)).fetchone()[0] == LILAC["scientific_name"]
+
+
+def test_download_and_request_repairs_serialize_and_recheck_marker(db, tmp_path, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    import species_identity_repair as repair
+    from db import Database
+
+    _, detection = _photo(db, tmp_path)
+    db.add_prediction(detection, "Lilac-crowned Parrot", .9, "BioCLIP", labels_fingerprint="custom",
+                      taxonomy={"scientific_name": BROWED["scientific_name"]})
+    db.set_meta(repair.INFERRED_TAXONOMY_MARKER, "1")
+    peer = Database(db._db_path)
+    db.set_meta(repair.INFERRED_TAXONOMY_MARKER, "0")
+    entered = threading.Event()
+    release = threading.Event()
+    competing = threading.Event()
+    duplicate_plan = threading.Event()
+    plans = []
+    original = repair.plan_inferred_taxonomy_repairs
+
+    def slow_plan(database):
+        result = original(database)
+        plans.append(result)
+        if len(plans) == 1:
+            entered.set()
+            assert release.wait(5)
+        else:
+            duplicate_plan.set()
+        return result
+
+    def request_repair():
+        competing.set()
+        return repair.repair_on_upgrade(peer)
+
+    monkeypatch.setattr(repair, "plan_inferred_taxonomy_repairs", slow_plan)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            download = pool.submit(repair.repair_on_upgrade, db)
+            try:
+                assert entered.wait(5)
+                request = pool.submit(request_repair)
+                assert competing.wait(5)
+                # A second connection must wait for the first plan/commit,
+                # then recheck the marker instead of planning stale rows.
+                assert not duplicate_plan.wait(.2)
+            finally:
+                release.set()
+            assert download.result(timeout=5) == 1
+            assert request.result(timeout=5) == 0
+        assert len(plans) == 1
+        assert db.get_meta(repair.INFERRED_TAXONOMY_MARKER) == "1"
+        assert db.conn.execute("SELECT COUNT(*) FROM species_identity_repairs").fetchone()[0] == 1
+        assert db.conn.execute("SELECT scientific_name FROM predictions").fetchone()[0] == LILAC["scientific_name"]
+    finally:
+        release.set()
+        peer.close()

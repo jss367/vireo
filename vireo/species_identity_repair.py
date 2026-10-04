@@ -1,6 +1,7 @@
 """Audited, idempotent repair of known legacy common-name enrichment errors."""
 
 import json
+import threading
 
 from species_identity import COMMON_NAME_CORRECTIONS, SpeciesResolver, resolution_identity
 
@@ -11,6 +12,10 @@ TAXONOMY_COLUMNS = ("scientific_name", *("taxonomy_" + rank for rank in TAXONOMY
 # enrichment also includes this version so pre-repair portable artifacts
 # cannot reintroduce incorrect names after this one-shot marker is set.
 INFERRED_TAXONOMY_MARKER = "inferred_taxonomy_repair:v1"
+
+# Download jobs and request Database constructors can reach the same one-shot
+# repair concurrently. Serialize marker checks, planning and commit together.
+_REPAIR_LOCK = threading.RLock()
 
 
 def plan_repairs(conn):
@@ -180,6 +185,11 @@ def apply_repairs(conn, changes):
 
 
 def repair_on_upgrade(db):
+    with _REPAIR_LOCK:
+        return _repair_on_upgrade_locked(db)
+
+
+def _repair_on_upgrade_locked(db):
     count = 0
     marker = "species_identity_repair:" + resolution_identity()
     if db.get_meta(marker) != "1":
