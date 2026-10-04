@@ -7,9 +7,9 @@ from species_identity import COMMON_NAME_CORRECTIONS, SpeciesResolver, resolutio
 TAXONOMY_RANKS = ("kingdom", "phylum", "class", "order", "family", "genus")
 TAXONOMY_COLUMNS = ("scientific_name", *("taxonomy_" + rank for rank in TAXONOMY_RANKS))
 
-# Bump the suffix only when the inferred-taxonomy rule below changes; it is
-# deliberately not tied to resolution_identity(), which also keys portable
-# caches and pipeline results that this data-only repair does not affect.
+# Bump the suffix when the inferred-taxonomy rule changes. Classifier output
+# enrichment also includes this version so pre-repair portable artifacts
+# cannot reintroduce incorrect names after this one-shot marker is set.
 INFERRED_TAXONOMY_MARKER = "inferred_taxonomy_repair:v1"
 
 

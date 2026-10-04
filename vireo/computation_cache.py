@@ -425,6 +425,7 @@ def classifier_runtime_fingerprint(
     taxonomy_identity="no-tax",
 ):
     from species_identity import resolution_identity
+    from species_identity_repair import INFERRED_TAXONOMY_MARKER
     if (
         not isinstance(model_identity, dict)
         or not _is_sha256(labels_fingerprint_full)
@@ -449,6 +450,9 @@ def classifier_runtime_fingerprint(
         # replaces raw binomials with current names (Codex #1560 P2).
         "output_enrichment": {
             "species_resolution": resolution_identity(),
+            # Pre-repair artifacts may contain another species' binomial.
+            # Quarantine them even after the one-shot catalog repair is done.
+            "inferred_taxonomy_repair": INFERRED_TAXONOMY_MARKER,
             "taxonomy_identity": taxonomy_identity,
             "scientific_synonyms_identity": local_synonyms_identity(),
         },
