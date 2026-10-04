@@ -84,7 +84,7 @@ def best_batch_scope(db, seed_photo_id, max_gap_seconds=8.0, max_sequence_gap=2,
             """SELECT p.id, p.folder_id, p.filename, p.extension, p.timestamp,
                       p.flag, p.rating, p.quality_score, p.sharpness
                FROM photos p
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
                WHERE wf.workspace_id = ? AND p.folder_id = ? AND p.filename LIKE ?
                ORDER BY p.filename ASC, p.id ASC""",
@@ -129,7 +129,7 @@ def best_batch_scope(db, seed_photo_id, max_gap_seconds=8.0, max_sequence_gap=2,
         """SELECT p.id, p.folder_id, p.filename, p.extension, p.timestamp,
                   p.flag, p.rating, p.quality_score, p.sharpness
            FROM photos p
-           JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+           JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
            JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
            WHERE wf.workspace_id = ? AND p.folder_id = ?
            ORDER BY p.timestamp IS NULL, p.timestamp ASC, p.filename ASC, p.id ASC""",

@@ -497,8 +497,8 @@ class PredictionRepository:
                     SELECT pr.id FROM predictions pr
                     JOIN detections d ON d.id = pr.detection_id
                     JOIN photos ph ON ph.id = d.photo_id
-                    JOIN workspace_folders wf
-                      ON wf.folder_id = ph.folder_id AND wf.workspace_id = ?
+                    JOIN photo_workspace_visibility wf
+                      ON wf.photo_id = ph.id AND wf.workspace_id = ?
                     {where_clause}
                 )""",
                 [ws, *params],
@@ -532,8 +532,8 @@ class PredictionRepository:
                         FROM classifier_match_scores cms
                         JOIN detections d ON d.id = cms.detection_id
                         JOIN photos ph ON ph.id = d.photo_id
-                        JOIN workspace_folders wf
-                          ON wf.folder_id = ph.folder_id AND wf.workspace_id = ?
+                        JOIN photo_workspace_visibility wf
+                          ON wf.photo_id = ph.id AND wf.workspace_id = ?
                         {cms_where}
                     )""",
                 [ws, *cms_params],
@@ -590,8 +590,8 @@ class PredictionRepository:
                         FROM classifier_runs cr
                         JOIN detections d ON d.id = cr.detection_id
                         JOIN photos ph ON ph.id = d.photo_id
-                        JOIN workspace_folders wf
-                          ON wf.folder_id = ph.folder_id AND wf.workspace_id = ?
+                        JOIN photo_workspace_visibility wf
+                          ON wf.photo_id = ph.id AND wf.workspace_id = ?
                         {run_where}
                     )""",
                 [ws, *run_params],
@@ -768,7 +768,7 @@ class PredictionRepository:
                     FROM predictions pr
                     JOIN detections d ON d.id = pr.detection_id
                     JOIN photos p ON p.id = d.photo_id
-                    JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                    JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                     LEFT JOIN prediction_review pr_rev
                       ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
                     {where} ORDER BY pr.confidence DESC""",
@@ -835,8 +835,8 @@ class PredictionRepository:
                  ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
                JOIN detections d ON d.id = pr.detection_id
                JOIN photos p ON p.id = d.photo_id
-               JOIN workspace_folders wf
-                 ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+               JOIN photo_workspace_visibility wf
+                 ON wf.photo_id = p.id AND wf.workspace_id = ?
                WHERE pr_rev.group_id = ?
                ORDER BY p.quality_score DESC""",
             (ws, ws, group_id),
@@ -1099,8 +1099,8 @@ class PredictionRepository:
                 """SELECT DISTINCT d.photo_id FROM predictions pr
                    JOIN detections d ON d.id = pr.detection_id
                    JOIN photos p ON p.id = d.photo_id
-                   JOIN workspace_folders wf
-                     ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                   JOIN photo_workspace_visibility wf
+                     ON wf.photo_id = p.id AND wf.workspace_id = ?
                    WHERE pr.classifier_model = ?""",
                 (self.workspace_id, model),
             ).fetchall()
@@ -1109,8 +1109,8 @@ class PredictionRepository:
                 """SELECT DISTINCT d.photo_id FROM predictions pr
                    JOIN detections d ON d.id = pr.detection_id
                    JOIN photos p ON p.id = d.photo_id
-                   JOIN workspace_folders wf
-                     ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                   JOIN photo_workspace_visibility wf
+                     ON wf.photo_id = p.id AND wf.workspace_id = ?
                    WHERE pr.classifier_model = ?
                      AND pr.labels_fingerprint = ?""",
                 (self.workspace_id, model, labels_fingerprint),
@@ -1133,18 +1133,23 @@ class PredictionRepository:
         effective threshold so they don't surface a species from a now-
         hidden detection.
 
-        Returns a dict with ``species``, ``scientific_name``, ``confidence``,
-        ``detection_id`` or None if no eligible prediction exists.
+        Returns a row with ``species``, ``scientific_name``, ``confidence``,
+        ``detection_id`` and the provenance columns
+        (``classifier_model``, ``labels_fingerprint``, ``source_taxon_id``)
+        or None if no eligible prediction exists. The stored scientific name
+        is raw: resolve it with ``species_identity.resolved_prediction_taxonomy``
+        before showing or submitting it.
         """
         if min_detector_confidence is None:
             return self.conn.execute(
                 """SELECT pr.species, pr.scientific_name, pr.confidence,
-                          pr.detection_id
+                          pr.detection_id, pr.classifier_model,
+                          pr.labels_fingerprint, pr.source_taxon_id
                    FROM predictions pr
                    JOIN detections d ON d.id = pr.detection_id
                    JOIN photos p ON p.id = d.photo_id
-                   JOIN workspace_folders wf
-                     ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                   JOIN photo_workspace_visibility wf
+                     ON wf.photo_id = p.id AND wf.workspace_id = ?
                    WHERE d.photo_id = ?
                      AND pr.labels_fingerprint = (
                         SELECT pr2.labels_fingerprint FROM predictions pr2
@@ -1158,12 +1163,13 @@ class PredictionRepository:
             ).fetchone()
         return self.conn.execute(
             """SELECT pr.species, pr.scientific_name, pr.confidence,
-                      pr.detection_id
+                      pr.detection_id, pr.classifier_model,
+                      pr.labels_fingerprint, pr.source_taxon_id
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
                JOIN photos p ON p.id = d.photo_id
-               JOIN workspace_folders wf
-                 ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+               JOIN photo_workspace_visibility wf
+                 ON wf.photo_id = p.id AND wf.workspace_id = ?
                WHERE d.photo_id = ?
                  AND d.detector_confidence >= ?
                  AND pr.labels_fingerprint = (
@@ -1224,8 +1230,8 @@ class PredictionRepository:
                 """SELECT pr.species, pr.confidence, pr.detection_id FROM predictions pr
                    JOIN detections d ON d.id = pr.detection_id
                    JOIN photos p ON p.id = d.photo_id
-                   JOIN workspace_folders wf
-                     ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                   JOIN photo_workspace_visibility wf
+                     ON wf.photo_id = p.id AND wf.workspace_id = ?
                    WHERE d.photo_id = ? AND pr.classifier_model = ?""",
                 (self.workspace_id, photo_id, model),
             ).fetchone()
@@ -1233,8 +1239,8 @@ class PredictionRepository:
             """SELECT pr.species, pr.confidence, pr.detection_id FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
                JOIN photos p ON p.id = d.photo_id
-               JOIN workspace_folders wf
-                 ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+               JOIN photo_workspace_visibility wf
+                 ON wf.photo_id = p.id AND wf.workspace_id = ?
                WHERE d.photo_id = ?
                  AND pr.classifier_model = ?
                  AND pr.labels_fingerprint = ?""",
@@ -1374,8 +1380,8 @@ class PredictionRepository:
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
                JOIN photos ph ON ph.id = d.photo_id
-               JOIN workspace_folders wf
-                 ON wf.folder_id = ph.folder_id AND wf.workspace_id = ?
+               JOIN photo_workspace_visibility wf
+                 ON wf.photo_id = ph.id AND wf.workspace_id = ?
                WHERE pr.id = ?""",
             (ws, prediction_id),
         ).fetchone()

@@ -272,7 +272,7 @@ class KeywordRepository:
             """SELECT COUNT(DISTINCT pk.keyword_id)
                FROM photo_keywords pk
                JOIN photos p ON p.id = pk.photo_id
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
                WHERE wf.workspace_id = ?""",
             (self.workspace_id,),
@@ -292,7 +292,7 @@ class KeywordRepository:
                FROM photo_keywords pk
                JOIN keywords k ON k.id = pk.keyword_id
                JOIN photos p ON p.id = pk.photo_id
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                WHERE wf.workspace_id = ?""",
             (self.workspace_id,),
         ).fetchone()[0]
@@ -314,7 +314,7 @@ class KeywordRepository:
                 """
                 SELECT DISTINCT k.name
                 FROM photos p
-                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                 JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
                 JOIN photo_keywords pk ON pk.photo_id = p.id
                 JOIN keywords k ON k.id = pk.keyword_id AND k.is_species = 1
@@ -1128,7 +1128,7 @@ class KeywordRepository:
             """SELECT DISTINCT pk.photo_id, wf.workspace_id
                FROM photo_keywords pk
                JOIN photos p ON p.id = pk.photo_id
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                WHERE pk.keyword_id = ?""",
             (keyword_id,),
         ).fetchall()
@@ -2272,8 +2272,8 @@ class KeywordRepository:
                     for row in self.conn.execute(
                         """SELECT DISTINCT wf.workspace_id
                            FROM photos p
-                           JOIN workspace_folders wf
-                             ON wf.folder_id = p.folder_id
+                           JOIN photo_workspace_visibility wf
+                             ON wf.photo_id = p.id
                            WHERE p.id = ?""",
                         (photo_id,),
                     ).fetchall()
@@ -2347,7 +2347,7 @@ class KeywordRepository:
                    SELECT DISTINCT pk.keyword_id AS id
                    FROM photo_keywords pk
                    JOIN photos p ON p.id = pk.photo_id
-                   JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                   JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                    WHERE wf.workspace_id = ?
                ),
                ancestors AS (
@@ -2666,7 +2666,7 @@ class KeywordRepository:
                    SELECT pk.keyword_id, pk.photo_id
                    FROM photo_keywords pk
                    JOIN photos p ON p.id = pk.photo_id
-                   JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                   JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                    WHERE wf.workspace_id = ?
                ),
                ws_kw AS (SELECT DISTINCT keyword_id AS id FROM ws_links),
@@ -2972,7 +2972,7 @@ class KeywordRepository:
                        SELECT DISTINCT pk.keyword_id AS id
                        FROM photo_keywords pk
                        JOIN photos p ON p.id = pk.photo_id
-                       JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                       JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                        WHERE wf.workspace_id = ?
                    ),
                    in_scope AS (

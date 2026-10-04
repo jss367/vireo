@@ -627,8 +627,8 @@ def _workspace_local_session_photo_count(
     row = db.conn.execute(
         """SELECT COUNT(*) AS photo_count
            FROM photos p
-           JOIN workspace_folders wf
-             ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+           JOIN photo_workspace_visibility wf
+             ON wf.photo_id = p.id AND wf.workspace_id = ?
            JOIN local_folder_mappings lfm ON lfm.folder_id = p.folder_id
            WHERE lfm.root_folder_id = ?""",
         (int(workspace_id), int(root_folder_id)),
@@ -644,7 +644,7 @@ def affected_workspace_ids(db, root_folder_id: int) -> list[int]:
     rows = db.conn.execute(
         """SELECT DISTINCT wf.workspace_id
            FROM local_folder_mappings lfm
-           JOIN workspace_folders wf ON wf.folder_id = lfm.folder_id
+           JOIN workspace_visible_folders wf ON wf.folder_id = lfm.folder_id
            WHERE lfm.root_folder_id=?
            ORDER BY wf.workspace_id""",
         (root_folder_id,),

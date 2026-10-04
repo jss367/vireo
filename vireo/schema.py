@@ -1022,6 +1022,12 @@ def _add_location_gps_reviews(conn):
     """)
 
 
+def _add_photo_workspace_visibility(conn):
+    from photo_visibility_schema import create_photo_visibility_schema
+
+    create_photo_visibility_schema(conn)
+
+
 MIGRATIONS = (
     Migration(
         version=5,
@@ -1058,6 +1064,7 @@ MIGRATIONS = (
         validate=_validate_grouping_history_snapshots_split,
     ),
     Migration(version=11, name="remember-gps-discrepancy-reviews", apply=_add_location_gps_reviews),
+    Migration(version=12, name="photo-specific-workspace-visibility", apply=_add_photo_workspace_visibility),
 )
 
 

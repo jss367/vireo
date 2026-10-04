@@ -59,6 +59,25 @@ def term_binds(like, term):
     return [f"{glob}*", f"*[^0-9.]{glob}*", like]
 
 
+def prediction_search_values(alias):
+    """Searchable expressions for a ``predictions`` row aliased ``alias``.
+
+    A custom-label row's stored scientific name may be another species' guess
+    (legacy burst enrichment put Amazona rhodocorytha on "Lilac-crowned
+    Amazon"), so it only answers a search when it is evidence; the label stays
+    searchable either way. The rank columns stay: those guesses were nearly
+    always a confusable neighbour, so their higher ranks are right, and SQL
+    cannot resolve a label to correct them.
+    """
+    from species_identity import stored_taxonomy_evidence_sql
+
+    return [
+        f"CASE WHEN {stored_taxonomy_evidence_sql(alias)} THEN {alias}.scientific_name END"
+        if column == "scientific_name" else f"{alias}.{column}"
+        for column in PREDICTION_COLUMNS
+    ]
+
+
 def values_contain(columns):
     """Columns are trusted SQL expressions, never user input. Binds ``term_binds``."""
     return (

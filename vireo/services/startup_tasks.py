@@ -474,7 +474,7 @@ def metadata_repair_count(db, workspace_id, root_paths=None):
         "f.id AS folder_id, f.path AS folder_path "
         "FROM photos p "
         "JOIN folders f ON f.id = p.folder_id "
-        "JOIN workspace_folders wf ON wf.folder_id = f.id "
+        "JOIN photo_workspace_visibility wf ON wf.photo_id = p.id "
         "WHERE wf.workspace_id = ? "
         "AND p.exif_data IS NULL"
         + where_extra

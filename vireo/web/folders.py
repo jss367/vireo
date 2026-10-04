@@ -137,7 +137,7 @@ def create_folders_blueprint(
         if not folder:
             return json_error("folder not found", 404)
         linked = db.conn.execute(
-            "SELECT 1 FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+            "SELECT 1 FROM workspace_visible_folders WHERE workspace_id = ? AND folder_id = ?",
             (db._active_workspace_id, folder_id),
         ).fetchone()
         if not linked:
@@ -188,11 +188,12 @@ def create_folders_blueprint(
     def api_folder_relocate(folder_id):
         db = get_db()
         # Folders are global; relocating rewrites the path for every
-        # workspace, so only a workspace that can see the folder may do it.
-        if not any(
-            workspace["id"] == db._active_workspace_id
-            for workspace in db.get_folder_workspaces(folder_id)
-        ):
+        # workspace, so only a workspace that owns the folder as a real or
+        # inherited link may do it. ``workspace_photos`` grants let a
+        # workspace see one photo in a folder owned by others; permitting
+        # relocation on that basis would rewrite paths for every hidden
+        # sibling the grant-only workspace has no claim to.
+        if not db.workspace_has_folder_link(folder_id):
             return json_error("folder not found", 404)
         body = request.get_json(silent=True) or {}
         if not isinstance(body, dict):
@@ -290,6 +291,10 @@ def create_folders_blueprint(
     @blueprint.route("/api/folders/<int:folder_id>", methods=["DELETE"])
     def api_folder_delete(folder_id):
         db = get_db()
+        # The missing-folder list may contain photo-only grants. Its scoped
+        # count never authorizes cascading deletion of hidden sibling rows.
+        if not db.workspace_has_folder_link(folder_id):
+            return json_error("folder not found", 404)
         # Deleting a folder that a local workspace has rebased removes the
         # folders row that local_workspace_folders and the manifest depend on,
         # so a later sync/discard would be unable to restore the catalog. The

@@ -193,8 +193,8 @@ def out_of_workspace_prediction_ids(db, pred_ids):
                 f"""SELECT pr.id FROM predictions pr
                     JOIN detections d ON d.id = pr.detection_id
                     JOIN photos ph ON ph.id = d.photo_id
-                    LEFT JOIN workspace_folders wf
-                      ON wf.folder_id = ph.folder_id
+                    LEFT JOIN photo_workspace_visibility wf
+                      ON wf.photo_id = ph.id
                      AND wf.workspace_id = ?
                     WHERE pr.id IN ({placeholders})
                       AND wf.workspace_id IS NULL""",

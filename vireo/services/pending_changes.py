@@ -70,7 +70,7 @@ def queue_location_sync_if_enabled(db, photo_id, workspace_id=None, _commit=True
             return
     elif db.conn.execute(
         """SELECT 1 FROM photos p
-           JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+           JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
            WHERE p.id = ? AND wf.workspace_id = ?""",
         (photo_id, workspace_id),
     ).fetchone() is None:

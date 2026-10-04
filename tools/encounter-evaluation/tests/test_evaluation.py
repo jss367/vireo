@@ -440,6 +440,32 @@ def test_subject_analysis_compatibility_keeps_library_unchanged(library, has_sub
     assert library.read_bytes() == before
 
 
+@pytest.mark.parametrize("canonical_view", [False, True])
+def test_reader_includes_photo_grants_without_siblings_or_source_writes(library, tmp_path, canonical_view):
+    conn = sqlite3.connect(library)
+    conn.executescript("""
+        INSERT INTO workspaces VALUES(2, 'Granted photo');
+        CREATE TABLE workspace_photos(workspace_id INTEGER, photo_id INTEGER);
+        INSERT INTO workspace_photos VALUES(2, 1);
+    """)
+    if canonical_view:
+        conn.executescript("""
+            CREATE VIEW photo_workspace_visibility AS
+            SELECT p.id AS photo_id, p.folder_id, wf.workspace_id FROM photos p
+            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+            UNION SELECT p.id, p.folder_id, wp.workspace_id FROM photos p
+            JOIN workspace_photos wp ON wp.photo_id = p.id;
+        """)
+    conn.close()
+    before = library.read_bytes()
+    manifest = prepare(library, tmp_path / 'granted', workspace=2)
+    bundle = read_bundle(tmp_path / 'granted', manifest['sessions'][0])
+    assert [p['id'] for p in bundle['photos']] == [1]
+    assert set(bundle['answers']) == {'1'}
+    assert bundle['answers']['1']['taxa'] == ['inat:101']
+    assert library.read_bytes() == before
+
+
 def test_verified_name_refresh_unifies_sources_and_reference_labels(library, tmp_path):
     from species_identity_repair import refresh_common_name_index
 

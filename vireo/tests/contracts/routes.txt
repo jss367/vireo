@@ -336,6 +336,7 @@ POST         /api/models/custom
 POST         /api/models/pipeline/delete
 POST         /api/models/pipeline/download
 POST         /api/move-folder/preflight
+POST         /api/move-photos/visibility
 POST         /api/move-rules
 POST         /api/move-rules/preview
 POST         /api/photo-preferences

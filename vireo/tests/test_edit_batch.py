@@ -186,7 +186,7 @@ def test_summary_bulk_loads_visible_recipes_without_full_metadata(app_and_db):
     assert response.json['count'] == len(ids)
     assert response.json['values']['adjustments.exposure'] is None
     assert response.json['values']['adjustments.contrast'] == 0
-    membership_reads = [sql for sql in queries if 'workspace_folders' in sql]
+    membership_reads = [sql for sql in queries if 'photo_workspace_visibility' in sql]
     recipe_reads = [sql for sql in queries if 'SELECT' in sql and 'photo_edit_recipes' in sql]
     assert 1 <= len(membership_reads) <= 4
     assert 1 <= len(recipe_reads) <= 3
@@ -285,7 +285,7 @@ def test_batch_slider_uses_chunked_reads_and_constant_commits(app_and_db):
     assert response.status_code == 200
     assert response.json['count'] == len(ids)
     assert response.json['skipped'] == [hidden_id, 999999]
-    assert 1 <= sum('workspace_folders' in sql for sql in queries) <= 4
+    assert 1 <= sum('photo_workspace_visibility' in sql for sql in queries) <= 4
     assert 1 <= sum('SELECT' in sql and 'photo_edit_recipes' in sql for sql in queries) <= 3
     assert 1 <= sum(sql == 'COMMIT' for sql in queries) <= 3
     assert not any('exif_data' in sql for sql in queries)

@@ -291,7 +291,7 @@ class SpeciesCurationRepository:
                       tp.predicted_confidence,
                       kw.keyword_names
                FROM photos p
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
                LEFT JOIN (
                    SELECT photo_id, name AS species FROM (
@@ -440,7 +440,7 @@ class SpeciesCurationRepository:
                JOIN keywords k ON k.id = pk.keyword_id
                 AND (k.is_species = 1 OR k.type = 'taxonomy')
                JOIN photos p ON p.id = pk.photo_id
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                 AND wf.workspace_id = ?
                JOIN folders f ON f.id = p.folder_id
                 AND f.status IN ('ok', 'partial')
@@ -477,7 +477,7 @@ class SpeciesCurationRepository:
                 AND (k.is_species = 1 OR k.type = 'taxonomy')
                JOIN taxa t ON t.id = k.taxon_id AND t.rank = 'species'
                JOIN photos p ON p.id = pk.photo_id
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                 AND wf.workspace_id = ?
                JOIN folders f ON f.id = p.folder_id
                 AND f.status IN ('ok', 'partial')
@@ -508,7 +508,7 @@ class SpeciesCurationRepository:
                 AND (k.is_species = 1 OR k.type = 'taxonomy')
                LEFT JOIN taxa t ON t.id = k.taxon_id
                JOIN photos p ON p.id = pk.photo_id
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                 AND wf.workspace_id = ?
                JOIN folders f ON f.id = p.folder_id
                 AND f.status IN ('ok', 'partial')
@@ -658,7 +658,7 @@ class SpeciesCurationRepository:
                     FROM photo_keywords pk
                     JOIN keywords k ON k.id = pk.keyword_id AND k.taxon_id IN ({placeholders})
                     JOIN photos p ON p.id = pk.photo_id
-                    JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                    JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                      AND wf.workspace_id = ?
                     JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok','partial')
                     WHERE COALESCE(p.flag, 'none') != 'rejected'
@@ -737,7 +737,7 @@ class SpeciesCurationRepository:
                 AND (k.is_species = 1 OR k.type = 'taxonomy')
                JOIN photos p ON p.id = pk.photo_id
                 AND COALESCE(p.flag, 'none') != 'rejected'
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                 AND wf.workspace_id = ?
                JOIN folders f ON f.id = p.folder_id
                 AND f.status IN ('ok', 'partial')
@@ -833,7 +833,7 @@ class SpeciesCurationRepository:
                 {species_filter}
                JOIN photos p ON p.id = pk.photo_id
                 AND COALESCE(p.flag, 'none') != 'rejected'
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                 AND wf.workspace_id = ?
                JOIN folders f ON f.id = p.folder_id
                 AND f.status IN ('ok', 'partial')
@@ -942,7 +942,7 @@ class SpeciesCurationRepository:
             f"""SELECT sr.species, sr.photo_id
                FROM species_representatives sr
                JOIN photos p ON p.id = sr.photo_id
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                 AND wf.workspace_id = ?
                JOIN folders f ON f.id = p.folder_id
                  {eligibility_filter}
@@ -1079,7 +1079,7 @@ class SpeciesCurationRepository:
         if eligible_only:
             eligibility_joins = """
                    JOIN photos p ON p.id = sh.photo_id
-                   JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                   JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                     AND wf.workspace_id = sh.workspace_id
                    JOIN folders f ON f.id = p.folder_id
                     AND f.status IN ('ok', 'partial')"""

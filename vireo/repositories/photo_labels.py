@@ -60,7 +60,7 @@ class PhotoLabelRepository:
             placeholders = ",".join("?" for _ in chunk)
             rows = self.conn.execute(
                 "SELECT p.id FROM photos p "
-                "JOIN workspace_folders wf ON wf.folder_id = p.folder_id "
+                "JOIN photo_workspace_visibility wf ON wf.photo_id = p.id "
                 f"WHERE wf.workspace_id = ? AND p.id IN ({placeholders})",
                 [self.workspace_id, *chunk],
             ).fetchall()

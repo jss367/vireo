@@ -196,6 +196,16 @@ def open_library(path):
         if not conn.execute(f"PRAGMA main.table_info({table})").fetchone():
             projection = ", ".join(f"NULL AS {column}" for column in columns)
             conn.execute(f"CREATE TEMP VIEW {table} AS SELECT {projection} WHERE 0")
+    # Legacy catalogs predate photo-specific grants. Mirror their folder-only
+    # membership in a connection-local view; never migrate the source library.
+    if not conn.execute("PRAGMA main.table_info(photo_workspace_visibility)").fetchone():
+        grants = ""
+        if conn.execute("PRAGMA main.table_info(workspace_photos)").fetchone():
+            grants = (" UNION SELECT p.id, p.folder_id, wp.workspace_id FROM main.photos p"
+                      " JOIN main.workspace_photos wp ON wp.photo_id = p.id")
+        conn.execute("CREATE TEMP VIEW photo_workspace_visibility AS "
+                     "SELECT p.id AS photo_id, p.folder_id, wf.workspace_id FROM main.photos p "
+                     "JOIN main.workspace_folders wf ON wf.folder_id = p.folder_id" + grants)
     return conn
 
 
@@ -284,7 +294,7 @@ def prepare(db_path, output, *, workspace=None, seed=42, max_sessions=None,
             raise ValueError("Split registry uses a different seed; reuse that seed or choose a separate registry")
         rows = [dict(r) for r in conn.execute("""SELECT p.id, p.folder_id, p.filename, p.timestamp,
             p.file_hash, p.thumb_path, f.path AS folder_path FROM photos p
-            JOIN folders f ON f.id = p.folder_id JOIN workspace_folders wf ON wf.folder_id = f.id
+            JOIN folders f ON f.id = p.folder_id JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
             WHERE wf.workspace_id = ? ORDER BY p.id""", (workspace,))]
         unknown_folders = set(complete_folders) - {r["folder_id"] for r in rows}
         if unknown_folders:
@@ -293,7 +303,7 @@ def prepare(db_path, output, *, workspace=None, seed=42, max_sessions=None,
         labels = defaultdict(lambda: {"taxa": set(), "sources": set()})
         for r in conn.execute("""SELECT pk.photo_id, pk.source, k.name, k.taxon_id, k.source_taxon_id FROM photo_keywords pk
             JOIN keywords k ON k.id = pk.keyword_id LEFT JOIN taxa t ON t.id = k.taxon_id
-            JOIN photos p ON p.id = pk.photo_id JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+            JOIN photos p ON p.id = pk.photo_id JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
             WHERE wf.workspace_id = ? AND (k.is_species = 1 OR k.type = 'taxonomy')
             AND (t.rank = 'species' OR t.rank IS NULL)""", (workspace,)):
             if label_source == "manual" and r["source"] != "manual":

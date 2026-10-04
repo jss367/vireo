@@ -1379,6 +1379,44 @@ class Database:
         """
         return self._workspace_repository().unpin_tab(nav_id)
 
+    def _photo_visibility_repository(self):
+        from repositories.photo_visibility import PhotoVisibilityRepository
+
+        return PhotoVisibilityRepository(self.conn)
+
+    def grant_workspace_photos(self, workspace_id, photo_ids):
+        self._photo_visibility_repository().grant(workspace_id, photo_ids)
+
+    def revoke_workspace_photo_grants_for_folders(self, workspace_id, folder_ids):
+        self._photo_visibility_repository().revoke_for_folders(workspace_id, folder_ids)
+
+    def grant_verified_twin_photos(self, workspace_id, rows):
+        self._photo_visibility_repository().grant_verified_twins(workspace_id, rows)
+
+    def grant_verified_twin_photos_tracked(self, workspace_id, rows):
+        """Grant twins and report the fresh grants and promoted folders.
+
+        Returns ``(new_grant_ids, promoted_folder_ids)``. See
+        :meth:`PhotoVisibilityRepository.grant_verified_twins_tracked`.
+        """
+        return self._photo_visibility_repository().grant_verified_twins_tracked(
+            workspace_id, rows,
+        )
+
+    def revoke_photo_grants(self, workspace_id, photo_ids):
+        """Revoke the specified ``workspace_photos`` rows (no sibling expansion)."""
+        self._photo_visibility_repository().revoke_grants(workspace_id, photo_ids)
+
+    def demote_folders_to_missing(self, folder_ids):
+        """Revert folders to ``status='missing'`` (import mount-loss rollback)."""
+        self._photo_visibility_repository().demote_folders_to_missing(folder_ids)
+
+    def photo_move_affected_workspaces(self, photo_ids):
+        return self._photo_visibility_repository().affected_workspaces(photo_ids, self._ws_id())
+
+    def preserve_photo_visibility_for_move(self, photo_id, keep_visible):
+        self._photo_visibility_repository().preserve_for_move(photo_id, self._ws_id(), keep_visible)
+
     def _workspace_repository(self, *, scoped=True):
         """Build the workspace repository on this connection.
 
@@ -1665,6 +1703,37 @@ class Database:
         """
         self._materialize_workspace_descendants(workspace_id)
         return self._workspace_folder_repository().roots(workspace_id)
+
+    def workspace_has_folder_link(self, folder_id, workspace_id=None):
+        """True iff the workspace has a real or inherited folder link.
+
+        Excludes ``workspace_photos`` grants, which only make a photo
+        visible, not the whole folder. Folder-wide mutations such as
+        ``/api/folders/<id>/relocate`` must gate on this view so a workspace
+        holding only a photo-specific grant for one photo cannot rewrite
+        paths for the hidden sibling photos owned by other workspaces.
+        """
+        if workspace_id is None:
+            workspace_id = self._ws_id()
+        return self._workspace_folder_repository().has_folder_link(
+            workspace_id, folder_id,
+        )
+
+    def get_audit_root_paths(self, workspace_id=None):
+        """Paths of the active workspace's audit scan roots.
+
+        Returns real ``workspace_folders`` roots only -- folders a workspace
+        reaches solely through a ``workspace_photos`` grant are excluded,
+        even when they would otherwise appear parentless in
+        ``get_folder_tree``. The audit treats the result as storage roots to
+        walk the filesystem under, and including a grant-only folder would
+        let ``/api/audit/untracked`` surface hidden sibling files that
+        ``/api/audit/import-untracked`` would then import under a real
+        workspace link.
+        """
+        if workspace_id is None:
+            workspace_id = self._ws_id()
+        return self._workspace_folder_repository().audit_root_paths(workspace_id)
 
     def get_workspace_extensions(self):
         """Return distinct lowercased file extensions for photos in the
@@ -2960,6 +3029,13 @@ class Database:
         'files': []}.
         """
         active_ws = self._ws_id()
+        if (active_ws is not None
+                and not self.workspace_has_folder_link(folder_id, active_ws)
+                and any(row["id"] == active_ws for row in self.get_folder_workspaces(folder_id))):
+            # Synthetic photo-grant membership cannot authorize a cascade.
+            # Preserve catalog cleanup/unlink callers with no visible claim,
+            # including physical ancestor aliases protected by foreign links.
+            raise ValueError("Folder is not linked to the active workspace")
         deleted_ids, files = self._folder_repository(scoped=False).delete(
             folder_id,
             active_ws,

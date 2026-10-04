@@ -654,7 +654,7 @@ def create_highlights_blueprint(get_db, json_error):
                 AND (k.is_species = 1 OR k.type = 'taxonomy')
                JOIN photos p ON p.id = pk.photo_id
                 AND COALESCE(p.flag, 'none') != 'rejected'
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                 AND wf.workspace_id = ?
                JOIN folders f ON f.id = p.folder_id
                 AND f.status IN ('ok', 'partial')

@@ -209,7 +209,7 @@ def create_system_blueprint(
             # Reject reveal for folders not linked to the active workspace,
             # matching the photo branch's verify_workspace gate.
             linked = db.conn.execute(
-                "SELECT 1 FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+                "SELECT 1 FROM workspace_visible_folders WHERE workspace_id = ? AND folder_id = ?",
                 (db._active_workspace_id, fid_int),
             ).fetchone()
             if not linked:
@@ -663,8 +663,8 @@ def create_system_blueprint(
                 """SELECT COUNT(*) FROM predictions pr
                    JOIN detections d ON d.id = pr.detection_id
                    JOIN photos p ON p.id = d.photo_id
-                   JOIN workspace_folders wf
-                     ON wf.folder_id = p.folder_id AND wf.workspace_id = ?""",
+                   JOIN photo_workspace_visibility wf
+                     ON wf.photo_id = p.id AND wf.workspace_id = ?""",
                 (db._ws_id(),)
             ).fetchone()[0]
         except Exception:

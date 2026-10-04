@@ -34,7 +34,7 @@ class WorkspaceFolderRepository:
         """True if the photo's folder is linked to ``workspace_id``."""
         row = self.conn.execute(
             """SELECT 1 FROM photos p
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                WHERE p.id = ? AND wf.workspace_id = ?""",
             (photo_id, workspace_id),
         ).fetchone()
@@ -146,6 +146,10 @@ class WorkspaceFolderRepository:
     def remove(self, workspace_id, folder_id):
         """Unlink a single folder and commit."""
         self.conn.execute(
+            "DELETE FROM workspace_photos WHERE workspace_id = ? AND photo_id IN "
+            "(SELECT id FROM photos WHERE folder_id = ?)", (workspace_id, folder_id),
+        )
+        self.conn.execute(
             "DELETE FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
             (workspace_id, folder_id),
         )
@@ -155,6 +159,10 @@ class WorkspaceFolderRepository:
         """Unlink ``folder_ids`` (a folder's subtree) and commit."""
         for chunk in self._chunks(folder_ids):
             placeholders = ",".join("?" for _ in chunk)
+            self.conn.execute(
+                f"DELETE FROM workspace_photos WHERE workspace_id = ? AND photo_id IN "
+                f"(SELECT id FROM photos WHERE folder_id IN ({placeholders}))", [workspace_id] + chunk,
+            )
             self.conn.execute(
                 f"""DELETE FROM workspace_folders
                     WHERE workspace_id = ? AND folder_id IN ({placeholders})""",
@@ -236,7 +244,7 @@ class WorkspaceFolderRepository:
     def list_workspaces_for_folder(self, folder_id):
         """Return every workspace in which ``folder_id`` is visible."""
         return self.conn.execute(
-            """SELECT w.id, w.name,
+            """WITH folder_links AS (SELECT w.id, w.name,
                       MAX(CASE
                             WHEN wf.folder_id = target.id AND wf.is_root = 1
                             THEN 1 ELSE 0
@@ -270,9 +278,68 @@ class WorkspaceFolderRepository:
                    WHERE removed.workspace_id = w.id AND removed.folder_id = target.id
                )
                GROUP BY w.id, w.name, w.pinned_at
+               )
+               SELECT w.id, w.name, MAX(m.is_root) AS is_root
+               FROM workspaces w JOIN (
+                   SELECT id, is_root FROM folder_links
+                   UNION ALL
+                   SELECT wp.workspace_id, 0 FROM workspace_photos wp
+                   JOIN photos p ON p.id = wp.photo_id WHERE p.folder_id = ?
+               ) m ON m.id = w.id
+               GROUP BY w.id, w.name, w.pinned_at
                ORDER BY (w.pinned_at IS NULL), LOWER(w.name), w.id""",
-            (folder_id,),
+            (folder_id, folder_id),
         ).fetchall()
+
+    def has_folder_link(self, workspace_id, folder_id):
+        """True iff ``workspace_id`` has a real or inherited folder link.
+
+        A real folder link is a ``workspace_folders`` row for the exact
+        folder, or a recursive-root row for an ancestor whose path (or
+        rebased ``local_folder_mappings.source_path``) contains the target.
+        ``workspace_photos`` grants, which make
+        :meth:`list_workspaces_for_folder` report the workspace as
+        associated, are deliberately excluded. Folder-wide mutations like
+        relocate must gate on this stricter view so a workspace holding only
+        a photo-specific grant cannot rewrite paths for the hidden sibling
+        photos owned by other workspaces.
+        """
+        row = self.conn.execute(
+            """SELECT 1
+               FROM workspace_folders wf
+               JOIN folders root ON root.id = wf.folder_id
+               JOIN folders target ON target.id = ?
+               LEFT JOIN local_folder_mappings target_lfm
+                 ON target_lfm.folder_id = target.id
+               WHERE wf.workspace_id = ?
+                 AND (wf.folder_id = target.id
+                    OR (
+                      wf.is_root = 1
+                      AND (
+                        REPLACE(target.path, '\\', '/') = REPLACE(root.path, '\\', '/')
+                        OR substr(
+                             REPLACE(target.path, '\\', '/'),
+                             1,
+                             length(RTRIM(REPLACE(root.path, '\\', '/'), '/') || '/')
+                           ) = RTRIM(REPLACE(root.path, '\\', '/'), '/') || '/'
+                        OR REPLACE(target_lfm.source_path, '\\', '/') = REPLACE(root.path, '\\', '/')
+                        OR substr(
+                             REPLACE(target_lfm.source_path, '\\', '/'),
+                             1,
+                             length(RTRIM(REPLACE(root.path, '\\', '/'), '/') || '/')
+                           ) = RTRIM(REPLACE(root.path, '\\', '/'), '/') || '/'
+                      )
+                    )
+                 )
+                 AND NOT EXISTS (
+                     SELECT 1 FROM workspace_removed_folders removed
+                     WHERE removed.workspace_id = wf.workspace_id
+                       AND removed.folder_id = target.id
+                 )
+               LIMIT 1""",
+            (folder_id, workspace_id),
+        ).fetchone()
+        return row is not None
 
     def root_ids(self, workspace_id):
         """Return the ids of the workspace's user-facing roots, by path."""
@@ -287,14 +354,18 @@ class WorkspaceFolderRepository:
         return [int(row["id"]) for row in rows]
 
     def roots(self, workspace_id):
-        """Return root folder rows with their linked-subtree photo count."""
+        """Return real scan/storage roots with their visible photo count.
+
+        Photo-only grants make a folder browsable, but never authorize
+        whole-directory scanning or local workspace copying.
+        """
         return self.conn.execute(
             """SELECT f.*, (
                    SELECT COUNT(*)
                    FROM photos p
                    JOIN folders cf ON cf.id = p.folder_id
-                   JOIN workspace_folders cwf
-                     ON cwf.folder_id = cf.id
+                   JOIN photo_workspace_visibility cwf
+                     ON cwf.photo_id = p.id
                     AND cwf.workspace_id = wf.workspace_id
                    LEFT JOIN local_folder_mappings lfm
                      ON lfm.folder_id = cf.id
@@ -318,12 +389,53 @@ class WorkspaceFolderRepository:
             (workspace_id,),
         ).fetchall()
 
+    def audit_root_paths(self, workspace_id):
+        """Return paths of the workspace's audit scan roots.
+
+        An audit root is a ``workspace_folders`` row whose nearest linked
+        ancestor does not exist in the active workspace, so the audit treats
+        its path as a storage root to walk the filesystem under. Folders a
+        workspace reaches only through ``workspace_photos`` grants are
+        deliberately excluded even when they would otherwise appear
+        parentless in ``get_folder_tree``, since the workspace does not own
+        them as scan roots: including a grant-only folder here would let
+        ``/api/audit/untracked`` enumerate hidden sibling files and
+        ``/api/audit/import-untracked`` create a real ``workspace_folders``
+        link that expands visibility to every photo in the directory.
+        """
+        rows = self.conn.execute(
+            """WITH RECURSIVE
+               linked(id) AS (
+                   SELECT wf.folder_id FROM workspace_folders wf
+                   WHERE wf.workspace_id = ?
+               ),
+               walk(start_id, current_id) AS (
+                   SELECT l.id, f.parent_id
+                   FROM linked l
+                   JOIN folders f ON f.id = l.id
+                   WHERE f.status IN ('ok', 'partial')
+                   UNION ALL
+                   SELECT w.start_id, f.parent_id
+                   FROM walk w
+                   JOIN folders f ON f.id = w.current_id
+                   WHERE w.current_id IS NOT NULL
+                     AND w.current_id NOT IN (SELECT id FROM linked)
+               )
+               SELECT DISTINCT f.path
+               FROM folders f
+               JOIN walk w ON w.start_id = f.id
+               WHERE w.current_id IS NULL
+               ORDER BY f.path""",
+            (workspace_id,),
+        ).fetchall()
+        return [row["path"] for row in rows]
+
     def extensions(self, workspace_id):
         """Distinct lowercased extensions of the workspace's visible photos."""
         rows = self.conn.execute(
             """SELECT DISTINCT LOWER(p.extension) AS ext
                FROM photos p
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                JOIN folders f ON f.id = p.folder_id
                               AND f.status IN ('ok', 'partial')
                WHERE wf.workspace_id = ?
@@ -534,6 +646,13 @@ class WorkspaceFolderRepository:
             # Move workspace_folders: remove from source, add to target
             for chunk in self._chunks(moved_folder_ids):
                 placeholders = ",".join("?" for _ in chunk)
+                # Moving ownership removes both kinds of source membership.
+                # Other workspaces' grants and all target sharing stay intact.
+                self.conn.execute(
+                    f"DELETE FROM workspace_photos WHERE workspace_id = ? AND photo_id IN "
+                    f"(SELECT id FROM photos WHERE folder_id IN ({placeholders}))",
+                    [source_ws_id] + chunk,
+                )
                 self.conn.execute(
                     f"""DELETE FROM workspace_folders
                         WHERE workspace_id = ? AND folder_id IN ({placeholders})""",

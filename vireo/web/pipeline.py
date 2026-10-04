@@ -229,7 +229,7 @@ def create_pipeline_blueprint(
             from db import _chunks  # noqa: PLC0415
             for fid in folder_ids:
                 linked = db.conn.execute(
-                    "SELECT 1 FROM workspace_folders "
+                    "SELECT 1 FROM workspace_visible_folders "
                     "WHERE workspace_id = ? AND folder_id = ?",
                     (ws_for_folders, fid),
                 ).fetchone()
@@ -242,7 +242,7 @@ def create_pipeline_blueprint(
                 for chunk in _chunks(db._folder_subtree_ids_by_path(fid)):
                     marks = ",".join("?" for _ in chunk)
                     rows = db.conn.execute(
-                        f"SELECT folder_id FROM workspace_folders "
+                        f"SELECT folder_id FROM workspace_visible_folders "
                         f"WHERE workspace_id = ? AND folder_id IN ({marks})",
                         [ws_for_folders] + list(chunk),
                     )
@@ -252,8 +252,9 @@ def create_pipeline_blueprint(
                 marks = ",".join("?" for _ in chunk)
                 scope_photo_ids.extend(
                     r["id"] for r in db.conn.execute(
-                        f"SELECT id FROM photos WHERE folder_id IN ({marks})",
-                        tuple(chunk),
+                        f"SELECT p.id FROM photos p JOIN photo_workspace_visibility pv ON pv.photo_id = p.id "
+                        f"WHERE p.folder_id IN ({marks}) AND pv.workspace_id = ?",
+                        [*chunk, ws_for_folders],
                     )
                 )
         # Expand a saved-process id the same way /api/jobs/pipeline does so
@@ -1708,7 +1709,7 @@ def create_pipeline_blueprint(
             SELECT pm.photo_id
               FROM photo_masks pm
               JOIN photos p ON p.id = pm.photo_id
-              JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+              JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
              WHERE wf.workspace_id = ? AND pm.variant = ?
             """,
             (ws, variant),
@@ -1810,6 +1811,7 @@ def create_pipeline_blueprint(
         preds = db.conn.execute(
             """SELECT pr.species, pr.confidence, pr.classifier_model AS model,
                       pr.category, pr.match_score,
+                      pr.labels_fingerprint, pr.source_taxon_id,
                       pr.scientific_name, pr.taxonomy_kingdom, pr.taxonomy_phylum,
                       pr.taxonomy_class, pr.taxonomy_order, pr.taxonomy_family,
                       pr.taxonomy_genus,
@@ -1836,7 +1838,16 @@ def create_pipeline_blueprint(
                ORDER BY pr.confidence DESC""",
             (ws, photo_id, min_conf),
         ).fetchall()
-        result["predictions"] = [dict(p) for p in preds]
+        # A custom-label row's stored taxonomy may be another species' guess;
+        # show the label's resolved binomial instead.
+        from species_identity import SpeciesResolver, resolved_prediction_taxonomy
+        resolver = SpeciesResolver(db=db)
+        result["predictions"] = []
+        for p in preds:
+            pred = dict(p)
+            pred.update(resolved_prediction_taxonomy(pred, resolver))
+            del pred["labels_fingerprint"], pred["source_taxon_id"]
+            result["predictions"].append(pred)
 
         # Match strength: how well the best label in each list actually fit,
         # as opposed to which label fit least badly. Reported for every
@@ -2270,7 +2281,7 @@ class _PipelineLaunch:
         from db import _chunks  # noqa: PLC0415
         for fid in self.folder_ids:
             linked = db.conn.execute(
-                "SELECT 1 FROM workspace_folders "
+                "SELECT 1 FROM workspace_visible_folders "
                 "WHERE workspace_id = ? AND folder_id = ?",
                 (ws_for_folders, fid),
             ).fetchone()
@@ -2294,7 +2305,7 @@ class _PipelineLaunch:
             for chunk in _chunks(db._folder_subtree_ids_by_path(fid)):
                 marks = ",".join("?" for _ in chunk)
                 rows = db.conn.execute(
-                    f"SELECT folder_id FROM workspace_folders "
+                    f"SELECT folder_id FROM workspace_visible_folders "
                     f"WHERE workspace_id = ? AND folder_id IN ({marks})",
                     [ws_for_folders] + list(chunk),
                 )
@@ -2346,9 +2357,10 @@ class _PipelineLaunch:
             # but there is no reason to bake them into the collection
             # membership.
             for r in db.conn.execute(
-                f"SELECT id, folder_id, filename FROM photos "
-                f"WHERE folder_id IN ({marks})",
-                tuple(chunk),
+                f"SELECT p.id, p.folder_id, p.filename FROM photos p "
+                f"JOIN photo_workspace_visibility pv ON pv.photo_id = p.id "
+                f"WHERE p.folder_id IN ({marks}) AND pv.workspace_id = ?",
+                [*chunk, db._active_workspace_id],
             ):
                 if r["id"] in excluded_photo_ids_set:
                     continue

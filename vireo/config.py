@@ -30,6 +30,7 @@ _lock = threading.Lock()
 settings_write_lock = threading.Lock()
 
 DEFAULTS = {
+    "move_keep_visible_in_other_workspaces": True,
     "classification_threshold": 0.4,
     # Per-model floor on the raw, pre-softmax match score, below which the best
     # label in the list is reported as not matching the image at all. Shaped

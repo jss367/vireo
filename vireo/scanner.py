@@ -963,6 +963,11 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
         # Remove keyword associations then the duplicate JPEG record
         db._transfer_gps_review_for_merge(companion["id"], primary["id"])
         db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (companion["id"],))
+        # Transfer effective visibility before cascade deletion removes the
+        # companion's photo-only grants. This shares only the surviving ID.
+        from repositories.photo_visibility import remap_photo_visibility
+
+        remap_photo_visibility(db.conn, {companion["id"]: primary["id"]})
         db.conn.execute("DELETE FROM photos WHERE id = ?", (companion["id"],))
         collection_remap[companion["id"]] = primary["id"]
         merged_ids.add(companion["id"])
