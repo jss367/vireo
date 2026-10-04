@@ -16,7 +16,7 @@ from labels import SpeciesLabels, fetch_species_list, load_merged_labels, read_l
 from labels_fingerprint import compute_full_fingerprint
 from pipeline import load_photo_features, normalize_cached_species
 from species_identity import SpeciesResolver
-from species_identity_repair import apply_repairs, plan_repairs
+from species_identity_repair import apply_repairs, plan_inferred_taxonomy_repairs, plan_repairs
 from taxonomy import Taxonomy
 
 RED = {"taxon_id": 18976, "scientific_name": "Amazona viridigenalis",
@@ -472,6 +472,127 @@ def test_upgrade_repairs_existing_database_once(db, tmp_path):
             assert upgraded.conn.execute("SELECT count(*) FROM species_identity_repairs").fetchone()[0] == 1
         finally:
             upgraded.close()
+
+
+def _inferred_row(db, det, species, scientific_name, fingerprint="custom", status="pending", **extra):
+    db.add_prediction(det, species, .8, "BioCLIP-2.5", status=status, labels_fingerprint=fingerprint,
+                      taxonomy={"scientific_name": scientific_name, "class": "Aves", "genus": "Amazona", **extra})
+    return db.conn.execute("SELECT * FROM predictions WHERE detection_id = ? AND species = ?",
+                           (det, species)).fetchone()
+
+
+def test_inferred_repair_replaces_a_neighbours_binomial(db, tmp_path):
+    """Legacy burst enrichment stamped the consensus species' taxonomy on every
+    frame: a Lilac-crowned label stored as Red-browed Amazon."""
+    db.conn.execute("INSERT INTO taxa (inat_id, name, rank) VALUES (1, 'Aves', 'class')")
+    db.conn.execute("INSERT INTO taxa (inat_id, name, rank, parent_id) VALUES "
+                    "(2, 'Amazona', 'genus', (SELECT id FROM taxa WHERE inat_id = 1))")
+    db.conn.execute("UPDATE taxa SET parent_id = (SELECT id FROM taxa WHERE inat_id = 2) WHERE inat_id = ?",
+                    (LILAC["taxon_id"],))
+    db.conn.commit()
+    _, det = _photo(db, tmp_path)
+    row = _inferred_row(db, det, "Lilac-crowned Parrot", BROWED["scientific_name"], status="accepted",
+                        family="Wrongidae")
+    review_before = [tuple(r) for r in db.conn.execute("SELECT * FROM prediction_review")]
+    plan = plan_inferred_taxonomy_repairs(db)
+    assert [c["reason"] for c in plan] == ["inferred-taxonomy-replaced"]
+    with db.conn:
+        assert apply_repairs(db.conn, plan) == 1
+    repaired = db.conn.execute("SELECT * FROM predictions WHERE id = ?", (row["id"],)).fetchone()
+    assert repaired["species"] == "Lilac-crowned Parrot"
+    assert repaired["confidence"] == .8
+    assert repaired["scientific_name"] == LILAC["scientific_name"]
+    assert (repaired["taxonomy_class"], repaired["taxonomy_genus"]) == ("Aves", "Amazona")
+    # No rank of the old guess survives next to the new binomial.
+    assert repaired["taxonomy_family"] is None
+    # A name lookup is not source evidence.
+    assert repaired["source_taxon_id"] is None
+    assert [tuple(r) for r in db.conn.execute("SELECT * FROM prediction_review")] == review_before
+    audit = db.conn.execute("SELECT * FROM species_identity_repairs").fetchone()
+    assert json.loads(audit["before_json"])["scientific_name"] == BROWED["scientific_name"]
+    assert plan_inferred_taxonomy_repairs(db) == []
+
+
+def test_inferred_repair_clears_only_names_the_label_cannot_support(db, tmp_path):
+    # Alternate names live in taxa_common_names; an unverified label the stored
+    # taxon carries there is consistent and stays.
+    db.conn.execute("INSERT INTO taxa_common_names (taxon_id, name) "
+                    "SELECT id, 'Green-cheeked Amazon' FROM taxa WHERE inat_id = ?", (RED["taxon_id"],))
+    db.conn.commit()
+    rows = {}
+    for i, (species, sci) in enumerate([
+        ("Lilac-crowned × Red-crowned Amazon", BROWED["scientific_name"]),  # hybrid, neighbour's binomial
+        ("Green-cheeked Amazon", RED["scientific_name"]),  # alternate name of the stored taxon
+        ("Phainopepla", "Phainopepla"),  # genus-named label stored as itself
+    ]):
+        _, det = _photo(db, tmp_path, f"p{i}.jpg")
+        rows[species] = _inferred_row(db, det, species, sci)["id"]
+    _, det = _photo(db, tmp_path, "native.jpg")
+    db.add_prediction(det, "Lilac-crowned Parrot", .9, "BioCLIP-2.5", labels_fingerprint="tol",
+                      taxonomy={"scientific_name": BROWED["scientific_name"]})
+    plan = plan_inferred_taxonomy_repairs(db)
+    assert [(c["id"], c["reason"]) for c in plan] == [
+        (rows["Lilac-crowned × Red-crowned Amazon"], "inferred-taxonomy-cleared")]
+    with db.conn:
+        apply_repairs(db.conn, plan)
+    cleared = db.conn.execute("SELECT * FROM predictions WHERE id = ?",
+                              (rows["Lilac-crowned × Red-crowned Amazon"],)).fetchone()
+    assert cleared["scientific_name"] is None
+    assert cleared["taxonomy_class"] is None and cleared["taxonomy_genus"] is None
+    # Model-native rows are primary evidence and never touched.
+    assert db.conn.execute("SELECT scientific_name FROM predictions WHERE labels_fingerprint = 'tol'"
+                           ).fetchone()[0] == BROWED["scientific_name"]
+
+
+def test_upgrade_repairs_inferred_taxonomy_once(db, tmp_path):
+    _, det = _photo(db, tmp_path)
+    _inferred_row(db, det, "Lilac-crowned Parrot", BROWED["scientific_name"], fingerprint="legacy")
+    from species_identity_repair import INFERRED_TAXONOMY_MARKER
+    db.set_meta(INFERRED_TAXONOMY_MARKER, "0")
+    path = db._db_path
+    db.close()
+    for _ in range(2):
+        upgraded = Database(path)
+        try:
+            assert upgraded.conn.execute("SELECT scientific_name FROM predictions").fetchone()[0] == LILAC["scientific_name"]
+            assert upgraded.conn.execute("SELECT count(*) FROM species_identity_repairs").fetchone()[0] == 1
+        finally:
+            upgraded.close()
+
+
+def test_inferred_repair_defers_until_local_taxonomy_is_populated(db, tmp_path):
+    """An empty ``taxa`` table is a supported first-run state: the resolver
+    verifies nothing then, so the "clear" branch would wipe every legacy row.
+    Skip the pass and leave the marker unset until taxonomy data arrives."""
+    from species_identity_repair import (
+        INFERRED_TAXONOMY_MARKER,
+        _local_taxonomy_populated,
+        repair_on_upgrade,
+    )
+    _, det = _photo(db, tmp_path)
+    _inferred_row(db, det, "Lilac-crowned Parrot", BROWED["scientific_name"], fingerprint="legacy")
+    db.set_meta(INFERRED_TAXONOMY_MARKER, "0")
+    # Simulate a first-run catalog whose optional taxonomy has not been
+    # downloaded: the taxa table is empty.
+    db.conn.execute("DELETE FROM taxa_common_names")
+    db.conn.execute("DELETE FROM taxa")
+    db.conn.commit()
+    assert _local_taxonomy_populated(db.conn) is False
+    assert repair_on_upgrade(db) == 0
+    # Marker stays unset so a later download can rerun this.
+    assert db.get_meta(INFERRED_TAXONOMY_MARKER) != "1"
+    assert db.conn.execute("SELECT scientific_name FROM predictions").fetchone()[0] == BROWED["scientific_name"]
+    # Once the taxonomy is populated, the repair runs and records the marker.
+    for entry in (RED, BROWED, LILAC):
+        db.conn.execute(
+            "INSERT INTO taxa (inat_id, name, common_name, rank) VALUES (?, ?, ?, ?)",
+            (entry["taxon_id"], entry["scientific_name"], entry["common_name"], entry["rank"]),
+        )
+    db.conn.commit()
+    assert _local_taxonomy_populated(db.conn) is True
+    assert repair_on_upgrade(db) == 1
+    assert db.get_meta(INFERRED_TAXONOMY_MARKER) == "1"
+    assert db.conn.execute("SELECT scientific_name FROM predictions").fetchone()[0] == LILAC["scientific_name"]
 
 
 @pytest.mark.parametrize("same_species", [True, False])
@@ -1149,3 +1270,218 @@ def test_review_consensus_invalid_votes_preserve_prediction_identity(db, votes):
     row = {"species": "Parrot", "source_taxon_id": LILAC["taxon_id"],
            "group_id": "burst", "individual": votes}
     assert SpeciesResolver(db=db).consensus(row).key == f"taxon:{LILAC['taxon_id']}"
+
+
+@pytest.mark.parametrize("identity_version", ["", "0", "999"])
+def test_inferred_repair_waits_for_verified_common_name_import(db, tmp_path, identity_version):
+    from species_identity_repair import INFERRED_TAXONOMY_MARKER, repair_on_upgrade
+    from taxonomy import COMMON_NAME_IDENTITY_VERSION
+
+    _, det = _photo(db, tmp_path)
+    row = _inferred_row(db, det, "Lilac-crowned Parrot", BROWED["scientific_name"],
+                        fingerprint="legacy", family="Historicalidae")
+    db.set_meta(INFERRED_TAXONOMY_MARKER, "0")
+    db.set_meta("common_name_identity_version", identity_version)
+    assert db.conn.execute("SELECT COUNT(*) FROM taxa").fetchone()[0] > 0
+    before = dict(db.conn.execute("SELECT * FROM predictions WHERE id=?", (row["id"],)).fetchone())
+    assert repair_on_upgrade(db) == 0
+    assert db.get_meta(INFERRED_TAXONOMY_MARKER) == "0"
+    assert dict(db.conn.execute("SELECT * FROM predictions WHERE id=?", (row["id"],)).fetchone()) == before
+    # A completed name import permits the postponed pass to retry.
+    db.set_meta("common_name_identity_version", str(COMMON_NAME_IDENTITY_VERSION))
+    assert repair_on_upgrade(db) == 1
+    assert db.get_meta(INFERRED_TAXONOMY_MARKER) == "1"
+    assert db.conn.execute("SELECT scientific_name FROM predictions WHERE id=?", (row["id"],)).fetchone()[0] == LILAC["scientific_name"]
+
+
+def test_inferred_repair_includes_resolved_taxons_own_rank(db, tmp_path):
+    db.conn.execute("INSERT INTO taxa(inat_id,name,rank) VALUES(1,'Aves','class')")
+    db.conn.execute("INSERT INTO taxa(inat_id,name,rank,parent_id) SELECT 2,'Amazona','genus',id FROM taxa WHERE inat_id=1")
+    db.conn.commit()
+    _, det = _photo(db, tmp_path)
+    row = _inferred_row(db, det, "Amazona", BROWED["scientific_name"])
+    with db.conn:
+        apply_repairs(db.conn, plan_inferred_taxonomy_repairs(db))
+    repaired = db.conn.execute("SELECT scientific_name,taxonomy_genus,taxonomy_class FROM predictions WHERE id=?", (row["id"],)).fetchone()
+    assert tuple(repaired) == ("Amazona", "Amazona", "Aves")
+
+
+def test_download_job_retries_deferred_taxonomy_repair_without_restart(app_and_db, tmp_path, monkeypatch):
+    import taxonomy as tax_mod
+    from species_identity_repair import INFERRED_TAXONOMY_MARKER
+    from wait import wait_for_job_via_client
+
+    app, database = app_and_db
+    pid = database.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()[0]
+    det = database.save_detections(pid, [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+                                        "confidence": 0.9, "category": "animal"}], "MDV6")[0]
+    row = _inferred_row(database, det, "Lilac-crowned Parrot", BROWED["scientific_name"], fingerprint="legacy")
+    database.set_meta(INFERRED_TAXONOMY_MARKER, "0")
+    database.set_meta("common_name_identity_version", "")
+    entries = [{**entry, "lineage_names": ["Animalia", "Aves", "Amazona", entry["scientific_name"]],
+                "lineage_ranks": ["kingdom", "class", "genus", "species"]} for entry in (RED, BROWED, LILAC)]
+    path = tmp_path / "verified-taxonomy.json"
+    payload = {"source": "iNaturalist DWCA", "common_name_identity_version": 1,
+               "ambiguous_common_names": [],
+               "taxa_by_scientific": {entry["scientific_name"].lower(): entry for entry in entries},
+               "taxa_by_common": {entry["common_name"].lower(): entry for entry in entries}}
+    monkeypatch.setattr(tax_mod, "TAXONOMY_JSON_PATH", str(path))
+    monkeypatch.setattr(tax_mod, "download_taxonomy", lambda target, **_: Path(target).write_text(json.dumps(payload)))
+    client = app.test_client()
+    response = client.post("/api/jobs/download-taxonomy", json={})
+    assert response.status_code == 200
+    job = wait_for_job_via_client(client, response.get_json()["job_id"])
+    assert job["status"] == "completed", job
+    assert database.get_meta(INFERRED_TAXONOMY_MARKER) == "1"
+    assert database.conn.execute("SELECT scientific_name FROM predictions WHERE id=?", (row["id"],)).fetchone()[0] == LILAC["scientific_name"]
+
+
+def test_download_and_request_repairs_serialize_and_recheck_marker(db, tmp_path, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    import species_identity_repair as repair
+    from db import Database
+
+    _, detection = _photo(db, tmp_path)
+    db.add_prediction(detection, "Lilac-crowned Parrot", .9, "BioCLIP", labels_fingerprint="custom",
+                      taxonomy={"scientific_name": BROWED["scientific_name"]})
+    db.set_meta(repair.INFERRED_TAXONOMY_MARKER, "1")
+    peer = Database(db._db_path)
+    db.set_meta(repair.INFERRED_TAXONOMY_MARKER, "0")
+    entered = threading.Event()
+    release = threading.Event()
+    competing = threading.Event()
+    duplicate_plan = threading.Event()
+    plans = []
+    original = repair.plan_inferred_taxonomy_repairs
+
+    def slow_plan(database):
+        result = original(database)
+        plans.append(result)
+        if len(plans) == 1:
+            entered.set()
+            assert release.wait(5)
+        else:
+            duplicate_plan.set()
+        return result
+
+    def request_repair():
+        competing.set()
+        return repair.repair_on_upgrade(peer)
+
+    monkeypatch.setattr(repair, "plan_inferred_taxonomy_repairs", slow_plan)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            download = pool.submit(repair.repair_on_upgrade, db)
+            try:
+                assert entered.wait(5)
+                request = pool.submit(request_repair)
+                assert competing.wait(5)
+                # A second connection must wait for the first plan/commit,
+                # then recheck the marker instead of planning stale rows.
+                assert not duplicate_plan.wait(.2)
+            finally:
+                release.set()
+            assert download.result(timeout=5) == 1
+            assert request.result(timeout=5) == 0
+        assert len(plans) == 1
+        assert db.get_meta(repair.INFERRED_TAXONOMY_MARKER) == "1"
+        assert db.conn.execute("SELECT COUNT(*) FROM species_identity_repairs").fetchone()[0] == 1
+        assert db.conn.execute("SELECT scientific_name FROM predictions").fetchone()[0] == LILAC["scientific_name"]
+    finally:
+        release.set()
+        peer.close()
+
+
+def test_repair_defers_when_completed_import_has_no_common_names(db, tmp_path):
+    from species_identity_repair import INFERRED_TAXONOMY_MARKER, repair_on_upgrade
+
+    _, detection = _photo(db, tmp_path)
+    row = _inferred_row(db, detection, "Lilac-crowned Parrot", BROWED["scientific_name"])
+    db.conn.execute("DELETE FROM taxa_common_names")
+    db.conn.execute("UPDATE taxa SET common_name=NULL")
+    db.conn.commit()
+    db.set_meta(INFERRED_TAXONOMY_MARKER, "0")
+    assert db.get_meta("common_name_identity_version") == "1"
+    assert repair_on_upgrade(db) == 0
+    assert db.get_meta(INFERRED_TAXONOMY_MARKER) == "0"
+    assert db.conn.execute("SELECT scientific_name FROM predictions WHERE id=?", (row["id"],)).fetchone()[0] == BROWED["scientific_name"]
+    db.conn.execute("UPDATE taxa SET common_name=? WHERE inat_id=?", (LILAC["common_name"], LILAC["taxon_id"]))
+    db.conn.commit()
+    assert repair_on_upgrade(db) == 1
+    assert db.get_meta(INFERRED_TAXONOMY_MARKER) == "1"
+
+
+def test_repair_rechecks_marker_after_another_process_commits(db, tmp_path, monkeypatch):
+    import sys
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    import species_identity_repair as repair
+
+    _, detection = _photo(db, tmp_path)
+    db.add_prediction(detection, "Lilac-crowned Parrot", .9, "BioCLIP", labels_fingerprint="custom",
+                      taxonomy={"scientific_name": BROWED["scientific_name"]})
+    db.set_meta(repair.INFERRED_TAXONOMY_MARKER, "0")
+    entered = threading.Event()
+    release = threading.Event()
+    ready = tmp_path / "peer-ready"
+    original = repair.plan_inferred_taxonomy_repairs
+
+    def slow_plan(database):
+        result = original(database)
+        entered.set()
+        assert release.wait(10)
+        return result
+
+    monkeypatch.setattr(repair, "plan_inferred_taxonomy_repairs", slow_plan)
+    script = """
+import sys, sqlite3
+from pathlib import Path
+sys.path.insert(0, sys.argv[2])
+import species_identity_repair as repair
+conn = sqlite3.connect(sys.argv[1], timeout=10)
+conn.row_factory = sqlite3.Row
+class Catalog:
+    def __init__(self): self.conn = conn
+    def get_meta(self, key):
+        row = conn.execute('SELECT value FROM db_meta WHERE key=?', (key,)).fetchone()
+        return row[0] if row else None
+    def set_meta(self, key, value, _commit=False):
+        conn.execute('INSERT OR REPLACE INTO db_meta(key,value) VALUES(?,?)', (key,value))
+def forbidden_plan(db):
+    raise AssertionError('The other process already repaired these rows')
+repair.plan_inferred_taxonomy_repairs = forbidden_plan
+Path(sys.argv[3]).write_text('ready')
+print(repair.repair_on_upgrade(Catalog()), flush=True)
+"""
+    peer = None
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            first = pool.submit(repair.repair_on_upgrade, db)
+            try:
+                assert entered.wait(5)
+                peer = subprocess.Popen(
+                    [sys.executable, "-c", script, db._db_path, str(Path(__file__).parents[1]), str(ready)],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                )
+                deadline = time.monotonic() + 5
+                while not ready.exists() and time.monotonic() < deadline and peer.poll() is None:
+                    time.sleep(.01)
+                assert ready.exists()
+                time.sleep(.2)
+                assert peer.poll() is None
+            finally:
+                release.set()
+            assert first.result(timeout=5) == 1
+        out, err = peer.communicate(timeout=10)
+        assert peer.returncode == 0, err
+        assert out.strip() == "0"
+        assert db.conn.execute("SELECT COUNT(*) FROM species_identity_repairs").fetchone()[0] == 1
+    finally:
+        release.set()
+        if peer is not None and peer.poll() is None:
+            peer.kill()
+            peer.communicate()
