@@ -4382,6 +4382,25 @@ def test_auto_tone_meters_on_active_mask_then_detection(
     assert (data["metering"], data["subject_source"]) == ("subject", "mask")
 
 
+def test_auto_tone_falls_back_to_detection_when_active_mask_is_misaligned(client_with_photo, monkeypatch):
+    """An unusable active mask does not discard a valid animal subject box."""
+    import web.media as media_module
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    db.conn.execute(
+        "INSERT INTO detections (photo_id, box_x, box_y, box_w, box_h, "
+        "detector_confidence, category) VALUES (?, 0.4, 0.4, 0.2, 0.2, 0.9, 'animal')",
+        (photo_id,),
+    )
+    db.conn.commit()
+    monkeypatch.setattr(media_module, "_load_active_mask", lambda *_: Image.new("L", (800, 100), 255))
+    response = app.test_client().get(f"/api/photos/{photo_id}/auto-tone")
+    assert response.status_code == 200
+    data = response.get_json()
+    assert (data["metering"], data["subject_source"]) == ("subject", "detection")
+
+
 @pytest.mark.parametrize("category,model", [
     ("person", "MDV6"), ("vehicle", "MDV6"), ("animal", "full-image"),
 ])

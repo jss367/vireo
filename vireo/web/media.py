@@ -3831,17 +3831,17 @@ def create_media_blueprint(
         if img is None:
             return json_error("Could not load image", 500)
         box = None
-        if (mask := _load_active_mask(db, photo_id)) is None:
-            detections = [
-                detection for detection in db.get_detections(photo_id)
-                if detection["category"] == "animal" and detection["detector_model"] != "full-image"
-            ]
-            if detections:
-                primary = detections[0]
-                box = {
-                    "x": primary["box_x"], "y": primary["box_y"],
-                    "w": primary["box_w"], "h": primary["box_h"],
-                }
+        mask = _load_active_mask(db, photo_id)
+        detections = [
+            detection for detection in db.get_detections(photo_id)
+            if detection["category"] == "animal" and detection["detector_model"] != "full-image"
+        ]
+        if detections:
+            primary = detections[0]
+            box = {
+                "x": primary["box_x"], "y": primary["box_y"],
+                "w": primary["box_w"], "h": primary["box_h"],
+            }
         try:
             result = auto_tone.fit_loaded_image(
                 img, recipe, native_size=edit.native_dims, mask=mask, box=box,
