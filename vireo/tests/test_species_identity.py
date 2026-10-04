@@ -560,6 +560,41 @@ def test_upgrade_repairs_inferred_taxonomy_once(db, tmp_path):
             upgraded.close()
 
 
+def test_inferred_repair_defers_until_local_taxonomy_is_populated(db, tmp_path):
+    """An empty ``taxa`` table is a supported first-run state: the resolver
+    verifies nothing then, so the "clear" branch would wipe every legacy row.
+    Skip the pass and leave the marker unset until taxonomy data arrives."""
+    from species_identity_repair import (
+        INFERRED_TAXONOMY_MARKER,
+        _local_taxonomy_populated,
+        repair_on_upgrade,
+    )
+    _, det = _photo(db, tmp_path)
+    _inferred_row(db, det, "Lilac-crowned Parrot", BROWED["scientific_name"], fingerprint="legacy")
+    db.set_meta(INFERRED_TAXONOMY_MARKER, "0")
+    # Simulate a first-run catalog whose optional taxonomy has not been
+    # downloaded: the taxa table is empty.
+    db.conn.execute("DELETE FROM taxa_common_names")
+    db.conn.execute("DELETE FROM taxa")
+    db.conn.commit()
+    assert _local_taxonomy_populated(db.conn) is False
+    assert repair_on_upgrade(db) == 0
+    # Marker stays unset so a later download can rerun this.
+    assert db.get_meta(INFERRED_TAXONOMY_MARKER) != "1"
+    assert db.conn.execute("SELECT scientific_name FROM predictions").fetchone()[0] == BROWED["scientific_name"]
+    # Once the taxonomy is populated, the repair runs and records the marker.
+    for entry in (RED, BROWED, LILAC):
+        db.conn.execute(
+            "INSERT INTO taxa (inat_id, name, common_name, rank) VALUES (?, ?, ?, ?)",
+            (entry["taxon_id"], entry["scientific_name"], entry["common_name"], entry["rank"]),
+        )
+    db.conn.commit()
+    assert _local_taxonomy_populated(db.conn) is True
+    assert repair_on_upgrade(db) == 1
+    assert db.get_meta(INFERRED_TAXONOMY_MARKER) == "1"
+    assert db.conn.execute("SELECT scientific_name FROM predictions").fetchone()[0] == LILAC["scientific_name"]
+
+
 @pytest.mark.parametrize("same_species", [True, False])
 def test_burst_grouping_uses_identity_and_keeps_raw_labels(db, tmp_path, taxonomy, same_species):
     from datetime import datetime

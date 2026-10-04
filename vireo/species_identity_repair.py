@@ -185,9 +185,20 @@ def repair_on_upgrade(db):
             count += apply_repairs(db.conn, plan_repairs(db.conn))
             db.set_meta(marker, "1", _commit=False)
     # Planned after the verified corrections commit, so rows they just gave a
-    # source taxon are out of scope here.
-    if db.get_meta(INFERRED_TAXONOMY_MARKER) != "1":
+    # source taxon are out of scope here. An empty ``taxa`` table is a
+    # supported first-run state (the taxonomy download is optional and runs
+    # later); without it the resolver verifies nothing and the "clear" branch
+    # would wipe every legacy row's binomial and every rank. Defer the whole
+    # pass — and the marker — until the local taxonomy has data to verify
+    # against, so a later download gets a chance to rerun this.
+    if db.get_meta(INFERRED_TAXONOMY_MARKER) != "1" and _local_taxonomy_populated(db.conn):
         with db.conn:
             count += apply_repairs(db.conn, plan_inferred_taxonomy_repairs(db))
             db.set_meta(INFERRED_TAXONOMY_MARKER, "1", _commit=False)
     return count
+
+
+def _local_taxonomy_populated(conn):
+    """True once the local ``taxa`` table has rows to verify labels against."""
+    row = conn.execute("SELECT 1 FROM taxa LIMIT 1").fetchone()
+    return row is not None
