@@ -13383,3 +13383,31 @@ def test_expanded_scope_tag_retry_preserves_paid_parent_tags(app_and_db, tmp_pat
         assert len(handoffs) == 1
         assert _tagged_count(db, own) == 0
         assert _tagged_count(db, list(child_ids)) == len(child_ids)
+
+
+def test_download_taxonomy_survives_a_failed_species_identity_repair(app_and_db, monkeypatch):
+    """A failed post-download repair leaves its marker unset for startup to
+    retry; it must not fail the download the user asked for."""
+    import species_identity_repair
+    import taxonomy
+
+    app, _db = app_and_db
+    monkeypatch.setattr(taxonomy, "download_taxonomy", lambda *a, **k: None)
+    populated = []
+    monkeypatch.setattr(taxonomy, "populate_taxa_db_from_json", lambda *a, **k: populated.append(1))
+    monkeypatch.setattr(taxonomy, "seed_informal_groups", lambda *a, **k: None)
+    monkeypatch.setattr(taxonomy, "load_local_taxonomy", lambda **k: object())
+
+    def boom(db):
+        if populated:  # Database init runs it too; fail only the post-download call.
+            raise sqlite3.OperationalError("database is locked")
+        return 0
+
+    monkeypatch.setattr(species_identity_repair, "repair_on_upgrade", boom)
+    from db import Database
+    monkeypatch.setattr(Database, "mark_species_keywords", lambda self, tax: 0)
+    monkeypatch.setattr(Database, "repair_duplicate_photo_species", lambda self: None)
+
+    resp = app.test_client().post("/api/jobs/download-taxonomy")
+    job = wait_for_job_via_runner(app._job_runner, resp.get_json()["job_id"])
+    assert job["status"] == "completed", job
