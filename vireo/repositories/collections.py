@@ -2269,8 +2269,8 @@ class _RuleQueryBuilder:
     def _metadata_rule(self, field, op, value, rule):
         from metadata_search import (
             photo_metadata_predicates,
-            term_binds,
             prediction_search_values,
+            term_binds,
             values_contain,
         )
 
