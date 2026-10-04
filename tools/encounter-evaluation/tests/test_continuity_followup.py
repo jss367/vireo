@@ -515,16 +515,19 @@ def test_identical_duplicate_scopes_are_deduplicated_silently(tmp_path):
 def test_code_identity_covers_review_html_templates(tmp_path):
     # Report generation reads the HTML template beside the Python modules;
     # a template-only edit must change the frozen source digest so the
-    # provenance guard refuses a drifted checkout.
+    # provenance guard refuses a drifted checkout. Build a repository-shaped
+    # tree under tmp_path rather than mutating the shared source checkout,
+    # so this test does not interfere with concurrent code_identity() calls
+    # or leave stray files behind if interrupted.
     from encounter_eval.common import code_identity
 
-    repo = configure_repo()
+    repo = tmp_path / "repo"
+    (repo / "vireo").mkdir(parents=True)
+    (repo / "vireo" / "encounters.py").write_bytes(b"# stub\n")
+    src = repo / "tools" / "encounter-evaluation" / "src" / "encounter_eval"
+    src.mkdir(parents=True)
+    (src / "common.py").write_bytes(b"# stub\n")
     before = code_identity(repo)["source_digest"]
-    extra = repo / "tools/encounter-evaluation/src/encounter_eval/_test_html_identity_fixture.html"
-    assert not extra.exists()
-    extra.write_bytes(b"<!-- template identity fixture -->\n")
-    try:
-        after = code_identity(repo)["source_digest"]
-    finally:
-        extra.unlink()
+    (src / "continuity_review.html").write_bytes(b"<!-- template identity fixture -->\n")
+    after = code_identity(repo)["source_digest"]
     assert before != after
