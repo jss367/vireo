@@ -51,7 +51,7 @@ def test_partition_exclusion_happens_before_feature_loading(library,tmp_path):
 
 def test_paired_run_uses_identical_read_only_scope(library,tmp_path,monkeypatch):
     from encounter_eval import continuity_compare
-    
+
     # A self-contained baseline keeps the test independent of Git history depth
     # and of whether the proposed feature loader has already been committed.
     original_output = continuity_compare.subprocess.check_output

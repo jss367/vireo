@@ -693,6 +693,14 @@ class _FeatureLoad:
         # Fetch the lower-confidence real boxes only for photos with fallback
         # results. Ordinary workspace queries keep their index-friendly floor.
         raw = dict(self.raw_mdv6_dets)
+        if not raw:
+            # Ordinary weak rescue does not load boxes when its floor is at
+            # or above the detector threshold. Full-image rescue still needs
+            # the normal-confidence anchors in that configuration.
+            raw = self.db.get_detections_for_photos(
+                self.photo_ids_for_dets, min_conf=self.min_conf,
+                detector_model='megadetector-v6',
+            )
         lower_boxes = self.db.get_detections_for_photos(
             list(fallback), min_conf=0.0, detector_model='megadetector-v6',
         )

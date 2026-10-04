@@ -10,6 +10,7 @@ import sys
 from datetime import datetime, timedelta
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -3938,7 +3939,8 @@ def test_yellowthroat_full_image_dropout_stays_in_one_encounter(tmp_path, monkey
         db.close()
 
 
-def test_full_image_rescue_respects_current_top_k(tmp_path, monkeypatch):
+@pytest.mark.parametrize("detector_confidence", [.20, .05])
+def test_full_image_rescue_respects_current_top_k(tmp_path, monkeypatch, detector_confidence):
     """Cached alternatives excluded by the workspace cannot defeat its margin gate."""
     import config as cfg
     from db import Database
@@ -3954,7 +3956,7 @@ def test_full_image_rescue_respects_current_top_k(tmp_path, monkeypatch):
         ids.append(pid)
         did = db.write_detection_batch(pid, 'megadetector-v6', [{
             'box': {'x': .4, 'y': .4, 'w': .2, 'h': .2},
-            'confidence': .06 if i == 1 else .8, 'category': 'animal',
+            'confidence': .02 if i == 1 else .8, 'category': 'animal',
         }])[0]
         if i == 1:
             did = db.write_detection_batch(pid, 'full-image', [{
@@ -3965,10 +3967,11 @@ def test_full_image_rescue_respects_current_top_k(tmp_path, monkeypatch):
         if i == 1:
             db.add_prediction(did, 'Song Sparrow', .98, 'BioCLIP-2.5')
     try:
-        default = load_photo_features(db, effective_config=cfg.DEFAULTS)[1]
+        effective = {**cfg.DEFAULTS, 'detector_confidence': detector_confidence}
+        default = load_photo_features(db, config=effective, effective_config=effective)[1]
         assert default['subject_absent']
-        limited = load_photo_features(db, config={**cfg.DEFAULTS, 'top_k_predictions': 1},
-                                      effective_config=cfg.DEFAULTS)[1]
+        limited = load_photo_features(db, config={**effective, 'top_k_predictions': 1},
+                                      effective_config=effective)[1]
         assert limited['subject_uncertain']
         assert len(limited['species_top5']) == 1
         assert limited['species_top5'][0][0] == 'Common Yellowthroat'
