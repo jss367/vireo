@@ -1264,7 +1264,7 @@ def _find_remote_content_conflict(rsync_bin, src_path, rsync_target, remote):
 
 
 def _first_missing_source_file(src_path, dest_path, *, verify_contents=False,
-                               is_merge=False):
+                               is_merge=False, progress=None):
     """Return the relative path of the first source file absent (or
     size-mismatched, or a symlink) at dest_path, or None if every source
     file is present and matches. Used to verify a merge before deleting
@@ -1303,16 +1303,24 @@ def _first_missing_source_file(src_path, dest_path, *, verify_contents=False,
     files under a merge; every other entry type (symlink, directory,
     missing source) and every fresh-move call fall through to the normal
     verification.
+
+    ``progress``, when given, is called as ``progress(checked, rel_name)``
+    before each file is examined and ``progress(checked, "")`` once every
+    file has passed, where ``checked`` counts the source files done so far.
     """
+    checked = 0
     for root, _, files in os.walk(src_path):
         rel = os.path.relpath(root, src_path)
         for fn in files:
             src_file = os.path.join(root, fn)
+            rel_name = fn if rel == "." else os.path.join(rel, fn)
+            if progress:
+                progress(checked, rel_name)
+            checked += 1
             if is_merge and fn in FINDER_METADATA_FILES and \
                     not os.path.islink(src_file) and \
                     os.path.isfile(src_file):
                 continue
-            rel_name = fn if rel == "." else os.path.join(rel, fn)
             dst_file = os.path.join(dest_path, rel_name)
             if not os.path.lexists(dst_file) or os.path.islink(dst_file):
                 return rel_name
@@ -1333,6 +1341,8 @@ def _first_missing_source_file(src_path, dest_path, *, verify_contents=False,
                             return rel_name
                     if dest.read(1):
                         return rel_name
+    if progress:
+        progress(checked, "")
     return None
 
 
@@ -2944,8 +2954,7 @@ class _PhotoMove:
             )
 
 
-def _plan_moved_file_mtimes(db, src_path, dest_path,
-                            progress_cb=None, total_files=0):
+def _plan_moved_file_mtimes(db, src_path, dest_path, progress_cb=None):
     """Plan re-stamping ``photos.file_mtime`` from the copy at ``dest_path``.
 
     A copy does not always carry the source's timestamp across. rsync
@@ -3029,13 +3038,16 @@ def _plan_moved_file_mtimes(db, src_path, dest_path,
     # per distinct folder rather than one per photo.
     ci_root = _case_insensitive_root(src_path)
     contained = {}
+    total_rows = len(rows)
+    # Announced even when there is nothing to check, so the step always
+    # starts and finishes rather than being skipped over.
+    if progress_cb:
+        progress_cb(0, total_rows, "", "Checking timestamps")
     for index, row in enumerate(rows):
         # One stat per side per photo, on a mount that may be slow enough
-        # for that to be visible. Keep the phase label on screen rather
-        # than letting the transfer look wedged between "Verifying copy"
-        # and "Updating catalog".
+        # for that to be visible, so count the rows as they go.
         if progress_cb and index % 100 == 0:
-            progress_cb(total_files, total_files, row["filename"],
+            progress_cb(index, total_rows, row["filename"],
                         "Checking timestamps")
         folder_path = row["folder_path"]
         if folder_path not in contained:
@@ -3097,6 +3109,8 @@ def _plan_moved_file_mtimes(db, src_path, dest_path,
             # The timestamp survived the copy: nothing to correct.
             continue
         updates.append((dst_st.st_mtime, row["id"], stored_mtime, stored_size))
+    if progress_cb:
+        progress_cb(total_rows, total_rows, "", "Checking timestamps")
     return updates, None
 
 
@@ -3246,7 +3260,7 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     return move.result()
 
 
-def _fresh_copy_mismatch(src_path, transfer_dest):
+def _fresh_copy_mismatch(src_path, transfer_dest, progress=None):
     """Describe how a fresh move's destination differs from its source.
 
     Fresh move into a destination we created: walk the source and check
@@ -3272,14 +3286,17 @@ def _fresh_copy_mismatch(src_path, transfer_dest):
     and readlink targets are compared instead.
 
     Returns the mismatch description, or None when the copy is complete.
+    ``progress`` is called as in ``_first_missing_source_file``.
     """
     src_count = 0
     for root, _dirs, files in os.walk(src_path):
         rel = os.path.relpath(root, src_path)
         for fn in files:
-            src_count += 1
             src_file = os.path.join(root, fn)
             rel_name = fn if rel == "." else os.path.join(rel, fn)
+            if progress:
+                progress(src_count, rel_name)
+            src_count += 1
             dst_file = os.path.join(transfer_dest, rel_name)
             if not os.path.lexists(dst_file):
                 return f"'{rel_name}' missing at destination"
@@ -3311,6 +3328,8 @@ def _fresh_copy_mismatch(src_path, transfer_dest):
     dst_count = sum(1 for _, _, f in os.walk(transfer_dest) for _ in f)
     if src_count != dst_count:
         return f"file count mismatch: source={src_count}, dest={dst_count}"
+    if progress:
+        progress(src_count, "")
     return None
 
 
@@ -3819,7 +3838,7 @@ class _FolderMove:
         if not self.remote:
             self.mtime_updates, problem = _plan_moved_file_mtimes(
                 self.db, self.src_path, self.transfer_dest,
-                progress_cb=self.progress_cb, total_files=self.total_files,
+                progress_cb=self.progress_cb,
             )
             if problem is not None:
                 # Verification below would catch this too. Failing here just
@@ -3844,7 +3863,19 @@ class _FolderMove:
         src_path = self.src_path
         transfer_dest = self.transfer_dest
         dest_exists = self.dest_exists
-        self.progress(self.total_files, self.total_files, "", "Verifying copy")
+        if self.remote:
+            # One rsync dry-run with no per-file output: no count to show.
+            self.progress(0, 0, "", "Verifying copy")
+        else:
+            # Recounted rather than reusing the pre-copy ``total_files`` so the
+            # bar's denominator is the tree the verifier actually walks.
+            verify_total = sum(1 for _, _, files in os.walk(src_path)
+                               for _ in files)
+
+            def report(checked, name):
+                self.progress(checked, max(verify_total, checked), name,
+                              "Verifying copy")
+            report(0, "")
         if self.remote:
             # The local filesystem can't be walked to confirm a remote copy, so
             # run a --checksum dry-run over SSH: any file it would still transfer
@@ -3872,14 +3903,16 @@ class _FolderMove:
             # source file is present at the destination with a matching size.
             missing = _first_missing_source_file(
                 src_path, transfer_dest,
-                verify_contents=self.verify_contents, is_merge=dest_exists)
+                verify_contents=self.verify_contents, is_merge=dest_exists,
+                progress=report)
             if missing is not None:
                 return {"moved": 0, "errors": [
                     f"Verification failed: '{missing}' missing, size mismatch, "
                     f"or symlinked at destination. Originals preserved."
                 ]}
         else:
-            verify_error = _fresh_copy_mismatch(src_path, transfer_dest)
+            verify_error = _fresh_copy_mismatch(src_path, transfer_dest,
+                                                progress=report)
             if verify_error is not None:
                 shutil.rmtree(transfer_dest, ignore_errors=True)
                 return {"moved": 0, "errors": [
@@ -3912,7 +3945,8 @@ class _FolderMove:
         ).fetchall()
         self.total_photos = len(all_photos)
 
-        self.progress(self.total_files, self.total_files, "", "Updating catalog")
+        # One database transaction: no per-item count to show.
+        self.progress(0, 0, "", "Updating catalog")
         if self.pre_commit_check:
             self.pre_commit_check()
         if self.merge_into_tracked is not None:
@@ -4109,7 +4143,8 @@ class _FolderMove:
         user their data is still in staging).
         """
         src_path = self.src_path
-        self.progress(self.total_files, self.total_files, "", "Removing originals")
+        # A single rmtree: no per-item count to show.
+        self.progress(0, 0, "", "Removing originals")
         log.info("Verification passed, deleting originals: %s", src_path)
         try:
             shutil.rmtree(src_path)

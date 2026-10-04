@@ -5458,6 +5458,13 @@ def test_pending_archive_review_delete_and_send(app_and_db, tmp_path, monkeypatc
     assert response.status_code == 200, response.get_json()
     sent = wait_for_job_via_client(client, response.get_json()["job_id"])
     assert sent["status"] == "completed", sent
+    # Every phase of the transfer is listed as its own finished step, with
+    # the verify pass counting the files it compared.
+    steps = {step["id"]: step for step in sent["steps"]}
+    assert list(steps) == ["check", "copy", "timestamps", "verify", "catalog", "cleanup"]
+    assert all(step["status"] == "completed" for step in steps.values()), steps
+    assert steps["verify"]["label"] == "Verify copy (compare every byte)"
+    assert steps["verify"]["progress"]["current"] == steps["verify"]["progress"]["total"] > 0
     assert (tmp_path / "NAS" / "trip" / "keep.jpg").exists()
     assert not (tmp_path / "NAS" / "trip" / "reject.jpg").exists()
     assert (tmp_path / "NAS" / "trip" / "published" / "gallery.txt").exists()
@@ -5496,6 +5503,9 @@ def test_pending_archive_cleanup_warning_does_not_reopen_verified_transfer(app_a
     assert "permission denied" in sent["result"]["cleanup_error"]
     assert "local cleanup needs attention" in sent["result"]["summary"]
     assert staging in sent["result"]["summary"]
+    cleanup = next(step for step in sent["steps"] if step["id"] == "cleanup")
+    assert cleanup["status"] == "completed"
+    assert "permission denied" in cleanup["error"]
     assert len(list((tmp_path / "NAS").rglob("*.jpg"))) == 2
     assert len(list((tmp_path / "staging").rglob("*.jpg"))) == 2
     assert client.get("/api/import/pending-archives").get_json()["items"] == []
@@ -5841,6 +5851,11 @@ def test_pending_archive_reports_edits_that_missed_the_transfer(app_and_db, tmp_
     assert sent["status"] == "completed", sent
     assert sent["result"]["metadata_queued_during_transfer"] == 1
     assert "1 edit queued during the transfer" in sent["summary"]
+    sync_step = sent["steps"][0]
+    assert sync_step["id"] == "sync"
+    assert sync_step["status"] == "completed"
+    assert sync_step["summary"] == "1 photo"
+    assert "1 edit queued during the transfer" in sync_step["error"]
 
 
 def test_pending_archive_says_so_when_the_residual_recheck_fails(app_and_db, tmp_path, monkeypatch):
@@ -5927,6 +5942,11 @@ def test_pending_archive_sync_failure_abandons_the_transfer(app_and_db, tmp_path
         f"/api/import/pending-archives/{archive_id}/send",
         json={"sync_first": True}).get_json()["job_id"])
     assert failed["status"] == "failed", failed
+    # The step that failed says why; the transfer steps never started.
+    assert failed["steps"][0]["id"] == "sync"
+    assert failed["steps"][0]["status"] == "failed"
+    assert "folder not accessible" in failed["steps"][0]["error"]
+    assert {step["status"] for step in failed["steps"][1:]} == {"pending"}
 
     # Nothing moved, and the banner says so and stays retryable.
     assert not (tmp_path / "NAS").exists()

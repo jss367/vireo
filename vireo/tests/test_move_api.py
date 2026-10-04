@@ -460,6 +460,8 @@ def test_move_folder_job_organizes_photos_into_capture_date_folders(
     assert job["status"] == "completed", job
     assert job["result"]["moved"] == 2
     assert job["result"]["destination_count"] == 2
+    # A date-organized move reports its own groups, not move_folder's steps.
+    assert job["steps"] == []
     assert job["config"]["source_path"] == str(src)
     assert job["config"]["resolved_destination"] == str(archive)
     assert job["config"]["folder_template"] == "%Y-%m-%d"
@@ -636,6 +638,12 @@ def test_move_folder_failed_move_recorded_as_failed(app_and_db, tmp_path):
 
     job = wait_for_job_via_client(client, job_id, wait_for_history=True)
     assert job["status"] == "failed", job
+    # The step that refused says why, and nothing after it ran.
+    check, *rest = job["steps"]
+    assert check["id"] == "check"
+    assert check["status"] == "failed"
+    assert check["error"]
+    assert {step["status"] for step in rest} == {"pending"}
     # The source must be untouched — a failed move never deletes originals.
     assert (src / "a.jpg").exists()
 
@@ -694,6 +702,14 @@ def test_move_folder_job_surfaces_post_commit_cleanup_warning(
     assert "cleanup_error" in result
     assert "cleanup failed" in result["summary"]
     assert "permission denied" in result["summary"]
+    # Each phase is its own step; the leftover originals are a warning on
+    # the step that tried to remove them.
+    steps = {step["id"]: step for step in job["steps"]}
+    assert list(steps) == ["check", "copy", "timestamps", "verify", "catalog", "cleanup"]
+    assert all(step["status"] == "completed" for step in steps.values()), steps
+    assert str(src) in steps["cleanup"]["error"]
+    assert "permission denied" in steps["cleanup"]["error"]
+    assert steps["verify"]["label"] == "Verify copy"
 
 
 def test_move_folder_merge_param_accepted(app_and_db, tmp_path):
