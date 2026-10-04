@@ -97,3 +97,18 @@ def test_refresh_rolls_back_with_callers_transaction(catalog):
         refresh_common_name_index(catalog, payload())
         raise RuntimeError('abort')
     assert list(catalog.iterdump()) == before
+
+
+def test_refresh_preserves_preferred_names_for_scientific_homonyms(catalog):
+    data = payload()
+    bird = {"taxon_id": 1, "scientific_name": "Prunella", "common_name": "Accentors"}
+    plant = {"taxon_id": 2, "scientific_name": "Prunella", "common_name": "Self-heals"}
+    data["taxa_by_scientific"]["prunella"] = bird
+    data["scientific_homonyms"] = {"prunella": [bird, plant]}
+    catalog.executemany("INSERT INTO taxa VALUES (?, ?, 'Prunella', 'Old name', 'genus')",
+                        [(3, 1), (4, 2)])
+    with catalog:
+        refresh_common_name_index(catalog, data)
+    assert [tuple(row) for row in catalog.execute(
+        "SELECT inat_id,common_name FROM taxa WHERE id IN (3,4) ORDER BY id")
+    ] == [(1, "Accentors"), (2, "Self-heals")]

@@ -13,7 +13,7 @@ def refresh_common_name_index(conn, taxonomy_data):
     source IDs are absent locally remain unresolved. The caller owns the
     transaction, including rollback on failure.
     """
-    from taxonomy import COMMON_NAME_IDENTITY_VERSION, _common_name_ambiguity
+    from taxonomy import COMMON_NAME_IDENTITY_VERSION, _common_name_ambiguity, _scientific_entries
 
     if (taxonomy_data.get("source") != "iNaturalist DWCA"
             or taxonomy_data.get("common_name_identity_version") != COMMON_NAME_IDENTITY_VERSION):
@@ -22,7 +22,7 @@ def refresh_common_name_index(conn, taxonomy_data):
     if not scientific:
         raise ValueError("Taxonomy has no scientific entries")
     preferred = {}
-    for entry in scientific.values():
+    for entry in _scientific_entries(taxonomy_data):
         if entry.get("taxon_id"):
             preferred[int(entry["taxon_id"])] = entry.get("common_name") or None
     existing = conn.execute("SELECT COUNT(*) FROM taxa").fetchone()[0]
