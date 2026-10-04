@@ -1043,6 +1043,7 @@ def create_pipeline_blueprint(
                 collection_id=collection_id,
                 config=effective_cfg,
                 photo_ids=photo_ids,
+                effective_config={**effective_cfg, "pipeline": pipeline_cfg},
             )
             if not photos:
                 return json_error("No photos with pipeline features", 404)
@@ -1133,6 +1134,7 @@ def create_pipeline_blueprint(
                 collection_id=collection_id,
                 config=effective_cfg,
                 photo_ids=photo_ids,
+                effective_config={**effective_cfg, "pipeline": pipeline_cfg},
             )
             if not photos:
                 return json_error("No photos with pipeline features", 404)
