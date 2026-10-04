@@ -283,6 +283,59 @@ def test_newest_sized_raw_decode_is_cached_even_above_the_budget(dng, monkeypatc
     assert [key[-1] for key in image_loader._linear_cache] == [256]
 
 
+@pytest.mark.parametrize("followers", [0, 1])
+def test_over_ceiling_linear_decode_is_never_copied(dng, monkeypatch, followers):
+    """Huge decodes stay uncopied; parked followers receive independent sources."""
+    import threading
+
+    monkeypatch.setattr(image_loader, '_linear_cache', image_loader.OrderedDict())
+    monkeypatch.setattr(image_loader, '_linear_inflight', {})
+    monkeypatch.setattr(image_loader, '_LINEAR_CACHE_MAX_ENTRY_BYTES', 1)
+    started, release = threading.Event(), threading.Event()
+    sources = []
+
+    def decode(path, max_size):
+        source = FloatImage(np.ones((2, 2, 3), dtype=np.float32))
+        sources.append(source)
+        if len(sources) == 1:
+            started.set()
+            assert release.wait(10)
+        return source
+
+    def copy(image):
+        raise MemoryError('over-ceiling source must never be copied')
+
+    monkeypatch.setattr(image_loader, '_decode_linear_sized', decode)
+    monkeypatch.setattr(FloatImage, 'copy', copy)
+    waiting = _signal_when_flight_has_waiters(monkeypatch, followers)
+    results, errors = [], []
+
+    def load():
+        try:
+            results.append(image_loader._load_linear_cached(dng, 128))
+        except BaseException as exc:
+            errors.append(exc)
+
+    leader = threading.Thread(target=load)
+    leader.start()
+    assert started.wait(10)
+    threads = [leader]
+    if followers:
+        follower = threading.Thread(target=load)
+        threads.append(follower)
+        follower.start()
+        assert waiting.wait(10)
+    release.set()
+    for thread in threads:
+        thread.join(10)
+        assert not thread.is_alive()
+    assert not errors
+    assert len(results) == len(sources) == 1 + followers
+    assert {id(image) for image in results} == {id(image) for image in sources}
+    assert not image_loader._linear_cache
+    assert not image_loader._linear_inflight
+
+
 def test_linear_decode_fallback_remains_a_display_image(tmp_path, monkeypatch):
     from test_image_loader import _FakeRaw, _install_fake_raw, _jpeg_bytes
 

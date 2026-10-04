@@ -119,22 +119,27 @@ def _load_linear_cached(path, max_size):
             break
         flight.done.wait()
         if flight.failed:
-            # The leader raised; decode ourselves so this request reports its
-            # own error rather than a shared one.
+            # The leader raised or could not retain an independent source.
+            # Decode ourselves so errors and mutable images stay per-request.
             continue
         return None if flight.image is None else flight.image.copy()
     try:
         image = _decode_linear_sized(path, max_size)
+        flight.image = image
+        if image is not None:
+            if _linear_cache_eligible(image):
+                # Retain an independent source only within the entry ceiling.
+                # The leader's image belongs to its caller, who may mutate it.
+                flight.image = image.copy()
+                _store_linear_cache(key, flight.image)
+            else:
+                # Do not duplicate a giant decode just to reject it from the
+                # cache. Followers must decode independent request sources.
+                flight.image = None
+                flight.failed = True
     except BaseException:
         flight.failed = True
         raise
-    else:
-        flight.image = image
-        if image is not None:
-            # Hand followers their own copy source; ``image`` itself goes to
-            # this caller, who may mutate it.
-            flight.image = image.copy()
-            _store_linear_cache(key, flight.image)
     finally:
         with _linear_cache_lock:
             _linear_inflight.pop(key, None)
@@ -151,13 +156,17 @@ def _decode_linear_sized(path, max_size):
     return image
 
 
-def _store_linear_cache(key, image):
+def _linear_cache_eligible(image):
     # Never cache a JPEG fallback as though the RAW decoded successfully.
     try:
         from .float_image import FloatImage
     except ImportError:
         from float_image import FloatImage
-    if not isinstance(image, FloatImage) or image.pixels.nbytes > _LINEAR_CACHE_MAX_ENTRY_BYTES:
+    return isinstance(image, FloatImage) and image.pixels.nbytes <= _LINEAR_CACHE_MAX_ENTRY_BYTES
+
+
+def _store_linear_cache(key, image):
+    if not _linear_cache_eligible(image):
         return
     with _linear_cache_lock:
         _linear_cache[key] = image
