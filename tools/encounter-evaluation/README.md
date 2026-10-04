@@ -144,6 +144,48 @@ judgments can be exported as JSON. This report does not edit photo tags.
 
 ## Algorithms and tuning
 
+### Compare using existing labels as automatic sequence references
+
+The label benchmark scores short sequences directly against existing species
+tags, alongside recovered species labels. Matching singleton tags on adjacent
+same-folder frames within three seconds supply join references; different
+partial tags are a conservative boundary proxy, not proof of absent species.
+Missing labels and multi-species tags do not manufacture boundary answers.
+Manual-only associations are reported separately from imported labels.
+
+```sh
+python -m encounter_eval.label_benchmark \
+  --scope /path/to/retained-run/scope-0-workspace-22 \
+  --scope /path/to/retained-run/scope-1-workspace-5 \
+  --output ~/.vireo/encounter-evaluation/runs/new-label-comparison
+```
+
+The bounded search compares 34 configurations on training data and the best
+of each algorithm family on development data. It saves the recipes, source and
+manifest hashes, individual results, selection policy, and frozen selection.
+It requires a new output directory. Optional `--constraints /path/to/cases.json`
+accepts explicit reviewed boundary expectations: a JSON list with `id`,
+`workspace`, `session`, ordered `ids`, and `expected_groups` per case. Optional
+`photos` identity records verify filenames. Only training/development reviews
+may constrain selection; imprecise review decisions are not converted into
+invented expected boundaries.
+
+By default, test feature bundles and answers are never loaded. Add
+`--evaluate-test` only for a final evaluation milestone: the runner freezes
+one selected candidate before scoring it on the test partition. Do not tune
+again on that test set after seeing the result. Exact duplicate file hashes
+and photo IDs crossing partitions cause an error; near-duplicate auditing is
+still required for claims of independent generalization.
+
+The baseline groups the retained photo features as captured; the continuity
+candidate applies the shared production continuity rules to those features.
+To replay the original before/after experiment, use a snapshot captured before
+the new rules were installed. A new snapshot from the updated loader already
+contains the repairs, so applying them again is normally a no-op.
+
+See [the completed continuity evaluation](../../docs/encounter-continuity-evaluation.md)
+for the selected parameters, results, limitations, and private artifact layout.
+
 `compare` evaluates the real production encounter implementation, a conservative
 per-photo species-set candidate, and a sequence candidate by default. All use
 the same materialized evidence. Production uses its existing flattened top-five

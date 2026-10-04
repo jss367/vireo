@@ -162,7 +162,7 @@ def _has_similarity_signal(photo):
     return (
         photo.get("dino_subject_embedding") is not None
         or photo.get("dino_global_embedding") is not None
-        or bool(photo.get("species_top5"))
+        or bool(grouping_species_predictions(photo))
         or bool(photo.get("subject_absent"))
         or bool(photo.get("subject_present"))
         or bool(photo.get("subject_uncertain"))
@@ -193,6 +193,11 @@ def sim_species(species_a, species_b):
     return sum(math.sqrt(dict_a[s] * dict_b[s]) for s in shared)
 
 
+def grouping_species_predictions(photo):
+    """Grouping evidence, leaving per-photo classifier predictions intact."""
+    return photo.get("grouping_species_top5", photo.get("species_top5"))
+
+
 def _normalized_species_name(name):
     """Return a stable comparison key for classifier species labels."""
     return " ".join(str(name or "").strip().casefold().split())
@@ -215,7 +220,7 @@ def _confident_species_prediction(photo, config=None):
     if photo.get("subject_absent"):
         return None
 
-    entries = photo.get("species_top5") or []
+    entries = grouping_species_predictions(photo) or []
     if not entries:
         return None
 
@@ -387,7 +392,7 @@ def compute_s_enc(photo_a, photo_b, config=None, return_components=False):
         sp = 0.0
     else:
         ss = sim_embedding(photo_a.get("dino_subject_embedding"), photo_b.get("dino_subject_embedding"))
-        sp = sim_species(photo_a.get("species_top5"), photo_b.get("species_top5"))
+        sp = sim_species(grouping_species_predictions(photo_a), grouping_species_predictions(photo_b))
     sg = sim_embedding(photo_a.get("dino_global_embedding"), photo_b.get("dino_global_embedding"))
     sm = sim_meta(photo_a, photo_b)
 
@@ -398,8 +403,8 @@ def compute_s_enc(photo_a, photo_b, config=None, return_components=False):
     has_subj_b = photo_b.get("dino_subject_embedding") is not None
     has_global_a = photo_a.get("dino_global_embedding") is not None
     has_global_b = photo_b.get("dino_global_embedding") is not None
-    has_species_a = bool(photo_a.get("species_top5"))
-    has_species_b = bool(photo_b.get("species_top5"))
+    has_species_a = bool(grouping_species_predictions(photo_a))
+    has_species_b = bool(grouping_species_predictions(photo_b))
     has_time_a = ts_a is not None
     has_time_b = ts_b is not None
 
@@ -626,6 +631,11 @@ def cut_microsegments(photos, config=None, emit_trace=False):
                     decision = "cut_soft"
             if decision is None:
                 if (
+                    sorted_photos[i].get("isolated_species_context")
+                    or sorted_photos[i + 1].get("isolated_species_context")
+                ):
+                    decision = "kept_species_continuity"
+                elif (
                     sorted_photos[i].get("subject_uncertain")
                     or sorted_photos[i + 1].get("subject_uncertain")
                 ):
@@ -709,7 +719,7 @@ def _segment_mean_species(segment):
     """
     species_scores = defaultdict(list)
     for p in segment:
-        for entry in (p.get("species_top5") or []):
+        for entry in (grouping_species_predictions(p) or []):
             species_scores[species_entry_key(entry)].append(entry[1])
     if not species_scores:
         return []
@@ -843,7 +853,7 @@ def encounter_species_label(photos):
     species_weights = defaultdict(float)
     display_names = {}
     for p in photos:
-        for entry in (p.get("species_top5") or []):
+        for entry in (grouping_species_predictions(p) or []):
             key = species_entry_key(entry)
             species_weights[key] += entry[1]
             display_names[key] = entry[0]
@@ -853,7 +863,7 @@ def encounter_species_label(photos):
 
     winner = max(species_weights, key=species_weights.get)
     # Normalize confidence: total weight / (number of photos * max possible per photo)
-    n_photos = len([p for p in photos if p.get("species_top5")])
+    n_photos = len([p for p in photos if grouping_species_predictions(p)])
     if n_photos == 0:
         return (display_names[winner], 0.0)
     avg_conf = species_weights[winner] / n_photos

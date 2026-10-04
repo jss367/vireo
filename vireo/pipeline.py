@@ -256,6 +256,7 @@ def load_photo_features(db, collection_id=None, config=None,
     load.load_confirmed_species()
     load.rescue_weak_runs()
     photos = load.build_photos()
+    photos = load.apply_encounter_continuity(photos)
 
     log.info("Loaded %d photos with pipeline features", len(photos))
     if load.variant_mismatches:
@@ -489,7 +490,7 @@ class _FeatureLoad:
             subjects_by_photo[det["photo_id"]].append(subject)
             subjects_by_detection[det["detection_id"]] = subject
 
-    def _query_predictions(self, *, full_image_only=False):
+    def _query_predictions(self, *, full_image_only=False, continuity_only=False):
         """Load species predictions (top-5 per photo, ordered by confidence).
 
         Predictions reference detections (not photos directly), so JOIN
@@ -508,6 +509,9 @@ class _FeatureLoad:
         """
         floor_sql = "AND d.detector_model = 'full-image'" if full_image_only else self.detection_floor_sql
         floor_params = () if full_image_only else self.detection_floor_params
+        if continuity_only:
+            floor_sql = "AND d.id IN (SELECT id FROM pipeline_continuity_detections)"
+            floor_params = ()
         if self.labels_fingerprint is not None:
             return self.db.conn.execute(
                 f"""SELECT d.photo_id, d.id AS detection_id,
@@ -572,6 +576,36 @@ class _FeatureLoad:
                 subject["predictions"].append(
                     (species, pr["confidence"], pr["model"], identity.key)
                 )
+
+    def apply_encounter_continuity(self, photos):
+        """Read extra cached evidence only for short candidate windows.
+
+        The same workspace and latest/pinned label-fingerprint predicates used
+        by ordinary loading apply here, including to below-threshold boxes.
+        This never writes classifier results or confirmed species keywords.
+        """
+        from encounter_continuity import apply_encounter_continuity, evidence_photo_ids
+        from species_identity import SpeciesResolver
+
+        config = {**self.effective_cfg, "top_k_predictions": (self.config or {}).get("top_k_predictions", 5)}
+        ids = evidence_photo_ids(photos, config)
+        if not ids:
+            return photos
+        evidence = {pid: [dict(d) for d in detections] for pid, detections in
+                    self.db.get_detections_for_photos(sorted(ids), min_conf=0.).items()}
+        by_detection = {}
+        for detections in evidence.values():
+            for d in detections:
+                d["predictions"] = []
+                by_detection[d["id"]] = d
+        _replace_temp_id_scope(self.db.conn, "pipeline_continuity_detections", sorted(by_detection))
+        resolver = SpeciesResolver(db=self.db)
+        for pr in self._query_predictions(continuity_only=True):
+            identity = resolver.prediction(pr)
+            by_detection[pr["detection_id"]]["predictions"].append(
+                (identity.display_name, pr["confidence"], pr["model"], identity.key)
+            )
+        return apply_encounter_continuity(photos, evidence, config)
 
     def load_primary_detections(self):
         """Load the selected primary detection per photo via the global
@@ -2285,7 +2319,7 @@ def compute_group_fingerprint(config):
     payload = {
         "encounters": _effective(encounters.DEFAULTS),
         "bursts": _effective(bursts.DEFAULTS),
-        "contextual_full_image_rescue_version": 1,
+        "contextual_full_image_rescue_version": 2,
     }
     from species_identity import resolution_identity
     payload["species_resolution"] = resolution_identity()

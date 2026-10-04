@@ -257,7 +257,7 @@ def inference_features(photo, taxonomy, evidence=()):
     allowed = {"id", "folder_id", "filename", "timestamp", "latitude", "longitude", "focal_length",
                "burst_id", "dino_subject_embedding", "dino_global_embedding", "species_top5",
                "subjects", "detection_box", "detection_conf", "subject_absent", "subject_present",
-               "subject_uncertain", "weak_detection_context"}
+               "subject_uncertain", "weak_detection_context", "isolated_species_context", "grouping_species_top5"}
     result = {k: v for k, v in photo.items() if k in allowed}
     captured = timestamp(photo['timestamp'])
     result['timestamp'] = captured.isoformat() if captured else None

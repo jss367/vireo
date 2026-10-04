@@ -151,7 +151,7 @@ def run_algorithm(name, photos, params=None, grouping_config=None):
     restore_features(photos)
     if name == "production":
         from encounters import DEFAULTS as PRODUCTION_DEFAULTS
-        from encounters import segment_encounters
+        from encounters import grouping_species_predictions, segment_encounters
         from species_identity import species_entry_key
         if set(params) - set(PRODUCTION_DEFAULTS):
             raise ValueError("Unknown production grouping parameter")
@@ -165,7 +165,7 @@ def run_algorithm(name, photos, params=None, grouping_config=None):
             weights = defaultdict(float)
             key_by_identity = {}
             for encounter_photo in encounter["photos"]:
-                for entry in (encounter_photo.get("species_top5") or []):
+                for entry in (grouping_species_predictions(encounter_photo) or []):
                     identity = species_entry_key(entry)
                     weights[identity] += entry[1]
                     lookup = encounter_photo.get("species_keys", {}).get(identity)

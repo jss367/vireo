@@ -3637,3 +3637,39 @@ def test_active_mask_variant_endpoint_requires_variant(setup):
     with app.test_client() as c:
         resp = c.post("/api/pipeline/active-mask-variant", json={})
         assert resp.status_code == 400
+
+
+@pytest.mark.parametrize("endpoint", ["reflow", "regroup-live"])
+@pytest.mark.parametrize("saved_gap,live_gap,rescued", [(3.0, 0.1, False), (0.1, 3.0, True)])
+def test_live_burst_gap_controls_weak_continuity(setup, tmp_path, endpoint, saved_gap, live_gap, rescued):
+    from datetime import timedelta
+
+    from db import Database
+
+    app, db_path = setup
+    with Database(db_path) as db:
+        db.update_workspace(db._ws_id(), config_overrides={
+            "detector_confidence": 0.2,
+            "pipeline": {"burst_time_gap": saved_gap, "weak_detection_confidence": 0.12,
+                         "weak_detection_rescue_enabled": True},
+        })
+        folder = db.add_folder(str(tmp_path / "sequence"))
+        ids = []
+        for i in range(3):
+            pid = db.add_photo(folder, f"{i}.jpg", ".jpg", 100, 1,
+                               timestamp=(datetime(2026, 1, 1) + timedelta(seconds=i * 0.5)).isoformat())
+            ids.append(pid)
+            did = db.write_detection_batch(pid, "megadetector-v6", [{
+                "box": {"x": 0.2, "y": 0.2, "w": 0.3, "h": 0.3},
+                "confidence": 0.06 if i == 1 else 0.8, "category": "animal",
+            }])[0]
+            db.add_prediction(did, "Bluebird", 0.99, "classifier")
+    response = app.test_client().post(f"/api/pipeline/{endpoint}", json={
+        "config": {"burst_time_gap": live_gap}, "save_cache": False,
+    })
+    assert response.status_code == 200, response.get_json()
+    middle = next(p for p in response.get_json()["photos"] if p["id"] == ids[1])
+    assert middle["subject_uncertain"] is rescued
+    assert middle["subject_absent"] is not rescued
+    with Database(db_path) as db:
+        assert db.get_effective_config({})["pipeline"]["burst_time_gap"] == saved_gap
