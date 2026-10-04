@@ -49,6 +49,11 @@ def code_identity(repo):
         for path in sorted(root.rglob("*.py")):
             if "__pycache__" not in path.parts:
                 files[str(path.relative_to(repo))] = hashlib.sha256(path.read_bytes()).hexdigest()
+    # Report generation also consumes HTML templates alongside the Python
+    # modules; a template-only change still produces a materially different
+    # review artifact, so the frozen source digest has to notice it.
+    for path in sorted((repo / "tools" / "encounter-evaluation" / "src").rglob("*.html")):
+        files[str(path.relative_to(repo))] = hashlib.sha256(path.read_bytes()).hexdigest()
     try:
         revision = subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=repo, text=True, stderr=subprocess.DEVNULL,

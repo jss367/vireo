@@ -186,6 +186,40 @@ contains the repairs, so applying them again is normally a no-op.
 See [the completed continuity evaluation](../../docs/encounter-continuity-evaluation.md)
 for the selected parameters, results, limitations, and private artifact layout.
 
+### Investigate remaining splits without reusing the final test
+
+The follow-up compares ten bounded continuity challengers against the merged
+rules on retained training/development sessions only. It adds differing-label
+controls through sixty seconds and rejects any loss of an already recovered
+reference label. The winning candidate remains provisional until a fresh final
+test; this command has no option to consume the former test partition.
+
+```sh
+python -m encounter_eval.continuity_followup \
+  --scope /path/to/retained-scope \
+  --constraints /path/to/reviewed-boundaries.json \
+  --output /path/to/new-comparison
+python -m encounter_eval.continuity_followup_report \
+  --comparison /path/to/new-comparison \
+  --output /path/to/new-review
+```
+
+Constraints use the same explicit `expected_groups` format as the label
+benchmark. Start from the pre-continuity retained snapshot to replay the October
+experiment exactly. The baseline reapplies the current production repairs;
+challengers adjust inference features only, without receiving reference labels.
+
+The comparison saves `inferred-regression-checks.json` separately from human
+judgments, plus frozen recipes, scores, and changed cases. Preserve an append-only
+copy of those inferred checks in the private evaluation dataset. The report
+includes only ambiguous cases, embeds available previews, and writes paired
+feature snapshots compatible with `encounter_eval.grouping_dataset import`.
+Use **Export decisions**, then import that export with the new review directory
+as `--run` and the existing cumulative review database as `--dataset`.
+
+See [the follow-up findings](../../docs/encounter-continuity-followup.md) for
+results, candidate selection, and the still-pending fresh final test.
+
 `compare` evaluates the real production encounter implementation, a conservative
 per-photo species-set candidate, and a sequence candidate by default. All use
 the same materialized evidence. Production uses its existing flattened top-five
