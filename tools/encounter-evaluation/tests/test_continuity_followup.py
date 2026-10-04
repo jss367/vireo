@@ -485,3 +485,46 @@ def test_report_rejects_retained_manifest_drift(tmp_path):
     write_json(scope / "manifest.json", manifest)
     with pytest.raises(ValueError, match="Retained scope manifest changed"):
         build(comparison, tmp_path / "report")
+
+
+def test_duplicate_sessions_with_differing_inputs_are_rejected(tmp_path):
+    # Two scopes may list the same session with the same photo IDs under the
+    # same source_library yet disagree on their manifest configuration or
+    # per-session digest, which would silently drop the second scope's
+    # evidence and grouping even though it is not interchangeable. The run
+    # must refuse rather than let selection depend on scope argument order.
+    scope_a = retained_scope(tmp_path / "a")
+    scope_b = retained_scope(tmp_path / "b")
+    manifest_b = json.loads((scope_b / "manifest.json").read_text())
+    manifest_b["config"] = {"different": True}
+    (scope_b / "manifest.json").write_text(json.dumps(manifest_b))
+    with pytest.raises(ValueError, match="Duplicate sessions"):
+        run([scope_a, scope_b], tmp_path / "result")
+
+
+def test_identical_duplicate_scopes_are_deduplicated_silently(tmp_path):
+    # When two scopes share the same session with matching inputs and
+    # manifest, dropping the second one leaves selection unchanged.
+    scope_a = retained_scope(tmp_path / "a")
+    scope_b = retained_scope(tmp_path / "b")
+    (scope_b / "manifest.json").write_bytes((scope_a / "manifest.json").read_bytes())
+    result = run([scope_a, scope_b], tmp_path / "result")
+    assert result["selected"]["id"] == "current"
+
+
+def test_code_identity_covers_review_html_templates(tmp_path):
+    # Report generation reads the HTML template beside the Python modules;
+    # a template-only edit must change the frozen source digest so the
+    # provenance guard refuses a drifted checkout.
+    from encounter_eval.common import code_identity
+
+    repo = configure_repo()
+    before = code_identity(repo)["source_digest"]
+    extra = repo / "tools/encounter-evaluation/src/encounter_eval/_test_html_identity_fixture.html"
+    assert not extra.exists()
+    extra.write_bytes(b"<!-- template identity fixture -->\n")
+    try:
+        after = code_identity(repo)["source_digest"]
+    finally:
+        extra.unlink()
+    assert before != after

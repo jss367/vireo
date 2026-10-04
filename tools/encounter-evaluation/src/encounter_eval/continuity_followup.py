@@ -184,15 +184,34 @@ def run(scopes, output, *, constraints=()):
                 photos, answers = bundle["photos"], bundle["answers"]
                 library = manifest.get("source_library", "legacy-source")
                 keys = {(library, p["id"]) for p in photos}
+                # Two scopes can list the same photo IDs under the same library
+                # yet disagree on the entry digest, configuration, labels or
+                # workspace metadata that decide this session's evidence and
+                # grouping. Record a full session identity so a later duplicate
+                # has to match it to be skipped as the same input.
+                session_identity = digest(
+                    [
+                        manifest["workspace"],
+                        entry["id"],
+                        entry["digest"],
+                        manifest["config"],
+                        manifest.get("grouping_config"),
+                        manifest.get("label_source"),
+                        manifest.get("taxonomy_display"),
+                        sorted(manifest.get("complete_folders", [])),
+                    ]
+                )
                 prior = keys & ids_seen.keys()
                 if prior:
-                    if any(ids_seen[k] != partition for k in prior):
+                    if any(ids_seen[k][0] != partition for k in prior):
                         raise ValueError("A photo crosses partitions")
                     if prior == keys:
-                        continue
+                        if all(ids_seen[k][1] == session_identity for k in prior):
+                            continue
+                        raise ValueError("Duplicate sessions disagree on inputs or manifest")
                     raise ValueError("Partially overlapping sessions")
                 for key in keys:
-                    ids_seen[key] = partition
+                    ids_seen[key] = (partition, session_identity)
                     file_hash = bundle["presentation"][str(key[1])].get("file_hash")
                     if file_hash and hashes_seen.setdefault(file_hash, partition) != partition:
                         raise ValueError("Duplicate file hashes cross partitions")
