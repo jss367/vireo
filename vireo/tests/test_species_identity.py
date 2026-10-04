@@ -16,7 +16,7 @@ from labels import SpeciesLabels, fetch_species_list, load_merged_labels, read_l
 from labels_fingerprint import compute_full_fingerprint
 from pipeline import load_photo_features, normalize_cached_species
 from species_identity import SpeciesResolver
-from species_identity_repair import apply_repairs, plan_repairs
+from species_identity_repair import apply_repairs, plan_inferred_taxonomy_repairs, plan_repairs
 from taxonomy import Taxonomy
 
 RED = {"taxon_id": 18976, "scientific_name": "Amazona viridigenalis",
@@ -469,6 +469,92 @@ def test_upgrade_repairs_existing_database_once(db, tmp_path):
         try:
             assert upgraded.conn.execute("SELECT scientific_name FROM predictions").fetchone()[0] == RED["scientific_name"]
             assert upgraded.conn.execute("SELECT status FROM prediction_review").fetchone()[0] == "rejected"
+            assert upgraded.conn.execute("SELECT count(*) FROM species_identity_repairs").fetchone()[0] == 1
+        finally:
+            upgraded.close()
+
+
+def _inferred_row(db, det, species, scientific_name, fingerprint="custom", status="pending", **extra):
+    db.add_prediction(det, species, .8, "BioCLIP-2.5", status=status, labels_fingerprint=fingerprint,
+                      taxonomy={"scientific_name": scientific_name, "class": "Aves", "genus": "Amazona", **extra})
+    return db.conn.execute("SELECT * FROM predictions WHERE detection_id = ? AND species = ?",
+                           (det, species)).fetchone()
+
+
+def test_inferred_repair_replaces_a_neighbours_binomial(db, tmp_path):
+    """Legacy burst enrichment stamped the consensus species' taxonomy on every
+    frame: a Lilac-crowned label stored as Red-browed Amazon."""
+    db.conn.execute("INSERT INTO taxa (inat_id, name, rank) VALUES (1, 'Aves', 'class')")
+    db.conn.execute("INSERT INTO taxa (inat_id, name, rank, parent_id) VALUES "
+                    "(2, 'Amazona', 'genus', (SELECT id FROM taxa WHERE inat_id = 1))")
+    db.conn.execute("UPDATE taxa SET parent_id = (SELECT id FROM taxa WHERE inat_id = 2) WHERE inat_id = ?",
+                    (LILAC["taxon_id"],))
+    db.conn.commit()
+    _, det = _photo(db, tmp_path)
+    row = _inferred_row(db, det, "Lilac-crowned Parrot", BROWED["scientific_name"], status="accepted",
+                        family="Wrongidae")
+    review_before = [tuple(r) for r in db.conn.execute("SELECT * FROM prediction_review")]
+    plan = plan_inferred_taxonomy_repairs(db)
+    assert [c["reason"] for c in plan] == ["inferred-taxonomy-replaced"]
+    with db.conn:
+        assert apply_repairs(db.conn, plan) == 1
+    repaired = db.conn.execute("SELECT * FROM predictions WHERE id = ?", (row["id"],)).fetchone()
+    assert repaired["species"] == "Lilac-crowned Parrot"
+    assert repaired["confidence"] == .8
+    assert repaired["scientific_name"] == LILAC["scientific_name"]
+    assert (repaired["taxonomy_class"], repaired["taxonomy_genus"]) == ("Aves", "Amazona")
+    # No rank of the old guess survives next to the new binomial.
+    assert repaired["taxonomy_family"] is None
+    # A name lookup is not source evidence.
+    assert repaired["source_taxon_id"] is None
+    assert [tuple(r) for r in db.conn.execute("SELECT * FROM prediction_review")] == review_before
+    audit = db.conn.execute("SELECT * FROM species_identity_repairs").fetchone()
+    assert json.loads(audit["before_json"])["scientific_name"] == BROWED["scientific_name"]
+    assert plan_inferred_taxonomy_repairs(db) == []
+
+
+def test_inferred_repair_clears_only_names_the_label_cannot_support(db, tmp_path):
+    # Alternate names live in taxa_common_names; an unverified label the stored
+    # taxon carries there is consistent and stays.
+    db.conn.execute("INSERT INTO taxa_common_names (taxon_id, name) "
+                    "SELECT id, 'Green-cheeked Amazon' FROM taxa WHERE inat_id = ?", (RED["taxon_id"],))
+    db.conn.commit()
+    rows = {}
+    for i, (species, sci) in enumerate([
+        ("Lilac-crowned × Red-crowned Amazon", BROWED["scientific_name"]),  # hybrid, neighbour's binomial
+        ("Green-cheeked Amazon", RED["scientific_name"]),  # alternate name of the stored taxon
+        ("Phainopepla", "Phainopepla"),  # genus-named label stored as itself
+    ]):
+        _, det = _photo(db, tmp_path, f"p{i}.jpg")
+        rows[species] = _inferred_row(db, det, species, sci)["id"]
+    _, det = _photo(db, tmp_path, "native.jpg")
+    db.add_prediction(det, "Lilac-crowned Parrot", .9, "BioCLIP-2.5", labels_fingerprint="tol",
+                      taxonomy={"scientific_name": BROWED["scientific_name"]})
+    plan = plan_inferred_taxonomy_repairs(db)
+    assert [(c["id"], c["reason"]) for c in plan] == [
+        (rows["Lilac-crowned × Red-crowned Amazon"], "inferred-taxonomy-cleared")]
+    with db.conn:
+        apply_repairs(db.conn, plan)
+    cleared = db.conn.execute("SELECT * FROM predictions WHERE id = ?",
+                              (rows["Lilac-crowned × Red-crowned Amazon"],)).fetchone()
+    assert cleared["scientific_name"] is None
+    assert cleared["taxonomy_class"] is None and cleared["taxonomy_genus"] is None
+    # Model-native rows are primary evidence and never touched.
+    assert db.conn.execute("SELECT scientific_name FROM predictions WHERE labels_fingerprint = 'tol'"
+                           ).fetchone()[0] == BROWED["scientific_name"]
+
+
+def test_upgrade_repairs_inferred_taxonomy_once(db, tmp_path):
+    _, det = _photo(db, tmp_path)
+    _inferred_row(db, det, "Lilac-crowned Parrot", BROWED["scientific_name"], fingerprint="legacy")
+    from species_identity_repair import INFERRED_TAXONOMY_MARKER
+    db.set_meta(INFERRED_TAXONOMY_MARKER, "0")
+    path = db._db_path
+    db.close()
+    for _ in range(2):
+        upgraded = Database(path)
+        try:
+            assert upgraded.conn.execute("SELECT scientific_name FROM predictions").fetchone()[0] == LILAC["scientific_name"]
             assert upgraded.conn.execute("SELECT count(*) FROM species_identity_repairs").fetchone()[0] == 1
         finally:
             upgraded.close()
