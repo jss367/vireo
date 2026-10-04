@@ -15,7 +15,13 @@ from keyword_normalization import keyword_match_key
 from labels import SpeciesLabels, fetch_species_list, load_merged_labels, read_label_file, save_labels
 from labels_fingerprint import compute_full_fingerprint
 from pipeline import load_photo_features, normalize_cached_species
-from species_identity import SpeciesResolver
+from species_identity import (
+    PREDICTION_TAXONOMY_COLUMNS,
+    SpeciesResolver,
+    resolved_prediction_taxonomy,
+    stored_taxonomy_evidence_sql,
+    stored_taxonomy_is_evidence,
+)
 from species_identity_repair import apply_repairs, plan_repairs
 from taxonomy import Taxonomy
 
@@ -1149,3 +1155,101 @@ def test_review_consensus_invalid_votes_preserve_prediction_identity(db, votes):
     row = {"species": "Parrot", "source_taxon_id": LILAC["taxon_id"],
            "group_id": "burst", "individual": votes}
     assert SpeciesResolver(db=db).consensus(row).key == f"taxon:{LILAC['taxon_id']}"
+
+
+@pytest.mark.parametrize("row,evidence", [
+    ({"classifier_model": "BioCLIP-2.5", "labels_fingerprint": "custom", "source_taxon_id": None}, False),
+    ({"classifier_model": "BioCLIP-2.5", "labels_fingerprint": "legacy", "source_taxon_id": None}, False),
+    ({"classifier_model": "BioCLIP-2.5", "labels_fingerprint": "custom", "source_taxon_id": 18976}, True),
+    ({"classifier_model": "BioCLIP-2.5", "labels_fingerprint": "tol", "source_taxon_id": None}, True),
+    ({"classifier_model": "iNat21 (EVA-02 Large)", "labels_fingerprint": "x", "source_taxon_id": None}, True),
+    ({"classifier_model": "inat-lowercase", "labels_fingerprint": "x", "source_taxon_id": None}, False),
+])
+def test_stored_taxonomy_evidence_rule_agrees_in_python_and_sql(db, row, evidence):
+    assert stored_taxonomy_is_evidence(row) is evidence
+    sql = db.conn.execute(
+        f"SELECT {stored_taxonomy_evidence_sql('pr')} FROM (SELECT ? AS classifier_model, "
+        "? AS labels_fingerprint, ? AS source_taxon_id) pr",
+        (row["classifier_model"], row["labels_fingerprint"], row["source_taxon_id"]),
+    ).fetchone()[0]
+    assert bool(sql) is evidence
+
+
+def test_resolved_prediction_taxonomy_replaces_a_neighbours_guess(db):
+    resolver = SpeciesResolver(db=db)
+    guessed = {"species": "Lilac-crowned Parrot", "classifier_model": "BioCLIP-2.5",
+               "labels_fingerprint": "custom", "source_taxon_id": None,
+               "scientific_name": BROWED["scientific_name"], "taxonomy_genus": "Amazona",
+               "taxonomy_family": "Wrongidae"}
+    shown = resolved_prediction_taxonomy(guessed, resolver)
+    assert shown["scientific_name"] == LILAC["scientific_name"]
+    # The guess's ranks are not shown next to a binomial they do not belong to.
+    assert shown["taxonomy_family"] is None and shown["taxonomy_genus"] is None
+    # A guess that names the label's own taxon keeps its ranks.
+    agreeing = {**guessed, "scientific_name": LILAC["scientific_name"]}
+    assert resolved_prediction_taxonomy(agreeing, resolver)["taxonomy_family"] == "Wrongidae"
+    # Nothing verifies the label: no binomial rather than the guessed one.
+    hybrid = {**guessed, "species": "Lilac-crowned × Red-crowned Amazon"}
+    assert resolved_prediction_taxonomy(hybrid, resolver) == dict.fromkeys(PREDICTION_TAXONOMY_COLUMNS)
+    # A fixed-head row's stored taxonomy is the model's output and passes through.
+    native = {**guessed, "classifier_model": "iNat21", "labels_fingerprint": "tol"}
+    assert resolved_prediction_taxonomy(native, resolver)["scientific_name"] == BROWED["scientific_name"]
+
+
+# Every SQL string that reads a prediction's stored scientific name, with why
+# it is safe. A custom-label row's stored name can be another species' guess,
+# so a new reader must resolve the label (``SpeciesResolver.prediction`` /
+# ``resolved_prediction_taxonomy``) or gate on ``stored_taxonomy_evidence_sql``
+# before it shows, searches or submits the name — then list itself here.
+RAW_SCIENTIFIC_NAME_READERS = {
+    "culling.py": "identity via SpeciesResolver.prediction",
+    "pipeline.py": "identity via SpeciesResolver.prediction",
+    "repositories/masks_features.py": "presence ordering and class routing only; guesses keep the right class",
+    "repositories/predictions.py": "get_top_prediction_for_photo returns provenance; web/inat.py resolves it",
+    "repositories/stats.py": "presence ordering only",
+    "web/pipeline.py": "Pipeline Inspector payload via resolved_prediction_taxonomy",
+    "web/predictions.py": "decision rows resolved via SpeciesResolver",
+}
+
+
+def test_every_raw_scientific_name_reader_is_reviewed():
+    import ast
+    import re
+
+    pattern = re.compile(r"\b(pr|pred)\.scientific_name\b")
+    root = Path(__file__).resolve().parents[1]
+    readers = set()
+    for path in root.rglob("*.py"):
+        if "tests" in path.relative_to(root).parts:
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and pattern.search(node.value):
+                readers.add(path.relative_to(root).as_posix())
+    assert readers == set(RAW_SCIENTIFIC_NAME_READERS)
+
+
+def test_inspector_and_review_payloads_resolve_guessed_binomials(app_and_db):
+    """The Pipeline Inspector and /api/predictions show the label's resolved
+    binomial, never a custom-label row's guessed one, and alternatives too."""
+    app, database = app_and_db
+    for entry in (BROWED, LILAC):
+        database.conn.execute("INSERT INTO taxa (inat_id, name, common_name, rank) VALUES (?, ?, ?, ?)",
+                              (entry["taxon_id"], entry["scientific_name"], entry["common_name"], entry["rank"]))
+    pid = database.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    det = database.save_detections(pid, [{"box": {"x": .1, "y": .1, "w": .5, "h": .5}, "confidence": .9,
+                                          "category": "animal"}], detector_model="MDV6")[0]
+    guess = {"scientific_name": BROWED["scientific_name"], "genus": "Amazona", "family": "Wrongidae"}
+    database.add_prediction(det, "Lilac-crowned Parrot", .9, "BioCLIP-2.5", labels_fingerprint="custom",
+                            taxonomy=guess)
+    database.add_prediction(det, "Red-browed Parrot", .1, "BioCLIP-2.5", labels_fingerprint="custom",
+                            status="alternative", taxonomy={**guess, "scientific_name": LILAC["scientific_name"]})
+    client = app.test_client()
+
+    inspector = {p["species"]: p for p in client.get(f"/api/photos/{pid}/pipeline").get_json()["predictions"]}
+    assert inspector["Lilac-crowned Parrot"]["scientific_name"] == LILAC["scientific_name"]
+    assert inspector["Lilac-crowned Parrot"]["taxonomy_family"] is None
+
+    review = [p for p in client.get("/api/predictions").get_json()["predictions"]
+              if p["species"] == "Lilac-crowned Parrot"]
+    assert review and review[0]["scientific_name"] == LILAC["scientific_name"]
+    assert [a["scientific_name"] for a in review[0]["alternatives"]] == [BROWED["scientific_name"]]

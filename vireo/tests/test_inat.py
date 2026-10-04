@@ -291,6 +291,11 @@ def app_and_db(tmp_path):
     ], detector_model="MDV6")
     d.add_prediction(det_ids[0], "Northern Cardinal", 0.95, "test-model",
                      taxonomy={"scientific_name": "Cardinalis cardinalis"})
+    # A custom-label prediction's binomial comes from resolving its label
+    # against the catalog's taxonomy, as in a real catalog.
+    d.conn.execute("INSERT INTO taxa (inat_id, name, common_name, rank) "
+                   "VALUES (9083, 'Cardinalis cardinalis', 'Northern Cardinal', 'species')")
+    d.conn.commit()
 
     for p in [pid]:
         Image.new('RGB', (100, 100)).save(os.path.join(thumb_dir, f"{p}.jpg"))
@@ -913,6 +918,32 @@ def test_api_inat_submit_success(app_and_db):
     # Verify recorded in DB
     subs = db.get_inat_submissions([pid])
     assert pid in subs
+
+
+def test_api_inat_never_offers_a_neighbours_guessed_binomial(app_and_db):
+    """Legacy burst enrichment stored another species' binomial on custom-label
+    rows ("Lilac-crowned Amazon" as Amazona rhodocorytha). Neither prepare nor
+    submit may hand that name to iNaturalist; the label's own resolved binomial
+    goes instead, or the label itself when nothing verifies it."""
+    app, db, pid = app_and_db
+    import config as cfg
+    cfg.save({"inat_token": "fake-token"})
+    db.conn.execute("UPDATE predictions SET scientific_name = 'Cardinalis sinuatus'")
+    db.conn.commit()
+    client = app.test_client()
+    assert client.get(f'/api/inat/prepare/{pid}').get_json()["scientific_name"] == "Cardinalis cardinalis"
+    with patch("inat.submit_observation", return_value=(1, "u")) as submit:
+        client.post('/api/inat/submit', json={'photo_id': pid})
+    assert submit.call_args.kwargs["taxon_name"] == "Cardinalis cardinalis"
+
+    db.conn.execute("DELETE FROM taxa")
+    db.conn.commit()
+    assert client.get(f'/api/inat/prepare/{pid}').get_json()["scientific_name"] == ""
+    with patch("inat.submit_observation", return_value=(2, "u")) as submit:
+        db.conn.execute("DELETE FROM inat_submissions")
+        db.conn.commit()
+        client.post('/api/inat/submit', json={'photo_id': pid})
+    assert submit.call_args.kwargs["taxon_name"] == "Northern Cardinal"
 
 
 def test_api_inat_submit_preserves_explicit_metadata_omissions(app_and_db):

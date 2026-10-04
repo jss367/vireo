@@ -34,11 +34,23 @@ from render_source import (
 from render_source import (
     recipe_source_dimensions as _recipe_source_dimensions,
 )
+from species_identity import SpeciesResolver, resolved_prediction_taxonomy
 from web.background_jobs import make_background_job
 from web.request_args import MAX_SELECTION_PHOTOS
 from working_copy_cache import working_copy_publication_guard
 
 log = logging.getLogger(__name__)
+
+
+def _prediction_scientific_name(db, pred):
+    """The binomial an iNaturalist observation may carry for ``pred``.
+
+    A custom-label prediction's stored name can be another species' guess
+    (legacy burst enrichment put Amazona rhodocorytha on "Lilac-crowned
+    Amazon"), so resolve its label instead. None when nothing verifies it;
+    callers then fall back to the label.
+    """
+    return resolved_prediction_taxonomy(pred, SpeciesResolver(db=db))["scientific_name"]
 
 
 class InatTokenGeneration:
@@ -116,7 +128,7 @@ def create_inat_blueprint(
         )
 
         species = pred["species"] if pred else ""
-        scientific = pred["scientific_name"] if pred else ""
+        scientific = (_prediction_scientific_name(db, pred) or "") if pred else ""
 
         loc = db.get_effective_photo_location(photo_id)
         lat = loc["latitude"] if loc else None
@@ -731,7 +743,7 @@ def create_inat_blueprint(
         )
 
         default_taxon = (
-            (pred["scientific_name"] or pred["species"]) if pred else None
+            (_prediction_scientific_name(db, pred) or pred["species"]) if pred else None
         )
         taxon = data.get("taxon_name", default_taxon)
         observed_on = (
@@ -851,7 +863,7 @@ def create_inat_blueprint(
             )
 
             default_taxon = (
-                (pred["scientific_name"] or pred["species"])
+                (_prediction_scientific_name(db, pred) or pred["species"])
                 if pred else None
             )
             taxon = sub.get("taxon_name", default_taxon)

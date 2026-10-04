@@ -1810,6 +1810,7 @@ def create_pipeline_blueprint(
         preds = db.conn.execute(
             """SELECT pr.species, pr.confidence, pr.classifier_model AS model,
                       pr.category, pr.match_score,
+                      pr.labels_fingerprint, pr.source_taxon_id,
                       pr.scientific_name, pr.taxonomy_kingdom, pr.taxonomy_phylum,
                       pr.taxonomy_class, pr.taxonomy_order, pr.taxonomy_family,
                       pr.taxonomy_genus,
@@ -1836,7 +1837,16 @@ def create_pipeline_blueprint(
                ORDER BY pr.confidence DESC""",
             (ws, photo_id, min_conf),
         ).fetchall()
-        result["predictions"] = [dict(p) for p in preds]
+        # A custom-label row's stored taxonomy may be another species' guess;
+        # show the label's resolved binomial instead.
+        from species_identity import SpeciesResolver, resolved_prediction_taxonomy
+        resolver = SpeciesResolver(db=db)
+        result["predictions"] = []
+        for p in preds:
+            pred = dict(p)
+            pred.update(resolved_prediction_taxonomy(pred, resolver))
+            del pred["labels_fingerprint"], pred["source_taxon_id"]
+            result["predictions"].append(pred)
 
         # Match strength: how well the best label in each list actually fit,
         # as opposed to which label fit least badly. Reported for every
