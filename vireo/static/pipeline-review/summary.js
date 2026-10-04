@@ -92,7 +92,8 @@ function renderAlgorithmTrace() {
     var dt = (t.dt_seconds === null || t.dt_seconds === undefined) ? '∞' : t.dt_seconds.toFixed(1) + 's';
     var score = (typeof t.score === 'number') ? t.score.toFixed(3) : '-';
     var decisionLabels = {
-      kept_weak_detection: 'kept · weak detection rescued'
+      kept_weak_detection: 'kept · weak detection rescued',
+      kept_species_continuity: 'kept · neighboring frames support the same species'
     };
     var decision = decisionLabels[t.decision] || t.decision || '?';
     html += '<div class="' + rowCls + '">';
@@ -113,6 +114,15 @@ function renderAlgorithmTrace() {
     html += '<span class="trace-pair-arrow">→</span>';
     html += pairPhotoHtml(bId, t.photo_b_filename);
     html += '</div>';
+    [aId, bId].forEach(function(pid) {
+      var context = (photoMap[pid] || {}).isolated_species_context;
+      if (!context) return;
+      html += '<div class="trace-thresholds">'
+        + escapeHtml((photoMap[pid] || {}).filename || ('Photo ' + pid))
+        + ': set aside the isolated ' + escapeHtml(context.conflicting_species)
+        + ' prediction for grouping. Neighboring frames support '
+        + escapeHtml(context.anchor_species) + '. The original classifier prediction is unchanged.</div>';
+    });
     if (t.components) {
       var nameA = shortName((photoMap[aId] || {}).filename || t.photo_a_filename || 'A');
       var nameB = shortName((photoMap[bId] || {}).filename || t.photo_b_filename || 'B');

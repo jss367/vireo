@@ -626,6 +626,11 @@ def cut_microsegments(photos, config=None, emit_trace=False):
                     decision = "cut_soft"
             if decision is None:
                 if (
+                    sorted_photos[i].get("isolated_species_context")
+                    or sorted_photos[i + 1].get("isolated_species_context")
+                ):
+                    decision = "kept_species_continuity"
+                elif (
                     sorted_photos[i].get("subject_uncertain")
                     or sorted_photos[i + 1].get("subject_uncertain")
                 ):
