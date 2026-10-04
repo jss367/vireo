@@ -4290,15 +4290,14 @@ def test_edit_preview_skips_recent_failed_raw_before_decode(
     assert called["load"] is False
 
 
-def test_edit_preview_analysis_keeps_raw_on_recipe_render_path(
+def test_auto_tone_keeps_raw_on_recipe_render_path(
     client_with_photo, monkeypatch,
 ):
-    """``analysis=1`` must not let an empty recipe drop a RAW primary onto
-    its legacy JPEG working copy. Auto Tone strips tonal adjustments to
-    read neutral pixels; for a RAW with no other geometry the resulting
-    recipe is empty, which would normally short-circuit
-    ``_recipe_render_source`` to the canonical working copy and produce
-    clipped pixels for the highlight/exposure heuristics.
+    """Auto Tone must not let a frame-only recipe drop a RAW primary onto
+    its legacy JPEG working copy. The fit selects the source from geometry
+    alone; for a RAW with no geometry that recipe is empty, which would
+    normally short-circuit ``_recipe_render_source`` to the canonical
+    working copy and hand the fit clipped pixels.
     """
     import web.media as media_module
 
@@ -4324,16 +4323,12 @@ def test_edit_preview_analysis_keeps_raw_on_recipe_render_path(
         query_string={"size": "1024", "recipe": "{}"},
     )
     client.get(
-        f"/photos/{photo_id}/edit-preview",
-        query_string={"size": "1024", "recipe": "{}", "analysis": "1"},
+        f"/api/photos/{photo_id}/auto-tone",
+        query_string={"recipe": '{"adjustments": {"exposure": 1}}'},
     )
     client.get(
-        f"/photos/{photo_id}/edit-preview",
-        query_string={
-            "size": "1024",
-            "recipe": '{"rotation":90}',
-            "analysis": "1",
-        },
+        f"/api/photos/{photo_id}/auto-tone",
+        query_string={"recipe": '{"rotation":90}'},
     )
 
     assert seen_recipes == [
@@ -4341,6 +4336,100 @@ def test_edit_preview_analysis_keeps_raw_on_recipe_render_path(
         {"version": 1},
         {"version": 1, "rotation": 90},
     ]
+
+
+def test_auto_tone_returns_fitted_controls(client_with_photo):
+    app, _db, photo_id = client_with_photo
+    resp = app.test_client().get(
+        f"/api/photos/{photo_id}/auto-tone",
+        query_string={"recipe": '{"crop": {"x": 0, "y": 0, "w": 0.5, "h": 0.5}}'},
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert set(data["adjustments"]) == {
+        "exposure", "highlights", "shadows", "contrast",
+        "whites", "blacks", "vibrance", "saturation",
+    }
+    assert data["metering"] == "frame"
+    assert data["subject_source"] is None
+    assert isinstance(data["notes"], list)
+
+
+def test_auto_tone_meters_on_active_mask_then_detection(
+    client_with_photo, monkeypatch,
+):
+    import web.media as media_module
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    db.conn.execute(
+        "INSERT INTO detections (photo_id, box_x, box_y, box_w, box_h, "
+        "detector_confidence, category) VALUES (?, 0.4, 0.4, 0.2, 0.2, 0.9, 'animal')",
+        (photo_id,),
+    )
+    db.conn.commit()
+    data = client.get(f"/api/photos/{photo_id}/auto-tone").get_json()
+    assert (data["metering"], data["subject_source"]) == ("subject", "detection")
+
+    def fake_mask(_db, _photo_id):
+        mask = Image.new("L", (800, 600), 0)
+        mask.paste(255, (300, 200, 500, 400))
+        return mask
+
+    monkeypatch.setattr(media_module, "_load_active_mask", fake_mask)
+    data = client.get(f"/api/photos/{photo_id}/auto-tone").get_json()
+    assert (data["metering"], data["subject_source"]) == ("subject", "mask")
+
+
+def test_auto_tone_falls_back_to_detection_when_active_mask_is_misaligned(client_with_photo, monkeypatch):
+    """An unusable active mask does not discard a valid animal subject box."""
+    import web.media as media_module
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    db.conn.execute(
+        "INSERT INTO detections (photo_id, box_x, box_y, box_w, box_h, "
+        "detector_confidence, category) VALUES (?, 0.4, 0.4, 0.2, 0.2, 0.9, 'animal')",
+        (photo_id,),
+    )
+    db.conn.commit()
+    monkeypatch.setattr(media_module, "_load_active_mask", lambda *_: Image.new("L", (800, 100), 255))
+    response = app.test_client().get(f"/api/photos/{photo_id}/auto-tone")
+    assert response.status_code == 200
+    data = response.get_json()
+    assert (data["metering"], data["subject_source"]) == ("subject", "detection")
+
+
+@pytest.mark.parametrize("category,model", [
+    ("person", "MDV6"), ("vehicle", "MDV6"), ("animal", "full-image"),
+])
+def test_auto_tone_ignores_non_animal_and_full_image_boxes(client_with_photo, category, model):
+    """Only a real animal detection can provide fallback subject metering."""
+    app, db, photo_id = client_with_photo
+    db.conn.execute(
+        "INSERT INTO detections (photo_id, box_x, box_y, box_w, box_h, "
+        "detector_confidence, category, detector_model) VALUES (?, 0.4, 0.4, 0.2, 0.2, 0.9, ?, ?)",
+        (photo_id, category, model),
+    )
+    db.conn.commit()
+    response = app.test_client().get(f"/api/photos/{photo_id}/auto-tone")
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["metering"] == "frame"
+    assert data["subject_source"] is None
+
+
+def test_auto_tone_rejects_bad_requests(client_with_photo):
+    app, _db, photo_id = client_with_photo
+    client = app.test_client()
+    assert client.get("/api/photos/999999/auto-tone").status_code == 404
+    for recipe in ("{not json", "[1]", '{"rotation": 45}'):
+        resp = client.get(
+            f"/api/photos/{photo_id}/auto-tone", query_string={"recipe": recipe},
+        )
+        assert resp.status_code == 400, recipe
+        assert resp.get_json()["error"]
 
 
 def test_non_crop_preview_loads_with_requested_size(client_with_photo, monkeypatch):

@@ -2,11 +2,15 @@
 
 import io
 import json
+import re
 from urllib.parse import parse_qs, urlparse
 
 import pytest
 from PIL import Image
 from playwright.sync_api import expect
+
+# The success toast, never the 'Could not analyze ... Auto Tone' error.
+AUTO_TONE_APPLIED = re.compile(r'Auto Tone.*(White balance left unchanged|nothing changed)')
 
 
 @pytest.fixture
@@ -93,4 +97,4 @@ def test_presence_presets_reset_and_auto_tone(live_server, page, presence_photo)
     adjustments = page.evaluate('recipeForSave(editorState.recipe).adjustments')
     for key, value in values.items():
         assert adjustments[key] == value
-    expect(page.locator('#toastContainer')).to_contain_text('Auto-balanced tones')
+    expect(page.locator('#toastContainer')).to_contain_text(AUTO_TONE_APPLIED)

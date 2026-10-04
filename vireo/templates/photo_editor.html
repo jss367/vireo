@@ -2023,7 +2023,7 @@ function updateHistogramFeedback() {
   // Sample only the active crop so the histogram and clip readouts describe
   // the frame the user is keeping — the preview render is uncropped, and a
   // blown sky the user already cropped away must not keep warning about
-  // highlight clipping. Mirrors Auto Tone's _lumaStats sampling.
+  // highlight clipping.
   var crop = editorPreviewAppliesCrop()
     ? {x: 0, y: 0, w: 1, h: 1}
     : (editorState.showBefore
@@ -3332,138 +3332,31 @@ function resetDetail() {
 }
 
 // --- Auto Tone -------------------------------------------------------------
-// One-click tonal balance derived from the photo's own luminance histogram.
-// These helpers mirror the semantics of tone.py (linear-light exposure,
-// display-space range controls) closely enough to land a sensible starting
-// point; the user fine-tunes from there. Auto Tone intentionally leaves colour
-// (white balance, vibrance, saturation) untouched so it never neutralises a
-// wanted cast such as golden-hour warmth.
+// The server fits Auto Tone by rendering candidates through the real tone
+// pipeline (see vireo/auto_tone.py), metering on the subject when the photo
+// has a mask or detection. It sets exposure, highlights, shadows, contrast,
+// whites, blacks, vibrance and saturation. White balance and the presence
+// controls stay as the user set them so a wanted cast such as golden-hour
+// warmth is never neutralised; the fit renders them, so it balances the photo
+// as it will look with them.
 
-function _srgbToLinear(c) {
-  return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
-}
-function _linearToSrgb(c) {
-  c = Math.max(0, c);
-  return c <= 0.0031308 ? c * 12.92 : 1.055 * Math.pow(c, 1 / 2.4) - 0.055;
-}
-function _smoothstep(e0, e1, x) {
-  var t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
-  return t * t * (3 - 2 * t);
-}
+var AUTO_TONE_KEYS = ['exposure', 'highlights', 'shadows', 'contrast', 'whites', 'blacks', 'vibrance', 'saturation'];
 
-// Sample an image into a 256-bin luma histogram plus shadow/highlight clip counts.
-function _lumaStats(img, crop) {
-  // The base render is geometry-applied but uncropped, and `crop` (normalized
-  // 0..1) is in that same coordinate space. Sample only the pixels inside the
-  // active crop so Auto Tone's heuristics see the frame the user is keeping.
-  var maxSample = 180;
-  var sx = 0, sy = 0;
-  var sW = img.naturalWidth, sH = img.naturalHeight;
-  if (crop && !isFullCrop(crop)) {
-    sx = Math.max(0, Math.round((Number(crop.x) || 0) * img.naturalWidth));
-    sy = Math.max(0, Math.round((Number(crop.y) || 0) * img.naturalHeight));
-    sW = Math.max(1, Math.round((Number(crop.w) || 1) * img.naturalWidth));
-    sH = Math.max(1, Math.round((Number(crop.h) || 1) * img.naturalHeight));
+function autoToneMessage(result, changedControls) {
+  var notes = (result && result.notes) || [];
+  var metering = '';
+  if (result && result.metering === 'subject') {
+    metering = result.subject_source === 'detection'
+      ? ' (metered on the detected subject)'
+      : ' (metered on the subject mask)';
   }
-  var scale = Math.min(1, maxSample / Math.max(sW, sH));
-  var w = Math.max(1, Math.round(sW * scale));
-  var h = Math.max(1, Math.round(sH * scale));
-  var c = document.createElement('canvas');
-  c.width = w;
-  c.height = h;
-  var cx = c.getContext('2d', { willReadFrequently: true });
-  if (!cx) return null;
-  cx.drawImage(img, sx, sy, sW, sH, 0, 0, w, h);
-  var data = cx.getImageData(0, 0, w, h).data;
-  var hist = new Array(256).fill(0);
-  var clipLow = 0;
-  var clipHigh = 0;
-  var total = 0;
-  for (var i = 0; i < data.length; i += 4) {
-    var luma = 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2];
-    var b = Math.min(255, Math.max(0, Math.round(luma)));
-    hist[b] += 1;
-    if (b <= 4) clipLow += 1;
-    if (b >= 250) clipHigh += 1;
-    total += 1;
+  if (!changedControls) return 'Auto Tone' + metering + ': already balanced, nothing changed';
+  if (!notes.length) {
+    return 'Auto Tone' + metering + ': Reset previous tone adjustments; source already balanced. White balance left unchanged.';
   }
-  return { hist: hist, total: Math.max(1, total), clipLow: clipLow, clipHigh: clipHigh };
-}
-
-// Luma value in [0,1] at which the cumulative histogram first reaches `frac`.
-function _percentile(hist, total, frac) {
-  var target = frac * total;
-  var cum = 0;
-  for (var i = 0; i < hist.length; i++) {
-    cum += hist[i];
-    if (cum >= target) return i / 255;
-  }
-  return 1;
-}
-
-function computeAutoTone(stats) {
-  var lo = _percentile(stats.hist, stats.total, 0.005); // shadow end
-  var hi = _percentile(stats.hist, stats.total, 0.995); // highlight end
-  var med = _percentile(stats.hist, stats.total, 0.5);  // midtone
-  var clipHighFrac = stats.clipHigh / stats.total;
-  var clipLowFrac = stats.clipLow / stats.total;
-
-  // Exposure: nudge the median toward a mid-grey target in linear light,
-  // damped and clamped so a legitimately bright or dark scene is not dragged
-  // to a flat grey.
-  var target = 0.45;
-  var ev = Math.log(_srgbToLinear(target) / _srgbToLinear(Math.max(med, 0.004))) / Math.LN2;
-  ev = Math.max(-1.2, Math.min(1.2, ev * 0.8));
-  var gain = Math.pow(2, ev);
-
-  // Predict where the endpoints will sit after the exposure shift.
-  var hiE = _linearToSrgb(_srgbToLinear(hi) * gain);
-  var loE = _linearToSrgb(_srgbToLinear(lo) * gain);
-
-  // Only set white/black points when there is a real tonal range to anchor to;
-  // a near-uniform frame has no meaningful endpoints to stretch.
-  var spread = hi - lo;
-  var hasRange = spread > 0.04;
-
-  // Whites: lift the brightest tones toward white only when the image clearly
-  // lacks brights (a well-exposed frame already near white is left alone).
-  var whites = 0;
-  if (hasRange && hiE < 0.9) {
-    var maskW = _smoothstep(0.70, 1.0, hiE) * 0.34;
-    if (maskW > 0.01) {
-      whites = ((0.97 - hiE) / ((1 - hiE) * maskW)) * 100;
-      whites = Math.max(0, Math.min(35, Math.round(whites)));
-    }
-  }
-
-  // Blacks: deepen the darkest tones only when true blacks are clearly missing
-  // (a low, hazy black point).
-  var blacks = 0;
-  if (hasRange && loE > 0.08) {
-    var maskB = (1 - _smoothstep(0.0, 0.3, loE)) * 0.34;
-    if (maskB > 0.01) {
-      blacks = ((loE - 0.03) / (loE * maskB)) * 100;
-      blacks = -Math.max(0, Math.min(35, Math.round(blacks)));
-    }
-  }
-
-  // Highlights / shadows: recover ends that are already blown or crushed.
-  var highlights = clipHighFrac > 0.02 ? -Math.min(55, Math.round(clipHighFrac * 600)) : 0;
-  var shadows = clipLowFrac > 0.02 ? Math.min(55, Math.round(clipLowFrac * 600)) : 0;
-
-  // Contrast: add some punch only when the original tonal range is genuinely
-  // flat (hazy / low-contrast). Never reduce contrast on a normal full-range
-  // image, which would just mute it.
-  var contrast = spread < 0.55 ? Math.min(25, Math.round((0.55 - spread) * 100)) : 0;
-
-  return {
-    exposure: Math.round(ev * 10) / 10,
-    whites: whites,
-    blacks: blacks,
-    highlights: highlights,
-    shadows: shadows,
-    contrast: contrast,
-  };
+  var text = notes.join(', ');
+  return 'Auto Tone' + metering + ': ' + text.charAt(0).toUpperCase() + text.slice(1) +
+    '. White balance left unchanged.';
 }
 
 function _loadImage(src) {
@@ -3477,6 +3370,8 @@ function _loadImage(src) {
 
 async function autoTone() {
   if (!editorState.photoId) return;
+  var photoId = editorState.photoId;
+  var loadSeq = editorState.loadSeq;
   var btn = document.getElementById('autoToneBtn');
   if (btn && btn.disabled) return;
   var prevLabel = btn ? btn.textContent : '';
@@ -3485,67 +3380,41 @@ async function autoTone() {
     btn.textContent = 'Analyzing...';
   }
   try {
-    // Analyse the photo with current geometry but NO tonal/colour edits, so
-    // Auto Tone reads the original pixels and is idempotent across clicks.
-    // ?analysis=1 keeps the server on the recipe-render path even when the
-    // stripped recipe is empty, so RAW primaries decode with highlight
-    // preservation instead of returning clipped legacy JPEG working-copy
-    // pixels that would skew the exposure/highlight heuristics.
-    // Snapshot the recipe at start: if the user changes crop, geometry, or
-    // sliders while the render is in flight, the analysis is stale — we
-    // built the URL and the sample crop from the old recipe, so applying
-    // the result would overwrite newer edits or compute from mismatched
-    // geometry.
+    // The fit reads the frame (geometry and crop), white balance and
+    // presence from this recipe; its tonal values do not affect the result,
+    // so repeated clicks are idempotent. Snapshot the recipe: if the user
+    // edits while the fit runs, the result describes a stale frame and
+    // applying it would overwrite newer edits.
     var startKey = recipeKey(editorState.recipe);
-    var sampleCrop = cloneRecipe({crop: ensureCrop(editorState.recipe)}).crop;
-    var base = previewRecipeFor(editorState.recipe);
-    delete base.adjustments;
-    // Strip local (Subject/Background) edits too — otherwise the analysis
-    // render samples pixels the user has already locally edited, and Auto
-    // Tone compensates for those, computing wrong global exposure/highlights.
-    delete base.local;
-    var src = '/photos/' + editorState.photoId + '/edit-preview?size=1024&analysis=1&recipe=' +
-      encodeURIComponent(JSON.stringify(base));
-    var img = await _loadImage(src);
-    if (recipeKey(editorState.recipe) !== startKey) return;
-    var stats = _lumaStats(img, sampleCrop);
-    if (!stats) throw new Error('no canvas context');
-    var auto = computeAutoTone(stats);
+    var analysed = previewRecipeFor(editorState.recipe, true);
+    delete analysed.local;
+    var result = await safeFetch('/api/photos/' + photoId + '/auto-tone?recipe=' +
+      encodeURIComponent(JSON.stringify(analysed)), {}, {toast: false});
+    if (editorState.photoId !== photoId || editorState.loadSeq !== loadSeq ||
+        recipeKey(editorState.recipe) !== startKey) return;
+    var auto = result.adjustments || {};
 
-    // Replace the basic tonal values; preserve advanced colour/curve choices
-    // already made. The curve remains a deliberate post-Auto-Tone creative
-    // adjustment rather than being silently discarded.
-    var vals = adjustmentValues(editorState.recipe);
-    var existingAdj = cloneRecipe(editorState.recipe.adjustments || {});
-    var adj = {};
-    if (existingAdj.denoise_mode === 'camera') adj.denoise_mode = 'camera';
-    ['exposure', 'highlights', 'shadows', 'whites', 'blacks', 'contrast'].forEach(function(k) {
-      if (Math.abs(auto[k]) > 0.000001) adj[k] = auto[k];
-    });
-    ['vibrance', 'saturation', 'texture', 'clarity', 'dehaze', 'sharpen', 'noise_reduction'].forEach(function(k) {
-      if (Math.abs(vals[k]) > 0.000001) adj[k] = vals[k];
-    });
-    if (adj.sharpen && Math.abs(vals.sharpen_radius - 1) > 0.000001) {
-      adj.sharpen_radius = vals.sharpen_radius;
-    }
-    var wb = {};
-    if (Math.abs(vals.temperature) > 0.000001) wb.temperature = vals.temperature;
-    if (Math.abs(vals.tint) > 0.000001) wb.tint = vals.tint;
-    if (Object.keys(wb).length) adj.white_balance = wb;
-    ['tone_curve', 'point_curves', 'point_color', 'hsl', 'color_grading'].forEach(function(key) {
-      if (existingAdj[key]) adj[key] = cloneRecipe(existingAdj[key]);
+    // Replace the fitted controls; keep every other choice (white balance,
+    // presence, detail, curves, HSL, grading, denoise mode) as it was.
+    var adj = cloneRecipe(editorState.recipe.adjustments || {});
+    var changedControls = false;
+    AUTO_TONE_KEYS.forEach(function(k) {
+      var value = Number(auto[k] || 0);
+      if (Math.abs(Number(adj[k] || 0) - value) > 0.000001) changedControls = true;
+      if (Math.abs(value) > 0.000001) adj[k] = value;
+      else delete adj[k];
     });
     if (Object.keys(adj).length) editorState.recipe.adjustments = adj;
     else delete editorState.recipe.adjustments;
 
     syncControls();
     markChanged(true);
-    if (typeof showToast === 'function') {
-      showToast('Auto-balanced tones from the histogram (color left unchanged)', 'success');
-    }
+    if (typeof showToast === 'function') showToast(autoToneMessage(result, changedControls), 'success');
   } catch (e) {
+    if (editorState.photoId !== photoId || editorState.loadSeq !== loadSeq) return;
     if (typeof showToast === 'function') {
-      showToast('Could not analyze this photo for Auto Tone', 'error');
+      showToast('Could not analyze this photo for Auto Tone' +
+        (e && e.message ? ': ' + e.message : ''), 'error');
     }
   } finally {
     if (btn) {

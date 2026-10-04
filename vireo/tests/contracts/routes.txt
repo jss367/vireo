@@ -99,6 +99,7 @@ GET          /api/models/status
 GET          /api/move-rules
 GET          /api/photos
 GET          /api/photos/<int:photo_id>
+GET          /api/photos/<int:photo_id>/auto-tone
 GET          /api/photos/<int:photo_id>/best-batch
 GET          /api/photos/<int:photo_id>/edit-history
 GET          /api/photos/<int:photo_id>/edit-recipe
