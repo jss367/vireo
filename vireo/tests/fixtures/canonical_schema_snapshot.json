@@ -914,6 +914,7 @@
   "exif_summary_backfill_v1": "1",
   "eye_kp_fingerprint_backfill": "1",
   "folder_health_version": "0",
+  "inferred_taxonomy_repair:v1": "1",
   "keyword_apostrophes_folded_v1": "1",
   "keyword_names_normalized": "1",
   "saved_processes_seeded": "1",
