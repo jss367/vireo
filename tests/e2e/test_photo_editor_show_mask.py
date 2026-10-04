@@ -64,3 +64,31 @@ def test_show_mask_before_any_local_adjustment(live_server, page, masked_photo):
 
     page.locator('#maskOverlayBtn').click()
     expect(overlay).to_be_hidden()
+
+
+def test_feather_only_does_not_freeze_an_obsolete_active_mask(live_server, page, masked_photo, tmp_path):
+    page.goto(f"{live_server['url']}/edit/{masked_photo}")
+    page.wait_for_function('!editorState.loading')
+    expect(page.locator('#localBand')).to_be_visible()
+    page.locator('#maskOverlayBtn').click()
+    with page.expect_response(lambda r: '/edit-mask-preview?' in r.url and 'feather=60' in r.url):
+        page.locator('#featherRange').evaluate("el => {el.value='60'; el.dispatchEvent(new Event('input', {bubbles:true}));}")
+    assert page.evaluate('editorState.localMask') is None
+    assert not page.evaluate('!!editorState.recipe.local')
+    # Extraction publishes a different active generation before the first
+    # region adjustment. The new overlay and the adjustment must both use it.
+    replacement = tmp_path / 'new-right-mask.png'
+    arr = np.zeros((128, 256), dtype=np.uint8)
+    arr[:, 128:] = 255
+    Image.fromarray(arr, 'L').save(replacement)
+    db = live_server['db']
+    db.upsert_photo_mask(masked_photo, 'sam2-small', str(replacement), 'megadetector-v6',
+                         0.0, 0.0, 0.5, 1.0)
+    with page.expect_response(lambda r: '/edit-mask-preview?' in r.url and 'feather=61' in r.url) as live:
+        page.locator('#featherRange').evaluate("el => {el.value='61'; el.dispatchEvent(new Event('input', {bubbles:true}));}")
+    live_alpha = np.asarray(Image.open(io.BytesIO(live.value.body())))[..., 3]
+    assert live_alpha[:, 3 * live_alpha.shape[1] // 5:].mean() > 60
+    with page.expect_response('**/edit-mask-preview?*') as frozen:
+        page.evaluate("setLocalAdjustment('subject', 'exposure', 1, true)")
+    frozen_alpha = np.asarray(Image.open(io.BytesIO(frozen.value.body())))[..., 3]
+    assert np.array_equal(live_alpha, frozen_alpha)

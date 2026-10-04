@@ -3153,6 +3153,12 @@ function setLocalFeather(raw) {
   editorState.localDraft.feather = v;
   var label = document.getElementById('featherValue');
   if (label) label.textContent = String(Math.round(v));
+  // Feather alone previews the live mask. Freeze it only when a region
+  // adjustment begins, so the overlay and that adjustment use the same mask.
+  if (!editorState.recipe.local && !editorState.localMask) {
+    refreshMaskOverlay();
+    return;
+  }
   if (editorState.localMask) {
     rebuildLocalSection();
     markChanged(true);
