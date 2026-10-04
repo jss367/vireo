@@ -18,14 +18,14 @@ def _time(photo):
         value = photo.get("timestamp")
         value = value if isinstance(value, datetime) else datetime.fromisoformat(value)
         return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return None
 
 
 def _box(detection):
     try:
         x, y, w, h = (float(detection[k]) for k in ("x", "y", "w", "h"))
-    except KeyError, TypeError, ValueError:
+    except (KeyError, TypeError, ValueError):
         return None
     if (
         not all(math.isfinite(v) for v in (x, y, w, h))
