@@ -46,7 +46,9 @@ def build_comparison(db, collection_id, photo_ids=None):
     preds = db.get_predictions(photo_ids=row_ids)
     detections_by_photo = db.get_detections_for_photos(row_ids)
     keywords_by_photo = db.get_keywords_for_photos(row_ids)
-    species_by_photo = db.get_species_keywords_for_photos(row_ids)
+    species_identities = db.get_species_keywords_for_photos(row_ids, include_identities=True)
+    species_by_photo = {pid: [entry["name"] for entry in entries]
+                        for pid, entries in species_identities.items()}
     edit_recipes_by_photo = db.get_photo_edit_recipes(row_ids)
     taxonomy = load_local_taxonomy()
 
@@ -68,6 +70,8 @@ def build_comparison(db, collection_id, photo_ids=None):
         names,
         compare_prediction_to_keywords,
     )
+    for pid, entries in species_identities.items():
+        build.by_photo[pid]["species_identity_keys"] = [entry["key"] for entry in entries]
     build.attach_detected_subjects(detections_by_photo)
     build.attach_predictions(preds)
     summary = build.summarize(len(photos))
@@ -975,9 +979,7 @@ def _is_multi_species(photo, assessment):
     subject the shown models read as an additional species, because that
     photo is a second-species decision rather than a one-species one.
     """
-    species = {
-        name.casefold() for name in photo.get("species_keywords") or [] if name
-    }
+    species = set(photo.get("species_identity_keys", photo.get("species_keywords") or []))
     return len(species) > 1 or assessment["signal"]["additional_subject_count"] > 0
 
 

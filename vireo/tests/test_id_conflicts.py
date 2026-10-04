@@ -580,3 +580,12 @@ def test_multi_subject_labels_name_the_subject_they_came_from():
 
     assert signal["consensus_label"] == "Subject 1: 2 models agree on Cardinal"
     assert signal["model_disagreement_label"] == "Subject 2: Blue Jay vs Sparrow"
+
+
+def test_multi_species_preserves_case_variants_and_linked_homonyms():
+    assessment = {"signal": {"additional_subject_count": 0}}
+    assert ic._is_multi_species({"species_keywords": ["Robin", "robin"]}, assessment)
+    assert ic._is_multi_species({"species_keywords": ["Robin", "Robin"],
+                               "species_identity_keys": ["taxon:1", "taxon:2"]}, assessment)
+    assert not ic._is_multi_species({"species_keywords": ["Robin", "robin"],
+                                   "species_identity_keys": ["taxon:1", "taxon:1"]}, assessment)
