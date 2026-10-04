@@ -3029,6 +3029,8 @@ class Database:
         'files': []}.
         """
         active_ws = self._ws_id()
+        if active_ws is not None and not self.workspace_has_folder_link(folder_id, active_ws):
+            raise ValueError("Folder is not linked to the active workspace")
         deleted_ids, files = self._folder_repository(scoped=False).delete(
             folder_id,
             active_ws,

@@ -291,6 +291,10 @@ def create_folders_blueprint(
     @blueprint.route("/api/folders/<int:folder_id>", methods=["DELETE"])
     def api_folder_delete(folder_id):
         db = get_db()
+        # The missing-folder list may contain photo-only grants. Its scoped
+        # count never authorizes cascading deletion of hidden sibling rows.
+        if not db.workspace_has_folder_link(folder_id):
+            return json_error("folder not found", 404)
         # Deleting a folder that a local workspace has rebased removes the
         # folders row that local_workspace_folders and the manifest depend on,
         # so a later sync/discard would be unable to restore the catalog. The

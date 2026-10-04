@@ -651,3 +651,29 @@ def test_grant_only_folder_cannot_become_a_workspace_scan_or_local_copy_root(app
     assert db.filter_photo_ids_in_workspace([shared, sibling]) == [shared]
     assert not db.workspace_has_folder_link(folder)
     assert not (tmp_path / "local").exists()
+
+
+def test_grant_only_missing_folder_cannot_delete_hidden_siblings(app_and_db, tmp_path):
+    app, db = app_and_db
+    owner = db._active_workspace_id
+    guest = db.create_workspace("Photo-only guest")
+    folder, shared = _photo(db, tmp_path / "missing-root", "shared.jpg")
+    _, sibling = _photo(db, tmp_path / "missing-root", "private.jpg", b"private")
+    db.grant_workspace_photos(guest, [shared])
+    db.conn.commit()
+    db.remove_workspace_folder(owner, folder)
+    db.conn.execute("UPDATE folders SET status='missing' WHERE id=?", (folder,))
+    db.conn.commit()
+    db.set_active_workspace(guest)
+    client = app.test_client()
+    assert client.post(f"/api/workspaces/{guest}/activate").status_code == 200
+    missing = client.get("/api/folders/missing").json
+    assert next(row for row in missing if row["id"] == folder)["photo_count"] == 1
+    response = client.delete(f"/api/folders/{folder}")
+    assert response.status_code == 404
+    with pytest.raises(ValueError, match="not linked"):
+        db.delete_folder(folder)
+    assert db.get_photo(shared) is not None
+    assert db.get_photo(sibling) is not None
+    assert db.filter_photo_ids_in_workspace([shared, sibling]) == [shared]
+    assert (tmp_path / "missing-root" / "private.jpg").read_bytes() == b"private"
