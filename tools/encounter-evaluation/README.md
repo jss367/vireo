@@ -220,6 +220,17 @@ as `--run` and the existing cumulative review database as `--dataset`.
 See [the follow-up findings](../../docs/encounter-continuity-followup.md) for
 results, candidate selection, and the still-pending fresh final test.
 
+Add `--experiment combined` to run the next fixed comparison: five challengers
+combine longer classifier-supported runs with conservative neighbor context or
+lower-confidence matching predictions. Its baseline is the previous experimental
+winner, not the installed algorithm. Every stage reads the same original
+production features, with direct classifier evidence taking precedence; stages
+cannot build new anchors from another stage's repairs. The saved baseline recipe
+also drives the review report's **Previous experiment** column.
+
+See [the combined-rule experiment](../../docs/combined-encounter-context.md) for
+the incremental results and remaining validation requirements.
+
 `compare` evaluates the real production encounter implementation, a conservative
 per-photo species-set candidate, and a sequence candidate by default. All use
 the same materialized evidence. Production uses its existing flattened top-five

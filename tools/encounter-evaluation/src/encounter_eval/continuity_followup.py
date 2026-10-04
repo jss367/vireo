@@ -10,7 +10,7 @@ from pathlib import Path
 from .algorithms import run_algorithm
 from .common import code_identity, configure_repo, digest, write_json
 from .continuity_compare import comparison_cases
-from .continuity_experiments import apply_candidate, candidates, prepare_baseline
+from .continuity_experiments import apply_candidate, candidates, combination_candidates, prepare_baseline
 from .grouping_dataset import boundary_errors
 from .label_scoring import eligible, measure, metrics
 from .library import read_bundle, timestamp
@@ -137,7 +137,9 @@ def _changed_cases(photos, answers, before, after, context, reviewed_joins):
     return result
 
 
-def run(scopes, output, *, constraints=()):
+def run(scopes, output, *, constraints=(), experiment="individual"):
+    if experiment not in {"individual", "combined"}:
+        raise ValueError("Unknown continuity experiment")
     repo = configure_repo()
     constraints = list(constraints)
     if len({c["id"] for c in constraints}) != len(constraints):
@@ -149,11 +151,13 @@ def run(scopes, output, *, constraints=()):
         raise ValueError("Training and development sessions are required")
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=False)
-    specs = candidates()
+    specs = candidates() if experiment == "individual" else combination_candidates()
     design = {
         "created_at": datetime.now(UTC).isoformat(),
         "source": code_identity(repo),
         "candidates": specs,
+        "experiment": experiment,
+        "baseline_candidate": specs[0],
         "scopes": [{"path": str(p), "manifest_digest": digest(m)} for p, m in scopes],
         "constraints": constraints,
         "selection": "Lowest training objective among eligible candidates per family; choose among those using development; no adaptive second search.",
@@ -225,7 +229,8 @@ def run(scopes, output, *, constraints=()):
                 references = pair_references(photos, answers)
                 references_all.extend({**context, **r} for r in references)
                 prepared = prepare_baseline(photos, manifest["config"])
-                baseline = run_algorithm("production", prepared[0], grouping_config=manifest["grouping_config"])
+                baseline_features = apply_candidate(prepared, manifest["config"], specs[0])
+                baseline = run_algorithm("production", baseline_features, grouping_config=manifest["grouping_config"])
                 matching = [
                     c for c in constraints if c["workspace"] == manifest["workspace"] and c["session"] == entry["id"]
                 ]
@@ -312,7 +317,15 @@ def run(scopes, output, *, constraints=()):
     cases = train[selected]["changed_cases"] + development[selected]["changed_cases"]
     summary = {
         "selected": winner,
-        "status": "provisional-awaiting-fresh-test" if selected != "current" else "keep-current",
+        "baseline_candidate": specs[0],
+        "experiment": experiment,
+        "status": (
+            "provisional-awaiting-fresh-test"
+            if selected != "current"
+            else "retain-previous-experimental-winner"
+            if experiment == "combined"
+            else "keep-current"
+        ),
         "candidate_count": len(specs),
         "test_evaluated": False,
         "finalists": finalists,
@@ -337,9 +350,13 @@ def main():
     parser.add_argument("--scope", type=Path, action="append", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--constraints", type=Path)
+    parser.add_argument("--experiment", choices=("individual", "combined"), default="individual")
     args = parser.parse_args()
     result = run(
-        args.scope, args.output, constraints=json.loads(args.constraints.read_text()) if args.constraints else ()
+        args.scope,
+        args.output,
+        constraints=json.loads(args.constraints.read_text()) if args.constraints else (),
+        experiment=args.experiment,
     )
     print(json.dumps(result, indent=2))
 
