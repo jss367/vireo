@@ -1290,7 +1290,7 @@ class JobRunner:
         """Raise ``WorkspaceBusyError`` naming every blocker in ``template``.
 
         A request that has held its reservation past
-        ``STALE_WORKSPACE_MUTATION_SECS`` is called out as probably stuck, and
+        ``STALE_WORKSPACE_MUTATION_SECS`` is called out as long-running, and
         its thread's stack goes to the log so the hang can be diagnosed
         without attaching a debugger to the running app.
         """
@@ -1301,8 +1301,7 @@ class JobRunner:
         parts += list(extra)
         message = template.format(blockers=_join_blockers(parts), it="it" if len(parts) == 1 else "them")
         if stale:
-            message += (" A request running that long is probably stuck;"
-                        " restarting Vireo releases it.")
+            message += " A request is taking longer than usual; it may still be working."
         (log.warning if stale else log.info)("Workspace %s busy: %s", workspace_id, message)
         frames = sys._current_frames() if stale else {}
         for holder in stale:

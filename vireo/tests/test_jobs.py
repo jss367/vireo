@@ -213,7 +213,7 @@ def test_busy_rejection_names_the_request_holding_the_workspace():
     runner.shutdown()
 
 
-def test_busy_rejection_flags_a_stuck_request_and_logs_its_stack(monkeypatch, caplog):
+def test_busy_rejection_names_long_running_request_and_logs_its_stack(monkeypatch, caplog):
     import jobs
     from jobs import JobRunner, WorkspaceBusyError
 
@@ -231,13 +231,15 @@ def test_busy_rejection_flags_a_stuck_request_and_logs_its_stack(monkeypatch, ca
         assert holder_entered.wait(10)
         monkeypatch.setattr(jobs, "STALE_WORKSPACE_MUTATION_SECS", 0)
         with caplog.at_level("WARNING", logger="jobs"):
-            with pytest.raises(WorkspaceBusyError, match="probably stuck; restarting Vireo releases it"):
+            with pytest.raises(WorkspaceBusyError, match="taking longer than usual") as excinfo:
                 runner.start_singleton("send-to-nas", lambda job: None, singleton_key="archive",
                                        workspace_id=1, exclusive_workspace=True)
     finally:
         release.set()
         thread.join(timeout=10)
-    # The holder's current stack lands in the log, pointing at the hang.
+    assert "stuck" not in str(excinfo.value)
+    assert "restart" not in str(excinfo.value)
+    # The holder's current stack remains available for diagnosis.
     assert any("in hold" in r.getMessage() and "/api/hung" in r.getMessage() for r in caplog.records)
     assert not runner._workspace_mutations
     runner.shutdown()
