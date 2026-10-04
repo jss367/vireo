@@ -83,6 +83,8 @@ var VireoExportJob = (function() {
       },
       // The stream dropped (or the job was already gone) before the outcome
       // arrived, so say where to find it rather than leaving the user guessing.
+      // This replaces the generic "Connection lost" toast, not adds to it.
+      quietError: true,
       onError: function() {
         showToast('Could not follow the export to the end. Its result is in the jobs panel.', 'warning');
       },

@@ -38,6 +38,27 @@ const lightbox = Array.from(
   ), match => match[1]
 );
 
+test('safeEventSource toasts a dropped stream unless the caller shows its own message', () => {
+  for (const [quietError, expected] of [[undefined, ['Connection lost']], [true, []]]) {
+    const toasts = [];
+    let source;
+    let handled = 0;
+    const ctx = load([fn(helpers, 'safeEventSource')], {
+      EventSource: function(url) {
+        source = this;
+        this.addEventListener = () => {};
+        this.close = () => { this.closed = true; };
+      },
+      showToast: (message) => toasts.push(message),
+    });
+    ctx.safeEventSource('/api/jobs/x/stream', {quietError, onError: () => { handled += 1; }});
+    source.onerror();
+    assert.equal(source.closed, true);
+    assert.equal(handled, 1);
+    assert.deepEqual(toasts, expected);
+  }
+});
+
 test('formatMatchScore renders logits and probabilities at their own precision', () => {
   const ctx = load([fn(inspector, 'formatMatchScore')]);
   assert.equal(ctx.formatMatchScore(null, 'logit'), '—');

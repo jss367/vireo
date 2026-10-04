@@ -104,7 +104,10 @@ test('watch toasts the outcome when the job stream completes', () => {
 test('watch points to the jobs panel when the stream drops', () => {
   const toasts = [];
   const job = load({
-    safeEventSource(url, callbacks) { callbacks.onError(); },
+    safeEventSource(url, callbacks) {
+      assert.equal(callbacks.quietError, true, 'the generic Connection lost toast must be suppressed');
+      callbacks.onError();
+    },
     showToast(message, type) { toasts.push([message, type]); },
   });
   job.watch('export-2');
