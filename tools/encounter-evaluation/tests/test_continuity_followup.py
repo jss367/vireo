@@ -126,6 +126,36 @@ def test_relaxed_weak_rules_keep_independent_guards(change):
     assert after[1]["subject_absent"]
 
 
+def test_relaxed_support_threshold_also_applies_to_conflicting_classifiers():
+    # An independent full-image classifier predicts a different species at
+    # 0.65 — above the weak-lower-confidence candidate's own support
+    # threshold (0.6/0.2) but below the fixed production veto (0.8/0.6).
+    # The candidate must veto the rescue so lowering the support threshold
+    # is symmetric for contradictory evidence.
+    p = photos()
+    p[1]["evidence"].append(
+        {
+            "id": 99,
+            "detector_model": "full-image",
+            "category": "animal",
+            "detector_confidence": 0.0,
+            "box_x": 0.0,
+            "box_y": 0.0,
+            "box_w": 1.0,
+            "box_h": 1.0,
+            "sources": [
+                {
+                    "model": "two",
+                    "mode": "exclusive",
+                    "predictions": [{"name": "Other", "score": 0.65, "taxon": "inat:2"}],
+                }
+            ],
+        }
+    )
+    after = apply_candidate(prepare_baseline(p, {}), {}, spec("weak-lower-confidence"))
+    assert after[1]["subject_absent"]
+
+
 def test_anchor_only_abstains_and_does_not_manufacture_classifier_scores():
     p = photos()
     p[1]["evidence"][0]["sources"] = []

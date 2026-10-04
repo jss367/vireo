@@ -4,7 +4,25 @@ Start with the merged production repairs, then test one bounded relaxation.
 No reference labels are accepted by this module.
 """
 
+from collections import defaultdict
+
 from .continuity import apply_continuity, native_evidence
+
+
+def _conflicts_with(entries, target, confidence, margin):
+    """Any independent classifier that qualifies at the candidate's own
+    thresholds and names a different species vetoes the repair; evaluating
+    the veto at the same confidence/margin as support keeps contradictory
+    evidence symmetric when the support threshold is relaxed.
+    """
+    by_model = defaultdict(list)
+    for entry in entries:
+        by_model[entry[2] if len(entry) > 2 else "unknown"].append(entry)
+    for values in by_model.values():
+        winner = _winner(values, confidence, margin)
+        if winner and winner["key"] != target:
+            return True
+    return False
 
 
 def candidates():
@@ -35,7 +53,7 @@ def _winner(entries, confidence, margin):
 
 
 def _weak(photos, evidence, animals, config, params):
-    from encounter_continuity import _conflicting_model, _overlap, _predictions, _time, _visual_conflict
+    from encounter_continuity import _overlap, _predictions, _time, _visual_conflict
     from encounters import grouping_species_predictions
     from weak_detections import contextual_weak_runs
 
@@ -70,8 +88,10 @@ def _weak(photos, evidence, animals, config, params):
         if not all(winners) or winners[0]["key"] != winners[1]["key"]:
             continue
         target = winners[0]["key"]
-        # Even an anchor's secondary subject or hidden classifier may veto.
-        if any(_conflicting_model(d["predictions"], target) for a in anchors for d in evidence[a["id"]]):
+        # Even an anchor's secondary subject or hidden classifier may veto;
+        # evaluate at the candidate's own thresholds so lowering support
+        # does not make contradictory evidence asymmetric.
+        if any(_conflicts_with(d["predictions"], target, confidence, margin) for a in anchors for d in evidence[a["id"]]):
             continue
         selected = {}
         for pid in ids:
@@ -80,7 +100,7 @@ def _weak(photos, evidence, animals, config, params):
                 break
             if _visual_conflict(by_id[pid], anchors):
                 break
-            if any(_conflicting_model(d["predictions"], target) for d in evidence[pid]):
+            if any(_conflicts_with(d["predictions"], target, confidence, margin) for d in evidence[pid]):
                 break
             sources = [
                 _predictions([d for d in evidence[pid] if d["detector_model"] == "full-image"], top_k),
