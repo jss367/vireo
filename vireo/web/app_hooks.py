@@ -50,6 +50,17 @@ RESERVATION_EXEMPT_ENDPOINTS = frozenset({
     "jobs.api_job_cancel", "jobs.api_job_pause", "jobs.api_job_resume",
     "jobs.api_jobs_cancel_queued",
     "move_cleanup.source_cleanup",
+}) | frozenset({
+    # Reads that use POST only because their body (a rule tree or an id
+    # list) is too big for a query string. Browse issues them on every
+    # folder or filter change, so reserving for them blocked browsing for
+    # the length of a NAS send. Only add a route here if it writes nothing.
+    "photos.api_photos_query", "photos.api_photos_companion_count",
+    "browse.api_browse_photo_counts",
+    "browse.api_selection_keyword_suggestions",
+    "browse.api_selection_prediction_suggestions",
+    "browse.api_selection_wildlife_state",
+    "photo_edit_recipes.api_photo_edit_recipe_summary",
 })
 
 
