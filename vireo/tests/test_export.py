@@ -3820,3 +3820,21 @@ def test_export_applies_point_curves_and_sampled_color(export_env):
         r, g, b = rendered.getpixel((40, 30))
         assert g > r + 30 and g > b + 30, (r, g, b)
         assert g < 160, 'the red-channel curve must reduce brightness before the hue shift'
+
+
+def test_export_reports_collision_created_after_preflight(export_env):
+    from job_summaries import describe_result
+    env = export_env
+    assert not preview_export_renames(env["db"], [env["p1"]], env["dest"],
+                                     {"naming_template": "{original}"})
+    occupied = Path(env["dest"]) / "bird1.jpg"
+    occupied.parent.mkdir(parents=True, exist_ok=True)
+    occupied.write_bytes(b"another process owns this file")
+    result = export_photos(env["db"], env["vireo_dir"], [env["p1"]], env["dest"],
+                           {"naming_template": "{original}"})
+    assert occupied.read_bytes() == b"another process owns this file"
+    assert result["renamed"] == 1
+    assert result["renames"] == [{"requested_name": "bird1.jpg", "export_name": "bird1_2.jpg"}]
+    visible = describe_result("export", result)
+    assert "1 file renamed to avoid overwriting" in visible["summary"]
+    assert "bird1.jpg → bird1_2.jpg" in visible["details"]

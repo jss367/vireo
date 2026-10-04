@@ -661,6 +661,7 @@ def export_photos(db, vireo_dir, photo_ids, destination=None, options=None,
     # Track sequence numbers per subdirectory
     seq_counters = {}
     exported = 0
+    renamed_outputs = []
     exported_files = [] if collect_files else None
     errors = []
     metadata_jobs = []
@@ -767,6 +768,7 @@ def export_photos(db, vireo_dir, photo_ids, destination=None, options=None,
 
         # Load, resize, and save
         claimed_out_path = None
+        requested_out_path = out_path
         try:
             img = load_export_image(
                 photo, vireo_dir, folders, recipe=edit_recipes.get(pid),
@@ -811,6 +813,9 @@ def export_photos(db, vireo_dir, photo_ids, destination=None, options=None,
                 exported += 1
                 if exported_files is not None:
                     exported_files.append(out_path)
+            if out_path != requested_out_path:
+                renamed_outputs.append({"requested_name": os.path.basename(requested_out_path),
+                                        "export_name": os.path.basename(out_path)})
         except Exception as exc:
             if claimed_out_path:
                 with contextlib.suppress(OSError):
@@ -850,6 +855,8 @@ def export_photos(db, vireo_dir, photo_ids, destination=None, options=None,
     )
     result = {
         "exported": exported,
+        "renamed": len(renamed_outputs),
+        "renames": renamed_outputs[:20],
         "errors": errors,
         "destination": result_destination,
         "destinations": resolved_destinations,

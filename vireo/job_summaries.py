@@ -248,7 +248,13 @@ def _export(result: dict, config: dict) -> tuple[str, list[str]]:
             summary += f"/{subfolder}"
     if isinstance(errors, list) and errors:
         summary += f", {_n(len(errors), 'error')}"
-    return summary, _error_details(result)
+    details = _error_details(result)
+    renamed = _int(result, "renamed")
+    if renamed:
+        summary += f", {_n(renamed, 'file')} renamed to avoid overwriting"
+        for rename in result.get("renames") or []:
+            details.append(f"{rename['requested_name']} → {rename['export_name']}")
+    return summary, details
 
 
 def _cull(result: dict, config: dict) -> tuple[str, list[str]]:
