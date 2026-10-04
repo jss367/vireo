@@ -1062,6 +1062,7 @@ def apply_recipe_to_loaded_image(
 
 def local_weight_map(
     local_mask, source_size, recipe, native_size=None, detail_scale=None,
+    feather=None,
 ):
     """The local-adjustment weight map exactly as the renderer computes it.
 
@@ -1078,10 +1079,15 @@ def local_weight_map(
     otherwise the overlay recomputes the scale from the crop-stripped
     recipe and disagrees with what /edit-preview passes to
     :func:`apply_recipe_to_loaded_image`.
+
+    ``feather`` previews a mask the recipe does not reference yet (the
+    editor's Show Mask before any local slider moves): when given, it
+    replaces the recipe's ``local.mask.feather`` and the recipe needs no
+    local section.
     """
-    normalized = normalize_recipe(recipe)
-    local = (normalized or {}).get("local")
-    if not local or local_mask is None:
+    normalized = normalize_recipe(recipe) or {}
+    local = normalized.get("local")
+    if local_mask is None or (not local and feather is None):
         return None
     fitted = _fit_mask_to_source(local_mask, source_size)
     if fitted is None:
@@ -1092,8 +1098,9 @@ def local_weight_map(
         if detail_scale is not None
         else detail_render_scale(mask_geo.size, native_size, normalized)
     )
-    feather = (local["mask"].get("feather") or 0.0) * scale
-    return _feathered_weight(mask_geo, feather)
+    if feather is None:
+        feather = local["mask"].get("feather") or 0.0
+    return _feathered_weight(mask_geo, feather * scale)
 
 
 def copy_recipe(recipe):

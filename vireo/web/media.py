@@ -2671,6 +2671,30 @@ class _EditPreviewRequest:
         )
 
 
+def _load_active_mask(db, photo_id):
+    """The photo's active SAM mask as a PIL 'L' image, or None."""
+    import io
+
+    from PIL import Image
+
+    for _attempt in range(3):
+        row = db.conn.execute(
+            "SELECT active_mask_variant FROM photos WHERE id=?", (photo_id,)
+        ).fetchone()
+        variant = row["active_mask_variant"] if row else None
+        mask_row = db.get_photo_mask(photo_id, variant) if variant else None
+        if not mask_row or not mask_row.get("path"):
+            return None
+        try:
+            with open(mask_row["path"], "rb") as handle:
+                mask_bytes = handle.read()
+            with Image.open(io.BytesIO(mask_bytes)) as img:
+                return img.convert("L").copy()
+        except (OSError, ValueError):
+            continue
+    return None
+
+
 def create_media_blueprint(
     get_db,
     json_error,
@@ -3518,6 +3542,10 @@ def create_media_blueprint(
         untouched; this one shows the pixels the renderer actually weights —
         the recipe's snapshot after geometry and feathering — so the editor
         overlay can never disagree with the saved render.
+
+        A recipe with no local section previews the photo's active mask
+        instead (the one the first local slider would freeze), feathered by
+        the ``feather`` arg, so Show Mask works before any local edit.
         """
         import io
 
@@ -3550,6 +3578,7 @@ def create_media_blueprint(
 
         import local_masks
         from image_edits import (
+            LOCAL_FEATHER_RANGE,
             RecipeError,
             detail_render_scale,
             local_weight_map,
@@ -3560,8 +3589,17 @@ def create_media_blueprint(
             normalized = normalize_recipe(recipe) or {}
         except RecipeError as e:
             return str(e), 400
+        preview_feather = None
         if not normalized.get("local"):
-            return "Recipe has no local adjustments", 404
+            try:
+                preview_feather = float(request.args.get("feather", "0"))
+            except ValueError:
+                return "Invalid feather", 400
+            lo, hi = LOCAL_FEATHER_RANGE
+            if not math.isfinite(preview_feather) or not (
+                lo <= preview_feather <= hi
+            ):
+                return "Invalid feather", 400
         apply_crop = request.args.get("apply_crop") == "1"
         # Crop editing uses the whole source; after the crop is committed the
         # editor displays the real cropped render and the overlay must follow.
@@ -3570,9 +3608,14 @@ def create_media_blueprint(
             display_recipe.pop("crop", None)
 
         vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
-        snapshot = local_masks.load_snapshot(vireo_dir, photo_id, normalized)
-        if snapshot is None:
-            return "No usable edit-mask snapshot", 404
+        if preview_feather is None:
+            snapshot = local_masks.load_snapshot(vireo_dir, photo_id, normalized)
+            if snapshot is None:
+                return "No usable edit-mask snapshot", 404
+        else:
+            snapshot = _load_active_mask(db, photo_id)
+            if snapshot is None:
+                return "Photo has no active subject mask", 404
         native_dims = _recipe_source_dimensions(photo)
         source_size = size
         if apply_crop and normalized.get("crop") and all(native_dims):
@@ -3610,6 +3653,7 @@ def create_media_blueprint(
             snapshot, source_dims, display_recipe,
             native_size=native_dims,
             detail_scale=preview_detail_scale,
+            feather=preview_feather,
         )
         if weight is None:
             return "Mask does not fit this photo", 404

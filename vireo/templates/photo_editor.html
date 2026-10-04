@@ -3028,7 +3028,17 @@ function rebuildLocalSection() {
   // Mirror normalize_recipe's canonical region order so the dirty-state
   // comparison stays stable against the server's saved form.
   regions.sort(function(a, b) { return a.region < b.region ? -1 : 1; });
-  if (!regions.length || !editorState.localMask) {
+  if (!regions.length) {
+    delete editorState.recipe.local;
+    // No adjustment retains this snapshot. Preview and the next adjustment
+    // must both use the current active generation, including after zeroing
+    // the last region while a snapshot request is still in flight.
+    editorState.localMask = null;
+    editorState.localMaskPromise = null;
+    editorState.localMaskUpdateSeq++;
+    return;
+  }
+  if (!editorState.localMask) {
     delete editorState.recipe.local;
     return;
   }
@@ -3152,6 +3162,12 @@ function setLocalFeather(raw) {
   editorState.localDraft.feather = v;
   var label = document.getElementById('featherValue');
   if (label) label.textContent = String(Math.round(v));
+  // Feather alone previews the live mask. Freeze it only when a region
+  // adjustment begins, so the overlay and that adjustment use the same mask.
+  if (!editorState.recipe.local && !editorState.localMask) {
+    scheduleMaskOverlayRefresh();
+    return;
+  }
   if (editorState.localMask) {
     rebuildLocalSection();
     markChanged(true);
@@ -3220,7 +3236,11 @@ function refreshMaskOverlay() {
   // saved cropped render actually weights.
   var source = editorState.showBefore ? editorState.savedRecipe : editorState.recipe;
   var recipe = recipeForSave(source || {});
-  if (!editorState.maskOverlay || !recipe.local) {
+  // With no local section yet, the endpoint previews the photo's active
+  // mask at the Feather slider's value — the mask the first local slider
+  // would freeze — so the user can check it before adjusting anything.
+  var previewActiveMask = !recipe.local && editorState.localAvailable;
+  if (!editorState.maskOverlay || !(recipe.local || previewActiveMask)) {
     // Bump the sequence and clear handlers so any in-flight preview load
     // can't win the race and re-show an overlay the user just hid (or one
     // from a previous photo during navigation).
@@ -3238,6 +3258,9 @@ function refreshMaskOverlay() {
   var url = '/photos/' + editorState.photoId + '/edit-mask-preview?size=' +
     size + '&apply_crop=' + (editorPreviewAppliesCrop() ? '1' : '0') +
     '&recipe=' + encodeURIComponent(JSON.stringify(recipe));
+  if (previewActiveMask) {
+    url += '&feather=' + encodeURIComponent(Number(editorState.localDraft.feather) || 0);
+  }
   if (overlay.getAttribute('src') === url && overlay.complete && overlay.naturalWidth) {
     // Identical overlay already loaded — just make sure it's placed and shown.
     editorState.maskOverlaySeq++;
@@ -4701,8 +4724,15 @@ async function loadPhoto(photoId, opts) {
     safeFetch('/api/photos/' + photoId + '/masks', {}, {toast: false})
       .then(function(d) {
         if (editorState.photoId !== photoId) return;
+        var becameAvailable = !editorState.localAvailable && !!d.active;
         editorState.localAvailable = !!d.active;
         updateLocalBandVisibility();
+        // If the user already clicked Show Mask before this resolved,
+        // the overlay was cleared because availability was still false.
+        // Retry the overlay now that we know an active mask exists.
+        if (becameAvailable && editorState.maskOverlay) {
+          refreshMaskOverlay();
+        }
       }).catch(function() {});
     if (photo.edit_recipe && photo.edit_recipe.local) {
       var localStaleSavedRecipeSeq = editorState.savedRecipeSeq;
