@@ -116,3 +116,9 @@ using their own provenance before consensus is marked complete. Any lookup
 failure defers this pass and leaves it retryable. Case-only prompt variants
 participate in the same conflict check; agreeing sources identify the prompt,
 and conflicting source taxa leave it unresolved.
+
+The legacy sentinel did not retain classifier mode, so consensus is limited
+to unenriched BioCLIP text rows. Existing scientific names or taxonomy ranks
+may be native Tree-of-Life evidence and are preserved. Legacy-only consensus
+also snapshots source text and sidecars and rechecks them inside its writer
+transaction; changed evidence leaves the pass unmarked for retry.

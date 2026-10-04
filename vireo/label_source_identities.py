@@ -46,9 +46,17 @@ REPAIR_REASON = "label-list-source-identity"
 # list is newly matched, since its identities can settle more of them.
 LEGACY_MARKER = MARKER_PREFIX + "legacy"
 LEGACY_REPAIR_REASON = "label-list-consensus-identity"
-# Text-label rows only: iNat21 rows name their own scientific identity.
+# The pre-fingerprint mode was not recorded. Only unenriched BioCLIP text
+# rows are eligible: a scientific name or rank may be fixed-head ToL output,
+# and must never be overwritten from a regional list's consensus.
 _UNSTAMPED_LEGACY_WHERE = (
-    "labels_fingerprint = 'legacy' AND classifier_model NOT LIKE 'iNat%'"
+    "labels_fingerprint = 'legacy' AND classifier_model GLOB 'BioCLIP*' AND "
+    + " AND ".join(
+        f"COALESCE(trim({column}), '') = ''" for column in (
+            "scientific_name", "taxonomy_kingdom", "taxonomy_phylum", "taxonomy_class",
+            "taxonomy_order", "taxonomy_family", "taxonomy_genus",
+        )
+    )
 )
 
 
@@ -295,7 +303,7 @@ def legacy_pass_needed(db):
     ).fetchone() is not None
 
 
-def consensus_identities(db, saved_metas, *, fetch=None, identities_by_file=None):
+def consensus_identities(db, saved_metas, *, fetch=None, identities_by_file=None, source_snapshots=None):
     """Identity per species spelling that every known list agrees on.
 
     Predictions older than label fingerprints (``labels_fingerprint =
@@ -316,7 +324,8 @@ def consensus_identities(db, saved_metas, *, fetch=None, identities_by_file=None
         from labels import fetch_species_list as fetch
     if identities_by_file is None:
         identities_by_file = {}
-
+    if source_snapshots is None:
+        source_snapshots = {}
 
     def vote(species, taxon_id, identity):
         spellings.add(species)
@@ -339,6 +348,9 @@ def consensus_identities(db, saved_metas, *, fetch=None, identities_by_file=None
         path = meta.get("labels_file")
         if not path or not os.path.exists(path):
             continue
+        snapshot = source_snapshots.setdefault(path, _source_snapshot([meta]))
+        if _source_snapshot([meta]) != snapshot:
+            raise RuntimeError("Label source files changed before legacy consensus; retry required")
         names = read_label_file(path)
         # Include legacy-only lists too: they may never have produced a
         # tracked fingerprint, but still constrain older predictions.
@@ -347,6 +359,8 @@ def consensus_identities(db, saved_metas, *, fetch=None, identities_by_file=None
                 identities_by_file[path] = source_identities(meta, fetch)
             except Exception as exc:
                 raise RuntimeError(f"{os.path.basename(path)}: {exc}") from exc
+        if _source_snapshot([meta]) != snapshot:
+            raise RuntimeError("Label source files changed during legacy consensus; retry required")
         identities = identities_by_file[path]
         for name in names:
             entry = identities.get(name)
@@ -367,7 +381,7 @@ def consensus_identities(db, saved_metas, *, fetch=None, identities_by_file=None
     }
 
 
-def apply_legacy(db, saved_metas=None, *, fetch=None, identities_by_file=None):
+def apply_legacy(db, saved_metas=None, *, fetch=None, identities_by_file=None, source_snapshots=None):
     """Stamp pre-fingerprint text-label predictions from the lists' consensus.
 
     Returns the number of predictions changed. Model-native rows (iNat21)
@@ -377,10 +391,19 @@ def apply_legacy(db, saved_metas=None, *, fetch=None, identities_by_file=None):
 
     if saved_metas is None:
         saved_metas = get_saved_labels()
-    identities = consensus_identities(db, saved_metas, fetch=fetch, identities_by_file=identities_by_file)
+    if source_snapshots is None:
+        source_snapshots = {}
+    identities = consensus_identities(
+        db, saved_metas, fetch=fetch, identities_by_file=identities_by_file,
+        source_snapshots=source_snapshots,
+    )
     conn = db.conn
     with conn:
         conn.execute("BEGIN IMMEDIATE")
+        for meta in saved_metas:
+            snapshot = source_snapshots.get(meta.get("labels_file"))
+            if snapshot is not None and _source_snapshot([meta]) != snapshot:
+                raise RuntimeError("Label source files changed before legacy commit; retry required")
         changes = _changes(conn, _UNSTAMPED_LEGACY_WHERE, (), identities, LEGACY_REPAIR_REASON)
         # Nothing ever writes new rows under 'legacy', so these runs are
         # retired from export like any other corrected historical run.
@@ -409,6 +432,7 @@ def backfill(db, fetch=None, progress=None, cancel_check=None):
         "errors": [],
     }
     identities_by_file = {}
+    source_snapshots = {}
     for index, label_set in enumerate(pending):
         if cancel_check is not None and cancel_check():
             result["cancelled"] = True
@@ -420,6 +444,7 @@ def backfill(db, fetch=None, progress=None, cancel_check=None):
             for meta in label_set["metas"]:
                 path = meta["labels_file"]
                 if path not in identities_by_file:
+                    source_snapshots[path] = _source_snapshot([meta])
                     identities_by_file[path] = source_identities(meta, fetch)
         except Exception as exc:
             log.warning("Could not re-query label list for %s", label_set["fingerprint"], exc_info=True)
@@ -448,6 +473,7 @@ def backfill(db, fetch=None, progress=None, cancel_check=None):
         try:
             result["legacy_predictions_updated"] = apply_legacy(
                 db, fetch=fetch, identities_by_file=identities_by_file,
+                source_snapshots=source_snapshots,
             )
         except Exception as exc:
             log.warning("Could not complete legacy label-list consensus", exc_info=True)

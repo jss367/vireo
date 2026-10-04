@@ -537,3 +537,47 @@ def test_source_change_during_lookup_keeps_old_fingerprint_unstamped(db, tmp_pat
     assert db.get_meta(LEGACY_MARKER) is None
     assert _row(db, _prediction_id(db, det, "BioCLIP-2.5", fingerprint))["source_taxon_id"] is None
     assert db.conn.execute("SELECT COUNT(*) FROM label_source_identities").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("taxonomy", [
+    {"scientific_name": "Aythya ferina"}, {"genus": "Aythya"},
+])
+def test_legacy_native_bioclip_taxonomy_is_not_repaired_from_list_consensus(db, tmp_path, legacy_list, taxonomy):
+    """The legacy sentinel loses mode provenance, so existing ToL taxonomy is protected."""
+    old = _detection(db, tmp_path, "native.jpg")
+    db.add_prediction(old, "Redhead", .51, "BioCLIP-2.5", taxonomy=taxonomy)
+    pred_id = _prediction_id(db, old, "BioCLIP-2.5", "legacy")
+    before = dict(_row(db, pred_id))
+    db.conn.execute(
+        "INSERT INTO classifier_runs (detection_id, classifier_model, labels_fingerprint, runtime_fingerprint) "
+        "VALUES (?, 'BioCLIP-2.5', 'legacy', 'native-runtime')", (old,),
+    )
+    db.conn.commit()
+    result = backfill(db, fetch=_fetch(["Redhead"], {"Redhead": REDHEAD}))
+    assert result["predictions_updated"] == 0
+    assert dict(_row(db, pred_id)) == before
+    assert db.conn.execute("SELECT runtime_fingerprint FROM classifier_runs WHERE detection_id=?", (old,)).fetchone()[0] == 'native-runtime'
+
+
+@pytest.mark.parametrize("changed_file", ["text", "sidecar"])
+def test_legacy_only_source_change_during_lookup_leaves_consensus_retryable(db, tmp_path, legacy_list, changed_file):
+    """Legacy-only lookup cannot commit an identity from changing source evidence."""
+    from label_source_identities import LEGACY_MARKER
+
+    old = _detection(db, tmp_path, "old.jpg")
+    db.add_prediction(old, "Redhead", .51, "BioCLIP-2.5")
+
+    def fetch(*args, **kwargs):
+        if changed_file == 'text':
+            legacy_list['path'].write_text('Mallard\nRedhead\nCanvasback\n')
+        else:
+            path = legacy_list['path'].with_suffix('.json')
+            meta = json.loads(path.read_text())
+            meta['place_id'] = 1
+            path.write_text(json.dumps(meta))
+        return SpeciesLabels(['Redhead'], {'Redhead': REDHEAD})
+
+    result = backfill(db, fetch=fetch)
+    assert result['ok'] is False
+    assert db.get_meta(LEGACY_MARKER) is None
+    assert _row(db, _prediction_id(db, old, 'BioCLIP-2.5', 'legacy'))['source_taxon_id'] is None
