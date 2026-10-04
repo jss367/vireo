@@ -2314,6 +2314,7 @@ class _EditPreviewRequest:
         display_recipe,
         size,
         apply_crop,
+        analysis=False,
     ):
         self.db = db
         self.photo_id = photo_id
@@ -2324,6 +2325,7 @@ class _EditPreviewRequest:
         self.display_recipe = display_recipe
         self.size = size
         self.apply_crop = apply_crop
+        self.analysis = analysis
         self.original_abs = os.path.join(
             folder_row["path"], photo["filename"],
         )
@@ -2333,6 +2335,40 @@ class _EditPreviewRequest:
         self.load_max_size = None
         self.native_dims = None
         self.source_failure_current = False
+
+    def load(self):
+        """Decode the edit source with every recovery path; ``None`` on failure.
+
+        Retries the original when an evicted working copy vanished, swaps an
+        undersized RAW decode for a larger companion JPEG, and falls back to
+        the companion when the RAW will not decode. A failure the RAW already
+        recorded for this source mtime is not retried or re-recorded.
+        """
+        from image_loader import RAW_EXTENSIONS
+
+        photo = self.photo
+        img = self.load_source()
+        if self.source_failure_current:
+            log.info(
+                "Skipping edit-preview generation for photo %s; RAW "
+                "working-copy extraction already failed for current source mtime",
+                self.photo_id,
+            )
+            return None
+        if img is None and self.using_working_copy:
+            img = self.retry_original_source()
+        if (
+            img is not None
+            and self.selected_ext in RAW_EXTENSIONS
+            and photo["width"]
+            and photo["height"]
+        ):
+            img = self.replace_undersized_raw_decode(img)
+        if img is None and self.selected_ext in RAW_EXTENSIONS:
+            img = self.load_companion_after_raw_failure()
+        if img is None:
+            _record_working_copy_failure(self.db, photo, self.canonical)
+        return img
 
     def load_source(self):
         """Select the edit source and decode it; ``None`` when it failed.
@@ -2383,7 +2419,7 @@ class _EditPreviewRequest:
                 )
             )
             if (
-                request.args.get("analysis") == "1" or undersized_wc
+                self.analysis or undersized_wc
                 or os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
             ):
                 source_recipe = {"version": SCHEMA_VERSION}
@@ -3706,7 +3742,6 @@ def create_media_blueprint(
 
         try:
             from image_edits import RecipeError, normalize_recipe
-            from image_loader import RAW_EXTENSIONS
             recipe = normalize_recipe(recipe) or {}
             apply_crop = request.args.get("apply_crop") == "1"
             display_recipe = dict(recipe)
@@ -3729,27 +3764,8 @@ def create_media_blueprint(
                 size,
                 apply_crop,
             )
-            img = edit.load_source()
-            if edit.source_failure_current:
-                log.info(
-                    "Skipping edit-preview generation for photo %s; RAW "
-                    "working-copy extraction already failed for current source mtime",
-                    photo_id,
-                )
-                return "Could not load image", 500
-            if img is None and edit.using_working_copy:
-                img = edit.retry_original_source()
-            if (
-                img is not None
-                and edit.selected_ext in RAW_EXTENSIONS
-                and photo["width"]
-                and photo["height"]
-            ):
-                img = edit.replace_undersized_raw_decode(img)
-            if img is None and edit.selected_ext in RAW_EXTENSIONS:
-                img = edit.load_companion_after_raw_failure()
+            img = edit.load()
             if img is None:
-                _record_working_copy_failure(db, photo, edit.canonical)
                 return "Could not load image", 500
             img = edit.render(img)
         except RecipeError as e:
@@ -3759,6 +3775,79 @@ def create_media_blueprint(
         img.save(buf, format="JPEG", quality=cfg.load().get("preview_quality", 90))
         img.close()
         return Response(buf.getvalue(), mimetype="image/jpeg")
+
+    @blueprint.route("/api/photos/<int:photo_id>/auto-tone")
+    def api_auto_tone(photo_id):
+        """Fit Auto Tone to the photo as framed by ``recipe``.
+
+        Returns the fitted exposure, highlights, shadows, contrast, whites,
+        blacks, vibrance and saturation, whether metering weighted the
+        subject (and from its mask or detection box), and plain-language
+        notes on what changed. Reads the same highlight-preserving source as
+        the edit preview; the recipe's tonal values do not affect the fit.
+        """
+        import auto_tone
+
+        db = get_db()
+        photo = db.get_photo(photo_id, verify_workspace=True)
+        if not photo:
+            return json_error("Photo not found", 404)
+        try:
+            recipe = json.loads(request.args.get("recipe") or "{}")
+        except (TypeError, ValueError):
+            return json_error("Invalid recipe")
+        if not isinstance(recipe, dict):
+            return json_error("Invalid recipe")
+
+        from image_edits import RecipeError, normalize_recipe
+        try:
+            recipe = normalize_recipe(recipe) or {}
+        except RecipeError as e:
+            return json_error(str(e))
+        # Source selection and decode size depend only on the frame.
+        frame_recipe = {
+            key: recipe[key]
+            for key in ("version", "rotation", "flip", "straighten", "crop")
+            if key in recipe
+        }
+        folder_row = db.conn.execute(
+            "SELECT id, path FROM folders WHERE id=?", (photo["folder_id"],)
+        ).fetchone()
+        if not folder_row:
+            return json_error("Photo not found", 404)
+        edit = _EditPreviewRequest(
+            db,
+            photo_id,
+            photo,
+            folder_row,
+            os.path.dirname(config["THUMB_CACHE_DIR"]),
+            frame_recipe,
+            frame_recipe,
+            auto_tone.SOURCE_LONG_EDGE,
+            True,
+            analysis=True,
+        )
+        img = edit.load()
+        if img is None:
+            return json_error("Could not load image", 500)
+        box = None
+        if (mask := _load_active_mask(db, photo_id)) is None:
+            detections = db.get_detections(photo_id)
+            if detections:
+                primary = detections[0]
+                box = {
+                    "x": primary["box_x"], "y": primary["box_y"],
+                    "w": primary["box_w"], "h": primary["box_h"],
+                }
+        try:
+            result = auto_tone.fit_loaded_image(
+                img, recipe, native_size=edit.native_dims, mask=mask, box=box,
+            )
+        finally:
+            img.close()
+            if mask is not None:
+                mask.close()
+        return jsonify(result)
 
     @blueprint.route("/photos/<int:photo_id>/original")
     def serve_original_photo(photo_id, *, _artifact_flight_guarded=False, _prepare_source=None):

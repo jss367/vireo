@@ -1,11 +1,15 @@
 """Camera denoising survives editor saves, presets, history, and resets."""
 
 import json
+import re
 
 import numpy as np
 import pytest
 from PIL import Image
 from playwright.sync_api import expect
+
+# The success toast, never the 'Could not analyze ... Auto Tone' error.
+AUTO_TONE_APPLIED = re.compile(r'Auto Tone.*(White balance left as shot|nothing changed)')
 
 
 @pytest.fixture
@@ -88,6 +92,6 @@ def test_unknown_camera_fallback_and_preset(live_server, page, denoise_photo):
     assert 'camera' not in recipe
 
     page.evaluate('autoTone()')
-    expect(page.locator('#toastContainer')).to_contain_text('Auto-balanced tones')
+    expect(page.locator('#toastContainer')).to_contain_text(AUTO_TONE_APPLIED)
     expect(page.locator('#denoiseModeSelect')).to_have_value('camera')
     assert page.evaluate('recipeForSave(editorState.recipe).adjustments.denoise_mode') == 'camera'
