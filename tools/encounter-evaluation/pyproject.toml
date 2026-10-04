@@ -7,13 +7,17 @@ name = "vireo-encounter-evaluation"
 version = "0.1.0"
 description = "Offline evaluation and parameter tuning for Vireo encounter grouping"
 requires-python = ">=3.14"
-dependencies = ["numpy>=2.0", "certifi>=2024.0.0", "requests>=2.32.0"]
+dependencies = ["numpy>=2.0", "certifi>=2024.0.0", "requests>=2.32.0", "Pillow>=12.1.1"]
 
 [project.optional-dependencies]
 test = ["pytest>=8", "ruff>=0.15.8", "build>=1.2", "setuptools>=75", "wheel", "pyinstaller>=6.15"]
 
 [project.scripts]
 vireo-evaluate-encounters = "encounter_eval.cli:main"
+vireo-review-encounters = "encounter_eval.review_server:main"
+
+[tool.setuptools.package-data]
+encounter_eval = ["review.html", "continuity_review.html"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

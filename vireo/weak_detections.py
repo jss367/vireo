@@ -226,3 +226,71 @@ def matching_anchor_species(
         "left_photo_id": run["left_photo_id"],
         "right_photo_id": run["right_photo_id"],
     }
+
+
+def matching_full_image_runs(
+    photos, detections_by_photo, species_by_photo, fallback_by_photo, *,
+    detector_confidence=0.20, max_gap=3.0, config=None,
+):
+    """Bridge short detector dropouts corroborated by full-image classifiers.
+
+    Unlike ordinary weak-box rescue, every middle frame must independently
+    identify the anchors' species with the confident-species gate. Require a
+    real positive-confidence animal box overlapping both anchor boxes, at most
+    three middle frames, and at most three seconds from anchor to anchor. A
+    full-image prediction alone cannot turn an empty scene into an encounter.
+    Species keys (including source identities), not display names, must agree.
+    No confirmed photo tags are used as evidence here.
+    """
+    from encounters import _confident_species_prediction
+
+    def best_box(pid):
+        candidates = [d for d in detections_by_photo.get(pid, [])
+                      if _get(d, "category", "animal") == "animal"
+                      and _get(d, "detector_model") != "full-image"]
+        return max(candidates, key=_confidence, default=None)
+
+    def overlap(a, b):
+        if a is None or b is None:
+            return 0.0
+        try:
+            ax, ay, aw, ah = (float(_get(a, k)) for k in ("x", "y", "w", "h"))
+            bx, by, bw, bh = (float(_get(b, k)) for k in ("x", "y", "w", "h"))
+        except (TypeError, ValueError):
+            return 0.0
+        intersection = max(0, min(ax+aw, bx+bw)-max(ax, bx)) * max(0, min(ay+ah, by+bh)-max(ay, by))
+        union = aw*ah + bw*bh - intersection
+        return intersection / union if union > 0 else 0.0
+
+    by_id = {_get(p, 'id'): p for p in photos}
+    matched = []
+    # A tiny positive floor excludes zero-box detector runs. This is NOT a
+    # new general detection threshold: the independent classifier, geometry,
+    # short-span, and two-sided identity gates below must all pass.
+    for run in contextual_weak_runs(photos, detections_by_photo,
+                                   detector_confidence=detector_confidence,
+                                   weak_confidence=1e-6, max_gap=min(max_gap, 3.0)):
+        ids = run['photo_ids']
+        if len(ids) > 3 or any(pid not in fallback_by_photo for pid in ids):
+            continue
+        left, right = run['left_photo_id'], run['right_photo_id']
+        duration = (_parse_timestamp(_get(by_id[right], 'timestamp')) -
+                    _parse_timestamp(_get(by_id[left], 'timestamp'))).total_seconds()
+        if duration > min(max_gap, 3.0):
+            continue
+        winners = [_confident_species_prediction({'species_top5': entries}, config=config)
+                   for entries in [species_by_photo.get(left), species_by_photo.get(right),
+                                   *(fallback_by_photo[pid] for pid in ids)]]
+        if any(winner is None for winner in winners) or len({winner['key'] for winner in winners}) != 1:
+            continue
+        # Multiple qualifying subjects on an anchor make a whole-image label
+        # insufficient to identify which subject continued through the gap.
+        if any(sum(_confidence(d) >= detector_confidence and _get(d, 'category', 'animal') == 'animal'
+                   for d in detections_by_photo.get(pid, [])) != 1 for pid in (left, right)):
+            continue
+        if any(overlap(best_box(pid), best_box(anchor)) < 0.10 for pid in ids for anchor in (left, right)):
+            continue
+        matched.append({**run, 'species': winners[0]['species'], 'species_key': winners[0]['key'],
+                        'evidence': 'full_image_sequence',
+                        'left_confidence': winners[0]['confidence'], 'right_confidence': winners[1]['confidence']})
+    return matched

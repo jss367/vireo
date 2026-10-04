@@ -33,8 +33,10 @@ def parser():
     p.add_argument("--resume", type=Path, help="Continue an existing run using its retained inputs, not current labels")
     p.add_argument("--max-sessions", type=positive_int, help="Limit whole sessions; unlimited by default")
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--capture-date", help="Only sessions on this capture date (YYYY-MM-DD); keeps stable split membership")
     p.add_argument("--split-registry", type=Path, help="Persistent day membership; defaults beside run directories")
     p.add_argument("--label-source", choices=["all", "manual"], default="all")
+    p.add_argument("--review-labels", type=Path, help="Review database containing saved per-photo reference labels")
     p.add_argument("--complete-folder", type=int, action="append", default=[],
                    help="Assert that tagged photos in this folder have complete species rosters; repeatable")
     p.add_argument("--config", type=Path, help="Explicit JSON loader/grouping settings; otherwise recorded app defaults")
@@ -59,7 +61,7 @@ def main(argv=None):
     if args.resume and args.output:
         p.error("--resume and --output are mutually exclusive")
     if args.resume and (args.workspace is not None or args.max_sessions is not None or args.complete_folder
-                        or args.config or args.split_registry or args.label_source != "all" or args.seed != 42):
+                        or args.config or args.split_registry or args.review_labels or args.capture_date or args.label_source != "all" or args.seed != 42):
         p.error("--resume retains the original data and split policy; start a new run to change data options")
     if args.command == "tune" and (args.partition != "development" or args.candidate_file):
         p.error("tune uses train/development only; --partition and --candidate-file are for compare")
@@ -92,7 +94,8 @@ def main(argv=None):
             print(f"Preparing current library evidence in {output}", flush=True)
             manifest = prepare(args.db, output, workspace=args.workspace, seed=args.seed,
                                max_sessions=args.max_sessions, complete_folders=args.complete_folder,
-                               label_source=args.label_source, config=cfg, split_registry=args.split_registry, repo=repo)
+                               label_source=args.label_source, config=cfg, split_registry=args.split_registry, repo=repo,
+                               review_labels=args.review_labels, capture_date=args.capture_date)
         if not manifest["sessions"]:
             raise ValueError("No labeled sessions selected; inspect workspace and label-source coverage")
         if args.command == "compare":

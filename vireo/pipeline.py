@@ -489,7 +489,7 @@ class _FeatureLoad:
             subjects_by_photo[det["photo_id"]].append(subject)
             subjects_by_detection[det["detection_id"]] = subject
 
-    def _query_predictions(self):
+    def _query_predictions(self, *, full_image_only=False):
         """Load species predictions (top-5 per photo, ordered by confidence).
 
         Predictions reference detections (not photos directly), so JOIN
@@ -506,6 +506,8 @@ class _FeatureLoad:
         otherwise pick the most recent one per (detection, model) so stale
         species from an old label set don't leak into the top-k.
         """
+        floor_sql = "AND d.detector_model = 'full-image'" if full_image_only else self.detection_floor_sql
+        floor_params = () if full_image_only else self.detection_floor_params
         if self.labels_fingerprint is not None:
             return self.db.conn.execute(
                 f"""SELECT d.photo_id, d.id AS detection_id,
@@ -517,12 +519,12 @@ class _FeatureLoad:
                    JOIN photos p ON p.id = d.photo_id
                    JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                    WHERE wf.workspace_id = ?
-                     {self.detection_floor_sql}
+                     {floor_sql}
                      AND pr.labels_fingerprint = ?
                      {self.scope_sql}
                    ORDER BY d.photo_id, pr.confidence DESC""",
                 (
-                    self.ws_id, *self.detection_floor_params,
+                    self.ws_id, *floor_params,
                     self.labels_fingerprint, *self.scope_params,
                 ),
             ).fetchall()
@@ -536,7 +538,7 @@ class _FeatureLoad:
                JOIN photos p ON p.id = d.photo_id
                JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                WHERE wf.workspace_id = ?
-                 {self.detection_floor_sql}
+                 {floor_sql}
                  {self.scope_sql}
                  AND pr.labels_fingerprint = (
                      SELECT pr2.labels_fingerprint FROM predictions pr2
@@ -546,7 +548,7 @@ class _FeatureLoad:
                      LIMIT 1
                  )
                ORDER BY d.photo_id, pr.confidence DESC""",
-            (self.ws_id, *self.detection_floor_params, *self.scope_params),
+            (self.ws_id, *floor_params, *self.scope_params),
         ).fetchall()
 
     def load_predictions(self):
@@ -660,7 +662,62 @@ class _FeatureLoad:
     def rescue_weak_runs(self):
         self._match_weak_run_anchors()
         self._drop_unrescued_weak_candidates()
+        self._rescue_full_image_runs()
         self._use_raw_boxes_for_rescued()
+
+    def _rescue_full_image_runs(self):
+        """Recover a corroborated brief dropout without lowering the global floor.
+
+        Full-image classifications stay separate until sequence eligibility is
+        established. They are never detector subjects or synthetic crop boxes.
+        The existing rescue switch controls both contextual paths.
+        """
+        if not self.weak_rescue_enabled:
+            return
+        from species_identity import SpeciesResolver
+        from weak_detections import matching_full_image_runs
+
+        resolver = SpeciesResolver(db=self.db)
+        fallback = defaultdict(list)
+        top_k = (self.config or {}).get("top_k_predictions", 5)
+        for pr in self._query_predictions(full_image_only=True):
+            pid = pr['photo_id']
+            if pid not in self.detected_photo_ids or pid in self.mdv6_passing_photo_ids:
+                continue
+            if len(fallback[pid]) >= top_k:
+                continue
+            identity = resolver.prediction(pr)
+            fallback[pid].append((identity.display_name, pr['confidence'], pr['model'], identity.key))
+        if not fallback:
+            return
+        # Fetch the lower-confidence real boxes only for photos with fallback
+        # results. Ordinary workspace queries keep their index-friendly floor.
+        raw = dict(self.raw_mdv6_dets)
+        if not raw:
+            # Ordinary weak rescue does not load boxes when its floor is at
+            # or above the detector threshold. Full-image rescue still needs
+            # the normal-confidence anchors in that configuration.
+            raw = self.db.get_detections_for_photos(
+                self.photo_ids_for_dets, min_conf=self.min_conf,
+                detector_model='megadetector-v6',
+            )
+        lower_boxes = self.db.get_detections_for_photos(
+            list(fallback), min_conf=0.0, detector_model='megadetector-v6',
+        )
+        raw.update({pid: sorted((d for d in dets if d['category'] == 'animal'),
+                                key=lambda d: d['confidence'], reverse=True)
+                    for pid, dets in lower_boxes.items()})
+        for run in matching_full_image_runs(
+            self.rows, raw, self.species_by_photo, fallback,
+            detector_confidence=self.min_conf,
+            max_gap=self.pipeline_cfg.get('burst_time_gap', 3.0),
+            config=self.pipeline_cfg,
+        ):
+            for pid in run['photo_ids']:
+                self.species_by_photo[pid] = fallback[pid]
+                self.rescued_weak_ids.add(pid)
+                self.weak_context_by_photo[pid] = {k: v for k, v in run.items() if k != 'photo_ids'}
+                self.raw_mdv6_dets[pid] = raw[pid]
 
     def _match_weak_run_anchors(self):
         """Classification is intentionally more permissive than grouping: it
@@ -772,7 +829,8 @@ class _FeatureLoad:
                                 renormalize, no penalty)
 
         Both queries are filtered to `megadetector-v6` so synthetic
-        `full-image` fallback rows can't sway the signal. Read at
+        `full-image` rows alone cannot establish subject presence. A fallback
+        corroborated by the short-sequence rescue above is explicitly uncertain. Read at
         regroup time because regroup runs BEFORE the miss stage —
         photos.miss_no_subject would lag by one run.
         """
@@ -2210,7 +2268,8 @@ def compute_group_fingerprint(config):
     and ``bursts.DEFAULTS`` for any matching key. Only keys present in
     those DEFAULTS dicts contribute to the hash, so unrelated pipeline
     settings (detector confidence, classifier model, etc.) don't bump
-    the fingerprint.
+    the fingerprint. A feature-loading revision also invalidates results
+    produced before contextual full-image rescue was available.
     """
     import hashlib
     import json
@@ -2226,6 +2285,7 @@ def compute_group_fingerprint(config):
     payload = {
         "encounters": _effective(encounters.DEFAULTS),
         "bursts": _effective(bursts.DEFAULTS),
+        "contextual_full_image_rescue_version": 1,
     }
     from species_identity import resolution_identity
     payload["species_resolution"] = resolution_identity()

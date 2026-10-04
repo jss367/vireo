@@ -10,6 +10,7 @@ import sys
 from datetime import datetime, timedelta
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -3873,3 +3874,107 @@ def test_auto_detach_does_not_promote_candidate_override_to_confirmed_species():
     auto_detach_burst_for_species(results, 0, 0, "Wigeon")
     new_enc = next(e for e in results["encounters"] if e["photo_ids"] == [1, 2])
     assert new_enc["confirmed_species_list"] == ["Wigeon", "Teal", "Gadwall"]
+
+
+def test_yellowthroat_full_image_dropout_stays_in_one_encounter(tmp_path, monkeypatch):
+    """Reproduce DSC_0814–0827: a 6.4% detector box splits 11 + 1 + 2,
+    despite a 99.84% matching full-image classifier on the middle frame.
+    No user species tags or image embeddings supply the missing evidence.
+    """
+    import config as cfg
+    from db import Database
+    from pipeline import load_photo_features, run_grouping
+
+    monkeypatch.setattr(cfg, 'CONFIG_PATH', str(tmp_path/'config.json'))
+    db = Database(str(tmp_path/'yellowthroat.db'))
+    db.conn.execute("INSERT INTO taxa(id,inat_id,name,common_name,rank) VALUES(1,9721,'Geothlypis trichas','Common Yellowthroat','species')")
+    db.conn.commit()
+    fid = db.add_folder(str(tmp_path/'photos'))
+    base = datetime(2026, 10, 3, 9, 10, 24, 410000)
+    offsets = [0, *[1.68+i*0.05 for i in range(10)], 2.56, 2.63, 2.68]
+    ids = []
+    for i, offset in enumerate(offsets):
+        pid = db.add_photo(fid, f'DSC_{814+i:04}.NEF', '.nef', 100, 1,
+                           timestamp=(base+timedelta(seconds=offset)).isoformat())
+        ids.append(pid)
+        middle = i == 11
+        did = db.write_detection_batch(pid, 'megadetector-v6', [{
+            'box': {'x':0.44,'y':0.45,'w':0.15,'h':0.2},
+            'confidence':0.06396484375 if middle else 0.617 if i > 11 else 0.224,
+            'category':'animal',
+        }])[0]
+        if middle:
+            did = db.write_detection_batch(pid, 'full-image', [{
+                'box':{'x':0,'y':0,'w':1,'h':1},'confidence':0,'category':'animal',
+            }])[0]
+        if middle:
+            fallback_detection_id = did
+        db.add_prediction(did, 'Common Yellowthroat', 0.9984 if middle else 0.9998,
+                          'BioCLIP-2.5', taxonomy={'taxon_id':9721})
+    try:
+        disabled = {'pipeline':{'weak_detection_rescue_enabled':False}}
+        before = run_grouping(load_photo_features(db, effective_config=disabled))
+        assert [e['photo_count'] for e in before] == [11,1,2]
+        photos = load_photo_features(db, effective_config=cfg.DEFAULTS)
+        middle = photos[11]
+        assert middle['subject_uncertain'] and not middle['subject_absent']
+        assert not middle['subject_present']
+        assert middle['detection_conf'] == 0.06396484375
+        assert middle['subjects'] == []  # no invented full-image subject/crop
+        assert middle['weak_detection_context']['evidence'] == 'full_image_sequence'
+        after = run_grouping(photos, emit_trace=True)
+        assert [e['photo_count'] for e in after] == [14]
+        assert after[0]['species'][0] == 'Common Yellowthroat'
+        assert any(t['decision'] == 'kept_weak_detection' for t in after[0]['trace'])
+        assert all(not db.get_photo_keywords(pid) for pid in ids)
+        # A newer label set contradicting the anchors must supersede the
+        # matching old fallback. Explicit fingerprint selection still works.
+        db.add_prediction(fallback_detection_id, 'Song Sparrow', 0.99, 'BioCLIP-2.5',
+                          taxonomy={'taxon_id':1}, labels_fingerprint='new-labels')
+        newest = load_photo_features(db, effective_config=cfg.DEFAULTS)[11]
+        assert newest['subject_absent'] and not newest['subject_uncertain']
+        pinned = load_photo_features(db, effective_config=cfg.DEFAULTS, labels_fingerprint='legacy')[11]
+        assert pinned['subject_uncertain']
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("detector_confidence", [.20, .05])
+def test_full_image_rescue_respects_current_top_k(tmp_path, monkeypatch, detector_confidence):
+    """Cached alternatives excluded by the workspace cannot defeat its margin gate."""
+    import config as cfg
+    from db import Database
+    from pipeline import load_photo_features
+
+    monkeypatch.setattr(cfg, 'CONFIG_PATH', str(tmp_path / 'config.json'))
+    db = Database(str(tmp_path / 'top-k.db'))
+    fid = db.add_folder(str(tmp_path / 'photos'))
+    ids = []
+    for i in range(3):
+        pid = db.add_photo(fid, f'{i}.jpg', '.jpg', 100, 1,
+                           timestamp=f'2026-10-03T09:10:0{i}')
+        ids.append(pid)
+        did = db.write_detection_batch(pid, 'megadetector-v6', [{
+            'box': {'x': .4, 'y': .4, 'w': .2, 'h': .2},
+            'confidence': .02 if i == 1 else .8, 'category': 'animal',
+        }])[0]
+        if i == 1:
+            did = db.write_detection_batch(pid, 'full-image', [{
+                'box': {'x': 0, 'y': 0, 'w': 1, 'h': 1},
+                'confidence': 0, 'category': 'animal',
+            }])[0]
+        db.add_prediction(did, 'Common Yellowthroat', .99, 'BioCLIP-2.5')
+        if i == 1:
+            db.add_prediction(did, 'Song Sparrow', .98, 'BioCLIP-2.5')
+    try:
+        effective = {**cfg.DEFAULTS, 'detector_confidence': detector_confidence}
+        default = load_photo_features(db, config=effective, effective_config=effective)[1]
+        assert default['subject_absent']
+        limited = load_photo_features(db, config={**effective, 'top_k_predictions': 1},
+                                      effective_config=effective)[1]
+        assert limited['subject_uncertain']
+        assert len(limited['species_top5']) == 1
+        assert limited['species_top5'][0][0] == 'Common Yellowthroat'
+    finally:
+        db.close()
+
