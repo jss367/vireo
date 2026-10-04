@@ -1270,3 +1270,25 @@ def test_review_consensus_invalid_votes_preserve_prediction_identity(db, votes):
     row = {"species": "Parrot", "source_taxon_id": LILAC["taxon_id"],
            "group_id": "burst", "individual": votes}
     assert SpeciesResolver(db=db).consensus(row).key == f"taxon:{LILAC['taxon_id']}"
+
+
+@pytest.mark.parametrize("identity_version", ["", "0", "999"])
+def test_inferred_repair_waits_for_verified_common_name_import(db, tmp_path, identity_version):
+    from species_identity_repair import INFERRED_TAXONOMY_MARKER, repair_on_upgrade
+    from taxonomy import COMMON_NAME_IDENTITY_VERSION
+
+    _, det = _photo(db, tmp_path)
+    row = _inferred_row(db, det, "Lilac-crowned Parrot", BROWED["scientific_name"],
+                        fingerprint="legacy", family="Historicalidae")
+    db.set_meta(INFERRED_TAXONOMY_MARKER, "0")
+    db.set_meta("common_name_identity_version", identity_version)
+    assert db.conn.execute("SELECT COUNT(*) FROM taxa").fetchone()[0] > 0
+    before = dict(db.conn.execute("SELECT * FROM predictions WHERE id=?", (row["id"],)).fetchone())
+    assert repair_on_upgrade(db) == 0
+    assert db.get_meta(INFERRED_TAXONOMY_MARKER) == "0"
+    assert dict(db.conn.execute("SELECT * FROM predictions WHERE id=?", (row["id"],)).fetchone()) == before
+    # A completed name import permits the postponed pass to retry.
+    db.set_meta("common_name_identity_version", str(COMMON_NAME_IDENTITY_VERSION))
+    assert repair_on_upgrade(db) == 1
+    assert db.get_meta(INFERRED_TAXONOMY_MARKER) == "1"
+    assert db.conn.execute("SELECT scientific_name FROM predictions WHERE id=?", (row["id"],)).fetchone()[0] == LILAC["scientific_name"]

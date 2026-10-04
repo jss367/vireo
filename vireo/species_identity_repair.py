@@ -189,9 +189,13 @@ def repair_on_upgrade(db):
     # supported first-run state (the taxonomy download is optional and runs
     # later); without it the resolver verifies nothing and the "clear" branch
     # would wipe every legacy row's binomial and every rank. Defer the whole
-    # pass — and the marker — until the local taxonomy has data to verify
-    # against, so a later download gets a chance to rerun this.
-    if db.get_meta(INFERRED_TAXONOMY_MARKER) != "1" and _local_taxonomy_populated(db.conn):
+    # pass and marker until scientific taxa AND the verified common-name
+    # import have completed. A partial scientific-only import is not enough.
+    from taxonomy import COMMON_NAME_IDENTITY_VERSION
+
+    if (db.get_meta(INFERRED_TAXONOMY_MARKER) != "1"
+            and db.get_meta("common_name_identity_version") == str(COMMON_NAME_IDENTITY_VERSION)
+            and _local_taxonomy_populated(db.conn)):
         with db.conn:
             count += apply_repairs(db.conn, plan_inferred_taxonomy_repairs(db))
             db.set_meta(INFERRED_TAXONOMY_MARKER, "1", _commit=False)
