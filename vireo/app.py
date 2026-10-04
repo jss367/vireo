@@ -1820,6 +1820,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         _thumb_backfill_timer.daemon = True
         _thumb_backfill_timer.start()
 
+    # Taxon IDs for predictions made from label lists saved before lists
+    # recorded them (see StartupTasks.kickoff_label_identity_backfill).
+    # Ephemeral JobRunner job, skipped when no label set needs it.
+    app._kickoff_label_identity_backfill = startup.kickoff_label_identity_backfill
+
+    if not os.environ.get("VIREO_DISABLE_STARTUP_BACKFILL_TIMERS"):
+        _label_identity_timer = threading.Timer(8.0, startup.kickoff_label_identity_backfill)
+        _label_identity_timer.daemon = True
+        _label_identity_timer.start()
+
     # -- Per-app services shared by several blueprints --
 
     # Resolves visual-search clauses; owns the per-app query-text

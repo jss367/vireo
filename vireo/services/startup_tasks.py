@@ -417,6 +417,62 @@ class StartupTasks:
         except Exception:
             log.exception("Failed to start thumb_path backfill job")
 
+    def kickoff_label_identity_backfill(self):
+        """Recover taxon IDs for predictions made from legacy label lists.
+
+        Lists saved before they recorded identities leave BioCLIP predictions
+        identified by name only, so a species whose name the taxonomy calls
+        ambiguous shows up twice in review. See ``label_source_identities``.
+        The pass re-queries iNaturalist, so it runs as an ephemeral JobRunner
+        job (visible in the bottom panel) and only when a label set needs it;
+        a list it could not reach stays pending for the next startup.
+        """
+        from label_source_identities import backfill, legacy_pass_needed, pending_label_sets
+
+        app = self._app
+        db_path = self._db_path
+        check_db = None
+        try:
+            check_db = Database(db_path)
+            pending = pending_label_sets(check_db) or legacy_pass_needed(check_db)
+        except Exception:
+            log.exception("Label list species IDs: pending check failed")
+            return
+        finally:
+            if check_db is not None:
+                check_db.close()
+        if not pending:
+            log.debug("Label list species IDs: nothing to recover, skipping")
+            return
+
+        runner = app._job_runner
+
+        def work(job):
+            thread_db = Database(db_path)
+            try:
+                def progress(current, total, phase):
+                    job["progress"]["current"] = current
+                    job["progress"]["total"] = total
+                    runner.push_event(job["id"], "progress", {
+                        "current": current, "total": total, "phase": phase,
+                    })
+
+                return backfill(
+                    thread_db, progress=progress,
+                    cancel_check=lambda: runner.is_cancelled(job["id"]),
+                )
+            finally:
+                thread_db.close()
+
+        try:
+            runner.start(
+                "label-list-species-ids", work,
+                ephemeral=True,
+                config={"trigger": "startup"},
+            )
+        except Exception:
+            log.exception("Failed to start label list species ID job")
+
 
 def utc_iso_now():
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")

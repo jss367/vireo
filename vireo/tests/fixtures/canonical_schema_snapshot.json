@@ -877,6 +877,30 @@
    "CREATE VIEW workspace_removed_folders AS\n            WITH paths AS NOT MATERIALIZED (\n                SELECT f.id,\n                       RTRIM(REPLACE(f.path, '\\', '/'), '/') AS path,\n                       RTRIM(REPLACE(COALESCE(m.source_path, f.path), '\\', '/'), '/') AS source_path\n                FROM folders f\n                LEFT JOIN local_folder_mappings m ON m.folder_id = f.id\n            ), scopes AS NOT MATERIALIZED (\n                -- Exact records use primary-key lookups; only recursive\n                -- roots need to search the catalog for descendants.\n                SELECT workspace_id, folder_id AS root_id, folder_id\n                FROM workspace_folder_removals\n                UNION ALL\n                SELECT removed.workspace_id, root.id, candidate.id\n                FROM workspace_folder_removals removed\n                JOIN paths root ON root.id = removed.folder_id\n                JOIN paths candidate\n                  ON substr(candidate.path, 1, length(root.path) + 1) = root.path || '/'\n                  OR substr(candidate.source_path, 1, length(root.source_path) + 1) = root.source_path || '/'\n                WHERE removed.recursive = 1 AND candidate.id != root.id\n            )\n            SELECT removed.workspace_id, candidate.id AS folder_id\n            FROM scopes removed\n            JOIN paths root ON root.id = removed.root_id\n            JOIN paths candidate ON candidate.id = removed.folder_id\n            WHERE NOT EXISTS (\n                SELECT 1 FROM workspace_folders direct\n                WHERE direct.workspace_id = removed.workspace_id\n                  AND direct.folder_id = candidate.id\n            ) AND NOT EXISTS (\n                -- An explicitly restored subfolder root may cover new\n                -- descendants without restoring its removed ancestors.\n                SELECT 1 FROM workspace_folders restored\n                JOIN paths restored_path ON restored_path.id = restored.folder_id\n                WHERE restored.workspace_id = removed.workspace_id\n                  AND restored.is_root = 1\n                  AND (substr(restored_path.path, 1, length(root.path) + 1) = root.path || '/'\n                       OR substr(restored_path.source_path, 1, length(root.source_path) + 1) = root.source_path || '/')\n                  AND (candidate.id = restored.folder_id\n                       OR substr(candidate.path, 1, length(restored_path.path) + 1) = restored_path.path || '/'\n                       OR substr(candidate.source_path, 1, length(restored_path.source_path) + 1) = restored_path.source_path || '/')\n            )"
   ],
   [
+   "table",
+   "label_source_identities",
+   "label_source_identities",
+   "CREATE TABLE label_source_identities (\n            labels_fingerprint TEXT NOT NULL,\n            species            TEXT NOT NULL,\n            source_taxon_id    INTEGER NOT NULL,\n            scientific_name    TEXT NOT NULL,\n            PRIMARY KEY (labels_fingerprint, species)\n        )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_label_source_identities_1",
+   "label_source_identities",
+   null
+  ],
+  [
+   "trigger",
+   "trg_predictions_label_source_identity_insert",
+   "predictions",
+   "CREATE TRIGGER trg_predictions_label_source_identity_insert\n                AFTER INSERT ON predictions\n                WHEN NEW.source_taxon_id IS NULL AND EXISTS (\n                    SELECT 1 FROM label_source_identities i\n                    WHERE i.labels_fingerprint = NEW.labels_fingerprint\n                      AND i.species = NEW.species)\n                BEGIN\n                    UPDATE predictions SET (source_taxon_id, scientific_name) =\n                        (SELECT i.source_taxon_id, i.scientific_name\n                         FROM label_source_identities i\n                         WHERE i.labels_fingerprint = NEW.labels_fingerprint\n                           AND i.species = NEW.species)\n                    WHERE id = NEW.id;\n                END"
+  ],
+  [
+   "trigger",
+   "trg_predictions_label_source_identity_update",
+   "predictions",
+   "CREATE TRIGGER trg_predictions_label_source_identity_update\n                AFTER UPDATE OF source_taxon_id ON predictions\n                WHEN NEW.source_taxon_id IS NULL AND EXISTS (\n                    SELECT 1 FROM label_source_identities i\n                    WHERE i.labels_fingerprint = NEW.labels_fingerprint\n                      AND i.species = NEW.species)\n                BEGIN\n                    UPDATE predictions SET (source_taxon_id, scientific_name) =\n                        (SELECT i.source_taxon_id, i.scientific_name\n                         FROM label_source_identities i\n                         WHERE i.labels_fingerprint = NEW.labels_fingerprint\n                           AND i.species = NEW.species)\n                    WHERE id = NEW.id;\n                END"
+  ],
+  [
    "index",
    "idx_keywords_source_taxon_id",
    "keywords",

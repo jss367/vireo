@@ -347,7 +347,8 @@ OBSERVATION_FILTERS = {
 
 
 def fetch_species_list(
-    place_id, taxon_groups, observation_filter="research", progress_callback=None
+    place_id, taxon_groups, observation_filter="research", progress_callback=None,
+    strict=False,
 ):
     """Fetch species observed in a region from iNaturalist.
 
@@ -356,6 +357,10 @@ def fetch_species_list(
         taxon_groups: list of group keys from TAXON_GROUPS (e.g., ['birds', 'mammals'])
         observation_filter: one of 'research', 'wild', 'all'
         progress_callback: optional callable(message, current=None, total=None)
+        strict: raise ``RuntimeError`` when a page cannot be fetched instead
+            of returning the species gathered so far. A caller that treats
+            the list as complete must not mistake a dropped connection for
+            "iNaturalist has nothing more".
 
     Returns:
         SpeciesLabels of species prompts. Names two taxa share are
@@ -429,6 +434,11 @@ def fetch_species_list(
                             )
 
             if data is None:
+                if strict:
+                    raise RuntimeError(
+                        f"Could not fetch page {page} of {group_name} species "
+                        f"from iNaturalist"
+                    )
                 break
 
             results = data.get("results", [])

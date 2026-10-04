@@ -997,6 +997,38 @@ class CanonicalSchema:
         # skips on exactly the databases that need it.
         if "match_score" not in pred_cols:
             cur.execute("ALTER TABLE predictions ADD COLUMN match_score REAL")
+        # Taxon identities recovered for label lists saved before lists
+        # recorded them (see ``label_source_identities.py``), keyed by the
+        # label set's fingerprint so they never change that fingerprint and
+        # never force a reclassification. The triggers give every prediction
+        # row written under such a fingerprint its label's identity, whichever
+        # write path produced it (classify, cache materialization, refresh),
+        # exactly as a list that carried the identity would have.
+        cur.execute("""CREATE TABLE IF NOT EXISTS label_source_identities (
+            labels_fingerprint TEXT NOT NULL,
+            species            TEXT NOT NULL,
+            source_taxon_id    INTEGER NOT NULL,
+            scientific_name    TEXT NOT NULL,
+            PRIMARY KEY (labels_fingerprint, species)
+        )""")
+        for trigger, event in (
+            ("trg_predictions_label_source_identity_insert", "INSERT"),
+            ("trg_predictions_label_source_identity_update", "UPDATE OF source_taxon_id"),
+        ):
+            cur.execute(f"""CREATE TRIGGER IF NOT EXISTS {trigger}
+                AFTER {event} ON predictions
+                WHEN NEW.source_taxon_id IS NULL AND EXISTS (
+                    SELECT 1 FROM label_source_identities i
+                    WHERE i.labels_fingerprint = NEW.labels_fingerprint
+                      AND i.species = NEW.species)
+                BEGIN
+                    UPDATE predictions SET (source_taxon_id, scientific_name) =
+                        (SELECT i.source_taxon_id, i.scientific_name
+                         FROM label_source_identities i
+                         WHERE i.labels_fingerprint = NEW.labels_fingerprint
+                           AND i.species = NEW.species)
+                    WHERE id = NEW.id;
+                END""")
         cur.execute("PRAGMA table_info(keywords)")
         kw_cols = {row[1] for row in cur.fetchall()}
         if "source_taxon_id" not in kw_cols:
