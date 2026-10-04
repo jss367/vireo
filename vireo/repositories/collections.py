@@ -2262,6 +2262,7 @@ class _RuleQueryBuilder:
         from metadata_search import (
             PREDICTION_COLUMNS,
             photo_metadata_predicates,
+            term_binds,
             values_contain,
         )
 
@@ -2286,7 +2287,8 @@ class _RuleQueryBuilder:
         params.extend(species_params)
         prediction_sql, prediction_params = self._prediction_exists(
             values_contain([f"pred.{col}" for col in PREDICTION_COLUMNS]
-                           + ["COALESCE(prv.status, 'pending')"]), [like],
+                           + ["COALESCE(prv.status, 'pending')"]),
+            term_binds(like, value),
         )
         # Once a photo has a species, search matches what the user said it
         # is, not what a classifier guessed: a Wood duck photo must not

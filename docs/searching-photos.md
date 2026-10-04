@@ -7,7 +7,11 @@ locations, and current predictions. It also searches the values of stored file
 tags, including captions, titles, authors, copyright, and custom tags.
 
 Words can match different fields. Matches are substrings, so `haw` finds
-`hawk`. Use uppercase operators to combine searches:
+`hawk` and `7688` finds `DSC_7688.NEF`. Numbers match from their start, so
+`7688` finds file number 7688 and `5.6` finds f/5.6, but `7688` doesn't find
+shutter count 157688 or a lens coefficient of 0.0029115676880. Internal values
+such as file hashes, byte counts, and computed scores aren't searched. Use
+uppercase operators to combine searches:
 
 | Search | Finds photos with |
 | --- | --- |
