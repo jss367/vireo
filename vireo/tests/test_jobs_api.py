@@ -5921,6 +5921,99 @@ def test_pending_archive_sends_when_a_workspace_declines_to_write_flags(app_and_
     assert sent["result"]["metadata_queued_during_transfer"] == 0
 
 
+def test_pending_archive_fail_after_sync_marks_transfer_step_not_sync(app_and_db, tmp_path, monkeypatch):
+    """A failure between a successful sync and the transfer's first phase
+    callback must mark the transfer step failed, not the sync we just
+    finished.
+
+    ``send_pending_archive`` can still raise before ``move_folder`` emits its
+    first "Checking destination" callback -- a vanished staging source, a
+    folder guard refusal, or GNU rsync unavailable. Without closing the sync
+    step after sync finishes, the except handler finds sync still active and
+    marks it failed, hiding the real failure under the step that already
+    succeeded.
+    """
+    import pending_archives
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+    db.queue_change(imported["result"]["photo_ids"][0], "keyword_add", "Osprey")
+
+    def raise_before_transfer_starts(*a, **kw):
+        raise ValueError("Local originals are unavailable. Reconnect their storage before sending to NAS.")
+
+    monkeypatch.setattr(
+        pending_archives, "send_pending_archive", raise_before_transfer_starts)
+    failed = wait_for_job_via_client(client, client.post(
+        f"/api/import/pending-archives/{archive_id}/send",
+        json={"sync_first": True}).get_json()["job_id"])
+    assert failed["status"] == "failed", failed
+    # The sync we actually finished stays completed; the step that fell to
+    # the exception is the transfer's first one.
+    sync = next(s for s in failed["steps"] if s["id"] == "sync")
+    assert sync["status"] == "completed", failed["steps"]
+    check = next(s for s in failed["steps"] if s["id"] == "check")
+    assert check["status"] == "failed", failed["steps"]
+    assert "Local originals are unavailable" in check["error"]
+
+
+def test_pending_archive_post_transfer_db_failure_shows_up_on_the_step_tree(
+        app_and_db, tmp_path, monkeypatch):
+    """A ``pending_archives`` bookkeeping failure after the move succeeded
+    still has to render as a failed step; it must not disappear behind an
+    all-completed tree.
+
+    The transfer, including the file deletion, is already done, so the step
+    panel would otherwise render as fully green while the job's overall
+    status says it failed. Running the final ``UPDATE pending_archives SET
+    state='complete'`` while the cleanup step is still active keeps a step
+    available for ``steps.fail`` to mark with the actual exception message.
+    """
+    from db import Database
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    client = app.test_client()
+    archive_id = imported["config"]["pending_archive_id"]
+
+    original_init = Database.__init__
+
+    class _ExecuteGuard:
+        """Wraps a sqlite3.Connection so one specific UPDATE raises.
+
+        ``sqlite3.Connection`` is an immutable type, so its ``execute`` can
+        only be swapped by proxying the whole connection object. The guard
+        passes every attribute through to the real connection and only
+        intercepts the one SQL this test needs to break.
+        """
+        def __init__(self, real):
+            self._real = real
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+        def execute(self, sql, *args, **kwargs):
+            if "UPDATE pending_archives SET state = 'complete'" in sql:
+                raise sqlite3.OperationalError("simulated db lock on commit")
+            return self._real.execute(sql, *args, **kwargs)
+
+    def patched_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        self.conn = _ExecuteGuard(self.conn)
+
+    monkeypatch.setattr(Database, "__init__", patched_init)
+    failed = wait_for_job_via_client(client, client.post(
+        f"/api/import/pending-archives/{archive_id}/send").get_json()["job_id"])
+    assert failed["status"] == "failed", failed
+    # The transfer finished (originals removed, NAS populated), but the
+    # bookkeeping blew up and the exception has to be surfaced on a step.
+    cleanup = next(s for s in failed["steps"] if s["id"] == "cleanup")
+    assert cleanup["status"] == "failed", failed["steps"]
+    assert "simulated db lock on commit" in cleanup["error"]
+
+
 def test_pending_archive_sync_failure_abandons_the_transfer(app_and_db, tmp_path, monkeypatch):
     """A half-done sync must not send stale sidecars to the NAS anyway."""
     import sync as sync_mod

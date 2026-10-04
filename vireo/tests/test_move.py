@@ -5878,6 +5878,42 @@ def test_move_folder_counts_files_through_verification(move_env, merge):
     assert set(counts("Removing originals")) == {(0, 0)}
 
 
+def test_move_folder_resume_completes_copy_bar_when_rsync_skips_everything(
+        move_env):
+    """A merge/resume where every source file already exists at the
+    destination still reaches ``Copying files: N / N``.
+
+    rsync's ``--ignore-existing`` reports (via ``--out-format``) only files
+    it actually transfers, so a no-op resume emits no per-file ``Copying
+    files`` callback. Without an explicit final count the next phase would
+    auto-close Copy files completed with a half-full bar, which is what the
+    whole stepped jobs panel exists to avoid.
+    """
+    from move import move_folder
+
+    env = move_env
+    (env["dst"] / "src").mkdir()
+    # Mirror the source files at the destination so --ignore-existing skips
+    # every one; sizes are identical so the merge verifier is also content.
+    for name in ("bird1.jpg", "bird1.xmp", "bird2.jpg"):
+        (env["dst"] / "src" / name).write_bytes((env["src"] / name).read_bytes())
+
+    calls = []
+    result = move_folder(
+        db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]),
+        merge=True, verify_contents=False,
+        progress_cb=lambda cur, tot, fn, phase: calls.append(
+            (cur, tot, fn, phase)
+        ),
+    )
+    assert result["errors"] == []
+    copy_calls = [(c[0], c[1]) for c in calls if c[3] == "Copying files"]
+    # The last Copy files event matches total/total, so the step closes
+    # with a full bar instead of 0 / N.
+    assert copy_calls[-1][0] == copy_calls[-1][1]
+    assert copy_calls[-1][1] >= 3  # 2 jpgs + 1 xmp
+
+
 def test_move_folder_progress_shutil_fallback(move_env, monkeypatch):
     """When rsync is unavailable, the shutil fallback still reports per-file
     copy progress through the same phase contract."""

@@ -3810,6 +3810,14 @@ class _FolderMove:
             ]}
         if returncode != 0:
             return {"moved": 0, "errors": [f"rsync failed: {stderr.strip()}"]}
+        # Mark Copy files fully done. With ``--ignore-existing`` (merge/resume)
+        # rsync's ``--out-format`` reports only the files it actually transferred,
+        # and the shutil fallback above skips a pre-existing destination entry
+        # the same way, so a no-op resume can leave this phase at 0 / total; the
+        # next phase would then auto-close Copy files completed with that partial
+        # bar still showing. Emitting the final count here is the honest end of
+        # the step whether rsync transferred all, some, or none of the files.
+        self.progress(total_files, total_files, "", "Copying files")
         return None
 
     def plan_mtime_corrections(self):

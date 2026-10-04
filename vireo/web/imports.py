@@ -1305,6 +1305,16 @@ def create_imports_blueprint(
                             synced, undeliverable = _sync_staged_metadata(
                                 thread_db, progress, sync_job_lock,
                                 folder_ids) if sync_first else (0, set())
+                            if sync_first:
+                                # The sync has finished; close its step now.
+                                # ``send_pending_archive`` can still raise
+                                # before ``move_folder`` emits its first
+                                # "Checking destination" callback (a vanished
+                                # staging source, a folder guard refusal, or
+                                # GNU rsync unavailable). Without this the
+                                # except handler marks the sync we just
+                                # finished failed instead of the transfer step.
+                                steps.finish()
 
                             result = send_pending_archive(
                                 thread_db, archive, vireo_dir=os.path.dirname(config["THUMB_CACHE_DIR"]),
@@ -1382,6 +1392,17 @@ def create_imports_blueprint(
                                 "metadata_queued_during_transfer": residual,
                                 "summary": summary,
                             }
+                        # Finalize bookkeeping first, while the cleanup step is
+                        # still active. If this UPDATE or commit fails, the
+                        # except handler's ``steps.fail(...)`` falls on the
+                        # active step and the exception is visible; closing the
+                        # steps first would leave an all-terminal tree that
+                        # ``MoveSteps.fail`` cannot mark, so the global failure
+                        # would render as an all-completed step tree.
+                        thread_db.conn.execute(
+                            "UPDATE pending_archives SET state = 'complete', error = '' WHERE id = ?", (archive_id,),
+                        )
+                        thread_db.conn.commit()
                         # A stepped job's panel shows only its steps, so the
                         # outcomes that need the user's attention go on the
                         # step they came from.
@@ -1400,10 +1421,6 @@ def create_imports_blueprint(
                             steps.finish("cleanup", error=(
                                 f"Local cleanup needs attention at {archive['staging_destination']}: "
                                 f"{result['cleanup_error']}"))
-                        thread_db.conn.execute(
-                            "UPDATE pending_archives SET state = 'complete', error = '' WHERE id = ?", (archive_id,),
-                        )
-                        thread_db.conn.commit()
                         try:
                             invalidate_missing_originals()
                         except Exception:
