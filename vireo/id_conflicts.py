@@ -71,7 +71,7 @@ def build_comparison(db, collection_id, photo_ids=None):
         compare_prediction_to_keywords,
     )
     for pid, entries in species_identities.items():
-        build.by_photo[pid]["species_identity_keys"] = [entry["key"] for entry in entries]
+        build.by_photo[pid]["species_identity_count"] = len(entries)
     build.attach_detected_subjects(detections_by_photo)
     build.attach_predictions(preds)
     summary = build.summarize(len(photos))
@@ -980,7 +980,8 @@ def _is_multi_species(photo, assessment):
     photo is a second-species decision rather than a one-species one.
     """
     species = set(photo.get("species_identity_keys", photo.get("species_keywords") or []))
-    return len(species) > 1 or assessment["signal"]["additional_subject_count"] > 0
+    count = photo.get("species_identity_count", len(species))
+    return count > 1 or assessment["signal"]["additional_subject_count"] > 0
 
 
 def _filter_mask(record):
