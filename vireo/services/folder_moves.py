@@ -31,6 +31,7 @@ from services.local_workspace import (
     folder_has_local_workspace,
     stage_boundary_lock,
 )
+from services.move_steps import MoveSteps, folder_move_steps
 
 log = logging.getLogger(__name__)
 
@@ -217,6 +218,9 @@ class FolderMoves:
             job["_start_time"] = time.time()
 
             last_phase = {"value": None}
+            # Set once the transfer starts; a date-organized move reports
+            # its own phases and keeps the single progress line.
+            steps = None
 
             def progress_cb(current, total, filename, phase="Moving folder"):
                 # Only update keys JobRunner pre-seeds in job["progress"]
@@ -228,20 +232,30 @@ class FolderMoves:
                 job["progress"]["current"] = current
                 job["progress"]["total"] = total
                 job["progress"]["current_file"] = filename
-                # The copy phase fires once per file; on a large folder that
-                # would flood the SSE stream and tie up Flask threads. Throttle
-                # to every 10th file, but always emit on a phase change and on
-                # the first/last file so the panel never looks stalled.
-                phase_changed = phase != last_phase["value"]
-                last_phase["value"] = phase
-                if not phase_changed and current % 10 != 0 \
-                        and current not in (1, total):
-                    return
+                if steps is not None:
+                    if not steps.report(current, total, filename, phase):
+                        return
+                else:
+                    # The copy phase fires once per file; on a large folder
+                    # that would flood the SSE stream and tie up Flask
+                    # threads. Throttle to every 10th file, but always emit
+                    # on a phase change and on the first/last file so the
+                    # panel never looks stalled.
+                    phase_changed = phase != last_phase["value"]
+                    last_phase["value"] = phase
+                    if not phase_changed and current % 10 != 0 \
+                            and current not in (1, total):
+                        return
                 runner.push_event(job["id"], "progress", {
                     "current": current,
                     "total": total,
                     "current_file": filename,
                     "phase": phase,
+                    # The count belongs to this phase, not the whole move;
+                    # label it so nothing reads it as "Overall".
+                    "phase_current": current,
+                    "phase_total": total,
+                    "phase_label": phase,
                 })
 
             # The chained moves from one import all rsync to the same NAS,
@@ -317,20 +331,43 @@ class FolderMoves:
                         developed_dir=developed_dir,
                     )
                 else:
-                    result = move_folder(
-                        db=thread_db,
-                        folder_id=folder_id,
-                        destination=destination,
-                        progress_cb=progress_cb,
-                        developed_dir=developed_dir,
-                        merge=merge,
-                        remote=remote,
-                        destination_name=destination_name,
-                        allow_tracked_merge=allow_tracked_merge,
-                        thumb_cache_dir=self._config["THUMB_CACHE_DIR"],
-                        **({"verify_contents": True} if managed_staging_root and not remote else {}),
-                        **({"pre_commit_check": check_mount} if check_mount else {}),
-                    )
+                    steps = MoveSteps(runner, job, folder_move_steps(
+                        remote=bool(remote),
+                        verify_contents=bool(managed_staging_root),
+                    ))
+                    steps.start()
+                    try:
+                        result = move_folder(
+                            db=thread_db,
+                            folder_id=folder_id,
+                            destination=destination,
+                            progress_cb=progress_cb,
+                            developed_dir=developed_dir,
+                            merge=merge,
+                            remote=remote,
+                            destination_name=destination_name,
+                            allow_tracked_merge=allow_tracked_merge,
+                            thumb_cache_dir=self._config["THUMB_CACHE_DIR"],
+                            **({"verify_contents": True} if managed_staging_root and not remote else {}),
+                            **({"pre_commit_check": check_mount} if check_mount else {}),
+                        )
+                    except Exception as e:
+                        steps.fail(str(e))
+                        raise
+                    # A stepped job's panel shows only its steps, so the
+                    # outcome goes on the step it came from.
+                    errors = result.get("errors") or []
+                    if result.get("needs_merge"):
+                        steps.fail(errors[0] if errors else "Destination already exists",
+                                   status="cancelled")
+                    elif errors:
+                        steps.fail(errors[0])
+                    else:
+                        steps.finish()
+                        if result.get("cleanup_error"):
+                            steps.finish("cleanup", error=(
+                                f"Originals left at {source_path}: "
+                                f"{result['cleanup_error']}"))
             finally:
                 if serialize_lock is not None:
                     serialize_lock.release()

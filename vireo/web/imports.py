@@ -30,6 +30,7 @@ from services.local_folder import (
     stage_pending_source_paths,
 )
 from services.local_workspace import stage_boundary_lock
+from services.move_steps import FOLDER_MOVE_PHASES, MoveSteps, folder_move_steps
 from services.startup_tasks import metadata_repair_count
 from web.background_jobs import make_background_job
 from web.request_args import reject_visual_collection
@@ -1246,11 +1247,28 @@ def create_imports_blueprint(
                         (archive_id,),
                     )
                     thread_db.conn.commit()
+                    steps = None
                     try:
+                        remote = json.loads(archive["target_json"]).get("transport") != "mounted"
+                        steps = MoveSteps(
+                            runner, job,
+                            ([{"id": "sync", "label": "Write metadata to sidecars"}] if sync_first else [])
+                            + folder_move_steps(remote=remote, verify_contents=not remote),
+                            phases={**FOLDER_MOVE_PHASES,
+                                    "Waiting for current XMP sync": "sync",
+                                    "Writing metadata to sidecars": "sync"},
+                        )
+                        steps.start()
+
                         def progress(current, total, filename, phase="Sending to NAS"):
                             job["progress"].update(current=current, total=total, current_file=filename)
+                            if not steps.report(current, total, filename, phase):
+                                return
                             runner.push_event(job["id"], "progress", {
                                 "current": current, "total": total, "current_file": filename, "phase": phase,
+                                # The count belongs to this phase, not the whole
+                                # transfer; label it so nothing reads it as "Overall".
+                                "phase_current": current, "phase_total": total, "phase_label": phase,
                             })
 
                         folder_ids = _staging_folder_ids(
@@ -1288,6 +1306,9 @@ def create_imports_blueprint(
                                 thread_db, progress, sync_job_lock,
                                 folder_ids) if sync_first else (0, set())
 
+                            # Transfer preflight can fail before move_folder's
+                            # first callback. The successful sync is already over.
+                            progress(0, 0, "", "Checking destination")
                             result = send_pending_archive(
                                 thread_db, archive, vireo_dir=os.path.dirname(config["THUMB_CACHE_DIR"]),
                                 guard_folder=guard_move_folder, progress_cb=progress,
@@ -1364,6 +1385,24 @@ def create_imports_blueprint(
                                 "metadata_queued_during_transfer": residual,
                                 "summary": summary,
                             }
+                        # A stepped job's panel shows only its steps, so the
+                        # outcomes that need the user's attention go on the
+                        # step they came from.
+                        steps.finish()
+                        if sync_first:
+                            steps.finish("sync", summary=(
+                                f"{synced} photo{'' if synced == 1 else 's'}"
+                            ), error=(
+                                "Could not re-check the sync queue afterwards, so whether any "
+                                "edit was queued during the transfer is unknown"
+                                if residual is None else
+                                f"{residual} edit{'' if residual == 1 else 's'} queued during the "
+                                "transfer and still need a sync, now over the NAS connection"
+                                if residual else None))
+                        if result.get("cleanup_error"):
+                            steps.finish("cleanup", error=(
+                                f"Local cleanup needs attention at {archive['staging_destination']}: "
+                                f"{result['cleanup_error']}"))
                         thread_db.conn.execute(
                             "UPDATE pending_archives SET state = 'complete', error = '' WHERE id = ?", (archive_id,),
                         )
@@ -1376,6 +1415,8 @@ def create_imports_blueprint(
                             log.warning("Could not invalidate Missing Originals after archive", exc_info=True)
                         return result
                     except Exception as e:
+                        if steps is not None:
+                            steps.fail(str(e), status="cancelled" if runner.is_cancelled(job["id"]) else "failed")
                         thread_db.conn.execute(
                             "UPDATE pending_archives SET state = 'pending', error = ? WHERE id = ?",
                             (str(e), archive_id),

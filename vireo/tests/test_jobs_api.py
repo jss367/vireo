@@ -5458,6 +5458,13 @@ def test_pending_archive_review_delete_and_send(app_and_db, tmp_path, monkeypatc
     assert response.status_code == 200, response.get_json()
     sent = wait_for_job_via_client(client, response.get_json()["job_id"])
     assert sent["status"] == "completed", sent
+    # Every phase of the transfer is listed as its own finished step, with
+    # the verify pass counting the files it compared.
+    steps = {step["id"]: step for step in sent["steps"]}
+    assert list(steps) == ["check", "copy", "timestamps", "verify", "catalog", "cleanup"]
+    assert all(step["status"] == "completed" for step in steps.values()), steps
+    assert steps["verify"]["label"] == "Verify copy (compare every byte)"
+    assert steps["verify"]["progress"]["current"] == steps["verify"]["progress"]["total"] > 0
     assert (tmp_path / "NAS" / "trip" / "keep.jpg").exists()
     assert not (tmp_path / "NAS" / "trip" / "reject.jpg").exists()
     assert (tmp_path / "NAS" / "trip" / "published" / "gallery.txt").exists()
@@ -5496,6 +5503,9 @@ def test_pending_archive_cleanup_warning_does_not_reopen_verified_transfer(app_a
     assert "permission denied" in sent["result"]["cleanup_error"]
     assert "local cleanup needs attention" in sent["result"]["summary"]
     assert staging in sent["result"]["summary"]
+    cleanup = next(step for step in sent["steps"] if step["id"] == "cleanup")
+    assert cleanup["status"] == "completed"
+    assert "permission denied" in cleanup["error"]
     assert len(list((tmp_path / "NAS").rglob("*.jpg"))) == 2
     assert len(list((tmp_path / "staging").rglob("*.jpg"))) == 2
     assert client.get("/api/import/pending-archives").get_json()["items"] == []
@@ -5841,6 +5851,11 @@ def test_pending_archive_reports_edits_that_missed_the_transfer(app_and_db, tmp_
     assert sent["status"] == "completed", sent
     assert sent["result"]["metadata_queued_during_transfer"] == 1
     assert "1 edit queued during the transfer" in sent["summary"]
+    sync_step = sent["steps"][0]
+    assert sync_step["id"] == "sync"
+    assert sync_step["status"] == "completed"
+    assert sync_step["summary"] == "1 photo"
+    assert "1 edit queued during the transfer" in sync_step["error"]
 
 
 def test_pending_archive_says_so_when_the_residual_recheck_fails(app_and_db, tmp_path, monkeypatch):
@@ -5927,6 +5942,11 @@ def test_pending_archive_sync_failure_abandons_the_transfer(app_and_db, tmp_path
         f"/api/import/pending-archives/{archive_id}/send",
         json={"sync_first": True}).get_json()["job_id"])
     assert failed["status"] == "failed", failed
+    # The step that failed says why; the transfer steps never started.
+    assert failed["steps"][0]["id"] == "sync"
+    assert failed["steps"][0]["status"] == "failed"
+    assert "folder not accessible" in failed["steps"][0]["error"]
+    assert {step["status"] for step in failed["steps"][1:]} == {"pending"}
 
     # Nothing moved, and the banner says so and stays retryable.
     assert not (tmp_path / "NAS").exists()
@@ -5935,6 +5955,72 @@ def test_pending_archive_sync_failure_abandons_the_transfer(app_and_db, tmp_path
     assert item["state"] == "ready"
     assert "folder not accessible" in item["error"]
     assert "without syncing" in item["error"]
+
+
+def test_pending_archive_preflight_failure_is_not_a_sync_failure(app_and_db, tmp_path, monkeypatch):
+    import pending_archives
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    archive_id = imported["config"]["pending_archive_id"]
+
+    def refuse(*args, **kwargs):
+        raise ValueError("Transfer preflight refused")
+
+    monkeypatch.setattr(pending_archives, "send_pending_archive", refuse)
+    client = app.test_client()
+    job = wait_for_job_via_client(client, client.post(
+        f"/api/import/pending-archives/{archive_id}/send",
+        json={"sync_first": True}).get_json()["job_id"])
+    assert job["status"] == "failed"
+    steps = {step["id"]: step for step in job["steps"]}
+    assert steps["sync"]["status"] == "completed"
+    assert steps["check"]["status"] == "failed"
+    assert "preflight refused" in steps["check"]["error"]
+    assert steps["copy"]["status"] == "pending"
+    assert not (tmp_path / "NAS").exists()
+
+
+@pytest.mark.parametrize("cleanup_warning", [False, True])
+def test_pending_archive_post_transfer_failure_stays_visible(app_and_db, tmp_path, monkeypatch, cleanup_warning):
+    import shutil
+
+    import move
+
+    app, db = app_and_db
+    imported = _import_for_review(app, db, tmp_path, monkeypatch)
+    archive_id = imported["config"]["pending_archive_id"]
+    staging = imported["config"]["managed_staging"]["destination"]
+    # Fail only this library's post-transfer bookkeeping, without changing
+    # sqlite connections used by pytest/coverage or other threads.
+    db.conn.execute("""CREATE TRIGGER refuse_archive_completion
+        BEFORE UPDATE OF state ON pending_archives WHEN NEW.state = 'complete'
+        BEGIN SELECT RAISE(FAIL, 'Transfer bookkeeping failed'); END""")
+    db.conn.commit()
+
+    def no_rsync(*args, **kwargs):
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(move, "_run_rsync_streamed", no_rsync)
+    if cleanup_warning:
+        remove = shutil.rmtree
+
+        def cleanup(path, *args, **kwargs):
+            if os.path.realpath(path) == os.path.realpath(staging):
+                raise PermissionError("Local cleanup permission denied")
+            return remove(path, *args, **kwargs)
+
+        monkeypatch.setattr(shutil, "rmtree", cleanup)
+    client = app.test_client()
+    job = wait_for_job_via_client(client, client.post(
+        f"/api/import/pending-archives/{archive_id}/send").get_json()["job_id"])
+    assert job["status"] == "failed"
+    assert all(step["status"] == "completed" for step in job["steps"])
+    cleanup = next(step for step in job["steps"] if step["id"] == "cleanup")
+    assert "bookkeeping failed" in cleanup["error"]
+    if cleanup_warning:
+        assert "permission denied" in cleanup["error"]
+    assert (tmp_path / "NAS" / "trip" / "keep.jpg").exists()
 
 
 def test_pending_archive_sync_first_waits_for_a_running_xmp_sync(app_and_db, tmp_path, monkeypatch):

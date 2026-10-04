@@ -5835,6 +5835,82 @@ def test_move_folder_reports_phases_and_per_file_progress(move_env):
     assert all(c[1] == total for c in copy_calls)
 
 
+@pytest.mark.parametrize("merge", [False, True])
+def test_move_folder_counts_files_through_verification(move_env, merge):
+    """Verification and the timestamp pass each count their own items, so a
+    long byte-for-byte compare on a slow mount shows how far it has got
+    instead of a bar left full from the copy."""
+    from move import move_folder
+
+    env = move_env
+    if merge:
+        (env["dst"] / "src").mkdir()
+    calls = []
+    result = move_folder(
+        db=env["db"],
+        folder_id=env["fid_src"],
+        destination=str(env["dst"]),
+        merge=merge,
+        verify_contents=True,
+        progress_cb=lambda cur, tot, fn, phase: calls.append(
+            (cur, tot, fn, phase)
+        ),
+    )
+    assert result["errors"] == []
+
+    def counts(phase):
+        return [(c[0], c[1]) for c in calls if c[3] == phase]
+
+    verify = counts("Verifying copy")
+    assert verify[0] == (0, 3)
+    assert verify[-1] == (3, 3)
+    assert [cur for cur, _ in verify] == sorted(cur for cur, _ in verify)
+    named = {c[2] for c in calls if c[3] == "Verifying copy" and c[2]}
+    assert named == {"bird1.jpg", "bird1.xmp", "bird2.jpg"}
+
+    timestamps = counts("Checking timestamps")
+    assert timestamps[0] == (0, 2)
+    assert timestamps[-1] == (2, 2)
+
+    # Single operations with nothing to count report no total rather than
+    # a full bar.
+    assert set(counts("Updating catalog")) == {(0, 0)}
+    assert set(counts("Removing originals")) == {(0, 0)}
+
+
+@pytest.mark.parametrize("existing", [1, 3])
+def test_merge_copy_progress_finishes_with_skipped_files(move_env, monkeypatch, existing):
+    import shutil
+
+    import move
+
+    env = move_env
+    destination = env["dst"] / "src"
+    destination.mkdir()
+    files = sorted(env["src"].iterdir())
+    for path in files[:existing]:
+        shutil.copy2(path, destination / path.name)
+
+    def resume(src, dest, flags, total, progress, **kwargs):
+        assert "--ignore-existing" in flags
+        copied = 0
+        for path in files:
+            if not (destination / path.name).exists():
+                shutil.copy2(path, destination / path.name)
+                copied += 1
+                progress(copied, total, path.name, "Copying files")
+        return 0, "", False
+
+    monkeypatch.setattr(move, "_run_rsync_streamed", resume)
+    calls = []
+    result = move.move_folder(env["db"], env["fid_src"], str(env["dst"]), merge=True,
+                              progress_cb=lambda *args: calls.append(args))
+    assert not result["errors"]
+    copy = [(cur, total) for cur, total, _, phase in calls if phase == "Copying files"]
+    assert copy[0] == (0, 3) and copy[-1] == (3, 3)
+    assert not env["src"].exists()
+
+
 def test_move_folder_progress_shutil_fallback(move_env, monkeypatch):
     """When rsync is unavailable, the shutil fallback still reports per-file
     copy progress through the same phase contract."""
