@@ -67,12 +67,33 @@ _RAW_DECODE_MODES = {
     RAW_DECODE_LINEAR,
 }
 
-# Sized editor sources only: a 45MP float original alone is over 500 MB.
-# Cache decoded radiance, never recipe output. Every reader gets its own image
-# object; geometry/tone rendering must not modify another request's source.
+# Sized editor sources only. Cache decoded radiance, never recipe output.
+# Every reader gets its own image object; geometry/tone rendering must not
+# modify another request's source.
+#
+# The newest decode is kept even when it alone exceeds the budget: the
+# editor's zoomed-in views decode a D850 at up to ~550 MB, and without that
+# entry every slider move at that zoom re-decodes the RAW (seconds, or tens of
+# seconds from a busy network volume). Older entries are evicted first, so
+# resident memory stays at max(budget, one decode). Decodes above
+# _LINEAR_CACHE_MAX_ENTRY_BYTES (a 100 MP medium-format native frame) are
+# never cached.
 _LINEAR_CACHE_BYTES = 128 * 1024 * 1024
+_LINEAR_CACHE_MAX_ENTRY_BYTES = 1024 * 1024 * 1024
 _linear_cache = OrderedDict()
 _linear_cache_lock = threading.Lock()
+# Decodes in progress, by cache key. The editor fires a preview per slider
+# pause; requests that miss the cache while the same decode is running wait
+# for it instead of starting their own, which would multiply the RAW read and
+# demosaic by the number of pauses.
+_linear_inflight = {}
+
+
+class _LinearDecodeFlight:
+    def __init__(self):
+        self.done = threading.Event()
+        self.image = None
+        self.failed = False
 
 
 def _load_linear_cached(path, max_size):
@@ -80,27 +101,71 @@ def _load_linear_cached(path, max_size):
         return _load_raw_with_retry(path, max_size, raw_decode=RAW_DECODE_LINEAR)
     stat = path.stat()
     key = (str(path.resolve()), stat.st_mtime_ns, stat.st_size, max_size)
-    with _linear_cache_lock:
-        cached = _linear_cache.get(key)
+    while True:
+        with _linear_cache_lock:
+            cached = _linear_cache.get(key)
+            if cached is not None:
+                _linear_cache.move_to_end(key)
+            else:
+                flight = _linear_inflight.get(key)
+                leader = flight is None
+                if leader:
+                    flight = _linear_inflight[key] = _LinearDecodeFlight()
         if cached is not None:
-            _linear_cache.move_to_end(key)
+            # Copy outside the lock: cached entries are never mutated, and a
+            # native-size copy takes long enough to stall other readers.
             return cached.copy()
+        if leader:
+            break
+        flight.done.wait()
+        if flight.failed:
+            # The leader raised; decode ourselves so this request reports its
+            # own error rather than a shared one.
+            continue
+        return None if flight.image is None else flight.image.copy()
+    try:
+        image = _decode_linear_sized(path, max_size)
+    except BaseException:
+        flight.failed = True
+        raise
+    else:
+        flight.image = image
+        if image is not None:
+            # Hand followers their own copy source; ``image`` itself goes to
+            # this caller, who may mutate it.
+            flight.image = image.copy()
+            _store_linear_cache(key, flight.image)
+    finally:
+        with _linear_cache_lock:
+            _linear_inflight.pop(key, None)
+        flight.done.set()
+    return image
+
+
+def _decode_linear_sized(path, max_size):
     image = _load_raw_with_retry(path, max_size, raw_decode=RAW_DECODE_LINEAR)
     if image is None:
         return None
     if max(image.size) > max_size:
         image.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+    return image
+
+
+def _store_linear_cache(key, image):
     # Never cache a JPEG fallback as though the RAW decoded successfully.
     try:
         from .float_image import FloatImage
     except ImportError:
         from float_image import FloatImage
-    if isinstance(image, FloatImage) and image.pixels.nbytes <= _LINEAR_CACHE_BYTES:
-        with _linear_cache_lock:
-            _linear_cache[key] = image.copy()
-            while sum(item.pixels.nbytes for item in _linear_cache.values()) > _LINEAR_CACHE_BYTES:
-                _linear_cache.popitem(last=False)
-    return image
+    if not isinstance(image, FloatImage) or image.pixels.nbytes > _LINEAR_CACHE_MAX_ENTRY_BYTES:
+        return
+    with _linear_cache_lock:
+        _linear_cache[key] = image
+        _linear_cache.move_to_end(key)
+        while len(_linear_cache) > 1 and sum(
+            item.pixels.nbytes for item in _linear_cache.values()
+        ) > _LINEAR_CACHE_BYTES:
+            _linear_cache.popitem(last=False)
 
 # macOS "package" directories that hold OTHER apps' managed data. Walking
 # into them triggers Sequoia's "<app> would like to access data from other
