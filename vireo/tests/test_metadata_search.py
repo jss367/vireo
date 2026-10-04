@@ -161,6 +161,35 @@ def test_number_search_matches_where_a_number_starts(catalog):
     assert search("Binary") == set()
 
 
+def test_metadata_search_excludes_exiftool_file_size(catalog):
+    """Raw and formatted ExifTool byte counts never answer metadata searches."""
+    db, ids = catalog
+    db.conn.execute("UPDATE photos SET exif_data=? WHERE id=?", (json.dumps({
+        "System": {"FileSize": 31837688}, "File": {"FileSize": "31 MB"},
+    }), ids["empty"]))
+    for term in ("3183", "31837688", "31 MB"):
+        rule = {"field": "metadata", "op": "contains", "value": term}
+        assert ids["empty"] not in db.query_photo_ids([rule])
+
+
+@pytest.mark.parametrize("number,term,expected", [
+    (1e-10, "10", False), (-1e-10, "10", False),
+    (1e-10, "1", True), (-1e-10, "1", True),
+    (-117.006978, "117", True), (-117.006978, "-117", True),
+])
+@pytest.mark.parametrize("source", ["photo", "exif"])
+def test_scalar_numbers_do_not_match_inside_exponents(catalog, number, term, expected, source):
+    """Scalar prefixes include an optional sign, never an exponent's digits."""
+    db, ids = catalog
+    if source == "photo":
+        db.conn.execute("UPDATE photos SET latitude=? WHERE id=?", (number, ids["empty"]))
+    else:
+        db.conn.execute("UPDATE photos SET exif_data=? WHERE id=?",
+                        (json.dumps({"EXIF": {"Number": number}}), ids["empty"]))
+    rule = {"field": "metadata", "op": "contains", "value": term}
+    assert (ids["empty"] in db.query_photo_ids([rule])) == expected
+
+
 @pytest.mark.parametrize("op,value", [("is", "hawk"), ("contains", ""), ("contains", None),
                                     ("contains", 123), pytest.param("contains", "x" * 4097, id="too-long")])
 def test_invalid_metadata_rules_are_rejected(catalog, op, value):

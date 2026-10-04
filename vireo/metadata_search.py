@@ -22,11 +22,11 @@ PREDICTION_COLUMNS = (
 )
 
 
-# File-layout tags: where the embedded previews and image data sit in the
-# file and how many bytes they take. Exiftool also reports the previews
+# File size and layout tags: where embedded previews and image data sit
+# in the file and how many bytes they take. Exiftool also reports the previews
 # themselves as "(Binary data N bytes, ...)" placeholders.
 LAYOUT_TAGS = (
-    "StripOffsets", "StripByteCounts", "TileOffsets", "TileByteCounts",
+    "FileSize", "StripOffsets", "StripByteCounts", "TileOffsets", "TileByteCounts",
     "ThumbnailOffset", "ThumbnailLength", "JpgFromRawStart", "JpgFromRawLength",
     "OtherImageStart", "OtherImageLength", "PreviewImageStart", "PreviewImageLength",
     "MPImageStart", "MPImageLength",
@@ -41,14 +41,18 @@ def value_matches(value, value_type, number_text=False):
     starts with the term: ``7688`` finds file number 7688, not shutter count
     157688 or a coefficient of 0.0029115676880. With ``number_text``, file
     tags written as text made only of numbers ("2.86 0.177", "180 600 5.6
-    6.3") count as numbers too, matching where any of them starts.
+    6.3") count as numbers too, matching where any of them starts. Scalar
+    numbers may omit their leading sign, but never match within an exponent.
     """
-    number_like = f"{value_type} IN ('integer', 'real')"
+    scalar_number = f"{value_type} IN ('integer', 'real')"
+    number_text_like = "0"
     if number_text:
-        number_like += f" OR ({value_type} = 'text' AND {value} NOT GLOB '*[^0-9 .,+-]*')"
+        number_text_like = f"{value_type} = 'text' AND {value} NOT GLOB '*[^0-9 .,+-]*'"
     return (
-        f"(CASE WHEN {number_like} "
-        f"THEN lower({value}) GLOB ? OR lower({value}) GLOB ? "
+        f"(CASE WHEN {scalar_number} OR ({number_text_like}) "
+        f"THEN lower({value}) GLOB ? "
+        f"OR ({scalar_number} AND lower(ltrim({value}, '+-')) GLOB ?) "
+        f"OR ({number_text_like} AND lower({value}) GLOB ?) "
         f"ELSE {value} LIKE ? ESCAPE '\\' END)"
     )
 
@@ -56,7 +60,7 @@ def value_matches(value, value_type, number_text=False):
 def term_binds(like, term):
     """The binds for one ``value_matches``: number-start GLOBs, then LIKE."""
     glob = "".join(f"[{ch}]" if ch in "*?[" else ch for ch in term.lower())
-    return [f"{glob}*", f"*[^0-9.]{glob}*", like]
+    return [f"{glob}*", f"{glob}*", f"*[^0-9.]{glob}*", like]
 
 
 def prediction_search_values(alias):
