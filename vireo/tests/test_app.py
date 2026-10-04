@@ -4948,6 +4948,36 @@ def test_shutdown_endpoints_take_no_workspace_mutation_reservation(
     assert calls
 
 
+def test_browse_reads_run_while_a_nas_send_holds_the_workspace(app_and_db):
+    """A NAS send holds the workspace exclusively for its whole run. The
+    POST-shaped reads Browse issues on every folder or filter change must
+    still answer, or the user cannot even look at a folder until the send
+    finishes; a real mutation is still refused."""
+    app, db = app_and_db
+    ws_id = db._active_workspace_id
+    read_endpoints = {
+        "photos.api_photos_query": {"rules": None, "per_page": 10},
+        "photos.api_photos_by_ids": {"photo_ids": [1]},
+        "photos.api_photos_companion_count": {"photo_ids": [1]},
+        "browse.api_browse_photo_counts": {"paths": []},
+        "browse.api_selection_keyword_suggestions": {"photo_ids": [1]},
+        "browse.api_selection_prediction_suggestions": {"photo_ids": [1]},
+        "browse.api_selection_wildlife_state": {"photo_ids": [1]},
+        "photo_edit_recipes.api_photo_edit_recipe_summary": {"photo_ids": [1]},
+        "collections.api_collection_preview": {"rules": []},
+    }
+    rules = {r.endpoint: r for r in app.url_map.iter_rules()}
+    client = app.test_client()
+    with app._job_runner.workspace_mutation(ws_id, exclusive=True, label="send"):
+        for endpoint, body in read_endpoints.items():
+            rule = rules[endpoint]
+            assert "POST" in rule.methods, endpoint
+            resp = client.post(rule.rule, json=body)
+            assert resp.status_code == 200, (endpoint, resp.get_json())
+        resp = client.post("/api/recent-destinations", json={"path": "relative"})
+        assert resp.status_code == 409
+
+
 def test_pipeline_page_init_api(app_and_db):
     """GET /api/pipeline/page-init returns pipeline initialization data."""
     app, _ = app_and_db
