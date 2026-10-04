@@ -3936,3 +3936,42 @@ def test_yellowthroat_full_image_dropout_stays_in_one_encounter(tmp_path, monkey
         assert pinned['subject_uncertain']
     finally:
         db.close()
+
+
+def test_full_image_rescue_respects_current_top_k(tmp_path, monkeypatch):
+    """Cached alternatives excluded by the workspace cannot defeat its margin gate."""
+    import config as cfg
+    from db import Database
+    from pipeline import load_photo_features
+
+    monkeypatch.setattr(cfg, 'CONFIG_PATH', str(tmp_path / 'config.json'))
+    db = Database(str(tmp_path / 'top-k.db'))
+    fid = db.add_folder(str(tmp_path / 'photos'))
+    ids = []
+    for i in range(3):
+        pid = db.add_photo(fid, f'{i}.jpg', '.jpg', 100, 1,
+                           timestamp=f'2026-10-03T09:10:0{i}')
+        ids.append(pid)
+        did = db.write_detection_batch(pid, 'megadetector-v6', [{
+            'box': {'x': .4, 'y': .4, 'w': .2, 'h': .2},
+            'confidence': .06 if i == 1 else .8, 'category': 'animal',
+        }])[0]
+        if i == 1:
+            did = db.write_detection_batch(pid, 'full-image', [{
+                'box': {'x': 0, 'y': 0, 'w': 1, 'h': 1},
+                'confidence': 0, 'category': 'animal',
+            }])[0]
+        db.add_prediction(did, 'Common Yellowthroat', .99, 'BioCLIP-2.5')
+        if i == 1:
+            db.add_prediction(did, 'Song Sparrow', .98, 'BioCLIP-2.5')
+    try:
+        default = load_photo_features(db, effective_config=cfg.DEFAULTS)[1]
+        assert default['subject_absent']
+        limited = load_photo_features(db, config={**cfg.DEFAULTS, 'top_k_predictions': 1},
+                                      effective_config=cfg.DEFAULTS)[1]
+        assert limited['subject_uncertain']
+        assert len(limited['species_top5']) == 1
+        assert limited['species_top5'][0][0] == 'Common Yellowthroat'
+    finally:
+        db.close()
+

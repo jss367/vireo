@@ -679,9 +679,12 @@ class _FeatureLoad:
 
         resolver = SpeciesResolver(db=self.db)
         fallback = defaultdict(list)
+        top_k = (self.config or {}).get("top_k_predictions", 5)
         for pr in self._query_predictions(full_image_only=True):
             pid = pr['photo_id']
             if pid not in self.detected_photo_ids or pid in self.mdv6_passing_photo_ids:
+                continue
+            if len(fallback[pid]) >= top_k:
                 continue
             identity = resolver.prediction(pr)
             fallback[pid].append((identity.display_name, pr['confidence'], pr['model'], identity.key))
