@@ -124,9 +124,9 @@ def _load_linear_cached(path, max_size):
             break
         flight.done.wait()
         if flight.failed:
-            # The leader failed; decode ourselves so this request reports its
-            # own error rather than a shared one.
-            continue
+            # Retry independently: rejoining the flight loop would serialize
+            # all followers behind repeated slow failures.
+            return _decode_linear_sized(path, max_size)
         return None if flight.image is None else flight.image.copy()
     image = None
     try:

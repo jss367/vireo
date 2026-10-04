@@ -516,3 +516,57 @@ def test_late_follower_joins_during_uncacheable_snapshot_copy(dng, monkeypatch):
     assert len({id(image.pixels) for image in results}) == 3
     assert not image_loader._linear_cache
     assert not image_loader._linear_inflight
+
+
+def test_failed_flight_followers_retry_independently(dng, monkeypatch):
+    """All failed-flight followers can retry together without a new flight queue."""
+    import threading
+
+    monkeypatch.setattr(image_loader, '_linear_cache', image_loader.OrderedDict())
+    monkeypatch.setattr(image_loader, '_linear_inflight', {})
+    started, release = threading.Event(), threading.Event()
+    retry_barrier = threading.Barrier(3)
+    calls, results, errors = [], {}, {}
+    call_lock = threading.Lock()
+
+    def decode(path, max_size):
+        with call_lock:
+            calls.append(True)
+            leader = len(calls) == 1
+        if leader:
+            started.set()
+            assert release.wait(10)
+            raise MemoryError('leader failed')
+        retry_barrier.wait(timeout=3)
+        return FloatImage(np.ones((2, 2, 3), dtype=np.float32))
+
+    monkeypatch.setattr(image_loader, '_decode_linear_sized', decode)
+    waiting = _signal_when_flight_has_waiters(monkeypatch, 3)
+
+    def load(name):
+        try:
+            results[name] = image_loader._load_linear_cached(dng, 128)
+        except BaseException as exc:
+            errors[name] = exc
+
+    threads = []
+    try:
+        leader = threading.Thread(target=load, args=('leader',))
+        threads.append(leader)
+        leader.start()
+        assert started.wait(10)
+        for name in ('one', 'two', 'three'):
+            follower = threading.Thread(target=load, args=(name,))
+            threads.append(follower)
+            follower.start()
+        assert waiting.wait(10)
+    finally:
+        release.set()
+        for thread in threads:
+            thread.join(10)
+    assert all(not thread.is_alive() for thread in threads)
+    assert set(errors) == {'leader'}
+    assert isinstance(errors['leader'], MemoryError)
+    assert set(results) == {'one', 'two', 'three'}
+    assert len(calls) == 4
+    assert not image_loader._linear_inflight
