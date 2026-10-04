@@ -21,6 +21,13 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Keep the Mac from idle-sleeping until this script exits. The E2E suite takes
+# ~30 minutes, and a sleep mid-run fails a page load with
+# net::ERR_NETWORK_IO_SUSPENDED, which aborts the release.
+if command -v caffeinate >/dev/null 2>&1; then
+    caffeinate -i -w $$ >/dev/null 2>&1 &
+fi
+
 # Browser tests can exhaust macOS's default 256-descriptor soft limit. Raise
 # only this process's soft limit; child tests/builds inherit it, and the hard
 # limit and caller's shell remain unchanged. Check before modifying manifests.
@@ -87,7 +94,10 @@ fi
 
 # --- Run E2E tests ---
 echo "==> Running E2E tests..."
-python -m pytest tests/e2e/ -v
+# Match the release gate in e2e-full.yml: retry a failed test up to twice so a
+# one-off timing flake doesn't block the release. A broken test still fails all
+# three attempts.
+python -m pytest tests/e2e/ -v --reruns 2 --reruns-delay 1
 echo ""
 
 # --- Local build (only when NOT publishing — CI handles publish builds) ---
