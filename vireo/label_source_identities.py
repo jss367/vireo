@@ -84,6 +84,15 @@ def _changes(conn, where, params, identities, reason):
     return changes
 
 
+class _BackfillCancelled(RuntimeError):
+    pass
+
+
+def _check_cancelled(cancel_check):
+    if cancel_check is not None and cancel_check():
+        raise _BackfillCancelled("Label identity backfill cancelled")
+
+
 def _same_path(a, b):
     return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
 
@@ -322,7 +331,7 @@ def legacy_pass_needed(db):
     ).fetchone() is not None
 
 
-def consensus_identities(db, saved_metas, *, fetch=None, identities_by_file=None, source_snapshots=None):
+def consensus_identities(db, saved_metas, *, fetch=None, identities_by_file=None, source_snapshots=None, cancel_check=None):
     """Identity per species spelling that every known list agrees on.
 
     Predictions older than label fingerprints (``labels_fingerprint =
@@ -380,6 +389,7 @@ def consensus_identities(db, saved_metas, *, fetch=None, identities_by_file=None
                 identities_by_file[path] = source_identities(meta, fetch)
             except Exception as exc:
                 raise RuntimeError(f"{os.path.basename(path)}: {exc}") from exc
+        _check_cancelled(cancel_check)
         if _source_snapshot([meta]) != snapshot:
             raise RuntimeError("Label source files changed during legacy consensus; retry required")
         identities = identities_by_file[path]
@@ -402,7 +412,7 @@ def consensus_identities(db, saved_metas, *, fetch=None, identities_by_file=None
     }
 
 
-def apply_legacy(db, saved_metas=None, *, fetch=None, identities_by_file=None, source_snapshots=None):
+def apply_legacy(db, saved_metas=None, *, fetch=None, identities_by_file=None, source_snapshots=None, cancel_check=None):
     """Stamp pre-fingerprint text-label predictions from the lists' consensus.
 
     Returns the number of predictions changed. Model-native rows (iNat21)
@@ -414,9 +424,10 @@ def apply_legacy(db, saved_metas=None, *, fetch=None, identities_by_file=None, s
         saved_metas = get_saved_labels()
     if source_snapshots is None:
         source_snapshots = {}
+    _check_cancelled(cancel_check)
     identities = consensus_identities(
         db, saved_metas, fetch=fetch, identities_by_file=identities_by_file,
-        source_snapshots=source_snapshots,
+        source_snapshots=source_snapshots, cancel_check=cancel_check,
     )
     conn = db.conn
     with conn:
@@ -425,6 +436,7 @@ def apply_legacy(db, saved_metas=None, *, fetch=None, identities_by_file=None, s
             snapshot = source_snapshots.get(meta.get("labels_file"))
             if snapshot is not None and _source_snapshot([meta]) != snapshot:
                 raise RuntimeError("Label source files changed before legacy commit; retry required")
+        _check_cancelled(cancel_check)
         changes = _changes(conn, _UNSTAMPED_LEGACY_WHERE, (), identities, LEGACY_REPAIR_REASON)
         # Nothing ever writes new rows under 'legacy', so these runs are
         # retired from export like any other corrected historical run.
@@ -470,6 +482,10 @@ def backfill(db, fetch=None, progress=None, cancel_check=None):
                     if _source_snapshot([meta]) != source_snapshots[path]:
                         raise RuntimeError("Label source files changed before lookup; retry required")
                     identities_by_file[path] = source_identities(meta, fetch)
+                _check_cancelled(cancel_check)
+        except _BackfillCancelled:
+            result["cancelled"] = True
+            break
         except Exception as exc:
             log.warning("Could not re-query label list for %s", label_set["fingerprint"], exc_info=True)
             result["errors"].append(
@@ -478,10 +494,14 @@ def backfill(db, fetch=None, progress=None, cancel_check=None):
             continue
         planned, unidentified = plan_label_set(label_set, identities_by_file)
         try:
+            _check_cancelled(cancel_check)
             result["predictions_updated"] += apply_label_set(
                 db, label_set["fingerprint"], planned, len(label_set["labels"]), unidentified,
                 label_set=label_set,
             )
+        except _BackfillCancelled:
+            result["cancelled"] = True
+            break
         except RuntimeError as exc:
             result["errors"].append(f"{label_set['fingerprint']}: {exc}")
             continue
@@ -497,8 +517,10 @@ def backfill(db, fetch=None, progress=None, cancel_check=None):
         try:
             result["legacy_predictions_updated"] = apply_legacy(
                 db, fetch=fetch, identities_by_file=identities_by_file,
-                source_snapshots=source_snapshots,
+                source_snapshots=source_snapshots, cancel_check=cancel_check,
             )
+        except _BackfillCancelled:
+            result["cancelled"] = True
         except Exception as exc:
             log.warning("Could not complete legacy label-list consensus", exc_info=True)
             result["errors"].append(f"Legacy label-list consensus: {exc}")

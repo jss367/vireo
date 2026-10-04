@@ -610,3 +610,26 @@ def test_replaced_sidecar_after_catalog_read_uses_current_query(db, tmp_path, le
     assert _row(db, _prediction_id(db, det, "BioCLIP-2.5", fingerprint))["source_taxon_id"] == 7054
     if not tracked:
         assert db.get_meta(LEGACY_MARKER) is not None
+
+
+@pytest.mark.parametrize("tracked", [False, True])
+def test_cancel_during_final_lookup_does_not_commit_repairs(db, tmp_path, legacy_list, tracked):
+    from label_source_identities import LEGACY_MARKER
+
+    det = _detection(db, tmp_path, "cancelled.jpg")
+    fingerprint = legacy_list["fingerprint"] if tracked else "legacy"
+    db.add_prediction(det, "Redhead", .51, "BioCLIP-2.5", labels_fingerprint=fingerprint)
+    cancelled = False
+
+    def fetch(*args, **kwargs):
+        nonlocal cancelled
+        cancelled = True
+        return SpeciesLabels(["Redhead"], {"Redhead": REDHEAD})
+
+    result = backfill(db, fetch=fetch, cancel_check=lambda: cancelled)
+    assert result["cancelled"] is True
+    assert result["predictions_updated"] == 0
+    assert db.get_meta(MARKER_PREFIX + fingerprint) is None
+    assert db.get_meta(LEGACY_MARKER) is None
+    assert _row(db, _prediction_id(db, det, "BioCLIP-2.5", fingerprint))["source_taxon_id"] is None
+    assert db.conn.execute("SELECT COUNT(*) FROM label_source_identities").fetchone()[0] == 0
