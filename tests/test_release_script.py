@@ -188,3 +188,18 @@ def test_cargo_lock_version_matches_pyproject():
         f"src-tauri/Cargo.lock has vireo v{match.group(1)} but pyproject.toml "
         f"has {expected}. Run `cd src-tauri && cargo update --workspace`."
     )
+
+
+def test_release_keeps_the_mac_awake_through_e2e():
+    """A sleep during the ~30-minute E2E run fails a page load with
+    net::ERR_NETWORK_IO_SUSPENDED and aborts the release."""
+    lines = _code_lines()
+    caffeinate = _sole_index(lines, r"^\s*caffeinate -i -w \$\$ .*&\s*$")
+    e2e = _sole_index(lines, r"^\s*python -m pytest tests/e2e/")
+    assert caffeinate < e2e
+
+
+def test_release_e2e_reruns_flakes_like_the_ci_release_gate():
+    lines = _code_lines()
+    e2e = lines[_sole_index(lines, r"^\s*python -m pytest tests/e2e/")]
+    assert "--reruns 2" in e2e
