@@ -448,3 +448,17 @@ def test_compare_rows_carry_the_render_key_their_thumbnails_need(compare_collect
                     f"{label} row for an unedited photo invented a render "
                     "key, costing a needless refetch"
                 )
+
+
+def test_multi_species_counts_real_case_variant_unlinked_keywords(compare_collection):
+    import id_conflicts
+    _, db, cid, photo_ids = compare_collection
+    pid = photo_ids[0]
+    db.conn.execute("DELETE FROM photo_keywords WHERE photo_id=?", (pid,))
+    for index, name in enumerate(["Robin", "robin"]):
+        keyword = db.add_keyword(f"Distinct Robin {index}", is_species=True)
+        db.conn.execute("UPDATE keywords SET name=? WHERE id=?", (name, keyword))
+        db.tag_photo(pid, keyword)
+    photo = next(p for p in id_conflicts.build_comparison(db, cid)["photos"] if p["photo_id"] == pid)
+    assert photo["species_identity_count"] == 2
+    assert id_conflicts._is_multi_species(photo, {"signal": {"additional_subject_count": 0}})
