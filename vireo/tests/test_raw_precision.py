@@ -152,6 +152,202 @@ def test_sized_raw_cache_is_bounded_isolated_and_invalidates_on_source_change(dn
     assert sum(i.pixels.nbytes for i in image_loader._linear_cache.values()) <= image_loader._LINEAR_CACHE_BYTES
 
 
+def _signal_when_flight_has_waiters(monkeypatch, count):
+    """Event set once ``count`` requests are parked on an in-flight decode."""
+    import threading
+
+    waiters = []
+    waiting = threading.Event()
+
+    class CountingEvent(threading.Event):
+        def wait(self, timeout=None):
+            waiters.append(True)
+            if len(waiters) == count:
+                waiting.set()
+            return super().wait(timeout)
+
+    class Flight(image_loader._LinearDecodeFlight):
+        def __init__(self):
+            super().__init__()
+            self.done = CountingEvent()
+
+    monkeypatch.setattr(image_loader, '_LinearDecodeFlight', Flight)
+    return waiting
+
+
+def test_concurrent_sized_raw_misses_share_one_decode(dng, monkeypatch):
+    """Slider pauses that miss the cache together must not each decode."""
+    import threading
+
+    monkeypatch.setattr(image_loader, '_linear_cache', image_loader.OrderedDict())
+    monkeypatch.setattr(image_loader, '_linear_inflight', {})
+    original = image_loader._postprocess_raw_linear
+    calls = []
+    started = threading.Event()
+    release = threading.Event()
+
+    def decode(raw):
+        calls.append(True)
+        started.set()
+        assert release.wait(10)
+        return original(raw)
+
+    monkeypatch.setattr(image_loader, '_postprocess_raw_linear', decode)
+    waiting = _signal_when_flight_has_waiters(monkeypatch, 3)
+    results = [None] * 4
+
+    def load(i):
+        results[i] = load_image(dng, max_size=128, raw_decode=RAW_DECODE_LINEAR)
+
+    leader = threading.Thread(target=load, args=(0,))
+    leader.start()
+    assert started.wait(10)
+    followers = [threading.Thread(target=load, args=(i,)) for i in range(1, 4)]
+    for t in followers:
+        t.start()
+    # Followers must be parked on the flight before the decode finishes.
+    assert waiting.wait(10)
+    release.set()
+    for t in [leader, *followers]:
+        t.join(10)
+    assert len(calls) == 1
+    assert all(isinstance(r, FloatImage) for r in results)
+    assert len({id(r.pixels) for r in results}) == 4
+    results[0].pixels[:] = 0
+    assert results[1].pixels.max() > 0
+    assert image_loader._linear_inflight == {}
+
+
+def test_sized_raw_followers_share_the_leader_failure(dng, monkeypatch):
+    """Parked followers must not retry a failed decode one after another."""
+    import threading
+
+    monkeypatch.setattr(image_loader, '_linear_cache', image_loader.OrderedDict())
+    monkeypatch.setattr(image_loader, '_linear_inflight', {})
+    calls = []
+    started = threading.Event()
+    release = threading.Event()
+
+    def decode(raw):
+        calls.append(True)
+        started.set()
+        assert release.wait(10)
+        raise MemoryError('leader decode failed')
+
+    monkeypatch.setattr(image_loader, '_postprocess_raw_linear', decode)
+    waiting = _signal_when_flight_has_waiters(monkeypatch, 3)
+    results = [object()] * 4
+
+    def load(i):
+        results[i] = load_image(dng, max_size=128, raw_decode=RAW_DECODE_LINEAR)
+
+    leader = threading.Thread(target=load, args=(0,))
+    leader.start()
+    assert started.wait(10)
+    followers = [threading.Thread(target=load, args=(i,)) for i in range(1, 4)]
+    for t in followers:
+        t.start()
+    assert waiting.wait(10)
+    release.set()
+    for t in [leader, *followers]:
+        t.join(10)
+        assert not t.is_alive()
+    assert len(calls) == 1
+    assert results == [None] * 4  # load_image logs each request's failure
+    assert image_loader._linear_inflight == {}
+
+    # The failure is not cached: the next request decodes again.
+    release.set()
+    load(0)
+    assert len(calls) == 2
+
+
+def test_lone_decode_above_the_entry_ceiling_is_not_duplicated(dng, monkeypatch):
+    """A decode too large to cache must not be copied when nobody waits on it."""
+    monkeypatch.setattr(image_loader, '_linear_cache', image_loader.OrderedDict())
+    monkeypatch.setattr(image_loader, '_linear_inflight', {})
+    monkeypatch.setattr(image_loader, '_LINEAR_CACHE_MAX_ENTRY_BYTES', 1)
+    original_copy = FloatImage.copy
+    copies = []
+
+    def counting_copy(self):
+        copies.append(True)
+        return original_copy(self)
+
+    monkeypatch.setattr(FloatImage, 'copy', counting_copy)
+    image = load_image(dng, max_size=128, raw_decode=RAW_DECODE_LINEAR)
+    assert isinstance(image, FloatImage)
+    assert copies == []
+    assert len(image_loader._linear_cache) == 0
+
+
+def test_followers_of_an_uncacheable_decode_share_it(dng, monkeypatch):
+    import threading
+
+    monkeypatch.setattr(image_loader, '_linear_cache', image_loader.OrderedDict())
+    monkeypatch.setattr(image_loader, '_linear_inflight', {})
+    monkeypatch.setattr(image_loader, '_LINEAR_CACHE_MAX_ENTRY_BYTES', 1)
+    original = image_loader._postprocess_raw_linear
+    calls = []
+    started = threading.Event()
+    release = threading.Event()
+
+    def decode(raw):
+        calls.append(True)
+        started.set()
+        assert release.wait(10)
+        return original(raw)
+
+    monkeypatch.setattr(image_loader, '_postprocess_raw_linear', decode)
+    waiting = _signal_when_flight_has_waiters(monkeypatch, 2)
+    results = [None] * 3
+
+    def load(i):
+        results[i] = load_image(dng, max_size=128, raw_decode=RAW_DECODE_LINEAR)
+
+    leader = threading.Thread(target=load, args=(0,))
+    leader.start()
+    assert started.wait(10)
+    followers = [threading.Thread(target=load, args=(i,)) for i in (1, 2)]
+    for t in followers:
+        t.start()
+    assert waiting.wait(10)
+    release.set()
+    for t in [leader, *followers]:
+        t.join(10)
+    assert len(calls) == 1
+    assert all(isinstance(r, FloatImage) for r in results)
+    assert len({id(r.pixels) for r in results}) == 3
+    assert len(image_loader._linear_cache) == 0
+    assert image_loader._linear_inflight == {}
+
+
+def test_newest_sized_raw_decode_is_cached_even_above_the_budget(dng, monkeypatch):
+    """A zoomed-in editor source larger than the budget must still be reused."""
+    monkeypatch.setattr(image_loader, '_linear_cache', image_loader.OrderedDict())
+    monkeypatch.setattr(image_loader, '_linear_inflight', {})
+    monkeypatch.setattr(image_loader, '_LINEAR_CACHE_BYTES', 1)
+    original = image_loader._postprocess_raw_linear
+    calls = []
+
+    def decode(raw):
+        calls.append(True)
+        return original(raw)
+
+    monkeypatch.setattr(image_loader, '_postprocess_raw_linear', decode)
+    load_image(dng, max_size=128, raw_decode=RAW_DECODE_LINEAR)
+    load_image(dng, max_size=128, raw_decode=RAW_DECODE_LINEAR)
+    assert len(calls) == 1
+    load_image(dng, max_size=256, raw_decode=RAW_DECODE_LINEAR)
+    assert len(calls) == 2
+    # Only the newest oversized entry stays resident.
+    assert [key[-1] for key in image_loader._linear_cache] == [256]
+
+    monkeypatch.setattr(image_loader, '_LINEAR_CACHE_MAX_ENTRY_BYTES', 1)
+    load_image(dng, max_size=192, raw_decode=RAW_DECODE_LINEAR)
+    assert [key[-1] for key in image_loader._linear_cache] == [256]
+
+
 def test_linear_decode_fallback_remains_a_display_image(tmp_path, monkeypatch):
     from test_image_loader import _FakeRaw, _install_fake_raw, _jpeg_bytes
 
@@ -243,3 +439,85 @@ def test_camera_denoise_retains_float_precision_and_16_bit_export(local):
     exported = tifffile.imread(stream)
     assert exported.dtype == np.uint16
     assert len(np.unique(exported)) > 256
+
+
+def test_late_follower_joins_during_uncacheable_snapshot_copy(dng, monkeypatch):
+    """A reader arriving during snapshot construction must not decode again."""
+    import threading
+
+    monkeypatch.setattr(image_loader, '_linear_cache', image_loader.OrderedDict())
+    monkeypatch.setattr(image_loader, '_linear_inflight', {})
+    monkeypatch.setattr(image_loader, '_LINEAR_CACHE_MAX_ENTRY_BYTES', 1)
+    decoded, release_decode = threading.Event(), threading.Event()
+    copying, release_copy = threading.Event(), threading.Event()
+    calls, copies, results, errors = [], [], [], []
+    original_copy = FloatImage.copy
+
+    def decode(path, max_size):
+        calls.append(True)
+        decoded.set()
+        assert release_decode.wait(10)
+        return FloatImage(np.ones((2, 2, 3), dtype=np.float32))
+
+    def copy(image):
+        copies.append(True)
+        if len(copies) == 1:
+            copying.set()
+            assert release_copy.wait(10)
+        return original_copy(image)
+
+    monkeypatch.setattr(image_loader, '_decode_linear_sized', decode)
+    monkeypatch.setattr(FloatImage, 'copy', copy)
+    # Reuse the fixture's parking hook, observing each join individually.
+    first_waiter = _signal_when_flight_has_waiters(monkeypatch, 1)
+    first_flight = image_loader._LinearDecodeFlight
+    second_waiter = threading.Event()
+
+    class Flight(first_flight):
+        def __init__(self):
+            super().__init__()
+            original_wait = self.done.wait
+
+            def wait(timeout=None):
+                if self.waiters == 2:
+                    second_waiter.set()
+                return original_wait(timeout)
+
+            self.done.wait = wait
+
+    monkeypatch.setattr(image_loader, '_LinearDecodeFlight', Flight)
+
+    def load():
+        try:
+            results.append(image_loader._load_linear_cached(dng, 128))
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = []
+    try:
+        leader = threading.Thread(target=load)
+        threads.append(leader)
+        leader.start()
+        assert decoded.wait(10)
+        first = threading.Thread(target=load)
+        threads.append(first)
+        first.start()
+        assert first_waiter.wait(10)
+        release_decode.set()
+        assert copying.wait(10)
+        late = threading.Thread(target=load)
+        threads.append(late)
+        late.start()
+        assert second_waiter.wait(3)
+    finally:
+        release_decode.set()
+        release_copy.set()
+        for thread in threads:
+            thread.join(10)
+    assert not errors
+    assert all(not thread.is_alive() for thread in threads)
+    assert len(calls) == 1
+    assert len(results) == 3
+    assert len({id(image.pixels) for image in results}) == 3
+    assert not image_loader._linear_cache
+    assert not image_loader._linear_inflight
