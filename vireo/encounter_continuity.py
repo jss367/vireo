@@ -58,6 +58,18 @@ def _winner(entries, confidence=0.8):
     )
 
 
+def _conflicting_model(entries, target):
+    """Any independent confident classifier can veto a continuity repair."""
+    by_model = defaultdict(list)
+    for entry in entries:
+        by_model[entry[2] if len(entry) > 2 else "unknown"].append(entry)
+    for values in by_model.values():
+        winner = _winner(values)
+        if winner and winner["key"] != target:
+            return True
+    return False
+
+
 def _weak_windows(photos, max_gap):
     """Cheap temporal preselection before loading low-confidence evidence."""
     folders = defaultdict(list)
@@ -87,6 +99,8 @@ def _weak_windows(photos, max_gap):
 
 def _flip_window(left, middle, right):
     triple = (left, middle, right)
+    if any(p.get("isolated_species_context") for p in triple):
+        return None
     if any(not p.get("subject_present") or p.get("subject_absent") for p in triple):
         return None
     if left.get("folder_id") is None or len({p.get("folder_id") for p in triple}) != 1:
@@ -167,11 +181,13 @@ def _recover_weak(photos, evidence, animals, config):
         for pid in ids:
             if any(_overlap(animals[pid][0], animals[a][0]) < 0.02 for a in (left, right)):
                 break
-            secondary = [_winner(_predictions([d], top_k)) for d in animals[pid][1:]]
-            if any(w and w["key"] != target for w in secondary):
+            if any(_conflicting_model(d.get("predictions", []), target) for d in animals[pid][1:]):
                 break
-            full = _predictions([d for d in evidence[pid] if d["detector_model"] == "full-image"], top_k)
+            full_detections = [d for d in evidence[pid] if d["detector_model"] == "full-image"]
+            full = _predictions(full_detections, top_k)
             crop = _predictions([animals[pid][0]], top_k)
+            if any(_conflicting_model(d.get("predictions", []), target) for d in [*full_detections, animals[pid][0]]):
+                break
             options = [(name, entries, _winner(entries)) for name, entries in (("full_image", full), ("crop", crop))]
             if any(w and w["key"] != target for _, _, w in options):
                 break
@@ -206,8 +222,7 @@ def _recover_weak(photos, evidence, animals, config):
 def _matching_subject(detections, target, floor, confidence):
     matches = []
     for d in detections:
-        winner = _winner(d.get("predictions", []))
-        if winner and winner["key"] != target:
+        if _conflicting_model(d.get("predictions", []), target):
             return None
         if d["confidence"] >= floor:
             strong = _winner(d.get("predictions", []), confidence)
@@ -259,8 +274,7 @@ def _suppress_isolated(photos, evidence, animals, config):
             if d["detector_model"] == "full-image"
             for entry in d.get("predictions", [])
         ]
-        winner = _winner(full)
-        if winner and winner["key"] != winners[0]["key"]:
+        if _conflicting_model(full, winners[0]["key"]):
             continue
         if _visual_conflict(middle, (left, right)):
             continue
@@ -279,7 +293,7 @@ def _suppress_isolated(photos, evidence, animals, config):
     # No synthetic classifier score: abstain for grouping and let surrounding
     # observations supply the encounter suggestion. Per-subject predictions stay intact.
     return [
-        {**p, "species_top5": [], "isolated_species_context": accepted[p["id"]]} if p["id"] in accepted else p
+        {**p, "grouping_species_top5": [], "isolated_species_context": accepted[p["id"]]} if p["id"] in accepted else p
         for p in photos
     ]
 

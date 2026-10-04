@@ -65,6 +65,29 @@ def test_default_candidate_inventory_preserves_the_experiment():
     assert len(specs) == 34 and len({s["id"] for s in specs}) == 34
 
 
+def test_retained_features_preserve_grouping_override_and_classifier(library):
+    import sqlite3
+
+    from encounter_eval.algorithms import run_algorithm
+    from encounter_eval.library import Taxonomy, inference_features
+
+    photo = {
+        "id": 1,
+        "folder_id": 1,
+        "timestamp": "2026-01-01T00:00:00",
+        "subject_present": True,
+        "species_top5": [("Spotted Redshank", 0.99, "m", "taxon:101")],
+        "grouping_species_top5": [],
+        "isolated_species_context": {"anchor_ids": [2, 3]},
+    }
+    with sqlite3.connect(library) as conn:
+        conn.row_factory = sqlite3.Row
+        retained = json.loads(encode(inference_features(photo, Taxonomy(conn))))
+    assert retained["species_top5"][0][0] == "Spotted Redshank"
+    assert retained["grouping_species_top5"] == []
+    assert run_algorithm("production", [retained])[0].roster is None
+
+
 def test_training_never_loads_final_test_answers_without_request(tmp_path, monkeypatch):
     import encounter_eval.label_benchmark as benchmark
 

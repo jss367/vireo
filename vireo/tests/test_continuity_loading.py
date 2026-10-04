@@ -65,20 +65,26 @@ def test_weak_crop_recovers_without_full_image_or_keyword_labels(sequence_db):
 
 
 def test_isolated_species_abstention_preserves_subject_prediction_and_trace(sequence_db):
-    from pipeline import load_photo_features, run_grouping, serialize_results
+    from pipeline import load_photo_features, rebuild_species_predictions, run_grouping, run_triage, serialize_results
 
     db, ids = sequence_db
     for i, pid in enumerate(ids):
         classify(db, pid, 0.7, "Chickadee" if i == 1 else "Nuthatch", 0.828 if i == 1 else 0.99)
     photos = load_photo_features(db, effective_config={})
-    assert photos[1]["species_top5"] == []
+    assert photos[1]["species_top5"][0][0] == "Chickadee"
+    assert photos[1]["grouping_species_top5"] == []
     assert photos[1]["subjects"][0]["predictions"][0][0] == "Chickadee"
     assert photos[1]["isolated_species_context"]["original_species_top5"][0][0] == "Chickadee"
     groups = run_grouping(photos, emit_trace=True)
     assert len(groups) == 1 and groups[0]["species"][0] == "Nuthatch"
     assert any(t["decision"] == "kept_species_continuity" for t in groups[0]["trace"])
-    saved = serialize_results({"photos": photos, "encounters": groups, "summary": {}})
+    groups, triaged = run_triage(groups)
+    assert triaged[1]["species_top5"][0][0] == "Chickadee"
+    saved = serialize_results({"photos": triaged, "encounters": groups, "summary": {}})
     assert saved["photos"][1]["isolated_species_context"] == photos[1]["isolated_species_context"]
+    assert saved["photos"][1]["species_top5"][0][0] == "Chickadee"
+    predictions = rebuild_species_predictions(saved, ids)
+    assert any(p["species"] == "Chickadee" for p in predictions)
     assert all(not db.get_photo_keywords(pid) for pid in ids)
 
 

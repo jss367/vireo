@@ -74,7 +74,8 @@ def test_repairs_isolated_flip_without_inventing_scores_or_editing_original():
     after, changes = suppress_flips(photos, {})
     assert len(before) == 3 and len(segment_encounters(after)) == 1
     assert len(changes) == 1 and changes[0]["photo_id"] == 2
-    assert after[1]["species_top5"] == []
+    assert after[1]["species_top5"] == original[1]["species_top5"]
+    assert after[1]["grouping_species_top5"] == []
     assert after[1]["evidence"] == original[1]["evidence"]
     assert photos == original
 
@@ -188,6 +189,19 @@ def test_repeated_invocation_does_not_cascade():
     assert changes and suppress_flips(p, {})[0] == p
 
 
+def test_disagreeing_full_image_models_veto_isolated_repair():
+    photos = flip_sequence()
+    full = deepcopy(photos[1]["evidence"][0])
+    full["detector_model"] = "full-image"
+    full["sources"] = [
+        {"model": "model-a", "predictions": [{"name": "Bird 10", "score": 0.99, "taxon": "inat:10"}]},
+        {"model": "model-b", "predictions": [{"name": "Bird 20", "score": 0.99, "taxon": "inat:20"}]},
+    ]
+    photos[1]["evidence"].append(full)
+    after, changes = suppress_flips(photos, {})
+    assert not changes and after == photos
+
+
 def promote(photos, config):
     evidence = compact(photos)
     selected = evidence_photo_ids(photos, config)
@@ -235,6 +249,19 @@ def test_crop_evidence_recovers_without_full_image_and_never_mutates_inputs():
     assert len(bridges) == 1 and after[1]["subject_uncertain"] and not after[1]["subject_absent"]
     assert after[1]["species_keys"] == {"taxon:10": "inat:10"}
     assert ps == original
+
+
+@pytest.mark.parametrize("source", ["full-image", "megadetector-v6"])
+def test_disagreeing_supplemental_models_veto_weak_rescue(source):
+    photos = weak_sequence()
+    supplemental = deepcopy(photos[1]["evidence"][0])
+    supplemental.update(id=99, detector_model=source, detector_confidence=0.02)
+    supplemental["sources"].append(
+        {"model": "model-b", "predictions": [{"name": "Other bird", "score": 0.99, "taxon": "inat:20"}]}
+    )
+    photos[1]["evidence"].append(supplemental)
+    after, bridges = promote(photos, {})
+    assert not bridges and after == photos
 
 
 @pytest.mark.parametrize(

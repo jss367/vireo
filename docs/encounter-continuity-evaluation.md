@@ -25,7 +25,9 @@ across all three pairs. Multiple agreeing classifier models on the conflicting
 frame, competing confident subjects, corroborating full-image disagreement, or
 available embedding cosine similarity below 0.80 prevent the correction.
 
-The isolated classification abstains only in the grouping feature view.
+The isolated classification abstains only through `grouping_species_top5`;
+the per-photo `species_top5` classifier field remains unchanged for triage,
+cached results, conflict detection, and review summaries.
 Surrounding frames supply the encounter suggestion. Original classifier rows,
 per-subject predictions, photo tags, and ratings are preserved. Saved grouping
 features retain the original prediction and supporting context; the encounter
@@ -103,8 +105,14 @@ cumulative review database.
 
 The reusable scorer and bounded comparison runner now live in
 `tools/encounter-evaluation`. Both the evaluator's retained-feature adapter and
-Vireo's feature loader call `vireo/encounter_continuity.py`. Production port
+Vireo's feature loader call `vireo/encounter_continuity.py`. Initial production port
 verification compared both paths with the frozen selected experiment across
 all 71,153 photos: encounter memberships and species suggestions matched in
 every session. This is implementation-equivalence testing, not another tuning
 pass over the final test.
+
+Subsequent PR review strengthened the contrary-evidence veto to check each
+classifier model independently, including when combined evidence has no
+winner. The figures above describe the frozen experiment before that stricter
+veto; they have not been recomputed for the review fixes. Regression tests
+cover the shared production/evaluator grouping field and contrary-model cases.
