@@ -27,6 +27,7 @@ records them and stamps the rows already there, with a before/after audit
 in ``species_identity_repairs``.
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -79,6 +80,21 @@ def _same_path(a, b):
     return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
 
 
+def _source_snapshot(metas):
+    """Content digests of source text and identity/query sidecars for one plan."""
+    snapshot = []
+    for meta in metas:
+        path = meta["labels_file"]
+        for candidate in (path, os.path.splitext(path)[0] + ".json"):
+            try:
+                with open(candidate, "rb") as source:
+                    digest = hashlib.sha256(source.read()).hexdigest()
+            except FileNotFoundError:
+                digest = None
+            snapshot.append((candidate, digest))
+    return snapshot
+
+
 def pending_label_sets(db, saved_metas=None):
     """Label sets whose predictions lack identities a list query can supply.
 
@@ -126,6 +142,7 @@ def pending_label_sets(db, saved_metas=None):
         # The list as today's merge reads it, or, for one file, as it was
         # read before merging folded case-only duplicates. Either rebuilding
         # the recorded fingerprint proves the file is the one classified.
+        source_snapshot = _source_snapshot(metas)
         candidates = [load_merged_labels(metas)]
         if len(metas) == 1:
             candidates.append(read_label_file(metas[0]["labels_file"]))
@@ -136,7 +153,12 @@ def pending_label_sets(db, saved_metas=None):
                 "not recovering species IDs for it", fingerprint,
             )
             continue
-        pending.append({"fingerprint": fingerprint, "metas": metas, "labels": labels})
+        if _source_snapshot(metas) != source_snapshot:
+            continue
+        pending.append({
+            "fingerprint": fingerprint, "metas": metas, "labels": labels,
+            "source_snapshot": source_snapshot,
+        })
     return pending
 
 
@@ -212,13 +234,16 @@ def plan_label_set(label_set, identities_by_file):
     for name in label_set["labels"]:
         taxa = {}
         key = keyword_match_key(name)
+        vetoed = False
         for path, names in file_names.items():
             for source_name in names.get(key, []):
                 entry = identities_by_file.get(path, {}).get(source_name)
-                if entry:
+                if _valid_identity(entry):
                     taxa[entry["taxon_id"]] = entry
+                else:
+                    vetoed = True
         species = normalize_keyword_display(name)
-        if len(taxa) != 1 or not species:
+        if vetoed or len(taxa) != 1 or not species:
             unidentified.append(name)
             continue
         entry = next(iter(taxa.values()))
@@ -226,7 +251,7 @@ def plan_label_set(label_set, identities_by_file):
     return planned, unidentified
 
 
-def apply_label_set(db, fingerprint, planned, label_count, unidentified=()):
+def apply_label_set(db, fingerprint, planned, label_count, unidentified=(), *, label_set=None):
     """Record identities for one label set and stamp its existing predictions.
 
     Returns the number of predictions changed. One writer transaction, so a
@@ -241,6 +266,8 @@ def apply_label_set(db, fingerprint, planned, label_count, unidentified=()):
         conn.execute("BEGIN IMMEDIATE")
         if db.get_meta(marker) is not None:
             return 0
+        if label_set is not None and _source_snapshot(label_set["metas"]) != label_set["source_snapshot"]:
+            raise RuntimeError("Label source files changed during identity lookup; retry required")
         conn.executemany(
             "INSERT OR REPLACE INTO label_source_identities "
             "(labels_fingerprint, species, source_taxon_id, scientific_name) VALUES (?, ?, ?, ?)",
@@ -401,9 +428,14 @@ def backfill(db, fetch=None, progress=None, cancel_check=None):
             )
             continue
         planned, unidentified = plan_label_set(label_set, identities_by_file)
-        result["predictions_updated"] += apply_label_set(
-            db, label_set["fingerprint"], planned, len(label_set["labels"]), unidentified,
-        )
+        try:
+            result["predictions_updated"] += apply_label_set(
+                db, label_set["fingerprint"], planned, len(label_set["labels"]), unidentified,
+                label_set=label_set,
+            )
+        except RuntimeError as exc:
+            result["errors"].append(f"{label_set['fingerprint']}: {exc}")
+            continue
         result["label_sets"] += 1
         result["labels"] += len(label_set["labels"])
         result["labels_identified"] += len(planned)

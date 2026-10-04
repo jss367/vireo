@@ -493,3 +493,47 @@ def test_merged_prompt_checks_case_folded_sources(tmp_path, other, identified):
     )
     assert bool(planned) == identified
     assert bool(unidentified) != identified
+
+
+def test_unidentified_folded_source_vetoes_a_merged_identity(tmp_path):
+    """One identified source cannot override another source's ambiguous prompt."""
+    from label_source_identities import plan_label_set
+
+    paths = [tmp_path / "one.txt", tmp_path / "two.txt"]
+    for path, name in zip(paths, ["Redhead", "redhead"], strict=True):
+        path.write_text(name + "\n")
+    metas = [{"labels_file": str(path)} for path in paths]
+    planned, unidentified = plan_label_set(
+        {"metas": metas, "labels": load_merged_labels(metas)},
+        {str(paths[0]): {"Redhead": REDHEAD}, str(paths[1]): {}},
+    )
+    assert not planned
+    assert len(unidentified) == 1
+
+
+@pytest.mark.parametrize("changed_file", ["text", "sidecar"])
+def test_source_change_during_lookup_keeps_old_fingerprint_unstamped(db, tmp_path, legacy_list, changed_file):
+    """Network lookup results never stamp an old fingerprint after its files change."""
+    from label_source_identities import LEGACY_MARKER
+
+    det = _detection(db, tmp_path, "duck.jpg")
+    fingerprint = legacy_list["fingerprint"]
+    db.add_prediction(det, "Redhead", .51, "BioCLIP-2.5", labels_fingerprint=fingerprint)
+
+    def fetch(*args, **kwargs):
+        if changed_file == "text":
+            legacy_list["path"].write_text("Mallard\nRedhead\nCanvasback\n")
+        else:
+            path = legacy_list["path"].with_suffix(".json")
+            meta = json.loads(path.read_text())
+            meta["place_id"] = 1
+            path.write_text(json.dumps(meta))
+        return SpeciesLabels(["Redhead"], {"Redhead": REDHEAD})
+
+    result = backfill(db, fetch=fetch)
+    assert result["ok"] is False
+    assert "changed" in result["errors"][0]
+    assert db.get_meta(MARKER_PREFIX + fingerprint) is None
+    assert db.get_meta(LEGACY_MARKER) is None
+    assert _row(db, _prediction_id(db, det, "BioCLIP-2.5", fingerprint))["source_taxon_id"] is None
+    assert db.conn.execute("SELECT COUNT(*) FROM label_source_identities").fetchone()[0] == 0
