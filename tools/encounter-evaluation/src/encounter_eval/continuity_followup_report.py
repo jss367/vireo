@@ -22,7 +22,8 @@ def build(comparison, output):
     from bursts import detect_bursts
 
     comparison, output = Path(comparison), Path(output)
-    frozen_source = json.loads((comparison / "search-design.json").read_text())["source"]
+    design = json.loads((comparison / "search-design.json").read_text())
+    frozen_source = design["source"]
     current_source = code_identity(repo)
     # The report pairs the frozen revision with a hash of the live source: both
     # must come from the same checkout, or the recorded provenance lies.
@@ -31,6 +32,11 @@ def build(comparison, output):
             "Current checkout differs from the frozen comparison; check out the comparison's "
             "revision before regenerating the report or rerun the comparison"
         )
+    # The per-case grouping replay catches changes that reach the case's output,
+    # but a manifest edit elsewhere (taxonomy_display, workspace, config) can
+    # still alter review labels or the exported snapshot without changing those
+    # groups. Reject any manifest whose digest no longer matches the frozen one.
+    frozen_manifest_digests = {entry["path"]: entry["manifest_digest"] for entry in design.get("scopes", [])}
     selection = json.loads((comparison / "summary.json").read_text())
     changed = json.loads((comparison / "changed-cases.json").read_text())["cases"]
     cases = [c for c in changed if c["needs_review"]]
@@ -40,6 +46,12 @@ def build(comparison, output):
         source = Path(case["scope"])
         if source not in scopes:
             manifest = json.loads((source / "manifest.json").read_text())
+            frozen_manifest_digest = frozen_manifest_digests.get(str(source))
+            if frozen_manifest_digest is None or digest(manifest) != frozen_manifest_digest:
+                raise ValueError(
+                    "Retained scope manifest changed since the frozen comparison; "
+                    "restore the original manifest or rerun the comparison"
+                )
             scope = output / f"scope-{len(scopes)}-workspace-{manifest['workspace']}"
             (scope / "inputs").mkdir(parents=True)
             (scope / "baseline-inputs").mkdir()

@@ -276,7 +276,14 @@ def test_ambiguous_report_exports_a_replayable_snapshot(tmp_path):
     measured = {"train": {"counts": {"photos": 3}}, "development": {"counts": {"photos": 0}}}
     write_json(comparison / "summary.json", {"selected": selected, "baseline": measured, "selected_metrics": measured})
     write_json(comparison / "changed-cases.json", {"cases": cases})
-    write_json(comparison / "search-design.json", {"source": code_identity(configure_repo())})
+    frozen_manifest = json.loads((scope / "manifest.json").read_text())
+    write_json(
+        comparison / "search-design.json",
+        {
+            "source": code_identity(configure_repo()),
+            "scopes": [{"path": str(scope), "manifest_digest": digest(frozen_manifest)}],
+        },
+    )
     report = tmp_path / "review"
     result = build(comparison, report)
     assert result["cases"] == 1
@@ -335,4 +342,93 @@ def test_report_rejects_source_drifted_from_frozen_comparison(tmp_path):
     drifted["source_digest"] = "0" * 64
     write_json(comparison / "search-design.json", {"source": drifted})
     with pytest.raises(ValueError, match="Current checkout differs"):
+        build(comparison, tmp_path / "report")
+
+
+def test_acceptable_rejects_candidates_that_add_more_incorrect_additions():
+    from encounter_eval.continuity_followup import acceptable
+
+    baseline = {
+        "metrics": {
+            "counts": {
+                "positive_labels": 10,
+                "recovered_positive_labels": 6,
+                "incorrect_additions": 2,
+                "different_label_short_joins": 0,
+                "unverified_additions": 0,
+            },
+            "objective": 0.4,
+        },
+        "reviewed_cases": [],
+    }
+    improved_recall_but_worse_additions = {
+        "metrics": {
+            "counts": {
+                "positive_labels": 10,
+                "recovered_positive_labels": 9,
+                "incorrect_additions": 3,
+                "different_label_short_joins": 0,
+                "unverified_additions": 0,
+            },
+            "objective": 0.1,
+        },
+        "reviewed_cases": [],
+    }
+    assert not acceptable(improved_recall_but_worse_additions, baseline)
+    # The same gain with no new known-wrong additions is accepted.
+    unchanged_additions = {
+        "metrics": {
+            "counts": {
+                "positive_labels": 10,
+                "recovered_positive_labels": 9,
+                "incorrect_additions": 2,
+                "different_label_short_joins": 0,
+                "unverified_additions": 0,
+            },
+            "objective": 0.1,
+        },
+        "reviewed_cases": [],
+    }
+    assert acceptable(unchanged_additions, baseline)
+
+
+def test_report_rejects_retained_manifest_drift(tmp_path):
+    from encounter_eval.common import code_identity, write_json
+    from encounter_eval.continuity_followup_report import build
+
+    scope = retained_scope(tmp_path)
+    manifest = json.loads((scope / "manifest.json").read_text())
+    entry = manifest["sessions"][0]
+    comparison = tmp_path / "comparison"
+    comparison.mkdir()
+    measured = {"train": {"counts": {"photos": 1}}, "development": {"counts": {"photos": 0}}}
+    write_json(
+        comparison / "summary.json",
+        {"selected": spec("weak-lower-confidence"), "baseline": measured, "selected_metrics": measured},
+    )
+    cases = [
+        {
+            "id": "case-0",
+            "needs_review": True,
+            "scope": str(scope),
+            "session": entry["id"],
+            "input_digest": entry["digest"],
+            "ids": [0],
+            "before": [],
+            "after": [],
+        }
+    ]
+    write_json(comparison / "changed-cases.json", {"cases": cases})
+    write_json(
+        comparison / "search-design.json",
+        {
+            "source": code_identity(configure_repo()),
+            "scopes": [{"path": str(scope), "manifest_digest": digest(manifest)}],
+        },
+    )
+    # Mutate the manifest on disk after freezing the comparison without
+    # changing the per-session bundle digests the replay check inspects.
+    manifest["taxonomy_display"] = {"inat:1": "Renamed bird"}
+    write_json(scope / "manifest.json", manifest)
+    with pytest.raises(ValueError, match="Retained scope manifest changed"):
         build(comparison, tmp_path / "report")

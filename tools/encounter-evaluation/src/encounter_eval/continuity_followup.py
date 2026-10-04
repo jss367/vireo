@@ -82,10 +82,15 @@ def summarize(counts):
 
 def acceptable(result, baseline):
     counts = Counter(result["metrics"]["counts"])
+    baseline_counts = Counter(baseline["metrics"]["counts"])
     return (
         eligible(result["metrics"], baseline["metrics"])
         and not counts["lost_previously_recovered_labels"]
         and not counts["new_differing_label_joins"]
+        # Known-wrong additions are counted on completely labeled photos; a
+        # candidate that adds more of them is never a win however much recall
+        # it gains elsewhere.
+        and counts["incorrect_additions"] <= baseline_counts["incorrect_additions"]
         and all(c["passed"] for c in result["reviewed_cases"])
     )
 
@@ -152,7 +157,7 @@ def run(scopes, output, *, constraints=()):
         "scopes": [{"path": str(p), "manifest_digest": digest(m)} for p, m in scopes],
         "constraints": constraints,
         "selection": "Lowest training objective among eligible candidates per family; choose among those using development; no adaptive second search.",
-        "eligibility": "No lost previously recovered reference species, no newly joined differing-label controls within 60 seconds, all reviewed boundaries preserved, and bounded unverified additions.",
+        "eligibility": "No lost previously recovered reference species, no newly joined differing-label controls within 60 seconds, no increase in known incorrect additions on completely labeled photos, all reviewed boundaries preserved, and bounded unverified additions.",
         "test_policy": "Never load former final-test bundles; reserve capture days after 2026-10-03 for a future independent final test.",
         "reference_policy": "Same singleton tags within 10 seconds imply a join proxy; different partial tags are conservative controls, not proven absence; inferred checks are not human approvals.",
     }
