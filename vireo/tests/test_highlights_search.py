@@ -22,3 +22,16 @@ def test_search_skips_prediction_on_identified_photo():
 
     found, _ = filter_highlight_sections(buckets, [], "wood duck")
     assert [p["id"] for b in found for p in b["photos"]] == [1]
+
+
+def test_search_uses_canonical_accepted_name_without_classifier_guess():
+    from highlights_payload import collect_highlight_buckets
+    buckets, other = collect_highlight_buckets(
+        [{"id": 1, "filename": "bird.jpg", "species": "Gray Jay",
+          "predicted_species": "Least Grebe", "predicted_confidence": 0.9}],
+        0.5, canonicalize_species=lambda _: "Canada Jay")
+    assert buckets[0]["species"] == "Canada Jay"
+    found, _ = filter_highlight_sections(buckets, other, "Canada")
+    assert [p["id"] for b in found for p in b["photos"]] == [1]
+    found, _ = filter_highlight_sections(buckets, other, "Least Grebe")
+    assert not found

@@ -478,6 +478,7 @@ def collect_highlight_buckets(
             "noise_estimate": r.get("noise_estimate"),
             "eye_tenengrad": r.get("eye_tenengrad"),
             "species": accepted,
+            "canonical_species": species if is_accepted else None,
             "prediction_id": r.get("prediction_id"),
             "predicted_species": r.get("predicted_species"),
             "predicted_confidence": predicted_conf,
@@ -549,6 +550,7 @@ def _highlight_search_fields(photo):
         photo.get("folder_path") or "",
         photo.get("keyword_names") or "",
         photo.get("species") or "",
+        photo.get("canonical_species") or "",
         predicted or "",
         "unidentified" if photo.get("is_unidentified") else "",
     ]
