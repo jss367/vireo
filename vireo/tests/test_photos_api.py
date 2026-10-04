@@ -5406,6 +5406,7 @@ def test_photo_editor_page_renders(client_with_photo):
     assert "'/api/jobs/export/preflight'" in html
     assert "function buildExportPreflightRequest()" in html
     assert "VireoExportCollisions.acknowledged(preflight)" in html
+    assert "VireoExportJob.watch(data.job_id);" in html
     assert "var editorExportRequestGeneration = 0;" in html
     assert "requestGeneration !== editorExportRequestGeneration" in html
     assert "function setExportControlsBusy(busy)" in html

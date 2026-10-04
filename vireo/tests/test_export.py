@@ -397,6 +397,29 @@ def test_export_photos_defaults_to_original_folder(export_env):
     assert os.path.isfile(env["src"] / "bird1_2.jpg")
 
 
+def test_export_beside_unreachable_original_folder_names_the_folder(export_env):
+    """An offline original folder fails the photo with the folder's path, so
+    the toast the user reads says which drive to reconnect, and the export
+    does not recreate the folder on the local disk."""
+    env = export_env
+    offline = env["tmp_path"] / "offline-src"
+    os.rename(env["src"], offline)
+
+    result = export_photos(
+        db=env["db"],
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination="",
+        options={"naming_template": "{original}"},
+    )
+
+    assert result["exported"] == 0
+    assert result["errors"] == [
+        f"bird1.jpg: original folder is not reachable ({env['src']})"
+    ]
+    assert not env["src"].exists()
+
+
 def test_export_photos_reports_every_original_folder(export_env):
     """Beside-original exports expose every resolved output directory."""
     env = export_env
@@ -429,6 +452,34 @@ def test_export_photos_reports_every_original_folder(export_env):
     assert result["destination"] == ""
     assert result["destinations"] == [str(env["src"]), str(second_src)]
     assert result["destination_mode"] == "original"
+
+
+def test_export_photos_written_destinations_skip_folders_whose_photos_failed(export_env):
+    """A folder is resolved before its photo is written, so ``destinations``
+    names it even when that photo fails; ``written_destinations`` lists only
+    the folders that received a file."""
+    env = export_env
+    second_src = env["tmp_path"] / "second-src"
+    second_src.mkdir()
+    second_folder_id = env["db"].add_folder(str(second_src), name="Second Safari")
+    unreadable = env["db"].add_photo(
+        folder_id=second_folder_id, filename="gone.jpg", extension=".jpg",
+        file_size=500, file_mtime=3.0, timestamp="2024-06-17T10:00:00",
+    )
+
+    result = export_photos(
+        db=env["db"],
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"], unreadable],
+        destination="",
+        options={"naming_template": "{original}"},
+    )
+
+    assert result["exported"] == 1
+    assert len(result["errors"]) == 1
+    assert result["errors"][0].startswith("gone.jpg: ")
+    assert result["destinations"] == [str(env["src"]), str(second_src)]
+    assert result["written_destinations"] == [str(env["src"])]
 
 
 def test_export_photos_can_use_subfolder_beside_originals(export_env):

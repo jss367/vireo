@@ -450,7 +450,8 @@ async function startExport() {
     }
     setExportDismissible(true);
     closeExportModal();
-    showToast('Export started (' + count + ' photos)', 'info');
+    showToast('Export started (' + count + ' photo' + (count === 1 ? '' : 's') + ')', 'info');
+    VireoExportJob.watch(data.job_id);
   } catch(err) {
     if (requestGeneration !== exportRequestGeneration) return;
     setExportDismissible(true);

@@ -766,6 +766,8 @@ async function developPhotos(photoIds) {
 }
 
 /* ---------- Safe EventSource ---------- */
+// A dropped stream toasts "Connection lost" unless the caller passes
+// quietError: true because its onError shows a more specific message.
 function safeEventSource(url, callbacks) {
   callbacks = callbacks || {};
   var source = new EventSource(url);
@@ -782,7 +784,7 @@ function safeEventSource(url, callbacks) {
   });
   source.onerror = function() {
     source.close();
-    showToast('Connection lost', 'error');
+    if (!callbacks.quietError) showToast('Connection lost', 'error');
     if (callbacks.onError) callbacks.onError();
   };
   return source;
