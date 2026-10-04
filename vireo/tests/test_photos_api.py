@@ -14616,3 +14616,18 @@ def test_partial_global_paste_does_not_require_or_rebind_local_mask(client_with_
     assert response.status_code == 200
     assert response.json["skipped"] == []
     assert db.get_photo_edit_recipe(pid) == {"version": 1, "adjustments": {"exposure": 1}}
+
+
+def test_active_mask_retries_replaced_generation(client_with_photo, monkeypatch, tmp_path):
+    from PIL import Image
+    from web.media import _load_active_mask
+
+    _, db, photo_id = client_with_photo
+    _register_active_mask(db, photo_id, str(tmp_path))
+    replacement = tmp_path / "replacement.png"
+    Image.new("L", (7, 5), 123).save(replacement)
+    paths = iter([tmp_path / "deleted-generation.png", replacement])
+    monkeypatch.setattr(db, "get_photo_mask", lambda *_: {"path": str(next(paths))})
+    mask = _load_active_mask(db, photo_id)
+    assert mask.size == (7, 5)
+    assert mask.getpixel((0, 0)) == 123

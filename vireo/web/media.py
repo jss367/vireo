@@ -2673,20 +2673,26 @@ class _EditPreviewRequest:
 
 def _load_active_mask(db, photo_id):
     """The photo's active SAM mask as a PIL 'L' image, or None."""
+    import io
+
     from PIL import Image
 
-    row = db.conn.execute(
-        "SELECT active_mask_variant FROM photos WHERE id=?", (photo_id,)
-    ).fetchone()
-    variant = row["active_mask_variant"] if row else None
-    mask_row = db.get_photo_mask(photo_id, variant) if variant else None
-    if not mask_row or not mask_row.get("path"):
-        return None
-    try:
-        with Image.open(mask_row["path"]) as img:
-            return img.convert("L").copy()
-    except (OSError, ValueError):
-        return None
+    for _attempt in range(3):
+        row = db.conn.execute(
+            "SELECT active_mask_variant FROM photos WHERE id=?", (photo_id,)
+        ).fetchone()
+        variant = row["active_mask_variant"] if row else None
+        mask_row = db.get_photo_mask(photo_id, variant) if variant else None
+        if not mask_row or not mask_row.get("path"):
+            return None
+        try:
+            with open(mask_row["path"], "rb") as handle:
+                mask_bytes = handle.read()
+            with Image.open(io.BytesIO(mask_bytes)) as img:
+                return img.convert("L").copy()
+        except (OSError, ValueError):
+            continue
+    return None
 
 
 def create_media_blueprint(
