@@ -3353,7 +3353,7 @@ function autoToneMessage(result) {
   if (!notes.length) return 'Auto Tone' + metering + ': already balanced, nothing changed';
   var text = notes.join(', ');
   return 'Auto Tone' + metering + ': ' + text.charAt(0).toUpperCase() + text.slice(1) +
-    '. White balance left as shot.';
+    '. White balance left unchanged.';
 }
 
 function _loadImage(src) {

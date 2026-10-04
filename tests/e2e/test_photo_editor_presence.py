@@ -10,7 +10,7 @@ from PIL import Image
 from playwright.sync_api import expect
 
 # The success toast, never the 'Could not analyze ... Auto Tone' error.
-AUTO_TONE_APPLIED = re.compile(r'Auto Tone.*(White balance left as shot|nothing changed)')
+AUTO_TONE_APPLIED = re.compile(r'Auto Tone.*(White balance left unchanged|nothing changed)')
 
 
 @pytest.fixture

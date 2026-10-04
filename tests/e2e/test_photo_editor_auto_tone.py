@@ -47,7 +47,7 @@ def test_auto_tone_button_sets_sliders_and_reports_metering(live_server, page, d
 
     toast = page.locator('#toastContainer')
     expect(toast).to_contain_text('Auto Tone (metered on the detected subject): Brightened')
-    expect(toast).to_contain_text('White balance left as shot.')
+    expect(toast).to_contain_text('White balance left unchanged.')
     assert fitted['exposure'] > 0
     expect(page.locator('#exposureValue')).to_have_text(f"{fitted['exposure']:.1f}")
     adjustments = page.evaluate('recipeForSave(editorState.recipe).adjustments')
