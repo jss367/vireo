@@ -418,3 +418,31 @@ def test_non_animal_subject_does_not_hide_the_true_animal_anchor():
     after, bridges = promote(photos, {})
     assert bridges == [3, 4, 5]
     assert after[2]["weak_detection_context"]["anchor_ids"] == [1, 6]
+
+
+def test_burst_time_gap_does_not_shift_default_continuity_with_hidden_anchor_conflict():
+    # A hidden anchor conflict (a full-image detection on each anchor whose
+    # independent classifier picks a different species) would be ignored by the
+    # retained legacy _recover_weak pass but vetoed by _recover_extended's
+    # anchor-conflict check. Without the burst_time_gap decoupling, lowering
+    # the slider past the anchor-to-anchor gap would skip the legacy run that
+    # still rescues at the default gap, so the slider would change encounter
+    # continuity. Pinning the legacy window inside the default rule keeps the
+    # outcome identical across saved burst_time_gap values.
+    base = weak_sequence()
+    for anchor_idx in (0, 2):
+        base[anchor_idx]["evidence"].append({
+            "id": 100 + anchor_idx,
+            "detector_model": "full-image",
+            "category": "animal",
+            "detector_confidence": 0.5,
+            "box_x": 0.0, "box_y": 0.0, "box_w": 1.0, "box_h": 1.0,
+            "sources": [{"model": "model-b", "predictions": [
+                {"name": "Other bird", "score": 0.99, "taxon": "inat:20"},
+            ]}],
+        })
+    wide, wide_bridges = promote(deepcopy(base), {"pipeline": {"burst_time_gap": 3.0}})
+    narrow, narrow_bridges = promote(deepcopy(base), {"pipeline": {"burst_time_gap": 0.1}})
+    assert wide_bridges == narrow_bridges
+    assert [p["subject_absent"] for p in wide] == [p["subject_absent"] for p in narrow]
+    assert [p["subject_uncertain"] for p in wide] == [p["subject_uncertain"] for p in narrow]

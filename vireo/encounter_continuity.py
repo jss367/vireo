@@ -402,12 +402,21 @@ def apply_encounter_continuity(photos, evidence_by_photo, config=None, *, repair
     synthetic classifier prediction or confidence.
     """
     config = config or {}
-    photos = apply_previous_continuity(photos, evidence_by_photo, config, repair_isolated=repair_isolated)
+    # Pin the retained legacy rescue to the 3.0s cap _recover_weak already
+    # enforced so the burst_time_gap slider cannot shift default encounter
+    # continuity. Without this override, a lower burst gap would skip legacy
+    # runs the historical baseline still formed, letting the slider decide the
+    # outcome in cases the extended rule later vetoes (hidden anchor conflict).
+    continuity_config = {
+        **config,
+        "pipeline": {**config.get("pipeline", {}), "burst_time_gap": 3.0},
+    }
+    photos = apply_previous_continuity(photos, evidence_by_photo, continuity_config, repair_isolated=repair_isolated)
     animals = _animal_detections(evidence_by_photo)
     changes = {}
     for anchor_context in (False, True):
         for before, after in zip(
-            photos, _recover_extended(photos, evidence_by_photo, animals, config, anchor_context=anchor_context),
+            photos, _recover_extended(photos, evidence_by_photo, animals, continuity_config, anchor_context=anchor_context),
             strict=True,
         ):
             if after is not before:
