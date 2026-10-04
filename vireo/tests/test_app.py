@@ -4957,6 +4957,7 @@ def test_browse_reads_run_while_a_nas_send_holds_the_workspace(app_and_db):
     ws_id = db._active_workspace_id
     read_endpoints = {
         "photos.api_photos_query": {"rules": None, "per_page": 10},
+        "photos.api_photos_by_ids": {"photo_ids": [1]},
         "photos.api_photos_companion_count": {"photo_ids": [1]},
         "browse.api_browse_photo_counts": {"paths": []},
         "browse.api_selection_keyword_suggestions": {"photo_ids": [1]},
