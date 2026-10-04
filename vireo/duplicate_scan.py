@@ -36,6 +36,75 @@ def _fetch_photo_rows(db, photo_ids, columns, where_extra=""):
     return rows
 
 
+def revalidate_scan_result(db, result):
+    """Drop entries of a stored scan result that no longer match the catalog.
+
+    ``/api/duplicates/last-scan`` restores a scan that may be months old.
+    Its entries name photos by id, but ``photos.id`` is a plain INTEGER
+    PRIMARY KEY, so once an extra copy's row is deleted, SQLite hands that
+    id to the next photo imported. Served as-is, the restored card shows the
+    new photo's thumbnail under the old filename, which reads as two unrelated
+    photos flagged as duplicates.
+
+    An entry is current only while its id still names the same file (same
+    path) with the group's ``file_hash``. A group whose kept photo is stale,
+    or that has no current extra copy left, is dropped; buckets and counts
+    are rebuilt from the groups that remain. Returns a new result dict with
+    ``stale_group_count`` set to the number of groups dropped. Does no
+    filesystem I/O, so a sleeping NAS cannot stall the page load.
+    """
+    proposals = result.get("proposals") or []
+    photo_ids = sorted({
+        entry["id"]
+        for p in proposals
+        for entry in [p.get("winner") or {}] + list(p.get("losers") or [])
+        if isinstance(entry.get("id"), int)
+    })
+    rows = _fetch_photo_rows(
+        db, photo_ids,
+        columns="p.id, p.filename, p.file_hash, f.path AS folder_path",
+    )
+    live = {
+        r["id"]: (
+            os.path.join(r["folder_path"] or "", r["filename"] or ""),
+            r["file_hash"],
+        )
+        for r in rows
+    }
+
+    def current(entry, file_hash):
+        return live.get(entry.get("id")) == (entry.get("path"), file_hash)
+
+    kept = []
+    for p in proposals:
+        file_hash = p.get("file_hash")
+        winner = p.get("winner") or {}
+        losers = [
+            loser for loser in p.get("losers") or []
+            if current(loser, file_hash)
+        ]
+        if not current(winner, file_hash) or not losers:
+            continue
+        kept.append(dict(p, losers=losers))
+
+    return dict(
+        result,
+        proposals=kept,
+        buckets=bucket_unresolved_proposals(kept),
+        group_count=len(kept),
+        loser_count=sum(
+            len(p["losers"]) for p in kept if p.get("status") == "unresolved"
+        ),
+        resolved_group_count=sum(
+            1 for p in kept if p.get("status") == "resolved"
+        ),
+        resolved_loser_count=sum(
+            len(p["losers"]) for p in kept if p.get("status") == "resolved"
+        ),
+        stale_group_count=len(proposals) - len(kept),
+    )
+
+
 def _volume_offline(path):
     """True when ``path`` sits on a mount-shaped volume that is not reachable.
 
