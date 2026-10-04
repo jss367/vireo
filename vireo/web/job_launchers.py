@@ -1423,7 +1423,7 @@ def create_job_launchers_blueprint(
         folder = request_db.conn.execute(
             "SELECT path, name FROM folders WHERE id = ?", (folder_id,)
         ).fetchone()
-        if not folder:
+        if not folder or not request_db.workspace_has_folder_link(folder_id):
             return json_error("Folder not found", status=404)
 
         guard_err = guard_move_folder(request_db, folder_id)

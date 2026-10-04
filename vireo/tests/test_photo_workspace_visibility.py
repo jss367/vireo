@@ -598,3 +598,31 @@ def test_mount_loss_rollback_revokes_duplicate_grants_and_demotes_promotion(tmp_
             'SELECT 1 FROM workspace_photos WHERE workspace_id=? AND photo_id=?',
             (workspace, other_photo),
         ).fetchone()
+
+
+def test_grant_only_workspace_cannot_preflight_or_launch_whole_folder_move(app_and_db, tmp_path):
+    app, db = app_and_db
+    owner = db._active_workspace_id
+    guest = db.create_workspace("Guest")
+    source = tmp_path / "owned-source"
+    folder, shared = _photo(db, source, "shared.jpg")
+    _, sibling = _photo(db, source, "private.jpg", b"private")
+    untracked = source / "untracked.txt"
+    untracked.write_bytes(b"untracked")
+    db.add_workspace_folder(owner, folder)
+    db.grant_workspace_photos(guest, [shared])
+    db.conn.commit()
+    client = app.test_client()
+    assert client.post(f"/api/workspaces/{guest}/activate").status_code == 200
+    destination = tmp_path / "destination"
+    destination.mkdir()
+    body = {"folder_id": folder, "destination": str(destination)}
+    for route in ["/api/move-folder/preflight", "/api/jobs/move-folder"]:
+        assert client.post(route, json=body).status_code == 404
+    assert (source / "shared.jpg").exists() and (source / "private.jpg").read_bytes() == b"private"
+    assert untracked.read_bytes() == b"untracked"
+    assert not list(destination.iterdir())
+    assert db.get_folder(folder)["path"] == str(source)
+    assert db.get_photo(sibling) is not None
+    assert client.post(f"/api/workspaces/{owner}/activate").status_code == 200
+    assert client.post("/api/move-folder/preflight", json=body).status_code == 200

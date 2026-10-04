@@ -216,10 +216,11 @@ def create_moves_blueprint(get_db, json_error):
         except ValueError as exc:
             return json_error(str(exc))
 
-        folder = get_db().conn.execute(
+        request_db = get_db()
+        folder = request_db.conn.execute(
             "SELECT path, name FROM folders WHERE id = ?", (folder_id,)
         ).fetchone()
-        if not folder:
+        if not folder or not request_db.workspace_has_folder_link(folder_id):
             return json_error("Folder not found", status=404)
 
         # Remote target: resolve the NAS-side dest and probe it over SSH.
