@@ -42,7 +42,7 @@ var VireoExportJob = (function() {
     }
     if (!result) {
       if (done.status === 'cancelled') {
-        return {message: 'Export stopped before any photo was exported.', type: 'warning'};
+        return {message: 'Export stopped before any photo was exported', type: 'warning'};
       }
       var jobErrors = done.errors || [];
       return {
@@ -56,7 +56,9 @@ var VireoExportJob = (function() {
     var errors = result.errors || [];
     var message;
     if (done.status === 'cancelled') {
-      message = 'Export stopped after exporting ' + photos(exported) + (exported ? where(result) : '');
+      message = exported
+        ? 'Export stopped after exporting ' + photos(exported) + where(result)
+        : 'Export stopped before any photo was exported';
     } else if (exported) {
       message = 'Exported ' + photos(exported) + where(result);
     } else {

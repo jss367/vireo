@@ -78,7 +78,11 @@ test('a job that crashed before returning a result shows its error', () => {
 
 test('a stopped export says how far it got', () => {
   same(outcome({status: 'cancelled', result: null}),
-    {message: 'Export stopped before any photo was exported.', type: 'warning'});
+    {message: 'Export stopped before any photo was exported', type: 'warning'});
+  // Stopped mid-run before the first file finished: the job still returns a
+  // result, with nothing exported.
+  same(outcome({status: 'cancelled', result: {exported: 0, errors: [], destinations: ['/out']}}),
+    {message: 'Export stopped before any photo was exported', type: 'warning'});
   same(outcome({status: 'cancelled', result: {exported: 2, errors: [], destinations: ['/out']}}),
     {message: 'Export stopped after exporting 2 photos to /out', type: 'warning'});
 });
