@@ -438,3 +438,34 @@ def test_subject_analysis_compatibility_keeps_library_unchanged(library, has_sub
     finally:
         conn.close()
     assert library.read_bytes() == before
+
+
+def test_verified_name_refresh_unifies_sources_and_reference_labels(library, tmp_path):
+    from species_identity_repair import refresh_common_name_index
+
+    conn = sqlite3.connect(library)
+    conn.execute("CREATE TABLE taxa_common_names(taxon_id, name, locale, UNIQUE(taxon_id,name,locale))")
+    conn.execute("UPDATE predictions SET classifier_model='BioCLIP-2.5'")
+    conn.execute("""INSERT INTO predictions VALUES
+        (100,1,'Spotted Redshank','Tringa erythropus',.99,'iNat21','tol','2026-01-02')""")
+    entries = {
+        name.lower(): {'taxon_id': tid, 'scientific_name': sci, 'common_name': name, 'rank': 'species'}
+        for tid, name, sci in [(101, 'Spotted Redshank', 'Tringa erythropus'),
+                               (102, 'Glossy Ibis', 'Plegadis falcinellus')]
+    }
+    with conn:
+        refresh_common_name_index(conn, {
+            'source': 'iNaturalist DWCA', 'common_name_identity_version': 1,
+            'ambiguous_common_names': [], 'taxa_by_common': entries,
+            'taxa_by_scientific': {e['scientific_name'].lower(): e for e in entries.values()},
+        })
+    conn.close()
+    output = tmp_path / 'run'
+    manifest = prepare(library, output)
+    bundle = read_bundle(output, manifest['sessions'][0])
+    first = bundle['photos'][0]
+    assert bundle['answers']['1']['taxa'] == ['inat:101']
+    assert {p['taxon'] for s in first['evidence'][0]['sources'] for p in s['predictions']} == {'inat:101'}
+    for algorithm in ('production', 'independent', 'sequence'):
+        groups = run_algorithm(algorithm, bundle['photos'], grouping_config=manifest['grouping_config'])
+        assert groups[0].roster == ('inat:101',)
