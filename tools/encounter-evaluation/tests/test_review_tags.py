@@ -186,3 +186,15 @@ def test_http_save_updates_tags_and_reports_retriable_failure(writable_queue, mo
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+def test_individually_shared_photo_can_sync_review_tags(writable_queue):
+    queue, db, pid, old, preserved = writable_queue
+    db.grant_workspace_photos(db._ws_id(), [pid])
+    db.conn.execute('DELETE FROM workspace_folders')
+    db.conn.commit()
+    result = save_and_sync(queue, pid, ['inat:102'])
+    assert result['status'] == 'applied', result
+    assert old not in keywords(db, pid)
+    assert preserved <= keywords(db, pid)
+    assert db.get_pending_changes()

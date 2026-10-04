@@ -23,7 +23,7 @@ def _apply_tags(db, photo, answer, marker):
         db.conn.execute('BEGIN IMMEDIATE')
         now = db.conn.execute('''SELECT p.filename,p.file_hash,f.path AS folder
             FROM photos p JOIN folders f ON f.id=p.folder_id
-            JOIN workspace_folders wf ON wf.folder_id=p.folder_id
+            JOIN photo_workspace_visibility wf ON wf.photo_id=p.id
             WHERE p.id=? AND wf.workspace_id=?''', (pid, db._ws_id())).fetchone()
         if now is None or not same_photo(photo, dict(now)):
             raise ValueError('Photo no longer matches this library or workspace; no tags were changed')

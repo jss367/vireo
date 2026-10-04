@@ -121,3 +121,16 @@ def test_import_never_adds_dataset_tables_to_the_photo_library(comparison, libra
     with pytest.raises(ValueError, match='Destination'):
         import_reviews(library, root, export)
     assert library.read_bytes() == original
+
+
+def test_live_replay_accepts_individually_shared_photos(comparison, library):
+    from photo_visibility_schema import create_photo_visibility_schema
+
+    root, export, dataset = comparison
+    import_reviews(dataset, root, export)
+    with sqlite3.connect(library) as conn:
+        create_photo_visibility_schema(conn)
+        conn.executemany('INSERT INTO workspace_photos(workspace_id,photo_id) VALUES(1,?)',
+                         ((pid,) for pid in range(1, 13)))
+        conn.execute('DELETE FROM workspace_folders')
+    assert check(dataset, features='live', library=library)['counts']['passed_cases'] == 1

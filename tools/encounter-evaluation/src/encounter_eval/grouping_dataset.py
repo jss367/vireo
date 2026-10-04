@@ -144,7 +144,7 @@ def _live_features(conn, metadata, bundle):
     workspace = manifest['workspace']
     current = {str(r['id']): dict(r) for r in conn.execute('''SELECT p.id,p.filename,p.file_hash,f.path AS folder
         FROM photos p JOIN folders f ON f.id=p.folder_id
-        JOIN workspace_folders wf ON wf.folder_id=p.folder_id WHERE wf.workspace_id=?''', (workspace,))}
+        JOIN photo_workspace_visibility wf ON wf.photo_id=p.id WHERE wf.workspace_id=?''', (workspace,))}
     for pid, identity in bundle['presentation'].items():
         if pid not in current or not same_photo(identity, current[pid]):
             raise ValueError(f'Photo {pid} no longer matches the captured identity/workspace')
