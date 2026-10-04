@@ -17391,7 +17391,7 @@ def test_browse_export_started_uses_info_toast():
     fn_end = text.find("\n}", fn_start)
     assert fn_end != -1
     body = text[fn_start:fn_end]
-    assert "showToast('Export started (' + count + ' photos)', 'info')" in body
+    assert "showToast('Export started (' + count + ' photo' + (count === 1 ? '' : 's') + ')', 'info')" in body
 
 
 def test_review_switch_collection_does_not_silently_widen_scope():
