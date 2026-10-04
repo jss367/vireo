@@ -218,6 +218,29 @@ def test_missing_review_case_cannot_silently_pass(tmp_path):
         )
 
 
+def test_current_grouping_cannot_fall_back_through_a_failing_reviewed_boundary(tmp_path):
+    # The retained fixture's training session groups photos 10, 11 and 12 into
+    # one encounter; a constraint that expects a split between 11 and 12
+    # therefore fails on the current baseline, and run must refuse rather than
+    # freeze a selection whose reviewed_cases carry passed: false.
+    scope = retained_scope(tmp_path)
+    with pytest.raises(ValueError, match="reviewed boundary"):
+        run(
+            [scope],
+            tmp_path / "result",
+            constraints=[
+                {
+                    "id": "split-11-12",
+                    "workspace": 1,
+                    "session": "train",
+                    "partition": "train",
+                    "ids": [10, 11, 12],
+                    "expected_groups": [[10, 11], [12]],
+                }
+            ],
+        )
+
+
 def test_final_test_constraints_are_rejected(tmp_path):
     scope = retained_scope(tmp_path)
     with pytest.raises(ValueError, match="final-test"):

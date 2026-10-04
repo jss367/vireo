@@ -277,6 +277,11 @@ def run(scopes, output, *, constraints=()):
     baseline_checks = train["current"]["reviewed_cases"] + development["current"]["reviewed_cases"]
     if {c["id"] for c in baseline_checks} != {c["id"] for c in constraints}:
         raise ValueError("Not every reviewed constraint was evaluated")
+    # Falling back to the current grouping only preserves reviewed boundaries
+    # if the current grouping itself still honors them; otherwise freezing it
+    # would record a selection whose reviewed_cases contain passed: false.
+    if not all(c["passed"] for c in baseline_checks):
+        raise ValueError("A reviewed boundary no longer passes on the current grouping")
     valid = [
         s
         for s in finalists
