@@ -115,7 +115,17 @@ function renderAlgorithmTrace() {
     html += pairPhotoHtml(bId, t.photo_b_filename);
     html += '</div>';
     [aId, bId].forEach(function(pid) {
-      var context = (photoMap[pid] || {}).isolated_species_context;
+      var photo = photoMap[pid] || {};
+      var weak = photo.weak_detection_context;
+      if (weak && weak.evidence === 'extended_sequence') {
+        html += '<div class="trace-thresholds">'
+          + escapeHtml(photo.filename || ('Photo ' + pid))
+          + (weak.support === 'anchor_context'
+            ? ': weak animal detection kept using matching neighboring frames. This photo contributes no species vote; the neighbors support '
+            : ': weak animal detection kept using matching classifier predictions and neighboring frames supporting ')
+          + escapeHtml(weak.species) + '.</div>';
+      }
+      var context = photo.isolated_species_context;
       if (!context) return;
       html += '<div class="trace-thresholds">'
         + escapeHtml((photoMap[pid] || {}).filename || ('Photo ' + pid))

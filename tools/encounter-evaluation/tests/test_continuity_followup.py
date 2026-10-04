@@ -607,3 +607,23 @@ def test_combined_run_scores_the_experimental_baseline_not_production(tmp_path, 
     assert result["baseline_candidate"]["params"]["frames"] == 8
     assert result["status"] == "retain-previous-experimental-winner"
     assert not result["test_evaluated"]
+
+
+@pytest.mark.parametrize("score", [0.4, 0.99])
+def test_default_production_matches_selected_combination_and_keeps_historical_baseline(score):
+    from encounter_eval.continuity import apply_continuity
+    from encounter_eval.continuity_experiments import combination_candidates
+
+    p = photos()
+    p[-1]["timestamp"] = "2026-01-01T00:00:05"
+    p[1]["evidence"][0]["sources"][0]["predictions"][0]["score"] = score
+    prepared = prepare_baseline(p, {})
+    assert prepared[0][1]["subject_absent"]
+    selected = next(s for s in combination_candidates() if s["id"] == "combined-long-context")
+    expected = apply_candidate(prepared, {}, selected)
+    actual = apply_continuity(p, {})
+    assert not actual[1]["subject_absent"]
+    for a, b in zip(actual, expected, strict=True):
+        for field in ("species_top5", "grouping_species_top5", "species_keys", "subject_absent", "subject_uncertain"):
+            assert a.get(field) == b.get(field)
+    assert prepare_baseline(p, {})[0][1]["subject_absent"]

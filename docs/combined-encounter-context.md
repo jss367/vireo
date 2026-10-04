@@ -3,8 +3,8 @@
 The next experiment, completed October 4, 2026, found that longer runs with
 matching classifier predictions and neighboring-frame context recover different
 misses. Their combination improves on the previous experimental winner. These
-are further training/development results, not a fresh final test or a change
-to Vireo's production behavior.
+were training/development results. The selected rule is now the default in
+Vireo; the historical production validation is recorded below.
 
 ## Question and fixed comparison
 
@@ -86,6 +86,62 @@ see the [evaluation README](../tools/encounter-evaluation/README.md) for its
 scope, constraints, report, and decision-import arguments. The report preserves
 the previous experimental baseline in its frozen before/after snapshots.
 
-Before recommending this for production, import the pending grouping decisions
-and evaluate the frozen candidate on fresh capture days, including species
-changes and interruptions as well as continuous single-species sequences.
+## Default production behavior and historical validation
+
+The selected combination now runs by default in `load_photo_features`, with
+no new setting or opt-in. The existing ability to disable weak-detection rescue
+still applies. It reuses cached model evidence; no new photos or model runs are
+required. Grouping cache version 3 makes the next grouping run recompute results
+under these rules. Normal burst segmentation remains unchanged: the burst
+time slider controls bursts within an encounter, while the new encounter
+continuity window stays at ten seconds.
+
+The implementation preserves the earlier narrow repairs, then evaluates the
+longer classifier-supported rule and the neighboring-context rule against the
+same baseline. Both are capped at eight middle frames and ten seconds from
+anchor to anchor. The classifier-supported rule requires a matching prediction
+on every middle frame, overlap of at least 0.02, and a positive animal box; the
+context rule uses the stronger 0.03 detector and 0.20 overlap thresholds above.
+Contrary classifiers, multiple strong anchor animals, folder boundaries, and
+available contradictory embeddings retain their vetoes. The review trace
+explains when neighbors supply the species suggestion without a middle-frame
+species vote. Stored predictions and photo tags are unchanged.
+
+The database evidence preselection includes nearby photos even when a strong
+person or vehicle detection marks a weak animal frame as present. The animal
+evidence, rather than that whole-photo state, determines the actual anchors.
+A historical replay exposed this integration case; a regression test now
+covers it.
+
+Both the retained-evidence adapter and the real database loader were compared
+with the frozen experimental winner from source commit `d666f7219` across
+**71,153 photos in 177 sessions**. Every encounter membership and species roster
+matched, and all **43 saved human-reviewed constraints** passed on the database
+loader's output. This replay includes the previously used test partition; it
+checks implementation equivalence and historical outcomes, not a new independent
+estimate of generalization. No parameters were changed after scoring it.
+
+Compared with the prior production algorithm:
+
+| Historical scope | Photos | Additional recovered reference labels | Fewer same-label splits within ten seconds |
+| --- | ---: | ---: | ---: |
+| Training and development | 54,739 | 119 | 92 |
+| Previously used test partition | 16,414 | 23 | 18 |
+| All retained sessions | 71,153 | 142 | 110 |
+
+Across all sessions, no previously recovered reference labels were lost, no
+unverified additions increased, and none of the 740 differing-label control
+pairs within sixty seconds were newly joined. Existing tags remain partial
+positive reference answers; these counts do not prove that every species is
+present in the tags or that every merge is correct.
+
+The four pending review cases remain unreviewed; their status is preserved in
+the dataset. Shipping this default relies on the historical results and saved
+regressions, without requiring fresh captures or additional opt-in review.
+Private replay inputs, scripts, results, and partition counts are preserved in
+`default-encounter-continuity-20261004` under the local evaluation runs directory.
+
+The offline challenger runner explicitly retains its version 2 baseline through
+`apply_previous_continuity`, so shipping the winner cannot silently move the
+baseline of the two recorded searches. The default retained-feature adapter
+and app both call the new production implementation.

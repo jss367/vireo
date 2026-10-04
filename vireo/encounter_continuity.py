@@ -9,7 +9,7 @@ import math
 from collections import defaultdict
 from datetime import UTC, datetime
 
-from encounters import _confident_species_prediction
+from encounters import _confident_species_prediction, grouping_species_predictions
 from weak_detections import contextual_weak_runs
 
 
@@ -79,22 +79,17 @@ def _weak_windows(photos, max_gap):
             folders[p["folder_id"]].append((when, p["id"], p))
     for folder in folders.values():
         ordered = [p for _, _, p in sorted(folder)]
-        index = 0
-        while index < len(ordered):
-            if ordered[index].get("subject_present"):
-                index += 1
+        # subject_present can describe a vehicle/person detection even when
+        # the animal box is weak. Do not stop at that proxy: the complete
+        # animal evidence below decides which photos are actual anchors.
+        for index, photo in enumerate(ordered):
+            if not photo.get("subject_absent"):
                 continue
-            start = index
-            while index < len(ordered) and not ordered[index].get("subject_present"):
-                index += 1
-            if start == 0 or index == len(ordered) or index - start > 3:
-                continue
-            window = ordered[start - 1 : index + 1]
-            if (
-                any(p.get("subject_absent") for p in window[1:-1])
-                and (_time(window[-1]) - _time(window[0])).total_seconds() <= max_gap
-            ):
-                yield window
+            when = _time(photo)
+            yield [
+                p for p in ordered[max(0, index - 9):index + 10]
+                if abs((_time(p) - when).total_seconds()) <= max_gap
+            ]
 
 
 def _flip_window(left, middle, right):
@@ -129,7 +124,7 @@ def evidence_photo_ids(photos, config):
     needed = set()
     pipeline = config.get("pipeline", {})
     if pipeline.get("weak_detection_rescue_enabled", True):
-        for window in _weak_windows(photos, min(pipeline.get("burst_time_gap", 3.0), 3.0)):
+        for window in _weak_windows(photos, 10.0):
             needed.update(p["id"] for p in window)
     for triple in zip(photos, photos[1:], photos[2:], strict=False):
         if _flip_window(*triple):
@@ -304,9 +299,126 @@ def _suppress_isolated(photos, evidence, animals, config):
     ]
 
 
-def apply_encounter_continuity(photos, evidence_by_photo, config=None, *, repair_isolated=True):
-    """Return grouping features with the evaluated repairs; never mutate inputs."""
+def apply_previous_continuity(photos, evidence_by_photo, config=None, *, repair_isolated=True):
+    """Version 2 baseline retained for reproducible historical experiments."""
     config = config or {}
     animals = _animal_detections(evidence_by_photo)
     photos = _recover_weak(photos, evidence_by_photo, animals, config)
     return _suppress_isolated(photos, evidence_by_photo, animals, config) if repair_isolated else photos
+
+
+def _recover_extended(photos, evidence, animals, config, *, anchor_context=False):
+    """The frozen eight-frame, ten-second rule, with optional anchor support."""
+    if not config.get("pipeline", {}).get("weak_detection_rescue_enabled", True):
+        return photos
+    floor = config.get("detector_confidence", 0.2)
+    span, frames = 10.0, 8
+    overlap, box_floor = (0.2, 0.03) if anchor_context else (0.02, 1e-6)
+    top_k = config.get("top_k_predictions", 5)
+    by_id = {p["id"]: p for p in photos}
+    changes = {}
+    timed = [{"id": p["id"], "folder_id": p.get("folder_id"), "timestamp": _time(p)} for p in photos]
+    for run in contextual_weak_runs(
+        timed,
+        animals,
+        detector_confidence=floor,
+        weak_confidence=box_floor,
+        max_gap=span,
+    ):
+        ids = run["photo_ids"]
+        anchors = [by_id[run[k]] for k in ("left_photo_id", "right_photo_id")]
+        if len(ids) > frames or not any(by_id[pid].get("subject_absent") for pid in ids):
+            continue
+        if (_time(anchors[1]) - _time(anchors[0])).total_seconds() > span:
+            continue
+        if any(a.get("isolated_species_context") for a in anchors):
+            continue
+        if any(sum(d["confidence"] >= floor for d in animals[a["id"]]) != 1 for a in anchors):
+            continue
+        winners = [_winner(grouping_species_predictions(a) or []) for a in anchors]
+        if not all(winners) or winners[0]["key"] != winners[1]["key"]:
+            continue
+        target = winners[0]["key"]
+        # Even an anchor's secondary subject or hidden classifier may veto;
+        # support and conflicting evidence use the same confidence gate.
+        if any(
+            _conflicting_model(d.get("predictions", []), target) for a in anchors for d in evidence[a["id"]]
+        ):
+            continue
+        selected = {}
+        for pid in ids:
+            primary = animals[pid][0]
+            if any(_overlap(primary, animals[a["id"]][0]) < overlap for a in anchors):
+                break
+            if _visual_conflict(by_id[pid], anchors):
+                break
+            if any(_conflicting_model(d.get("predictions", []), target) for d in evidence[pid]):
+                break
+            sources = [
+                _predictions([d for d in evidence[pid] if d["detector_model"] == "full-image"], top_k),
+                _predictions([primary], top_k),
+            ]
+            support = None
+            for entries in sources:
+                winner = _winner(entries)
+                if winner and winner["key"] == target:
+                    support = entries
+                    break
+            if support is None and not anchor_context:
+                break
+            # Abstain when borrowing anchor context; do not invent a model score.
+            selected[pid] = support or []
+        else:
+            for pid in ids:
+                if not by_id[pid].get("subject_absent"):
+                    continue
+                d = animals[pid][0]
+                changes[pid] = {
+                    **by_id[pid],
+                    "subject_absent": False,
+                    "subject_present": False,
+                    "subject_uncertain": True,
+                    "grouping_species_top5": selected[pid],
+                    "detection_box": {k: d[k] for k in ("x", "y", "w", "h")},
+                    "detection_conf": d["confidence"],
+                    "weak_detection_context": {
+                        "evidence": "extended_sequence",
+                        "species_key": target,
+                        "species": winners[0]["species"],
+                        "anchor_ids": [a["id"] for a in anchors],
+                        "support": "classifier" if selected[pid] else "anchor_context",
+                    },
+                }
+    return [changes.get(p["id"], p) for p in photos]
+
+
+
+def apply_encounter_continuity(photos, evidence_by_photo, config=None, *, repair_isolated=True):
+    """Apply default continuity using model evidence; never mutate inputs or tags.
+
+    Preserve the earlier repairs, then evaluate both extended rules against
+    that same baseline. Direct classifier support wins; repaired frames never
+    become anchors for a later stage. Anchor-only support contributes no
+    synthetic classifier prediction or confidence.
+    """
+    config = config or {}
+    # Pin the retained legacy rescue to the 3.0s cap _recover_weak already
+    # enforced so the burst_time_gap slider cannot shift default encounter
+    # continuity. Without this override, a lower burst gap would skip legacy
+    # runs the historical baseline still formed, letting the slider decide the
+    # outcome in cases the extended rule later vetoes (hidden anchor conflict).
+    continuity_config = {
+        **config,
+        "pipeline": {**config.get("pipeline", {}), "burst_time_gap": 3.0},
+    }
+    photos = apply_previous_continuity(photos, evidence_by_photo, continuity_config, repair_isolated=repair_isolated)
+    animals = _animal_detections(evidence_by_photo)
+    changes = {}
+    for anchor_context in (False, True):
+        for before, after in zip(
+            photos, _recover_extended(photos, evidence_by_photo, animals, continuity_config, anchor_context=anchor_context),
+            strict=True,
+        ):
+            if after is not before:
+                changes.setdefault(after["id"], after)
+    return [changes.get(p["id"], p) for p in photos]

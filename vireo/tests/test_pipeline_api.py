@@ -3640,8 +3640,8 @@ def test_active_mask_variant_endpoint_requires_variant(setup):
 
 
 @pytest.mark.parametrize("endpoint", ["reflow", "regroup-live"])
-@pytest.mark.parametrize("saved_gap,live_gap,rescued", [(3.0, 0.1, False), (0.1, 3.0, True)])
-def test_live_burst_gap_controls_weak_continuity(setup, tmp_path, endpoint, saved_gap, live_gap, rescued):
+@pytest.mark.parametrize("saved_gap,live_gap,burst_count", [(3.0, 0.1, 3), (0.1, 3.0, 1)])
+def test_live_burst_gap_preserves_encounter_continuity(setup, tmp_path, endpoint, saved_gap, live_gap, burst_count):
     from datetime import timedelta
 
     from db import Database
@@ -3668,8 +3668,12 @@ def test_live_burst_gap_controls_weak_continuity(setup, tmp_path, endpoint, save
         "config": {"burst_time_gap": live_gap}, "save_cache": False,
     })
     assert response.status_code == 200, response.get_json()
-    middle = next(p for p in response.get_json()["photos"] if p["id"] == ids[1])
-    assert middle["subject_uncertain"] is rescued
-    assert middle["subject_absent"] is not rescued
+    result = response.get_json()
+    middle = next(p for p in result["photos"] if p["id"] == ids[1])
+    # Encounter continuity has its own ten-second window. The live burst
+    # slider still controls burst boundaries without removing that context.
+    assert middle["subject_uncertain"] and not middle["subject_absent"]
+    assert len(result["encounters"]) == 1
+    assert result["encounters"][0]["burst_count"] == burst_count
     with Database(db_path) as db:
         assert db.get_effective_config({})["pipeline"]["burst_time_gap"] == saved_gap

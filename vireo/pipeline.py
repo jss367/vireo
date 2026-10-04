@@ -2319,7 +2319,7 @@ def compute_group_fingerprint(config):
     payload = {
         "encounters": _effective(encounters.DEFAULTS),
         "bursts": _effective(bursts.DEFAULTS),
-        "contextual_full_image_rescue_version": 2,
+        "contextual_full_image_rescue_version": 3,
     }
     from species_identity import resolution_identity
     payload["species_resolution"] = resolution_identity()

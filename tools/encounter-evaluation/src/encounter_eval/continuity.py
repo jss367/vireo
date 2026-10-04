@@ -30,8 +30,8 @@ def native_evidence(photos):
     return evidence, identities
 
 
-def apply_continuity(photos, config, *, repair_isolated=True):
-    from encounter_continuity import apply_encounter_continuity
+def apply_continuity(photos, config, *, repair_isolated=True, historical_baseline=False):
+    from encounter_continuity import apply_encounter_continuity, apply_previous_continuity
 
     evidence, identities = native_evidence(photos)
     restored = []
@@ -47,13 +47,18 @@ def apply_continuity(photos, config, *, repair_isolated=True):
         translated["species_keys"] = {**keys, **{value: value for value in keys.values()}}
         restored.append(translated)
     restored = restore_features(restored)
-    after = apply_encounter_continuity(restored, evidence, config, repair_isolated=repair_isolated)
+    transform = apply_previous_continuity if historical_baseline else apply_encounter_continuity
+    after = transform(restored, evidence, config, repair_isolated=repair_isolated)
     return [
         {
             **p,
             "species_keys": {
                 **p.get("species_keys", {}),
-                **{e[3]: identities[e[3]] for e in p["species_top5"] if e[3] in identities},
+                **{
+                    e[3]: identities[e[3]]
+                    for field in ("species_top5", "grouping_species_top5")
+                    for e in p.get(field, []) if len(e) > 3 and e[3] in identities
+                },
             },
         }
         for p in after

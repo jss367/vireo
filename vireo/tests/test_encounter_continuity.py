@@ -303,14 +303,146 @@ def test_weak_recovery_preserves_safety_boundaries(guard):
     elif guard == "geometry":
         ps[1]["evidence"][0]["box_x"] = 0.8
     elif guard == "time":
-        ps[-1]["timestamp"] = "2026-01-01T00:00:05"
+        ps[-1]["timestamp"] = "2026-01-01T00:00:12"
     elif guard == "folder":
         ps[-1]["folder_id"] = 2
     elif guard == "disabled":
         cfg = {"pipeline": {"weak_detection_rescue_enabled": False}}
     elif guard == "long_run":
-        mids = [deepcopy(ps[1]) for _ in range(4)]
+        mids = [deepcopy(ps[1]) for _ in range(9)]
         for i, p in enumerate(mids):
             p.update(id=10 + i, timestamp=f"2026-01-01T00:00:02.{i}")
         ps = [ps[0], *mids, ps[-1]]
     assert not promote(ps, cfg)[1]
+
+
+def extended_sequence(count=8, *, score=0.99, box_confidence=0.06):
+    from datetime import datetime, timedelta
+
+    left, middle, right = weak_sequence()
+    mids = [deepcopy(middle) for _ in range(count)]
+    photos = [left, *mids, right]
+    for i, photo in enumerate(photos):
+        photo.update(id=i + 1, timestamp=(datetime(2026, 1, 1) + timedelta(seconds=i)).isoformat())
+    for photo in mids:
+        d = photo["evidence"][0]
+        d["detector_confidence"] = box_confidence
+        d["sources"][0]["predictions"][0]["score"] = score
+    return photos
+
+
+@pytest.mark.parametrize("score,support", [(0.99, "classifier"), (0.4, "anchor_context")])
+def test_default_recovers_eight_weak_frames_without_changing_predictions(score, support):
+    photos = extended_sequence(score=score)
+    original = deepcopy(photos)
+    after, bridges = promote(photos, {})
+    assert bridges == list(range(2, 10))
+    assert photos == original
+    for before, photo in zip(photos[1:-1], after[1:-1], strict=True):
+        assert photo["species_top5"] == before["species_top5"]
+        assert photo["evidence"] == before["evidence"]
+        assert photo["weak_detection_context"]["support"] == support
+        assert bool(photo["grouping_species_top5"]) == (support == "classifier")
+    assert len(segment_encounters(after)) == 1
+    assert promote(after, {})[0] == after
+
+
+@pytest.mark.parametrize("guard", [
+    "nine_frames", "over_ten_seconds", "missing_box", "low_box", "overlap", "folder",
+    "anchor_prediction", "anchor_full_image", "middle_full_image", "secondary_model",
+    "visual_conflict", "isolated_anchor", "multiple_subjects", "disabled",
+])
+def test_extended_context_guards(guard):
+    photos = extended_sequence(9 if guard == "nine_frames" else 8, score=0.4)
+    config = {}
+    if guard == "over_ten_seconds":
+        photos[-1]["timestamp"] = "2026-01-01T00:00:10.001"
+    elif guard == "missing_box":
+        photos[4]["evidence"] = []
+    elif guard == "low_box":
+        photos[4]["evidence"][0]["detector_confidence"] = 0.029
+    elif guard == "overlap":
+        photos[4]["evidence"][0]["box_x"] = 0.45
+    elif guard == "folder":
+        photos[-1]["folder_id"] = 2
+    elif guard == "anchor_prediction":
+        photos[0]["species_top5"] = [("Other bird", 0.99, "model-a", "taxon:20")]
+    elif guard in ("anchor_full_image", "middle_full_image", "secondary_model"):
+        photo = photos[0] if guard == "anchor_full_image" else photos[4]
+        d = deepcopy(photo["evidence"][0])
+        d["detector_model"] = "full-image" if guard.endswith("full_image") else "megadetector-v6"
+        d["detector_confidence"] = 0.01
+        d["sources"].append({"model": "model-b", "predictions": [
+            {"name": "Other bird", "taxon": "inat:20", "score": 0.99},
+        ]})
+        photo["evidence"].append(d)
+    elif guard == "visual_conflict":
+        photos[0]["dino_subject_embedding"] = [1, 0]
+        photos[4]["dino_subject_embedding"] = [0, 1]
+    elif guard == "isolated_anchor":
+        photos[0]["isolated_species_context"] = {"anchor_ids": [99, 100]}
+    elif guard == "multiple_subjects":
+        photos[0]["evidence"].append(deepcopy(photos[0]["evidence"][0]))
+    elif guard == "disabled":
+        config = {"pipeline": {"weak_detection_rescue_enabled": False}}
+    assert not promote(photos, config)[1]
+
+
+def test_direct_classification_allows_weaker_boxes_than_anchor_context():
+    photos = extended_sequence(box_confidence=0.01)
+    assert len(promote(photos, {})[1]) == 8
+    for photo in photos[1:-1]:
+        photo["evidence"][0]["sources"][0]["predictions"][0]["score"] = 0.4
+    assert not promote(photos, {})[1]
+
+
+def test_ten_second_boundary_and_reference_labels():
+    photos = extended_sequence(score=0.4)
+    photos[-1]["timestamp"] = "2026-01-01T00:00:10"
+    first, _ = promote(photos, {})
+    for photo in photos:
+        photo["labels"] = ["Something else"]
+    second, _ = promote(photos, {})
+    assert all(not p["subject_absent"] for p in second)
+    assert [p.get("weak_detection_context") for p in first] == [p.get("weak_detection_context") for p in second]
+
+
+def test_non_animal_subject_does_not_hide_the_true_animal_anchor():
+    photos = extended_sequence(4)
+    # The loader marks this frame present because of a strong vehicle box,
+    # but its animal detection still belongs to the weak run.
+    photos[1].update(subject_present=True, subject_absent=False)
+    vehicle = deepcopy(photos[1]["evidence"][0])
+    vehicle.update(category="vehicle", detector_confidence=0.9)
+    photos[1]["evidence"].append(vehicle)
+    after, bridges = promote(photos, {})
+    assert bridges == [3, 4, 5]
+    assert after[2]["weak_detection_context"]["anchor_ids"] == [1, 6]
+
+
+def test_burst_time_gap_does_not_shift_default_continuity_with_hidden_anchor_conflict():
+    # A hidden anchor conflict (a full-image detection on each anchor whose
+    # independent classifier picks a different species) would be ignored by the
+    # retained legacy _recover_weak pass but vetoed by _recover_extended's
+    # anchor-conflict check. Without the burst_time_gap decoupling, lowering
+    # the slider past the anchor-to-anchor gap would skip the legacy run that
+    # still rescues at the default gap, so the slider would change encounter
+    # continuity. Pinning the legacy window inside the default rule keeps the
+    # outcome identical across saved burst_time_gap values.
+    base = weak_sequence()
+    for anchor_idx in (0, 2):
+        base[anchor_idx]["evidence"].append({
+            "id": 100 + anchor_idx,
+            "detector_model": "full-image",
+            "category": "animal",
+            "detector_confidence": 0.5,
+            "box_x": 0.0, "box_y": 0.0, "box_w": 1.0, "box_h": 1.0,
+            "sources": [{"model": "model-b", "predictions": [
+                {"name": "Other bird", "score": 0.99, "taxon": "inat:20"},
+            ]}],
+        })
+    wide, wide_bridges = promote(deepcopy(base), {"pipeline": {"burst_time_gap": 3.0}})
+    narrow, narrow_bridges = promote(deepcopy(base), {"pipeline": {"burst_time_gap": 0.1}})
+    assert wide_bridges == narrow_bridges
+    assert [p["subject_absent"] for p in wide] == [p["subject_absent"] for p in narrow]
+    assert [p["subject_uncertain"] for p in wide] == [p["subject_uncertain"] for p in narrow]
