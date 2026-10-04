@@ -14,9 +14,10 @@ var VireoExportJob = (function() {
     return n.toLocaleString() + ' photo' + (n === 1 ? '' : 's');
   }
 
-  // Where the files went: one folder by name, several by count.
+  // Where the files went: one folder by name, several by count. Only folders
+  // that received a file count; a folder whose photos all failed does not.
   function where(result) {
-    var destinations = result.destinations || [];
+    var destinations = result.written_destinations || result.destinations || [];
     if (destinations.length > 1) return ' to ' + destinations.length + ' folders';
     var destination = destinations[0] || result.destination;
     return destination ? ' to ' + destination : '';
@@ -79,6 +80,11 @@ var VireoExportJob = (function() {
       onComplete: function(done) {
         var toast = outcome(done);
         showToast(toast.message, toast.type);
+      },
+      // The stream dropped (or the job was already gone) before the outcome
+      // arrived, so say where to find it rather than leaving the user guessing.
+      onError: function() {
+        showToast('Could not follow the export to the end. Its result is in the jobs panel.', 'warning');
       },
     });
   }

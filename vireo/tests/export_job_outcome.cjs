@@ -32,6 +32,16 @@ test('a successful export names the count and the folder', () => {
   }}), {message: 'Exported 3 photos to 2 folders', type: 'success'});
 });
 
+test('only folders that received a file are counted', () => {
+  same(outcome({status: 'failed', result: {
+    exported: 1, errors: ['b.NEF: decode failed'], destination: '',
+    destinations: ['/a', '/b'], written_destinations: ['/a'],
+  }}), {message: 'Exported 1 photo to /a. 1 photo failed: b.NEF: decode failed', type: 'error'});
+  same(outcome({status: 'completed', result: {
+    exported: 2, errors: [], destinations: ['/a', '/b'], written_destinations: ['/a', '/b'],
+  }}), {message: 'Exported 2 photos to 2 folders', type: 'success'});
+});
+
 test('numbered names are counted', () => {
   same(outcome({status: 'completed', result: {
     exported: 2, renamed: 1, errors: [], destinations: ['/out'],
@@ -89,6 +99,16 @@ test('watch toasts the outcome when the job stream completes', () => {
   job.watch('export-1');
   assert.equal(streamed, '/api/jobs/export-1/stream');
   same(toasts, [['Exported 1 photo to /out', 'success']]);
+});
+
+test('watch points to the jobs panel when the stream drops', () => {
+  const toasts = [];
+  const job = load({
+    safeEventSource(url, callbacks) { callbacks.onError(); },
+    showToast(message, type) { toasts.push([message, type]); },
+  });
+  job.watch('export-2');
+  same(toasts, [['Could not follow the export to the end. Its result is in the jobs panel.', 'warning']]);
 });
 
 let failed = 0;

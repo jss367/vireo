@@ -454,6 +454,34 @@ def test_export_photos_reports_every_original_folder(export_env):
     assert result["destination_mode"] == "original"
 
 
+def test_export_photos_written_destinations_skip_folders_whose_photos_failed(export_env):
+    """A folder is resolved before its photo is written, so ``destinations``
+    names it even when that photo fails; ``written_destinations`` lists only
+    the folders that received a file."""
+    env = export_env
+    second_src = env["tmp_path"] / "second-src"
+    second_src.mkdir()
+    second_folder_id = env["db"].add_folder(str(second_src), name="Second Safari")
+    unreadable = env["db"].add_photo(
+        folder_id=second_folder_id, filename="gone.jpg", extension=".jpg",
+        file_size=500, file_mtime=3.0, timestamp="2024-06-17T10:00:00",
+    )
+
+    result = export_photos(
+        db=env["db"],
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"], unreadable],
+        destination="",
+        options={"naming_template": "{original}"},
+    )
+
+    assert result["exported"] == 1
+    assert len(result["errors"]) == 1
+    assert result["errors"][0].startswith("gone.jpg: ")
+    assert result["destinations"] == [str(env["src"]), str(second_src)]
+    assert result["written_destinations"] == [str(env["src"])]
+
+
 def test_export_photos_can_use_subfolder_beside_originals(export_env):
     """The optional export subfolder is resolved per original folder."""
     env = export_env

@@ -667,6 +667,11 @@ def export_photos(db, vireo_dir, photo_ids, destination=None, options=None,
     metadata_jobs = []
     resolved_destinations = []
     resolved_destination_set = set()
+    # Destinations that received at least one finished file. A destination is
+    # resolved before its photo is written, so a folder whose only photo
+    # failed is in resolved_destinations but not here.
+    written_destination_set = set()
+    metadata_job_destinations = {}
 
     # A custom destination is known even if every individual photo later
     # fails. Beside-original destinations are collected as each catalog folder
@@ -808,12 +813,15 @@ def export_photos(db, vireo_dir, photo_ids, destination=None, options=None,
                     raise
                 if metadata_args:
                     metadata_jobs.append((out_path, photo["filename"], metadata_args))
+                    metadata_job_destinations[out_path] = photo_destination
                 else:
                     exported += 1
+                    written_destination_set.add(photo_destination)
                     if exported_files is not None:
                         exported_files.append(out_path)
             else:
                 exported += 1
+                written_destination_set.add(photo_destination)
                 if exported_files is not None:
                     exported_files.append(out_path)
             if out_path != requested_out_path:
@@ -841,6 +849,10 @@ def export_photos(db, vireo_dir, photo_ids, destination=None, options=None,
         exported += metadata_exported
         errors.extend(metadata_errors)
         success_set = set(metadata_success_paths)
+        written_destination_set.update(
+            metadata_job_destinations[path] for path in success_set
+            if path in metadata_job_destinations
+        )
         # A failed metadata job's output cannot be reported as a rename even
         # when its cleanup unlink was silently swallowed (locked file on
         # Windows, destination permissions change). Track metadata success
@@ -873,6 +885,9 @@ def export_photos(db, vireo_dir, photo_ids, destination=None, options=None,
         "errors": errors,
         "destination": result_destination,
         "destinations": resolved_destinations,
+        "written_destinations": [
+            path for path in resolved_destinations if path in written_destination_set
+        ],
         "destination_mode": "custom" if destination else "original",
         "subfolder": subfolder,
     }

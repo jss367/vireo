@@ -58,7 +58,6 @@ def test_browse_export_reports_an_unreachable_original_folder(
         f"kestrel-a.jpg: original folder is not reachable ({folder})",
         timeout=15000,
     )
-    page.screenshot(path=".context/export-unreachable-toast.png")
     assert not folder.exists()
 
 
