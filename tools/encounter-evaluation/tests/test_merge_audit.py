@@ -193,3 +193,39 @@ def test_wilson_interval_bounds_small_samples():
     assert low == 0 and 0.2 < high < 0.35
     low, high = wilson(5, 10)
     assert low < 0.5 < high
+
+
+def test_results_do_not_extrapolate_answered_rate_over_abstentions(scope, tmp_path):
+    audit = tmp_path / "audit"
+    build([scope], audit)
+    cases = json.loads((audit / "merge-audit.json").read_text())
+    second = dict(cases[0], id="another-pair")
+    (audit / "merge-audit.json").write_text(json.dumps(cases + [second]))
+    summary = json.loads((audit / "audit-summary.json").read_text())
+    summary["counts"]["joined_pairs"] = 2
+    (audit / "audit-summary.json").write_text(json.dumps(summary))
+    decisions = [
+        {"case_id": case["id"], "decision": kind, "updated_at": "2026-10-05T06:00:00+00:00"}
+        for case, kind in zip(cases + [second], ["split", "unsure"], strict=True)
+    ]
+    result = results(audit, _export(audit, decisions), tmp_path / "out")
+    assert result["overall"]["answered"] == 1
+    assert result["overall"]["wrong_merge_rate"] == 1.0
+    assert result["estimated_wrong_merges"] is None
+    assert result["constraints_written"] == 1
+
+
+@pytest.mark.parametrize("expected", [[[2], [1]], [[3, 2], [1]]])
+def test_results_reject_conflicting_existing_boundaries(scope, tmp_path, expected):
+    audit = tmp_path / "audit"
+    build([scope], audit)
+    [case] = json.loads((audit / "merge-audit.json").read_text())
+    decision = {"case_id": case["id"], "decision": "keep", "updated_at": "2026-10-05T06:00:00+00:00"}
+    existing = tmp_path / "existing.json"
+    existing.write_text(json.dumps([{
+        "id": "earlier-review", "workspace": case["workspace"], "session": case["session"],
+        "ids": [pid for group in expected for pid in group], "expected_groups": expected,
+    }]))
+    with pytest.raises(ValueError, match="Conflicting constraints"):
+        results(audit, _export(audit, [decision]), tmp_path / "out", existing=existing)
+    assert not (tmp_path / "out").exists()

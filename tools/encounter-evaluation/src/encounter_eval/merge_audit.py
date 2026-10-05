@@ -330,7 +330,7 @@ def results(audit, exported, output, *, existing=None):
     joined = summary["counts"]["joined_pairs"]
     overall = _rates(breakdown["all"])
     estimate = None
-    if overall["wrong_merge_rate"] is not None:
+    if overall["wrong_merge_rate"] is not None and not overall["decisions"].get("unsure", 0):
         estimate = {
             "wrong_merges": round(overall["wrong_merge_rate"] * joined, 1),
             "interval_95": [round(x * joined, 1) for x in overall["wrong_merge_interval_95"]],
@@ -343,6 +343,18 @@ def results(audit, exported, output, *, existing=None):
         clashes = [c["id"] for c in constraints if c["id"] in ids]
         if clashes:
             raise ValueError(f"Constraints already present in {existing}: {clashes[:3]}")
+        for old in prior:
+            membership = {pid: i for i, group in enumerate(old["expected_groups"]) for pid in group}
+            for new in constraints:
+                a, b = new["ids"]
+                if (
+                    old.get("workspace") == new["workspace"]
+                    and old.get("session") == new["session"]
+                    and a in membership
+                    and b in membership
+                    and (membership[a] == membership[b]) != (len(new["expected_groups"]) == 1)
+                ):
+                    raise ValueError(f"Conflicting constraints in {existing}: {old['id']}, {new['id']}")
         combined = prior + constraints
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=False)
