@@ -18,6 +18,40 @@ def test_ensure_schema_stamps_baseline_on_fresh_db(tmp_path):
         ]
 
 
+def test_database_stamps_baseline_on_a_database_it_creates(tmp_path):
+    with Database(str(tmp_path / "vireo.db")) as db:
+        assert db.conn.execute("PRAGMA user_version").fetchone()[0] == schema.BASELINE_VERSION
+
+
+def test_ensure_schema_refuses_catalog_older_than_retired_migrations(tmp_path):
+    """A populated catalog below the oldest upgradable version is refused, not
+    stamped as upgraded without the retired migrations it still needs."""
+    from db import IncompatibleDatabaseError
+
+    db_path = str(tmp_path / "vireo.db")
+    schema.ensure_schema(db_path)
+    old_version = schema.OLDEST_UPGRADABLE_VERSION - 1
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(f"PRAGMA user_version = {old_version}")
+
+    with pytest.raises(IncompatibleDatabaseError) as excinfo:
+        schema.ensure_schema(db_path)
+
+    assert not excinfo.value.newer
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == old_version
+
+
+def test_ensure_schema_initializes_an_empty_existing_file(tmp_path):
+    db_path = tmp_path / "vireo.db"
+    sqlite3.connect(db_path).close()
+
+    schema.ensure_schema(str(db_path))
+
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == schema.BASELINE_VERSION
+
+
 def test_registry_migration_above_baseline_applies_once(tmp_path, monkeypatch):
     db_path = str(tmp_path / "vireo.db")
     schema.ensure_schema(db_path)
@@ -106,7 +140,7 @@ def test_ensure_schema_backs_up_before_pending_migrations(tmp_path):
     db_path = str(tmp_path / "vireo.db")
     schema.ensure_schema(db_path)
     with sqlite3.connect(db_path) as conn:
-        conn.execute("PRAGMA user_version = 7")
+        conn.execute(f"PRAGMA user_version = {schema.OLDEST_UPGRADABLE_VERSION}")
 
     schema.ensure_schema(db_path)
 
@@ -115,7 +149,7 @@ def test_ensure_schema_backs_up_before_pending_migrations(tmp_path):
     assert os.path.exists(backup_path)
     # The snapshot reflects the pre-migration state.
     with sqlite3.connect(backup_path) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == schema.OLDEST_UPGRADABLE_VERSION
         assert conn.execute("SELECT COUNT(*) FROM workspaces").fetchone()[0] >= 1
 
 
@@ -143,7 +177,7 @@ def test_ensure_schema_prunes_older_backups(tmp_path):
     with open(stale_backup, "w") as f:
         f.write("old snapshot")
     with sqlite3.connect(db_path) as conn:
-        conn.execute("PRAGMA user_version = 7")
+        conn.execute(f"PRAGMA user_version = {schema.OLDEST_UPGRADABLE_VERSION}")
 
     schema.ensure_schema(db_path)
 
@@ -165,7 +199,7 @@ def test_ensure_schema_keeps_older_backups_when_snapshot_fails(tmp_path, monkeyp
     with open(stale_backup, "w") as f:
         f.write("older snapshot")
     with sqlite3.connect(db_path) as conn:
-        conn.execute("PRAGMA user_version = 7")
+        conn.execute(f"PRAGMA user_version = {schema.OLDEST_UPGRADABLE_VERSION}")
 
     # Simulate _snapshot_before_migrations failing silently (its except
     # branch already swallows sqlite3.Error / OSError and logs a warning).
@@ -257,7 +291,7 @@ def test_ensure_schema_keeps_later_version_snapshots(tmp_path):
     with open(newer_backup, "w") as f:
         f.write("later-version snapshot")
     with sqlite3.connect(db_path) as conn:
-        conn.execute("PRAGMA user_version = 7")
+        conn.execute(f"PRAGMA user_version = {schema.OLDEST_UPGRADABLE_VERSION}")
 
     schema.ensure_schema(db_path)
 

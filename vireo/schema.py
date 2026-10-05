@@ -18,6 +18,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from canonical_schema import SCHEMA_VERSION
 from db import Database, IncompatibleDatabaseError
 from file_replace import replace_file
 
@@ -36,9 +37,15 @@ class Migration:
 
 # The schema ``create_tables`` builds. Migrations 5-12 were retired once every
 # catalog had applied them, and ``create_tables`` now creates their end state
-# directly, so ``_apply_pending`` stamps this version on any catalog below it.
-# The next schema change is ``Migration(BASELINE_VERSION + 1, ...)``.
-BASELINE_VERSION = 12
+# directly. The next schema change is ``Migration(BASELINE_VERSION + 1, ...)``.
+BASELINE_VERSION = SCHEMA_VERSION
+
+# The oldest stamped catalog ``create_tables`` alone can bring to the
+# baseline: migration 12 only created objects ``create_tables`` already
+# creates, so a version-11 catalog needs nothing else. Anything older relied
+# on a retired migration (column adds, the MegaDetector alias merge, the
+# grouping-history split) and is refused rather than stamped as upgraded.
+OLDEST_UPGRADABLE_VERSION = 11
 
 MIGRATIONS = ()
 
@@ -80,6 +87,15 @@ def _existing_user_version(db_path):
         return None
     with contextlib.closing(sqlite3.connect(db_path)) as conn:
         return conn.execute("PRAGMA user_version").fetchone()[0]
+
+
+def _has_tables(db_path):
+    """Whether ``db_path`` already holds any table (a populated catalog,
+    not a file only just created)."""
+    with contextlib.closing(sqlite3.connect(db_path)) as conn:
+        return conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' LIMIT 1"
+        ).fetchone() is not None
 
 
 def _backup_path(db_path, target_version):
@@ -164,6 +180,18 @@ def ensure_schema(db_path):
                 db_path,
                 cause=f"schema version {current} is newer than supported {latest}",
                 newer=True,
+            )
+        if (
+            current is not None
+            and current < OLDEST_UPGRADABLE_VERSION
+            and _has_tables(db_path)
+        ):
+            raise IncompatibleDatabaseError(
+                db_path,
+                cause=(
+                    f"schema version {current} predates the oldest version "
+                    f"this build can upgrade ({OLDEST_UPGRADABLE_VERSION})"
+                ),
             )
         upgrading = current is not None and current < latest
         if upgrading:

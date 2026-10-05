@@ -16,12 +16,19 @@ This module must not import ``db``: ``schema.py`` imports ``db``, and
 ``db`` builds this class on every schema setup.
 """
 
+# ``PRAGMA user_version`` of the shape ``create_tables`` builds, stamped on a
+# database it creates from nothing. ``schema.BASELINE_VERSION`` is this value.
+SCHEMA_VERSION = 12
+
 
 class CanonicalSchema:
     def __init__(self, conn):
         self.conn = conn
 
     def create_tables(self):
+        fresh = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' LIMIT 1"
+        ).fetchone() is None
         self.conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS folders (
@@ -1045,4 +1052,6 @@ class CanonicalSchema:
         from photo_visibility_schema import create_photo_visibility_schema
 
         create_photo_visibility_schema(self.conn)
+        if fresh:
+            self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self.conn.commit()
