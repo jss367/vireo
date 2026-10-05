@@ -688,6 +688,40 @@ def _group_photos_by_folder_and_stem(db):
     return groups
 
 
+def _max_raw_jpeg_matching(raws, jpegs):
+    """Return a maximum-cardinality set of ``(raw, jpeg)`` pairs where every
+    pair satisfies ``_companions_compatible``.
+
+    Standard augmenting-path bipartite matching: for each RAW, DFS a path
+    through already-matched JPEGs to find an unmatched one; the groups
+    here are a single stem's RAWs and JPEGs, so near always ≤2 of each
+    and ``len(raws) * len(jpegs)`` is tiny.
+
+    A first-fit greedy loop is wrong because a wildcard-compatible RAW
+    (missing capture metadata) matches every JPEG, so taking the first
+    free JPEG can leave a more constrained RAW with no option even when
+    every disjoint pair would be compatible.
+    """
+    if not raws or not jpegs:
+        return []
+    match_r2j: dict[int, int] = {}
+
+    def augment(ri: int, visited: set[int]) -> bool:
+        for ji, jpeg in enumerate(jpegs):
+            if ji in visited or not _companions_compatible(raws[ri], jpeg):
+                continue
+            visited.add(ji)
+            prev = next((r for r, j in match_r2j.items() if j == ji), None)
+            if prev is None or augment(prev, visited):
+                match_r2j[ri] = ji
+                return True
+        return False
+
+    for ri in range(len(raws)):
+        augment(ri, set())
+    return [(raws[ri], jpegs[ji]) for ri, ji in match_r2j.items()]
+
+
 def _pick_compatible_raw_jpeg_pairs(members):
     """Return every ``(raw, jpeg)`` to merge from one same-stem group.
 
@@ -748,17 +782,19 @@ def _pick_compatible_raw_jpeg_pairs(members):
     # Remaining unpaired RAWs then take disjoint, unclaimed JPEGs — so
     # ``IMG.arw``/``IMG.jpeg`` merges alongside an existing
     # ``IMG.cr3``/``IMG.jpg`` instead of being perpetually left split.
-    for raw in raws:
-        if raw["companion_path"] is not None:
-            continue
-        for jpeg in jpegs:
-            name = jpeg["filename"]
-            if name in claimed or name in taken:
-                continue
-            if _companions_compatible(raw, jpeg):
-                pairs.append((raw, jpeg))
-                taken.add(name)
-                break
+    # Maximum bipartite matching keeps a wildcard-compatible RAW (one
+    # with no capture metadata, which pairs with any JPEG) from stealing
+    # the one JPEG a more constrained RAW needs — a first-fit loop would
+    # match ARW→IMG.jpeg first and leave CR3 unable to pair with IMG.jpg
+    # even when every disjoint pair is otherwise compatible.
+    unpaired_raws = [r for r in raws if r["companion_path"] is None]
+    free_jpegs = [
+        j for j in jpegs
+        if j["filename"] not in claimed and j["filename"] not in taken
+    ]
+    for raw, jpeg in _max_raw_jpeg_matching(unpaired_raws, free_jpegs):
+        pairs.append((raw, jpeg))
+        taken.add(jpeg["filename"])
 
     if not pairs:
         unmatched_raws = [r for r in raws if r["companion_path"] is None]

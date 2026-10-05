@@ -1933,6 +1933,43 @@ def test_disjoint_raw_jpeg_sets_pair_independently_in_one_group(tmp_path):
         assert DuplicateChecker(index).match(copy) is not None, name
 
 
+def test_wildcard_raw_does_not_steal_the_only_jpeg_a_constrained_raw_can_use():
+    """When two unpaired RAWs share a stem with two JPEGs and only one
+    assignment covers both RAWs, maximum bipartite matching picks it.
+
+    IMG_001.cr3 carries Canon metadata and only matches IMG_001.jpeg
+    (also Canon). IMG_001.arw lacks metadata, so it is compatible with
+    both JPEGs. A first-fit loop would match ARW→IMG_001.jpeg first and
+    leave CR3 with no compatible JPEG; the matching must give CR3 the
+    constrained match and ARW the other JPEG.
+    """
+    from scanner import _pick_compatible_raw_jpeg_pairs
+
+    def row(filename, extension, camera_make=None):
+        return {
+            "id": filename,
+            "filename": filename,
+            "extension": extension,
+            "companion_path": None,
+            "timestamp": None,
+            "camera_make": camera_make,
+            "camera_model": None,
+        }
+
+    members = [
+        row("IMG_001.arw", ".arw"),
+        row("IMG_001.cr3", ".cr3", camera_make="Canon"),
+        row("IMG_001.jpeg", ".jpeg", camera_make="Canon"),
+        row("IMG_001.jpg", ".jpg", camera_make="Nikon"),
+    ]
+    pairs = _pick_compatible_raw_jpeg_pairs(members)
+    pairing = {raw["filename"]: companion["filename"] for raw, companion in pairs}
+    assert pairing == {
+        "IMG_001.cr3": "IMG_001.jpeg",
+        "IMG_001.arw": "IMG_001.jpg",
+    }
+
+
 def test_rescan_changed_companion_invalidates_jpeg_thumbnail_variant(tmp_path):
     """Re-pairing a changed companion drops its source-specific thumbnail
     even when the replacement preserves filesystem mtime."""
