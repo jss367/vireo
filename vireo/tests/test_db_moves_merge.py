@@ -1170,6 +1170,61 @@ def test_merge_moves_embedded_keyword_offered_from_phantom_target(
     assert [tuple(r) for r in offered_rows] == [(t["staged"], "robin")]
 
 
+@pytest.mark.parametrize("same_hash", [True, False])
+@pytest.mark.parametrize("hierarchical", [False, True])
+@pytest.mark.parametrize("removed_on_survivor", [False, True])
+def test_merge_preserves_embedded_tags_and_survivor_removals(
+        db, tmp_path, same_hash, hierarchical, removed_on_survivor):
+    from scanner import _import_embedded_keywords_for_photo
+
+    t = _collision_tree(db, tmp_path, same_hash=same_hash)
+    losing, survivor = ((t["staged"], t["survivor"]) if same_hash
+                        else (t["survivor"], t["staged"]))
+    metadata = {"XMP": ({"HierarchicalSubject": ["Birds|Robin"]} if hierarchical
+                        else {"Subject": ["Robin"]})}
+    assert _import_embedded_keywords_for_photo(db, losing, metadata)
+    keyword = db.get_photo_keywords(losing)[0]
+    source = db.conn.execute(
+        "SELECT source FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+        (losing, keyword["id"]),
+    ).fetchone()[0]
+    if removed_on_survivor:
+        assert _import_embedded_keywords_for_photo(db, survivor, metadata)
+        db.untag_photo(survivor, keyword["id"])
+
+    db.merge_staged_tree_into_archive(t["stage_root"], t["arch"])
+
+    assert {k["name"] for k in db.get_photo_keywords(survivor)} == (
+        set() if removed_on_survivor else {"Robin"})
+    assert not _import_embedded_keywords_for_photo(db, survivor, metadata)
+    assert {k["name"] for k in db.get_photo_keywords(survivor)} == (
+        set() if removed_on_survivor else {"Robin"})
+    if not removed_on_survivor:
+        assert db.conn.execute(
+            "SELECT source FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+            (survivor, keyword["id"]),
+        ).fetchone()[0] == source
+
+
+@pytest.mark.parametrize("same_hash", [True, False])
+def test_embedded_merge_keeps_survivor_manual_provenance(db, tmp_path, same_hash):
+    from scanner import _import_embedded_keywords_for_photo
+
+    t = _collision_tree(db, tmp_path, same_hash=same_hash)
+    losing, survivor = ((t["staged"], t["survivor"]) if same_hash
+                        else (t["survivor"], t["staged"]))
+    _import_embedded_keywords_for_photo(db, losing, {"XMP": {"Subject": ["Robin"]}})
+    keyword = db.get_photo_keywords(losing)[0]
+    db.tag_photo(survivor, keyword["id"])
+
+    db.merge_staged_tree_into_archive(t["stage_root"], t["arch"])
+
+    assert db.conn.execute(
+        "SELECT source FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+        (survivor, keyword["id"]),
+    ).fetchone()[0] == "manual"
+
+
 def test_merge_links_archive_base_through_the_facade(db, monkeypatch):
     ws = db._active_workspace_id
     base = _folder(db, "/arch", link=False)
@@ -1535,7 +1590,9 @@ def test_merge_wires_every_callback_to_the_facade():
     }
     assert wired == expected
     others = {kw.arg for kw in call.keywords} - set(expected)
-    assert others == {"case_insensitive_root", "invalidate_new_images"}
+    assert others == {"case_insensitive_root", "invalidate_new_images", "KEYWORD_SOURCE_CONFLICT_SQL"}
+    fold = next(kw.value for kw in call.keywords if kw.arg == "KEYWORD_SOURCE_CONFLICT_SQL")
+    assert isinstance(fold, ast.Name) and fold.id == "KEYWORD_SOURCE_CONFLICT_SQL"
 
 
 @pytest.mark.parametrize("name,callback,target", [

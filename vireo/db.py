@@ -2956,6 +2956,7 @@ class Database:
                 self._new_images_cache.invalidate_workspaces(
                     self._db_path, workspace_ids)),
             update_folder_counts=self.update_folder_counts,
+            KEYWORD_SOURCE_CONFLICT_SQL=KEYWORD_SOURCE_CONFLICT_SQL,
         )
 
     def check_filename_collisions(self, photo_ids, target_folder_id):
