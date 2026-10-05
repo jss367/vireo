@@ -7641,7 +7641,7 @@ def test_startup_species_thread_runs_embedded_keyword_backfill_first(tmp_path, m
     order = []
     tasks = StartupTasks(app=None, db_path=db_path, init_db=db)
     monkeypatch.setattr(
-        tasks, "mark_species_and_repair",
+        tasks, "mark_species_keywords",
         lambda bg_db, _label: order.append(
             {k["name"] for k in bg_db.get_photo_keywords(photo_id)}
         ),

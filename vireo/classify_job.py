@@ -46,14 +46,10 @@ from keyword_normalization import species_match_key as _species_match_key
 from models import get_active_model, get_models
 from resource_ledger import ResourceWaitCancelled
 
-# ``_folded_species_key`` / ``_species_match_key`` used to be defined here.
-# They moved to ``keyword_normalization`` when ``db`` needed the same fold
-# for ``repair_mixed_species_prediction_groups`` — the repair's job is to
-# reproduce the grouping decision ``_store_grouped_predictions`` makes
-# below, so the two must not be able to drift. ``classify_job`` imports
-# ``db``, so the shared home has to be a module both can import. The
-# private aliases are kept because the grouping code and its tests read
-# better with the leading underscore signalling "this module's rule".
+# ``_folded_species_key`` / ``_species_match_key`` live in
+# ``keyword_normalization`` with the rest of the name folds. The private
+# aliases are kept because the grouping code and its tests read better with
+# the leading underscore signalling "this module's rule".
 
 try:
     from classifier import ClassificationCancelled, Classifier
@@ -3055,8 +3051,8 @@ def _store_match_prediction(
         # so alternatives-that-are-actually-the-primary stay unwritten.
         #
         # Comparison uses ``_species_match_key`` (ASCII-only case fold):
-        # downstream keyword joins already use SQLite ``COLLATE NOCASE``
-        # (see ``_fold_prediction_species_apostrophes``), so a merged
+        # downstream keyword joins already use SQLite ``COLLATE NOCASE``,
+        # so a merged
         # label set yielding primary `Say's Phoebe` and alternative
         # `Say's phoebe` is semantically one bird — but
         # ``_folded_species_key`` preserves case, letting them survive as

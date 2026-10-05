@@ -512,84 +512,6 @@ def test_get_new_images_for_workspace_uses_cache(db, monkeypatch):
 # -- legacy config migrations -------------------------------------------------
 
 
-def _malformed_workspaces(db):
-    """Workspaces whose overrides every legacy rewrite must skip."""
-    for name, raw in [
-        ("m-bad-json", "{"),
-        ("m-list", "[1]"),
-        ("m-no-pipeline", '{"x": 1}'),
-        ("m-pipeline-list", '{"pipeline": [1]}'),
-    ]:
-        _raw_overrides(db, db.create_workspace(name), raw)
-
-
-def _overrides(db, ws_id):
-    raw = db.get_workspace(ws_id)["config_overrides"]
-    return json.loads(raw) if raw else None
-
-
-def test_rewrite_legacy_miss_thresholds(db):
-    _malformed_workspaces(db)
-    legacy = db.create_workspace(
-        "Legacy",
-        config_overrides={"pipeline": {"miss_det_confidence": 0.5, "miss_det_confidence_burst": 0.6}},
-    )
-    custom = db.create_workspace(
-        "Custom",
-        config_overrides={"pipeline": {"miss_det_confidence": 0.5, "miss_det_confidence_burst": 0.9}},
-    )
-    assert db.rewrite_legacy_miss_thresholds_in_workspaces(0.5, 0.6, 0.3, 0.4) == 1
-    assert not db.conn.in_transaction
-    assert _overrides(db, legacy)["pipeline"] == {
-        "miss_det_confidence": 0.3, "miss_det_confidence_burst": 0.4,
-    }
-    assert _overrides(db, custom)["pipeline"]["miss_det_confidence_burst"] == 0.9
-    assert db.rewrite_legacy_miss_thresholds_in_workspaces(0.5, 0.6, 0.3, 0.4) == 0
-
-
-def test_rewrite_legacy_w_species_default(db):
-    _malformed_workspaces(db)
-    legacy = db.create_workspace("Legacy", config_overrides={"pipeline": {"w_species": 0.3}})
-    custom = db.create_workspace("Custom", config_overrides={"pipeline": {"w_species": 0.8}})
-    assert db.rewrite_legacy_w_species_default_in_workspaces(0.3, 0.5) == 1
-    assert _overrides(db, legacy)["pipeline"]["w_species"] == 0.5
-    assert _overrides(db, custom)["pipeline"]["w_species"] == 0.8
-    assert db.rewrite_legacy_w_species_default_in_workspaces(0.3, 0.5) == 0
-
-
-def test_rewrite_legacy_eye_detect_default_clears_fingerprint(db):
-    _malformed_workspaces(db)
-    legacy = db.create_workspace("Legacy", config_overrides={"pipeline": {"eye_detect_enabled": True}})
-    off = db.create_workspace("Off", config_overrides={"pipeline": {"eye_detect_enabled": False}})
-    db.set_workspace_group_state(legacy, "fp", "t")
-    db.set_workspace_group_state(off, "fp", "t")
-    assert db.rewrite_legacy_eye_detect_default_in_workspaces() == 1
-    assert _overrides(db, legacy)["pipeline"]["eye_detect_enabled"] is False
-    assert db.get_workspace(legacy)["last_group_fingerprint"] is None
-    assert db.get_workspace(off)["last_group_fingerprint"] == "fp"
-    assert db.rewrite_legacy_eye_detect_default_in_workspaces() == 0
-
-
-def test_invalidate_group_fingerprints_without_explicit_eye_false(db):
-    explicit_off = db.create_workspace("Off", config_overrides={"pipeline": {"eye_detect_enabled": False}})
-    inherits = db.create_workspace("Inherits")
-    bad_json = db.create_workspace("BadJson")
-    _raw_overrides(db, bad_json, "{")
-    listy = db.create_workspace("Listy")
-    _raw_overrides(db, listy, "[1]")
-    never_grouped = db.create_workspace("Never")
-    for ws_id in (explicit_off, inherits, bad_json, listy):
-        db.set_workspace_group_state(ws_id, "fp", "t")
-
-    assert db.invalidate_group_fingerprints_without_explicit_eye_false() == 3
-    assert not db.conn.in_transaction
-    assert db.get_workspace(explicit_off)["last_group_fingerprint"] == "fp"
-    for ws_id in (inherits, bad_json, listy):
-        assert db.get_workspace(ws_id)["last_group_fingerprint"] is None
-    assert db.get_workspace(never_grouped)["last_group_fingerprint"] is None
-    assert db.invalidate_group_fingerprints_without_explicit_eye_false() == 0
-
-
 # -- structure: the workspace SQL lives in the repository ---------------------
 
 # Database methods whose SQL moved to repositories/workspaces.py. Each stays
@@ -612,10 +534,6 @@ _DELEGATING_WORKSPACE_METHODS = (
     "unpin_tab",
     "create_new_images_snapshot",
     "get_new_images_snapshot",
-    "rewrite_legacy_miss_thresholds_in_workspaces",
-    "rewrite_legacy_w_species_default_in_workspaces",
-    "rewrite_legacy_eye_detect_default_in_workspaces",
-    "invalidate_group_fingerprints_without_explicit_eye_false",
 )
 
 

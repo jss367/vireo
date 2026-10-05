@@ -586,33 +586,6 @@ def test_ensure_default_genre_keywords_is_idempotent(db):
     assert after == before
 
 
-def test_migrate_legacy_keyword_types(db):
-    ids = {
-        legacy: _raw_kw(db, f"Legacy {legacy}", kw_type=legacy)
-        for legacy in ("people", "descriptive", "event", "location")
-    }
-    db.conn.commit()
-    db.migrate_legacy_keyword_types()
-    assert not db.conn.in_transaction
-    got = {
-        legacy: _visible(db, "SELECT type FROM keywords WHERE id = ?", (kid,))[0][0]
-        for legacy, kid in ids.items()
-    }
-    assert got == {
-        "people": "individual",
-        "descriptive": "general",
-        "event": "general",
-        "location": "location",
-    }
-    # Warm path: nothing legacy left, so only the probe runs.
-    statements = _trace(db)
-    db.migrate_legacy_keyword_types()
-    db.conn.set_trace_callback(None)
-    assert [s for s in statements if s.strip()] == [
-        "SELECT 1 FROM keywords WHERE type IN ('people', 'descriptive', 'event') LIMIT 1"
-    ]
-
-
 # -- update_keyword ------------------------------------------------------------------------
 
 
@@ -852,9 +825,6 @@ def test_normalize_keyword_row_name(db, lib, monkeypatch):
     db._normalize_keyword_row_name(kid)  # collides with the general 'Heron'
     assert renames == []
     assert _kw(db, kid)[0] == '"Heron"'
-    db._normalize_keyword_row_name(kid, disambiguate_on_conflict=True)
-    assert _kw(db, kid)[0] == f"Heron (id-{kid})"
-    assert renames == [(kid, '"Heron"', f"Heron (id-{kid})")]
     free = _raw_kw(db, "'Egret'")
     db._normalize_keyword_row_name(free)
     assert _kw(db, free)[0] == "Egret"
@@ -931,330 +901,7 @@ def test_reparent_disambiguated_routes_through_facade(db, lib, monkeypatch):
     assert db.conn.in_transaction  # caller commits
 
 
-def _fail_after(db, monkeypatch, name):
-    def boom(*a, **k):
-        db.conn.execute("INSERT INTO db_meta (key, value) VALUES ('sweep-probe', 'x')")
-        raise RuntimeError("sweep failed")
-
-    monkeypatch.setattr(db, name, boom)
-
-
-@pytest.mark.parametrize("marker,failing", [
-    ("keyword_names_normalized", "_normalize_keyword_data_once"),
-    ("curation_species_case_aligned_v2", "_align_curation_species_case"),
-    ("curation_species_case_aligned_v2", "_align_curation_history_species"),
-    ("keyword_apostrophes_folded_v1", "_fold_prediction_species_apostrophes"),
-])
-def test_normalize_keyword_data_rolls_back_each_sweep(db, monkeypatch, marker, failing):
-    db.conn.execute("DELETE FROM db_meta WHERE key = ?", (marker,))
-    db.conn.commit()
-    _fail_after(db, monkeypatch, failing)
-    if failing == "_fold_prediction_species_apostrophes":
-        monkeypatch.setattr(db, "_normalize_keyword_data_once", lambda: None)
-    with pytest.raises(RuntimeError, match="sweep failed"):
-        db.normalize_keyword_data()
-    assert not db.conn.in_transaction
-    assert db.get_meta(marker) is None
-    assert db.get_meta("sweep-probe") is None
-
-
-def test_normalize_keyword_data_runs_each_sweep_once(db, monkeypatch, caplog):
-    for marker in ("keyword_names_normalized", "curation_species_case_aligned_v2",
-                   "keyword_apostrophes_folded_v1"):
-        db.conn.execute("DELETE FROM db_meta WHERE key = ?", (marker,))
-    db.conn.commit()
-    calls = []
-    monkeypatch.setattr(db, "_normalize_keyword_data_once", lambda: calls.append("once"))
-    monkeypatch.setattr(db, "_align_curation_species_case", lambda: calls.append("case") or 2)
-    monkeypatch.setattr(db, "_align_curation_history_species",
-                        lambda: calls.append("hist") or 1)
-    monkeypatch.setattr(db, "_fold_prediction_species_apostrophes",
-                        lambda: calls.append("fold") or 3)
-    meta = []
-    real_set_meta = db.set_meta
-    monkeypatch.setattr(db, "set_meta", lambda k, v, _commit=True: meta.append(
-        (k, v, _commit)) or real_set_meta(k, v, _commit=_commit))
-    with caplog.at_level("INFO", logger="db"):
-        db.normalize_keyword_data()
-    assert calls == ["once", "case", "hist", "once", "fold"]
-    assert meta == [
-        ("keyword_names_normalized", "1", False),
-        ("curation_species_case_aligned_v2", "1", False),
-        ("keyword_apostrophes_folded_v1", "1", False),
-    ]
-    assert not db.conn.in_transaction
-    assert "moved 2 row(s), rewrote 1 history item(s)" in caplog.text
-    assert "apostrophe fold: rewrote 3 prediction species" in caplog.text
-    calls.clear()
-    db.normalize_keyword_data()
-    assert calls == []
-
-
-def _prediction(db, pid, species, conf=0.5, model="m", fp="fp", **cols):
-    det = db.save_detections(
-        pid, [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9,
-               "category": "animal"}], "md",
-    )[0]
-    db.conn.execute(
-        "INSERT INTO predictions (detection_id, classifier_model, labels_fingerprint, "
-        "species, confidence) VALUES (?, ?, ?, ?, ?)",
-        (det, model, fp, species, conf),
-    )
-    pred_id = db.conn.execute("SELECT MAX(id) FROM predictions").fetchone()[0]
-    for col, val in cols.items():
-        db.conn.execute(f"UPDATE predictions SET {col} = ? WHERE id = ?", (val, pred_id))
-    return det, pred_id
-
-
-def test_fold_prediction_species_apostrophes(db, lib):
-    p0, p1 = lib["p"][:2]
-    det, curly = _prediction(db, p0, "Say’s phoebe", 0.9)
-    db.conn.execute(
-        "INSERT INTO predictions (detection_id, classifier_model, labels_fingerprint, "
-        "species, confidence, category, scientific_name) "
-        "VALUES (?, 'm', 'fp', ?, 0.4, 'match', 'Sayornis saya')",
-        (det, "Say's Phoebe"),
-    )
-    ascii_id = db.conn.execute("SELECT MAX(id) FROM predictions").fetchone()[0]
-    _d2, lone = _prediction(db, p1, "Black’s bird", 0.3)
-    _d3, junk = _prediction(db, lib["p"][2], "’", 0.3)
-    db.conn.commit()
-    folded = db._fold_prediction_species_apostrophes()
-    assert folded == 2
-    rows = {r["id"]: tuple(r)[1:] for r in db.conn.execute(
-        "SELECT id, species, category, scientific_name FROM predictions")}
-    assert ascii_id not in rows
-    assert rows[curly] == ("Say's phoebe", "match", "Sayornis saya")
-    assert rows[lone][0] == "Black's bird"
-    assert rows[junk][0] == "’"
-    assert db.conn.in_transaction  # caller commits
-
-
-def test_merge_prediction_metadata_guards(db, lib):
-    _d, a = _prediction(db, lib["p"][0], "A", category="new")
-    _d, b = _prediction(db, lib["p"][1], "B", category="change",
-                        taxonomy_genus="G", scientific_name="S")
-    statements = _trace(db)
-    db._merge_prediction_metadata_before_delete(a, a)
-    db.conn.set_trace_callback(None)
-    assert statements == []
-    db._merge_prediction_metadata_before_delete(999_999, a)
-    db._merge_prediction_metadata_before_delete(b, a)
-    row = db.conn.execute(
-        "SELECT category, taxonomy_genus, scientific_name FROM predictions WHERE id = ?",
-        (a,),
-    ).fetchone()
-    assert tuple(row) == ("change", "G", "S")
-    db.conn.execute("UPDATE predictions SET category = 'match' WHERE id = ?", (a,))
-    db._merge_prediction_metadata_before_delete(b, a)
-    assert db.conn.execute("SELECT category FROM predictions WHERE id = ?",
-                           (a,)).fetchone()[0] == "match"
-
-
-def test_merge_prediction_review_before_delete(db, lib):
-    _d, a = _prediction(db, lib["p"][0], "A")
-    _d, b = _prediction(db, lib["p"][1], "B")
-    ws = lib["ws"]
-    other = db.create_workspace("Other")
-    db.conn.execute(
-        "INSERT INTO prediction_review (prediction_id, workspace_id, status) "
-        "VALUES (?, ?, 'accepted')", (b, ws))
-    db.conn.execute(
-        "INSERT INTO prediction_review (prediction_id, workspace_id, status) "
-        "VALUES (?, ?, 'rejected')", (b, other))
-    db.conn.execute(
-        "INSERT INTO prediction_review (prediction_id, workspace_id, status) "
-        "VALUES (?, ?, 'pending')", (a, other))
-    db._merge_prediction_review_before_delete(loser_id=b, winner_id=a)
-    got = sorted(tuple(r) for r in db.conn.execute(
-        "SELECT prediction_id, workspace_id, status FROM prediction_review"))
-    assert (a, ws, "accepted") in got
-
-
-def test_retarget_prediction_edit_history(db, lib):
-    p0 = lib["p"][0]
-    edit = db.conn.execute(
-        "INSERT INTO edit_history (action_type, description, new_value, workspace_id) "
-        "VALUES ('prediction_accept', 'x', 'v', ?)", (lib["ws"],)).lastrowid
-    items = [
-        "5",
-        json.dumps({"prediction_id": 5, "no_tag": True}),
-        json.dumps({"prediction_ids": [5, "x", 6]}),
-        json.dumps({"prediction_id": "bad"}),
-        json.dumps([5]),
-        "{not json",
-        json.dumps({"prediction_id": 6}),
-    ]
-    ids = []
-    for old in items:
-        ids.append(db.conn.execute(
-            "INSERT INTO edit_history_items (edit_id, photo_id, old_value, new_value) "
-            "VALUES (?, ?, ?, 'n')", (edit, p0, old)).lastrowid)
-    statements = _trace(db)
-    db._retarget_prediction_edit_history(loser_id=5, winner_id=5)
-    db.conn.set_trace_callback(None)
-    assert statements == []
-    db._retarget_prediction_edit_history(loser_id=5, winner_id=9)
-    got = [db.conn.execute("SELECT old_value FROM edit_history_items WHERE id = ?",
-                           (i,)).fetchone()[0] for i in ids]
-    assert got[0] == "9"
-    assert json.loads(got[1]) == {"prediction_id": 9, "no_tag": True}
-    assert json.loads(got[2]) == {"prediction_ids": [9, "x", 6]}
-    assert got[3:] == items[3:]
-
-
-def test_align_curation_species_case(db, lib, monkeypatch):
-    p0 = lib["p"][0]
-    ws = lib["ws"]
-    _raw_kw(db, "Saffron finch", kw_type="taxonomy", is_species=1)
-    _raw_kw(db, "Robin", kw_type="general", is_species=1)
-    _raw_kw(db, "robin", kw_type="taxonomy", is_species=1)
-    for species in ("Saffron Finch", "ROBIN", "Saffron finch"):
-        db.conn.execute(
-            "INSERT INTO species_highlights (workspace_id, species, photo_id, rank) "
-            "VALUES (?, ?, ?, 1)", (ws, species, p0))
-    db.conn.execute(
-        "INSERT INTO photo_preferences (workspace_id, purpose, species, photo_id) "
-        "VALUES (?, 'life_list', 'saffron FINCH', ?)", (ws, p0))
-    db.conn.commit()
-    moved = db._align_curation_species_case()
-    assert moved >= 1
-    assert sorted(r[0] for r in db.conn.execute(
-        "SELECT species FROM species_highlights")) == ["ROBIN", "Saffron finch"]
-    assert [r[0] for r in db.conn.execute(
-        "SELECT species FROM photo_preferences")] == ["Saffron finch"]
-    assert db.conn.in_transaction  # caller commits
-
-
-def test_align_curation_history_species(db, lib):
-    p0 = lib["p"][0]
-    _raw_kw(db, "Saffron finch", kw_type="taxonomy", is_species=1)
-    edit = db.conn.execute(
-        "INSERT INTO edit_history (action_type, description, new_value, workspace_id) "
-        "VALUES ('species_replace', 'x', 'v', ?)", (lib["ws"],)).lastrowid
-    payloads = [
-        {"curation": {"hl_prev": ["Saffron Finch", {"species": "saffron finch"}, 3],
-                      "pref_prev": [{"species": "SAFFRON FINCH"}, "x", {"species": 4}],
-                      "rep_prev": "nope"}},
-        {"curation": "nope"},
-        {"curation": {"hl_prev": ["Saffron finch"]}},
-    ]
-    raw = [json.dumps(p) for p in payloads] + ['{"curation": [', '["curation"]']
-    ids = [db.conn.execute(
-        "INSERT INTO edit_history_items (edit_id, photo_id, old_value, new_value) "
-        "VALUES (?, ?, ?, 'n')", (edit, p0, v)).lastrowid for v in raw]
-    assert db._align_curation_history_species() == 1
-    first = json.loads(db.conn.execute(
-        "SELECT old_value FROM edit_history_items WHERE id = ?", (ids[0],)).fetchone()[0])
-    assert first["curation"]["hl_prev"] == ["Saffron finch", {"species": "Saffron finch"}, 3]
-    assert first["curation"]["pref_prev"][0] == {"species": "Saffron finch"}
-    for i, v in zip(ids[1:], raw[1:], strict=True):
-        assert db.conn.execute("SELECT old_value FROM edit_history_items WHERE id = ?",
-                               (i,)).fetchone()[0] == v
-
-
-def test_species_keyword_maps_and_canonical(db, lib, monkeypatch):
-    _raw_kw(db, "Saffron finch", kw_type="taxonomy", is_species=1)
-    _raw_kw(db, "Robin", kw_type="general", is_species=1)
-    _raw_kw(db, "robin", kw_type="taxonomy", is_species=1)
-    birds = _raw_kw(db, "Birds")
-    _raw_kw(db, "Leafy", birds, "taxonomy", 1)
-    unique, all_keys = db._species_keyword_maps()
-    assert unique == {"saffron finch": "Saffron finch"}
-    assert all_keys == {"saffron finch", "robin"}
-    assert db._canonical_curation_species("'", unique, all_keys) == ""
-    assert db._canonical_curation_species(None, unique, all_keys) == ""
-    assert db._canonical_curation_species("SAFFRON FINCH", unique, all_keys) == "Saffron finch"
-    assert db._canonical_curation_species("ROBIN", unique, all_keys) == "ROBIN"
-    seen = []
-    monkeypatch.setattr(db, "resolve_species_display_name",
-                        lambda n: seen.append(n) or "Resolved")
-    assert db._canonical_curation_species("New bird", unique, all_keys) == "Resolved"
-    assert seen == ["New bird"]
-
-
 # -- duplicate photo species repair --------------------------------------------------------
-
-
-def _repair_setup(db, lib):
-    p0, p1 = lib["p"][:2]
-    root = _raw_kw(db, "Verdin", kw_type="taxonomy", is_species=1, taxon_id=3)
-    birds = _raw_kw(db, "Birds")
-    leaf = _raw_kw(db, "Desert Verdin", birds, "taxonomy", 1, taxon_id=3)
-    db.conn.execute("DELETE FROM db_meta WHERE key = ?",
-                    (Database._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,))
-    db.conn.commit()
-    for pid in (p0, p1):
-        db.tag_photo(pid, root)
-        db.tag_photo(pid, leaf)
-    return root, leaf
-
-
-def test_repair_duplicate_photo_species_detaches_roots(db, lib, monkeypatch, caplog):
-    p0, p1 = lib["p"][:2]
-    root, leaf = _repair_setup(db, lib)
-    db.queue_change(p0, "keyword_add", "Verdin")
-    queued = []
-    real_queue = db.queue_change
-    monkeypatch.setattr(db, "queue_change",
-                        lambda *a, **k: queued.append((a, k)) or real_queue(*a, **k))
-    with caplog.at_level("INFO", logger="db"):
-        assert db.repair_duplicate_photo_species() == 2
-    assert not db.conn.in_transaction
-    assert _visible(db, "SELECT photo_id, keyword_id FROM photo_keywords ORDER BY photo_id") == [
-        (p0, leaf), (p1, leaf),
-    ]
-    # p0's pending add was cancelled; p1 gets a sidecar remove queued.
-    assert [(a[0], a[1], a[2], k) for a, k in queued] == [
-        (p1, "keyword_remove", "Verdin", {"workspace_id": lib["ws"], "_commit": False}),
-    ]
-    assert db.get_meta(Database._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY) == "1"
-    assert "repaired 2 redundant" in caplog.text
-    assert db.repair_duplicate_photo_species() == 0
-
-
-def test_repair_duplicate_photo_species_waits_for_taxa(db, lib):
-    _repair_setup(db, lib)
-    db.conn.execute("UPDATE taxa SET rank = 'genus' WHERE rank = 'species'")
-    db.conn.commit()
-    assert db.repair_duplicate_photo_species() == 0
-    assert db.get_meta(Database._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY) is None
-
-
-def test_repair_duplicate_photo_species_rolls_back(db, lib, monkeypatch):
-    _repair_setup(db, lib)
-
-    def boom(*a, **k):
-        raise RuntimeError("queue failed")
-
-    monkeypatch.setattr(db, "queue_change", boom)
-    with pytest.raises(RuntimeError, match="queue failed"):
-        db.repair_duplicate_photo_species()
-    assert not db.conn.in_transaction
-    assert _visible(db, "SELECT COUNT(*) FROM photo_keywords") == [(4,)]
-    assert db.get_meta(Database._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY) is None
-
-
-def test_repair_duplicate_photo_species_prunes_edit_history(db, lib):
-    p0 = lib["p"][0]
-    root, leaf = _repair_setup(db, lib)
-    edit = db.conn.execute(
-        "INSERT INTO edit_history (action_type, description, new_value, workspace_id) "
-        "VALUES ('species_replace', 'x', 'v', ?)", (lib["ws"],)).lastrowid
-    values = [
-        json.dumps({"keyword_id": root}),
-        json.dumps({"keyword_ids": ["x", root]}),
-        json.dumps({"keyword_id": "bad", "keyword_ids": [leaf]}),
-        "{broken",
-        json.dumps([root]),
-    ]
-    ids = [db.conn.execute(
-        "INSERT INTO edit_history_items (edit_id, photo_id, old_value, new_value) "
-        "VALUES (?, ?, ?, 'n')", (edit, p0, v)).lastrowid for v in values]
-    db.conn.commit()
-    db.repair_duplicate_photo_species()
-    left = [r[0] for r in db.conn.execute("SELECT id FROM edit_history_items ORDER BY id")]
-    assert left == ids[2:]
 
 
 # -- species marking -----------------------------------------------------------------------
@@ -1332,7 +979,6 @@ def test_resolve_species_by_lineage(db, lib):
 _DELEGATING_KEYWORD_METHODS = (
     "filter_out_subject_tagged",
     "ensure_default_genre_keywords",
-    "migrate_legacy_keyword_types",
     "count_keywords",
     "count_keywords_in_workspace",
     "get_accepted_species",
@@ -1347,16 +993,6 @@ _DELEGATING_KEYWORD_METHODS = (
     "_merge_duplicate_keywords_pass",
     "_normalize_keyword_row_name",
     "_rename_keyword_dependents",
-    "normalize_keyword_data",
-    "_fold_prediction_species_apostrophes",
-    "_merge_prediction_review_before_delete",
-    "_merge_prediction_metadata_before_delete",
-    "_retarget_prediction_edit_history",
-    "_align_curation_species_case",
-    "_align_curation_history_species",
-    "_species_keyword_maps",
-    "has_possible_duplicate_photo_species",
-    "repair_duplicate_photo_species",
     "_reparent_disambiguated",
     "get_keyword_tree",
     "untag_photo",
@@ -1380,7 +1016,6 @@ _KEYWORD_METHODS_IN_PROVENANCE_REPOSITORY = (
     "_merge_keyword_into",
     "retire_builtin_wildlife_genre",
     "_upsert_one_keyword",
-    "_normalize_keyword_data_once",
 )
 
 _PROVENANCE_WRITERS = (
@@ -1488,9 +1123,7 @@ def test_keyword_facade_signatures_unchanged():
     assert sig["get_species_keywords_for_photos"] == (
         "(self, photo_ids, include_identities=False)"
     )
-    assert sig["_normalize_keyword_row_name"] == (
-        "(self, keyword_id, disambiguate_on_conflict=False)"
-    )
+    assert sig["_normalize_keyword_row_name"] == "(self, keyword_id)"
 
 
 def test_keyword_repository_never_hands_itself_out_as_the_database():

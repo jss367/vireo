@@ -199,9 +199,8 @@ class _PhotoSyncPlan:
 
     keywords_to_add: set = field(default_factory=set)
     keywords_to_remove: set = field(default_factory=set)
-    # ``keyword_remove_flat`` is queued by ``repair_duplicate_photo_species``
-    # when a detached root spelling still appears as an ancestor segment of a
-    # preserved hierarchy leaf. A regular hierarchical ``keyword_remove``
+    # ``keyword_remove_flat`` is queued when a detached root spelling still
+    # appears as an ancestor segment of a preserved hierarchy leaf. A regular hierarchical ``keyword_remove``
     # would strip that preserved ``lr:hierarchicalSubject`` entry; flat-only
     # removal touches only the stale ``dc:subject`` line.
     keywords_to_remove_flat: set = field(default_factory=set)

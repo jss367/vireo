@@ -7,16 +7,15 @@ fingerprint / match-score backfill, refreshed outputs), the per-workspace
 review state (absence == pending, preserved manual decisions, the auto-match
 marker), the ``_commit=False`` nested-transaction seams of the review
 mutators, commit visibility and ``commit_with_retry`` routing, chunking,
-workspace scoping and lazy active-workspace resolution, the legacy burst
-repair, and that composition (``get_effective_config``,
-``_build_query_from_rules``, ``accept_prediction``, ``get_meta`` /
-``set_meta``) still routes through the façade so monkeypatches take effect.
+workspace scoping and lazy active-workspace resolution, and that
+composition (``get_effective_config``, ``_build_query_from_rules``,
+``accept_prediction``) still routes through the façade so monkeypatches take
+effect.
 """
 
 import ast
 import contextlib
 import inspect
-import json
 import sqlite3
 import textwrap
 
@@ -573,74 +572,6 @@ def test_clear_group_info_never_inserts(db, cat):
 # -- legacy burst repair -------------------------------------------------------------------
 
 
-_REPAIR_KEY = "prediction_review_mixed_species_groups_v1"
-
-
-def test_repair_mixed_species_groups(db, cat, monkeypatch, caplog):
-    import db as dbmod
-
-    db.conn.execute("DELETE FROM db_meta WHERE key = ?", (_REPAIR_KEY,))
-    det = _det(db, cat["p"][0])
-    rows = {
-        "Mixed": json.dumps({"Purple Finch": 3, "Cassin's Finch": 2}),
-        "Folded": json.dumps({"Hawai'i 'Amakihi": 4, "Hawai’i ’Amakihi": 2}),
-        "Broken": "{not json, really",
-        "List": json.dumps(["a", "b"]),
-    }
-    ids = {}
-    for species, individual in rows.items():
-        db.add_prediction(det, species, 0.5, "m1", group_id="g", vote_count=5,
-                          total_votes=5, individual=individual)
-        ids[species] = _pred_id(db, det, species, fp="legacy")
-    commits = []
-    real = dbmod.commit_with_retry
-    monkeypatch.setattr(dbmod, "commit_with_retry",
-                        lambda conn, *a, **k: commits.append(1) or real(conn, *a, **k))
-    with caplog.at_level("INFO", logger="db"):
-        assert db.repair_mixed_species_prediction_groups() == 1
-    assert commits == [1]
-    assert not db.conn.in_transaction
-    assert _review(db, ids["Mixed"]) == ("pending", None, None, None, None)
-    for species in ("Folded", "Broken", "List"):
-        assert _review(db, ids[species])[2] == "g"
-    assert db.get_meta(_REPAIR_KEY) == "1"
-    assert "Ungrouped 1 legacy prediction review row(s) across 1 photo(s)" in caplog.text
-    assert db.repair_mixed_species_prediction_groups() == 0
-
-
-def test_repair_mixed_species_groups_nothing_to_clear(db, cat, caplog):
-    db.conn.execute("DELETE FROM db_meta WHERE key = ?", (_REPAIR_KEY,))
-    det = _det(db, cat["p"][0])
-    db.add_prediction(det, "Folded", 0.5, "m1", group_id="g",
-                      individual=json.dumps({"Robin": 1, "robin": 2}))
-    with caplog.at_level("INFO", logger="db"):
-        assert db.repair_mixed_species_prediction_groups() == 0
-    assert "found nothing to clear" in caplog.text
-    assert db.get_meta(_REPAIR_KEY) == "1"
-
-
-def test_repair_mixed_species_groups_no_candidates(db, cat, monkeypatch, caplog):
-    db.conn.execute("DELETE FROM db_meta WHERE key = ?", (_REPAIR_KEY,))
-    db.conn.commit()
-    meta = []
-    real = db.set_meta
-    monkeypatch.setattr(db, "set_meta",
-                        lambda k, v, _commit=True: meta.append((k, v, _commit))
-                        or real(k, v, _commit=_commit))
-    with caplog.at_level("INFO", logger="db"):
-        assert db.repair_mixed_species_prediction_groups() == 0
-    assert meta == [(_REPAIR_KEY, "1", True)]
-    assert "no multi-vote burst rows" in caplog.text
-
-
-def test_repair_mixed_species_groups_without_review_table(db):
-    db.conn.execute("DELETE FROM db_meta WHERE key = ?", (_REPAIR_KEY,))
-    db.conn.execute("ALTER TABLE prediction_review RENAME TO prediction_review_old")
-    db.conn.commit()
-    assert db.repair_mixed_species_prediction_groups() == 0
-    assert db.get_meta(_REPAIR_KEY) is None
-
-
 # -- accepts -------------------------------------------------------------------------------
 
 
@@ -741,7 +672,6 @@ _DELEGATING_PREDICTION_METHODS = (
     "update_prediction_status",
     "get_group_predictions",
     "update_predictions_status_by_photo",
-    "repair_mixed_species_prediction_groups",
     "ungroup_prediction",
     "get_existing_prediction_photo_ids",
     "get_top_prediction_for_photo",

@@ -1420,123 +1420,6 @@ def _migrate_edit_math_render_caches(app):
         db.close()
 
 
-def _migrate_unedited_raw_preview_sources(app):
-    """Drop previews that may have used an edit-quality RAW working copy.
-
-    RAW working copies deliberately preserve highlight headroom and therefore
-    look flatter/darker than the camera-rendered rendition used for browsing.
-    Older preview routing treated that working copy as the canonical source
-    even when a RAW had no edit recipe.  Those bytes are keyed only by
-    ``(photo_id, size)``, so fixing source selection alone would keep serving
-    already-cached dark tiers indefinitely.
-
-    Purge only recipe-free RAWs that currently have a working copy, and gate
-    the migration in ``db_meta`` so large libraries pay the directory scan
-    once.  If any cache file cannot be inspected or removed, leave the marker
-    unset so the next launch retries instead of permanently adopting stale
-    pixels.
-    """
-    from image_loader import RAW_EXTENSIONS
-
-    marker = "unedited_raw_camera_preview_source_v1"
-    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
-    preview_dir = os.path.join(vireo_dir, "previews")
-    db = Database(app.config["DB_PATH"])
-    try:
-        if db.get_meta(marker) == "1":
-            return
-
-        rows = db.conn.execute(
-            """SELECT p.id, p.filename
-               FROM photos p
-               LEFT JOIN photo_edit_recipes r ON r.photo_id = p.id
-               WHERE p.working_copy_path IS NOT NULL
-                 AND r.photo_id IS NULL"""
-        ).fetchall()
-        affected = {
-            int(row["id"])
-            for row in rows
-            if os.path.splitext(row["filename"] or "")[1].lower()
-            in RAW_EXTENSIONS
-        }
-
-        purge_failed = False
-        names_by_pid = {}
-        try:
-            preview_names = os.listdir(preview_dir)
-        except FileNotFoundError:
-            preview_names = ()
-        except OSError:
-            log.warning(
-                "Failed to list preview cache dir %s while migrating "
-                "unedited RAW preview sources; retrying next launch",
-                preview_dir,
-                exc_info=True,
-            )
-            preview_names = ()
-            purge_failed = True
-
-        for name in preview_names:
-            if not name.endswith(".jpg"):
-                continue
-            underscore = name.find("_")
-            if underscore <= 0:
-                continue
-            try:
-                photo_id = int(name[:underscore])
-            except ValueError:
-                continue
-            if photo_id in affected:
-                names_by_pid.setdefault(photo_id, set()).add(name)
-
-        invalidated = 0
-        for photo_id in affected:
-            tracked = db.conn.execute(
-                "SELECT size FROM preview_cache WHERE photo_id=?",
-                (photo_id,),
-            ).fetchall()
-            names = names_by_pid.get(photo_id, set())
-            names.update(
-                f"{photo_id}_{row['size']}.jpg" for row in tracked
-            )
-            photo_failed = False
-            for name in names:
-                path = os.path.join(preview_dir, name)
-                try:
-                    if os.path.exists(path):
-                        os.remove(path)
-                except OSError:
-                    log.warning(
-                        "Failed to remove stale unedited RAW preview %s",
-                        path,
-                        exc_info=True,
-                    )
-                    photo_failed = True
-                    purge_failed = True
-            if photo_failed:
-                continue
-            cursor = db.conn.execute(
-                "DELETE FROM preview_cache WHERE photo_id=?", (photo_id,)
-            )
-            invalidated += max(cursor.rowcount, 0)
-
-        if purge_failed:
-            db.conn.commit()
-            return
-
-        db.set_meta(marker, "1", _commit=False)
-        db.conn.commit()
-        if affected:
-            log.info(
-                "Invalidated %d preview-cache entries across %d unedited "
-                "RAW photos so camera-rendered previews can regenerate",
-                invalidated,
-                len(affected),
-            )
-    finally:
-        db.close()
-
-
 def _enforce_preview_cache_quota_at_startup(app):
     """Reconcile and evict at startup so prior runs / external deletes
     can't leave the table out of sync or over quota.
@@ -1627,8 +1510,6 @@ def _sweep_abandoned_transient_originals(app):
         )
 
 
-
-
 def create_app(db_path, thumb_cache_dir=None, api_token=None):
     """Create the Flask app for the Vireo photo browser.
 
@@ -1677,7 +1558,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     _migrate_legacy_preview_cache(app)
     _migrate_edit_math_render_caches(app)
-    _migrate_unedited_raw_preview_sources(app)
     _enforce_preview_cache_quota_at_startup(app)
     _sweep_abandoned_transient_originals(app)
     _enforce_working_copy_cache_quota_at_startup(app)

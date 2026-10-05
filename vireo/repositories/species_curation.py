@@ -27,8 +27,7 @@ What deliberately stays on ``Database``:
 - Composition. Every façade method a moved body calls arrives bound, under
   its ``Database`` name, and the body calls it as ``self.<name>(...)``:
   ``resolve_species_display_name`` and ``get_folder_subtree_ids`` (other
-  domains), ``set_meta`` (inside the representatives backfill's transaction,
-  with ``_commit=False``), and this domain's own entry points that other
+  domains), and this domain's own entry points that other
   methods compose with (``get_class_ancestors_for_taxa``,
   ``_next_species_representative_order``,
   ``_set_global_species_representative``,
@@ -43,7 +42,6 @@ caller owns the transaction, and no method here commits unless the
 """
 
 import json
-import sqlite3
 
 from keyword_normalization import keyword_match_key
 
@@ -56,11 +54,8 @@ class SpeciesCurationRepository:
         *,
         chunks,
         life_list_ancestor_suppression_clause,
-        species_highlights_backfill_key,
-        species_representatives_backfill_key,
         resolve_species_display_name,
         get_folder_subtree_ids,
-        set_meta,
         get_class_ancestors_for_taxa,
         next_species_representative_order,
         set_global_species_representative,
@@ -73,13 +68,9 @@ class SpeciesCurationRepository:
         # ``db._chunks`` itself (its size default is bound at import).
         self._chunks = chunks
         self._LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE = life_list_ancestor_suppression_clause
-        # ``Database`` class attributes, kept under their class names.
-        self._SPECIES_HIGHLIGHTS_BACKFILL_KEY = species_highlights_backfill_key
-        self._SPECIES_REPRESENTATIVES_BACKFILL_KEY = species_representatives_backfill_key
         # Bound ``Database`` methods, kept under their façade names.
         self.resolve_species_display_name = resolve_species_display_name
         self.get_folder_subtree_ids = get_folder_subtree_ids
-        self.set_meta = set_meta
         self.get_class_ancestors_for_taxa = get_class_ancestors_for_taxa
         self._next_species_representative_order = next_species_representative_order
         self._set_global_species_representative = set_global_species_representative
@@ -90,132 +81,12 @@ class SpeciesCurationRepository:
         """The active workspace id, resolved at each read (raises if none)."""
         return self._resolve_workspace_id()
 
-    def backfill_highlights_from_legacy_preferences(self):
-        """One-shot backfill: seed ``species_highlights`` from legacy
-        ``photo_preferences`` rows with ``purpose='highlights'``.
-
-        Before ordered highlights existed, a "Highlights" pick was stored
-        as a single ``photo_preferences`` row per (workspace, species).
-        The new Highlights UI reads exclusively from ``species_highlights``,
-        so upgraded databases would lose those picks — the pill/rank
-        indicators and bucket ordering would not surface the old choice
-        until the user manually re-added it. This copies each legacy pick
-        into ``species_highlights`` at the end of any existing bucket
-        (rank = MAX(rank) + 1) so pre-existing curated order is preserved
-        and the legacy pick still appears as a highlight.
-
-        Gated by a ``db_meta`` marker so it runs exactly once per DB.
-        """
-        marker = self.conn.execute(
-            "SELECT value FROM db_meta WHERE key = ?",
-            (self._SPECIES_HIGHLIGHTS_BACKFILL_KEY,),
-        ).fetchone()
-        if marker is not None:
-            return
-        try:
-            rows = self.conn.execute(
-                """SELECT workspace_id, species, photo_id
-                   FROM photo_preferences
-                   WHERE purpose = 'highlights'"""
-            ).fetchall()
-        except sqlite3.OperationalError:
-            rows = []
-        for row in rows:
-            ws = row["workspace_id"]
-            sp = row["species"]
-            pid = row["photo_id"]
-            existing = self.conn.execute(
-                """SELECT 1 FROM species_highlights
-                   WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
-                (ws, sp, pid),
-            ).fetchone()
-            if existing:
-                continue
-            next_rank = int(self.conn.execute(
-                """SELECT COALESCE(MAX(rank), 0) AS max_rank
-                   FROM species_highlights
-                   WHERE workspace_id = ? AND species = ?""",
-                (ws, sp),
-            ).fetchone()["max_rank"] or 0) + 1
-            self.conn.execute(
-                """INSERT INTO species_highlights
-                       (workspace_id, species, photo_id, rank,
-                        created_at, updated_at)
-                   VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))""",
-                (ws, sp, pid, next_rank),
-            )
-        self.conn.execute(
-            "INSERT INTO db_meta(key, value) VALUES (?, '1')",
-            (self._SPECIES_HIGHLIGHTS_BACKFILL_KEY,),
-        )
-        self.conn.commit()
-
     def next_representative_order(self):
         row = self.conn.execute(
             "SELECT COALESCE(MAX(selected_order), 0) + 1 AS next_order "
             "FROM species_representatives"
         ).fetchone()
         return int(row["next_order"] or 1)
-
-    def backfill_representatives_from_legacy_preferences(self):
-        """One-shot backfill from old per-workspace representative rows.
-
-        The current model stores representative markings globally and allows
-        multiple photos per species. Older databases stored one row per
-        (workspace, purpose, species), with ``species_representative`` taking
-        precedence over ``life_list`` and ``highlights`` fallbacks. Copy those
-        choices into the global list once so curated picks persist across
-        workspaces after upgrade.
-        """
-        marker = self.conn.execute(
-            "SELECT value FROM db_meta WHERE key = ?",
-            (self._SPECIES_REPRESENTATIVES_BACKFILL_KEY,),
-        ).fetchone()
-        if marker is not None:
-            return
-        try:
-            rows = self.conn.execute(
-                """SELECT workspace_id, purpose, species, photo_id,
-                          COALESCE(updated_at, created_at, '') AS ts
-                   FROM photo_preferences
-                   WHERE purpose IN ('species_representative', 'life_list', 'highlights')
-                   ORDER BY CASE purpose
-                              WHEN 'highlights' THEN 0
-                              WHEN 'life_list' THEN 1
-                              ELSE 2
-                            END,
-                            ts,
-                            workspace_id,
-                            species"""
-            ).fetchall()
-        except sqlite3.OperationalError:
-            rows = []
-        # Rows are ordered so higher-priority purposes are inserted last
-        # (highlights first, then life_list, then species_representative).
-        # Use UPSERT so a later canonical species_representative row for a
-        # (species, photo_id) already inserted by a fallback purpose promotes
-        # its selected_order to the newest value. Otherwise INSERT OR IGNORE
-        # would keep the fallback's low order and the reader (which sorts by
-        # selected_order DESC) could rank an unrelated life_list photo ahead
-        # of the canonical representative — inverting the pre-migration
-        # precedence this backfill is supposed to preserve.
-        for row in rows:
-            order = self._next_species_representative_order()
-            self.conn.execute(
-                """INSERT INTO species_representatives
-                       (species, photo_id, selected_order, created_at, updated_at)
-                   VALUES (?, ?, ?, datetime('now'), datetime('now'))
-                   ON CONFLICT(species, photo_id) DO UPDATE SET
-                       selected_order = excluded.selected_order,
-                       updated_at = excluded.updated_at""",
-                (row["species"], row["photo_id"], order),
-            )
-        self.set_meta(
-            self._SPECIES_REPRESENTATIVES_BACKFILL_KEY,
-            "1",
-            _commit=False,
-        )
-        self.conn.commit()
 
     def get_highlights_candidates(self, folder_id, min_quality=0.0, photo_id=None):
         """Return photos eligible for highlights selection.
@@ -395,7 +266,7 @@ class SpeciesCurationRepository:
         When ``species`` is provided, return the bucket for that species.
         A photo's surviving hierarchy leaf can have a different stored
         spelling from the canonical root keyword (``verdin`` vs
-        ``Verdin``) after ``repair_duplicate_photo_species`` detaches the
+        ``Verdin``) after the retired duplicate-species repair detached the
         redundant root row, but curation stays keyed on the root spelling
         — so the filter also accepts any keyword whose ``taxon_id`` links
         back to a root species keyword named ``species``. Otherwise
@@ -885,7 +756,7 @@ class SpeciesCurationRepository:
         if eligible_only:
             # Accept a hierarchy leaf whose taxon links back to a root
             # identification with the curation-keyed name. After
-            # repair_duplicate_photo_species detaches a redundant root but
+            # the retired duplicate-species repair detached a redundant root but
             # leaves the hierarchical leaf attached, the leaf's stored
             # spelling may differ from the root ("verdin" vs "Verdin"), yet
             # the photo still represents the same identification via a
@@ -1096,7 +967,7 @@ class SpeciesCurationRepository:
             # name equals ``sh.species``, so a photo carrying only
             # ``robin`` still cannot satisfy a ``Robin`` highlight
             # unless the two keywords share a taxon. It rescues the
-            # case where ``repair_duplicate_photo_species`` detached
+            # case where the retired duplicate-species repair detached
             # the redundant root and the surviving hierarchical leaf
             # has a different stored spelling from the canonical root
             # (``verdin`` vs ``Verdin``), so a preserved highlight

@@ -3,8 +3,8 @@
 These are the ``photo_keywords`` writers that create or converge an
 association, plus the flows that call them mid-transaction: ``tag_photo``,
 ``_merge_keyword_into``, ``link_keyword_to_place``,
-``retire_builtin_wildlife_genre``, ``_upsert_one_keyword``,
-``_normalize_keyword_data_once`` and ``accept_prediction``.
+``retire_builtin_wildlife_genre``, ``_upsert_one_keyword`` and
+``accept_prediction``.
 
 The tests go through the public ``Database`` façade only, so they hold
 whether the SQL lives in ``db.py`` or in a repository. They pin the
@@ -521,92 +521,6 @@ def test_link_keyword_to_place_returns_keyword_reused_in_its_own_chain(db, lib):
     ).fetchone()[0] is None
 
 
-# -- _normalize_keyword_data_once -----------------------------------------------------------
-
-
-def test_normalize_keyword_data_once_merges_through_the_facade_and_leaves_commit(
-    db, lib, monkeypatch,
-):
-    p0, p1, p2 = lib["p"][:3]
-    ws = lib["ws"]
-    clean = _raw_kw(db, "Apapane")
-    variant = _raw_kw(db, "‘Apapane")
-    stray = _raw_kw(db, "'")
-    orphan = _raw_kw(db, "Orphan", stray)
-    _raw_tag(db, p0, clean, KEYWORD_SOURCE_UNKNOWN)
-    _raw_tag(db, p0, variant, KEYWORD_SOURCE_MANUAL)
-    _raw_tag(db, p1, variant, KEYWORD_SOURCE_ACCEPT)
-    _raw_tag(db, p2, stray, KEYWORD_SOURCE_MANUAL)
-    db.conn.execute(
-        "INSERT INTO pending_changes (photo_id, change_type, value, workspace_id) "
-        "VALUES (?, 'keyword_add', ?, ?)", (p2, "‘Kiwi", ws),
-    )
-    db.conn.commit()
-    merges = _spy(monkeypatch, db, "_merge_keyword_into")
-
-    db._normalize_keyword_data_once()
-
-    assert merges == [((variant, clean), {"pending_source_only": True})]
-    assert db.conn.in_transaction
-    assert _visible(db, "SELECT COUNT(*) FROM keywords WHERE id = ?", (stray,)) == [(1,)]
-    db.conn.commit()
-    assert _visible(db, "SELECT id FROM keywords WHERE id IN (?, ?)", (variant, stray)) == []
-    assert _visible(db, "SELECT parent_id FROM keywords WHERE id = ?", (orphan,)) == [
-        (None,),
-    ]
-    assert sorted(_visible(
-        db, "SELECT photo_id, keyword_id, source FROM photo_keywords",
-    )) == [(p0, clean, "manual"), (p1, clean, "accept")]
-    assert _visible(db, "SELECT value FROM pending_changes WHERE photo_id = ?", (p2,)) == [
-        ("Kiwi",),
-    ]
-
-
-def test_normalize_keyword_data_once_routes_curation_through_the_facade(
-    db, lib, monkeypatch,
-):
-    p0 = lib["p"][0]
-    ws = lib["ws"]
-    db.conn.execute(
-        "INSERT INTO photo_preferences (workspace_id, purpose, species, photo_id) "
-        "VALUES (?, 'representative', ?, ?)", (ws, "‘Apapane", p0),
-    )
-    db.conn.execute(
-        "INSERT INTO species_highlights (workspace_id, species, photo_id, rank) "
-        "VALUES (?, ?, ?, 1)", (ws, "‘Apapane", p0),
-    )
-    db.conn.commit()
-    prefs = _spy(monkeypatch, db, "rename_photo_preferences_species")
-    highlights = _spy(monkeypatch, db, "rename_species_highlights_species")
-    align = _spy(monkeypatch, db, "_align_curation_species_case")
-    history = _spy(monkeypatch, db, "_align_curation_history_species")
-
-    db._normalize_keyword_data_once()
-
-    expected = [(("‘Apapane", "Apapane"), {"_commit": False})]
-    assert prefs == expected
-    assert highlights == expected
-    assert align == [((), {})]
-    assert history == [((), {})]
-    assert db.conn.execute(
-        "SELECT species FROM photo_preferences"
-    ).fetchall()[0][0] == "Apapane"
-
-
-def test_normalize_keyword_data_once_renames_variants_through_the_facade(
-    db, lib, monkeypatch,
-):
-    birds = _raw_kw(db, "Birds")
-    variant = _raw_kw(db, "“Heron”", birds)
-    db.conn.commit()
-    calls = _spy(monkeypatch, db, "_normalize_keyword_row_name")
-    db._normalize_keyword_data_once()
-    assert calls == [((variant,), {"disambiguate_on_conflict": True})]
-    assert db.conn.execute(
-        "SELECT name FROM keywords WHERE id = ?", (variant,),
-    ).fetchone()[0] == "Heron"
-
-
 # -- retire_builtin_wildlife_genre ----------------------------------------------------------
 
 
@@ -968,7 +882,6 @@ _DELEGATING_PROVENANCE_METHODS = (
     "link_keyword_to_place",
     "retire_builtin_wildlife_genre",
     "_upsert_one_keyword",
-    "_normalize_keyword_data_once",
     "accept_prediction",
 )
 
@@ -1045,7 +958,6 @@ def test_moved_writers_reach_each_other_only_through_the_facade():
     expected = {
         "merge_keyword_into": "_merge_keyword_into",
         "upsert_one_keyword": "_merge_keyword_into",
-        "normalize_keyword_data_once": "_merge_keyword_into",
         "accept_prediction": "tag_photo",
     }
     for name, facade_name in expected.items():
@@ -1101,7 +1013,6 @@ def test_keyword_provenance_facade_signatures_unchanged():
             "(self, name, parent_id, place_id=None, latitude=None, longitude=None, "
             "reuse_location_component=False)"
         ),
-        "_normalize_keyword_data_once": "(self)",
         "accept_prediction": (
             "(self, prediction_id, replace_species=False, photo_ids=None, "
             "prediction_ids=None, _commit=True)"

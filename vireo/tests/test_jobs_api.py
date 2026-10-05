@@ -7953,66 +7953,6 @@ def test_import_pause_waits_for_tag_transaction_to_commit(
     assert job["result"]["tagging"]["tagged_photos"] == 1
 
 
-def test_import_tag_reuses_keyword_repaired_from_legacy_peer(
-    app_and_db, tmp_path, monkeypatch,
-):
-    import import_job
-
-    app, db = app_and_db
-    client = app.test_client()
-    photo_id = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
-    clean_id = db.add_keyword("Import Legacy", kw_type="general")
-    legacy_id = db.conn.execute(
-        "INSERT INTO keywords (name, type) VALUES (?, 'general')",
-        ("‘Import Legacy",),
-    ).lastrowid
-    db.conn.commit()
-    db.tag_photo(photo_id, legacy_id)
-    # Simulate the supported upgrade sequence. The normalization repair runs
-    # before requests and merges the legacy spelling into the canonical row;
-    # runtime import code can then rely on the stored-name invariant instead
-    # of repeating normalized peer scans at every call site.
-    db.conn.execute(
-        "DELETE FROM db_meta WHERE key = 'keyword_names_normalized'"
-    )
-    db.conn.commit()
-    db.normalize_keyword_data()
-
-    def imported_result(job, runner, db_path, workspace_id, params):
-        return {
-            "ok": True,
-            "cancelled": False,
-            "photo_ids": [photo_id],
-            "discovered": 1,
-            "copied": 1,
-            "verified": 1,
-            "skipped_duplicate": 0,
-            "failed": 0,
-            "safe_to_format": True,
-            "unsafe_files": [],
-            "folders": {},
-            "errors": [],
-        }
-
-    monkeypatch.setattr(import_job, "run_import_job", imported_result)
-    resp = client.post("/api/jobs/import-photos", json={
-        "sources": [_import_card(tmp_path)],
-        "destination": str(tmp_path / "archive"),
-        "after_import": None,
-        "tags": ["Import Legacy"],
-    })
-    assert resp.status_code == 200, resp.get_json()
-    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
-    assert job["status"] == "completed", job
-    assert job["result"]["tagging"]["tagged_photos"] == 0
-    linked = db.conn.execute(
-        "SELECT keyword_id FROM photo_keywords "
-        "WHERE photo_id = ? AND keyword_id IN (?, ?)",
-        (photo_id, clean_id, legacy_id),
-    ).fetchall()
-    assert [row["keyword_id"] for row in linked] == [clean_id]
-
-
 def test_duplicate_only_import_does_not_tag_existing_photos(
     app_and_db, tmp_path,
 ):
@@ -13008,7 +12948,6 @@ def test_import_photos_accepts_symlinked_file_inside_source(
         })
         assert resp.status_code == 200, resp.get_json()
         _drain(client, resp)
-
 
 
 def test_extract_masks_route_reports_unreadable_sources(

@@ -625,10 +625,11 @@ def create_browse_blueprint(
         # rendered as its own empty state. Both are gone, because the state
         # they described is gone. ``confidences`` can only be empty when
         # *every* contributing row's raw label disagrees with the consensus
-        # the accept path applies, and that is precisely the legacy shape
-        # ``Database.repair_mixed_species_prediction_groups`` clears at
-        # startup: after the repair a grouped row's consensus is its own
-        # species, so every surviving row credits its own bucket. Keeping a
+        # the accept path applies, and that is precisely the legacy
+        # mixed-consensus burst shape, which a since-retired one-shot repair
+        # cleared from the catalog and current classification never writes:
+        # a grouped row's consensus is its own species, so every row credits
+        # its own bucket. Keeping a
         # filter plus a second piece of empty-state vocabulary for an
         # unreachable case is its own transparency cost — the user would be
         # asked to learn a distinction the data can no longer produce.

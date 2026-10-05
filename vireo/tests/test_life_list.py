@@ -408,37 +408,6 @@ def test_reselecting_representative_promotes_it(life_app):
     assert [p["id"] for p in cardinal["photos"][:2]] == [ids["p1"], ids["p2"]]
 
 
-def test_representative_backfill_prefers_canonical_purpose(life_app):
-    _app, db, ids = life_app
-    ws = db._ws_id()
-    db.conn.execute("DELETE FROM species_representatives")
-    db.conn.execute(
-        "DELETE FROM db_meta WHERE key = ?",
-        (db._SPECIES_REPRESENTATIVES_BACKFILL_KEY,),
-    )
-    db.conn.execute(
-        """INSERT INTO photo_preferences
-               (workspace_id, purpose, species, photo_id, created_at, updated_at)
-           VALUES (?, 'species_representative', 'Northern Cardinal', ?,
-                   '2024-01-01T00:00:00', '2024-01-01T00:00:00')""",
-        (ws, ids["p2"]),
-    )
-    db.conn.execute(
-        """INSERT INTO photo_preferences
-               (workspace_id, purpose, species, photo_id, created_at, updated_at)
-           VALUES (?, 'life_list', 'Northern Cardinal', ?,
-                   '2024-02-01T00:00:00', '2024-02-01T00:00:00')""",
-        (ws, ids["p1"]),
-    )
-    db.conn.commit()
-
-    db.backfill_species_representatives_from_legacy_preferences()
-
-    assert db.get_species_representative_lists()["Northern Cardinal"] == [
-        ids["p2"], ids["p1"],
-    ]
-
-
 def test_life_list_photo_preference_must_match_species(life_app):
     app, _, ids = life_app
     resp = app.test_client().post("/api/photo-preferences", json={
@@ -1368,9 +1337,9 @@ def test_life_list_export_rejects_unknown_format(life_app):
 
 
 def test_life_list_bucket_survives_root_repair_spelling_drift(tmp_path, monkeypatch):
-    """After ``repair_duplicate_photo_species`` detaches a redundant root
-    keyword, a photo may only carry the hierarchy leaf whose stored
-    spelling differs from the canonical root (``verdin`` vs ``Verdin``).
+    """A photo may carry only the hierarchy leaf whose stored spelling
+    differs from the canonical root (``verdin`` vs ``Verdin``), the shape
+    the retired duplicate-species repair left behind.
     The Life List must bucket that photo under the canonical root name so
     curation on the root key applies and
     ``/api/life-list/species?species=Verdin`` still returns the photo.
@@ -1426,16 +1395,10 @@ def test_life_list_bucket_survives_root_repair_spelling_drift(tmp_path, monkeypa
         "UPDATE keywords SET taxon_id = ? WHERE id = ?", (taxon_id, root),
     )
     db.tag_photo(pid_hier, nested)
-    db.tag_photo(pid_hier, root)
     db.tag_photo(pid_root, root)
-    db.conn.execute(
-        "DELETE FROM db_meta WHERE key = ?",
-        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
-    )
     db.conn.commit()
 
-    assert db.repair_duplicate_photo_species() == 1
-    # The hierarchical photo now only carries the lower-cased leaf.
+    # The hierarchical photo only carries the lower-cased leaf.
     hier_names = {
         row["name"] for row in db.get_photo_keywords(pid_hier)
     }
