@@ -3908,6 +3908,17 @@ def test_browse_lightbox_one_to_one_uses_device_pixels_and_natural_layout(live_s
         lambda route: route.fulfill(body=svg, content_type="image/svg+xml"),
     )
 
+    # Late fixture metadata must not replace the synthetic image geometry
+    # with null dimensions while native zoom or its source swap is pending.
+    def force_photo_dims(route):
+        resp = route.fetch()
+        data = resp.json()
+        data["width"] = 4000
+        data["height"] = 2000
+        route.fulfill(response=resp, json=data)
+
+    page.route(re.compile(r"/api/photos/\d+$"), force_photo_dims)
+
     url = live_server["url"]
     page.set_viewport_size({"width": 1000, "height": 800})
     page.goto(f"{url}/browse")
@@ -4123,6 +4134,17 @@ def test_browse_lightbox_pending_one_to_one_guard_schedules_sharper_source(
             route.fulfill(body=original_svg, content_type="image/svg+xml")
 
     page.route("**/photos/*/original*", hold_original)
+
+    # Late fixture metadata must not replace the synthetic image geometry
+    # with null dimensions while native zoom or its source swap is pending.
+    def force_photo_dims(route):
+        resp = route.fetch()
+        data = resp.json()
+        data["width"] = 4000
+        data["height"] = 2000
+        route.fulfill(response=resp, json=data)
+
+    page.route(re.compile(r"/api/photos/\d+$"), force_photo_dims)
 
     url = live_server["url"]
     page.set_viewport_size({"width": 1000, "height": 800})
