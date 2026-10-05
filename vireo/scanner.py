@@ -668,11 +668,12 @@ def _group_photos_by_folder_and_stem(db):
     """Group pairing candidates by folder_id + base name (without extension).
 
     Candidates are every photo not yet paired, plus RAW rows that already
-    carry a companion_path (so a second same-stem JPEG still meets its RAW).
+    carry a companion_path (so a rescan that re-inserts that companion's
+    file as its own row folds it back into its RAW).
     """
     rows = db.conn.execute(
         "SELECT id, folder_id, filename, extension, timestamp,"
-        " camera_make, camera_model FROM photos"
+        " camera_make, camera_model, companion_path FROM photos"
         " WHERE companion_path IS NULL"
         " OR (companion_path IS NOT NULL AND extension IN"
         " ('.nef','.cr2','.cr3','.arw','.raf','.dng','.rw2','.orf'))"
@@ -687,47 +688,126 @@ def _group_photos_by_folder_and_stem(db):
     return groups
 
 
-def _pick_compatible_raw_jpeg_pair(members):
-    """Return the ``(raw, jpeg)`` to merge from one same-stem group, or None.
+def _max_raw_jpeg_matching(raws, jpegs):
+    """Return a maximum-cardinality set of ``(raw, jpeg)`` pairs where every
+    pair satisfies ``_companions_compatible``.
 
-    A group needs at least one RAW and one JPEG, and the pair must not be
-    contradicted by capture metadata (see ``_companions_compatible``).
+    Standard augmenting-path bipartite matching: for each RAW, DFS a path
+    through already-matched JPEGs to find an unmatched one; the groups
+    here are a single stem's RAWs and JPEGs, so near always ≤2 of each
+    and ``len(raws) * len(jpegs)`` is tiny.
+
+    A first-fit greedy loop is wrong because a wildcard-compatible RAW
+    (missing capture metadata) matches every JPEG, so taking the first
+    free JPEG can leave a more constrained RAW with no option even when
+    every disjoint pair would be compatible.
+    """
+    if not raws or not jpegs:
+        return []
+    match_r2j: dict[int, int] = {}
+
+    def augment(ri: int, visited: set[int]) -> bool:
+        for ji, jpeg in enumerate(jpegs):
+            if ji in visited or not _companions_compatible(raws[ri], jpeg):
+                continue
+            visited.add(ji)
+            prev = next((r for r, j in match_r2j.items() if j == ji), None)
+            if prev is None or augment(prev, visited):
+                match_r2j[ri] = ji
+                return True
+        return False
+
+    for ri in range(len(raws)):
+        augment(ri, set())
+    return [(raws[ri], jpegs[ji]) for ri, ji in match_r2j.items()]
+
+
+def _pick_compatible_raw_jpeg_pairs(members):
+    """Return every ``(raw, jpeg)`` to merge from one same-stem group.
+
+    A group needs at least one RAW and one JPEG, and each returned pair
+    must not be contradicted by capture metadata (see
+    ``_companions_compatible``).
+
+    A RAW holds exactly one companion (``companion_path`` and its one
+    ``companion_identities`` row), so a RAW that already has one re-pairs
+    only with that same file. Trading it for another same-stem JPEG
+    (``IMG.jpg`` next to ``IMG.jpeg``) would drop the first JPEG from the
+    catalog: no row, no companion path, no import identity, so re-importing
+    the card would bring it in again. An unpaired RAW never takes a JPEG
+    another RAW already claims, and a JPEG belongs to at most one pair, so
+    disjoint RAW/JPEG sets in the same stem group pair independently
+    (``IMG.cr3``/``IMG.jpg`` and ``IMG.arw``/``IMG.jpeg`` both merge in one
+    pass instead of the newer set being starved by the reinserted older
+    companion).
     """
     raw_exts = {".nef", ".cr2", ".cr3", ".arw", ".raf", ".dng", ".rw2", ".orf"}
     jpeg_exts = {".jpg", ".jpeg"}
 
     if len(members) < 2:
-        return None
+        return []
 
     raws = [m for m in members if m["extension"] in raw_exts]
     jpegs = [m for m in members if m["extension"] in jpeg_exts]
 
     if not raws or not jpegs:
-        return None
+        return []
 
     # A shared stem alone does not make a pair: two bodies shooting
     # the same day with overlapping counters (or an import that
     # renamed one side of a collision) put unrelated IMG_0001.CR3 and
-    # IMG_0001.JPG side by side. Pair the first RAW/JPEG whose capture
-    # metadata does not contradict it; with no such pair, leave both
-    # as separate photos.
-    pair = next(
-        (
-            (raw, jpeg)
-            for raw in raws
-            for jpeg in jpegs
-            if _companions_compatible(raw, jpeg)
-        ),
-        None,
-    )
-    if pair is None:
-        log.info(
-            "Not pairing same-stem RAW and JPEG with conflicting capture "
-            "metadata: %s",
-            ", ".join(m["filename"] for m in raws + jpegs),
-        )
-        return None
-    return pair
+    # IMG_0001.JPG side by side. Pair RAW/JPEG sets whose capture
+    # metadata does not contradict them; otherwise leave both as
+    # separate photos.
+    claimed = {raw["companion_path"] for raw in raws if raw["companion_path"]}
+    jpegs_by_name = {j["filename"]: j for j in jpegs}
+
+    pairs = []
+    taken = set()
+
+    # Each RAW with an existing companion re-pairs with that same filename
+    # first; a rescan that re-inserts the companion's own file folds it
+    # back in, and the companion never drifts to another same-stem JPEG.
+    for raw in raws:
+        name = raw["companion_path"]
+        if (
+            name
+            and name in jpegs_by_name
+            and name not in taken
+            and _companions_compatible(raw, jpegs_by_name[name])
+        ):
+            pairs.append((raw, jpegs_by_name[name]))
+            taken.add(name)
+
+    # Remaining unpaired RAWs then take disjoint, unclaimed JPEGs — so
+    # ``IMG.arw``/``IMG.jpeg`` merges alongside an existing
+    # ``IMG.cr3``/``IMG.jpg`` instead of being perpetually left split.
+    # Maximum bipartite matching keeps a wildcard-compatible RAW (one
+    # with no capture metadata, which pairs with any JPEG) from stealing
+    # the one JPEG a more constrained RAW needs — a first-fit loop would
+    # match ARW→IMG.jpeg first and leave CR3 unable to pair with IMG.jpg
+    # even when every disjoint pair is otherwise compatible.
+    unpaired_raws = [r for r in raws if r["companion_path"] is None]
+    free_jpegs = [
+        j for j in jpegs
+        if j["filename"] not in claimed and j["filename"] not in taken
+    ]
+    for raw, jpeg in _max_raw_jpeg_matching(unpaired_raws, free_jpegs):
+        pairs.append((raw, jpeg))
+        taken.add(jpeg["filename"])
+
+    if not pairs:
+        unmatched_raws = [r for r in raws if r["companion_path"] is None]
+        unmatched_jpegs = [j for j in jpegs if j["filename"] not in claimed]
+        if unmatched_raws and unmatched_jpegs:
+            log.info(
+                "Not pairing same-stem RAW and JPEG with conflicting "
+                "capture metadata: %s",
+                ", ".join(
+                    m["filename"] for m in unmatched_raws + unmatched_jpegs
+                ),
+            )
+    return pairs
 
 
 def _read_metadata_transfer_rows(db, primary, companion):
@@ -1299,21 +1379,18 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
     collection_remap = {}
 
     for (_folder_id, _base), members in groups.items():
-        pair = _pick_compatible_raw_jpeg_pair(members)
-        if pair is None:
-            continue
-        primary, companion = pair
-
-        _merge_companion_into_primary(
-            db, primary, companion, vireo_dir, thumb_cache_dir,
-            post_commit_fs_actions,
-        )
-        collection_remap[companion["id"]] = primary["id"]
-        merged_ids.add(companion["id"])
-        if vireo_dir:
-            _defer_companion_derivative_cleanup(
-                post_commit_fs_actions, companion, vireo_dir, thumb_cache_dir,
+        for primary, companion in _pick_compatible_raw_jpeg_pairs(members):
+            _merge_companion_into_primary(
+                db, primary, companion, vireo_dir, thumb_cache_dir,
+                post_commit_fs_actions,
             )
+            collection_remap[companion["id"]] = primary["id"]
+            merged_ids.add(companion["id"])
+            if vireo_dir:
+                _defer_companion_derivative_cleanup(
+                    post_commit_fs_actions, companion, vireo_dir,
+                    thumb_cache_dir,
+                )
 
     if collection_remap:
         db.remap_collection_photo_ids(collection_remap)
