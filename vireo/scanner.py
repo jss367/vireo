@@ -668,11 +668,12 @@ def _group_photos_by_folder_and_stem(db):
     """Group pairing candidates by folder_id + base name (without extension).
 
     Candidates are every photo not yet paired, plus RAW rows that already
-    carry a companion_path (so a second same-stem JPEG still meets its RAW).
+    carry a companion_path (so a rescan that re-inserts that companion's
+    file as its own row folds it back into its RAW).
     """
     rows = db.conn.execute(
         "SELECT id, folder_id, filename, extension, timestamp,"
-        " camera_make, camera_model FROM photos"
+        " camera_make, camera_model, companion_path FROM photos"
         " WHERE companion_path IS NULL"
         " OR (companion_path IS NOT NULL AND extension IN"
         " ('.nef','.cr2','.cr3','.arw','.raf','.dng','.rw2','.orf'))"
@@ -692,6 +693,14 @@ def _pick_compatible_raw_jpeg_pair(members):
 
     A group needs at least one RAW and one JPEG, and the pair must not be
     contradicted by capture metadata (see ``_companions_compatible``).
+
+    A RAW holds exactly one companion (``companion_path`` and its one
+    ``companion_identities`` row), so a RAW that already has one re-pairs
+    only with that same file. Trading it for another same-stem JPEG
+    (``IMG.jpg`` next to ``IMG.jpeg``) would drop the first JPEG from the
+    catalog: no row, no companion path, no import identity, so re-importing
+    the card would bring it in again. The other JPEG stays its own photo,
+    and an unpaired RAW never takes a JPEG another RAW already claims.
     """
     raw_exts = {".nef", ".cr2", ".cr3", ".arw", ".raf", ".dng", ".rw2", ".orf"}
     jpeg_exts = {".jpg", ".jpeg"}
@@ -711,11 +720,26 @@ def _pick_compatible_raw_jpeg_pair(members):
     # IMG_0001.JPG side by side. Pair the first RAW/JPEG whose capture
     # metadata does not contradict it; with no such pair, leave both
     # as separate photos.
+    claimed = {raw["companion_path"] for raw in raws if raw["companion_path"]}
+    allowed = [
+        (raw, jpeg)
+        for raw in raws
+        for jpeg in jpegs
+        if raw["companion_path"] == jpeg["filename"]
+        or (raw["companion_path"] is None and jpeg["filename"] not in claimed)
+    ]
+    # A RAW's own companion, re-inserted by a rescan, re-pairs first.
+    allowed.sort(key=lambda pair: pair[0]["companion_path"] is None)
+    if not allowed:
+        log.debug(
+            "Not pairing %s: the same-stem RAW already has its companion",
+            ", ".join(m["filename"] for m in jpegs),
+        )
+        return None
     pair = next(
         (
             (raw, jpeg)
-            for raw in raws
-            for jpeg in jpegs
+            for raw, jpeg in allowed
             if _companions_compatible(raw, jpeg)
         ),
         None,

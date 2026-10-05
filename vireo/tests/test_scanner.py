@@ -1787,6 +1787,108 @@ def test_scan_pairs_raw_and_jpeg(tmp_path):
     assert photo["companion_path"] == "IMG_001.jpg"
 
 
+def _raw_with_two_jpegs(tmp_path):
+    """A folder holding IMG_001.cr3 with both IMG_001.jpg and IMG_001.jpeg."""
+    img_dir = tmp_path / "photos"
+    img_dir.mkdir()
+    Image.new("RGB", (200, 100), color="green").save(str(img_dir / "IMG_001.jpg"))
+    Image.new("RGB", (300, 100), color="blue").save(str(img_dir / "IMG_001.jpeg"))
+    (img_dir / "IMG_001.cr3").write_bytes(b"\x00" * 200)
+    return img_dir
+
+
+def _assert_every_jpeg_cataloged_and_recognized(db, img_dir, tmp_path):
+    """Each JPEG is a photo row or its RAW's companion, and a card copy of
+    it is a duplicate to the import gate ingest uses."""
+    from import_dedup import CatalogIndex, DuplicateChecker
+
+    rows = db.conn.execute("SELECT filename, companion_path FROM photos").fetchall()
+    cataloged = {r["filename"] for r in rows} | {
+        r["companion_path"] for r in rows if r["companion_path"]
+    }
+    assert {"IMG_001.jpg", "IMG_001.jpeg"} <= cataloged
+
+    card = tmp_path / "card"
+    card.mkdir(exist_ok=True)
+    index = CatalogIndex.from_db(db)
+    for name in ("IMG_001.jpg", "IMG_001.jpeg"):
+        copy = card / name
+        copy.write_bytes((img_dir / name).read_bytes())
+        assert DuplicateChecker(index).match(copy) is not None, name
+
+
+def test_raw_with_two_jpegs_pairs_one_and_keeps_the_other_in_one_scan(tmp_path):
+    """Both JPEGs arrive in one scan: the RAW takes one as its companion, the
+    other stays its own photo, and both are recognized on re-import."""
+    from db import Database
+    from scanner import scan
+
+    img_dir = _raw_with_two_jpegs(tmp_path)
+    db = Database(str(tmp_path / "test.db"))
+    scan(str(img_dir), db)
+
+    rows = db.conn.execute(
+        "SELECT filename, companion_path FROM photos ORDER BY filename"
+    ).fetchall()
+    assert len(rows) == 2
+    raw = next(r for r in rows if r["filename"] == "IMG_001.cr3")
+    assert raw["companion_path"] in ("IMG_001.jpg", "IMG_001.jpeg")
+    _assert_every_jpeg_cataloged_and_recognized(db, img_dir, tmp_path)
+
+
+def test_raw_already_paired_never_swaps_its_companion_for_a_second_jpeg(tmp_path):
+    """A later pairing pass must not trade the RAW's companion for the other
+    same-stem JPEG: that overwrote the first JPEG's import identity, so
+    re-importing the card brought it in again as a duplicate."""
+    from db import Database
+    from scanner import scan
+
+    img_dir = _raw_with_two_jpegs(tmp_path)
+    db = Database(str(tmp_path / "test.db"))
+    scan(str(img_dir), db)
+    companion = db.conn.execute(
+        "SELECT companion_path FROM photos WHERE filename='IMG_001.cr3'"
+    ).fetchone()["companion_path"]
+
+    # Pairing runs over the whole catalog, so a scan of any other folder
+    # reaches this RAW while its companion JPEG has no row of its own.
+    other = tmp_path / "other"
+    other.mkdir()
+    Image.new("RGB", (50, 50), color="red").save(str(other / "unrelated.jpg"))
+    scan(str(other), db)
+    scan(str(img_dir), db)
+    scan(str(other), db)
+
+    _assert_every_jpeg_cataloged_and_recognized(db, img_dir, tmp_path)
+    assert db.conn.execute(
+        "SELECT companion_path FROM photos WHERE filename='IMG_001.cr3'"
+    ).fetchone()["companion_path"] == companion
+
+
+def test_rescan_repairs_companion_onto_its_own_raw_not_a_new_same_stem_raw(tmp_path):
+    """A rescan re-inserts the companion JPEG's file and folds it back in; it
+    must go to the RAW that already holds it, not a same-stem RAW added since
+    (which sorts first by name), or two RAWs would claim one JPEG."""
+    from db import Database
+    from scanner import scan
+
+    img_dir = tmp_path / "photos"
+    img_dir.mkdir()
+    Image.new("RGB", (200, 100), color="green").save(str(img_dir / "IMG_001.jpg"))
+    (img_dir / "IMG_001.cr3").write_bytes(b"\x00" * 200)
+    db = Database(str(tmp_path / "test.db"))
+    scan(str(img_dir), db)
+
+    (img_dir / "IMG_001.arw").write_bytes(b"\x01" * 200)
+    scan(str(img_dir), db)
+
+    rows = {
+        r["filename"]: r["companion_path"]
+        for r in db.conn.execute("SELECT filename, companion_path FROM photos")
+    }
+    assert rows == {"IMG_001.cr3": "IMG_001.jpg", "IMG_001.arw": None}
+
+
 def test_rescan_changed_companion_invalidates_jpeg_thumbnail_variant(tmp_path):
     """Re-pairing a changed companion drops its source-specific thumbnail
     even when the replacement preserves filesystem mtime."""
