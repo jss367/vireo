@@ -17,7 +17,7 @@ vireo-evaluate-encounters = "encounter_eval.cli:main"
 vireo-review-encounters = "encounter_eval.review_server:main"
 
 [tool.setuptools.package-data]
-encounter_eval = ["review.html", "continuity_review.html"]
+encounter_eval = ["review.html", "continuity_review.html", "merge_audit.html"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
