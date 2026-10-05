@@ -55,7 +55,9 @@ def embedded_keyword_associations_for_merge(conn, losing_id, survivor_id, *,
     """Select carried tags while respecting detached embedded values on the survivor.
 
     Pairing also carries manual/sidecar associations; other embedded merges
-    carry only values actually offered by the embedded importer.
+    carry only values actually offered by the embedded importer. A loser
+    row stamped ``source='manual'`` bypasses the embedded-removal filter so
+    a tag the user re-added after the survivor's removal still carries.
     """
     def offered(photo_id):
         return {row["keyword_key"] for row in conn.execute(
@@ -98,7 +100,8 @@ def embedded_keyword_associations_for_merge(conn, losing_id, survivor_id, *,
             "SELECT 1 FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
             (survivor_id, row["id"]),
         ).fetchone()
-        if matched & target_keys and attached is None:
+        if (matched & target_keys and attached is None
+                and row["source"] != "manual"):
             continue
         yield row
 
