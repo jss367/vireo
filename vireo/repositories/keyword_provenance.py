@@ -107,10 +107,10 @@ FACADE_METHODS = (
 # -- merge_keyword_into steps -------------------------------------------------
 #
 # The steps ``KeywordProvenanceRepository.merge_keyword_into`` runs, in order.
-# They are module functions rather than repository methods because repository
-# methods may not reach one another through ``self``
-# (``test_moved_writers_reach_each_other_only_through_the_facade``), so each
-# step takes the connection, and any façade method it calls, as arguments.
+# Each step takes the connection, and any façade method it calls, as
+# arguments. (Private repository methods called through ``self`` would work
+# too: ``test_moved_writers_reach_each_other_only_through_the_facade`` only
+# forbids ``self.<name>`` calls to methods ``Database`` delegates to.)
 # None of them commits: the merge's caller does. The ``photo_keywords``
 # provenance fold and association move stay inline in ``merge_keyword_into``,
 # the convergence point ``test_keyword_provenance_contract`` keys by name.
@@ -2329,11 +2329,11 @@ class KeywordProvenanceRepository:
             raise
 
 
-# ``accept_prediction``'s steps. They are module functions rather than
-# methods because repository methods may not call one another through
-# ``self`` (``test_moved_writers_reach_each_other_only_through_the_facade``)
-# nor hand ``self`` to a helper; each takes the connection and the bound
-# façade methods it calls explicitly.
+# ``accept_prediction``'s steps. Each takes the connection and the bound
+# façade methods it calls explicitly. (Private repository methods called
+# through ``self`` would work too; what the structural tests forbid is a
+# ``self.<name>`` call to a method ``Database`` delegates to, and handing the
+# repository's bare ``self`` to a helper.)
 
 
 def _taxonomy_for_species_replacement():

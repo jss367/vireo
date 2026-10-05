@@ -938,30 +938,172 @@ def test_keyword_provenance_facade_names_never_shadow_repository_methods():
     assert not set(_repository_methods(tree)) & set(module.FACADE_METHODS)
 
 
+def _facade_exposed_repository_methods(database_class):
+    """Repository attributes a ``Database`` method reaches on a built repository.
+
+    ``database_class`` is the ``ast.ClassDef`` of ``Database``. A method is
+    façade-exposed when some ``Database`` method calls it on
+    ``self._keyword_provenance_repository()`` -- directly, or through a local
+    name bound to that call.
+    """
+
+    def builds_repository(node):
+        return (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "_keyword_provenance_repository"
+        )
+
+    exposed = set()
+    for fn in database_class.body:
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        bound = set()
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Assign) and builds_repository(node.value):
+                bound.update(t.id for t in node.targets if isinstance(t, ast.Name))
+            elif (isinstance(node, (ast.AnnAssign, ast.NamedExpr))
+                  and builds_repository(node.value)
+                  and isinstance(node.target, ast.Name)):
+                bound.add(node.target.id)
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Attribute) and (
+                builds_repository(node.value)
+                or (isinstance(node.value, ast.Name) and node.value.id in bound)
+            ):
+                exposed.add(node.attr)
+    return exposed
+
+
+def _self_references_to(repository_class, names):
+    """``(method, attr)`` for every ``self.<attr>`` in ``names``, in any method.
+
+    Every method body is walked, private helpers and nested closures
+    included, so a helper cannot launder a call the writer itself may not make.
+    """
+    return sorted(
+        (fn.name, node.attr)
+        for fn in repository_class.body
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name) and node.value.id == "self"
+        and node.attr in names
+    )
+
+
+def _database_class_tree():
+    import db as db_module
+
+    tree = ast.parse(inspect.getsource(db_module))
+    return next(
+        n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Database"
+    )
+
+
 def test_moved_writers_reach_each_other_only_through_the_facade():
     """Calls between the writers go through their ``Database`` names, so a
     monkeypatch of ``Database._merge_keyword_into`` / ``tag_photo`` still
-    intercepts the recursion, the mid-flight merges and the accept's tag."""
+    intercepts the recursion, the mid-flight merges and the accept's tag.
+
+    The rule covers the repository methods ``Database`` delegates to (derived
+    from ``db.py``, not listed here): no repository method may reach one of
+    them as ``self.<name>``. Private helpers the façade does not expose are
+    ordinary decomposition and may be called through ``self``; they are held
+    to the same rule, so they can't be a back door around it.
+    (``getattr(self, ...)`` would need a bare ``self``, which
+    ``test_keyword_provenance_repository_never_hands_itself_out_as_the_database``
+    forbids.)
+    """
     _module, tree = _module_tree()
     methods = _repository_methods(tree)
+    repository_class = next(
+        n for n in tree.body
+        if isinstance(n, ast.ClassDef) and n.name == "KeywordProvenanceRepository"
+    )
+    database_class = _database_class_tree()
+    exposed = _facade_exposed_repository_methods(database_class)
 
-    def self_attrs(node):
-        return {
-            n.attr for n in ast.walk(node)
-            if isinstance(n, ast.Attribute)
-            and isinstance(n.value, ast.Name) and n.value.id == "self"
-        }
+    # The derivation finds every wrapper's target, and nothing that isn't a
+    # repository method.
+    wrappers = {n.name: n for n in database_class.body
+                if isinstance(n, ast.FunctionDef)}
+    for name in _DELEGATING_PROVENANCE_METHODS:
+        wrapper = ast.ClassDef(name="Database", bases=[], keywords=[],
+                               body=[wrappers[name]], decorator_list=[])
+        assert _facade_exposed_repository_methods(wrapper), name
+    assert exposed <= set(methods), exposed - set(methods)
 
-    own = set(methods) - {"__init__", "workspace_id", "_active_workspace_id"}
-    for name, node in methods.items():
-        assert not self_attrs(node) & own, (name, self_attrs(node) & own)
+    assert not _self_references_to(repository_class, exposed)
     expected = {
         "merge_keyword_into": "_merge_keyword_into",
         "upsert_one_keyword": "_merge_keyword_into",
         "accept_prediction": "tag_photo",
     }
     for name, facade_name in expected.items():
-        assert facade_name in self_attrs(methods[name]), (name, facade_name)
+        assert (name, facade_name) in _self_references_to(
+            repository_class, {facade_name}), (name, facade_name)
+
+
+_SYNTHETIC_DATABASE = """
+class Database:
+    def tag_photo(self, photo_id, keyword_id, source="manual"):
+        self._keyword_provenance_repository().tag(photo_id, keyword_id, source=source)
+
+    def accept_prediction(self, prediction_id):
+        repo = self._keyword_provenance_repository()
+        return repo.accept_prediction(prediction_id)
+
+    def _keyword_provenance_repository(self):
+        return KeywordProvenanceRepository(self.conn)
+"""
+
+_SYNTHETIC_REPOSITORY = """
+class KeywordProvenanceRepository:
+    def tag(self, photo_id, keyword_id, *, source):
+        self.conn.execute("INSERT ...")
+
+    def accept_prediction(self, prediction_id):
+        photo_id = self._resolve_photo(prediction_id)
+        self.tag_photo(photo_id, 1, source="accept")
+
+    def _resolve_photo(self, prediction_id):
+        return self.conn.execute("SELECT ...", (prediction_id,)).fetchone()[0]
+"""
+
+
+def _synthetic_violations(repository_source):
+    database_class = ast.parse(_SYNTHETIC_DATABASE).body[0]
+    repository_class = ast.parse(textwrap.dedent(repository_source)).body[0]
+    return _self_references_to(
+        repository_class, _facade_exposed_repository_methods(database_class))
+
+
+def test_facade_call_check_derives_exposed_methods_from_the_wrappers():
+    database_class = ast.parse(_SYNTHETIC_DATABASE).body[0]
+    assert _facade_exposed_repository_methods(database_class) == {
+        "tag", "accept_prediction",
+    }
+
+
+def test_facade_call_check_allows_private_helpers_and_facade_routes():
+    assert _synthetic_violations(_SYNTHETIC_REPOSITORY) == []
+
+
+def test_facade_call_check_rejects_a_direct_call_to_an_exposed_method():
+    source = _SYNTHETIC_REPOSITORY.replace(
+        'self.tag_photo(photo_id, 1, source="accept")',
+        'self.tag(photo_id, 1, source="accept")',
+    )
+    assert _synthetic_violations(source) == [("accept_prediction", "tag")]
+
+
+def test_facade_call_check_rejects_an_exposed_call_hidden_in_a_private_helper():
+    source = _SYNTHETIC_REPOSITORY.replace(
+        'return self.conn.execute("SELECT ...", (prediction_id,)).fetchone()[0]',
+        "return self.accept_prediction(prediction_id)",
+    )
+    assert _synthetic_violations(source) == [("_resolve_photo", "accept_prediction")]
 
 
 def test_keyword_provenance_repository_does_not_import_db():
