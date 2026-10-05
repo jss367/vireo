@@ -104,6 +104,854 @@ FACADE_METHODS = (
 )
 
 
+# -- merge_keyword_into steps -------------------------------------------------
+#
+# The steps ``KeywordProvenanceRepository.merge_keyword_into`` runs, in order.
+# They are module functions rather than repository methods because repository
+# methods may not reach one another through ``self``
+# (``test_moved_writers_reach_each_other_only_through_the_facade``), so each
+# step takes the connection, and any façade method it calls, as arguments.
+# None of them commits: the merge's caller does. The ``photo_keywords``
+# provenance fold and association move stay inline in ``merge_keyword_into``,
+# the convergence point ``test_keyword_provenance_contract`` keys by name.
+
+# ``edit_history`` action types whose entries can name a keyword id: the
+# parent ``new_value`` rewrite and the JSON ``old_value`` payload pass both
+# scope to these.
+_MERGE_KEYWORD_ID_ACTIONS = (
+    'keyword_add', 'keyword_remove', 'prediction_accept',
+    'species_replace',
+)
+
+
+def _read_merge_rows(conn, src_id, dst_id):
+    """Return the ``(src, dst)`` keyword rows the merge reads; either may be None."""
+    src = conn.execute(
+        "SELECT name, type, is_species, latitude, longitude, taxon_id, "
+        "source_taxon_id, place_id FROM keywords WHERE id = ?",
+        (src_id,),
+    ).fetchone()
+    dst = conn.execute(
+        "SELECT name, type, is_species, place_id FROM keywords WHERE id = ?",
+        (dst_id,),
+    ).fetchone()
+    return src, dst
+
+
+def _transfer_place_id(conn, src, dst, src_id, dst_id):
+    """Move the source's Google ``place_id`` onto a destination that lacks one.
+
+    Runs before the source row is deleted. Without this, merging a coordless
+    sibling on top of a place-bearing sibling (or the reverse) silently drops
+    the Google place link — repeat startup repair of duplicate location roots
+    would otherwise strip the place ID from a repaired child (e.g. ``United
+    States -> California`` present as both a coordless branch and a
+    place-bearing branch).
+
+    When the transfer happens, the destination's coordinates are forced to
+    match the source's — the metadata fold (``_fold_keyword_metadata``) only
+    fills coordless rows via ``COALESCE(latitude, ?)``, so a destination that
+    carried unrelated stale coords would otherwise represent the incoming
+    Google place at the wrong point (saved-suggestion ranking and map markers
+    then use the stale location instead of the place's actual coordinates).
+    """
+    place_id_transferred = (
+        src is not None
+        and dst is not None
+        and src["place_id"] is not None
+        and dst["place_id"] is None
+    )
+    if place_id_transferred:
+        # The partial ``UNIQUE(place_id) WHERE place_id IS NOT NULL`` index
+        # requires clearing the source first before moving the value.
+        conn.execute(
+            "UPDATE keywords SET place_id = NULL WHERE id = ?",
+            (src_id,),
+        )
+        conn.execute(
+            "UPDATE keywords SET place_id = ?, latitude = ?, longitude = ? "
+            "WHERE id = ?",
+            (src["place_id"], src["latitude"], src["longitude"], dst_id),
+        )
+
+
+def _fold_keyword_metadata(conn, src, dst, dst_id):
+    """Fold the source's non-link metadata into the destination.
+
+    ``is_species``, coordinates, ``taxon_id`` and ``source_taxon_id`` fill in
+    where the destination lacks its own, so deleting the source can't silently
+    drop species/location info that only the duplicate carried. The one
+    exception is a species-bearing source retyped into a non-taxonomy
+    destination, which clears every species claim instead (see below).
+    No-op when the source row is missing.
+    """
+    if src is None:
+        return
+    # A species-bearing row being RETYPED into a non-taxonomy
+    # destination must not leak its species flag or taxon link
+    # onto the survivor: species queries `is_species = 1 OR
+    # type = 'taxonomy'` would otherwise keep matching every
+    # photo already tagged with that individual/general row
+    # (see update_keyword's retype-into-peer path, and the
+    # migration's general→specific-type fold). "Species-
+    # bearing" is `type='taxonomy'` OR `is_species=1` — legacy
+    # rows can still be `type='general', is_species=1` on
+    # upgraded DBs, and retyping them into an individual/general
+    # peer would otherwise take the else branch below and stamp
+    # is_species=1 onto the non-taxonomy destination. Gated on
+    # `src.type != dst.type` so same-type case-variant collapses
+    # (e.g. two `general, is_species=1` rows merging under one
+    # normalized spelling) still keep their metadata-fold
+    # behavior.
+    leaks_species_into_nontaxonomy = (
+        dst is not None
+        and dst["type"] != "taxonomy"
+        and src["type"] != dst["type"]
+        and (src["type"] == "taxonomy" or src["is_species"] == 1)
+    )
+    if leaks_species_into_nontaxonomy:
+        # Retype-into-peer path (see update_keyword): the survivor
+        # is deliberately non-taxonomy, so the row must not stay
+        # matched by species queries. Suppressing the source's
+        # is_species/taxon_id is not enough — the destination may
+        # carry a legacy is_species=1 (dirty pre-invariant data on
+        # 'individual'/'general' rows) or a stale taxon_id, and
+        # keeping either lets `is_species = 1 OR type = 'taxonomy'`
+        # keep matching every photo that already used the dst row.
+        # Clear all species claims (taxon_id AND source_taxon_id)
+        # alongside the metadata fold; a lingering iNat
+        # source_taxon_id would keep the survivor resolving to a
+        # species identity the retype was meant to drop.
+        conn.execute(
+            """UPDATE keywords
+               SET is_species        = 0,
+                   latitude          = COALESCE(latitude, ?),
+                   longitude         = COALESCE(longitude, ?),
+                   taxon_id          = NULL,
+                   source_taxon_id   = NULL
+               WHERE id = ?""",
+            (src["latitude"], src["longitude"], dst_id),
+        )
+    else:
+        # Fold ``source_taxon_id`` alongside ``taxon_id``: a
+        # source row can carry an iNat id without a resolved local
+        # taxon (see ``_add_source_species_keyword``), and
+        # ``keywords_claim_different_taxa`` treats a bare
+        # ``source_taxon_id`` as identity. Without this COALESCE
+        # the recursive child collapse would drop the only
+        # external taxon claim and leave the survivor an unlinked
+        # species row.
+        conn.execute(
+            """UPDATE keywords
+               SET is_species        = CASE WHEN ? = 1 THEN 1 ELSE is_species END,
+                   latitude          = COALESCE(latitude, ?),
+                   longitude         = COALESCE(longitude, ?),
+                   taxon_id          = COALESCE(taxon_id, ?),
+                   source_taxon_id   = COALESCE(source_taxon_id, ?)
+               WHERE id = ?""",
+            (src["is_species"], src["latitude"], src["longitude"],
+             src["taxon_id"], src["source_taxon_id"], dst_id),
+        )
+
+
+def _retarget_source_spelling(
+    conn, src, dst, src_id, dst_id, *, pending_source_only, chunks,
+    rename_species_highlights_species, rename_photo_preferences_species,
+):
+    """Repoint rows keyed on the source's *name* onto the destination's name.
+
+    Covers pending sidecar edits (``_retarget_pending_changes``) and species
+    curation (``_retarget_species_curation``). Applies only when both rows
+    exist and their names differ.
+    """
+    if src is not None and dst is not None:
+        src_name = src["name"]
+        dst_name = dst["name"]
+        if src_name and dst_name and src_name != dst_name:
+            _retarget_pending_changes(
+                conn, src_name, dst_name, src_id, dst_id,
+                pending_source_only=pending_source_only, chunks=chunks,
+            )
+            _retarget_species_curation(
+                conn, src, dst, src_name, dst_name, src_id, dst_id,
+                rename_species_highlights_species=rename_species_highlights_species,
+                rename_photo_preferences_species=rename_photo_preferences_species,
+            )
+
+
+def _retarget_pending_changes(
+    conn, src_name, dst_name, src_id, dst_id, *, pending_source_only, chunks,
+):
+    """Rewrite unsynced keyword_add/keyword_remove rows onto the survivor name.
+
+    Without this, the merge deletes the source row but leaves the pending
+    change referring to the old spelling, so the next ``sync_to_xmp`` writes
+    a keyword the DB no longer has.
+
+    A pending row that would collide with an existing (photo_id, change_type,
+    dst_name) row is dropped rather than duplicated — matches the dedupe
+    contract queue_change enforces. The rewrite is scoped to photos actually
+    tagged with either row: a value-only rewrite would otherwise affect every
+    workspace whose pending_changes carry the same name string for a keyword
+    row that was not merged. Captured before the photo_keywords UPDATE so the
+    query still sees the src tags.
+
+    Explicit merges set ``pending_source_only`` so only photos currently
+    carrying the source have their pending edits rewritten. A photo that
+    already removed the source must still remove that old spelling from its
+    sidecar, even when it also carries the destination keyword.
+    """
+    affected_pcx = [
+        r["photo_id"] for r in conn.execute(
+            "SELECT DISTINCT photo_id FROM photo_keywords WHERE keyword_id IN (?, ?)",
+            (src_id, src_id if pending_source_only else dst_id),
+        ).fetchall()
+    ]
+    for chunk in chunks(affected_pcx):
+        placeholders = ",".join("?" for _ in chunk)
+        conn.execute(
+            f"""DELETE FROM pending_changes
+                WHERE change_type IN ('keyword_add', 'keyword_remove')
+                  AND value = ?
+                  AND photo_id IN ({placeholders})
+                  AND EXISTS (
+                      SELECT 1 FROM pending_changes pc2
+                      WHERE pc2.photo_id = pending_changes.photo_id
+                        AND pc2.change_type = pending_changes.change_type
+                        AND pc2.value = ?
+                        AND COALESCE(pc2.workspace_id, -1)
+                            = COALESCE(pending_changes.workspace_id, -1)
+                  )""",
+            [src_name, *chunk, dst_name],
+        )
+        conn.execute(
+            f"""UPDATE pending_changes
+                SET value = ?
+                WHERE change_type IN ('keyword_add', 'keyword_remove')
+                  AND value = ?
+                  AND photo_id IN ({placeholders})""",
+            [dst_name, src_name, *chunk],
+        )
+
+
+def _retarget_species_curation(
+    conn, src, dst, src_name, dst_name, src_id, dst_id, *,
+    rename_species_highlights_species, rename_photo_preferences_species,
+):
+    """Rename species curation rows keyed to the source name onto the survivor.
+
+    Applies when either row is a species/taxonomy keyword. The eligible
+    curation queries compare those strings exact against the surviving
+    keywords.name, so highlights/representatives keyed to the source spelling
+    would silently disappear after a merge even though the tag itself was
+    retained. Mirrors the scoped rename _normalize_keyword_row_name runs on
+    the survivor; scoped to (photo, workspace) pairs that carried either row
+    so an unrelated workspace's same-species curation is not retargeted onto
+    a name it doesn't have tagged.
+    """
+    is_species_merge = (
+        src["is_species"] == 1 or src["type"] == "taxonomy"
+        or dst["is_species"] == 1 or dst["type"] == "taxonomy"
+    )
+    if is_species_merge:
+        tag_rows = conn.execute(
+            """SELECT DISTINCT pk.photo_id, wf.workspace_id
+               FROM photo_keywords pk
+               JOIN photos p ON p.id = pk.photo_id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
+               WHERE pk.keyword_id IN (?, ?)""",
+            (src_id, dst_id),
+        ).fetchall()
+        photo_workspace_pairs = [
+            (r["photo_id"], r["workspace_id"]) for r in tag_rows
+        ]
+        if photo_workspace_pairs:
+            rename_species_highlights_species(
+                src_name, dst_name,
+                photo_workspace_pairs=photo_workspace_pairs,
+                _commit=False,
+            )
+            rename_photo_preferences_species(
+                src_name, dst_name,
+                photo_workspace_pairs=photo_workspace_pairs,
+                _commit=False,
+            )
+
+
+def _retarget_edit_history(conn, src_id, dst_id, *, chunks, edit_prediction_ids):
+    """Retarget edit_history entries that name ``src_id`` onto ``dst_id``.
+
+    Undo/redo then lands on the survivor instead of a deleted row. Without
+    this, undo of a recent keyword_add / keyword_remove / prediction_accept /
+    species_replace looks up src_id, gets no keyword row (it's about to be
+    deleted), and marks the entry undone without reversing the effect: the
+    tag stays on the photo and the pending sidecar change (already rewritten
+    to the survivor spelling by ``_retarget_pending_changes``) is left in
+    place. Applies globally across workspaces — workspace_id scopes WHO ran
+    the edit, not which keyword row it references.
+
+    First drops (or, for prediction accepts, retires to status-only) the items
+    on photos that already carried the survivor, which cannot be retargeted
+    honestly (``_drop_unretargetable_history_items``); then rewrites the bare
+    ids (``_retarget_bare_history_ids``) and the JSON payloads
+    (``_retarget_history_json_payloads``). The survivor's pre-existing photos
+    are read here, before the photo_keywords move adds the source's photos
+    to them.
+    """
+    src_str = str(src_id)
+    dst_str = str(dst_id)
+    preexisting_dst_photos = [
+        r["photo_id"] for r in conn.execute(
+            "SELECT photo_id FROM photo_keywords WHERE keyword_id = ?",
+            (dst_id,),
+        ).fetchall()
+    ]
+    _drop_unretargetable_history_items(
+        conn, src_str, dst_str, preexisting_dst_photos,
+        chunks=chunks, edit_prediction_ids=edit_prediction_ids,
+    )
+    _retarget_bare_history_ids(conn, src_str, dst_str)
+    _retarget_history_json_payloads(conn, src_id, dst_id, preexisting_dst_photos)
+
+
+def _retire_tag_mutations(conn, rows, edit_prediction_ids):
+    """Delete each history item, or retire a prediction accept to status-only.
+
+    A prediction accept has two effects: the tag and review status. When a
+    merge makes its tag redundant, retain the status effect and metadata so
+    undo/redo still restores every prediction.
+    """
+    for row in rows:
+        if row["action_type"] != "prediction_accept":
+            conn.execute("DELETE FROM edit_history_items WHERE id = ?", (row["id"],))
+            continue
+        try:
+            meta = json.loads(row["old_value"] or "{}")
+        except (TypeError, ValueError):
+            meta = {}
+        if not isinstance(meta, dict):
+            meta = {}
+        meta["prediction_ids"] = edit_prediction_ids(meta, row["old_value"])
+        meta["no_tag"] = True
+        conn.execute(
+            "UPDATE edit_history_items SET old_value = ? WHERE id = ?",
+            (json.dumps(meta), row["id"]),
+        )
+
+
+def _drop_unretargetable_history_items(
+    conn, src_str, dst_str, preexisting_dst_photos, *, chunks, edit_prediction_ids,
+):
+    """Drop history items a src→dst retarget would make lie about the survivor.
+
+    Pre-existing survivor tags: for an edit recorded against src_id, an item
+    whose photo already carried dst_id at merge time can't be retargeted
+    honestly — the UPDATE OR IGNORE on photo_keywords leaves the survivor row
+    untouched and drops the src row, so an undo/redo of the retargeted entry
+    would touch the user's pre-existing survivor tag that was never part of
+    that edit. Drop those items before retargeting so undo/redo iterates 0 (or
+    the still-legitimate) items only. Covers these action types:
+
+      * `keyword_add`: undo calls untag_photo(pid, entry.new_value) per item;
+        the retargeted entry.new_value = dst_id would remove the survivor.
+      * `prediction_accept`: undo uses item.new_value for the tag. Retire
+        only that tag mutation by converting the item to ``no_tag``; its
+        prediction-status history remains undoable.
+      * `keyword_remove`: undo tags on the survivor (INSERT OR IGNORE — no-op
+        if dst pre-existed), BUT redo calls untag_photo(pid, entry.new_value);
+        the retargeted entry.new_value = dst_id would strip the survivor on
+        redo.
+      * `species_replace`: undo calls untag_photo(pid, item.new_value) before
+        restoring the old species (see `_apply_undo`); the retargeted
+        item.new_value = dst_id would remove the survivor tag the edit never
+        actually created. Redo similarly untags item.new_value again.
+        Symmetric case on the OLD side: for a prior replace where src was the
+        OLD species being swapped out, redo iterates old_kids (bare-string or
+        JSON `keyword_ids`) and untags each — a src→dst retarget of those
+        references would strip the pre-existing survivor. Drop those items
+        too (bare-string in ``_drop_replaced_old_species_items``, JSON in
+        ``_retarget_history_json_payloads``).
+
+    Each chunk of pre-existing survivor photos runs the four passes in order.
+    """
+    for chunk in chunks(preexisting_dst_photos):
+        ph = ",".join("?" for _ in chunk)
+        _retire_src_adds_on_preexisting_survivor(
+            conn, ph, chunk, src_str, dst_str, edit_prediction_ids,
+        )
+        _retire_later_redundant_adds(
+            conn, ph, chunk, src_str, dst_str, edit_prediction_ids,
+        )
+        _drop_removes_of_preexisting_survivor(conn, ph, chunk, src_str, dst_str)
+        _drop_replaced_old_species_items(conn, ph, chunk, src_str)
+
+
+def _retire_src_adds_on_preexisting_survivor(
+    conn, ph, chunk, src_str, dst_str, edit_prediction_ids,
+):
+    """Retire src-tagging items on photos that already carried the survivor.
+
+    keyword_add + prediction_accept + species_replace: item.new_value =
+    str(kid). Deleting a species_replace item here loses the
+    retag-old-species side of that per-photo swap on undo/redo, but leaving
+    it retargeted would silently untag the user's pre-existing survivor.
+    Prediction accepts instead keep a status-only record.
+
+    Identity is per item: for a mixed-alias prediction_accept batch (see
+    api_accept_predictions), the parent edit's ``new_value`` records only the
+    first alias, while each item's ``new_value`` records its own resolved
+    keyword id. Requiring the parent to also equal ``src`` would miss items
+    in that batch whose alias is the one being merged, and the survivor
+    retarget would then silently untag a pre-existing ``dst`` tag on undo.
+    For ``keyword_add`` and ``species_replace`` the parent and item always
+    agree, so dropping the parent match only widens coverage where it was
+    under-matching before.
+
+    Status-only accepts must retain their prediction undo record, and do not
+    count as earlier/later tag additions in these checks.
+    """
+    _retire_tag_mutations(conn, conn.execute(
+        f"""SELECT id, old_value,
+                   (SELECT action_type FROM edit_history
+                    WHERE id = edit_history_items.edit_id) AS action_type
+            FROM edit_history_items
+            WHERE new_value = ?
+              AND photo_id IN ({ph})
+              AND edit_id IN (
+                  SELECT id FROM edit_history
+                  WHERE action_type IN (
+                      'keyword_add', 'species_replace'
+                  ) OR (
+                      action_type = 'prediction_accept'
+                      AND COALESCE(edit_history_items.old_value, '') NOT LIKE '%"no_tag"%'
+                  )
+              )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM edit_history_items ehi2
+                  JOIN edit_history eh2
+                    ON eh2.id = ehi2.edit_id
+                  WHERE ehi2.photo_id = edit_history_items.photo_id
+                    AND ehi2.new_value IN (?, ?)
+                    AND eh2.action_type IN (
+                        'keyword_add',
+                        'prediction_accept',
+                        'species_replace'
+                    )
+                    AND (eh2.action_type != 'prediction_accept'
+                         OR COALESCE(ehi2.old_value, '') NOT LIKE '%"no_tag"%')
+                    AND ehi2.id > edit_history_items.id
+              )""",
+        [src_str, *chunk, src_str, dst_str],
+    ).fetchall(), edit_prediction_ids)
+
+
+def _retire_later_redundant_adds(
+    conn, ph, chunk, src_str, dst_str, edit_prediction_ids,
+):
+    """Retire a later add made redundant by an earlier source add.
+
+    When the source add happened first and a later add created the current
+    survivor association, the later add becomes the redundant operation after
+    src and dst converge. The guarded cleanup in
+    ``_retire_src_adds_on_preexisting_survivor`` deliberately preserves the
+    earlier source item; retire the later tag mutation instead so
+    latest-first undo leaves the merged tag in place until the original
+    source add is itself undone. Restrict this to add-like actions whose
+    whole per-photo effect is the tag association; species_replace has an
+    old-species restoration side that cannot be discarded.
+
+    The earlier-source lookup matches on the item's own ``new_value`` alone,
+    not the parent edit's, so a mixed-alias prediction_accept batch (whose
+    parent records only the first alias) still counts as the earlier source
+    add for a later redundant item.
+    """
+    _retire_tag_mutations(conn, conn.execute(
+        f"""SELECT id, old_value,
+                   (SELECT action_type FROM edit_history
+                    WHERE id = edit_history_items.edit_id) AS action_type
+            FROM edit_history_items
+            WHERE photo_id IN ({ph})
+              AND new_value IN (?, ?)
+              AND edit_id IN (
+                  SELECT id FROM edit_history
+                  WHERE action_type = 'keyword_add' OR (
+                      action_type = 'prediction_accept'
+                      AND COALESCE(edit_history_items.old_value, '') NOT LIKE '%"no_tag"%'
+                  )
+              )
+              AND EXISTS (
+                  SELECT 1
+                  FROM edit_history_items ehi1
+                  JOIN edit_history eh1
+                    ON eh1.id = ehi1.edit_id
+                  WHERE ehi1.photo_id = edit_history_items.photo_id
+                    AND ehi1.new_value = ?
+                    AND eh1.action_type IN (
+                        'keyword_add', 'prediction_accept'
+                    )
+                    AND (eh1.action_type != 'prediction_accept'
+                         OR COALESCE(ehi1.old_value, '') NOT LIKE '%"no_tag"%')
+                    AND ehi1.id < edit_history_items.id
+              )""",
+        [*chunk, src_str, dst_str, src_str],
+    ).fetchall(), edit_prediction_ids)
+
+
+def _drop_removes_of_preexisting_survivor(conn, ph, chunk, src_str, dst_str):
+    """Drop src keyword_remove items whose photo genuinely held the survivor.
+
+    keyword_remove: item.new_value is '' by convention (see record_edit call
+    sites in app.py); the keyword id lives in item.old_value. Drop the item
+    ONLY when the survivor genuinely pre-existed THIS remove — i.e., no later
+    edit added the merged keyword back to the same photo. If dst was tagged
+    AFTER this remove, the current photo_keywords row does not prove
+    pre-existence and dropping the item breaks undo: latest-first undo of the
+    later add first strips dst_id, and this remove's undo would then no-op
+    (no item), leaving the merged keyword missing when the earlier remove is
+    reversed. Keeping the item is safe in that case:
+
+      * undo of remove → tag_photo(pid, dst) is INSERT OR IGNORE and a no-op
+        if dst is already present;
+      * redo of remove → untag_photo(pid, dst) is consistent with replaying
+        the historical remove of what became the merged keyword.
+
+    "Later add" covers keyword_add / prediction_accept and the tagging half
+    of species_replace (item.new_value = str(kid)). Src-spelled adds count
+    too — pre-migration they refer to what will become the merged keyword.
+    """
+    conn.execute(
+        f"""DELETE FROM edit_history_items
+            WHERE old_value = ?
+              AND photo_id IN ({ph})
+              AND edit_id IN (
+                  SELECT id FROM edit_history
+                  WHERE new_value = ?
+                    AND action_type = 'keyword_remove'
+              )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM edit_history_items ehi2
+                  JOIN edit_history eh2
+                    ON eh2.id = ehi2.edit_id
+                  WHERE ehi2.photo_id = edit_history_items.photo_id
+                    AND ehi2.new_value IN (?, ?)
+                    AND eh2.action_type IN (
+                        'keyword_add',
+                        'prediction_accept',
+                        'species_replace'
+                    )
+                    AND (eh2.action_type != 'prediction_accept'
+                         OR COALESCE(ehi2.old_value, '') NOT LIKE '%"no_tag"%')
+                    AND ehi2.id > edit_history_items.id
+              )""",
+        [src_str, *chunk, src_str, src_str, dst_str],
+    )
+
+
+def _drop_replaced_old_species_items(conn, ph, chunk, src_str):
+    """Drop bare-string species_replace items that swapped src out.
+
+    species_replace: item.old_value = str(old_kid) (bare-string form) for a
+    prior replace where src_id was the OLD species being swapped out. The
+    bare-string retarget (``_retarget_bare_history_ids``) would rewrite that
+    to dst_str; _apply_redo then iterates old_kids=[dst_id] and
+    untag_photo(pid, dst_id), stripping the survivor tag that pre-existed the
+    merge and was never created by that edit. Drop the item — same tradeoff
+    as the new_value / species_replace case in
+    ``_retire_src_adds_on_preexisting_survivor``.
+    """
+    conn.execute(
+        f"""DELETE FROM edit_history_items
+            WHERE old_value = ?
+              AND photo_id IN ({ph})
+              AND edit_id IN (
+                  SELECT id FROM edit_history
+                  WHERE action_type = 'species_replace'
+              )""",
+        [src_str, *chunk],
+    )
+
+
+def _retarget_bare_history_ids(conn, src_str, dst_str):
+    """Rewrite bare keyword-id strings in edit_history and its items."""
+    _kw_placeholders = ",".join("?" * len(_MERGE_KEYWORD_ID_ACTIONS))
+    # 1) edit_history.new_value: the canonical keyword id per entry.
+    conn.execute(
+        f"""UPDATE edit_history
+            SET new_value = ?
+            WHERE new_value = ?
+              AND action_type IN ({_kw_placeholders})""",
+        (dst_str, src_str, *_MERGE_KEYWORD_ID_ACTIONS),
+    )
+    # 2) edit_history_items new_value / old_value: bare keyword-id
+    #    strings, but only the specific (action_type, column) pairs
+    #    that actually store keyword ids. record_edit populates:
+    #      keyword_add       → new_value=str(kid), old_value=''
+    #      keyword_remove    → old_value=str(kid), new_value=''
+    #      species_replace   → old_value=str(old_kid), new_value=str(kid)
+    #      prediction_accept → old_value=str(prediction_id),
+    #                          new_value=str(kid)
+    #    prediction_accept.old_value is the prediction id, NOT a
+    #    keyword id (see api_accept_prediction and _edit_prediction_id
+    #    which falls back to the bare string). A blanket rewrite over
+    #    every column would corrupt any prediction id whose numeric
+    #    value happens to equal src_id — undo/redo would then act on
+    #    the wrong prediction. Restrict each rewrite to the action
+    #    types whose column contains a keyword id.
+    _kw_id_by_col = {
+        "new_value": (
+            "keyword_add", "species_replace", "prediction_accept",
+        ),
+        "old_value": ("keyword_remove", "species_replace"),
+    }
+    for col, actions in _kw_id_by_col.items():
+        col_placeholders = ",".join("?" * len(actions))
+        conn.execute(
+            f"""UPDATE edit_history_items
+                SET {col} = ?
+                WHERE {col} = ?
+                  AND edit_id IN (
+                      SELECT id FROM edit_history
+                      WHERE action_type IN ({col_placeholders})
+                  )""",
+            (dst_str, src_str, *actions),
+        )
+
+
+def _retarget_history_json_payloads(conn, src_id, dst_id, preexisting_dst_photos):
+    """Rewrite ``keyword_id``/``keyword_ids`` in JSON ``old_value`` payloads.
+
+    species_replace and metadata-carrying keyword_add/prediction_accept
+    entries store {"keyword_id": ..., "keyword_ids": [...], ...}. Load,
+    rewrite, re-serialize per row. Scoped to values that look like JSON so
+    bare id strings (already handled by ``_retarget_bare_history_ids``) are
+    skipped cheaply. Uses ? for the LIKE prefix to keep the format string
+    free of literal SQL wildcard characters.
+
+    For species_replace items whose photo already carried the survivor before
+    the merge, a src→dst rewrite of the JSON old_kids would make _apply_redo
+    untag the pre-existing survivor (see ``_drop_replaced_old_species_items``);
+    drop those items instead of retargeting them.
+    """
+    _kw_placeholders = ",".join("?" * len(_MERGE_KEYWORD_ID_ACTIONS))
+    preexisting_set = set(preexisting_dst_photos)
+    json_rows = conn.execute(
+        f"""SELECT ehi.id, ehi.photo_id, ehi.old_value, eh.action_type
+            FROM edit_history_items ehi
+            JOIN edit_history eh ON eh.id = ehi.edit_id
+            WHERE eh.action_type IN ({_kw_placeholders})
+              AND ehi.old_value IS NOT NULL
+              AND ehi.old_value LIKE ?""",
+        (*_MERGE_KEYWORD_ID_ACTIONS, '{%'),
+    ).fetchall()
+    for row in json_rows:
+        try:
+            data = json.loads(row["old_value"])
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        if (
+            _payload_references_keyword(data, src_id)
+            and row["action_type"] == "species_replace"
+            and row["photo_id"] in preexisting_set
+        ):
+            conn.execute(
+                "DELETE FROM edit_history_items WHERE id = ?",
+                (row["id"],),
+            )
+            continue
+        if _rewrite_payload_keyword_ids(data, src_id, dst_id):
+            conn.execute(
+                "UPDATE edit_history_items SET old_value = ? WHERE id = ?",
+                (json.dumps(data, sort_keys=True), row["id"]),
+            )
+
+
+def _payload_references_keyword(data, keyword_id):
+    """True if a history payload's ``keyword_id`` or ``keyword_ids`` names it."""
+    references_src = False
+    raw_kid = data.get("keyword_id")
+    if raw_kid is not None:
+        try:
+            if int(raw_kid) == keyword_id:
+                references_src = True
+        except (TypeError, ValueError):
+            pass
+    if not references_src:
+        for k in (data.get("keyword_ids") or []):
+            try:
+                if int(k) == keyword_id:
+                    references_src = True
+                    break
+            except (TypeError, ValueError):
+                continue
+    return references_src
+
+
+def _rewrite_payload_keyword_ids(data, src_id, dst_id):
+    """Repoint ``src_id`` to ``dst_id`` in a payload, in place; True if changed."""
+    dirty = False
+    raw_kid = data.get("keyword_id")
+    if raw_kid is not None:
+        try:
+            if int(raw_kid) == src_id:
+                data["keyword_id"] = dst_id
+                dirty = True
+        except (TypeError, ValueError):
+            pass
+    raw_kids = data.get("keyword_ids")
+    if isinstance(raw_kids, list) and raw_kids:
+        rewritten = []
+        changed = False
+        for k in raw_kids:
+            try:
+                k_int = int(k)
+            except (TypeError, ValueError):
+                rewritten.append(k)
+                continue
+            if k_int == src_id:
+                k_int = dst_id
+                changed = True
+            rewritten.append(k_int)
+        if changed:
+            # Dedup preserving order: if the destination id was
+            # already in the list, don't repeat it after rewrite.
+            seen = []
+            for k in rewritten:
+                if k not in seen:
+                    seen.append(k)
+            data["keyword_ids"] = seen
+            dirty = True
+    return dirty
+
+
+def _reparent_children(
+    conn, src_id, dst_id, *, pending_source_only, db,
+    merge_keyword_into, reparent_disambiguated,
+):
+    """Move the source's children under the destination before it is deleted.
+
+    Without this the keywords.parent_id FK aborts the merge mid-way. Each
+    child is placed by ``_reparent_child``. Cycles are impossible: parent_id
+    chains are acyclic by construction.
+
+    Returns the number of keyword rows the recursive child merges folded away
+    (0 when none collided into a same-typed sibling).
+    """
+    merged = 0
+    children = conn.execute(
+        "SELECT id, name, type, place_id, taxon_id, source_taxon_id, is_species "
+        "FROM keywords WHERE parent_id = ?",
+        (src_id,),
+    ).fetchall()
+    for child in children:
+        merged += _reparent_child(
+            conn, child, dst_id,
+            pending_source_only=pending_source_only, db=db,
+            merge_keyword_into=merge_keyword_into,
+            reparent_disambiguated=reparent_disambiguated,
+        )
+    return merged
+
+
+def _reparent_child(
+    conn, child, dst_id, *, pending_source_only, db,
+    merge_keyword_into, reparent_disambiguated,
+):
+    """Reparent one child under ``dst_id``, merging or disambiguating on collision.
+
+    A child whose name matches an existing sibling under the destination
+    merges into that sibling recursively (through the façade's
+    ``_merge_keyword_into``) only when both share the same ``type`` and do
+    not claim different taxa or different Google places — "Birds > Heron"
+    and "birds > Heron" must converge on one Heron. Match uses
+    ``keyword_match_key`` (ASCII case fold on the display-normalized name),
+    the same key every lookup and dedup path uses, so a case-only variant is
+    a collision even though SQLite's UNIQUE(name, parent_id) index is BINARY.
+    When the existing sibling has a different ``type`` (e.g. a 'general'
+    Macro vs. a 'genre' Macro), the dedup boundary is (LOWER(name),
+    parent_id, type), so they are NOT duplicates; both are preserved by
+    disambiguating the migrating child's name with an id suffix.
+
+    Returns the number of keyword rows a recursive merge folded away, else 0.
+    """
+    # Detect the collision explicitly: SQLite's UNIQUE(name, parent_id)
+    # is BINARY, so `foo` reparenting under a destination that already
+    # holds `Foo` would UPDATE cleanly and leave two semantic peers no
+    # keyword lookup (all folded through ``keyword_match_key``) could
+    # tell apart. Fold every sibling's name to check for either shape
+    # of collision, and only reparent when the folded slot is free.
+    siblings = conn.execute(
+        "SELECT id, name, type, place_id, taxon_id, source_taxon_id, is_species "
+        "FROM keywords WHERE parent_id = ? AND id != ?",
+        (dst_id, child["id"]),
+    ).fetchall()
+    child_key = keyword_match_key(child["name"])
+    existing = next(
+        (s for s in siblings if keyword_match_key(s["name"]) == child_key),
+        None,
+    )
+    if existing is None:
+        conn.execute(
+            "UPDATE keywords SET parent_id = ? WHERE id = ?",
+            (dst_id, child["id"]),
+        )
+        return 0
+    # Every disambiguation below has to dodge the whole sibling
+    # set, not just the row it collided with: the suffixed name
+    # can itself be occupied (a user typed it, or an earlier
+    # disambiguation produced it), and a second
+    # UNIQUE(name, parent_id) violation here is uncaught.
+    taken = {row["name"] for row in siblings}
+    if keywords_claim_different_taxa(db, existing, child):
+        # Two same-named species rows that resolve to DIFFERENT
+        # taxa. A recursive merge keeps the destination's taxon
+        # claim (COALESCE folds only fill missing fields), so
+        # every photo under the migrating row would silently
+        # come out tagged as the other species. Same reasoning
+        # as the distinct place case below; keep both rows
+        # instead.
+        reparent_disambiguated(
+            child, dst_id, free_sibling_name(
+                taken, child["name"], f"id-{child['id']}"),
+        )
+    elif (
+        existing["type"] == "location"
+        and child["type"] == "location"
+        and existing["place_id"] is not None
+        and child["place_id"] is not None
+        and existing["place_id"] != child["place_id"]
+    ):
+        # Two location siblings sharing (name, parent_id) but
+        # pointing at distinct Google places (e.g. two direct
+        # ``United States -> Springfield`` rows created from
+        # different place IDs). A recursive merge here would
+        # delete the migrating row and silently retag its
+        # photos onto a sibling that represents a different
+        # Google place. Disambiguate the migrating child with a
+        # place-id suffix so both Google places survive.
+        reparent_disambiguated(
+            child, dst_id, free_sibling_name(
+                taken, child["name"], child["place_id"][-8:]),
+        )
+    elif existing["type"] == child["type"]:
+        return merge_keyword_into(
+            child["id"], existing["id"], pending_source_only=pending_source_only,
+        )
+    else:
+        # Same name + parent but different type: outside the
+        # (LOWER(name), parent_id, type) dedup boundary, so
+        # preserve both by renaming the migrating child rather
+        # than retagging photos across types.
+        reparent_disambiguated(
+            child, dst_id, free_sibling_name(
+                taken, child["name"], f"id-{child['id']}"),
+        )
+    return 0
+
+
 class KeywordProvenanceRepository:
     def __init__(
         self,
@@ -190,604 +1038,44 @@ class KeywordProvenanceRepository:
     def merge_keyword_into(self, src_id, dst_id, *, pending_source_only=False):
         """Merge keyword ``src_id`` into ``dst_id`` and delete the source.
 
-        Moves photo associations, then reparents the source's children onto
-        the destination. A child whose name matches an existing sibling
-        under the destination merges into that sibling recursively only when
-        both share the same ``type`` — "Birds > Heron" and "birds > Heron"
-        must converge on one Heron. Match uses ``keyword_match_key`` (ASCII
-        case fold on the display-normalized name), the same key every lookup
-        and dedup path uses, so a case-only variant is a collision even
-        though SQLite's UNIQUE(name, parent_id) index is BINARY — an
-        unchecked reparent would otherwise leave two semantic peers no
-        import could tell apart. When the existing sibling has a different
-        ``type`` (e.g. a 'general' Macro vs. a 'genre' Macro), the dedup
-        boundary is (LOWER(name), parent_id, type), so they are NOT
-        duplicates; preserve both by disambiguating the migrating child's
-        name with an id suffix. Cycles are impossible: parent_id chains are
-        acyclic by construction.
-        Non-link metadata (is_species, coordinates, taxon_id,
-        source_taxon_id) folds into the destination when it lacks its own,
-        so deleting the source can't silently drop species/location info
-        that only the duplicate carried.
-
-        Rewrites pending_changes so an unsynced keyword_add/keyword_remove
-        queued under the source spelling points at the surviving name after
-        the merge. Without this, the merge deletes the source row but leaves
-        the pending change referring to the old spelling, so the next
-        ``sync_to_xmp`` writes a keyword the DB no longer has.
+        Repoints everything that refers to the source onto the destination,
+        in this order: import aliases; the Google place link and the row's
+        species/location metadata; pending sidecar edits and species curation
+        keyed on the source spelling; edit history that names the source id;
+        the photo associations, folding provenance where a photo carried both
+        keywords; and the source's children, which merge recursively into a
+        same-named, same-typed sibling and are otherwise reparented. Each
+        step's helper documents the rule it enforces.
 
         Explicit merges set ``pending_source_only`` so only photos currently
-        carrying the source have their pending edits rewritten. A photo that
-        already removed the source must still remove that old spelling from
-        its sidecar, even when it also carries the destination keyword.
+        carrying the source have their pending edits rewritten (see
+        ``_retarget_pending_changes``).
 
-        Returns the number of keyword rows merged away (>= 1). Caller
-        commits.
+        Returns the number of keyword rows merged away (>= 1), counting
+        recursive child merges. Caller commits.
         """
         merged = 1
         self.conn.execute(
             'UPDATE keyword_import_aliases SET keyword_id = ? WHERE keyword_id = ?',
             (dst_id, src_id),
         )
-        src = self.conn.execute(
-            "SELECT name, type, is_species, latitude, longitude, taxon_id, "
-            "source_taxon_id, place_id FROM keywords WHERE id = ?",
-            (src_id,),
-        ).fetchone()
-        dst = self.conn.execute(
-            "SELECT name, type, is_species, place_id FROM keywords WHERE id = ?",
-            (dst_id,),
-        ).fetchone()
-        # Transfer the source's Google ``place_id`` onto the destination when
-        # the destination lacks one before the row is deleted below. Without
-        # this, merging a coordless sibling on top of a place-bearing sibling
-        # (or the reverse) silently drops the Google place link — repeat
-        # startup repair of duplicate location roots would otherwise strip
-        # the place ID from a repaired child (e.g. ``United States ->
-        # California`` present as both a coordless branch and a place-bearing
-        # branch). The partial ``UNIQUE(place_id) WHERE place_id IS NOT NULL``
-        # index requires clearing the source first before moving the value.
-        # When the transfer happens, force the destination's coordinates to
-        # match the source's — the metadata fold below only fills coordless
-        # rows via ``COALESCE(latitude, ?)``, so a destination that carried
-        # unrelated stale coords would otherwise represent the incoming
-        # Google place at the wrong point (saved-suggestion ranking and map
-        # markers then use the stale location instead of the place's actual
-        # coordinates).
-        place_id_transferred = (
-            src is not None
-            and dst is not None
-            and src["place_id"] is not None
-            and dst["place_id"] is None
+        src, dst = _read_merge_rows(self.conn, src_id, dst_id)
+        _transfer_place_id(self.conn, src, dst, src_id, dst_id)
+        _fold_keyword_metadata(self.conn, src, dst, dst_id)
+        # The pending-change, curation and edit-history retargets read
+        # photo_keywords as it stood before the merge, so they run before the
+        # association move below.
+        _retarget_source_spelling(
+            self.conn, src, dst, src_id, dst_id,
+            pending_source_only=pending_source_only,
+            chunks=self._chunks,
+            rename_species_highlights_species=self.rename_species_highlights_species,
+            rename_photo_preferences_species=self.rename_photo_preferences_species,
         )
-        if place_id_transferred:
-            self.conn.execute(
-                "UPDATE keywords SET place_id = NULL WHERE id = ?",
-                (src_id,),
-            )
-            self.conn.execute(
-                "UPDATE keywords SET place_id = ?, latitude = ?, longitude = ? "
-                "WHERE id = ?",
-                (src["place_id"], src["latitude"], src["longitude"], dst_id),
-            )
-        if src is not None:
-            # A species-bearing row being RETYPED into a non-taxonomy
-            # destination must not leak its species flag or taxon link
-            # onto the survivor: species queries `is_species = 1 OR
-            # type = 'taxonomy'` would otherwise keep matching every
-            # photo already tagged with that individual/general row
-            # (see update_keyword's retype-into-peer path, and the
-            # migration's general→specific-type fold). "Species-
-            # bearing" is `type='taxonomy'` OR `is_species=1` — legacy
-            # rows can still be `type='general', is_species=1` on
-            # upgraded DBs, and retyping them into an individual/general
-            # peer would otherwise take the else branch below and stamp
-            # is_species=1 onto the non-taxonomy destination. Gated on
-            # `src.type != dst.type` so same-type case-variant collapses
-            # (e.g. two `general, is_species=1` rows merging under one
-            # normalized spelling) still keep their metadata-fold
-            # behavior.
-            leaks_species_into_nontaxonomy = (
-                dst is not None
-                and dst["type"] != "taxonomy"
-                and src["type"] != dst["type"]
-                and (src["type"] == "taxonomy" or src["is_species"] == 1)
-            )
-            if leaks_species_into_nontaxonomy:
-                # Retype-into-peer path (see update_keyword): the survivor
-                # is deliberately non-taxonomy, so the row must not stay
-                # matched by species queries. Suppressing the source's
-                # is_species/taxon_id is not enough — the destination may
-                # carry a legacy is_species=1 (dirty pre-invariant data on
-                # 'individual'/'general' rows) or a stale taxon_id, and
-                # keeping either lets `is_species = 1 OR type = 'taxonomy'`
-                # keep matching every photo that already used the dst row.
-                # Clear all species claims (taxon_id AND source_taxon_id)
-                # alongside the metadata fold; a lingering iNat
-                # source_taxon_id would keep the survivor resolving to a
-                # species identity the retype was meant to drop.
-                self.conn.execute(
-                    """UPDATE keywords
-                       SET is_species        = 0,
-                           latitude          = COALESCE(latitude, ?),
-                           longitude         = COALESCE(longitude, ?),
-                           taxon_id          = NULL,
-                           source_taxon_id   = NULL
-                       WHERE id = ?""",
-                    (src["latitude"], src["longitude"], dst_id),
-                )
-            else:
-                # Fold ``source_taxon_id`` alongside ``taxon_id``: a
-                # source row can carry an iNat id without a resolved local
-                # taxon (see ``_add_source_species_keyword``), and
-                # ``keywords_claim_different_taxa`` treats a bare
-                # ``source_taxon_id`` as identity. Without this COALESCE
-                # the recursive child collapse would drop the only
-                # external taxon claim and leave the survivor an unlinked
-                # species row.
-                self.conn.execute(
-                    """UPDATE keywords
-                       SET is_species        = CASE WHEN ? = 1 THEN 1 ELSE is_species END,
-                           latitude          = COALESCE(latitude, ?),
-                           longitude         = COALESCE(longitude, ?),
-                           taxon_id          = COALESCE(taxon_id, ?),
-                           source_taxon_id   = COALESCE(source_taxon_id, ?)
-                       WHERE id = ?""",
-                    (src["is_species"], src["latitude"], src["longitude"],
-                     src["taxon_id"], src["source_taxon_id"], dst_id),
-                )
-        # Retarget pending keyword_add/keyword_remove rows queued under the
-        # source name onto the destination name. A pending row that would
-        # collide with an existing (photo_id, change_type, dst_name) row is
-        # dropped rather than duplicated — matches the dedupe contract
-        # queue_change enforces. Scope the rewrite to photos actually tagged
-        # with either row: a value-only rewrite would otherwise affect every
-        # workspace whose pending_changes carry the same name string for a
-        # keyword row that was not merged. Captured before the
-        # photo_keywords UPDATE below so the query still sees the src tags.
-        if src is not None and dst is not None:
-            src_name = src["name"]
-            dst_name = dst["name"]
-            if src_name and dst_name and src_name != dst_name:
-                affected_pcx = [
-                    r["photo_id"] for r in self.conn.execute(
-                        "SELECT DISTINCT photo_id FROM photo_keywords WHERE keyword_id IN (?, ?)",
-                        (src_id, src_id if pending_source_only else dst_id),
-                    ).fetchall()
-                ]
-                for chunk in self._chunks(affected_pcx):
-                    placeholders = ",".join("?" for _ in chunk)
-                    self.conn.execute(
-                        f"""DELETE FROM pending_changes
-                            WHERE change_type IN ('keyword_add', 'keyword_remove')
-                              AND value = ?
-                              AND photo_id IN ({placeholders})
-                              AND EXISTS (
-                                  SELECT 1 FROM pending_changes pc2
-                                  WHERE pc2.photo_id = pending_changes.photo_id
-                                    AND pc2.change_type = pending_changes.change_type
-                                    AND pc2.value = ?
-                                    AND COALESCE(pc2.workspace_id, -1)
-                                        = COALESCE(pending_changes.workspace_id, -1)
-                              )""",
-                        [src_name, *chunk, dst_name],
-                    )
-                    self.conn.execute(
-                        f"""UPDATE pending_changes
-                            SET value = ?
-                            WHERE change_type IN ('keyword_add', 'keyword_remove')
-                              AND value = ?
-                              AND photo_id IN ({placeholders})""",
-                        [dst_name, src_name, *chunk],
-                    )
-                # Retarget species curation rows keyed to the deleted source
-                # name onto the surviving destination name when either row is
-                # a species/taxonomy keyword. The eligible curation queries
-                # compare those strings exact against the surviving
-                # keywords.name, so highlights/representatives keyed to the
-                # source spelling would silently disappear after a merge even
-                # though the tag itself was retained. Mirrors the scoped
-                # rename _normalize_keyword_row_name runs on the survivor;
-                # scoped to (photo, workspace) pairs that carried either row
-                # so an unrelated workspace's same-species curation is not
-                # retargeted onto a name it doesn't have tagged.
-                is_species_merge = (
-                    src["is_species"] == 1 or src["type"] == "taxonomy"
-                    or dst["is_species"] == 1 or dst["type"] == "taxonomy"
-                )
-                if is_species_merge:
-                    tag_rows = self.conn.execute(
-                        """SELECT DISTINCT pk.photo_id, wf.workspace_id
-                           FROM photo_keywords pk
-                           JOIN photos p ON p.id = pk.photo_id
-                           JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-                           WHERE pk.keyword_id IN (?, ?)""",
-                        (src_id, dst_id),
-                    ).fetchall()
-                    photo_workspace_pairs = [
-                        (r["photo_id"], r["workspace_id"]) for r in tag_rows
-                    ]
-                    if photo_workspace_pairs:
-                        self.rename_species_highlights_species(
-                            src_name, dst_name,
-                            photo_workspace_pairs=photo_workspace_pairs,
-                            _commit=False,
-                        )
-                        self.rename_photo_preferences_species(
-                            src_name, dst_name,
-                            photo_workspace_pairs=photo_workspace_pairs,
-                            _commit=False,
-                        )
-        # Retarget edit_history entries that reference src_id as a
-        # keyword id so undo/redo lands on the survivor instead of a
-        # deleted row. Without this, undo of a recent keyword_add /
-        # keyword_remove / prediction_accept / species_replace looks up
-        # src_id, gets no keyword row (it's about to be deleted below),
-        # and marks the entry undone without reversing the effect: the
-        # tag stays on the photo and the pending sidecar change (already
-        # rewritten to the survivor spelling above) is left in place.
-        # Applies globally across workspaces — workspace_id scopes WHO
-        # ran the edit, not which keyword row it references.
-        _kw_id_actions = (
-            'keyword_add', 'keyword_remove', 'prediction_accept',
-            'species_replace',
+        _retarget_edit_history(
+            self.conn, src_id, dst_id,
+            chunks=self._chunks, edit_prediction_ids=self._edit_prediction_ids,
         )
-        src_str = str(src_id)
-        dst_str = str(dst_id)
-        _kw_placeholders = ",".join("?" * len(_kw_id_actions))
-        # Pre-existing survivor tags: for an edit recorded against src_id,
-        # an item whose photo already carried dst_id at merge time can't
-        # be retargeted honestly — the UPDATE OR IGNORE on photo_keywords
-        # below leaves the survivor row untouched and drops the src row,
-        # so an undo/redo of the retargeted entry would touch the user's
-        # pre-existing survivor tag that was never part of that edit.
-        # Drop those items before retargeting so undo/redo iterates 0 (or
-        # the still-legitimate) items only. Covers three action types:
-        #   * `keyword_add`: undo calls untag_photo(pid, entry.new_value)
-        #     per item; the retargeted entry.new_value = dst_id would
-        #     remove the survivor.
-        #   * `prediction_accept`: undo uses item.new_value for the tag.
-        #     Retire only that tag mutation by converting the item to
-        #     ``no_tag``; its prediction-status history remains undoable.
-        #   * `keyword_remove`: undo tags on the survivor (INSERT OR
-        #     IGNORE — no-op if dst pre-existed), BUT redo calls
-        #     untag_photo(pid, entry.new_value); the retargeted
-        #     entry.new_value = dst_id would strip the survivor on redo.
-        #   * `species_replace`: undo calls untag_photo(pid,
-        #     item.new_value) before restoring the old species (see
-        #     `_apply_undo`); the retargeted item.new_value = dst_id would
-        #     remove the survivor tag the edit never actually created.
-        #     Redo similarly untags item.new_value again. Symmetric case
-        #     on the OLD side: for a prior replace where src was the OLD
-        #     species being swapped out, redo iterates
-        #     old_kids (bare-string or JSON `keyword_ids`) and untags each
-        #     — a src→dst retarget of those references would strip the
-        #     pre-existing survivor. Drop those items too (bare-string in
-        #     the second DELETE below, JSON in the payload rewrite pass).
-        def _retire_tag_mutations(rows):
-            # A prediction accept has two effects: the tag and review status.
-            # When a merge makes its tag redundant, retain the status effect
-            # and metadata so undo/redo still restores every prediction.
-            for row in rows:
-                if row["action_type"] != "prediction_accept":
-                    self.conn.execute("DELETE FROM edit_history_items WHERE id = ?", (row["id"],))
-                    continue
-                try:
-                    meta = json.loads(row["old_value"] or "{}")
-                except (TypeError, ValueError):
-                    meta = {}
-                if not isinstance(meta, dict):
-                    meta = {}
-                meta["prediction_ids"] = self._edit_prediction_ids(meta, row["old_value"])
-                meta["no_tag"] = True
-                self.conn.execute(
-                    "UPDATE edit_history_items SET old_value = ? WHERE id = ?",
-                    (json.dumps(meta), row["id"]),
-                )
-
-        preexisting_dst_photos = [
-            r["photo_id"] for r in self.conn.execute(
-                "SELECT photo_id FROM photo_keywords WHERE keyword_id = ?",
-                (dst_id,),
-            ).fetchall()
-        ]
-        for chunk in self._chunks(preexisting_dst_photos):
-            ph = ",".join("?" for _ in chunk)
-            # keyword_add + prediction_accept + species_replace:
-            # item.new_value = str(kid). Deleting a species_replace item
-            # here loses the retag-old-species side of that per-photo swap
-            # on undo/redo, but leaving it retargeted would silently
-            # untag the user's pre-existing survivor. Prediction accepts
-            # instead keep a status-only record.
-            # Identity is per item: for a mixed-alias prediction_accept
-            # batch (see api_accept_predictions), the parent edit's
-            # ``new_value`` records only the first alias, while each item's
-            # ``new_value`` records its own resolved keyword id. Requiring
-            # the parent to also equal ``src`` would miss items in that
-            # batch whose alias is the one being merged, and the survivor
-            # retarget below would then silently untag a pre-existing
-            # ``dst`` tag on undo. For ``keyword_add`` and
-            # ``species_replace`` the parent and item always agree, so
-            # dropping the parent match only widens coverage where it was
-            # under-matching before.
-            # Status-only accepts must retain their prediction undo record,
-            # and do not count as earlier/later tag additions in these checks.
-            _retire_tag_mutations(self.conn.execute(
-                f"""SELECT id, old_value,
-                           (SELECT action_type FROM edit_history
-                            WHERE id = edit_history_items.edit_id) AS action_type
-                    FROM edit_history_items
-                    WHERE new_value = ?
-                      AND photo_id IN ({ph})
-                      AND edit_id IN (
-                          SELECT id FROM edit_history
-                          WHERE action_type IN (
-                              'keyword_add', 'species_replace'
-                          ) OR (
-                              action_type = 'prediction_accept'
-                              AND COALESCE(edit_history_items.old_value, '') NOT LIKE '%"no_tag"%'
-                          )
-                      )
-                      AND NOT EXISTS (
-                          SELECT 1
-                          FROM edit_history_items ehi2
-                          JOIN edit_history eh2
-                            ON eh2.id = ehi2.edit_id
-                          WHERE ehi2.photo_id = edit_history_items.photo_id
-                            AND ehi2.new_value IN (?, ?)
-                            AND eh2.action_type IN (
-                                'keyword_add',
-                                'prediction_accept',
-                                'species_replace'
-                            )
-                            AND (eh2.action_type != 'prediction_accept'
-                                 OR COALESCE(ehi2.old_value, '') NOT LIKE '%"no_tag"%')
-                            AND ehi2.id > edit_history_items.id
-                      )""",
-                [src_str, *chunk, src_str, dst_str],
-            ).fetchall())
-            # When the source add happened first and a later add created
-            # the current survivor association, the later add becomes the
-            # redundant operation after src and dst converge. The guarded
-            # cleanup above deliberately preserves the earlier source item;
-            # retire the later tag mutation instead so latest-first undo leaves
-            # the merged tag in place until the original source add is
-            # itself undone. Restrict this to add-like actions whose whole
-            # per-photo effect is the tag association; species_replace has
-            # an old-species restoration side that cannot be discarded.
-            # The earlier-source lookup matches on the item's own
-            # ``new_value`` alone, not the parent edit's, so a mixed-alias
-            # prediction_accept batch (whose parent records only the first
-            # alias) still counts as the earlier source add for a later
-            # redundant item.
-            _retire_tag_mutations(self.conn.execute(
-                f"""SELECT id, old_value,
-                           (SELECT action_type FROM edit_history
-                            WHERE id = edit_history_items.edit_id) AS action_type
-                    FROM edit_history_items
-                    WHERE photo_id IN ({ph})
-                      AND new_value IN (?, ?)
-                      AND edit_id IN (
-                          SELECT id FROM edit_history
-                          WHERE action_type = 'keyword_add' OR (
-                              action_type = 'prediction_accept'
-                              AND COALESCE(edit_history_items.old_value, '') NOT LIKE '%"no_tag"%'
-                          )
-                      )
-                      AND EXISTS (
-                          SELECT 1
-                          FROM edit_history_items ehi1
-                          JOIN edit_history eh1
-                            ON eh1.id = ehi1.edit_id
-                          WHERE ehi1.photo_id = edit_history_items.photo_id
-                            AND ehi1.new_value = ?
-                            AND eh1.action_type IN (
-                                'keyword_add', 'prediction_accept'
-                            )
-                            AND (eh1.action_type != 'prediction_accept'
-                                 OR COALESCE(ehi1.old_value, '') NOT LIKE '%"no_tag"%')
-                            AND ehi1.id < edit_history_items.id
-                      )""",
-                [*chunk, src_str, dst_str, src_str],
-            ).fetchall())
-            # keyword_remove: item.new_value is '' by convention (see
-            # record_edit call sites in app.py); the keyword id lives in
-            # item.old_value. Drop the item ONLY when the survivor
-            # genuinely pre-existed THIS remove — i.e., no later edit
-            # added the merged keyword back to the same photo. If dst
-            # was tagged AFTER this remove, the current photo_keywords
-            # row does not prove pre-existence and dropping the item
-            # breaks undo: latest-first undo of the later add first
-            # strips dst_id, and this remove's undo would then no-op
-            # (no item), leaving the merged keyword missing when the
-            # earlier remove is reversed. Keeping the item is safe in
-            # that case:
-            #   * undo of remove → tag_photo(pid, dst) is INSERT OR
-            #     IGNORE and a no-op if dst is already present;
-            #   * redo of remove → untag_photo(pid, dst) is consistent
-            #     with replaying the historical remove of what became
-            #     the merged keyword.
-            # "Later add" covers keyword_add / prediction_accept and
-            # the tagging half of species_replace (item.new_value =
-            # str(kid)). Src-spelled adds count too — pre-migration
-            # they refer to what will become the merged keyword.
-            self.conn.execute(
-                f"""DELETE FROM edit_history_items
-                    WHERE old_value = ?
-                      AND photo_id IN ({ph})
-                      AND edit_id IN (
-                          SELECT id FROM edit_history
-                          WHERE new_value = ?
-                            AND action_type = 'keyword_remove'
-                      )
-                      AND NOT EXISTS (
-                          SELECT 1
-                          FROM edit_history_items ehi2
-                          JOIN edit_history eh2
-                            ON eh2.id = ehi2.edit_id
-                          WHERE ehi2.photo_id = edit_history_items.photo_id
-                            AND ehi2.new_value IN (?, ?)
-                            AND eh2.action_type IN (
-                                'keyword_add',
-                                'prediction_accept',
-                                'species_replace'
-                            )
-                            AND (eh2.action_type != 'prediction_accept'
-                                 OR COALESCE(ehi2.old_value, '') NOT LIKE '%"no_tag"%')
-                            AND ehi2.id > edit_history_items.id
-                      )""",
-                [src_str, *chunk, src_str, src_str, dst_str],
-            )
-            # species_replace: item.old_value = str(old_kid) (bare-string
-            # form) for a prior replace where src_id was the OLD species
-            # being swapped out. The bare-string retarget below would
-            # rewrite that to dst_str; _apply_redo then iterates
-            # old_kids=[dst_id] and untag_photo(pid, dst_id), stripping
-            # the survivor tag that pre-existed the merge and was never
-            # created by that edit. Drop the item — same tradeoff as the
-            # new_value / species_replace case above.
-            self.conn.execute(
-                f"""DELETE FROM edit_history_items
-                    WHERE old_value = ?
-                      AND photo_id IN ({ph})
-                      AND edit_id IN (
-                          SELECT id FROM edit_history
-                          WHERE action_type = 'species_replace'
-                      )""",
-                [src_str, *chunk],
-            )
-        # 1) edit_history.new_value: the canonical keyword id per entry.
-        self.conn.execute(
-            f"""UPDATE edit_history
-                SET new_value = ?
-                WHERE new_value = ?
-                  AND action_type IN ({_kw_placeholders})""",
-            (dst_str, src_str, *_kw_id_actions),
-        )
-        # 2) edit_history_items new_value / old_value: bare keyword-id
-        #    strings, but only the specific (action_type, column) pairs
-        #    that actually store keyword ids. record_edit populates:
-        #      keyword_add       → new_value=str(kid), old_value=''
-        #      keyword_remove    → old_value=str(kid), new_value=''
-        #      species_replace   → old_value=str(old_kid), new_value=str(kid)
-        #      prediction_accept → old_value=str(prediction_id),
-        #                          new_value=str(kid)
-        #    prediction_accept.old_value is the prediction id, NOT a
-        #    keyword id (see api_accept_prediction and _edit_prediction_id
-        #    which falls back to the bare string). A blanket rewrite over
-        #    every column would corrupt any prediction id whose numeric
-        #    value happens to equal src_id — undo/redo would then act on
-        #    the wrong prediction. Restrict each rewrite to the action
-        #    types whose column contains a keyword id.
-        _kw_id_by_col = {
-            "new_value": (
-                "keyword_add", "species_replace", "prediction_accept",
-            ),
-            "old_value": ("keyword_remove", "species_replace"),
-        }
-        for col, actions in _kw_id_by_col.items():
-            col_placeholders = ",".join("?" * len(actions))
-            self.conn.execute(
-                f"""UPDATE edit_history_items
-                    SET {col} = ?
-                    WHERE {col} = ?
-                      AND edit_id IN (
-                          SELECT id FROM edit_history
-                          WHERE action_type IN ({col_placeholders})
-                      )""",
-                (dst_str, src_str, *actions),
-            )
-        # 3) edit_history_items.old_value JSON payloads: species_replace
-        #    and metadata-carrying keyword_add/prediction_accept entries
-        #    store {"keyword_id": ..., "keyword_ids": [...], ...}. Load,
-        #    rewrite, re-serialize per row. Scoped to values that look
-        #    like JSON so bare id strings (already handled above) are
-        #    skipped cheaply. Uses ? for the LIKE prefix to keep the
-        #    format string free of literal SQL wildcard characters.
-        #    For species_replace items whose photo already carried the
-        #    survivor before the merge, a src→dst rewrite of the JSON
-        #    old_kids would make _apply_redo untag the pre-existing
-        #    survivor (see the bare-string DELETE above); drop those
-        #    items instead of retargeting them.
-        preexisting_set = set(preexisting_dst_photos)
-        json_rows = self.conn.execute(
-            f"""SELECT ehi.id, ehi.photo_id, ehi.old_value, eh.action_type
-                FROM edit_history_items ehi
-                JOIN edit_history eh ON eh.id = ehi.edit_id
-                WHERE eh.action_type IN ({_kw_placeholders})
-                  AND ehi.old_value IS NOT NULL
-                  AND ehi.old_value LIKE ?""",
-            (*_kw_id_actions, '{%'),
-        ).fetchall()
-        for row in json_rows:
-            try:
-                data = json.loads(row["old_value"])
-            except (TypeError, ValueError):
-                continue
-            if not isinstance(data, dict):
-                continue
-            references_src = False
-            raw_kid = data.get("keyword_id")
-            if raw_kid is not None:
-                try:
-                    if int(raw_kid) == src_id:
-                        references_src = True
-                except (TypeError, ValueError):
-                    pass
-            if not references_src:
-                for k in (data.get("keyword_ids") or []):
-                    try:
-                        if int(k) == src_id:
-                            references_src = True
-                            break
-                    except (TypeError, ValueError):
-                        continue
-            if (
-                references_src
-                and row["action_type"] == "species_replace"
-                and row["photo_id"] in preexisting_set
-            ):
-                self.conn.execute(
-                    "DELETE FROM edit_history_items WHERE id = ?",
-                    (row["id"],),
-                )
-                continue
-            dirty = False
-            if raw_kid is not None:
-                try:
-                    if int(raw_kid) == src_id:
-                        data["keyword_id"] = dst_id
-                        dirty = True
-                except (TypeError, ValueError):
-                    pass
-            raw_kids = data.get("keyword_ids")
-            if isinstance(raw_kids, list) and raw_kids:
-                rewritten = []
-                changed = False
-                for k in raw_kids:
-                    try:
-                        k_int = int(k)
-                    except (TypeError, ValueError):
-                        rewritten.append(k)
-                        continue
-                    if k_int == src_id:
-                        k_int = dst_id
-                        changed = True
-                    rewritten.append(k_int)
-                if changed:
-                    # Dedup preserving order: if the destination id was
-                    # already in the list, don't repeat it after rewrite.
-                    seen = []
-                    for k in rewritten:
-                        if k not in seen:
-                            seen.append(k)
-                    data["keyword_ids"] = seen
-                    dirty = True
-            if dirty:
-                self.conn.execute(
-                    "UPDATE edit_history_items SET old_value = ? WHERE id = ?",
-                    (json.dumps(data, sort_keys=True), row["id"]),
-                )
         # Preserve durable authorship before collapsing association conflicts.
         # UPDATE OR IGNORE below leaves the destination row untouched when a
         # photo already carries both keywords; without this fold, deleting the
@@ -820,86 +1108,13 @@ class KeywordProvenanceRepository:
             (dst_id, src_id),
         )
         self.conn.execute("DELETE FROM photo_keywords WHERE keyword_id = ?", (src_id,))
-        # Reparent children onto the destination before deleting, or the
-        # keywords.parent_id FK aborts the merge mid-way.
-        children = self.conn.execute(
-            "SELECT id, name, type, place_id, taxon_id, source_taxon_id, is_species "
-            "FROM keywords WHERE parent_id = ?",
-            (src_id,),
-        ).fetchall()
-        for child in children:
-            # Detect the collision explicitly: SQLite's UNIQUE(name, parent_id)
-            # is BINARY, so `foo` reparenting under a destination that already
-            # holds `Foo` would UPDATE cleanly and leave two semantic peers no
-            # keyword lookup (all folded through ``keyword_match_key``) could
-            # tell apart. Fold every sibling's name to check for either shape
-            # of collision, and only reparent when the folded slot is free.
-            siblings = self.conn.execute(
-                "SELECT id, name, type, place_id, taxon_id, source_taxon_id, is_species "
-                "FROM keywords WHERE parent_id = ? AND id != ?",
-                (dst_id, child["id"]),
-            ).fetchall()
-            child_key = keyword_match_key(child["name"])
-            existing = next(
-                (s for s in siblings if keyword_match_key(s["name"]) == child_key),
-                None,
-            )
-            if existing is None:
-                self.conn.execute(
-                    "UPDATE keywords SET parent_id = ? WHERE id = ?",
-                    (dst_id, child["id"]),
-                )
-            else:
-                # Every disambiguation below has to dodge the whole sibling
-                # set, not just the row it collided with: the suffixed name
-                # can itself be occupied (a user typed it, or an earlier
-                # disambiguation produced it), and a second
-                # UNIQUE(name, parent_id) violation here is uncaught.
-                taken = {row["name"] for row in siblings}
-                if keywords_claim_different_taxa(self.db, existing, child):
-                    # Two same-named species rows that resolve to DIFFERENT
-                    # taxa. A recursive merge keeps the destination's taxon
-                    # claim (COALESCE folds only fill missing fields), so
-                    # every photo under the migrating row would silently
-                    # come out tagged as the other species. Same reasoning
-                    # as the distinct place case below; keep both rows
-                    # instead.
-                    self._reparent_disambiguated(
-                        child, dst_id, free_sibling_name(
-                            taken, child["name"], f"id-{child['id']}"),
-                    )
-                elif (
-                    existing["type"] == "location"
-                    and child["type"] == "location"
-                    and existing["place_id"] is not None
-                    and child["place_id"] is not None
-                    and existing["place_id"] != child["place_id"]
-                ):
-                    # Two location siblings sharing (name, parent_id) but
-                    # pointing at distinct Google places (e.g. two direct
-                    # ``United States -> Springfield`` rows created from
-                    # different place IDs). A recursive merge here would
-                    # delete the migrating row and silently retag its
-                    # photos onto a sibling that represents a different
-                    # Google place. Disambiguate the migrating child with a
-                    # place-id suffix so both Google places survive.
-                    self._reparent_disambiguated(
-                        child, dst_id, free_sibling_name(
-                            taken, child["name"], child["place_id"][-8:]),
-                    )
-                elif existing["type"] == child["type"]:
-                    merged += self._merge_keyword_into(
-                        child["id"], existing["id"], pending_source_only=pending_source_only,
-                    )
-                else:
-                    # Same name + parent but different type: outside the
-                    # (LOWER(name), parent_id, type) dedup boundary, so
-                    # preserve both by renaming the migrating child rather
-                    # than retagging photos across types.
-                    self._reparent_disambiguated(
-                        child, dst_id, free_sibling_name(
-                            taken, child["name"], f"id-{child['id']}"),
-                    )
+        merged += _reparent_children(
+            self.conn, src_id, dst_id,
+            pending_source_only=pending_source_only,
+            db=self.db,
+            merge_keyword_into=self._merge_keyword_into,
+            reparent_disambiguated=self._reparent_disambiguated,
+        )
         self.conn.execute("DELETE FROM keywords WHERE id = ?", (src_id,))
         return merged
 
