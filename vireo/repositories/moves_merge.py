@@ -6,11 +6,12 @@ sibling workspaces (and the grant lookup behind
 ``Database._photo_syncable_in_workspace``), and the staged-tree -> archive
 reconciliation with the per-collision state transfers it runs.
 
-``Database`` keeps the composition. Keyword re-tagging stays on the façade
+``Database`` keeps the composition. Most keyword re-tagging stays on the façade
 (``Database.tag_photo`` / ``untag_photo``), whose writes live in
 ``repositories/keyword_provenance.py``, so the keyword-provenance fold applies
 and its contract test (``test_keyword_provenance_contract``) sees every
-re-tag call site. The merge and ``move_folder_path`` call other domains'
+re-tag call site. Embedded associations carried here use the injected shared
+provenance fold. The merge and ``move_folder_path`` call other domains'
 ``Database`` methods mid-transaction; those are passed in as callbacks so the
 bodies here stay verbatim and patched façade methods still take effect.
 
@@ -654,7 +655,7 @@ class MovesMergeRepository:
             add_workspace_folder_no_commit, case_insensitive_root,
             move_location_state, reconcile_keyword_edits,
             transfer_review_state, link_survivor_for_sibling_edits,
-            invalidate_new_images, update_folder_counts):
+            invalidate_new_images, update_folder_counts, KEYWORD_SOURCE_CONFLICT_SQL):
         """Fold a staged folder subtree into a tracked archive; returns counts.
 
         See ``Database.merge_staged_tree_into_archive`` for the contract. The
@@ -676,6 +677,7 @@ class MovesMergeRepository:
           ``transfer_review_state``, ``link_survivor_for_sibling_edits`` ->
           the ``Database._*_for_merge`` / ``_link_survivor_*`` helpers
         * ``invalidate_new_images(workspace_ids)`` -> the new-images cache
+        * ``KEYWORD_SOURCE_CONFLICT_SQL`` -> the shared association provenance fold
         """
         staged_root = self.conn.execute(
             "SELECT path FROM folders WHERE id = ?", (staged_root_id,)
@@ -690,6 +692,7 @@ class MovesMergeRepository:
         ws = workspace_id_fn()
         merge = _StagedTreeMerge(
             self, ws, staged_root_path, archive_path,
+            KEYWORD_SOURCE_CONFLICT_SQL=KEYWORD_SOURCE_CONFLICT_SQL,
             root_ancestor_exists=root_ancestor_exists,
             root_descendant_exists=root_descendant_exists,
             prune_nonroot_links_outside_roots=(
@@ -805,8 +808,9 @@ class _StagedTreeMerge:
             materialize_workspace_descendants, add_workspace_folder,
             add_workspace_folder_no_commit, case_insensitive_root,
             move_location_state, reconcile_keyword_edits,
-            transfer_review_state, link_survivor_for_sibling_edits):
+            transfer_review_state, link_survivor_for_sibling_edits, KEYWORD_SOURCE_CONFLICT_SQL):
         self.conn = repo.conn
+        self.KEYWORD_SOURCE_CONFLICT_SQL = KEYWORD_SOURCE_CONFLICT_SQL
         self._subtree_prefix = repo._subtree_prefix
         self._subtree_relative = repo._subtree_relative
         self._join_subtree_path = repo._join_subtree_path
@@ -1456,10 +1460,21 @@ class _StagedTreeMerge:
             remap_photo_visibility(self.conn, {pid: survivor_id})
             self._carry_staged_state_to_survivor(
                 pid, survivor_id, survivor_off_staging)
+        # ``photo_embedded_keyword_offered``'s FK is non-cascading, so the
+        # row has to move onto the survivor (or be dropped when there is
+        # none) before the photo delete below, or SQLite aborts with
+        # ``FOREIGN KEY constraint failed``. Moving the record also keeps
+        # a user's keyword removal from being re-tagged on the surviving
+        # row by a later rescan of the same embedded value.
+        if survivor_id is not None:
+            self._transfer_embedded_keyword_offered(pid, survivor_id)
+        else:
+            self.conn.execute(
+                "DELETE FROM photo_embedded_keyword_offered "
+                "WHERE photo_id = ?",
+                (pid,))
         self.conn.execute(
-            "DELETE FROM photo_keywords "
-            "WHERE photo_id = ?",
-            (pid,))
+            "DELETE FROM photo_keywords WHERE photo_id = ?", (pid,))
         self.conn.execute(
             "DELETE FROM photos WHERE id = ?", (pid,))
         self.collection_remap[pid] = survivor_id
@@ -1642,9 +1657,14 @@ class _StagedTreeMerge:
         # the merge, so a residual re-read scoped
         # by those ids already finds the remapped
         # edits.
+        # Same reason as the collision branch above: the non-cascading FK
+        # on ``photo_embedded_keyword_offered.photo_id`` would otherwise
+        # abort the photo delete, and the survivor (``pid``) should carry
+        # the phantom's suppression so a later rescan doesn't resurrect a
+        # removed tag.
+        self._transfer_embedded_keyword_offered(collision["id"], pid)
         self.conn.execute(
-            "DELETE FROM photo_keywords "
-            "WHERE photo_id = ?", (collision["id"],))
+            "DELETE FROM photo_keywords WHERE photo_id = ?", (collision["id"],))
         self.conn.execute(
             "DELETE FROM photos WHERE id = ?",
             (collision["id"],))
@@ -1679,6 +1699,42 @@ class _StagedTreeMerge:
         )
         self.counts["preserved_edit_count"] += (
             remap.rowcount or 0)
+
+    def _transfer_embedded_keyword_offered(self, losing_id, survivor_id):
+        """Carry the losing row's embedded-offered keys onto the survivor.
+
+        ``photo_embedded_keyword_offered`` records that an embedded
+        keyword was offered to a photo so a later rescan won't re-tag a
+        removal the user already made; a merge that collapses the row
+        has to move that intent onto the surviving photo, and the
+        non-cascading FK requires the losing row's entries be gone
+        before the ``DELETE FROM photos`` either way. No commit; the
+        caller holds the transaction.
+        """
+        self._carry_embedded_keyword_associations(losing_id, survivor_id)
+        self.conn.execute(
+            "INSERT OR IGNORE INTO photo_embedded_keyword_offered "
+            "(photo_id, keyword_key) "
+            "SELECT ?, keyword_key FROM photo_embedded_keyword_offered "
+            "WHERE photo_id = ?",
+            (survivor_id, losing_id),
+        )
+        self.conn.execute(
+            "DELETE FROM photo_embedded_keyword_offered "
+            "WHERE photo_id = ?",
+            (losing_id,),
+        )
+
+    def _carry_embedded_keyword_associations(self, losing_id, survivor_id):
+        """Keep attached embedded tags without undoing a survivor's removal."""
+        from keyword_identity import embedded_keyword_associations_for_merge
+
+        for row in embedded_keyword_associations_for_merge(self.conn, losing_id, survivor_id):
+            self.conn.execute(
+                "INSERT INTO photo_keywords (photo_id, keyword_id, source) VALUES (?, ?, ?) "
+                + self.KEYWORD_SOURCE_CONFLICT_SQL,
+                (survivor_id, row["id"], row["source"]),
+            )
 
     def delete_folded_staged_folders(self):
         """Delete the staged folder rows folded into existing targets.

@@ -2431,7 +2431,10 @@ class Database:
             new_path,
             commit=commit,
             transfer_gps_review=self._transfer_gps_review_for_merge,
+            transfer_embedded_offered=(
+                self.transfer_embedded_keyword_offered_for_merge),
             relink_parents_by_path=self._relink_parents_by_path,
+            KEYWORD_SOURCE_CONFLICT_SQL=KEYWORD_SOURCE_CONFLICT_SQL,
         )
 
     # -- Move operations --
@@ -2953,6 +2956,7 @@ class Database:
                 self._new_images_cache.invalidate_workspaces(
                     self._db_path, workspace_ids)),
             update_folder_counts=self.update_folder_counts,
+            KEYWORD_SOURCE_CONFLICT_SQL=KEYWORD_SOURCE_CONFLICT_SQL,
         )
 
     def check_filename_collisions(self, photo_ids, target_folder_id):
@@ -9057,6 +9061,44 @@ class Database:
         """
         return self._sync_repository().keyword_removal_keys(
             photo_id, hierarchical=hierarchical,
+        )
+
+    def get_embedded_keyword_offered_keys(self, photo_id):
+        """Normalized keys the scanner has imported from the image file itself.
+
+        The pending-removal filter above suppresses a value only until the
+        next XMP sync clears the queue entry, but Vireo never writes into
+        image files, so a later full scan or image rewrite re-reads the same
+        embedded value. The scanner records every embedded value it offers to
+        a photo here so ``_import_embedded_keywords_for_photo`` can filter
+        them out on later passes -- a user removal is not silently undone when
+        the queued removal has already been synced away.
+        """
+        return self._keyword_repository().embedded_offered_keys(photo_id)
+
+    def record_embedded_keyword_offered(self, photo_id, keys, _commit=True):
+        """Record that the scanner offered these embedded keys to a photo.
+
+        See ``get_embedded_keyword_offered_keys``. Idempotent, and empty
+        ``keys`` is a no-op. ``_commit=False`` lets a caller batch several
+        edits (e.g. an inline scan loop) into its own transaction.
+        """
+        self._keyword_repository().record_embedded_offered_keys(
+            photo_id, keys, _commit=_commit,
+        )
+
+    def transfer_embedded_keyword_offered_for_merge(
+            self, losing_id, surviving_id):
+        """Move suppression records onto the survivor before deleting a row.
+
+        Every merge path that drops a photo row with another row inheriting
+        its identity must call this before the ``DELETE FROM photos`` --
+        ``photo_embedded_keyword_offered``'s FK is non-cascading, so a
+        leftover row aborts the delete with ``FOREIGN KEY constraint
+        failed``. No commit; the merge folds it into its own transaction.
+        """
+        self._keyword_repository().transfer_embedded_offered_keys(
+            losing_id, surviving_id,
         )
 
     def _pending_keyword_sidecar_alias(self, photo_id, workspace_id, value):

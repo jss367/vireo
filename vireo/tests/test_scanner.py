@@ -952,6 +952,319 @@ def test_scan_skips_empty_normalized_keywords(tmp_path):
     assert 'Birds' in tree_names
 
 
+def _embed_keywords(path, flat, hierarchical):
+    """Write keywords into an image file the way Lightroom does for JPEGs."""
+    import subprocess
+
+    args = ["exiftool", "-q", "-overwrite_original"]
+    args += [f"-XMP-dc:Subject={kw}" for kw in flat]
+    args += [f"-IPTC:Keywords={kw}" for kw in flat]
+    args += [f"-XMP-lr:HierarchicalSubject={kw}" for kw in hierarchical]
+    subprocess.run([*args, path], check=True)
+
+
+@requires_exiftool
+def test_scan_imports_keywords_embedded_in_jpeg(tmp_path):
+    """A JPEG with keywords inside the file, and no sidecar, gets them."""
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    path = os.path.join(root, "motmot.jpg")
+    Image.new("RGB", (100, 100)).save(path)
+    _embed_keywords(
+        path,
+        flat=["1Locations", "Chichén Itzá", "2Birds", "Turquoise-browed motmot"],
+        hierarchical=["1Locations|Chichén Itzá", "2Birds|Turquoise-browed motmot"],
+    )
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(root, db)
+
+    photo = db.get_photos()[0]
+    assert {k["name"] for k in db.get_photo_keywords(photo["id"])} == {
+        "1Locations", "Chichén Itzá", "2Birds", "Turquoise-browed motmot",
+    }
+    tree = {k["name"]: k for k in db.get_keyword_tree()}
+    assert tree["Turquoise-browed motmot"]["parent_id"] == tree["2Birds"]["id"]
+
+
+@requires_exiftool
+def test_incremental_scan_imports_keywords_written_into_jpeg_later(tmp_path):
+    """Keywords Lightroom writes into an already-scanned JPEG land on rescan.
+
+    Lightroom rewrites the JPEG itself rather than a sidecar, so the file's
+    own mtime/size change is the signal, not ``xmp_mtime``.
+    """
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    path = os.path.join(root, "warbler.jpg")
+    Image.new("RGB", (100, 100)).save(path)
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(root, db)
+    photo = db.get_photos()[0]
+    assert db.get_photo_keywords(photo["id"]) == []
+
+    time.sleep(0.05)
+    _embed_keywords(
+        path, flat=["2Birds", "Magnolia warbler"],
+        hierarchical=["2Birds|Magnolia warbler"],
+    )
+    scan(root, db, incremental=True)
+
+    assert {k["name"] for k in db.get_photo_keywords(photo["id"])} == {
+        "2Birds", "Magnolia warbler",
+    }
+
+
+def test_scan_merges_embedded_keywords_with_sidecar(tmp_path, monkeypatch):
+    """A file with both a sidecar and in-file keywords gets the union."""
+    import scanner
+    from db import Database
+    from scanner import scan
+    from xmp import write_sidecar
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    Image.new("RGB", (100, 100)).save(os.path.join(root, "bird.jpg"))
+    write_sidecar(
+        os.path.join(root, "bird.xmp"),
+        flat_keywords={"Dyke Marsh"},
+        hierarchical_keywords={"Dyke Marsh"},
+    )
+    monkeypatch.setattr(
+        scanner, "extract_metadata",
+        lambda paths, **_kw: {p: {"XMP": {
+            "Subject": ["8Landscape", "Sunrise"],
+            "HierarchicalSubject": ["8Landscape|Sunrise"],
+        }} for p in paths},
+    )
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(root, db)
+
+    photo = db.get_photos()[0]
+    assert {k["name"] for k in db.get_photo_keywords(photo["id"])} == {
+        "Dyke Marsh", "8Landscape", "Sunrise",
+    }
+
+
+def test_backfill_embedded_keywords_imports_stored_exiftool_output(tmp_path):
+    """Photos scanned before scans read embedded keywords get them once."""
+    from db import Database
+    from scanner import EMBEDDED_KEYWORDS_BACKFILL_KEY, backfill_embedded_keywords
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
+    tagged, already, raw = (
+        db.add_photo(folder_id=folder_id, filename=name, extension=ext,
+                     file_size=100, file_mtime=1.0)
+        for name, ext in (("a.jpg", ".jpg"), ("b.jpg", ".jpg"), ("c.nef", ".nef"))
+    )
+    stored = {
+        tagged: {"XMP": {"Subject": ["2Birds", "Heron"],
+                         "HierarchicalSubject": ["2Birds|Heron"]}},
+        already: {"IPTC": {"Keywords": ["Egret"]}},
+        # Camera RAW output: SubjectDistance must not read as a keyword tag.
+        raw: {"EXIF": {"SubjectDistance": 12.5, "Make": "Nikon"}},
+    }
+    for photo_id, meta in stored.items():
+        db.conn.execute(
+            "UPDATE photos SET exif_data = ? WHERE id = ?",
+            (json.dumps(meta), photo_id),
+        )
+    db.tag_photo(already, db.add_keyword("Egret"))
+    db.conn.commit()
+
+    assert backfill_embedded_keywords(db) == 1
+    assert {k["name"] for k in db.get_photo_keywords(tagged)} == {"2Birds", "Heron"}
+    assert {k["name"] for k in db.get_photo_keywords(already)} == {"Egret"}
+    assert db.get_photo_keywords(raw) == []
+    assert db.get_meta(EMBEDDED_KEYWORDS_BACKFILL_KEY) == "1"
+
+    # One-shot: keywords the user removes afterwards are not re-imported.
+    db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (tagged,))
+    db.conn.commit()
+    assert backfill_embedded_keywords(db) == 0
+    assert db.get_photo_keywords(tagged) == []
+
+
+def test_embedded_import_does_not_undo_a_user_removal_on_reimport(tmp_path):
+    """Removing an embedded keyword stays removed when the file is reread.
+
+    Vireo never writes into image files, so the embedded value is still
+    there after the user removes the tag and the pending-removal queue
+    entry is synced away. ``photo_embedded_keyword_offered`` is the
+    durable record that keeps the next scan from silently re-tagging.
+    """
+    from db import Database
+    from scanner import _import_embedded_keywords_for_photo
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
+    pid = db.add_photo(folder_id=folder_id, filename="bird.jpg",
+                       extension=".jpg", file_size=100, file_mtime=1.0)
+    file_meta = {"XMP": {"Subject": ["Robin", "Hawk"],
+                         "HierarchicalSubject": ["Birds|Robin"]}}
+
+    assert _import_embedded_keywords_for_photo(db, pid, file_meta) is True
+    # The hierarchy import tags only the leaf (Robin), not the parent,
+    # so the photo carries exactly the two flat values plus the leaf.
+    assert {k["name"] for k in db.get_photo_keywords(pid)} == {"Robin", "Hawk"}
+
+    # User removes Robin (tag drop + pending removal reaching sync and
+    # clearing). Only the catalog state is simulated; a real sync clears
+    # the pending_changes row the same way.
+    robin_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'Robin'",
+    ).fetchone()[0]
+    db.conn.execute(
+        "DELETE FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+        (pid, robin_id),
+    )
+    db.conn.commit()
+
+    # A later image rewrite (Lightroom re-exports with the same keywords)
+    # must not resurrect Robin. The hierarchy entry whose leaf is Robin is
+    # filtered too, since the leaf is what the import would re-tag.
+    assert _import_embedded_keywords_for_photo(db, pid, file_meta) is False
+    assert {k["name"] for k in db.get_photo_keywords(pid)} == {"Hawk"}
+
+
+def test_embedded_import_still_picks_up_newly_added_values(tmp_path):
+    """A truly new embedded value lands even when older ones are suppressed."""
+    from db import Database
+    from scanner import _import_embedded_keywords_for_photo
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
+    pid = db.add_photo(folder_id=folder_id, filename="bird.jpg",
+                       extension=".jpg", file_size=100, file_mtime=1.0)
+
+    first = {"XMP": {"Subject": ["Robin"]}}
+    assert _import_embedded_keywords_for_photo(db, pid, first) is True
+
+    db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (pid,))
+    db.conn.commit()
+
+    # Lightroom re-exports and the file now carries both the old Robin and
+    # a new Hawk. Robin stays suppressed (user removed), Hawk is new.
+    second = {"XMP": {"Subject": ["Robin", "Hawk"]}}
+    assert _import_embedded_keywords_for_photo(db, pid, second) is True
+    assert {k["name"] for k in db.get_photo_keywords(pid)} == {"Hawk"}
+
+
+def test_embedded_import_distinct_hierarchies_sharing_a_leaf_each_import(tmp_path):
+    """A new ``People|Robin`` imports after ``Birds|Robin`` was offered.
+
+    ``_import_keyword_lists`` creates distinct keyword rows for the two
+    paths because their parent chains differ, so they are genuinely
+    different tags. The suppression key for each hierarchy must therefore
+    track the full normalized path, not just its leaf -- otherwise the
+    second hierarchy's leaf would already be in the offered set and the
+    tag could never be imported.
+    """
+    from db import Database
+    from scanner import _import_embedded_keywords_for_photo
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
+    pid = db.add_photo(folder_id=folder_id, filename="bird.jpg",
+                       extension=".jpg", file_size=100, file_mtime=1.0)
+
+    first = {"XMP": {"HierarchicalSubject": ["Birds|Robin"]}}
+    assert _import_embedded_keywords_for_photo(db, pid, first) is True
+    assert db.get_embedded_keyword_offered_keys(pid) == {"birds|robin"}
+
+    # Lightroom later writes a genuinely new hierarchy that shares the leaf.
+    # The embedded import must not treat it as "already offered."
+    second = {"XMP": {"HierarchicalSubject": ["People|Robin"]}}
+    assert _import_embedded_keywords_for_photo(db, pid, second) is True
+    # Both normalized paths are now recorded, and the photo carries two
+    # distinct Robin keyword rows (one under Birds, one under People).
+    assert db.get_embedded_keyword_offered_keys(pid) == {
+        "birds|robin", "people|robin",
+    }
+    rows = db.conn.execute(
+        "SELECT k.name, k.parent_id FROM photo_keywords pk "
+        "JOIN keywords k ON k.id = pk.keyword_id "
+        "WHERE pk.photo_id = ?",
+        (pid,),
+    ).fetchall()
+    robin_parent_ids = {
+        row["parent_id"] for row in rows if row["name"] == "Robin"
+    }
+    assert len(robin_parent_ids) == 2
+
+
+def test_embedded_import_skips_malformed_hierarchy_without_recording_leaf(tmp_path):
+    """A ``Birds||Hawk`` is skipped AND leaves ``hawk`` free for a later import.
+
+    ``_import_keyword_lists`` already filters a hierarchy whose chain has a
+    segment that normalizes to empty, so recording the leaf as offered would
+    make the next scan after Lightroom repairs the entry to ``Birds|Hawk``
+    silently drop a keyword that was never actually imported.
+    """
+    from db import Database
+    from scanner import _import_embedded_keywords_for_photo
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
+    pid = db.add_photo(folder_id=folder_id, filename="bird.jpg",
+                       extension=".jpg", file_size=100, file_mtime=1.0)
+
+    # First export carries a broken hierarchy: nothing imports, and the leaf
+    # is NOT recorded as offered.
+    broken = {"XMP": {"HierarchicalSubject": ["Birds||Hawk"]}}
+    assert _import_embedded_keywords_for_photo(db, pid, broken) is False
+    assert db.get_photo_keywords(pid) == []
+    assert db.get_embedded_keyword_offered_keys(pid) == set()
+
+    # Lightroom repairs the entry; the leaf imports normally on the next
+    # scan because the suppression set never admitted it.
+    repaired = {"XMP": {"HierarchicalSubject": ["Birds|Hawk"]}}
+    assert _import_embedded_keywords_for_photo(db, pid, repaired) is True
+    assert "Hawk" in {k["name"] for k in db.get_photo_keywords(pid)}
+
+
+def test_embedded_import_valueerror_does_not_record_offered_keys(tmp_path, monkeypatch):
+    """A warn-and-skip path leaves the next scan free to retry.
+
+    If the import raises before any tag lands (for example a two-place
+    name collision), the offered record stays empty so a scan after the
+    user resolves the conflict can still tag the embedded keywords.
+    """
+    import scanner
+    from db import Database
+    from scanner import _import_embedded_keywords_for_photo
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
+    pid = db.add_photo(folder_id=folder_id, filename="bird.jpg",
+                       extension=".jpg", file_size=100, file_mtime=1.0)
+
+    def _raise(*args, **kwargs):
+        raise ValueError("different linked places")
+
+    monkeypatch.setattr(scanner, "_import_keyword_lists", _raise)
+
+    file_meta = {"XMP": {"Subject": ["Springfield"]}}
+    assert _import_embedded_keywords_for_photo(db, pid, file_meta) is False
+    assert db.get_photo_keywords(pid) == []
+    assert db.get_embedded_keyword_offered_keys(pid) == set()
+
+    # Resolve the conflict (stop raising) and the import still gets a shot
+    # at the keyword, because nothing was recorded above.
+    monkeypatch.undo()
+    assert _import_embedded_keywords_for_photo(db, pid, file_meta) is True
+    assert {k["name"] for k in db.get_photo_keywords(pid)} == {"Springfield"}
+
+
 def test_scan_imports_hierarchical_keywords(tmp_path):
     """scan() creates keyword hierarchy from lr:hierarchicalSubject."""
     from db import Database
@@ -1595,6 +1908,79 @@ def test_pairing_transfers_edit_recipe_from_companion(tmp_path):
     undone = db.undo_last_edit()
     assert undone is not None
     assert db.get_photo_edit_recipe(photo["id"]) is None
+
+
+def test_pairing_moves_embedded_keyword_offered_onto_the_survivor(tmp_path):
+    """Pairing a JPEG with embedded suppression into its RAW doesn't FK-abort.
+
+    ``photo_embedded_keyword_offered.photo_id`` is a non-cascading FK, so a
+    leftover row on the companion aborts the ``DELETE FROM photos`` with
+    ``FOREIGN KEY constraint failed``. The suppression must also follow the
+    survivor so a later rescan of the embedded Robin on the RAW does not
+    re-tag what the user had removed.
+    """
+    from db import Database
+    from scanner import _import_embedded_keywords_for_photo, _pair_raw_jpeg_companions
+
+    img_dir = tmp_path / "photos"
+    img_dir.mkdir()
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(img_dir), name="photos")
+    jpeg_id = db.add_photo(
+        folder_id=fid, filename="IMG_002.jpg", extension=".jpg",
+        file_size=1000, file_mtime=1.0,
+    )
+    raw_id = db.add_photo(
+        folder_id=fid, filename="IMG_002.cr3", extension=".cr3",
+        file_size=2000, file_mtime=1.0,
+    )
+
+    # The embedded Robin is imported into the JPEG and recorded as offered
+    # on it.
+    file_meta = {"XMP": {"Subject": ["Robin"]}}
+    assert _import_embedded_keywords_for_photo(db, jpeg_id, file_meta) is True
+    assert "robin" in db.get_embedded_keyword_offered_keys(jpeg_id)
+
+    # Pairing must not raise and must leave the suppression on the survivor.
+    _pair_raw_jpeg_companions(db)
+
+    survivors = db.conn.execute(
+        "SELECT id, filename FROM photos",
+    ).fetchall()
+    assert len(survivors) == 1
+    assert survivors[0]["filename"] == "IMG_002.cr3"
+    assert survivors[0]["id"] == raw_id
+    assert db.get_embedded_keyword_offered_keys(raw_id) == {"robin"}
+    assert db.get_embedded_keyword_offered_keys(jpeg_id) == set()
+
+
+@pytest.mark.parametrize("removed_on_raw", [False, True])
+@pytest.mark.parametrize("hierarchical", [False, True])
+def test_pairing_preserves_embedded_tags_and_raw_removals(tmp_path, removed_on_raw, hierarchical):
+    from db import Database
+    from scanner import _import_embedded_keywords_for_photo, _pair_raw_jpeg_companions
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path / "photos"))
+    jpeg = db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg",
+                        file_size=100, file_mtime=1.0)
+    raw = db.add_photo(folder_id=fid, filename="bird.cr3", extension=".cr3",
+                       file_size=200, file_mtime=1.0)
+    metadata = {"XMP": ({"HierarchicalSubject": ["Birds|Robin"]} if hierarchical
+                        else {"Subject": ["Robin"]})}
+    _import_embedded_keywords_for_photo(db, jpeg, metadata)
+    db.tag_photo(jpeg, db.add_keyword("Field note"))
+    if removed_on_raw:
+        _import_embedded_keywords_for_photo(db, raw, metadata)
+        for keyword in db.get_photo_keywords(raw):
+            db.untag_photo(raw, keyword["id"])
+
+    _pair_raw_jpeg_companions(db)
+
+    assert {k["name"] for k in db.get_photo_keywords(raw)} == (
+        {"Field note"} if removed_on_raw else {"Robin", "Field note"})
+    assert not _import_embedded_keywords_for_photo(db, raw, metadata)
 
 
 def test_pairing_invalidates_existing_raw_display_cache(tmp_path):
@@ -7196,3 +7582,32 @@ def test_pair_raw_jpeg_batches_collection_remap(tmp_path):
     ).fetchone()[0])
     assert stored == [{"field": "photo_ids", "value": list(primary_ids)}]
     db.close()
+
+
+def test_startup_species_thread_runs_embedded_keyword_backfill_first(tmp_path, monkeypatch):
+    """The background pass imports embedded keywords before marking species."""
+    from db import Database
+    from services.startup_tasks import StartupTasks
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
+    photo_id = db.add_photo(folder_id=folder_id, filename="a.jpg",
+                            extension=".jpg", file_size=100, file_mtime=1.0)
+    db.conn.execute(
+        "UPDATE photos SET exif_data = ? WHERE id = ?",
+        (json.dumps({"XMP": {"Subject": ["Heron"]}}), photo_id),
+    )
+    db.conn.commit()
+
+    order = []
+    tasks = StartupTasks(app=None, db_path=db_path, init_db=db)
+    monkeypatch.setattr(
+        tasks, "mark_species_and_repair",
+        lambda bg_db, _label: order.append(
+            {k["name"] for k in bg_db.get_photo_keywords(photo_id)}
+        ),
+    )
+    tasks.mark_species()
+
+    assert order == [{"Heron"}]

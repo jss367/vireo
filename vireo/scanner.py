@@ -36,11 +36,17 @@ from image_loader import (
 )
 from keyword_identity import (
     drop_stale_vireo_location_keywords,
+    embedded_keyword_associations_for_merge,
     filter_removed_import_aliases,
     validate_import_locations,
 )
 from keyword_normalization import keyword_match_key
-from metadata import EXIF_SUMMARY_COLUMNS, exif_summary_columns, extract_metadata
+from metadata import (
+    EXIF_SUMMARY_COLUMNS,
+    embedded_keywords,
+    exif_summary_columns,
+    extract_metadata,
+)
 from PIL import Image
 from preview_cache import (
     RecycledIdIndex,
@@ -303,6 +309,100 @@ def _import_keywords_for_photo(db, photo_id, xmp_path_str):
     flat_keywords, hier_keywords = drop_stale_vireo_location_keywords(
         db, photo_id, xmp_path_str, flat_keywords, hier_keywords,
     )
+    _import_keyword_lists(db, photo_id, flat_keywords, hier_keywords)
+
+
+def _import_embedded_keywords_for_photo(db, photo_id, file_meta):
+    """Import the keywords stored inside the image file (see ``embedded_keywords``).
+
+    Additive, like the sidecar import, and run alongside it: a file can carry
+    both. Vireo never writes into image files, so none of these entries can be
+    a stale Vireo-written location. Returns whether anything was offered for
+    import.
+
+    A conflict with the photo's linked place skips this photo's embedded
+    keywords instead of failing the scan: the sidecar import raises there, but
+    the embedded copy is a second, older source, and one stale JPEG must not
+    leave every folder in scope half-scanned.
+
+    Durable suppression: the pending-removal filter in ``_import_keyword_lists``
+    only hides a value until the next XMP sync clears the queue entry, but
+    Vireo cannot remove the value from the image itself, so an image rewrite
+    or full rescan would otherwise re-tag the photo with a keyword the user
+    had already deleted. Every embedded entry offered to the photo is
+    recorded in ``photo_embedded_keyword_offered``; a key already in that
+    record is filtered out before the import -- a user removal stands, and
+    only genuinely new embedded entries (added by a later Lightroom export)
+    reach the tag writer. Flat entries record their normalized leaf key;
+    hierarchies record the full normalized pipe-joined path (``birds|robin``,
+    not ``robin``) so a genuinely new hierarchy such as ``People|Robin``
+    isn't filtered out just because an earlier scan offered ``Birds|Robin``
+    -- ``_import_keyword_lists`` creates distinct keyword rows for those
+    paths (their parent IDs differ), so they are distinct tags.
+    """
+    flat_keywords, hier_keywords = embedded_keywords(file_meta or {})
+    if not flat_keywords and not hier_keywords:
+        return False
+
+    offered = db.get_embedded_keyword_offered_keys(photo_id)
+    # Candidate suppression keys: flat entries map to their own normalized
+    # leaf key; a hierarchy maps to its full normalized pipe-joined path so
+    # distinct hierarchies sharing a leaf (``Birds|Robin`` vs
+    # ``People|Robin``) record separately and don't collide.
+    #
+    # A malformed hierarchy whose ancestor normalizes to empty (e.g.
+    # ``"Birds||Hawk"``) is skipped by ``_import_keyword_lists`` and so must
+    # not be recorded as offered either; otherwise, once Lightroom rewrites
+    # the entry to ``"Birds|Hawk"``, the path would already be in the
+    # suppression set and every rescan would filter it out before the tag
+    # writer ever saw it.
+    def _hier_path(parts):
+        if not parts or any(not keyword_match_key(part) for part in parts):
+            return None
+        return "|".join(keyword_match_key(part) for part in parts)
+
+    candidate_keys = {
+        key for name in flat_keywords
+        if (key := keyword_match_key(name))
+    }
+    for hier in hier_keywords:
+        if (path := _hier_path(hier.split("|"))) is not None:
+            candidate_keys.add(path)
+
+    fresh_flat = [
+        name for name in flat_keywords
+        if keyword_match_key(name) not in offered
+    ]
+    fresh_hier = [
+        hier for hier in hier_keywords
+        if (path := _hier_path(hier.split("|"))) is not None
+        and path not in offered
+    ]
+
+    if fresh_flat or fresh_hier:
+        try:
+            _import_keyword_lists(db, photo_id, fresh_flat, fresh_hier)
+        except ValueError as exc:
+            log.warning(
+                "Skipped keywords embedded in photo %s: %s", photo_id, exc,
+            )
+            # Deliberately do not record the suppression on ValueError: the
+            # import never ran, so the user's view of these keys has not
+            # changed. A follow-up scan after the conflict is resolved
+            # (user clears or picks a compatible place) should still get
+            # the chance to tag them.
+            return False
+    # Record every candidate seen, including the fresh ones that imported
+    # just now: the goal is to make the next scan's filter think of them
+    # as "already offered" so a later removal is not silently undone.
+    new_to_record = candidate_keys - offered
+    if new_to_record:
+        db.record_embedded_keyword_offered(photo_id, new_to_record)
+    return bool(fresh_flat or fresh_hier)
+
+
+def _import_keyword_lists(db, photo_id, flat_keywords, hier_keywords):
+    """Tag a photo with imported flat and hierarchical keywords (additive)."""
     pending_flat_removals = db.get_pending_keyword_removal_keys(photo_id)
     pending_hierarchical_removals = db.get_pending_keyword_removal_keys(
         photo_id, hierarchical=True,
@@ -403,6 +503,54 @@ def _import_keywords_for_photo(db, photo_id, xmp_path_str):
     ).fetchone()
     if newly_eligible_wildlife is not None:
         db.set_meta(db._RETIRED_WILDLIFE_GENRE_KEY, "0")
+
+
+EMBEDDED_KEYWORDS_BACKFILL_KEY = "embedded_keywords_backfill_v1"
+
+
+def backfill_embedded_keywords(db):
+    """One-shot import of embedded keywords for photos scanned before scans read them.
+
+    Scans only read keywords from ``.xmp`` sidecars until
+    ``_import_embedded_keywords_for_photo`` existed, and an unchanged file is
+    never re-read, so the keywords Lightroom wrote into JPEGs and DNGs stayed
+    out of the catalog. The scan stored ExifTool's full output in
+    ``exif_data``, so this pass imports them from there without touching the
+    originals. ``db_meta``-gated; returns the number of photos that gained a
+    keyword.
+    """
+    if db.get_meta(EMBEDDED_KEYWORDS_BACKFILL_KEY) == "1":
+        return 0
+    # ``exif_data`` is ``json.dumps`` output, so the key spelling is fixed.
+    # The closing quote keeps ``"SubjectDistance"`` and friends out.
+    rows = db.conn.execute(
+        """SELECT id, exif_data FROM photos
+           WHERE exif_data LIKE '%"Subject": %'
+              OR exif_data LIKE '%"HierarchicalSubject": %'
+              OR exif_data LIKE '%"Keywords": %'"""
+    ).fetchall()
+    imported = 0
+    for row in rows:
+        try:
+            file_meta = json.loads(row["exif_data"])
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(file_meta, dict):
+            continue
+        before = _photo_keyword_count(db, row["id"])
+        if (
+            _import_embedded_keywords_for_photo(db, row["id"], file_meta)
+            and _photo_keyword_count(db, row["id"]) > before
+        ):
+            imported += 1
+    db.set_meta(EMBEDDED_KEYWORDS_BACKFILL_KEY, "1")
+    return imported
+
+
+def _photo_keyword_count(db, photo_id):
+    return db.conn.execute(
+        "SELECT COUNT(*) FROM photo_keywords WHERE photo_id = ?", (photo_id,),
+    ).fetchone()[0]
 
 
 def _extract_dimensions(exif_group, file_group, extension=None):
@@ -683,10 +831,9 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
             )
 
         # Transfer keywords from companion to primary
-        companion_keywords = db.conn.execute(
-            "SELECT keyword_id, source FROM photo_keywords WHERE photo_id = ?",
-            (companion["id"],),
-        ).fetchall()
+        companion_keywords = embedded_keyword_associations_for_merge(
+            db.conn, companion["id"], primary["id"], include_non_embedded=True,
+        )
         for kw in companion_keywords:
             # Move the association's provenance with it: pairing a RAW with
             # its camera JPEG must not turn the user's hand-added keywords
@@ -696,7 +843,7 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
             db.conn.execute(
                 "INSERT INTO photo_keywords (photo_id, keyword_id, source) "
                 "VALUES (?, ?, ?) " + KEYWORD_SOURCE_CONFLICT_SQL,
-                (primary["id"], kw["keyword_id"], kw["source"]),
+                (primary["id"], kw["id"], kw["source"]),
             )
 
         db.conn.execute(
@@ -963,6 +1110,13 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
         # Remove keyword associations then the duplicate JPEG record
         db._transfer_gps_review_for_merge(companion["id"], primary["id"])
         db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (companion["id"],))
+        # Move the embedded-offered suppression onto the survivor so a
+        # user removal survives this pairing. The FK on
+        # ``photo_embedded_keyword_offered.photo_id`` is non-cascading, so
+        # a leftover row would also block the ``DELETE FROM photos`` below.
+        db.transfer_embedded_keyword_offered_for_merge(
+            companion["id"], primary["id"],
+        )
         # Transfer effective visibility before cascade deletion removes the
         # companion's photo-only grants. This shares only the surviving ID.
         from repositories.photo_visibility import remap_photo_visibility
@@ -4476,6 +4630,10 @@ class _ScanRun:
         # keywords would be stranded on the rejected row.
         if xmp_path.exists():
             _import_keywords_for_photo(db, photo_id, str(xmp_path))
+        # Keywords Lightroom wrote into the file itself (JPEG, TIFF, DNG).
+        # This path runs whenever the file is new or changed, which is also
+        # when such a write lands: it rewrites the file, not a sidecar.
+        _import_embedded_keywords_for_photo(db, photo_id, item.meta.file_meta)
 
         # Trigger duplicate auto-resolve now that file_hash AND XMP keywords
         # are committed. add_photo was called without the hash, so the hook

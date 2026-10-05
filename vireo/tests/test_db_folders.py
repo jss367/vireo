@@ -818,6 +818,152 @@ def test_merge_into_existing_preserves_non_root_link(db, tmp_path):
     assert _links(db, target) == {(ws, 0)}
 
 
+def test_merge_into_existing_moves_embedded_keyword_offered_onto_survivor(
+        db, tmp_path):
+    """A same-filename duplicate's embedded-offered suppression follows the survivor.
+
+    Without the transfer, the ``DELETE FROM photos`` on the losing row
+    aborts on the non-cascading FK, and a later rescan of the surviving
+    row's embedded metadata would re-tag a keyword the user had already
+    removed on the merged-in source.
+    """
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    target = db.add_folder(str(target_dir), workspace_root=False)
+    source = db.add_folder("/src")
+    db.conn.execute(
+        "UPDATE folders SET status = 'missing' WHERE id = ?", (source,))
+    db.conn.commit()
+    survivor = _photo(db, target, "bird.jpg")
+    dup = _photo(db, source, "bird.jpg")
+    db.record_embedded_keyword_offered(dup, ["robin"])
+    assert db.get_embedded_keyword_offered_keys(dup) == {"robin"}
+    assert db.get_embedded_keyword_offered_keys(survivor) == set()
+
+    db._merge_into_existing(source, target, str(target_dir))
+
+    with _reader(db) as r:
+        offered_rows = r.execute(
+            "SELECT photo_id, keyword_key "
+            "FROM photo_embedded_keyword_offered",
+        ).fetchall()
+    assert [tuple(row) for row in offered_rows] == [(survivor, "robin")]
+
+
+def test_merge_into_existing_drops_phantom_embedded_keyword_offered(
+        db, tmp_path):
+    """A phantom source row's suppression is cleared instead of transferred.
+
+    When the source photo has no matching filename on disk at the target,
+    the row is a phantom with no survivor to inherit anything, so the
+    offered record is dropped. The DELETE must still run so the FK on
+    ``photo_embedded_keyword_offered.photo_id`` does not abort the
+    ``DELETE FROM photos``.
+    """
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    target = db.add_folder(str(target_dir), workspace_root=False)
+    source = db.add_folder("/src")
+    db.conn.execute(
+        "UPDATE folders SET status = 'missing' WHERE id = ?", (source,))
+    db.conn.commit()
+    phantom = _photo(db, source, "gone.jpg")
+    db.record_embedded_keyword_offered(phantom, ["robin"])
+
+    db._merge_into_existing(source, target, str(target_dir))
+
+    with _reader(db) as r:
+        offered_rows = r.execute(
+            "SELECT photo_id, keyword_key "
+            "FROM photo_embedded_keyword_offered",
+        ).fetchall()
+    assert offered_rows == []
+
+
+def test_merge_into_existing_carries_source_keywords_onto_survivor(
+        db, tmp_path):
+    """A duplicate source row's attached keywords move to the survivor.
+
+    Dropping source's keyword associations while transferring embedded
+    suppression keys would leave the survivor marked as "already offered"
+    for a key it doesn't actually carry, and every later embedded rescan
+    would silently filter out the tag -- permanently losing a keyword
+    that only the source row carried.
+    """
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    target = db.add_folder(str(target_dir), workspace_root=False)
+    source = db.add_folder("/src")
+    db.conn.execute(
+        "UPDATE folders SET status = 'missing' WHERE id = ?", (source,))
+    db.conn.commit()
+    survivor = _photo(db, target, "bird.jpg")
+    dup = _photo(db, source, "bird.jpg")
+    # Source carries an embedded-imported Robin tag; the survivor has no
+    # keyword yet. The suppression key is what a prior embedded scan of
+    # ``bird.jpg`` on the source row recorded.
+    robin_id = db.add_keyword("Robin")
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id, source) "
+        "VALUES (?, ?, NULL)",
+        (dup, robin_id),
+    )
+    db.record_embedded_keyword_offered(dup, ["robin"])
+    db.conn.commit()
+
+    db._merge_into_existing(source, target, str(target_dir))
+
+    with _reader(db) as r:
+        tag_names = {
+            row["name"] for row in r.execute(
+                "SELECT k.name FROM photo_keywords pk "
+                "JOIN keywords k ON k.id = pk.keyword_id "
+                "WHERE pk.photo_id = ?",
+                (survivor,),
+            )
+        }
+        offered_keys = {
+            row["keyword_key"] for row in r.execute(
+                "SELECT keyword_key FROM photo_embedded_keyword_offered "
+                "WHERE photo_id = ?",
+                (survivor,),
+            )
+        }
+    # The attached Robin followed the suppression onto the survivor so a
+    # later rescan sees a tag matching the offered key and skips re-import
+    # (the correct behavior) instead of filtering a missing tag out
+    # permanently.
+    assert tag_names == {"Robin"}
+    assert offered_keys == {"robin"}
+
+
+@pytest.mark.parametrize("removed_on_survivor", [False, True])
+@pytest.mark.parametrize("hierarchical", [False, True])
+def test_folder_merge_respects_embedded_keyword_removals(
+        db, tmp_path, removed_on_survivor, hierarchical):
+    from scanner import _import_embedded_keywords_for_photo
+
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    target = db.add_folder(str(target_dir), workspace_root=False)
+    source = db.add_folder(str(tmp_path / "missing"))
+    survivor = _photo(db, target, "bird.jpg")
+    duplicate = _photo(db, source, "bird.jpg")
+    metadata = {"XMP": ({"HierarchicalSubject": ["Birds|Robin"]} if hierarchical
+                        else {"Subject": ["Robin"]})}
+    _import_embedded_keywords_for_photo(db, duplicate, metadata)
+    if removed_on_survivor:
+        _import_embedded_keywords_for_photo(db, survivor, metadata)
+        for keyword in db.get_photo_keywords(survivor):
+            db.untag_photo(survivor, keyword["id"])
+
+    db._merge_into_existing(source, target, str(target_dir))
+
+    assert {k["name"] for k in db.get_photo_keywords(survivor)} == (
+        set() if removed_on_survivor else {"Robin"})
+    assert not _import_embedded_keywords_for_photo(db, survivor, metadata)
+
+
 # -- delete_folder ------------------------------------------------------------
 
 
@@ -1085,6 +1231,8 @@ _FACADE_CALLBACKS = {
     },
     "_merge_into_existing": {
         "transfer_gps_review": "_transfer_gps_review_for_merge",
+        "transfer_embedded_offered": (
+            "transfer_embedded_keyword_offered_for_merge"),
         "relink_parents_by_path": "_relink_parents_by_path",
     },
     "delete_folder": {

@@ -48,7 +48,7 @@ VIREO_DIR = Path(__file__).resolve().parent.parent
 # have typed it in Lightroom, or Vireo may have written it out itself.
 PROVENANCE_NEUTRAL_WRITERS = {
     ("sync.py", "sync_from_xmp"): "XMP reconcile cannot tell user terms from Vireo's own",
-    ("scanner.py", "_import_keywords_for_photo"): "scanned sidecar terms have ambiguous authorship",
+    ("scanner.py", "_import_keyword_lists"): "scanned sidecar and embedded terms have ambiguous authorship",
 }
 
 # Writers that neither claim nor decline authorship: they move an association
@@ -83,6 +83,8 @@ PROVENANCE_CONVERGENCE_POINTS = {
     (_PROVENANCE_MODULE, "link_keyword_to_place"): "place link repoints rows onto canonical",
     (_PROVENANCE_MODULE, "retire_builtin_wildlife_genre"): "latches sidecar verdict to the top",
     ("scanner.py", "_pair_raw_jpeg_companions"): "pairing copies companion keywords",
+    ("repositories/folders.py", "merge_into_existing"): "folder merge carries loser's keywords onto the survivor",
+    ("repositories/moves_merge.py", "_carry_embedded_keyword_associations"): "staged merge preserves embedded association stamps",
 }
 
 

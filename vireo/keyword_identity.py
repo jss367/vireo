@@ -50,6 +50,59 @@ def path_key(parts):
     return json.dumps([keyword_match_key(p) for p in parts], ensure_ascii=False)
 
 
+def embedded_keyword_associations_for_merge(conn, losing_id, survivor_id, *,
+                                            include_non_embedded=False):
+    """Select carried tags while respecting detached embedded values on the survivor.
+
+    Pairing also carries manual/sidecar associations; other embedded merges
+    carry only values actually offered by the embedded importer.
+    """
+    def offered(photo_id):
+        return {row["keyword_key"] for row in conn.execute(
+            "SELECT keyword_key FROM photo_embedded_keyword_offered WHERE photo_id = ?",
+            (photo_id,),
+        )}
+
+    source_keys, target_keys = offered(losing_id), offered(survivor_id)
+    if not source_keys and not include_non_embedded:
+        return
+    for row in conn.execute(
+            "SELECT k.id, k.name, k.parent_id, pk.source FROM photo_keywords pk "
+            "JOIN keywords k ON k.id = pk.keyword_id WHERE pk.photo_id = ?",
+            (losing_id,)).fetchall():
+        parts, parent_id, seen = [row["name"]], row["parent_id"], {row["id"]}
+        while parent_id is not None and parent_id not in seen:
+            seen.add(parent_id)
+            parent = conn.execute(
+                "SELECT name, parent_id FROM keywords WHERE id = ?", (parent_id,),
+            ).fetchone()
+            if parent is None:
+                break
+            parts.insert(0, parent["name"])
+            parent_id = parent["parent_id"]
+        paths = [parts] + [json.loads(alias["path_json"]) for alias in conn.execute(
+            "SELECT path_json FROM keyword_import_aliases WHERE keyword_id = ?",
+            (row["id"],),
+        )]
+        matched = set()
+        for path in paths:
+            full = "|".join(keyword_match_key(part) for part in path)
+            leaf = keyword_match_key(path[-1])
+            if full in source_keys:
+                matched.add(full)
+            elif leaf in source_keys:
+                matched.add(leaf)
+        if not matched and not include_non_embedded:
+            continue
+        attached = conn.execute(
+            "SELECT 1 FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+            (survivor_id, row["id"]),
+        ).fetchone()
+        if matched & target_keys and attached is None:
+            continue
+        yield row
+
+
 def resolve_import_alias(db, name, parent_id, *, kw_type=None):
     parts = [name]
     seen = set()

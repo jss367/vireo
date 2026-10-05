@@ -375,6 +375,45 @@ def extract_metadata(file_paths, restricted_tags=None, progress_callback=None,
     return results
 
 
+def _keyword_values(value):
+    """Normalize one ExifTool keyword tag to a list of non-empty strings.
+
+    ExifTool's JSON gives a list for several keywords but a bare scalar for
+    one, and ``-n`` turns a numeric keyword such as ``2019`` into an int.
+    """
+    if value is None:
+        return []
+    values = value if isinstance(value, list) else [value]
+    result = []
+    for item in values:
+        if isinstance(item, bool):
+            continue
+        if isinstance(item, int | float):
+            item = str(item)
+        if isinstance(item, str) and item.strip():
+            result.append(item.strip())
+    return result
+
+
+def embedded_keywords(grouped_meta):
+    """Keywords stored inside the image file itself, from ExifTool output.
+
+    Lightroom writes the keywords of JPEG, TIFF, PNG and DNG files into the
+    file rather than an ``.xmp`` sidecar, so a scan that only reads sidecars
+    never sees them. Returns ``(flat_set, hierarchical_list)`` in the same
+    shape as the sidecar readers in ``xmp``.
+
+    XMP ``dc:subject`` is preferred over IPTC ``Keywords``: writers that set
+    both (Lightroom does) keep them identical, and the XMP copy is the
+    Unicode-safe one. IPTC is the fallback for files only older tools tagged.
+    """
+    xmp = grouped_meta.get("XMP") or {}
+    iptc = grouped_meta.get("IPTC") or {}
+    flat = _keyword_values(xmp.get("Subject")) or _keyword_values(iptc.get("Keywords"))
+    hierarchical = _keyword_values(xmp.get("HierarchicalSubject"))
+    return set(flat), hierarchical
+
+
 def extract_summary_fields(grouped_meta):
     """Pull quick-summary fields from grouped metadata.
 

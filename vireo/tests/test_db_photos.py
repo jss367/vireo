@@ -906,7 +906,9 @@ def test_delete_photos_chunks_every_in_clause(db, lib, monkeypatch):
     db.conn.set_trace_callback(None)
     assert result["deleted"] == len(ids)
     statements = list(dict.fromkeys(s.strip() for s in statements))
-    for prefix in ("DELETE FROM photo_keywords", "DELETE FROM pending_changes",
+    for prefix in ("DELETE FROM photo_keywords",
+                   "DELETE FROM photo_embedded_keyword_offered",
+                   "DELETE FROM pending_changes",
                    "DELETE FROM detections", "DELETE FROM photos"):
         assert len([s for s in statements if s.startswith(prefix)]) == 2, prefix
 
@@ -923,6 +925,7 @@ def test_delete_photos_sql_order(db, lib, monkeypatch, tmp_path):
     head = stmts.index(f"DELETE FROM photo_keywords WHERE photo_id IN ({a})")
     assert stmts[head:stmts.index("COMMIT") + 1] == [
         f"DELETE FROM photo_keywords WHERE photo_id IN ({a})",
+        f"DELETE FROM photo_embedded_keyword_offered WHERE photo_id IN ({a})",
         f"DELETE FROM pending_changes WHERE photo_id IN ({a})",
         f"DELETE FROM detections WHERE photo_id IN ({a})",
         "SELECT id, rules FROM collections",

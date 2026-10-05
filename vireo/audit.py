@@ -641,6 +641,9 @@ def remove_orphans(db, photo_ids):
     """
     for pid in photo_ids:
         db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (pid,))
+        db.conn.execute(
+            "DELETE FROM photo_embedded_keyword_offered WHERE photo_id = ?", (pid,),
+        )
         db.conn.execute("DELETE FROM pending_changes WHERE photo_id = ?", (pid,))
         db.conn.execute("DELETE FROM photos WHERE id = ?", (pid,))
     db.remap_collection_photo_ids(dict.fromkeys(photo_ids))

@@ -511,12 +511,22 @@ class FolderRepository:
         return cascaded
 
     def merge_into_existing(self, source_folder_id, target_folder_id, new_path, *,
-                            commit=True, transfer_gps_review, relink_parents_by_path):
+                            commit=True, transfer_gps_review,
+                            transfer_embedded_offered,
+                            relink_parents_by_path,
+                            KEYWORD_SOURCE_CONFLICT_SQL):
         """Fold a missing folder into the existing folder at new_path.
 
-        ``transfer_gps_review`` is ``Database._transfer_gps_review_for_merge``
-        and ``relink_parents_by_path`` is ``Database._relink_parents_by_path``;
-        both run inside this transaction. Commits only when ``commit``.
+        ``transfer_gps_review`` is ``Database._transfer_gps_review_for_merge``,
+        ``transfer_embedded_offered`` is
+        ``Database.transfer_embedded_keyword_offered_for_merge``, and
+        ``relink_parents_by_path`` is ``Database._relink_parents_by_path``;
+        all three run inside this transaction. Commits only when ``commit``.
+
+        ``KEYWORD_SOURCE_CONFLICT_SQL`` is the ``db`` module constant of the
+        same name, the shared ON CONFLICT clause the ``photo_keywords`` carry
+        below uses so a losing row's keyword that lands on an existing
+        survivor association keeps the stronger of the two provenance stamps.
         """
         old_row = self.conn.execute(
             "SELECT path FROM folders WHERE id = ?", (source_folder_id,)
@@ -541,6 +551,32 @@ class FolderRepository:
             ).fetchone()
             if existing:
                 transfer_gps_review(photo["id"], existing["id"])
+                # Move the embedded-offered suppression onto the surviving
+                # row so a user's keyword removal is not resurrected by a
+                # later rescan of the same embedded value. The non-cascading
+                # FK on ``photo_embedded_keyword_offered.photo_id`` would
+                # also abort the ``DELETE FROM photos`` below without this.
+                # Carry the losing row's keyword associations onto the
+                # survivor before the batch delete below drops them. Without
+                # this, a tag the loser carried but the survivor did not
+                # (common when the embedded import tagged the loser from
+                # ``Robin`` in file metadata) would be lost -- and the
+                # suppression transferred above would then make every later
+                # embedded rescan skip the key as "already offered",
+                # permanently filtering the tag out. The shared conflict
+                # clause folds provenance when both rows carried the keyword
+                # so a hand-added manual tag on the survivor cannot be
+                # silently downgraded to an unknown by the import's stamp.
+                from keyword_identity import embedded_keyword_associations_for_merge
+
+                for keyword in embedded_keyword_associations_for_merge(
+                        self.conn, photo["id"], existing["id"]):
+                    self.conn.execute(
+                        "INSERT INTO photo_keywords (photo_id, keyword_id, source) "
+                        "VALUES (?, ?, ?) " + KEYWORD_SOURCE_CONFLICT_SQL,
+                        (existing["id"], keyword["id"], keyword["source"]),
+                    )
+                transfer_embedded_offered(photo["id"], existing["id"])
                 drop_ids.append(photo["id"])
                 collection_remap[photo["id"]] = existing["id"]
             elif os.path.exists(os.path.join(new_path, photo["filename"])):
@@ -558,6 +594,10 @@ class FolderRepository:
             remap_photo_visibility(self.conn, collection_remap)
             ph = ",".join("?" for _ in drop_ids)
             self.conn.execute(f"DELETE FROM photo_keywords WHERE photo_id IN ({ph})", drop_ids)
+            self.conn.execute(
+                f"DELETE FROM photo_embedded_keyword_offered WHERE photo_id IN ({ph})",
+                drop_ids,
+            )
             self.conn.execute(f"DELETE FROM pending_changes WHERE photo_id IN ({ph})", drop_ids)
             self.conn.execute(f"DELETE FROM detections WHERE photo_id IN ({ph})", drop_ids)
             self.conn.execute(f"DELETE FROM photos WHERE id IN ({ph})", drop_ids)

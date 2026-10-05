@@ -939,6 +939,10 @@ class PhotoRepository:
             for chunk in id_chunks:
                 ph = ",".join("?" for _ in chunk)
                 self.conn.execute(f"DELETE FROM photo_keywords WHERE photo_id IN ({ph})", chunk)
+                self.conn.execute(
+                    f"DELETE FROM photo_embedded_keyword_offered WHERE photo_id IN ({ph})",
+                    chunk,
+                )
                 self.conn.execute(f"DELETE FROM pending_changes WHERE photo_id IN ({ph})", chunk)
                 # Deleting detections cascades to predictions via ON DELETE CASCADE
                 self.conn.execute(f"DELETE FROM detections WHERE photo_id IN ({ph})", chunk)

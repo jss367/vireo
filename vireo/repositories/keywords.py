@@ -141,6 +141,64 @@ class KeywordRepository:
         """The active workspace id, resolved at each read (raises if none)."""
         return self._resolve_workspace_id()
 
+    def embedded_offered_keys(self, photo_id):
+        """Normalized embedded keyword keys the scanner has offered this photo.
+
+        Backs ``Database.get_embedded_keyword_offered_keys`` -- see there for
+        why the record exists. Returns a set so callers can test membership
+        in O(1) when they filter candidate keywords.
+        """
+        return {
+            row["keyword_key"]
+            for row in self.conn.execute(
+                "SELECT keyword_key FROM photo_embedded_keyword_offered "
+                "WHERE photo_id = ?",
+                (photo_id,),
+            )
+        }
+
+    def record_embedded_offered_keys(self, photo_id, keys, _commit=True):
+        """Mark these normalized keys as embedded-offered for the photo.
+
+        Backs ``Database.record_embedded_keyword_offered`` -- see there for
+        why the record exists. Idempotent (INSERT OR IGNORE on the composite
+        primary key). ``keys`` empty is a no-op. ``_commit=False`` leaves the
+        commit to the caller for batch work.
+        """
+        rows = [(photo_id, key) for key in keys if key]
+        if not rows:
+            return
+        self.conn.executemany(
+            "INSERT OR IGNORE INTO photo_embedded_keyword_offered "
+            "(photo_id, keyword_key) VALUES (?, ?)",
+            rows,
+        )
+        if _commit:
+            self.conn.commit()
+
+    def transfer_embedded_offered_keys(self, losing_id, surviving_id):
+        """Move the losing row's embedded-offered keys onto the survivor.
+
+        Used by every merge path that deletes a photo row with a different
+        row inheriting its identity: the suppression record exists so a
+        user's keyword removal survives a later rescan, and that intent must
+        follow the surviving row rather than be dropped with the losing one.
+        No commit; the caller folds this into its own transaction. The
+        non-cascading FK on ``photo_embedded_keyword_offered.photo_id``
+        would otherwise block the ``DELETE FROM photos``.
+        """
+        self.conn.execute(
+            "INSERT OR IGNORE INTO photo_embedded_keyword_offered "
+            "(photo_id, keyword_key) "
+            "SELECT ?, keyword_key FROM photo_embedded_keyword_offered "
+            "WHERE photo_id = ?",
+            (surviving_id, losing_id),
+        )
+        self.conn.execute(
+            "DELETE FROM photo_embedded_keyword_offered WHERE photo_id = ?",
+            (losing_id,),
+        )
+
     def filter_out_subject_tagged(self, photo_ids, subject_types):
         """Return the subset of photo_ids whose photos do NOT have any keyword
         of a type in subject_types. Empty subject_types or empty photo_ids

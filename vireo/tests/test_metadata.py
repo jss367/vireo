@@ -744,3 +744,46 @@ def test_exiftool_status_present_but_nonzero_returncode(monkeypatch):
     assert status["path"] == "/usr/bin/exiftool"
     assert status["version"] is None
     assert "Can't locate Image/ExifTool.pm" in status["error"]
+
+
+def test_embedded_keywords_reads_xmp_subject_and_hierarchy():
+    """Lightroom's in-file keywords come back in the sidecar readers' shape."""
+    from metadata import embedded_keywords
+
+    flat, hierarchical = embedded_keywords({
+        "XMP": {
+            "Subject": ["2Birds", "Turquoise-browed motmot"],
+            "HierarchicalSubject": ["2Birds|Turquoise-browed motmot"],
+        },
+        "IPTC": {"Keywords": ["2Birds", "Turquoise-browed motmot"]},
+    })
+    assert flat == {"2Birds", "Turquoise-browed motmot"}
+    assert hierarchical == ["2Birds|Turquoise-browed motmot"]
+
+
+def test_embedded_keywords_normalizes_scalars_and_numbers():
+    """ExifTool's JSON gives a bare scalar for one keyword, an int under -n."""
+    from metadata import embedded_keywords
+
+    flat, hierarchical = embedded_keywords({
+        "XMP": {"Subject": 2019, "HierarchicalSubject": "Trips|Belize"},
+    })
+    assert flat == {"2019"}
+    assert hierarchical == ["Trips|Belize"]
+
+
+def test_embedded_keywords_prefers_xmp_and_falls_back_to_iptc():
+    """XMP wins when both exist; IPTC-only files still yield their keywords."""
+    from metadata import embedded_keywords
+
+    flat, _ = embedded_keywords({
+        "XMP": {"Subject": ["Heron"]},
+        "IPTC": {"Keywords": ["Heron", "Stale IPTC copy"]},
+    })
+    assert flat == {"Heron"}
+
+    flat, hierarchical = embedded_keywords({"IPTC": {"Keywords": ["Egret", " "]}})
+    assert flat == {"Egret"}
+    assert hierarchical == []
+
+    assert embedded_keywords({"EXIF": {"Make": "Nikon"}}) == (set(), [])
