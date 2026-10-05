@@ -413,7 +413,11 @@
       document.getElementById('restoredAgo').textContent =
         formatTimeAgo(data.finished_at);
       var stale = (data.result && data.result.stale_group_count) || 0;
-      document.getElementById('restoredStale').textContent = stale
+      var remaining = (data.result && (data.result.proposals || []).length) || 0;
+      // When every group is stale the empty-state message in ``results``
+      // already explains that the scan is out of date — don't repeat it
+      // here or the banner contradicts and duplicates the main message.
+      document.getElementById('restoredStale').textContent = (stale && remaining)
         ? ' ' + stale.toLocaleString() + (stale === 1
             ? ' group from that scan no longer matches your catalog and is hidden.'
             : ' groups from that scan no longer match your catalog and are hidden.')
@@ -732,8 +736,20 @@
 
     if (_proposals.length === 0) {
       setEmptyVisible(false);
-      document.getElementById('results').innerHTML =
-        '<div class="no-results">No duplicates found. Your library is clean.</div>';
+      // A restored scan with every group revalidated out tells us the old
+      // groups are stale, not that the library is currently clean. The
+      // user needs a fresh scan to rule out duplicates added since.
+      var staleCount = result.stale_group_count || 0;
+      if (staleCount > 0) {
+        document.getElementById('results').innerHTML =
+          '<div class="no-results">The last scan is out of date — ' +
+          staleCount.toLocaleString() +
+          (staleCount === 1 ? ' group no longer matches' : ' groups no longer match') +
+          ' your catalog. Run a new scan to check for duplicates.</div>';
+      } else {
+        document.getElementById('results').innerHTML =
+          '<div class="no-results">No duplicates found. Your library is clean.</div>';
+      }
       return;
     }
 
