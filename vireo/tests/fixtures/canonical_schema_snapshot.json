@@ -40,7 +40,7 @@
    "table",
    "companion_identities",
    "companion_identities",
-   "CREATE TABLE companion_identities (\n                photo_id INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,\n                filename TEXT NOT NULL,\n                file_size INTEGER,\n                timestamp TEXT,\n                file_hash TEXT\n            )"
+   "CREATE TABLE companion_identities (\n                photo_id INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,\n                filename TEXT NOT NULL,\n                file_size INTEGER,\n                timestamp TEXT,\n                file_hash TEXT,\n                file_mtime REAL\n            )"
   ],
   [
    "table",

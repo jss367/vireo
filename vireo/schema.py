@@ -18,7 +18,6 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from canonical_schema import SCHEMA_VERSION
 from db import Database, IncompatibleDatabaseError
 from file_replace import replace_file
 
@@ -35,10 +34,14 @@ class Migration:
     validate: Callable[[sqlite3.Connection], None] | None = None
 
 
-# The schema ``create_tables`` builds. Migrations 5-12 were retired once every
-# catalog had applied them, and ``create_tables`` now creates their end state
-# directly. The next schema change is ``Migration(BASELINE_VERSION + 1, ...)``.
-BASELINE_VERSION = SCHEMA_VERSION
+# The version every catalog is stamped to before registry migrations run.
+# Migrations 5-12 were retired once every catalog had applied them, and
+# ``create_tables`` now creates their end state directly. Later changes are
+# ``Migration``s numbered from ``BASELINE_VERSION + 1``; ``create_tables``
+# builds their end state too and stamps a fresh database with the newest one
+# (``canonical_schema.SCHEMA_VERSION``), so each migration must be a no-op on
+# a catalog that already has its change.
+BASELINE_VERSION = 12
 
 # The oldest stamped catalog ``create_tables`` alone can bring to the
 # baseline: migration 12 only created objects ``create_tables`` already
@@ -47,7 +50,31 @@ BASELINE_VERSION = SCHEMA_VERSION
 # grouping-history split) and is refused rather than stamped as upgraded.
 OLDEST_UPGRADABLE_VERSION = 11
 
-MIGRATIONS = ()
+def _add_companion_file_mtime(conn):
+    """Record each paired JPEG's mtime beside its import identity.
+
+    A rescan compares a companion JPEG's size and mtime with this row to
+    see that the RAW's companion is unchanged, the way an incremental scan
+    checks a photo's own row. Existing rows start NULL: the next scan
+    hashes those companions once and fills it in.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(companion_identities)")}
+    if "file_mtime" not in columns:
+        conn.execute("ALTER TABLE companion_identities ADD COLUMN file_mtime REAL")
+
+
+def _validate_companion_file_mtime(conn):
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(companion_identities)")}
+    if "file_mtime" not in columns:
+        raise RuntimeError("companion_identities.file_mtime is missing")
+
+
+MIGRATIONS = (
+    Migration(
+        13, "companion_identities_file_mtime",
+        _add_companion_file_mtime, _validate_companion_file_mtime,
+    ),
+)
 
 
 def _latest_version():

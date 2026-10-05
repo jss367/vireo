@@ -668,8 +668,8 @@ def _group_photos_by_folder_and_stem(db):
     """Group pairing candidates by folder_id + base name (without extension).
 
     Candidates are every photo not yet paired, plus RAW rows that already
-    carry a companion_path (so a rescan that re-inserts that companion's
-    file as its own row folds it back into its RAW).
+    carry a companion_path (so a companion whose file changed, which a
+    rescan re-inserts as its own row, folds back into its RAW).
     """
     rows = db.conn.execute(
         "SELECT id, folder_id, filename, extension, timestamp,"
@@ -766,8 +766,9 @@ def _pick_compatible_raw_jpeg_pairs(members):
     taken = set()
 
     # Each RAW with an existing companion re-pairs with that same filename
-    # first; a rescan that re-inserts the companion's own file folds it
-    # back in, and the companion never drifts to another same-stem JPEG.
+    # first; a rescan that found the companion changed re-inserts its file,
+    # which folds back in, and the companion never drifts to another
+    # same-stem JPEG.
     for raw in raws:
         name = raw["companion_path"]
         if (
@@ -845,10 +846,13 @@ def _keep_companion_import_identity(db, primary, companion):
     """Attach the companion's import identity to the primary."""
     # Pairing hides the JPEG row, not the JPEG's import identity. Keep
     # it attached to the RAW so re-importing a card still skips both.
+    # ``file_mtime`` lets a later scan see the companion unchanged without
+    # reading it (see ``_KnownCompanions``).
     db.conn.execute(
         "INSERT OR REPLACE INTO companion_identities "
-        "(photo_id, filename, file_size, timestamp, file_hash) "
-        "SELECT ?, filename, file_size, timestamp, file_hash FROM photos WHERE id=?",
+        "(photo_id, filename, file_size, timestamp, file_hash, file_mtime) "
+        "SELECT ?, filename, file_size, timestamp, file_hash, file_mtime"
+        " FROM photos WHERE id=?",
         (primary["id"], companion["id"]),
     )
 
@@ -3512,7 +3516,7 @@ def backfill_working_copies(db, vireo_dir, progress_callback=None,
 
 _EMPTY_SCAN_COUNTS = {
     "discovered": 0, "indexed": 0, "vanished": 0, "skipped_uncataloged": 0,
-    "merged_companions": 0,
+    "merged_companions": 0, "known_companions": 0,
 }
 
 
@@ -3547,6 +3551,93 @@ def _incremental_photo_index(db, image_files):
         for row in rows:
             result[os.path.join(row["folder_path"], row["filename"])] = row
     return result
+
+
+class _KnownCompanions:
+    """JPEGs the catalog already holds as some RAW's companion.
+
+    A paired JPEG has no ``photos`` row of its own: it is the RAW row's
+    ``companion_path`` plus a ``companion_identities`` row. Without this
+    lookup a rescan found no row for the JPEG, inserted it as a new photo,
+    and the pairing pass merged it straight back into the RAW (re-keying
+    its state, deleting the row, discarding the RAW's companion-derived
+    display caches), once per companion per rescan.
+
+    ``lookup`` matches the RAW row by ``folder_id`` and ``companion_path``,
+    the same keys pairing writes. Each folder's companion names are read
+    once per scan and only filter; a hit is re-read from the catalog, so a
+    pairing or deletion that ran since the snapshot is honored.
+    """
+
+    _OWNER_SQL = (
+        "SELECT p.id AS owner_id, c.file_size, c.file_mtime, c.file_hash"
+        " FROM photos p LEFT JOIN companion_identities c"
+        " ON c.photo_id = p.id AND c.filename = p.companion_path"
+        " WHERE p.folder_id = ? AND p.companion_path = ?"
+        # A RAW with a stored identity vouches for the file; legacy pairs
+        # that two RAWs both claim prefer the one that can.
+        " ORDER BY c.photo_id IS NULL, p.id LIMIT 1"
+    )
+
+    def __init__(self, db):
+        self.db = db
+        self._names_by_folder = {}
+        self._folder_ids_by_path = {}
+
+    def lookup(self, folder_id, filename):
+        """The owning RAW and its stored companion identity, or None."""
+        names = self._names_by_folder.get(folder_id)
+        if names is None:
+            names = {
+                row[0] for row in self.db.conn.execute(
+                    "SELECT companion_path FROM photos"
+                    " WHERE folder_id = ? AND companion_path IS NOT NULL",
+                    (folder_id,),
+                )
+            }
+            self._names_by_folder[folder_id] = names
+        if filename not in names:
+            return None
+        return self.db.conn.execute(
+            self._OWNER_SQL, (folder_id, filename),
+        ).fetchone()
+
+    def lookup_path(self, image_path):
+        """``lookup`` by path, resolving the folder like ``_incremental_photo_index``."""
+        parent = str(image_path.parent)
+        folder_ids = self._folder_ids_by_path.get(parent)
+        if folder_ids is None:
+            folder_ids = [
+                row[0] for row in self.db.conn.execute(
+                    "SELECT id FROM folders WHERE path IN (?, ?)",
+                    (parent, parent + os.sep),
+                )
+            ]
+            self._folder_ids_by_path[parent] = folder_ids
+        for folder_id in folder_ids:
+            known = self.lookup(folder_id, image_path.name)
+            if known is not None:
+                return known
+        return None
+
+
+def _companion_stat_unchanged(known, stat):
+    """True when size and mtime match the identity a hash vouched for."""
+    return (
+        known["file_mtime"] is not None
+        and known["file_mtime"] == stat.st_mtime
+        and known["file_size"] == stat.st_size
+        and (known["file_hash"] is not None or stat.st_size == 0)
+    )
+
+
+def _companion_bytes_unchanged(known, file_size, file_hash):
+    """True when freshly hashed bytes are the ones the identity stores."""
+    if known["file_size"] is None or known["file_size"] != file_size:
+        return False
+    if file_size == 0:
+        return True
+    return file_hash is not None and file_hash == known["file_hash"]
 
 
 def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True, photo_callback=None, skip_paths=None, status_callback=None, recursive=True, restrict_dirs=None, restrict_files=None, vireo_dir=None, thumb_cache_dir=None, permission_error_callback=None, cancel_check=None, pause_check=None, cancel_only_check=None, skip_working_copies=False, repair_missing_metadata=False, register_restrict_dirs_as_roots=True, allow_photo_inserts=True, counts=None, discovered_files=None):
@@ -3662,7 +3753,9 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         (update-only scans declining to insert), and
         ``merged_companions`` (JPEGs folded into a same-basename RAW's
         row, which are discounted from ``indexed`` because they stop
-        being photos of their own).
+        being photos of their own), and ``known_companions`` (JPEGs the
+        catalog already holds as their RAW's companion, found unchanged
+        and left in place rather than re-imported and merged again).
         Build user-facing counts from ``indexed``, never from the progress
         counter — progress advances for skipped files too.
     """
@@ -4171,6 +4264,17 @@ class _ScanRun:
             _incremental_photo_index(db, self.image_files)
             if self.incremental else {}
         )
+        self.known_companions = _KnownCompanions(db)
+        # Companion JPEGs the incremental pre-pass found unchanged by stat,
+        # as ``(image_path, owner_id)``; settled once the pre-pass knows
+        # which RAW rows it is re-reading (see ``_settle_stat_unchanged_companions``).
+        self.stat_unchanged_companions = []
+        # Cataloged rows the pre-pass sends for re-reading.
+        self.reprocessed_row_ids = set()
+        # ``(owner_id, companion columns)`` for companions found unchanged
+        # after their metadata was read; applied to the owner once every
+        # file is indexed (see ``_refill_owners_from_companions``).
+        self.companion_gap_fills = []
 
         # Build folder cache: path -> folder_id
         self.folder_cache = {}
@@ -4344,6 +4448,8 @@ class _ScanRun:
                 self._check_cancelled()
                 if self._needs_processing(image_path):
                     files_to_process.append(image_path)
+            if self._settle_stat_unchanged_companions(files_to_process):
+                files_to_process.sort()
         except BaseException:
             # Pre-pass died (e.g. non-retryable DB error on an XMP commit).
             # Route through the same partial-status path as a main-loop failure
@@ -4402,11 +4508,40 @@ class _ScanRun:
         if self.incremental:
             full_path_str = str(image_path)
             existing = self.existing_by_path.get(full_path_str)
-            if existing and self._reuse_existing_row(
-                existing, full_path_str, stat, xmp_path, xmp_mtime,
-            ):
-                return False
+            if existing:
+                if self._reuse_existing_row(
+                    existing, full_path_str, stat, xmp_path, xmp_mtime,
+                ):
+                    return False
+                self.reprocessed_row_ids.add(existing["id"])
+            else:
+                known = self.known_companions.lookup_path(image_path)
+                if known is not None and _companion_stat_unchanged(known, stat):
+                    self.stat_unchanged_companions.append(
+                        (image_path, known["owner_id"]),
+                    )
+                    return False
         return True
+
+    def _settle_stat_unchanged_companions(self, files_to_process):
+        """Credit unchanged companions, or re-read them beside a re-read RAW.
+
+        Re-reading a RAW rewrites its EXIF summary columns from the RAW
+        alone, clearing the ones only the camera JPEG carries. Pairing
+        filled those from the JPEG, so a companion whose RAW is being
+        re-read is read too, and its columns refill the gaps (see
+        ``_refill_owners_from_companions``). Returns whether any were
+        added to ``files_to_process``.
+        """
+        added = False
+        for image_path, owner_id in self.stat_unchanged_companions:
+            if owner_id in self.reprocessed_row_ids:
+                files_to_process.append(image_path)
+                added = True
+            else:
+                self._credit_known_companion(owner_id, str(image_path))
+        self.stat_unchanged_companions = []
+        return added
 
     def _reuse_existing_row(self, existing, full_path_str, stat, xmp_path, xmp_mtime):
         """``True`` when the cataloged row still vouches for the file."""
@@ -4491,6 +4626,20 @@ class _ScanRun:
         self.indexed_photo_ids.add(photo_id)
         if self.photo_callback:
             self.photo_callback(photo_id, full_path_str)
+        if self.progress_callback:
+            self.progress_callback(self.processed_count, self.total)
+
+    def _credit_known_companion(self, owner_id, full_path_str):
+        """Dispose of a companion JPEG its RAW's row already holds.
+
+        ``photo_callback`` gets the RAW's id: that row is where the file is
+        cataloged (callers such as import-in-place count the path as
+        indexed). It is not ``indexed`` again, the RAW was.
+        """
+        self.processed_count += 1
+        self.counts["known_companions"] += 1
+        if self.photo_callback:
+            self.photo_callback(owner_id, full_path_str)
         if self.progress_callback:
             self.progress_callback(self.processed_count, self.total)
 
@@ -4830,6 +4979,11 @@ class _ScanRun:
         row_already_existed = existing_row is not None
         prev_file_hash = existing_row["file_hash"] if existing_row else None
 
+        if not row_already_existed and self._keep_known_companion(
+            image_path, folder_id, file_size, file_mtime, file_hash, meta,
+        ):
+            return
+
         # Process may refresh metadata for cataloged photos, but it must
         # never admit a filesystem path as a side effect. A row can
         # disappear between repair-scope resolution and this point; skip
@@ -4877,6 +5031,91 @@ class _ScanRun:
         self.processed_count += 1
         if self.progress_callback:
             self.progress_callback(self.processed_count, self.total)
+
+    def _keep_known_companion(
+        self, image_path, folder_id, file_size, file_mtime, file_hash, meta,
+    ):
+        """Leave an unchanged companion JPEG in its RAW's row; True if it was.
+
+        A companion whose bytes changed (or that has no stored identity to
+        compare) returns False and is cataloged as before: inserted, then
+        merged back into its RAW by the pairing pass, which refreshes the
+        stored identity, fills the RAW's gaps from it, carries its new
+        keywords over, and drops the RAW's companion-derived caches.
+        """
+        known = self.known_companions.lookup(folder_id, image_path.name)
+        if known is None:
+            return False
+        if file_hash is None and file_size > 0:
+            # Unreadable right now. Re-merging would replace a verified
+            # identity with an unhashed one; keep the catalog's and let the
+            # next scan, which sees the stored mtime is stale, try again.
+            log.info(
+                "Could not read companion %s to check it; keeping its RAW's "
+                "stored identity", image_path,
+            )
+        elif _companion_bytes_unchanged(known, file_size, file_hash):
+            # Same bytes: record the stat so the next incremental scan can
+            # see that without reading the file again.
+            self.db.conn.execute(
+                "UPDATE companion_identities SET file_mtime = ?"
+                " WHERE photo_id = ? AND filename = ?",
+                (file_mtime, known["owner_id"], image_path.name),
+            )
+            commit_with_retry(self.db.conn)
+            if meta.file_meta:
+                self.companion_gap_fills.append(
+                    (known["owner_id"], self._companion_columns(meta)),
+                )
+        else:
+            return False
+        self._credit_known_companion(known["owner_id"], str(image_path))
+        return True
+
+    def _companion_columns(self, meta):
+        """The columns pairing reads from a companion row, from fresh metadata.
+
+        Shaped like ``_read_metadata_transfer_rows``'s companion row, so
+        ``_fill_primary_metadata_gaps`` treats it the way the merge would
+        have treated the same file re-inserted as a row.
+        """
+        file_meta = meta.file_meta
+        columns = {
+            "timestamp": meta.timestamp,
+            "rating": 0,
+            "flag": "none",
+            "latitude": meta.latitude,
+            "longitude": meta.longitude,
+            "exif_data": (
+                json.dumps(file_meta) if self.extract_full_metadata else "{}"
+            ),
+            "width": meta.width,
+            "height": meta.height,
+        }
+        summary = exif_summary_columns(file_meta)
+        for column in EXIF_SUMMARY_COLUMNS:
+            columns[column] = summary.get(column)
+        return columns
+
+    def _refill_owners_from_companions(self):
+        """Fill each RAW's gaps from the unchanged companion read this scan.
+
+        Runs after every file is indexed, so a RAW re-read in the same scan
+        has already rewritten its own columns, whichever file came first.
+        """
+        if not self.companion_gap_fills:
+            return
+        for owner_id, companion_columns in self.companion_gap_fills:
+            owner_columns, _ = _read_metadata_transfer_rows(
+                self.db, {"id": owner_id}, {"id": owner_id},
+            )
+            if owner_columns is None:
+                continue
+            _fill_primary_metadata_gaps(
+                self.db, {"id": owner_id}, owner_columns, companion_columns,
+            )
+        commit_with_retry(self.db.conn)
+        self.companion_gap_fills = []
 
     def _read_file_metadata(self, image_path):
         # Get pre-extracted metadata for this file
@@ -5144,6 +5383,7 @@ class _ScanRun:
             # RAW survives. Applied to the sink immediately (not just the
             # returned dict) so a caller reading counts after a later failure
             # in this block still sees the corrected number.
+            self._refill_owners_from_companions()
             _merged_ids = _pair_raw_jpeg_companions(
                 db, vireo_dir=vireo_dir, thumb_cache_dir=self.thumb_cache_dir,
             )
@@ -5217,18 +5457,19 @@ class _ScanRun:
         vanished_count = counts["vanished"]
         skipped_uncataloged_count = counts["skipped_uncataloged"]
         merged_count = counts["merged_companions"]
+        known_companion_count = counts["known_companions"]
         indexed_count = counts["indexed"]
         accounted = (
             indexed_count + vanished_count + skipped_uncataloged_count
-            + merged_count
+            + merged_count + known_companion_count
         )
         if accounted != processed_count:
             log.error(
                 "Scan count invariant broken: indexed=%d + vanished=%d + "
-                "skipped=%d + merged=%d != processed=%d (a file disposition is "
-                "unclassified)",
+                "skipped=%d + merged=%d + known companions=%d != processed=%d "
+                "(a file disposition is unclassified)",
                 indexed_count, vanished_count, skipped_uncataloged_count,
-                merged_count, processed_count,
+                merged_count, known_companion_count, processed_count,
             )
 
         # Report what reached the catalog, not what the walk turned up. These
@@ -5239,10 +5480,16 @@ class _ScanRun:
         summary = f"Scan complete: {indexed_count} photos indexed"
         if merged_count:
             summary += f", {merged_count} JPEG(s) merged into their RAW"
+        if known_companion_count:
+            summary += (
+                f", {known_companion_count} JPEG(s) already paired with "
+                "their RAW"
+            )
         if vanished_count:
             summary += f", {vanished_count} vanished"
         if skipped_uncataloged_count:
             summary += f", {skipped_uncataloged_count} uncataloged (skipped)"
-        if merged_count or vanished_count or skipped_uncataloged_count:
+        if (merged_count or known_companion_count or vanished_count
+                or skipped_uncataloged_count):
             summary += f" of {self.total} discovered"
         log.info(summary)

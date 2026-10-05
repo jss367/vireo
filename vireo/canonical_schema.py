@@ -17,8 +17,10 @@ This module must not import ``db``: ``schema.py`` imports ``db``, and
 """
 
 # ``PRAGMA user_version`` of the shape ``create_tables`` builds, stamped on a
-# database it creates from nothing. ``schema.BASELINE_VERSION`` is this value.
-SCHEMA_VERSION = 12
+# database it creates from nothing. It is the newest registry migration in
+# ``schema.MIGRATIONS``: ``create_tables`` builds every migration's end state,
+# so a fresh database has nothing to migrate.
+SCHEMA_VERSION = 13
 
 
 class CanonicalSchema:
@@ -125,7 +127,8 @@ class CanonicalSchema:
                 filename TEXT NOT NULL,
                 file_size INTEGER,
                 timestamp TEXT,
-                file_hash TEXT
+                file_hash TEXT,
+                file_mtime REAL
             );
 
             CREATE TABLE IF NOT EXISTS keywords (

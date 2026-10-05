@@ -21,6 +21,11 @@ to keep no matter what order things happen in:
 5. **No photo drops out of a workspace.** A photo a workspace could see
    before a step is still visible to it afterwards, unless the step deleted
    the photo. (Moves rewrite folder links; this is where that goes wrong.)
+6. **A scan catalogs the whole folder, and a second scan changes nothing.**
+   After scanning the user's own folder every image in it is a photo row or
+   the companion JPEG of a RAW row beside it, whose stored identity matches
+   the JPEG's bytes. Scanning again at once inserts, merges and deletes no
+   rows: a RAW's companion is not re-imported and merged back every time.
 
 Imports are interrupted two ways: a cancel, which the job handles, and a
 crash, where an exception escapes mid-batch the way a killed process stops
@@ -73,6 +78,10 @@ from hypothesis.stateful import (  # noqa: E402
 from PIL import ExifTags, Image  # noqa: E402
 
 IMAGE_EXTENSIONS = (".jpg", ".jpeg")
+# RAW+JPEG shooting puts IMG.cr3 beside IMG.jpg; a scan pairs them into one
+# photo whose row is the RAW and whose companion_path is the JPEG.
+RAW_EXTENSION = ".cr3"
+ORIGINAL_EXTENSIONS = (*IMAGE_EXTENSIONS, RAW_EXTENSION)
 CARDS = ("card_a", "card_b")
 # A small name pool on purpose: different photos sharing a camera filename is
 # the everyday case that collision handling exists for.
@@ -133,6 +142,15 @@ def _write_photo(path, seed, captured_at):
     exif[ExifTags.Base.DateTimeOriginal] = captured_at.strftime("%Y:%m:%d %H:%M:%S")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     img.save(path, exif=exif, quality=90)
+    ts = captured_at.timestamp()
+    os.utime(path, (ts, ts))
+
+
+def _write_raw(path, seed, captured_at):
+    """Bytes unique to ``seed`` under a RAW extension (no decoder reads them)."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as handle:
+        handle.write(b"RAW" + seed.to_bytes(4, "big") * 64)
     ts = captured_at.timestamp()
     os.utime(path, (ts, ts))
 
@@ -262,7 +280,7 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
         for dirpath, dirnames, filenames in os.walk(self.root):
             dirnames[:] = [d for d in dirnames if d != "thumbs" and not d.startswith(".")]
             for name in filenames:
-                if name.lower().endswith(IMAGE_EXTENSIONS):
+                if name.lower().endswith(ORIGINAL_EXTENSIONS):
                     path = os.path.join(dirpath, name)
                     found[path] = _sha256(path)
         return found
@@ -444,7 +462,11 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
     @rule(card=st.sampled_from(CARDS), data=st.data())
     def copy_existing_photo_onto_card(self, card, data):
         """A byte-identical duplicate of a photo already on disk."""
-        existing = sorted(p for p in self.snapshot if os.sep + "trash" + os.sep not in p)
+        existing = sorted(
+            p for p in self.snapshot
+            if os.sep + "trash" + os.sep not in p
+            and p.lower().endswith(IMAGE_EXTENSIONS)
+        )
         if not existing:
             return
         source = data.draw(st.sampled_from(existing))
@@ -461,6 +483,41 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
                 os.path.join(self.own_folder, f"IMG_{self.next_seed:04d}.jpg"),
                 self.next_seed, self._new_capture_time(day),
             )
+        self.snapshot = self._disk_snapshot()
+
+    @rule(day=st.integers(0, len(CAPTURE_DAYS) - 1))
+    def shoot_raw_plus_jpeg_into_own_folder(self, day):
+        self.next_seed += 1
+        captured_at = self._new_capture_time(day)
+        stem = os.path.join(self.own_folder, f"RAW_{self.next_seed:04d}")
+        _write_photo(stem + ".jpg", self.next_seed, captured_at)
+        _write_raw(stem + RAW_EXTENSION, self.next_seed, captured_at)
+        self.snapshot = self._disk_snapshot()
+
+    def _paired_companion_paths(self):
+        return sorted(
+            path for path in (
+                os.path.join(r[0], r[1]) for r in self.db.conn.execute(
+                    "SELECT f.path, p.companion_path FROM photos p"
+                    " JOIN folders f ON f.id = p.folder_id"
+                    " WHERE p.companion_path IS NOT NULL"
+                )
+            )
+            if os.path.isfile(path)
+        )
+
+    @precondition(lambda self: self._paired_companion_paths())
+    @rule(data=st.data(), rewrite=st.booleans())
+    def edit_a_companion_jpeg(self, data, rewrite):
+        """An editor touches a paired JPEG, or saves new pixels over it."""
+        path = data.draw(st.sampled_from(self._paired_companion_paths()))
+        if rewrite:
+            self.next_seed += 1
+            _write_photo(path, self.next_seed, self._new_capture_time(0))
+        else:
+            later = os.stat(path).st_mtime + 60
+            os.utime(path, (later, later))
+        # Overwriting the file is the user's action, not Vireo's.
         self.snapshot = self._disk_snapshot()
 
     # -- Vireo operations ----------------------------------------------------
@@ -535,12 +592,50 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
         result = self._run_import(card, _Runner(cancel_after=cancel_after))
         event(f"interrupted import: cancelled={bool(result.get('cancelled'))}")
 
-    @rule()
-    def scan_own_folder(self):
+    @rule(incremental=st.booleans())
+    def scan_own_folder(self, incremental):
         import scanner
 
-        scanner.scan(os.path.dirname(self.own_folder), self.db, incremental=True,
+        own_root = os.path.dirname(self.own_folder)
+        scanner.scan(own_root, self.db, incremental=incremental,
                      thumb_cache_dir=self.thumbs)
+        self._check_scan_catalogs_folder(own_root)
+        rows_before = self._catalog_rows()
+        counts = scanner.scan(own_root, self.db, incremental=incremental,
+                              thumb_cache_dir=self.thumbs)
+        assert not counts["merged_companions"], (
+            f"rescanning an unchanged folder merged {counts['merged_companions']} "
+            "companion JPEG(s) into their RAW again"
+        )
+        assert sorted(map(sorted, map(dict.items, self._catalog_rows()))) == sorted(
+            map(sorted, map(dict.items, rows_before))
+        ), "rescanning an unchanged folder changed the catalog rows"
+
+    def _check_scan_catalogs_folder(self, root):
+        cataloged = set()
+        companions = {}
+        for row in self.db.conn.execute(
+            "SELECT f.path, p.filename, p.companion_path, c.file_hash"
+            " FROM photos p JOIN folders f ON f.id = p.folder_id"
+            " LEFT JOIN companion_identities c"
+            " ON c.photo_id = p.id AND c.filename = p.companion_path"
+        ):
+            cataloged.add(os.path.normcase(os.path.join(row[0], row[1])))
+            if row[2]:
+                companions[os.path.normcase(os.path.join(row[0], row[2]))] = row[3]
+        for dirpath, _dirnames, filenames in os.walk(root):
+            for name in filenames:
+                if not name.lower().endswith(ORIGINAL_EXTENSIONS):
+                    continue
+                path = os.path.join(dirpath, name)
+                key = os.path.normcase(path)
+                if key in cataloged:
+                    continue
+                assert key in companions, f"scan left {path} out of the catalog"
+                assert companions[key] == _sha256(path), (
+                    f"{path} is its RAW's companion, but the stored identity "
+                    "does not match its bytes"
+                )
 
     @precondition(lambda self: self._has_visible_photos())
     @rule(data=st.data())

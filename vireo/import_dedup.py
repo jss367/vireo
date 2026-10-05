@@ -257,19 +257,21 @@ def _recover_companion_batch(db, rows):
     for row in rows:
         path = Path(row["path"]) / row["companion_path"]
         try:
-            available.append((row, path, path.stat().st_size))
+            stat = path.stat()
         except OSError:
             continue
+        available.append((row, path, stat.st_size, stat.st_mtime))
     if not available:
         return
-    captures = source_capture_timestamps([path for _, path, _ in available])
+    captures = source_capture_timestamps([path for _, path, _, _ in available])
     recovered = []
-    for row, path, size in available:
+    for row, path, size, mtime in available:
         try:
             capture = captures.get(path)
             recovered.append((row["id"], row["companion_path"], size,
                               capture.isoformat() if capture else None,
-                              compute_file_hash(str(path)) if size else None))
+                              compute_file_hash(str(path)) if size else None,
+                              mtime))
         except OSError:
             continue
     if not recovered:
@@ -278,7 +280,8 @@ def _recover_companion_batch(db, rows):
     try:
         db.conn.executemany(
             "INSERT OR REPLACE INTO companion_identities "
-            "(photo_id, filename, file_size, timestamp, file_hash) VALUES (?, ?, ?, ?, ?)",
+            "(photo_id, filename, file_size, timestamp, file_hash, file_mtime)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
             recovered,
         )
     except BaseException:
