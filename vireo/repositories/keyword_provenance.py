@@ -780,7 +780,7 @@ def _payload_references_keyword(data, keyword_id):
         except (TypeError, ValueError):
             pass
     if not references_src:
-        for k in (data.get("keyword_ids") or []):
+        for k in _payload_keyword_id_list(data):
             try:
                 if int(k) == keyword_id:
                     references_src = True
@@ -788,6 +788,18 @@ def _payload_references_keyword(data, keyword_id):
             except (TypeError, ValueError):
                 continue
     return references_src
+
+
+def _payload_keyword_id_list(data):
+    """A history payload's ``keyword_ids``, or ``[]`` when it is not a list.
+
+    Every writer stores a list, but a malformed payload (a bare int or a
+    string) must not abort a keyword merge or be iterated character by
+    character, so the reference check and the rewrite pass both read the
+    field through here and ignore anything else.
+    """
+    raw_kids = data.get("keyword_ids")
+    return raw_kids if isinstance(raw_kids, list) else []
 
 
 def _rewrite_payload_keyword_ids(data, src_id, dst_id):
@@ -801,8 +813,8 @@ def _rewrite_payload_keyword_ids(data, src_id, dst_id):
                 dirty = True
         except (TypeError, ValueError):
             pass
-    raw_kids = data.get("keyword_ids")
-    if isinstance(raw_kids, list) and raw_kids:
+    raw_kids = _payload_keyword_id_list(data)
+    if raw_kids:
         rewritten = []
         changed = False
         for k in raw_kids:
