@@ -21,7 +21,6 @@ from the caller. The path helpers come from ``db`` and are injected, since this
 module imports no ``db`` code.
 """
 
-import json
 import logging
 import os
 from collections.abc import Callable
@@ -1728,49 +1727,9 @@ class _StagedTreeMerge:
 
     def _carry_embedded_keyword_associations(self, losing_id, survivor_id):
         """Keep attached embedded tags without undoing a survivor's removal."""
-        def offered(photo_id):
-            return {row["keyword_key"] for row in self.conn.execute(
-                "SELECT keyword_key FROM photo_embedded_keyword_offered WHERE photo_id = ?",
-                (photo_id,),
-            )}
+        from keyword_identity import embedded_keyword_associations_for_merge
 
-        source_keys, target_keys = offered(losing_id), offered(survivor_id)
-        if not source_keys:
-            return
-        for row in self.conn.execute(
-                "SELECT k.id, k.name, k.parent_id, pk.source FROM photo_keywords pk "
-                "JOIN keywords k ON k.id = pk.keyword_id WHERE pk.photo_id = ?",
-                (losing_id,)).fetchall():
-            parts, parent_id, seen = [row["name"]], row["parent_id"], {row["id"]}
-            while parent_id is not None and parent_id not in seen:
-                seen.add(parent_id)
-                parent = self.conn.execute(
-                    "SELECT name, parent_id FROM keywords WHERE id = ?", (parent_id,),
-                ).fetchone()
-                if parent is None:
-                    break
-                parts.insert(0, parent["name"])
-                parent_id = parent["parent_id"]
-            paths = [parts] + [json.loads(alias["path_json"]) for alias in self.conn.execute(
-                "SELECT path_json FROM keyword_import_aliases WHERE keyword_id = ?",
-                (row["id"],),
-            )]
-            matched = set()
-            for path in paths:
-                full = "|".join(keyword_match_key(part) for part in path)
-                leaf = keyword_match_key(path[-1])
-                if full in source_keys:
-                    matched.add(full)
-                elif leaf in source_keys:
-                    matched.add(leaf)
-            if not matched:
-                continue
-            attached = self.conn.execute(
-                "SELECT 1 FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
-                (survivor_id, row["id"]),
-            ).fetchone()
-            if matched & target_keys and attached is None:
-                continue
+        for row in embedded_keyword_associations_for_merge(self.conn, losing_id, survivor_id):
             self.conn.execute(
                 "INSERT INTO photo_keywords (photo_id, keyword_id, source) VALUES (?, ?, ?) "
                 + self.KEYWORD_SOURCE_CONFLICT_SQL,

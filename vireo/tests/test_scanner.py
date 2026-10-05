@@ -1955,6 +1955,34 @@ def test_pairing_moves_embedded_keyword_offered_onto_the_survivor(tmp_path):
     assert db.get_embedded_keyword_offered_keys(jpeg_id) == set()
 
 
+@pytest.mark.parametrize("removed_on_raw", [False, True])
+@pytest.mark.parametrize("hierarchical", [False, True])
+def test_pairing_preserves_embedded_tags_and_raw_removals(tmp_path, removed_on_raw, hierarchical):
+    from db import Database
+    from scanner import _import_embedded_keywords_for_photo, _pair_raw_jpeg_companions
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path / "photos"))
+    jpeg = db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg",
+                        file_size=100, file_mtime=1.0)
+    raw = db.add_photo(folder_id=fid, filename="bird.cr3", extension=".cr3",
+                       file_size=200, file_mtime=1.0)
+    metadata = {"XMP": ({"HierarchicalSubject": ["Birds|Robin"]} if hierarchical
+                        else {"Subject": ["Robin"]})}
+    _import_embedded_keywords_for_photo(db, jpeg, metadata)
+    db.tag_photo(jpeg, db.add_keyword("Field note"))
+    if removed_on_raw:
+        _import_embedded_keywords_for_photo(db, raw, metadata)
+        for keyword in db.get_photo_keywords(raw):
+            db.untag_photo(raw, keyword["id"])
+
+    _pair_raw_jpeg_companions(db)
+
+    assert {k["name"] for k in db.get_photo_keywords(raw)} == (
+        {"Field note"} if removed_on_raw else {"Robin", "Field note"})
+    assert not _import_embedded_keywords_for_photo(db, raw, metadata)
+
+
 def test_pairing_invalidates_existing_raw_display_cache(tmp_path):
     """A newly paired camera JPEG must replace a pre-pairing RAW rendition."""
     from db import Database

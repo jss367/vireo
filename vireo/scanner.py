@@ -36,6 +36,7 @@ from image_loader import (
 )
 from keyword_identity import (
     drop_stale_vireo_location_keywords,
+    embedded_keyword_associations_for_merge,
     filter_removed_import_aliases,
     validate_import_locations,
 )
@@ -830,10 +831,9 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
             )
 
         # Transfer keywords from companion to primary
-        companion_keywords = db.conn.execute(
-            "SELECT keyword_id, source FROM photo_keywords WHERE photo_id = ?",
-            (companion["id"],),
-        ).fetchall()
+        companion_keywords = embedded_keyword_associations_for_merge(
+            db.conn, companion["id"], primary["id"], include_non_embedded=True,
+        )
         for kw in companion_keywords:
             # Move the association's provenance with it: pairing a RAW with
             # its camera JPEG must not turn the user's hand-added keywords
@@ -843,7 +843,7 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
             db.conn.execute(
                 "INSERT INTO photo_keywords (photo_id, keyword_id, source) "
                 "VALUES (?, ?, ?) " + KEYWORD_SOURCE_CONFLICT_SQL,
-                (primary["id"], kw["keyword_id"], kw["source"]),
+                (primary["id"], kw["id"], kw["source"]),
             )
 
         db.conn.execute(

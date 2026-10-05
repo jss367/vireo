@@ -937,6 +937,33 @@ def test_merge_into_existing_carries_source_keywords_onto_survivor(
     assert offered_keys == {"robin"}
 
 
+@pytest.mark.parametrize("removed_on_survivor", [False, True])
+@pytest.mark.parametrize("hierarchical", [False, True])
+def test_folder_merge_respects_embedded_keyword_removals(
+        db, tmp_path, removed_on_survivor, hierarchical):
+    from scanner import _import_embedded_keywords_for_photo
+
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    target = db.add_folder(str(target_dir), workspace_root=False)
+    source = db.add_folder(str(tmp_path / "missing"))
+    survivor = _photo(db, target, "bird.jpg")
+    duplicate = _photo(db, source, "bird.jpg")
+    metadata = {"XMP": ({"HierarchicalSubject": ["Birds|Robin"]} if hierarchical
+                        else {"Subject": ["Robin"]})}
+    _import_embedded_keywords_for_photo(db, duplicate, metadata)
+    if removed_on_survivor:
+        _import_embedded_keywords_for_photo(db, survivor, metadata)
+        for keyword in db.get_photo_keywords(survivor):
+            db.untag_photo(survivor, keyword["id"])
+
+    db._merge_into_existing(source, target, str(target_dir))
+
+    assert {k["name"] for k in db.get_photo_keywords(survivor)} == (
+        set() if removed_on_survivor else {"Robin"})
+    assert not _import_embedded_keywords_for_photo(db, survivor, metadata)
+
+
 # -- delete_folder ------------------------------------------------------------
 
 
