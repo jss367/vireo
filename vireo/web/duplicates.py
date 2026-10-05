@@ -14,6 +14,7 @@ import json
 import logging
 import os
 
+from duplicate_scan import revalidate_scan_result
 from flask import Blueprint, jsonify, request
 from photo_payload import attach_nested_edit_recipes
 from sql_chunks import chunked
@@ -348,6 +349,10 @@ def create_duplicates_blueprint(
         completed scan is valid for any active workspace — even though
         the row carries the triggering workspace's id.
 
+        Groups whose photos no longer match the catalog (an extra copy
+        deleted since, its id reused by a later import) are dropped before
+        serving; ``result.stale_group_count`` says how many.
+
         Response: ``{found: false}`` or
         ``{found: true, job_id, started_at, finished_at, result}``.
         """
@@ -367,6 +372,9 @@ def create_duplicates_blueprint(
             result = json.loads(row["result"])
         except (json.JSONDecodeError, TypeError):
             return jsonify({"found": False})
+        if not isinstance(result, dict):
+            return jsonify({"found": False})
+        result = revalidate_scan_result(db, result)
         attach_nested_edit_recipes(db, result)
         return jsonify({
             "found": True,

@@ -9,21 +9,45 @@ import json
 from playwright.sync_api import expect
 
 
-def _seed_prior_scan(db):
-    """Insert a synthetic completed duplicate-scan into job_history."""
+def _seed_prior_scan(db, stale_group=False, only_stale=False):
+    """Insert a completed duplicate-scan into job_history over real rows.
+
+    last-scan drops groups whose ids no longer name the same catalog file,
+    so the restored group must point at photos that exist. ``stale_group``
+    adds a second group whose ids name no photo. ``only_stale`` seeds a
+    single group whose ids name no photo and no live groups at all, so
+    revalidation drops every proposal.
+    """
+    proposals = []
+    if not only_stale:
+        fid = db.add_folder("/photos")
+        ids = [
+            db.add_photo(folder_id=fid, filename=name, extension=".jpg",
+                         file_size=1000, file_mtime=100.0, file_hash="HFAKE")
+            for name in ("a.jpg", "a (2).jpg")
+        ]
+        db.conn.execute("UPDATE photos SET flag='none' WHERE file_hash='HFAKE'")
+        proposals.append({
+            "file_hash": "HFAKE",
+            "status": "unresolved",
+            "winner": {"id": ids[0], "filename": "a.jpg", "path": "/photos/a.jpg", "file_size": 1000},
+            "losers": [
+                {"id": ids[1], "filename": "a (2).jpg", "path": "/photos/a (2).jpg", "file_size": 1000}
+            ],
+        })
+    if stale_group or only_stale:
+        proposals.append({
+            "file_hash": "HGONE",
+            "status": "resolved",
+            "winner": {"id": 9001, "filename": "b.jpg", "path": "/photos/b.jpg", "file_size": 1000},
+            "losers": [
+                {"id": 9002, "filename": "b-2.jpg", "path": "/photos/b-2.jpg", "file_size": 1000}
+            ],
+        })
     result = {
-        "group_count": 1,
+        "group_count": len(proposals),
         "loser_count": 1,
-        "proposals": [
-            {
-                "file_hash": "HFAKE",
-                "status": "unresolved",
-                "winner": {"id": 1, "filename": "a.jpg", "path": "/photos/a.jpg"},
-                "losers": [
-                    {"id": 2, "filename": "a (2).jpg", "path": "/photos/a (2).jpg"}
-                ],
-            }
-        ],
+        "proposals": proposals,
     }
     db.conn.execute(
         """INSERT INTO job_history
@@ -49,6 +73,42 @@ def test_duplicates_page_restores_prior_scan(live_server, page):
     expect(banner).to_contain_text("Showing results from your last scan")
     expect(page.locator("#emptyState")).not_to_be_visible()
     expect(page.locator("#results")).to_contain_text("HFAKE")
+    expect(banner).not_to_contain_text("no longer")
+
+
+def test_duplicates_page_hides_restored_groups_that_no_longer_match(
+    live_server, page,
+):
+    """A restored group whose photos are gone is hidden, and the banner
+    says so instead of showing cards for photos the ids no longer name."""
+    _seed_prior_scan(live_server["db"], stale_group=True)
+    page.goto(f"{live_server['url']}/duplicates")
+
+    banner = page.locator("#restoredBanner")
+    expect(banner).to_contain_text(
+        "1 group from that scan no longer matches your catalog and is hidden."
+    )
+    expect(page.locator("#results")).to_contain_text("HFAKE")
+    expect(page.locator("#results")).not_to_contain_text("b-2.jpg")
+
+
+def test_duplicates_page_all_stale_does_not_declare_library_clean(
+    live_server, page,
+):
+    """When every restored group's photos are gone, the empty state asks
+    for a fresh scan instead of claiming the library is clean — the old
+    scan only tells us its groups are out of date."""
+    _seed_prior_scan(live_server["db"], only_stale=True)
+    page.goto(f"{live_server['url']}/duplicates")
+
+    results = page.locator("#results")
+    expect(results).to_contain_text("The last scan is out of date")
+    expect(results).to_contain_text("Run a new scan")
+    expect(results).not_to_contain_text("Your library is clean")
+    # The banner's stale text would duplicate the empty-state message, so
+    # it is suppressed when nothing remains to show alongside it.
+    expect(page.locator("#restoredBanner")).to_be_visible()
+    expect(page.locator("#restoredStale")).to_have_text("")
 
 
 def test_duplicates_page_no_prior_scan_shows_empty_state(live_server, page):

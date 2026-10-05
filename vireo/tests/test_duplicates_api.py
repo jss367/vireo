@@ -744,6 +744,66 @@ def test_last_scan_picks_most_recent_completed(app_and_db):
     assert "HOLD" in hashes  # still present in the library
 
 
+def test_last_scan_drops_group_whose_extra_copy_id_was_reused(app_and_db, tmp_path):
+    """A deleted extra copy's id goes to the next photo added. The restored
+    group must not pair the kept photo with that unrelated newcomer."""
+    app, db = app_and_db
+    for name in ("k.jpg", "k (2).jpg", "r.jpg", "r-2.jpg"):
+        (tmp_path / name).write_bytes(b"x")  # buckets list folders on disk
+    fid = db.add_folder(str(tmp_path))
+    _seed_pair(db, "HKEEP", fid, name_a="k.jpg", name_b="k (2).jpg")
+    _keep, extra = _seed_pair(db, "HREUSE", fid, name_a="r.jpg", name_b="r-2.jpg")
+
+    client = app.test_client()
+    job_id = client.post("/api/duplicates/scan").get_json()["job_id"]
+    wait_for_job_via_client(client, job_id, wait_for_history=True)
+
+    first = client.get("/api/duplicates/last-scan").get_json()["result"]
+    assert sorted(first["buckets"][0]["file_hashes"]) == ["HKEEP", "HREUSE"]
+    assert first["stale_group_count"] == 0
+
+    db.delete_photos([extra])
+    newcomer = db.add_photo(
+        folder_id=fid, filename="unrelated.jpg", extension=".jpg",
+        file_size=5000, file_mtime=300.0, file_hash="HOTHER",
+    )
+    assert newcomer == extra  # SQLite reused the freed id
+
+    result = client.get("/api/duplicates/last-scan").get_json()["result"]
+    assert [p["file_hash"] for p in result["proposals"]] == ["HKEEP"]
+    assert result["stale_group_count"] == 1
+    assert result["group_count"] == 1
+    assert [h for b in result["buckets"] for h in b["file_hashes"]] == ["HKEEP"]
+
+
+def test_last_scan_keeps_group_with_a_current_extra_copy_left(app_and_db):
+    """Deleting one of two extra copies leaves a group that still applies."""
+    app, db = app_and_db
+    fid = db.add_folder("/tmp/duplastscanpartial")
+    keep, extra1 = _seed_pair(db, "HTRIO", fid, name_a="t.jpg", name_b="t (2).jpg")
+    extra2 = db.add_photo(
+        folder_id=fid, filename="t (3).jpg", extension=".jpg",
+        file_size=1000, file_mtime=300.0, file_hash="HTRIO",
+    )
+    db.conn.execute("UPDATE photos SET flag='none' WHERE file_hash='HTRIO'")
+    db.conn.commit()
+
+    client = app.test_client()
+    job_id = client.post("/api/duplicates/scan").get_json()["job_id"]
+    wait_for_job_via_client(client, job_id, wait_for_history=True)
+    proposal = client.get("/api/duplicates/last-scan").get_json()["result"]["proposals"][0]
+    assert proposal["winner"]["id"] == keep
+    gone = proposal["losers"][0]["id"]
+    left = ({extra1, extra2} - {gone}).pop()
+
+    db.delete_photos([gone])
+
+    result = client.get("/api/duplicates/last-scan").get_json()["result"]
+    assert result["stale_group_count"] == 0
+    assert [l["id"] for l in result["proposals"][0]["losers"]] == [left]
+    assert result["loser_count"] == 1
+
+
 def test_bulk_resolve_endpoint_resolves_by_folder(app_and_db, tmp_path):
     """POST /api/duplicates/bulk-resolve forces winners by keep_folder for
     every supplied hash and returns a summary."""
