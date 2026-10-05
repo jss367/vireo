@@ -2039,10 +2039,32 @@ class _PairedCatalog:
         monkeypatch.setattr(scanner, "_merge_companion_into_primary", merge)
         self.extracted = []
         real_extract = scanner.extract_metadata
+        # The dummy RAW is 200 null bytes and the JPEG has no EXIF, so a
+        # real exiftool run returns only File-group tags. On runners that
+        # ship no exiftool at all (Windows CI), the result is empty: the
+        # RAW's row then has NULL exif_data and NULL summary columns, which
+        # trips ``metadata_missing`` on the next rescan and sends both the
+        # RAW and its companion back through extraction. Fill in capture
+        # metadata for any path the real extractor leaves uncovered so the
+        # no-churn rescan tests measure the pairing path, not the host's
+        # exiftool availability. Outer monkeypatches that already provide
+        # metadata (e.g. ``test_raw_reread_keeps_metadata_only_its_companion_carries``)
+        # are preserved by using ``setdefault``.
+        default_payload = {
+            "EXIF": {
+                "DateTimeOriginal": "2024:01:15 10:30:00",
+                "Make": "TestCam",
+                "Model": "TestModel",
+            },
+            "Composite": {},
+        }
 
         def extract(paths, *args, **kwargs):
             self.extracted.extend(os.path.basename(p) for p in paths)
-            return real_extract(paths, *args, **kwargs)
+            result = dict(real_extract(paths, *args, **kwargs))
+            for path in paths:
+                result.setdefault(path, default_payload)
+            return result
 
         monkeypatch.setattr(scanner, "extract_metadata", extract)
         self.callbacks = []
