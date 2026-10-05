@@ -328,40 +328,45 @@ def _import_embedded_keywords_for_photo(db, photo_id, file_meta):
     only hides a value until the next XMP sync clears the queue entry, but
     Vireo cannot remove the value from the image itself, so an image rewrite
     or full rescan would otherwise re-tag the photo with a keyword the user
-    had already deleted. Every embedded leaf key offered to the photo is
+    had already deleted. Every embedded entry offered to the photo is
     recorded in ``photo_embedded_keyword_offered``; a key already in that
     record is filtered out before the import -- a user removal stands, and
     only genuinely new embedded entries (added by a later Lightroom export)
-    reach the tag writer.
+    reach the tag writer. Flat entries record their normalized leaf key;
+    hierarchies record the full normalized pipe-joined path (``birds|robin``,
+    not ``robin``) so a genuinely new hierarchy such as ``People|Robin``
+    isn't filtered out just because an earlier scan offered ``Birds|Robin``
+    -- ``_import_keyword_lists`` creates distinct keyword rows for those
+    paths (their parent IDs differ), so they are distinct tags.
     """
     flat_keywords, hier_keywords = embedded_keywords(file_meta or {})
     if not flat_keywords and not hier_keywords:
         return False
 
     offered = db.get_embedded_keyword_offered_keys(photo_id)
-    # Candidate leaves: flat entries map to their own key; a hierarchy's leaf
-    # is what ``_import_keyword_lists`` would actually tag. Suppressing on the
-    # leaf matches the shape of the tag we're guarding against -- the parent
-    # chain is additive hierarchy structure, not a tag the user removed.
+    # Candidate suppression keys: flat entries map to their own normalized
+    # leaf key; a hierarchy maps to its full normalized pipe-joined path so
+    # distinct hierarchies sharing a leaf (``Birds|Robin`` vs
+    # ``People|Robin``) record separately and don't collide.
     #
     # A malformed hierarchy whose ancestor normalizes to empty (e.g.
     # ``"Birds||Hawk"``) is skipped by ``_import_keyword_lists`` and so must
     # not be recorded as offered either; otherwise, once Lightroom rewrites
-    # the entry to ``"Birds|Hawk"``, the leaf would already be in the
+    # the entry to ``"Birds|Hawk"``, the path would already be in the
     # suppression set and every rescan would filter it out before the tag
     # writer ever saw it.
-    def _hier_leaf(parts):
+    def _hier_path(parts):
         if not parts or any(not keyword_match_key(part) for part in parts):
             return None
-        return keyword_match_key(parts[-1])
+        return "|".join(keyword_match_key(part) for part in parts)
 
     candidate_keys = {
         key for name in flat_keywords
         if (key := keyword_match_key(name))
     }
     for hier in hier_keywords:
-        if (leaf := _hier_leaf(hier.split("|"))) is not None:
-            candidate_keys.add(leaf)
+        if (path := _hier_path(hier.split("|"))) is not None:
+            candidate_keys.add(path)
 
     fresh_flat = [
         name for name in flat_keywords
@@ -369,8 +374,8 @@ def _import_embedded_keywords_for_photo(db, photo_id, file_meta):
     ]
     fresh_hier = [
         hier for hier in hier_keywords
-        if (leaf := _hier_leaf(hier.split("|"))) is not None
-        and leaf not in offered
+        if (path := _hier_path(hier.split("|"))) is not None
+        and path not in offered
     ]
 
     if fresh_flat or fresh_hier:

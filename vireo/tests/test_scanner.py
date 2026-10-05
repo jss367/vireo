@@ -1159,6 +1159,49 @@ def test_embedded_import_still_picks_up_newly_added_values(tmp_path):
     assert {k["name"] for k in db.get_photo_keywords(pid)} == {"Hawk"}
 
 
+def test_embedded_import_distinct_hierarchies_sharing_a_leaf_each_import(tmp_path):
+    """A new ``People|Robin`` imports after ``Birds|Robin`` was offered.
+
+    ``_import_keyword_lists`` creates distinct keyword rows for the two
+    paths because their parent chains differ, so they are genuinely
+    different tags. The suppression key for each hierarchy must therefore
+    track the full normalized path, not just its leaf -- otherwise the
+    second hierarchy's leaf would already be in the offered set and the
+    tag could never be imported.
+    """
+    from db import Database
+    from scanner import _import_embedded_keywords_for_photo
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
+    pid = db.add_photo(folder_id=folder_id, filename="bird.jpg",
+                       extension=".jpg", file_size=100, file_mtime=1.0)
+
+    first = {"XMP": {"HierarchicalSubject": ["Birds|Robin"]}}
+    assert _import_embedded_keywords_for_photo(db, pid, first) is True
+    assert db.get_embedded_keyword_offered_keys(pid) == {"birds|robin"}
+
+    # Lightroom later writes a genuinely new hierarchy that shares the leaf.
+    # The embedded import must not treat it as "already offered."
+    second = {"XMP": {"HierarchicalSubject": ["People|Robin"]}}
+    assert _import_embedded_keywords_for_photo(db, pid, second) is True
+    # Both normalized paths are now recorded, and the photo carries two
+    # distinct Robin keyword rows (one under Birds, one under People).
+    assert db.get_embedded_keyword_offered_keys(pid) == {
+        "birds|robin", "people|robin",
+    }
+    rows = db.conn.execute(
+        "SELECT k.name, k.parent_id FROM photo_keywords pk "
+        "JOIN keywords k ON k.id = pk.keyword_id "
+        "WHERE pk.photo_id = ?",
+        (pid,),
+    ).fetchall()
+    robin_parent_ids = {
+        row["parent_id"] for row in rows if row["name"] == "Robin"
+    }
+    assert len(robin_parent_ids) == 2
+
+
 def test_embedded_import_skips_malformed_hierarchy_without_recording_leaf(tmp_path):
     """A ``Birds||Hawk`` is skipped AND leaves ``hawk`` free for a later import.
 

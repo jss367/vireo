@@ -2434,6 +2434,7 @@ class Database:
             transfer_embedded_offered=(
                 self.transfer_embedded_keyword_offered_for_merge),
             relink_parents_by_path=self._relink_parents_by_path,
+            KEYWORD_SOURCE_CONFLICT_SQL=KEYWORD_SOURCE_CONFLICT_SQL,
         )
 
     # -- Move operations --
