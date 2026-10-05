@@ -66,7 +66,17 @@ def _post_snapshot_until_ready(client, timeout=5.0):
     )
 
 
-def test_api_new_images_reports_unscanned_files(app_and_db):
+def test_api_new_images_reports_unscanned_files(app_and_db, monkeypatch):
+    import new_images
+
+    real_count = new_images.count_new_images_for_workspace
+
+    def delayed_count(*args, **kwargs):
+        # Exercise the pending response rather than depend on a fast runner.
+        time.sleep(0.6)
+        return real_count(*args, **kwargs)
+
+    monkeypatch.setattr(new_images, "count_new_images_for_workspace", delayed_count)
     app, db, ws_id, tmp_path = app_and_db
     root = tmp_path / "shoot"
     _touch_image(str(root / "IMG.JPG"))
@@ -76,6 +86,13 @@ def test_api_new_images_reports_unscanned_files(app_and_db):
     resp = client.get("/api/workspaces/active/new-images")
     assert resp.status_code == 200
     data = resp.get_json()
+    deadline = time.monotonic() + 5.0
+    while data.get("pending") and time.monotonic() < deadline:
+        time.sleep(0.05)
+        resp = client.get("/api/workspaces/active/new-images")
+        assert resp.status_code == 200
+        data = resp.get_json()
+    assert not data.get("pending"), data
     assert data["new_count"] == 1
     assert len(data["per_root"]) == 1
     assert data["workspace_id"] == ws_id
