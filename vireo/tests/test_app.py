@@ -10727,117 +10727,6 @@ def test_create_app_defers_builtin_wildlife_retirement(tmp_path, monkeypatch):
     app._cleanup_app_resources()
 
 
-def test_create_app_repairs_duplicate_species_after_taxonomy_marking(
-    tmp_path, monkeypatch,
-):
-    """Startup must type/link legacy hierarchy leaves before stamping the
-    one-shot duplicate-species repair marker."""
-    from unittest.mock import MagicMock, patch
-
-    from db import Database
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    import config as cfg
-    import models
-    from app import create_app
-
-    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
-    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "vireo-models"))
-    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
-
-    db_path = str(tmp_path / "test.db")
-    thumb_dir = str(tmp_path / "thumbs")
-    os.makedirs(thumb_dir)
-    db = Database(db_path)
-    fid = db.add_folder("/photos", name="photos")
-    pid = db.add_photo(
-        folder_id=fid, filename="a.jpg", extension=".jpg",
-        file_size=100, file_mtime=1.0,
-    )
-    db.conn.execute(
-        "INSERT INTO taxa (id, inat_id, name, common_name, rank) "
-        "VALUES (2912, 2912, 'Auriparus flaviceps', 'Verdin', 'species')"
-    )
-    parent = db.add_keyword("Penduline tits")
-    nested = db.conn.execute(
-        "INSERT INTO keywords (name, parent_id, is_species, type) "
-        "VALUES ('Verdin', ?, 0, 'general')",
-        (parent,),
-    ).lastrowid
-    root = db.add_keyword("Verdin", is_species=True)
-    db.tag_photo(pid, nested)
-    db.tag_photo(pid, root)
-    db.conn.execute(
-        "DELETE FROM db_meta WHERE key = ?",
-        (Database._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
-    )
-    db.conn.commit()
-    db.close()
-
-    fake_tax = MagicMock()
-    fake_tax.lookup.side_effect = lambda name: (
-        {"taxon_id": 2912} if name == "Verdin" else None
-    )
-    with patch(
-        "taxonomy.load_local_taxonomy", return_value=fake_tax,
-    ) as load_taxonomy:
-        create_app(db_path=db_path, thumb_cache_dir=thumb_dir, api_token="test")
-
-    assert load_taxonomy.call_count == 1, (
-        "overlapping synchronous startup migrations must share one taxonomy parse"
-    )
-    db2 = Database(db_path, initialize_schema=False)
-    tagged_ids = {row["id"] for row in db2.get_photo_keywords(pid)}
-    assert nested in tagged_ids
-    assert root not in tagged_ids
-    assert db2.get_meta(Database._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY) == "1"
-    db2.close()
-
-
-def test_create_app_skips_taxonomy_when_duplicate_repair_is_impossible(
-    tmp_path, monkeypatch,
-):
-    """An empty/non-species catalog must not parse taxonomy.json merely to
-    stamp the one-time duplicate-species repair marker."""
-    from unittest.mock import patch
-
-    from db import Database
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    import config as cfg
-    import models
-    from app import create_app
-
-    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
-    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "vireo-models"))
-    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
-
-    db_path = str(tmp_path / "test.db")
-    thumb_dir = str(tmp_path / "thumbs")
-    os.makedirs(thumb_dir)
-
-    db = Database(db_path)
-    ws_id = db.ensure_default_workspace()
-    db.set_active_workspace(ws_id)
-    db.conn.execute(
-        "DELETE FROM db_meta WHERE key = ?",
-        (Database._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
-    )
-    db.conn.commit()
-    db.close()
-
-    with patch("taxonomy.load_local_taxonomy") as load_taxonomy:
-        app = create_app(
-            db_path=db_path, thumb_cache_dir=thumb_dir, api_token="test",
-        )
-        assert app is not None
-
-    load_taxonomy.assert_not_called()
-    db2 = Database(db_path, initialize_schema=False)
-    assert db2.get_meta(Database._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY) == "1"
-    db2.close()
-
-
 def test_create_app_runs_keyword_normalization_migration_on_file_db(
     tmp_path, monkeypatch,
 ):
@@ -15269,57 +15158,6 @@ def test_rename_species_representatives_species_chunks_large_photo_lists(tmp_pat
     ).fetchone()["c"]
     assert remaining_old == 0
     assert moved_new == len(photo_ids)
-
-
-def test_backfill_species_highlights_from_legacy_preferences(tmp_path):
-    """On upgraded databases, legacy photo_preferences rows with
-    purpose='highlights' should seed species_highlights so pre-existing
-    Highlights picks stay visible under the new ordered-highlights UI."""
-    from vireo.db import Database
-
-    db_path = tmp_path / "legacy.db"
-    db = Database(str(db_path))
-    ws_id = db._ws_id()
-    fid = db.conn.execute(
-        "INSERT INTO folders (path, name, status) VALUES ('/legacy', 'legacy', 'ok')"
-    ).lastrowid
-    db.conn.execute(
-        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
-        (ws_id, fid),
-    )
-    pid = db.conn.execute(
-        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
-        "VALUES (?, 'legacy.jpg', 0.9, 'none')",
-        (fid,),
-    ).lastrowid
-    db.conn.execute(
-        """INSERT INTO photo_preferences
-               (workspace_id, purpose, species, photo_id,
-                created_at, updated_at)
-           VALUES (?, 'highlights', 'Legacy Bird', ?,
-                   datetime('now'), datetime('now'))""",
-        (ws_id, pid),
-    )
-    # Clear the one-shot marker so re-running the backfill picks up the
-    # newly-added legacy row (simulates opening a DB that predated the
-    # ordered-highlights feature).
-    db.conn.execute(
-        "DELETE FROM db_meta WHERE key = ?",
-        (db._SPECIES_HIGHLIGHTS_BACKFILL_KEY,),
-    )
-    db.conn.commit()
-    db.backfill_species_highlights_from_legacy_preferences()
-
-    hl = db.get_species_highlights()
-    assert pid in (hl.get("Legacy Bird") or {})
-
-    # Marker set so subsequent calls are no-ops even if the row is missing.
-    marker = db.conn.execute(
-        "SELECT value FROM db_meta WHERE key = ?",
-        (db._SPECIES_HIGHLIGHTS_BACKFILL_KEY,),
-    ).fetchone()
-    assert marker is not None
-    db.close()
 
 
 def test_highlights_accepted_species_wins_over_higher_confidence_prediction(app_and_db):
@@ -20175,80 +20013,6 @@ def test_selection_prediction_suggestions_confidence_unknown_without_consensus_r
     # zero"), and not 0.95 (which would misattribute Sparrow's evidence).
     assert robin["min_confidence"] is None
     assert robin["max_confidence"] is None
-
-
-def test_selection_prediction_suggestions_offers_repaired_legacy_burst_as_own_species(
-    app_and_db,
-):
-    """A repaired legacy row becomes an ordinary, honest bucket.
-
-    This is the shape the endpoint used to suppress. A lone Sparrow-
-    labelled frame at 0.95, stamped by the pre-#1165 classifier with a
-    ``group_id`` and a Robin-winning vote dict, cleared an 0.80 floor on
-    its own raw score and then aggregated under Robin — an "Accept on 1"
-    for a species with no evidence above the floor. The endpoint answered
-    that by dropping the bucket and reporting the drop.
-
-    ``repair_mixed_species_prediction_groups`` removes the cause instead.
-    The row is ungrouped, so it means what it says: a 95% Sparrow
-    prediction. It surfaces as Sparrow at 0.95, actionable, and accepting
-    it tags Sparrow — nothing is hidden and nothing needs explaining.
-    """
-    import json as _json
-
-    app, db = app_and_db
-    # 0.80 floor: high enough that the pre-repair Robin bucket would have
-    # rested entirely on Sparrow's borrowed 0.95.
-    ws_id = db.get_workspaces()[0]["id"]
-    db.update_workspace(ws_id, config_overrides={"classifier_confidence": 0.80})
-
-    client = app.test_client()
-    folder_id = db.get_folder_tree()[0]["id"]
-    photo_id = db.add_photo(
-        folder_id=folder_id, filename="borrowed-only-above-threshold.jpg",
-        extension=".jpg", file_size=100, file_mtime=1.0,
-    )
-    det_id = db.save_detections(
-        photo_id,
-        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
-          "confidence": 0.9, "category": "animal"}],
-        detector_model="MDV6",
-    )[0]
-    db.add_prediction(
-        det_id, "Sparrow", 0.95, "bioclip",
-        group_id="burst-borrowed-above-threshold",
-        individual=_json.dumps({"Robin": 2, "Sparrow": 1}),
-    )
-
-    # The fixture's create_app already ran the repair against an empty
-    # catalog and stamped its one-shot marker. Clear the marker so the row
-    # above is met the way an upgrade meets it: written before the boot that
-    # repairs it.
-    db.conn.execute(
-        "DELETE FROM db_meta WHERE key = ?",
-        (type(db)._MIXED_SPECIES_GROUP_REPAIR_KEY,),
-    )
-    db.conn.commit()
-    assert db.repair_mixed_species_prediction_groups() == 1
-
-    resp = client.post(
-        "/api/selection/prediction-suggestions",
-        json={"photo_ids": [photo_id]},
-    )
-    assert resp.status_code == 200, resp.get_data(as_text=True)
-    data = resp.get_json()
-    predictions = data["predictions"]
-    assert [p["species"] for p in predictions] == ["Sparrow"]
-    sparrow = predictions[0]
-    # The score is the row's own, credited to the row's own species — the
-    # attribution problem is gone because the misattribution is gone.
-    assert sparrow["max_confidence"] == 0.95
-    assert sparrow["acceptable_photo_count"] == 1
-    assert data["below_threshold_count"] == 0
-    assert data["threshold"] == 0.80
-    # No second empty-state vocabulary: nothing is suppressed, so the
-    # endpoint has no suppression to report.
-    assert "suppressed_borrowed_count" not in data
 
 
 def test_selection_prediction_suggestions_keeps_bucket_when_matching_row_above_threshold(
@@ -26129,7 +25893,6 @@ def test_encounter_species_remove_redo_refreshes_pipeline_cache(app_and_db):
     assert cache["encounters"][0]["bursts"][0]["species_override"] == {
         "species": None, "confirmed": False, "species_list": [],
     }
-
 
 
 def test_encounter_species_remove_redo_with_disjoint_extras_keeps_empty_override(app_and_db):

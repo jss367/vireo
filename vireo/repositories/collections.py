@@ -51,7 +51,6 @@ class CollectionRepository:
         burst_gap_tolerance_seconds,
         needs_identification_rules,
         gps_without_location_keyword_rules,
-        no_location_information_rules,
         photo_date_asc_order,
         photo_sort_orders,
         prediction_confidence_sorts,
@@ -83,7 +82,6 @@ class CollectionRepository:
         self.BURST_GAP_TOLERANCE_SECONDS = burst_gap_tolerance_seconds
         self.NEEDS_IDENTIFICATION_RULES = needs_identification_rules
         self.GPS_WITHOUT_LOCATION_KEYWORD_RULES = gps_without_location_keyword_rules
-        self.NO_LOCATION_INFORMATION_RULES = no_location_information_rules
         self._PHOTO_DATE_ASC_ORDER = photo_date_asc_order
         self._PHOTO_SORT_ORDERS = photo_sort_orders
         self._PREDICTION_CONFIDENCE_SORTS = prediction_confidence_sorts
@@ -1549,139 +1547,6 @@ class CollectionRepository:
                     (name, json.dumps(rules), ws_id),
                 )
         self.conn.commit()
-
-    def migrate_default_location(self):
-        """Clarify default location collection names/rules across workspaces.
-
-        - ``Needs Location`` was the default collection for photos that already
-          have EXIF GPS but lack a structured Vireo location keyword. Rename
-          exact default instances to the more literal
-          ``GPS Without Location Keyword``.
-        - Some workspaces had a hand-built ``No Location`` collection using the
-          inverse of that rule. That actually meant "not GPS-without-keyword",
-          not "has no location". For that exact legacy rule, replace it with a
-          true ``No Location Information`` collection.
-        """
-        updated = 0
-        gps_rules = [
-            self.GPS_WITHOUT_LOCATION_KEYWORD_RULES,
-            {
-                "mode": "all",
-                "rules": self.GPS_WITHOUT_LOCATION_KEYWORD_RULES,
-            },
-        ]
-        no_location_inverse_rules = [
-            [{"field": "location_keyword_missing", "op": "equals", "value": 0}],
-            {
-                "mode": "all",
-                "rules": [
-                    {"field": "location_keyword_missing", "op": "equals", "value": 0},
-                ],
-            },
-        ]
-
-        rows = self.conn.execute(
-            "SELECT id, workspace_id, name, rules FROM collections "
-            "WHERE name IN ('Needs Location', 'No Location')"
-        ).fetchall()
-        for row in rows:
-            try:
-                current = json.loads(row["rules"])
-            except (TypeError, ValueError):
-                continue
-
-            if row["name"] == "Needs Location" and current in gps_rules:
-                self.conn.execute(
-                    "UPDATE collections SET name = ?, rules = ? WHERE id = ?",
-                    (
-                        "GPS Without Location Keyword",
-                        json.dumps(self.GPS_WITHOUT_LOCATION_KEYWORD_RULES),
-                        row["id"],
-                    ),
-                )
-                updated += 1
-                continue
-
-            if row["name"] == "No Location" and current in no_location_inverse_rules:
-                self.conn.execute(
-                    "UPDATE collections SET name = ?, rules = ? WHERE id = ?",
-                    (
-                        "No Location Information",
-                        json.dumps(self.NO_LOCATION_INFORMATION_RULES),
-                        row["id"],
-                    ),
-                )
-                updated += 1
-
-        if updated:
-            self.conn.commit()
-        return updated
-
-    def migrate_default_subject(self):
-        """Rename legacy 'Needs Classification' (with rule has_species==0)
-        to 'Needs Identification' (rule has_subject==0) across ALL workspaces.
-
-        Workspace activation does not re-run startup migrations, so an
-        upgraded multi-workspace database would otherwise leave non-active
-        workspaces stuck on the legacy rule. Skips collections the user has
-        customized. Idempotent."""
-        rows = self.conn.execute(
-            "SELECT id, workspace_id, rules FROM collections WHERE name = ?",
-            ("Needs Classification",),
-        ).fetchall()
-        legacy_rule = [{"field": "has_species", "op": "equals", "value": 0}]
-        for row in rows:
-            try:
-                current = json.loads(row["rules"])
-            except (TypeError, ValueError):
-                continue
-            if current != legacy_rule:
-                continue
-            # Don't clobber an existing "Needs Identification" in the SAME
-            # workspace (each workspace has its own default collections).
-            existing = self.conn.execute(
-                "SELECT 1 FROM collections WHERE workspace_id = ? AND name = ?",
-                (row["workspace_id"], "Needs Identification"),
-            ).fetchone()
-            if existing:
-                continue
-            self.conn.execute(
-                "UPDATE collections SET name = ?, rules = ? WHERE id = ?",
-                (
-                    "Needs Identification",
-                    json.dumps(self.NEEDS_IDENTIFICATION_RULES),
-                    row["id"],
-                ),
-            )
-        self.conn.commit()
-
-    def migrate_default_needs_identification(self):
-        """Upgrade the default Needs Identification rule to skip Not Wildlife.
-
-        User-customized collections are left alone; only the exact previous
-        default ``has_subject == 0`` rule is rewritten.
-        """
-        old_rule = [{"field": "has_subject", "op": "equals", "value": 0}]
-        rows = self.conn.execute(
-            "SELECT id, rules FROM collections WHERE name = ?",
-            ("Needs Identification",),
-        ).fetchall()
-        updated = 0
-        for row in rows:
-            try:
-                current = json.loads(row["rules"])
-            except (TypeError, ValueError):
-                continue
-            if current != old_rule:
-                continue
-            self.conn.execute(
-                "UPDATE collections SET rules = ? WHERE id = ?",
-                (json.dumps(self.NEEDS_IDENTIFICATION_RULES), row["id"]),
-            )
-            updated += 1
-        if updated:
-            self.conn.commit()
-        return updated
 
 
 _SQLITE_NUMERIC_TEXT_RE = re.compile(

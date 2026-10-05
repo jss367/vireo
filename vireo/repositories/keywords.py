@@ -10,9 +10,9 @@ This module owns the SQL behind the keyword domain:
   species) and ``untag``;
 - species-name resolution (``resolve_species_display``, taxon lookup,
   case-convention detection, lineage resolution, species marking);
-- the one-shot normalization and repair sweeps (``normalize_data``,
-  ``repair_duplicate_photo_species``, the curation case alignment, the
-  prediction apostrophe fold and its merge helpers), and the scope and
+- the one-shot normalization sweep (``normalize_data``, the curation case
+  alignment, the prediction apostrophe fold and its merge helpers), and the
+  scope and
   liveness reads of ``Database._merge_duplicate_keywords_pass``.
 
 The method bodies were moved verbatim from ``Database``. The only edits are
@@ -71,7 +71,6 @@ from keyword_normalization import keyword_match_key, normalize_keyword_display
 FACADE_METHODS = (
     "get_meta",
     "set_meta",
-    "queue_change",
     "rename_photo_preferences_species",
     "rename_species_highlights_species",
     "rename_species_representatives_species",
@@ -110,7 +109,6 @@ class KeywordRepository:
         taxon_lookup_variants,
         resolve_import_alias,
         filter_subject_chunk,
-        duplicate_photo_species_repair_key,
         facade,
     ):
         self.conn = conn
@@ -128,7 +126,6 @@ class KeywordRepository:
         self.resolve_import_alias = resolve_import_alias
         # ``Database`` class attributes, kept under their class names.
         self._FILTER_SUBJECT_CHUNK = filter_subject_chunk
-        self._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY = duplicate_photo_species_repair_key
         # The ``Database`` itself, for the two helpers the moved bodies hand
         # it to (``resolve_import_alias`` and ``SpeciesResolver``).
         self.db = facade
@@ -297,25 +294,6 @@ class KeywordRepository:
                 "INSERT INTO keywords (name, type, is_species) VALUES (?, 'genre', 0)",
                 (name,),
             )
-        self.conn.commit()
-
-    def migrate_legacy_types(self):
-        """One-shot migration of legacy keyword type names to the canonical
-        enum. Idempotent — once all rows are migrated, the warm-path
-        short-circuits cheaply (single SELECT 1 LIMIT 1) so this is safe to
-        call from Database.__init__ on every instantiation.
-
-        This runs before default genre seeding so old rows settle onto the
-        canonical enum before same-name defaults are reconciled.
-        """
-        legacy = self.conn.execute(
-            "SELECT 1 FROM keywords WHERE type IN ('people', 'descriptive', 'event') LIMIT 1"
-        ).fetchone()
-        if not legacy:
-            return
-        self.conn.execute("UPDATE keywords SET type = 'individual' WHERE type = 'people'")
-        self.conn.execute("UPDATE keywords SET type = 'general' WHERE type = 'descriptive'")
-        self.conn.execute("UPDATE keywords SET type = 'general' WHERE type = 'event'")
         self.conn.commit()
 
     def count(self):
@@ -564,7 +542,7 @@ class KeywordRepository:
         ``resolve_species_display_name`` uses the same lookup to route
         curation keys through the canonical root when only a hierarchy
         alias is stored (e.g. a leaf ``Desert Verdin`` after
-        ``repair_duplicate_photo_species`` detached the top-level
+        the retired duplicate-species repair detached the top-level
         ``Verdin``). Callers with the taxon id in hand can skip the
         name-based lookup and go straight to the root row.
         """
@@ -1957,428 +1935,6 @@ class KeywordRepository:
             if len(set(names)) == 1
         }
         return unique, set(species_by_key.keys())
-
-    def has_possible_duplicate_photo_species(self):
-        """Whether any photo carries a typed species/taxonomy tag beside
-        another tag.
-
-        The legacy bug ``repair_duplicate_photo_species`` cleans up always
-        left such a pair, so ``False`` means the repair cannot find anything
-        and its one-shot marker is safe to stamp without parsing taxonomy.
-        """
-        return self.conn.execute(
-            """SELECT 1
-               FROM photo_keywords species_pk
-               JOIN keywords species_k
-                 ON species_k.id = species_pk.keyword_id
-               WHERE (species_k.is_species = 1
-                      OR species_k.type = 'taxonomy')
-                 AND EXISTS (
-                     SELECT 1
-                     FROM photo_keywords other_pk
-                     WHERE other_pk.photo_id = species_pk.photo_id
-                       AND other_pk.keyword_id != species_pk.keyword_id
-                 )
-               LIMIT 1"""
-        ).fetchone() is not None
-
-    def repair_duplicate_photo_species(self):
-        """Remove redundant same-photo associations for one species taxon.
-
-        Older imports preserved Lightroom hierarchy leaves, while later
-        species confirmations attached a second top-level keyword row. Both
-        rows are useful globally, but one photo should not carry both for the
-        same species-rank taxon. Remove only top-level associations when at
-        least one hierarchy-bearing association exists; multiple deliberate
-        hierarchy placements remain intact. Leave photo-scoped curation on
-        the root spelling because that keyword row remains the canonical
-        species key, and leave all keyword rows intact.
-
-        Pending keyword changes are name-based rather than keyword-id-based.
-        Once the hierarchy association survives, a queued remove for either
-        spelling would incorrectly erase the surviving XMP keyword. Cancel
-        matching adds/removes; the hierarchical association originated from
-        that sidecar and remains the source of truth.
-
-        When a detached root's spelling does not survive on the photo (for
-        example a root ``Verdin`` is detached because a hierarchical alias
-        ``Birds|Desert Verdin`` is kept), the sidecar's previously synced
-        ``dc:subject: Verdin`` still names a keyword the DB no longer
-        carries. Left alone, the next XMP-to-DB scan would flat-import
-        ``Verdin`` and re-attach the top-level row this repair just
-        removed. Queue a ``keyword_remove`` for those orphaned spellings
-        so ``sync_to_xmp`` clears them from the sidecar; skip the queue
-        when a surviving row (species or general, hierarchical or not)
-        already carries the same normalized name, since the scanner's
-        per-photo dedup keeps the flat entry from re-tagging in that case
-        and a hierarchical remove would strip the surviving keyword.
-        """
-        if self.get_meta(self._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY) == "1":
-            return 0
-        if self.conn.execute(
-            "SELECT 1 FROM taxa WHERE rank = 'species' LIMIT 1"
-        ).fetchone() is None:
-            # Taxonomy JSON can exist before the download job has populated
-            # the local taxa table. Without species rows, differently-spelled
-            # aliases cannot yet be grouped; leave the marker unset to retry.
-            return 0
-        removed_count = 0
-        try:
-            rows = self.conn.execute(
-                """SELECT pk.photo_id, k.id AS keyword_id, k.name,
-                          k.parent_id, k.taxon_id, t.rank AS taxon_rank
-                   FROM photo_keywords pk
-                   JOIN keywords k ON k.id = pk.keyword_id
-                   LEFT JOIN taxa t ON t.id = k.taxon_id
-                   WHERE (k.is_species = 1 OR k.type = 'taxonomy')
-                     AND (t.rank = 'species' OR k.taxon_id IS NULL)
-                   ORDER BY pk.photo_id,
-                            CASE WHEN k.parent_id IS NULL THEN 1 ELSE 0 END,
-                            k.id"""
-            ).fetchall()
-            by_photo = {}
-            for row in rows:
-                by_photo.setdefault(row["photo_id"], []).append(row)
-
-            # A key with multiple linked taxa anywhere in the catalog is an
-            # ambiguous homonym (e.g. legacy ``Robin`` alongside taxonomy
-            # ``robin`` bound to different taxa). ``get_photos_with_equivalent_species``
-            # gates its NULL-taxon fallback the same way; without the guard
-            # here, a NULL-taxon leaf on a photo that also carries one linked
-            # root gets folded into that root's group, the root is treated
-            # as a redundant duplicate, and the accepted taxonomy species is
-            # detached from the photo.
-            homonym_keys = set()
-            key_taxa = {}
-            for row in self.conn.execute(
-                """SELECT DISTINCT k.name, k.taxon_id
-                   FROM keywords k
-                   WHERE (k.is_species = 1 OR k.type = 'taxonomy')
-                     AND k.taxon_id IS NOT NULL"""
-            ).fetchall():
-                key = keyword_match_key(row["name"])
-                taxa = key_taxa.setdefault(key, set())
-                taxa.add(row["taxon_id"])
-                if len(taxa) > 1:
-                    homonym_keys.add(key)
-
-            grouped = {}
-            for photo_id, photo_rows in by_photo.items():
-                linked = {}
-                unlinked = {}
-                for row in photo_rows:
-                    if row["taxon_id"] is not None:
-                        linked.setdefault(row["taxon_id"], []).append(row)
-                    else:
-                        unlinked.setdefault(
-                            keyword_match_key(row["name"]), []
-                        ).append(row)
-                # Fold a legacy NULL-taxon spelling into a unique linked
-                # species group on the same photo. If multiple linked taxa
-                # share that common name, or the same key is a known homonym
-                # bound to different taxa elsewhere, leave it alone rather
-                # than guessing.
-                for name_key, null_rows in unlinked.items():
-                    if name_key in homonym_keys:
-                        grouped[(photo_id, "name", name_key)] = null_rows
-                        continue
-                    candidates = [
-                        taxon_id for taxon_id, linked_rows in linked.items()
-                        if any(
-                            keyword_match_key(row["name"]) == name_key
-                            for row in linked_rows
-                        )
-                    ]
-                    if len(candidates) == 1:
-                        linked[candidates[0]].extend(null_rows)
-                    else:
-                        grouped[(photo_id, "name", name_key)] = null_rows
-                for taxon_id, linked_rows in linked.items():
-                    grouped[(photo_id, "taxon", taxon_id)] = linked_rows
-
-            for group_key, group in grouped.items():
-                photo_id = group_key[0]
-                if len(group) < 2:
-                    continue
-                nested = sorted(
-                    (row for row in group if row["parent_id"] is not None),
-                    key=lambda row: row["keyword_id"],
-                )
-                remove = [row for row in group if row["parent_id"] is None]
-                if not nested or not remove:
-                    continue
-                if group_key[1] == "name":
-                    # Unlinked (NULL-taxon) rows are grouped by
-                    # ``keyword_match_key`` only. Curation/eligibility for
-                    # unlinked species keys is compared with exact
-                    # ``k.name`` — there is no taxon fallback that maps a
-                    # differently-spelled leaf back to the root spelling.
-                    # Detaching root ``Foo`` while only leaf ``foo``
-                    # remains would strand highlights/representatives/
-                    # life-list preferences saved under ``Foo``. Restrict
-                    # removal to root rows whose exact spelling matches at
-                    # least one surviving leaf so exact-name eligibility
-                    # keeps applying; different-spelling unlinked
-                    # duplicates stay attached until a taxon link makes
-                    # canonicalization safe.
-                    nested_names = {row["name"] for row in nested}
-                    remove = [row for row in remove if row["name"] in nested_names]
-                    if not remove:
-                        continue
-                # Preserve every hierarchy placement; detach only root rows.
-                remove_ids = [row["keyword_id"] for row in remove]
-                placeholders = ",".join("?" for _ in remove_ids)
-                self.conn.execute(
-                    f"""DELETE FROM photo_keywords
-                        WHERE photo_id = ? AND keyword_id IN ({placeholders})""",
-                    [photo_id, *remove_ids],
-                )
-                removed_count += len(remove_ids)
-
-                # Drop this photo's undo/redo items that reference a root tag
-                # the repair detached. Keyword add/remove handlers read the
-                # shared parent edit_history.new_value, so merely retargeting
-                # edit_history_items would let redo attach the redundant root
-                # again. Prediction accepts record each actual tag per item.
-                # Deleting only the affected item preserves other photos in
-                # a batch; empty parent edits are
-                # removed below. Scope by action/column so an unrelated rating
-                # or prediction id with the same numeric value is untouched.
-                # ``no_tag`` prediction_accept items (JSON old_value carrying
-                # ``"no_tag": true``) already skip tag mutations on undo/redo
-                # because the photo carried the species via an equivalent
-                # row, so keeping them cannot reattach the detached root and
-                # dropping them would erase the only audit/undo record of
-                # the accepted prediction-status flip.
-                for removed in remove:
-                    removed_id = str(removed["keyword_id"])
-                    self.conn.execute(
-                        """DELETE FROM edit_history_items
-                           WHERE photo_id = ?
-                             AND edit_id IN (
-                                 SELECT id FROM edit_history
-                                 WHERE (
-                                     action_type = 'keyword_add'
-                                     AND edit_history_items.new_value = ?
-                                 ) OR (
-                                     action_type = 'prediction_accept'
-                                     AND edit_history_items.new_value = ?
-                                     AND (
-                                         edit_history_items.old_value IS NULL
-                                         OR edit_history_items.old_value
-                                             NOT LIKE '%"no_tag"%'
-                                     )
-                                 ) OR (
-                                     action_type = 'keyword_remove'
-                                     AND edit_history_items.old_value = ?
-                                 ) OR (
-                                     action_type = 'species_replace'
-                                     AND (
-                                         edit_history_items.old_value = ?
-                                         OR edit_history_items.new_value = ?
-                                     )
-                                 )
-                             )""",
-                        (photo_id, removed_id, removed_id, removed_id,
-                         removed_id, removed_id),
-                    )
-
-                # species_replace items can store ``old_value`` as a JSON
-                # payload carrying ``keyword_id``/``keyword_ids`` when the
-                # replace swapped out multiple old species rows for one
-                # photo. A bare-string equality misses those, so an undo/redo
-                # would parse the JSON and re-tag the detached root, undoing
-                # the repair. Scan JSON payloads on this photo and drop any
-                # species_replace item whose keyword_id(s) contains the
-                # detached root.
-                removed_id_ints = {int(row["keyword_id"]) for row in remove}
-                json_items = self.conn.execute(
-                    """SELECT ehi.id, ehi.old_value
-                       FROM edit_history_items ehi
-                       JOIN edit_history eh ON eh.id = ehi.edit_id
-                       WHERE ehi.photo_id = ?
-                         AND eh.action_type = 'species_replace'
-                         AND ehi.old_value IS NOT NULL
-                         AND ehi.old_value LIKE '{%'""",
-                    (photo_id,),
-                ).fetchall()
-                for item in json_items:
-                    try:
-                        payload = json.loads(item["old_value"])
-                    except (TypeError, ValueError):
-                        continue
-                    if not isinstance(payload, dict):
-                        continue
-                    references_removed = False
-                    raw_kid = payload.get("keyword_id")
-                    if raw_kid is not None:
-                        try:
-                            if int(raw_kid) in removed_id_ints:
-                                references_removed = True
-                        except (TypeError, ValueError):
-                            pass
-                    if not references_removed:
-                        for k in (payload.get("keyword_ids") or []):
-                            try:
-                                if int(k) in removed_id_ints:
-                                    references_removed = True
-                                    break
-                            except (TypeError, ValueError):
-                                continue
-                    if references_removed:
-                        self.conn.execute(
-                            "DELETE FROM edit_history_items WHERE id = ?",
-                            (item["id"],),
-                        )
-
-                self.conn.execute(
-                    """DELETE FROM edit_history
-                       WHERE id NOT IN (
-                           SELECT DISTINCT edit_id FROM edit_history_items
-                       )"""
-                )
-
-                # Only cancel pending changes for the root spellings actually
-                # being detached. Using every name in ``group`` here would
-                # also match preserved hierarchy leaves — e.g. a leaf
-                # ``Desert Verdin`` that a user tagged shortly before the
-                # repair runs. That pending ``keyword_add`` must still reach
-                # the sidecar, otherwise ``sync_to_xmp`` writes only the
-                # root cleanup and the preserved hierarchy never appears
-                # in XMP.
-                remove_keys = {
-                    keyword_match_key(row["name"]) for row in remove
-                }
-                pending = self.conn.execute(
-                    """SELECT id, change_type, value FROM pending_changes
-                       WHERE photo_id = ?
-                         AND change_type IN ('keyword_add', 'keyword_remove')""",
-                    (photo_id,),
-                ).fetchall()
-                pending_ids = []
-                cancelled_add_keys = set()
-                for row in pending:
-                    key = keyword_match_key(row["value"] or "")
-                    if key not in remove_keys:
-                        continue
-                    pending_ids.append(row["id"])
-                    if row["change_type"] == "keyword_add":
-                        cancelled_add_keys.add(key)
-                for chunk in self._chunks(pending_ids):
-                    pending_placeholders = ",".join("?" for _ in chunk)
-                    self.conn.execute(
-                        f"DELETE FROM pending_changes WHERE id IN ({pending_placeholders})",
-                        chunk,
-                    )
-
-                # Split post-repair surviving names into two buckets:
-                #
-                # * attached-leaf keys — names of keywords still directly
-                #   tagged on the photo. The scanner's flat dedup during
-                #   a later XMP re-import already skips a matching
-                #   ``dc:subject`` entry, so no sidecar remove is needed.
-                # * ancestor-only keys — names that appear only in the
-                #   parent chain of a surviving hierarchical leaf. The
-                #   scanner does NOT count these when building its
-                #   per-photo ``existing_keys`` (it uses attached leaf
-                #   names only, see ``scanner._import_keywords_for_photo``),
-                #   so a stale ``dc:subject: Verdin`` next to a preserved
-                #   ``Verdin|Desert Verdin`` will be reimported and
-                #   reattach the flat root — recreating the very
-                #   duplicate this repair just removed. Queue a
-                #   flat-only sidecar remove for these; a plain
-                #   ``keyword_remove`` cannot be used because
-                #   ``sync_to_xmp`` applies it hierarchically and would
-                #   strip the preserved ``lr:hierarchicalSubject`` entry.
-                attached_leaf_keys = set()
-                ancestor_only_keys = set()
-                for row in self.conn.execute(
-                    """WITH RECURSIVE anc(id, name, parent_id, is_leaf) AS (
-                           SELECT k.id, k.name, k.parent_id, 1
-                             FROM photo_keywords pk
-                             JOIN keywords k ON k.id = pk.keyword_id
-                            WHERE pk.photo_id = ?
-                           UNION
-                           SELECT k.id, k.name, k.parent_id, 0
-                             FROM keywords k
-                             JOIN anc ON anc.parent_id = k.id
-                       )
-                       SELECT name, MAX(is_leaf) AS leaf
-                         FROM anc GROUP BY id""",
-                    (photo_id,),
-                ).fetchall():
-                    key = keyword_match_key(row["name"])
-                    if not key:
-                        continue
-                    if row["leaf"]:
-                        attached_leaf_keys.add(key)
-                    else:
-                        ancestor_only_keys.add(key)
-                # The repair scans photo_keywords globally, but
-                # pending_changes are filtered by workspace at read
-                # time (get_pending_changes uses the active workspace).
-                # A photo whose folder is not in the active workspace
-                # would otherwise get its sidecar remove queued under
-                # a workspace that will never sync it, leaving the
-                # stale root spelling in XMP for the real workspace(s)
-                # to re-import. Queue the remove for every workspace
-                # that actually contains this photo; fall back to the
-                # active workspace only when the photo has no
-                # workspace membership at all.
-                photo_workspaces = [
-                    row["workspace_id"]
-                    for row in self.conn.execute(
-                        """SELECT DISTINCT wf.workspace_id
-                           FROM photos p
-                           JOIN photo_workspace_visibility wf
-                             ON wf.photo_id = p.id
-                           WHERE p.id = ?""",
-                        (photo_id,),
-                    ).fetchall()
-                ]
-                for removed in remove:
-                    key = keyword_match_key(removed["name"])
-                    if not key or key in attached_leaf_keys:
-                        continue
-                    if key in cancelled_add_keys:
-                        # The flat root add was still pending — cancelling
-                        # it above already prevents the sidecar from ever
-                        # receiving it, so no remove is required.
-                        continue
-                    # Ancestor-only survivors need flat-only cleanup:
-                    # strip the stale ``dc:subject`` entry without the
-                    # hierarchical sweep that would also drop the
-                    # preserved ``lr:hierarchicalSubject`` line.
-                    change_type = (
-                        "keyword_remove_flat"
-                        if key in ancestor_only_keys
-                        else "keyword_remove"
-                    )
-                    if photo_workspaces:
-                        for ws_id in photo_workspaces:
-                            self.queue_change(
-                                photo_id, change_type, removed["name"],
-                                workspace_id=ws_id, _commit=False,
-                            )
-                    else:
-                        self.queue_change(
-                            photo_id, change_type, removed["name"],
-                            _commit=False,
-                        )
-
-            self.set_meta(
-                self._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY, "1", _commit=False
-            )
-            self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
-        if removed_count:
-            self.log.info(
-                "repaired %d redundant same-photo species keyword association(s)",
-                removed_count,
-            )
-        return removed_count
 
     def reparent_disambiguated(self, child, dst_id, new_name):
         """Move a colliding child under ``dst_id`` under a free name.

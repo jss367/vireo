@@ -586,33 +586,6 @@ def test_ensure_default_genre_keywords_is_idempotent(db):
     assert after == before
 
 
-def test_migrate_legacy_keyword_types(db):
-    ids = {
-        legacy: _raw_kw(db, f"Legacy {legacy}", kw_type=legacy)
-        for legacy in ("people", "descriptive", "event", "location")
-    }
-    db.conn.commit()
-    db.migrate_legacy_keyword_types()
-    assert not db.conn.in_transaction
-    got = {
-        legacy: _visible(db, "SELECT type FROM keywords WHERE id = ?", (kid,))[0][0]
-        for legacy, kid in ids.items()
-    }
-    assert got == {
-        "people": "individual",
-        "descriptive": "general",
-        "event": "general",
-        "location": "location",
-    }
-    # Warm path: nothing legacy left, so only the probe runs.
-    statements = _trace(db)
-    db.migrate_legacy_keyword_types()
-    db.conn.set_trace_callback(None)
-    assert [s for s in statements if s.strip()] == [
-        "SELECT 1 FROM keywords WHERE type IN ('people', 'descriptive', 'event') LIMIT 1"
-    ]
-
-
 # -- update_keyword ------------------------------------------------------------------------
 
 
@@ -1176,87 +1149,6 @@ def test_species_keyword_maps_and_canonical(db, lib, monkeypatch):
 # -- duplicate photo species repair --------------------------------------------------------
 
 
-def _repair_setup(db, lib):
-    p0, p1 = lib["p"][:2]
-    root = _raw_kw(db, "Verdin", kw_type="taxonomy", is_species=1, taxon_id=3)
-    birds = _raw_kw(db, "Birds")
-    leaf = _raw_kw(db, "Desert Verdin", birds, "taxonomy", 1, taxon_id=3)
-    db.conn.execute("DELETE FROM db_meta WHERE key = ?",
-                    (Database._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,))
-    db.conn.commit()
-    for pid in (p0, p1):
-        db.tag_photo(pid, root)
-        db.tag_photo(pid, leaf)
-    return root, leaf
-
-
-def test_repair_duplicate_photo_species_detaches_roots(db, lib, monkeypatch, caplog):
-    p0, p1 = lib["p"][:2]
-    root, leaf = _repair_setup(db, lib)
-    db.queue_change(p0, "keyword_add", "Verdin")
-    queued = []
-    real_queue = db.queue_change
-    monkeypatch.setattr(db, "queue_change",
-                        lambda *a, **k: queued.append((a, k)) or real_queue(*a, **k))
-    with caplog.at_level("INFO", logger="db"):
-        assert db.repair_duplicate_photo_species() == 2
-    assert not db.conn.in_transaction
-    assert _visible(db, "SELECT photo_id, keyword_id FROM photo_keywords ORDER BY photo_id") == [
-        (p0, leaf), (p1, leaf),
-    ]
-    # p0's pending add was cancelled; p1 gets a sidecar remove queued.
-    assert [(a[0], a[1], a[2], k) for a, k in queued] == [
-        (p1, "keyword_remove", "Verdin", {"workspace_id": lib["ws"], "_commit": False}),
-    ]
-    assert db.get_meta(Database._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY) == "1"
-    assert "repaired 2 redundant" in caplog.text
-    assert db.repair_duplicate_photo_species() == 0
-
-
-def test_repair_duplicate_photo_species_waits_for_taxa(db, lib):
-    _repair_setup(db, lib)
-    db.conn.execute("UPDATE taxa SET rank = 'genus' WHERE rank = 'species'")
-    db.conn.commit()
-    assert db.repair_duplicate_photo_species() == 0
-    assert db.get_meta(Database._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY) is None
-
-
-def test_repair_duplicate_photo_species_rolls_back(db, lib, monkeypatch):
-    _repair_setup(db, lib)
-
-    def boom(*a, **k):
-        raise RuntimeError("queue failed")
-
-    monkeypatch.setattr(db, "queue_change", boom)
-    with pytest.raises(RuntimeError, match="queue failed"):
-        db.repair_duplicate_photo_species()
-    assert not db.conn.in_transaction
-    assert _visible(db, "SELECT COUNT(*) FROM photo_keywords") == [(4,)]
-    assert db.get_meta(Database._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY) is None
-
-
-def test_repair_duplicate_photo_species_prunes_edit_history(db, lib):
-    p0 = lib["p"][0]
-    root, leaf = _repair_setup(db, lib)
-    edit = db.conn.execute(
-        "INSERT INTO edit_history (action_type, description, new_value, workspace_id) "
-        "VALUES ('species_replace', 'x', 'v', ?)", (lib["ws"],)).lastrowid
-    values = [
-        json.dumps({"keyword_id": root}),
-        json.dumps({"keyword_ids": ["x", root]}),
-        json.dumps({"keyword_id": "bad", "keyword_ids": [leaf]}),
-        "{broken",
-        json.dumps([root]),
-    ]
-    ids = [db.conn.execute(
-        "INSERT INTO edit_history_items (edit_id, photo_id, old_value, new_value) "
-        "VALUES (?, ?, ?, 'n')", (edit, p0, v)).lastrowid for v in values]
-    db.conn.commit()
-    db.repair_duplicate_photo_species()
-    left = [r[0] for r in db.conn.execute("SELECT id FROM edit_history_items ORDER BY id")]
-    assert left == ids[2:]
-
-
 # -- species marking -----------------------------------------------------------------------
 
 
@@ -1332,7 +1224,6 @@ def test_resolve_species_by_lineage(db, lib):
 _DELEGATING_KEYWORD_METHODS = (
     "filter_out_subject_tagged",
     "ensure_default_genre_keywords",
-    "migrate_legacy_keyword_types",
     "count_keywords",
     "count_keywords_in_workspace",
     "get_accepted_species",
@@ -1355,8 +1246,6 @@ _DELEGATING_KEYWORD_METHODS = (
     "_align_curation_species_case",
     "_align_curation_history_species",
     "_species_keyword_maps",
-    "has_possible_duplicate_photo_species",
-    "repair_duplicate_photo_species",
     "_reparent_disambiguated",
     "get_keyword_tree",
     "untag_photo",

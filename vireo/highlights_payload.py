@@ -821,7 +821,7 @@ def build_life_list_payload(
         )
 
     # Canonicalize each row's species to the root keyword's stored
-    # spelling. After repair_duplicate_photo_species detaches a
+    # spelling. After the retired duplicate-species repair detached a
     # redundant root row, a photo may only carry the hierarchy leaf
     # (``verdin``) whose spelling differs from the curation-keyed
     # root (``Verdin``); without canonicalization, that photo would

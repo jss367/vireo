@@ -148,8 +148,8 @@ function predictionEmptyMessage(state, hiddenCount) {
     // borrowed-confidence suppression had dropped and naming that as the
     // reason the panel was empty. Both the suppression and this branch are
     // retired: the only rows that could reach them were legacy
-    // mixed-consensus bursts, which
-    // `Database.repair_mixed_species_prediction_groups` clears at startup.
+    // mixed-consensus bursts, which a since-retired one-shot repair cleared
+    // and current classification never writes.
     // The two remaining branches are exhaustive again — with nothing
     // suppressed, an empty panel under a classifier that ran means either
     // the floor hid everything or there was nothing to hide.
@@ -407,9 +407,9 @@ function renderDetailPredictions(data, photoId) {
   // null` was dropped, counted, and explained in its own empty-state
   // sentence. Retired along with the server's copy. A pending bucket can
   // only keep a null confidence when every row in it is labelled with a
-  // species other than the one the accept path applies, and
-  // `Database.repair_mixed_species_prediction_groups` clears that shape out
-  // of the catalog at startup — a grouped row's consensus is now its own
+  // species other than the one the accept path applies, and a since-retired
+  // one-shot repair cleared that shape out of the catalog (current
+  // classification never writes it) — a grouped row's consensus is now its own
   // species, so a surviving row always credits its own bucket. (With
   // `threshold > 0` the row filter above has already dropped any row whose
   // confidence is null or zero, so there is no second route to a null

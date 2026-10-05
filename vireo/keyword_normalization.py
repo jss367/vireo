@@ -169,15 +169,6 @@ def species_match_key(species):
     fold that ``classify_job._store_grouped_predictions`` applies when it
     computes ``group_reviewable``.
 
-    Lives here rather than in ``classify_job`` because ``db`` needs the same
-    rule to recognise a burst whose stored votes span more than one species
-    (see ``Database.repair_mixed_species_prediction_groups``) and
-    ``classify_job`` imports ``db``, so the dependency can only run this way.
-    Two copies would be worse than one import: the repair's whole job is to
-    reproduce the classifier's grouping decision, and a fold that drifted
-    from the classifier's would either strip legitimate groups or leave
-    divergent ones behind.
-
     ``str.lower()``/``str.casefold()`` and SQLite's ``lower()`` are all
     wrong substitutes: the first two fold non-ASCII pairs SQLite treats as
     distinct, and the last does not apply the apostrophe/edge-quote folding

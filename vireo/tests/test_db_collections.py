@@ -20,7 +20,6 @@ import pytest
 from db import (
     GPS_WITHOUT_LOCATION_KEYWORD_RULES,
     NEEDS_IDENTIFICATION_RULES,
-    NO_LOCATION_INFORMATION_RULES,
     Database,
 )
 
@@ -841,59 +840,6 @@ def test_create_default_collections_for_explicit_workspace_skips_active(db):
     assert count == 6
 
 
-def _raw_collection(db, name, rules, workspace_id=1):
-    db.conn.execute(
-        "INSERT INTO collections (name, rules, workspace_id) VALUES (?, ?, ?)",
-        (name, rules, workspace_id),
-    )
-    db.conn.commit()
-
-
-def test_migrate_location_collections_skips_malformed_rules(db):
-    _raw_collection(db, "Needs Location", "{not json")
-    assert db.migrate_default_location_collections() == 0
-    assert not db.conn.in_transaction
-
-
-def test_migrate_location_collections_fixes_no_location(db):
-    _raw_collection(
-        db, "No Location",
-        json.dumps([{"field": "location_keyword_missing", "op": "equals", "value": 0}]),
-    )
-    assert db.migrate_default_location_collections() == 1
-    with _reader(db) as other:
-        row = other.execute("SELECT name, rules FROM collections").fetchone()
-    assert row["name"] == "No Location Information"
-    assert json.loads(row["rules"]) == NO_LOCATION_INFORMATION_RULES
-
-
-def test_migrate_subject_collection_skips_malformed_and_existing(db):
-    legacy = json.dumps([{"field": "has_species", "op": "equals", "value": 0}])
-    _raw_collection(db, "Needs Classification", "{not json")
-    _raw_collection(db, "Needs Classification", legacy)
-    _raw_collection(db, "Needs Identification", "[]")
-    db.migrate_default_subject_collection()
-    names = sorted(
-        r["name"] for r in db.conn.execute("SELECT name FROM collections")
-    )
-    assert names == ["Needs Classification", "Needs Classification", "Needs Identification"]
-    assert not db.conn.in_transaction
-
-
-def test_migrate_needs_identification_skips_malformed(db):
-    _raw_collection(db, "Needs Identification", None)
-    _raw_collection(
-        db, "Needs Identification",
-        json.dumps([{"field": "has_subject", "op": "equals", "value": 0}]),
-    )
-    assert db.migrate_default_needs_identification_collection() == 1
-    with _reader(db) as other:
-        rules = [r["rules"] for r in other.execute("SELECT rules FROM collections ORDER BY id")]
-    assert rules == [None, json.dumps(NEEDS_IDENTIFICATION_RULES)]
-    assert db.migrate_default_needs_identification_collection() == 0
-    assert not db.conn.in_transaction
-
-
 # -- structure ----------------------------------------------------------------
 
 
@@ -932,9 +878,6 @@ _DELEGATING_COLLECTION_METHODS = (
     "_folder_filter_values",
     "collection_photo_ids",
     "create_default_collections",
-    "migrate_default_location_collections",
-    "migrate_default_subject_collection",
-    "migrate_default_needs_identification_collection",
 )
 
 # No SQL of their own: they compose other façade methods, so monkeypatches of

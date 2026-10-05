@@ -163,14 +163,14 @@ def test_16_bit_grayscale_scales_to_midgray(tmp_path):
 def test_settings_roundtrip_preserves_migration_markers(app_and_db):
     import config
     app, db = app_and_db
-    config.save({"_migrations_applied": [config.MIGRATION_MISS_THRESHOLDS],
+    config.save({"_migrations_applied": ["some_migration"],
                  "pipeline": {"miss_det_confidence": 0.25, "miss_det_confidence_burst": 0.15}})
     client = app.test_client()
     exported = client.get("/api/settings/export").json
+    assert "_migrations_applied" not in exported
     response = client.post("/api/settings/import", json={"json": json.dumps(exported)})
     assert response.status_code == 200, response.json
-    assert config.MIGRATION_MISS_THRESHOLDS in config._read_raw().get("_migrations_applied", [])
-    assert not config.migrate_legacy_miss_thresholds()
+    assert "some_migration" in config._read_raw().get("_migrations_applied", [])
     assert config.load()["pipeline"]["miss_det_confidence"] == 0.25
 
 

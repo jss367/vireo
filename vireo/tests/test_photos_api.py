@@ -1722,7 +1722,6 @@ def test_batch_keyword_with_type_override(app_and_db):
 # --- Working copy integration tests for serving endpoints ---
 
 
-
 def test_preview_uses_working_copy(app_and_db):
     """Preview endpoint loads from working copy instead of original."""
     app, db = app_and_db
@@ -8078,93 +8077,6 @@ def test_legacy_migration_preserves_preview_max_size_zero(tmp_path, monkeypatch)
     # File stays exactly where it was; no renamed version was produced.
     assert legacy.exists()
     assert not (preview_dir / "42_1920.jpg").exists()
-
-
-def test_startup_invalidates_unedited_raw_previews_built_from_working_copies(
-    tmp_path, monkeypatch,
-):
-    """Existing dark RAW tiers are purged once; ordinary JPEGs are retained."""
-    import config as cfg
-    from app import create_app
-    from db import Database
-    from PIL import Image
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
-    cfg.save({**cfg.DEFAULTS, "preview_max_size": 1920})
-
-    photos_dir = tmp_path / "photos"
-    photos_dir.mkdir()
-    raw_source = photos_dir / "source.NEF"
-    raw_source.write_bytes(b"raw bytes")
-    jpeg_source = photos_dir / "plain.jpg"
-    Image.new("RGB", (200, 150), (180, 90, 40)).save(
-        jpeg_source, "JPEG",
-    )
-
-    vireo_dir = tmp_path / "vireo"
-    thumb_dir = vireo_dir / "thumbnails"
-    preview_dir = vireo_dir / "previews"
-    working_dir = vireo_dir / "working"
-    thumb_dir.mkdir(parents=True)
-    preview_dir.mkdir()
-    working_dir.mkdir()
-    db_path = str(vireo_dir / "vireo.db")
-
-    db = Database(db_path)
-    workspace_id = db.ensure_default_workspace()
-    db.set_active_workspace(workspace_id)
-    folder_id = db.add_folder(str(photos_dir), name="photos")
-    raw_id = db.add_photo(
-        folder_id=folder_id,
-        filename=raw_source.name,
-        extension=".nef",
-        file_size=raw_source.stat().st_size,
-        file_mtime=raw_source.stat().st_mtime,
-        width=200,
-        height=150,
-    )
-    jpeg_id = db.add_photo(
-        folder_id=folder_id,
-        filename=jpeg_source.name,
-        extension=".jpg",
-        file_size=jpeg_source.stat().st_size,
-        file_mtime=jpeg_source.stat().st_mtime,
-        width=200,
-        height=150,
-    )
-    for photo_id in (raw_id, jpeg_id):
-        working = working_dir / f"{photo_id}.jpg"
-        Image.new("RGB", (200, 150), (25, 25, 25)).save(working, "JPEG")
-        db.conn.execute(
-            "UPDATE photos SET working_copy_path=? WHERE id=?",
-            (f"working/{photo_id}.jpg", photo_id),
-        )
-
-    raw_preview = preview_dir / f"{raw_id}_2560.jpg"
-    jpeg_preview = preview_dir / f"{jpeg_id}_2560.jpg"
-    raw_preview.write_bytes(b"dark raw preview")
-    jpeg_preview.write_bytes(b"ordinary jpeg preview")
-    db.preview_cache_insert(raw_id, 2560, raw_preview.stat().st_size)
-    db.preview_cache_insert(jpeg_id, 2560, jpeg_preview.stat().st_size)
-    db.conn.commit()
-
-    create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))
-
-    assert not raw_preview.exists()
-    assert db.preview_cache_get(raw_id, 2560) is None
-    assert jpeg_preview.exists()
-    assert db.preview_cache_get(jpeg_id, 2560) is not None
-    assert db.get_meta("unedited_raw_camera_preview_source_v1") == "1"
-
-    # The source-selection fix prevents new dark entries. The migration itself
-    # remains one-shot and does not repeatedly clear healthy future previews.
-    raw_preview.write_bytes(b"new camera-rendered preview")
-    db.preview_cache_insert(raw_id, 2560, raw_preview.stat().st_size)
-    create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))
-    assert raw_preview.exists()
-    assert db.preview_cache_get(raw_id, 2560) is not None
-    db.close()
 
 
 def test_edit_math_version_bump_invalidates_edited_photo_caches(tmp_path, monkeypatch):

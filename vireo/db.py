@@ -844,23 +844,10 @@ class Database:
         self.repair_missing_folder_parents()
         self.repair_stale_folder_parents()
         self.ensure_default_workspace()
-        # Normalize retired keyword types before seeding the built-in genres.
-        # Cheap warm-path (single SELECT 1 LIMIT 1) once all legacy rows are
-        # gone.
-        self.migrate_legacy_keyword_types()
         # Idempotent default-keyword seed. Cheap warm-path (single
         # SELECT 1 LIMIT 1 short-circuit) — matches ensure_default_workspace
         # above.
         self.ensure_default_genre_keywords()
-        # Idempotent, one-shot: seed species_highlights from legacy
-        # photo_preferences rows with purpose='highlights' so upgraded
-        # DBs don't lose their prior Highlights picks the first time the
-        # ordered-highlights UI reads only species_highlights. Gated by
-        # db_meta so it runs at most once per DB.
-        self.backfill_species_highlights_from_legacy_preferences()
-        # Idempotent, one-shot: seed globally shared species representatives
-        # from the older per-workspace single-preference rows.
-        self.backfill_species_representatives_from_legacy_preferences()
         # One-shot keyword-name normalization backfill. keywords.name,
         # pending sidecar change values, and species curation rows
         # historically stored names verbatim, so imports could seed
@@ -1921,9 +1908,6 @@ class Database:
         """
         return self._keyword_provenance_repository().retire_builtin_wildlife_genre(force=force)
 
-    _SPECIES_HIGHLIGHTS_BACKFILL_KEY = "species_highlights_from_preferences_backfill"
-    _SPECIES_REPRESENTATIVES_BACKFILL_KEY = "species_representatives_from_preferences_backfill"
-
     def _species_curation_repository(self):
         """Build the species-curation repository on this connection.
 
@@ -1944,13 +1928,8 @@ class Database:
             life_list_ancestor_suppression_clause=(
                 _LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE
             ),
-            species_highlights_backfill_key=self._SPECIES_HIGHLIGHTS_BACKFILL_KEY,
-            species_representatives_backfill_key=(
-                self._SPECIES_REPRESENTATIVES_BACKFILL_KEY
-            ),
             resolve_species_display_name=self.resolve_species_display_name,
             get_folder_subtree_ids=self.get_folder_subtree_ids,
-            set_meta=self.set_meta,
             get_class_ancestors_for_taxa=self.get_class_ancestors_for_taxa,
             next_species_representative_order=(
                 self._next_species_representative_order
@@ -1963,49 +1942,8 @@ class Database:
             ),
         )
 
-    def backfill_species_highlights_from_legacy_preferences(self):
-        """One-shot backfill: seed ``species_highlights`` from legacy
-        ``photo_preferences`` rows with ``purpose='highlights'``.
-
-        Before ordered highlights existed, a "Highlights" pick was stored
-        as a single ``photo_preferences`` row per (workspace, species).
-        The new Highlights UI reads exclusively from ``species_highlights``,
-        so upgraded databases would lose those picks — the pill/rank
-        indicators and bucket ordering would not surface the old choice
-        until the user manually re-added it. This copies each legacy pick
-        into ``species_highlights`` at the end of any existing bucket
-        (rank = MAX(rank) + 1) so pre-existing curated order is preserved
-        and the legacy pick still appears as a highlight.
-
-        Gated by a ``db_meta`` marker so it runs exactly once per DB.
-        """
-        return self._species_curation_repository().backfill_highlights_from_legacy_preferences()
-
     def _next_species_representative_order(self):
         return self._species_curation_repository().next_representative_order()
-
-    def backfill_species_representatives_from_legacy_preferences(self):
-        """One-shot backfill from old per-workspace representative rows.
-
-        The current model stores representative markings globally and allows
-        multiple photos per species. Older databases stored one row per
-        (workspace, purpose, species), with ``species_representative`` taking
-        precedence over ``life_list`` and ``highlights`` fallbacks. Copy those
-        choices into the global list once so curated picks persist across
-        workspaces after upgrade.
-        """
-        return self._species_curation_repository().backfill_representatives_from_legacy_preferences()
-
-    def migrate_legacy_keyword_types(self):
-        """One-shot migration of legacy keyword type names to the canonical
-        enum. Idempotent — once all rows are migrated, the warm-path
-        short-circuits cheaply (single SELECT 1 LIMIT 1) so this is safe to
-        call from Database.__init__ on every instantiation.
-
-        This runs before default genre seeding so old rows settle onto the
-        canonical enum before same-name defaults are reconciled.
-        """
-        return self._keyword_repository().migrate_legacy_types()
 
     # -- Folders --
 
@@ -5454,9 +5392,6 @@ class Database:
             taxon_lookup_variants=_taxon_lookup_variants,
             resolve_import_alias=resolve_import_alias,
             filter_subject_chunk=self._FILTER_SUBJECT_CHUNK,
-            duplicate_photo_species_repair_key=(
-                self._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY
-            ),
             facade=self,
         )
 
@@ -5620,7 +5555,7 @@ class Database:
         ``resolve_species_display_name`` uses the same lookup to route
         curation keys through the canonical root when only a hierarchy
         alias is stored (e.g. a leaf ``Desert Verdin`` after
-        ``repair_duplicate_photo_species`` detached the top-level
+        the retired duplicate-species repair detached the top-level
         ``Verdin``). Callers with the taxon id in hand can skip the
         name-based lookup and go straight to the root row.
         """
@@ -6508,45 +6443,6 @@ class Database:
             return clean
         return self.resolve_species_display_name(clean)
 
-    _DUPLICATE_PHOTO_SPECIES_REPAIR_KEY = "duplicate_photo_species_repaired_v1"
-
-    def has_possible_duplicate_photo_species(self):
-        """Whether ``repair_duplicate_photo_species`` could find anything."""
-        return self._keyword_repository().has_possible_duplicate_photo_species()
-
-    def repair_duplicate_photo_species(self):
-        """Remove redundant same-photo associations for one species taxon.
-
-        Older imports preserved Lightroom hierarchy leaves, while later
-        species confirmations attached a second top-level keyword row. Both
-        rows are useful globally, but one photo should not carry both for the
-        same species-rank taxon. Remove only top-level associations when at
-        least one hierarchy-bearing association exists; multiple deliberate
-        hierarchy placements remain intact. Leave photo-scoped curation on
-        the root spelling because that keyword row remains the canonical
-        species key, and leave all keyword rows intact.
-
-        Pending keyword changes are name-based rather than keyword-id-based.
-        Once the hierarchy association survives, a queued remove for either
-        spelling would incorrectly erase the surviving XMP keyword. Cancel
-        matching adds/removes; the hierarchical association originated from
-        that sidecar and remains the source of truth.
-
-        When a detached root's spelling does not survive on the photo (for
-        example a root ``Verdin`` is detached because a hierarchical alias
-        ``Birds|Desert Verdin`` is kept), the sidecar's previously synced
-        ``dc:subject: Verdin`` still names a keyword the DB no longer
-        carries. Left alone, the next XMP-to-DB scan would flat-import
-        ``Verdin`` and re-attach the top-level row this repair just
-        removed. Queue a ``keyword_remove`` for those orphaned spellings
-        so ``sync_to_xmp`` clears them from the sidecar; skip the queue
-        when a surviving row (species or general, hierarchical or not)
-        already carries the same normalized name, since the scanner's
-        per-photo dedup keeps the flat entry from re-tagging in that case
-        and a hierarchical remove would strip the surviving keyword.
-        """
-        return self._keyword_repository().repair_duplicate_photo_species()
-
     def _normalize_keyword_data_once(self):
         """One-shot backfill: normalize every stored keyword/species name.
 
@@ -6787,7 +6683,7 @@ class Database:
         When ``species`` is provided, return the bucket for that species.
         A photo's surviving hierarchy leaf can have a different stored
         spelling from the canonical root keyword (``verdin`` vs
-        ``Verdin``) after ``repair_duplicate_photo_species`` detaches the
+        ``Verdin``) after the retired duplicate-species repair detached the
         redundant root row, but curation stays keyed on the root spelling
         — so the filter also accepts any keyword whose ``taxon_id`` links
         back to a root species keyword named ``species``. Otherwise
@@ -7328,10 +7224,8 @@ class Database:
             self._ws_id,
             chunks=_chunks,
             commit_with_retry=commit_with_retry,
-            log=log,
             auto_match_review_marker=AUTO_MATCH_REVIEW_MARKER,
             top_prediction_confidence_expr=_TOP_PREDICTION_CONFIDENCE_EXPR,
-            mixed_species_group_repair_key=self._MIXED_SPECIES_GROUP_REPAIR_KEY,
             facade=self,
         )
 
@@ -7926,60 +7820,6 @@ class Database:
         return self._prediction_repository().update_status_by_photo(
             photo_id, status, _commit=_commit,
         )
-
-    _MIXED_SPECIES_GROUP_REPAIR_KEY = "prediction_review_mixed_species_groups_v1"
-
-    def repair_mixed_species_prediction_groups(self):
-        """Ungroup legacy bursts whose stored votes span more than one species.
-
-        ``classify_job._store_grouped_predictions`` only stamps ``group_id``
-        and ``individual`` when every frame in the burst folds to a single
-        ``species_match_key`` — ``group_reviewable``. That gate arrived in
-        #1165; bursts stored before it got a ``group_id`` and an
-        unconditional multi-species vote dict regardless of whether the
-        frames agreed.
-
-        Those rows are actively wrong, not merely stale. ``accept_prediction``
-        derives the species it applies from the vote dict, so a legacy row
-        displays its own ``predictions.species`` and tags the vote winner:
-        accepting a frame labelled ``Purple Finch`` writes ``Cassin's
-        Finch``. That is the black box ``CORE_PHILOSOPHY.md`` forbids, and no
-        amount of careful rendering fixes it — the button would still have to
-        name one species and apply another.
-
-        So repair the data rather than the symptom: for every review row
-        whose ``individual`` holds more than one distinct species key, clear
-        ``group_id``, ``individual``, ``vote_count`` and ``total_votes``.
-        The row then reads exactly as the current classifier would have
-        written it — an ungrouped prediction that accepts as its own species.
-        ``status`` is untouched (a decision the user already made stays
-        made), and nothing in ``predictions`` is read or written: no
-        prediction is deleted, retitled or rescored, only the burst-grouping
-        metadata that was never valid.
-
-        Rows whose ``individual`` has several JSON keys that fold to *one*
-        species are left grouped. ``species_match_key`` collapses okina,
-        typographic-apostrophe and case variants, so ``{"Hawai'i 'Amakihi":
-        4, "Hawai’i ’Amakihi": 2}`` is a unanimous burst spelled two
-        ways and its grouping is legitimate. This is why the fold runs in
-        Python: SQLite's ``lower()`` does not apply that normalization and
-        would ungroup those rows.
-
-        Not workspace-scoped. ``prediction_review`` is keyed by
-        ``(prediction_id, workspace_id)`` and the same legacy classify run
-        wrote rows in whichever workspaces were active at the time, so this
-        deliberately runs across every workspace rather than through
-        ``_ws_id()``.
-
-        Idempotent and gated by a ``db_meta`` marker rather than
-        ``PRAGMA user_version``: this repo has known ``user_version`` drift
-        between branches, and a version-gated migration silently skips on a
-        database whose number already ran ahead. After the first run the cost
-        is one indexed ``db_meta`` lookup.
-
-        Returns the number of review rows cleared.
-        """
-        return self._prediction_repository().repair_mixed_species_groups()
 
     def ungroup_prediction(self, prediction_id, _commit=True):
         """Remove a prediction from its group in the active workspace.
@@ -9962,7 +9802,6 @@ class Database:
             burst_gap_tolerance_seconds=BURST_GAP_TOLERANCE_SECONDS,
             needs_identification_rules=NEEDS_IDENTIFICATION_RULES,
             gps_without_location_keyword_rules=GPS_WITHOUT_LOCATION_KEYWORD_RULES,
-            no_location_information_rules=NO_LOCATION_INFORMATION_RULES,
             photo_date_asc_order=_PHOTO_DATE_ASC_ORDER,
             photo_sort_orders=_PHOTO_SORT_ORDERS,
             prediction_confidence_sorts=_PREDICTION_CONFIDENCE_SORTS,
@@ -11013,96 +10852,6 @@ class Database:
         """Create missing default smart collections in every workspace."""
         for ws in self.get_workspaces():
             self.create_default_collections(workspace_id=ws["id"])
-
-    def migrate_default_location_collections(self):
-        """Clarify default location collection names/rules across workspaces.
-
-        - ``Needs Location`` was the default collection for photos that already
-          have EXIF GPS but lack a structured Vireo location keyword. Rename
-          exact default instances to the more literal
-          ``GPS Without Location Keyword``.
-        - Some workspaces had a hand-built ``No Location`` collection using the
-          inverse of that rule. That actually meant "not GPS-without-keyword",
-          not "has no location". For that exact legacy rule, replace it with a
-          true ``No Location Information`` collection.
-        """
-        return self._collection_repository().migrate_default_location()
-
-    def migrate_default_subject_collection(self):
-        """Rename legacy 'Needs Classification' (with rule has_species==0)
-        to 'Needs Identification' (rule has_subject==0) across ALL workspaces.
-
-        Workspace activation does not re-run startup migrations, so an
-        upgraded multi-workspace database would otherwise leave non-active
-        workspaces stuck on the legacy rule. Skips collections the user has
-        customized. Idempotent."""
-        self._collection_repository().migrate_default_subject()
-
-    def migrate_default_needs_identification_collection(self):
-        """Upgrade the default Needs Identification rule to skip Not Wildlife.
-
-        User-customized collections are left alone; only the exact previous
-        default ``has_subject == 0`` rule is rewritten.
-        """
-        return self._collection_repository().migrate_default_needs_identification()
-
-    def rewrite_legacy_miss_thresholds_in_workspaces(
-        self, legacy_det, legacy_burst, new_det, new_burst
-    ):
-        """Rewrite the exact legacy miss-threshold default pair in every
-        workspace's ``config_overrides``. Customized values are left alone.
-
-        Called from ``config.migrate_legacy_miss_thresholds``, which gates
-        the whole migration behind a one-time marker so this only runs
-        once per install — a user who later explicitly re-saves the
-        legacy pair via the settings UI keeps that setting.
-        """
-        return self._workspace_repository(scoped=False).rewrite_legacy_miss_thresholds(
-            legacy_det, legacy_burst, new_det, new_burst
-        )
-
-    def rewrite_legacy_w_species_default_in_workspaces(self, legacy, new):
-        """Rewrite the exact legacy ``pipeline.w_species`` default in every
-        workspace's ``config_overrides``. Customized values are left alone.
-
-        Called from ``config.migrate_legacy_w_species_default``, which gates
-        the whole migration behind a one-time marker so this only runs once
-        per install — a user who later explicitly re-saves the legacy value
-        via the algorithm slider keeps that setting.
-
-        Fingerprint invalidation isn't needed: ``compute_group_fingerprint``
-        reads the effective ``w_species``, so any rewritten workspace's
-        ``last_group_fingerprint`` will already stop matching on the next
-        Process-page load.
-        """
-        return self._workspace_repository(scoped=False).rewrite_legacy_w_species_default(
-            legacy, new
-        )
-
-    def rewrite_legacy_eye_detect_default_in_workspaces(self):
-        """Rewrite the exact legacy eye-detection default in workspace overrides.
-
-        Also nulls ``last_group_fingerprint`` on any rewritten workspace so the
-        Process page treats its cached KEEP/REJECT decisions as outdated —
-        those results were scored with eye detection on, and the workspace's
-        effective ``eye_detect_enabled`` just changed to False.
-        """
-        return self._workspace_repository(scoped=False).rewrite_legacy_eye_detect_default()
-
-    def invalidate_group_fingerprints_without_explicit_eye_false(self):
-        """Clear last_group_fingerprint on workspaces without an explicit
-        ``pipeline.eye_detect_enabled=False`` override.
-
-        Called from ``migrate_eye_detect_default_off`` when the global
-        default is about to flip from True to False. Workspaces that were
-        relying on the global default were producing eye-enabled scoring;
-        their cached triage must be treated as outdated so the Process page
-        re-runs Group & Score with the new default. Workspaces with an
-        explicit False override were already producing eye-disabled scoring
-        and don't need invalidation.
-        """
-        repo = self._workspace_repository(scoped=False)
-        return repo.invalidate_group_fingerprints_without_explicit_eye_false()
 
     # ------ iNaturalist submissions ------
 

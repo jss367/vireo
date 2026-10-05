@@ -9,10 +9,9 @@ The tests go through the public ``Database`` façade only, so they hold
 whether the SQL lives in ``db.py`` or in ``repositories/species_curation.py``.
 They pin return shapes and ordering, the ``_commit=False`` nested-transaction
 seams (the caller's transaction stays open and nothing is committed), commit
-visibility from a second connection, the backfill marker gates, lazy
-active-workspace resolution, chunking, and that composition
-(``resolve_species_display_name``, ``get_folder_subtree_ids``, ``set_meta``,
-``rename_species_representatives_species``, ...) still routes through the
+visibility from a second connection, lazy active-workspace resolution,
+chunking, and that composition (``resolve_species_display_name``,
+``get_folder_subtree_ids``, ``rename_species_representatives_species``, ...) still routes through the
 façade so monkeypatches take effect.
 """
 
@@ -160,178 +159,6 @@ def cur(db):
 
 
 # -- legacy backfills ---------------------------------------------------------------------
-
-
-_HL_KEY = "species_highlights_from_preferences_backfill"
-_REP_KEY = "species_representatives_from_preferences_backfill"
-
-
-def test_backfill_markers_are_set_on_init(db):
-    assert db.get_meta(_HL_KEY) == "1"
-    assert db.get_meta(_REP_KEY) == "1"
-    assert Database._SPECIES_HIGHLIGHTS_BACKFILL_KEY == _HL_KEY
-    assert Database._SPECIES_REPRESENTATIVES_BACKFILL_KEY == _REP_KEY
-
-
-def test_highlights_backfill_is_gated_by_its_marker(db, cur):
-    db.conn.execute(
-        "INSERT INTO photo_preferences (workspace_id, purpose, species, photo_id) "
-        "VALUES (?, 'highlights', 'American Robin', ?)",
-        (cur["ws"], cur["p"]["robin1"]),
-    )
-    db.conn.commit()
-    statements = _trace(db)
-    db.backfill_species_highlights_from_legacy_preferences()
-    db.conn.set_trace_callback(None)
-    assert [s for s in statements if s.strip()] == [
-        "SELECT value FROM db_meta WHERE key = "
-        "'species_highlights_from_preferences_backfill'"
-    ]
-    assert _highlights(db) == []
-
-
-def test_highlights_backfill_appends_legacy_picks_and_commits(db, cur):
-    ws, p = cur["ws"], cur["p"]
-    other = db.create_workspace("Other")
-    db.conn.execute("DELETE FROM db_meta WHERE key = ?", (_HL_KEY,))
-    db.conn.executemany(
-        "INSERT INTO species_highlights (workspace_id, species, photo_id, rank) "
-        "VALUES (?, ?, ?, ?)",
-        [(ws, "American Robin", p["robin1"], 5)],
-    )
-    db.conn.executemany(
-        "INSERT INTO photo_preferences (workspace_id, purpose, species, photo_id) "
-        "VALUES (?, ?, ?, ?)",
-        [
-            (ws, "highlights", "American Robin", p["robin1"]),  # already there
-            (ws, "highlights", "Northern Cardinal", p["card1"]),
-            (other, "highlights", "American Robin", p["robin2"]),
-            (ws, "life_list", "Cougar", p["puma"]),  # not a highlight
-        ],
-    )
-    db.conn.execute(
-        "UPDATE photo_preferences SET photo_id = ? WHERE workspace_id = ? "
-        "AND species = 'American Robin'",
-        (p["robin1"], ws),
-    )
-    db.conn.commit()
-    db.conn.execute(
-        "INSERT INTO photo_preferences (workspace_id, purpose, species, photo_id) "
-        "VALUES (?, 'highlights', 'Tanager', ?)",
-        (ws, p["robin2"]),
-    )
-    db.conn.commit()
-
-    db.backfill_species_highlights_from_legacy_preferences()
-
-    assert not db.conn.in_transaction
-    assert _visible(
-        db,
-        "SELECT workspace_id, species, photo_id, rank FROM species_highlights "
-        "ORDER BY workspace_id, species, rank",
-    ) == [
-        (ws, "American Robin", p["robin1"], 5),
-        (ws, "Northern Cardinal", p["card1"], 1),
-        (ws, "Tanager", p["robin2"], 1),
-        (other, "American Robin", p["robin2"], 1),
-    ]
-    assert _visible(db, "SELECT value FROM db_meta WHERE key = ?", (_HL_KEY,)) == [("1",)]
-
-
-def test_highlights_backfill_ranks_after_the_existing_bucket(db, cur):
-    ws, p = cur["ws"], cur["p"]
-    db.conn.execute("DELETE FROM db_meta WHERE key = ?", (_HL_KEY,))
-    db.conn.execute(
-        "INSERT INTO species_highlights (workspace_id, species, photo_id, rank) "
-        "VALUES (?, 'American Robin', ?, 3)",
-        (ws, p["robin2"]),
-    )
-    db.conn.execute(
-        "INSERT INTO photo_preferences (workspace_id, purpose, species, photo_id) "
-        "VALUES (?, 'highlights', 'American Robin', ?)",
-        (ws, p["robin1"]),
-    )
-    db.conn.commit()
-    db.backfill_species_highlights_from_legacy_preferences()
-    assert _highlights(db) == [
-        ("American Robin", p["robin2"], 3),
-        ("American Robin", p["robin1"], 4),
-    ]
-
-
-def test_highlights_backfill_tolerates_a_missing_preferences_table(db):
-    db.conn.execute("DELETE FROM db_meta WHERE key = ?", (_HL_KEY,))
-    db.conn.execute("ALTER TABLE photo_preferences RENAME TO photo_preferences_old")
-    db.conn.commit()
-    db.backfill_species_highlights_from_legacy_preferences()
-    assert db.get_meta(_HL_KEY) == "1"
-    assert not db.conn.in_transaction
-
-
-def test_representatives_backfill_is_gated_by_its_marker(db, cur):
-    db.conn.execute(
-        "INSERT INTO photo_preferences (workspace_id, purpose, species, photo_id) "
-        "VALUES (?, 'life_list', 'American Robin', ?)",
-        (cur["ws"], cur["p"]["robin1"]),
-    )
-    db.conn.commit()
-    db.backfill_species_representatives_from_legacy_preferences()
-    assert _reps(db) == []
-
-
-def test_representatives_backfill_orders_by_purpose_precedence(db, cur, monkeypatch):
-    ws, p = cur["ws"], cur["p"]
-    other = db.create_workspace("Other")
-    db.conn.execute("DELETE FROM db_meta WHERE key = ?", (_REP_KEY,))
-    rows = [
-        (ws, "species_representative", "American Robin", p["robin1"], "2024-01-03"),
-        (ws, "life_list", "American Robin", p["robin2"], "2024-01-01"),
-        (other, "highlights", "American Robin", p["robin1"], "2024-01-02"),
-        (ws, "highlights", "Northern Cardinal", p["card1"], None),
-        (ws, "other_purpose", "Cougar", p["puma"], "2024-01-01"),
-    ]
-    for ws_id, purpose, species, pid, ts in rows:
-        db.conn.execute(
-            "INSERT INTO photo_preferences "
-            "(workspace_id, purpose, species, photo_id, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (ws_id, purpose, species, pid, ts, ts),
-        )
-    db.conn.commit()
-    meta_calls = []
-    real_set_meta = db.set_meta
-
-    def recording_set_meta(key, value, _commit=True):
-        meta_calls.append((key, value, _commit))
-        return real_set_meta(key, value, _commit=_commit)
-
-    monkeypatch.setattr(db, "set_meta", recording_set_meta)
-
-    db.backfill_species_representatives_from_legacy_preferences()
-
-    assert meta_calls == [(_REP_KEY, "1", False)]
-    assert not db.conn.in_transaction
-    # highlights rows first (the NULL-timestamp one sorts first), then
-    # life_list, then species_representative promotes robin1 to newest.
-    assert _visible(
-        db,
-        "SELECT species, photo_id, selected_order FROM species_representatives "
-        "ORDER BY selected_order",
-    ) == [
-        ("Northern Cardinal", p["card1"], 1),
-        ("American Robin", p["robin2"], 3),
-        ("American Robin", p["robin1"], 4),
-    ]
-    assert db.get_meta(_REP_KEY) == "1"
-
-
-def test_representatives_backfill_tolerates_a_missing_preferences_table(db):
-    db.conn.execute("DELETE FROM db_meta WHERE key = ?", (_REP_KEY,))
-    db.conn.execute("ALTER TABLE photo_preferences RENAME TO photo_preferences_old")
-    db.conn.commit()
-    db.backfill_species_representatives_from_legacy_preferences()
-    assert db.get_meta(_REP_KEY) == "1"
-    assert not db.conn.in_transaction
 
 
 def test_next_species_representative_order(db, cur):
@@ -1425,9 +1252,7 @@ def test_rename_species_highlights_no_source_rows(db, cur):
 
 
 _DELEGATING_SPECIES_CURATION_METHODS = (
-    "backfill_species_highlights_from_legacy_preferences",
     "_next_species_representative_order",
-    "backfill_species_representatives_from_legacy_preferences",
     "get_highlights_candidates",
     "get_life_list_candidates",
     "get_explorer_root",

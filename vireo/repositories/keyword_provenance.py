@@ -2950,7 +2950,7 @@ class KeywordProvenanceRepository:
                     # migration in api_highlights_relabel.
                     #
                     # Curation is canonicalized on write, so when
-                    # ``repair_duplicate_photo_species`` detaches the
+                    # the retired duplicate-species repair detached the
                     # root ``Verdin`` and leaves a hierarchy alias like
                     # ``Desert Verdin`` attached, existing highlights and
                     # representatives remain keyed on the canonical root
