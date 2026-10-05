@@ -141,6 +141,41 @@ class KeywordRepository:
         """The active workspace id, resolved at each read (raises if none)."""
         return self._resolve_workspace_id()
 
+    def embedded_offered_keys(self, photo_id):
+        """Normalized embedded keyword keys the scanner has offered this photo.
+
+        Backs ``Database.get_embedded_keyword_offered_keys`` -- see there for
+        why the record exists. Returns a set so callers can test membership
+        in O(1) when they filter candidate keywords.
+        """
+        return {
+            row["keyword_key"]
+            for row in self.conn.execute(
+                "SELECT keyword_key FROM photo_embedded_keyword_offered "
+                "WHERE photo_id = ?",
+                (photo_id,),
+            )
+        }
+
+    def record_embedded_offered_keys(self, photo_id, keys, _commit=True):
+        """Mark these normalized keys as embedded-offered for the photo.
+
+        Backs ``Database.record_embedded_keyword_offered`` -- see there for
+        why the record exists. Idempotent (INSERT OR IGNORE on the composite
+        primary key). ``keys`` empty is a no-op. ``_commit=False`` leaves the
+        commit to the caller for batch work.
+        """
+        rows = [(photo_id, key) for key in keys if key]
+        if not rows:
+            return
+        self.conn.executemany(
+            "INSERT OR IGNORE INTO photo_embedded_keyword_offered "
+            "(photo_id, keyword_key) VALUES (?, ?)",
+            rows,
+        )
+        if _commit:
+            self.conn.commit()
+
     def filter_out_subject_tagged(self, photo_ids, subject_types):
         """Return the subset of photo_ids whose photos do NOT have any keyword
         of a type in subject_types. Empty subject_types or empty photo_ids

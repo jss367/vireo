@@ -323,18 +323,65 @@ def _import_embedded_keywords_for_photo(db, photo_id, file_meta):
     keywords instead of failing the scan: the sidecar import raises there, but
     the embedded copy is a second, older source, and one stale JPEG must not
     leave every folder in scope half-scanned.
+
+    Durable suppression: the pending-removal filter in ``_import_keyword_lists``
+    only hides a value until the next XMP sync clears the queue entry, but
+    Vireo cannot remove the value from the image itself, so an image rewrite
+    or full rescan would otherwise re-tag the photo with a keyword the user
+    had already deleted. Every embedded leaf key offered to the photo is
+    recorded in ``photo_embedded_keyword_offered``; a key already in that
+    record is filtered out before the import -- a user removal stands, and
+    only genuinely new embedded entries (added by a later Lightroom export)
+    reach the tag writer.
     """
     flat_keywords, hier_keywords = embedded_keywords(file_meta or {})
     if not flat_keywords and not hier_keywords:
         return False
-    try:
-        _import_keyword_lists(db, photo_id, flat_keywords, hier_keywords)
-    except ValueError as exc:
-        log.warning(
-            "Skipped keywords embedded in photo %s: %s", photo_id, exc,
-        )
-        return False
-    return True
+
+    offered = db.get_embedded_keyword_offered_keys(photo_id)
+    # Candidate leaves: flat entries map to their own key; a hierarchy's leaf
+    # is what ``_import_keyword_lists`` would actually tag. Suppressing on the
+    # leaf matches the shape of the tag we're guarding against -- the parent
+    # chain is additive hierarchy structure, not a tag the user removed.
+    candidate_keys = {
+        key for name in flat_keywords
+        if (key := keyword_match_key(name))
+    }
+    for hier in hier_keywords:
+        parts = hier.split("|")
+        if parts and (leaf := keyword_match_key(parts[-1])):
+            candidate_keys.add(leaf)
+
+    fresh_flat = [
+        name for name in flat_keywords
+        if keyword_match_key(name) not in offered
+    ]
+    fresh_hier = [
+        hier for hier in hier_keywords
+        if (parts := hier.split("|"))
+        and keyword_match_key(parts[-1]) not in offered
+    ]
+
+    if fresh_flat or fresh_hier:
+        try:
+            _import_keyword_lists(db, photo_id, fresh_flat, fresh_hier)
+        except ValueError as exc:
+            log.warning(
+                "Skipped keywords embedded in photo %s: %s", photo_id, exc,
+            )
+            # Deliberately do not record the suppression on ValueError: the
+            # import never ran, so the user's view of these keys has not
+            # changed. A follow-up scan after the conflict is resolved
+            # (user clears or picks a compatible place) should still get
+            # the chance to tag them.
+            return False
+    # Record every candidate seen, including the fresh ones that imported
+    # just now: the goal is to make the next scan's filter think of them
+    # as "already offered" so a later removal is not silently undone.
+    new_to_record = candidate_keys - offered
+    if new_to_record:
+        db.record_embedded_keyword_offered(photo_id, new_to_record)
+    return bool(fresh_flat or fresh_hier)
 
 
 def _import_keyword_lists(db, photo_id, flat_keywords, hier_keywords):

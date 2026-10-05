@@ -558,6 +558,10 @@ class FolderRepository:
             remap_photo_visibility(self.conn, collection_remap)
             ph = ",".join("?" for _ in drop_ids)
             self.conn.execute(f"DELETE FROM photo_keywords WHERE photo_id IN ({ph})", drop_ids)
+            self.conn.execute(
+                f"DELETE FROM photo_embedded_keyword_offered WHERE photo_id IN ({ph})",
+                drop_ids,
+            )
             self.conn.execute(f"DELETE FROM pending_changes WHERE photo_id IN ({ph})", drop_ids)
             self.conn.execute(f"DELETE FROM detections WHERE photo_id IN ({ph})", drop_ids)
             self.conn.execute(f"DELETE FROM photos WHERE id IN ({ph})", drop_ids)

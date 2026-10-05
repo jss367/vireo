@@ -1094,6 +1094,104 @@ def test_backfill_embedded_keywords_imports_stored_exiftool_output(tmp_path):
     assert db.get_photo_keywords(tagged) == []
 
 
+def test_embedded_import_does_not_undo_a_user_removal_on_reimport(tmp_path):
+    """Removing an embedded keyword stays removed when the file is reread.
+
+    Vireo never writes into image files, so the embedded value is still
+    there after the user removes the tag and the pending-removal queue
+    entry is synced away. ``photo_embedded_keyword_offered`` is the
+    durable record that keeps the next scan from silently re-tagging.
+    """
+    from db import Database
+    from scanner import _import_embedded_keywords_for_photo
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
+    pid = db.add_photo(folder_id=folder_id, filename="bird.jpg",
+                       extension=".jpg", file_size=100, file_mtime=1.0)
+    file_meta = {"XMP": {"Subject": ["Robin", "Hawk"],
+                         "HierarchicalSubject": ["Birds|Robin"]}}
+
+    assert _import_embedded_keywords_for_photo(db, pid, file_meta) is True
+    # The hierarchy import tags only the leaf (Robin), not the parent,
+    # so the photo carries exactly the two flat values plus the leaf.
+    assert {k["name"] for k in db.get_photo_keywords(pid)} == {"Robin", "Hawk"}
+
+    # User removes Robin (tag drop + pending removal reaching sync and
+    # clearing). Only the catalog state is simulated; a real sync clears
+    # the pending_changes row the same way.
+    robin_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'Robin'",
+    ).fetchone()[0]
+    db.conn.execute(
+        "DELETE FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+        (pid, robin_id),
+    )
+    db.conn.commit()
+
+    # A later image rewrite (Lightroom re-exports with the same keywords)
+    # must not resurrect Robin. The hierarchy entry whose leaf is Robin is
+    # filtered too, since the leaf is what the import would re-tag.
+    assert _import_embedded_keywords_for_photo(db, pid, file_meta) is False
+    assert {k["name"] for k in db.get_photo_keywords(pid)} == {"Hawk"}
+
+
+def test_embedded_import_still_picks_up_newly_added_values(tmp_path):
+    """A truly new embedded value lands even when older ones are suppressed."""
+    from db import Database
+    from scanner import _import_embedded_keywords_for_photo
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
+    pid = db.add_photo(folder_id=folder_id, filename="bird.jpg",
+                       extension=".jpg", file_size=100, file_mtime=1.0)
+
+    first = {"XMP": {"Subject": ["Robin"]}}
+    assert _import_embedded_keywords_for_photo(db, pid, first) is True
+
+    db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (pid,))
+    db.conn.commit()
+
+    # Lightroom re-exports and the file now carries both the old Robin and
+    # a new Hawk. Robin stays suppressed (user removed), Hawk is new.
+    second = {"XMP": {"Subject": ["Robin", "Hawk"]}}
+    assert _import_embedded_keywords_for_photo(db, pid, second) is True
+    assert {k["name"] for k in db.get_photo_keywords(pid)} == {"Hawk"}
+
+
+def test_embedded_import_valueerror_does_not_record_offered_keys(tmp_path, monkeypatch):
+    """A warn-and-skip path leaves the next scan free to retry.
+
+    If the import raises before any tag lands (for example a two-place
+    name collision), the offered record stays empty so a scan after the
+    user resolves the conflict can still tag the embedded keywords.
+    """
+    import scanner
+    from db import Database
+    from scanner import _import_embedded_keywords_for_photo
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
+    pid = db.add_photo(folder_id=folder_id, filename="bird.jpg",
+                       extension=".jpg", file_size=100, file_mtime=1.0)
+
+    def _raise(*args, **kwargs):
+        raise ValueError("different linked places")
+
+    monkeypatch.setattr(scanner, "_import_keyword_lists", _raise)
+
+    file_meta = {"XMP": {"Subject": ["Springfield"]}}
+    assert _import_embedded_keywords_for_photo(db, pid, file_meta) is False
+    assert db.get_photo_keywords(pid) == []
+    assert db.get_embedded_keyword_offered_keys(pid) == set()
+
+    # Resolve the conflict (stop raising) and the import still gets a shot
+    # at the keyword, because nothing was recorded above.
+    monkeypatch.undo()
+    assert _import_embedded_keywords_for_photo(db, pid, file_meta) is True
+    assert {k["name"] for k in db.get_photo_keywords(pid)} == {"Springfield"}
+
+
 def test_scan_imports_hierarchical_keywords(tmp_path):
     """scan() creates keyword hierarchy from lr:hierarchicalSubject."""
     from db import Database

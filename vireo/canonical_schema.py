@@ -155,6 +155,20 @@ class CanonicalSchema:
                 PRIMARY KEY (photo_id, keyword_id)
             );
 
+            -- Durable record of embedded keyword values the scanner has
+            -- offered to a photo. Vireo never writes into image files, so a
+            -- user removal that reaches the pending-changes queue (or the
+            -- photo's catalog row directly) can't erase an embedded value;
+            -- without this record, a later full scan or image rewrite would
+            -- re-read the same embedded value and silently re-tag it.
+            -- ``keyword_key`` is the normalized key (``keyword_match_key``),
+            -- the same shape used elsewhere for alias comparisons.
+            CREATE TABLE IF NOT EXISTS photo_embedded_keyword_offered (
+                photo_id    INTEGER REFERENCES photos(id),
+                keyword_key TEXT,
+                PRIMARY KEY (photo_id, keyword_key)
+            );
+
             -- Singleton key/value table for one-shot migration markers.
             CREATE TABLE IF NOT EXISTS db_meta (
                 key   TEXT PRIMARY KEY,
@@ -750,6 +764,8 @@ class CanonicalSchema:
             CREATE INDEX IF NOT EXISTS idx_keywords_type ON keywords(type);
             CREATE INDEX IF NOT EXISTS idx_photo_keywords_photo ON photo_keywords(photo_id);
             CREATE INDEX IF NOT EXISTS idx_photo_keywords_keyword ON photo_keywords(keyword_id);
+            CREATE INDEX IF NOT EXISTS idx_photo_embedded_keyword_offered_photo
+                ON photo_embedded_keyword_offered(photo_id);
             CREATE INDEX IF NOT EXISTS idx_photo_color_labels_ws
                 ON photo_color_labels(workspace_id);
             CREATE INDEX IF NOT EXISTS idx_photo_preferences_photo

@@ -68,6 +68,18 @@
   ],
   [
    "table",
+   "photo_embedded_keyword_offered",
+   "photo_embedded_keyword_offered",
+   "CREATE TABLE photo_embedded_keyword_offered (\n                photo_id    INTEGER REFERENCES photos(id),\n                keyword_key TEXT,\n                PRIMARY KEY (photo_id, keyword_key)\n            )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_photo_embedded_keyword_offered_1",
+   "photo_embedded_keyword_offered",
+   null
+  ],
+  [
+   "table",
    "db_meta",
    "db_meta",
    "CREATE TABLE db_meta (\n                key   TEXT PRIMARY KEY,\n                value TEXT\n            )"
@@ -689,6 +701,12 @@
    "idx_photo_keywords_keyword",
    "photo_keywords",
    "CREATE INDEX idx_photo_keywords_keyword ON photo_keywords(keyword_id)"
+  ],
+  [
+   "index",
+   "idx_photo_embedded_keyword_offered_photo",
+   "photo_embedded_keyword_offered",
+   "CREATE INDEX idx_photo_embedded_keyword_offered_photo\n                ON photo_embedded_keyword_offered(photo_id)"
   ],
   [
    "index",
