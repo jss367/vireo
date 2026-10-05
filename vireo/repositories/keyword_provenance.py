@@ -1344,8 +1344,9 @@ class KeywordProvenanceRepository:
         # pid -> "manual" (readable sidecar carries a flat Wildlife term),
         # "defer" (sidecar unreadable/corrupt — decide on a later run), or
         # "generated" (readable sidecar with no Wildlife term), or "absent"
-        # (no sidecar was ever imported, so a legacy NULL source cannot be
-        # distinguished from metadata imported with write_xmp=False).
+        # (no sidecar was ever imported, or it has since been deleted, so a
+        # legacy NULL source cannot be distinguished from metadata imported
+        # with write_xmp=False).
         sidecar_verdict_by_photo = {}
         unknown_without_sidecar_pairs = []
         deferred_sidecar = False
@@ -1355,15 +1356,22 @@ class KeywordProvenanceRepository:
                 base = os.path.splitext(row["filename"])[0]
                 xmp_path = os.path.join(row["folder_path"], base + ".xmp")
                 if not os.path.exists(xmp_path):
-                    # A non-null mtime means a sidecar was imported earlier but
-                    # is currently unavailable (for example, an offline NAS).
-                    # Preserve rather than destroy metadata without being able
-                    # to inspect its provenance, and flag the run as deferred
-                    # so the completion marker stays unset — otherwise the
-                    # catalog would be permanently frozen with this photo's
-                    # generated Wildlife association still attached, even
-                    # after the volume comes back online.
-                    if row["xmp_mtime"] is not None:
+                    # A non-null mtime means a sidecar was imported earlier.
+                    # If the original is unreachable too, the volume is
+                    # offline (for example, an unmounted NAS): preserve rather
+                    # than destroy metadata without being able to inspect its
+                    # provenance, and flag the run as deferred so the
+                    # completion marker stays unset — otherwise the catalog
+                    # would be permanently frozen with this photo's generated
+                    # Wildlife association still attached, even after the
+                    # volume comes back online. A reachable original means
+                    # the sidecar itself is gone, which no later run can
+                    # change, so it gets the never-imported verdict instead
+                    # of deferring every startup forever.
+                    original_reachable = os.path.exists(
+                        os.path.join(row["folder_path"], row["filename"])
+                    )
+                    if row["xmp_mtime"] is not None and not original_reachable:
                         sidecar_verdict_by_photo[pid] = "defer"
                         deferred_sidecar = True
                     else:
