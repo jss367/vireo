@@ -299,21 +299,6 @@ def test_session_preserves_cooperative_cancellation(tmp_path, monkeypatch):
         ra.RawAnalysisSession().prepare(str(path), detection)
 
 
-def test_existing_catalog_gains_analysis_schema(tmp_path):
-    from db import Database
-
-    path = str(tmp_path / "old.db")
-    db = Database(path)
-    db.conn.execute("ALTER TABLE photos DROP COLUMN quality_input_recipe")
-    db.conn.execute("DROP TABLE subject_raw_analysis")
-    db.conn.commit()
-    db.close()
-    migrated = Database(path)
-    migrated.conn.execute("SELECT quality_input_recipe FROM photos")
-    migrated.conn.execute("SELECT report_json FROM subject_raw_analysis")
-    migrated.close()
-
-
 def test_reports_persist_per_detection_and_cascade(tmp_path):
     from db import Database
 
@@ -331,45 +316,6 @@ def test_reports_persist_per_detection_and_cascade(tmp_path):
     db.conn.execute("DELETE FROM detections WHERE photo_id=?", (photo,))
     assert db.conn.execute("SELECT count(*) FROM subject_raw_analysis").fetchone()[0] == 0
     db.close()
-
-
-@pytest.mark.parametrize("old_quality_columns", [False, True])
-def test_mask_recipe_migration_preserves_active_and_invalidates_unknown_history(tmp_path, old_quality_columns):
-    from db import Database
-
-    path = str(tmp_path / "old-masks.db")
-    db = Database(path)
-    folder = db.add_folder(str(tmp_path))
-    photo = db.add_photo(folder, "bird.nef", ".nef", 100, 1)
-    detections = db.save_detections(photo, [{
-        "box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8},
-        "confidence": 0.9, "category": "animal",
-    }], detector_model="megadetector-v6")
-    db.save_subject_raw_analysis(detections[0], {"recipe": ra.RECIPE})
-    db.record_classifier_run(detections[0], "model", "labels", 1)
-    db.conn.execute("ALTER TABLE classifier_runs DROP COLUMN input_recipe")
-    for variant in ("sam2-small", "sam2-large"):
-        db.upsert_photo_mask(photo, variant, "/mask.png", "megadetector-v6", 0.1, 0.1, 0.8, 0.8)
-    db.set_active_mask_variant(photo, "sam2-large")
-    db.update_photo_pipeline_features(photo, quality_input_recipe=ra.RECIPE)
-    db.conn.execute("ALTER TABLE photo_masks DROP COLUMN quality_input_recipe")
-    if old_quality_columns:
-        for field in ("subject_clip_high", "subject_clip_low", "subject_y_median", "bg_separation", "phash_crop", "noise_estimate"):
-            db.conn.execute(f"ALTER TABLE photo_masks DROP COLUMN {field}")
-        db.update_photo_pipeline_features(photo, bg_separation=42, noise_estimate=5, phash_crop="1234")
-    db.conn.commit()
-    db.close()
-
-    migrated = Database(path)
-    assert migrated.get_classifier_run_keys(detections[0]) == set()
-    assert migrated.conn.execute("SELECT input_recipe FROM classifier_runs").fetchone()[0] == "unknown-raw-recipe"
-    assert migrated.get_photo_mask(photo, "sam2-large")["quality_input_recipe"] == ra.RECIPE
-    expected = "unknown-mask-quality-recipe" if old_quality_columns else "unknown-raw-analysis-recipe"
-    assert migrated.get_photo_mask(photo, "sam2-small")["quality_input_recipe"] == expected
-    if old_quality_columns:
-        active = migrated.get_photo_mask(photo, "sam2-large")
-        assert (active["bg_separation"], active["noise_estimate"], active["phash_crop"]) == (42, 5, "1234")
-    migrated.close()
 
 
 @pytest.mark.parametrize("kind", ["pending", "match", "grouped"])

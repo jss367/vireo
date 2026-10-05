@@ -130,8 +130,7 @@ def test_single_folder_unlink_does_not_remove_descendants(shared_tree):
     assert {w["id"] for w in db.get_folder_workspaces(child)} == {workspace, other}
 
 
-@pytest.mark.parametrize("legacy_records", [False, True])
-def test_refresh_after_large_subtree_removal_has_bounded_query_work(shared_tree, legacy_records):
+def test_refresh_after_large_subtree_removal_has_bounded_query_work(shared_tree):
     db, workspace, other, parent, missing, child = shared_tree
     path = db.get_folder(missing)["path"]
     db.conn.executemany(
@@ -142,12 +141,6 @@ def test_refresh_after_large_subtree_removal_has_bounded_query_work(shared_tree,
     db.add_workspace_folder(workspace, parent)
     db.add_workspace_folder(other, parent)
     db.remove_workspace_folder_tree(workspace, missing)
-    if legacy_records:
-        db.conn.execute("UPDATE workspace_folder_removals SET recursive = 1")
-        db.conn.execute("DELETE FROM db_meta WHERE key = 'workspace_folder_removal_scope_version'")
-        db.conn.commit()
-        with Database(db._db_path):
-            pass
     ticks = 0
 
     def limit_query_work():
@@ -214,29 +207,6 @@ def test_existing_catalog_gains_removal_tracking(shared_tree):
         upgraded.set_active_workspace(workspace)
         upgraded.delete_folder(missing)
         assert {f["id"] for f in upgraded.get_workspace_folders(workspace)} == {parent}
-
-
-@pytest.mark.parametrize("operation", ["tree", "single", "restore_child"])
-def test_catalog_upgrade_preserves_legacy_exact_scope(shared_tree, operation):
-    db, workspace, other, parent, missing, child = shared_tree
-    if operation != "single":
-        db.delete_folder(missing)
-        if operation == "restore_child":
-            db.add_workspace_folder(workspace, child)
-    else:
-        db.remove_workspace_folder(workspace, missing)
-    db.conn.execute("DROP VIEW workspace_removed_folders")
-    db.conn.execute("ALTER TABLE workspace_folder_removals DROP COLUMN recursive")
-    db.conn.execute("DELETE FROM db_meta WHERE key = 'workspace_folder_removal_scope_version'")
-    db.conn.commit()
-    with Database(db._db_path) as upgraded:
-        upgraded.set_active_workspace(other)
-        new_folder = upgraded.add_folder(upgraded.get_folder(missing)["path"] + "/new",
-                                         parent_id=missing, workspace_root=False)
-        # Pre-recursive catalogs excluded known IDs, not unknown future
-        # paths. Upgrading must preserve that scope without inventing intent.
-        expected = {parent, new_folder} if operation == "tree" else {parent, child, new_folder}
-        assert {f["id"] for f in upgraded.get_workspace_folders(workspace)} == expected
 
 
 @pytest.mark.parametrize("column_default", [0, 1])

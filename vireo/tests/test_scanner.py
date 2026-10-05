@@ -1704,14 +1704,12 @@ def test_rescan_clears_absent_exif_summary_columns(tmp_path, monkeypatch):
     assert row["iso"] is None
 
 
-def test_incremental_rescan_populates_phase1_summary_for_partial_marker(tmp_path, monkeypatch):
-    """Rows scanned before Phase 1 with only the ``exif_data='{}'`` marker
-    (extract_full_metadata=False path) get promoted-column values on the
-    next incremental scan. The DB migration clears '{}' to NULL, and the
-    scanner's pre-pass then re-flags the row as ``metadata_missing`` via
-    ``summary_needs_extract`` — otherwise the row's timestamp is populated
-    and the standard skip triggers, leaving camera_make etc. permanently
-    NULL on upgraded libraries."""
+def test_incremental_rescan_populates_phase1_summary_for_missing_exif_data(tmp_path, monkeypatch):
+    """A row with a timestamp but no ``exif_data`` and NULL promoted columns
+    gets promoted-column values on the next incremental scan: the scanner's
+    pre-pass re-flags it as ``metadata_missing`` via ``summary_needs_extract``
+    — otherwise the populated timestamp triggers the standard skip, leaving
+    camera_make etc. permanently NULL."""
     import scanner
     from db import Database
     from scanner import scan
@@ -1738,21 +1736,11 @@ def test_incremental_rescan_populates_phase1_summary_for_partial_marker(tmp_path
     }))
     db = Database(str(tmp_path / "test.db"))
     scan(str(root), db)
-    # Simulate the pre-Phase-1 storage shape: keep the timestamp, clear
-    # the promoted cols, and put the '{}' marker back on exif_data.
+    # Keep the timestamp, clear exif_data and the promoted cols.
     db.conn.execute(
-        "UPDATE photos SET exif_data='{}', camera_make=NULL, camera_model=NULL, "
+        "UPDATE photos SET exif_data=NULL, camera_make=NULL, camera_model=NULL, "
         "lens=NULL, aperture=NULL, shutter_speed=NULL, iso=NULL")
-    # Reset the migration marker and re-open so the migration reruns and
-    # clears the '{}' marker to NULL (Phase-1 backfill behavior).
-    db.conn.execute("DELETE FROM db_meta WHERE key='exif_summary_backfill_v1'")
     db.conn.commit()
-    db.close()
-    db = Database(str(tmp_path / "test.db"))
-    row = db.conn.execute(
-        "SELECT exif_data, camera_make FROM photos LIMIT 1").fetchone()
-    assert row["exif_data"] is None  # cleared by migration
-    assert row["camera_make"] is None
 
     # Incremental scan with the file unchanged (same mtime, same content).
     # Without the summary_needs_extract trigger, the pre-pass would skip

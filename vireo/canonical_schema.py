@@ -1,39 +1,25 @@
 """The canonical schema every catalog is opened against.
 
-``CanonicalSchema.create_tables`` is the legacy schema setup that used to be
-the body of ``Database._create_tables``: the ``CREATE TABLE IF NOT EXISTS``
-script for every table, index, trigger and view, followed by the inline
-one-shot column and table migrations, backfills and seeds (``db_meta``- or
-``PRAGMA user_version``-guarded) that bring an older catalog up to that
-shape, ending in a single commit. The body moved here verbatim and keeps its
-method indentation, because the whitespace inside its multi-line SQL strings
-is stored in ``sqlite_master``. It is to be split into discrete historical
-migrations in ``schema.py`` over time.
+``CanonicalSchema.create_tables`` creates every table, index, trigger and
+view with ``IF NOT EXISTS`` and seeds the saved processes, ending in a single
+commit. It builds the current shape directly; schema changes from here on are
+numbered migrations in ``schema.py``. The SQL keeps its method indentation,
+because the whitespace inside multi-line SQL strings is stored in
+``sqlite_master`` (pinned by ``test_db_canonical_schema``).
 
 What deliberately stays on ``Database``: ``_create_tables`` itself, as the
 thin wrapper tests monkeypatch and whose ``OperationalError`` failures
-``Database.__init__`` turns into ``IncompatibleDatabaseError``; every
-post-schema startup step ``__init__`` runs after it (folder-parent repairs,
-default workspace and genre seeds, keyword normalization, species identity
-repair); and ``_folder_removal_root_ids``, which the workspace-folder
-removal upgrade calls through the bound method it is handed so monkeypatches
-of ``Database`` still reach it. ``DEFAULT_TABS`` stays in ``db`` (the web
-layer and tests import it from there) and is passed in.
+``Database.__init__`` turns into ``IncompatibleDatabaseError``, and every
+post-schema startup step ``__init__`` runs after it.
 
 This module must not import ``db``: ``schema.py`` imports ``db``, and
 ``db`` builds this class on every schema setup.
 """
 
-import json
-import sqlite3
-import time
-
 
 class CanonicalSchema:
-    def __init__(self, conn, *, folder_removal_root_ids, default_tabs):
+    def __init__(self, conn):
         self.conn = conn
-        self._folder_removal_root_ids = folder_removal_root_ids
-        self.default_tabs = default_tabs
 
     def create_tables(self):
         self.conn.executescript(
@@ -107,6 +93,13 @@ class CanonicalSchema:
                 wildlife_excluded        INTEGER NOT NULL DEFAULT 0,
                 hash_checked_at          TEXT,
                 hash_status              TEXT,
+                camera_make              TEXT,
+                camera_model             TEXT,
+                lens                     TEXT,
+                aperture                 REAL,
+                shutter_speed            REAL,
+                iso                      INTEGER,
+                quality_input_recipe     TEXT,
                 UNIQUE(folder_id, filename)
             );
 
@@ -137,6 +130,8 @@ class CanonicalSchema:
                 latitude    REAL,
                 longitude   REAL,
                 taxon_id    INTEGER REFERENCES taxa(id),
+                source_taxon_id INTEGER,
+                place_id    TEXT,
                 UNIQUE(name, parent_id)
             );
 
@@ -436,6 +431,10 @@ class CanonicalSchema:
                 taxonomy_family      TEXT,
                 taxonomy_genus       TEXT,
                 created_at           TEXT DEFAULT (datetime('now')),
+                source_taxon_id      INTEGER,
+                -- This row's own raw (pre-softmax) score. NULL means "not
+                -- recorded", never "matched badly".
+                match_score          REAL,
                 UNIQUE(detection_id, classifier_model, labels_fingerprint, species)
             );
 
@@ -919,39 +918,6 @@ class CanonicalSchema:
         """
         )
         cur = self.conn.cursor()
-        removal_cols = {r[1] for r in cur.execute("PRAGMA table_info(workspace_folder_removals)")}
-        if "recursive" not in removal_cols:
-            # The old table only recorded exact folder IDs. A single-folder
-            # unlink and a subtree removal followed by an explicit child
-            # restore can leave identical rows, so recursion cannot safely
-            # be inferred from current membership. Preserve the stored
-            # exact scope; future tree removals record recursion explicitly.
-            cur.execute(
-                "ALTER TABLE workspace_folder_removals "
-                "ADD COLUMN recursive INTEGER NOT NULL DEFAULT 0"
-            )
-        scope_version = cur.execute(
-            "SELECT value FROM db_meta WHERE key = 'workspace_folder_removal_scope_version'"
-        ).fetchone()
-        if scope_version is None or scope_version[0] != "1":
-            # Upgrade catalogs created by earlier branch builds too: their
-            # view scanned the full catalog for every exact removal, and
-            # every descendant could carry a redundant recursive record.
-            recursive_by_workspace = {}
-            for row in cur.execute(
-                "SELECT workspace_id, folder_id FROM workspace_folder_removals WHERE recursive = 1"
-            ).fetchall():
-                recursive_by_workspace.setdefault(row["workspace_id"], set()).add(row["folder_id"])
-            for workspace_id, folder_ids in recursive_by_workspace.items():
-                redundant = folder_ids - self._folder_removal_root_ids(folder_ids)
-                cur.executemany(
-                    "UPDATE workspace_folder_removals SET recursive = 0 WHERE workspace_id = ? AND folder_id = ?",
-                    [(workspace_id, fid) for fid in redundant],
-                )
-            cur.execute("DROP VIEW IF EXISTS workspace_removed_folders")
-            cur.execute(
-                "INSERT OR REPLACE INTO db_meta(key, value) VALUES ('workspace_folder_removal_scope_version', '1')"
-            )
         # Share the effective removal scope across passive discovery,
         # membership reads and local-copy preparation. Source paths keep
         # the scope stable while folders are rebased into local storage.
@@ -998,21 +964,6 @@ class CanonicalSchema:
                        OR substr(candidate.source_path, 1, length(restored_path.source_path) + 1) = restored_path.source_path || '/')
             )
         """)
-        pending_cols = {r[1] for r in cur.execute("PRAGMA table_info(pending_changes)")}
-        if "sync_started" not in pending_cols:
-            cur.execute("ALTER TABLE pending_changes ADD COLUMN sync_started INTEGER NOT NULL DEFAULT 0")
-        pred_cols = {r[1] for r in cur.execute("PRAGMA table_info(predictions)")}
-        if "source_taxon_id" not in pred_cols:
-            cur.execute("ALTER TABLE predictions ADD COLUMN source_taxon_id INTEGER")
-        # This row's own raw (pre-softmax) score. NULL on every row written
-        # before the column existed, and NULL is the honest value there — it
-        # means "not recorded", never "matched badly". Probed by column rather
-        # than PRAGMA user_version for the reason normalize_keyword_data()
-        # documents: branch builds have already advanced live DBs past the
-        # next free version number, so a version-gated migration silently
-        # skips on exactly the databases that need it.
-        if "match_score" not in pred_cols:
-            cur.execute("ALTER TABLE predictions ADD COLUMN match_score REAL")
         # Taxon identities recovered for label lists saved before lists
         # recorded them (see ``label_source_identities.py``), keyed by the
         # label set's fingerprint so they never change that fingerprint and
@@ -1045,13 +996,7 @@ class CanonicalSchema:
                            AND i.species = NEW.species)
                     WHERE id = NEW.id;
                 END""")
-        cur.execute("PRAGMA table_info(keywords)")
-        kw_cols = {row[1] for row in cur.fetchall()}
-        if "source_taxon_id" not in kw_cols:
-            cur.execute("ALTER TABLE keywords ADD COLUMN source_taxon_id INTEGER")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_keywords_source_taxon_id ON keywords(source_taxon_id)")
-        if "place_id" not in kw_cols:
-            cur.execute("ALTER TABLE keywords ADD COLUMN place_id TEXT")
         cur.execute("""CREATE TABLE IF NOT EXISTS keyword_import_aliases (
             path_key TEXT PRIMARY KEY,
             path_json TEXT NOT NULL,
@@ -1061,651 +1006,6 @@ class CanonicalSchema:
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_keywords_place_id "
             "ON keywords(place_id) WHERE place_id IS NOT NULL"
         )
-        # Migration: folders.parent_id. Truly legacy databases predate the
-        # column, and CREATE TABLE IF NOT EXISTS above is a no-op for them —
-        # so add the column here so repair_missing_folder_parents() (and
-        # every other query that reads parent_id) can run.
-        try:
-            self.conn.execute("SELECT parent_id FROM folders LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.execute(
-                "ALTER TABLE folders "
-                "ADD COLUMN parent_id INTEGER REFERENCES folders(id)"
-            )
-        # Phase 1 storage-philosophy migration: classifier embeddings move
-        # from single-slot photos.(embedding, embedding_model) columns into
-        # the per-(photo, model, variant) photo_embeddings table. Rows whose
-        # embedding_model was never recorded have no key in the new schema
-        # and are dropped — they are recomputable from pixels. Truly legacy
-        # databases that pre-date embedding_model fall into the same bucket.
-        try:
-            self.conn.execute("SELECT embedding FROM photos LIMIT 0")
-        except sqlite3.OperationalError:
-            pass
-        else:
-            try:
-                self.conn.execute("SELECT embedding_model FROM photos LIMIT 0")
-                has_embedding_model = True
-            except sqlite3.OperationalError:
-                has_embedding_model = False
-            if has_embedding_model:
-                self.conn.execute(
-                    """INSERT OR IGNORE INTO photo_embeddings
-                           (photo_id, model, variant, embedding)
-                       SELECT id, embedding_model, '', embedding
-                       FROM photos
-                       WHERE embedding IS NOT NULL
-                         AND embedding_model IS NOT NULL"""
-                )
-                self.conn.execute("ALTER TABLE photos DROP COLUMN embedding_model")
-            self.conn.execute("ALTER TABLE photos DROP COLUMN embedding")
-        # Migration: add `tabs` column. Per the unified-tabs design (2026-04-30),
-        # we reset every workspace's tabs to DEFAULT_TABS — solo-user app, no
-        # preservation of prior nav_order / open_tabs customizations.
-        try:
-            self.conn.execute("SELECT tabs FROM workspaces LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.execute("ALTER TABLE workspaces ADD COLUMN tabs TEXT")
-            self.conn.execute(
-                "UPDATE workspaces SET tabs = ? WHERE tabs IS NULL",
-                (json.dumps(self.default_tabs),),
-            )
-        # Migration (import/process split PR 3): insert the Import tab
-        # before Process ("pipeline") in every saved tabs row that predates
-        # the split. One-shot, guarded by PRAGMA user_version so a later
-        # unpin isn't silently undone on the next Database.__init__ call
-        # (and `_get_db()` opens a fresh Database per request).
-        current_user_version = self.conn.execute("PRAGMA user_version").fetchone()[0]
-        if current_user_version < 1:
-            rows = self.conn.execute(
-                "SELECT id, tabs FROM workspaces WHERE tabs IS NOT NULL"
-            ).fetchall()
-            for row in rows:
-                try:
-                    tabs = json.loads(row["tabs"])
-                except (TypeError, ValueError):
-                    continue
-                if not isinstance(tabs, list) or "import" in tabs:
-                    continue
-                if "pipeline" in tabs:
-                    tabs.insert(tabs.index("pipeline"), "import")
-                else:
-                    tabs.insert(0, "import")
-                self.conn.execute(
-                    "UPDATE workspaces SET tabs = ? WHERE id = ?",
-                    (json.dumps(tabs), row["id"]),
-                )
-            self.conn.execute("PRAGMA user_version = 1")
-            current_user_version = 1
-
-        # Migration (storage page): cache/storage controls moved out of
-        # Settings and Dashboard, so existing workspaces need a visible
-        # Storage tab once. Guard with user_version so a later user unpin
-        # stays respected across fresh Database handles.
-        if current_user_version < 2:
-            rows = self.conn.execute(
-                "SELECT id, tabs FROM workspaces WHERE tabs IS NOT NULL"
-            ).fetchall()
-            for row in rows:
-                try:
-                    tabs = json.loads(row["tabs"])
-                except (TypeError, ValueError):
-                    continue
-                if not isinstance(tabs, list) or "storage" in tabs:
-                    continue
-                # A legacy table that lacked the tabs column was initialized
-                # above with today's compact primary workflow. Do not let this
-                # historical migration append a secondary page to that new
-                # default; Storage remains available under Tools.
-                if tabs == self.default_tabs:
-                    continue
-                if "settings" in tabs:
-                    tabs.insert(tabs.index("settings"), "storage")
-                elif "misses" in tabs:
-                    tabs.insert(tabs.index("misses") + 1, "storage")
-                else:
-                    tabs.append("storage")
-                self.conn.execute(
-                    "UPDATE workspaces SET tabs = ? WHERE id = ?",
-                    (json.dumps(tabs), row["id"]),
-                )
-            self.conn.execute("PRAGMA user_version = 2")
-            current_user_version = 2
-
-        # (Version 3 was briefly used on the fix-import-page-routing branch
-        # for an "import catch-up" that tried to backfill Import for
-        # databases suspected of having skipped the v1 migration. It was
-        # dropped before shipping: chronologically v1 (dae1653, 2026-07-05)
-        # landed before v2 (e988f21, 2026-07-08) and both live in this same
-        # method, so no real database can be at user_version 2 without
-        # having run v1. The catch-up therefore only fired on rows whose
-        # shape matched a user who unpinned Import from the current
-        # default — clobbering a legitimate preference to fix a scenario
-        # that cannot occur. The number is skipped rather than reused so
-        # any dev DB that briefly reached user_version 3 keeps monotonic
-        # ordering into v4.)
-
-        # Migration (import page prominence): Import is now the first pinned
-        # page, because adding photos is the natural starting workflow. Move
-        # an existing Import tab to the front once. Rows that lack Import
-        # are left alone — a one-shot migration must not silently re-add a
-        # tab a user removed.
-        if current_user_version < 4:
-            rows = self.conn.execute(
-                "SELECT id, tabs FROM workspaces WHERE tabs IS NOT NULL"
-            ).fetchall()
-            for row in rows:
-                try:
-                    tabs = json.loads(row["tabs"])
-                except (TypeError, ValueError):
-                    continue
-                if not isinstance(tabs, list) or "import" not in tabs:
-                    continue
-                if tabs[0] == "import":
-                    continue
-                tabs = [t for t in tabs if t != "import"]
-                tabs.insert(0, "import")
-                self.conn.execute(
-                    "UPDATE workspaces SET tabs = ? WHERE id = ?",
-                    (json.dumps(tabs), row["id"]),
-                )
-            self.conn.execute("PRAGMA user_version = 4")
-            current_user_version = 4
-
-        # Migration: drop legacy open_tabs column (replaced by `tabs`).
-        try:
-            self.conn.execute("SELECT open_tabs FROM workspaces LIMIT 0")
-            self.conn.execute("ALTER TABLE workspaces DROP COLUMN open_tabs")
-        except sqlite3.OperationalError:
-            pass  # column already absent (already dropped or fresh schema)
-        # Migration: per-workspace grouping provenance. last_grouped_at is
-        # the unix epoch when run_full_pipeline last completed for this
-        # workspace; last_group_fingerprint is a stable hash of the encounter
-        # + burst params used. Both NULL for fresh workspaces.
-        try:
-            self.conn.execute("SELECT last_grouped_at FROM workspaces LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.execute(
-                "ALTER TABLE workspaces ADD COLUMN last_grouped_at INTEGER"
-            )
-        try:
-            self.conn.execute("SELECT last_group_fingerprint FROM workspaces LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.execute(
-                "ALTER TABLE workspaces ADD COLUMN last_group_fingerprint TEXT"
-            )
-        # Migration: add `pinned_at` for the alphabetical-with-pinned-on-top
-        # workspace dropdown. NULL means unpinned; an ISO timestamp marks the
-        # workspace as pinned.
-        try:
-            self.conn.execute("SELECT pinned_at FROM workspaces LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.execute("ALTER TABLE workspaces ADD COLUMN pinned_at TEXT")
-        # Migration: distinguish user-facing workspace roots from internal
-        # descendant links materialized for recursive roots.
-        try:
-            self.conn.execute("SELECT is_root FROM workspace_folders LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.execute(
-                "ALTER TABLE workspace_folders "
-                "ADD COLUMN is_root INTEGER NOT NULL DEFAULT 1"
-            )
-            self.conn.execute(
-                """UPDATE workspace_folders AS child_wf
-                   SET is_root = 0
-                   WHERE EXISTS (
-                     SELECT 1
-                     FROM workspace_folders AS root_wf
-                     JOIN folders root ON root.id = root_wf.folder_id
-                     JOIN folders child ON child.id = child_wf.folder_id
-                     WHERE root_wf.workspace_id = child_wf.workspace_id
-                       AND root_wf.folder_id != child_wf.folder_id
-                       AND substr(
-                         REPLACE(child.path, '\\', '/'),
-                         1,
-                         length(RTRIM(REPLACE(root.path, '\\', '/'), '/') || '/')
-                       ) = RTRIM(REPLACE(root.path, '\\', '/'), '/') || '/'
-                   )"""
-            )
-        # Migration: workspace_sync_only_folders -> workspace_sync_only_photos.
-        # #1661 briefly recorded these grants keyed by folder; a database
-        # opened by that parent commit still carries them, and every reader
-        # in this commit prefers the new photo-keyed table. Without this
-        # migration the sibling-workspace pending edits that #1661 preserved
-        # lose their path grant on upgrade and stay queued as inaccessible
-        # with nothing saying why. Rewrite what we can identify: every
-        # ``workspace_sync_only_folders`` row was written by
-        # ``_link_survivor_for_sibling_edits`` for a specific survivor
-        # sitting in that folder at grant time. Match each legacy row to the
-        # pending photos that were actually authorized by it -- photos still
-        # in the granted folder, and photos that ``move_photos`` later
-        # relocated out of it (matched by ``last_move_source_folder_path``,
-        # the exact provenance the mover records for this purpose).
-        # Restricting the migration this way keeps unrelated pending edits
-        # in the same workspace -- for example, an edit for a folder
-        # subsequently unlinked from the workspace by
-        # ``remove_workspace_folder`` -- from silently gaining sync-only
-        # access on upgrade, which was never something the legacy grant
-        # authorized. Grants for library-visible photos are inert:
-        # ``_photo_syncable_in_workspace`` short-circuits on library
-        # membership before consulting the grant.
-        #
-        # The legacy table stays after this best-effort copy: ``move_photos``
-        # clears ``last_move_source_folder_path`` after draining the last
-        # same-stem move from a source folder, so a survivor moved before
-        # upgrade can match neither its current folder nor its stale
-        # provenance and slip past the migration. Retaining the row lets
-        # ``_photo_syncable_in_workspace`` and ``get_sync_only_photo_paths``
-        # keep resolving the grant at read time -- via the same criteria,
-        # so a photo that returns to the granted folder or gets its
-        # provenance restamped is still recoverable -- rather than losing
-        # the record and the sibling's preserved edit with it. The
-        # migration is idempotent (``INSERT OR IGNORE``) so re-running it
-        # on subsequent opens fills in whatever the previous run missed.
-        legacy_sof = self.conn.execute(
-            "SELECT 1 FROM sqlite_master "
-            "WHERE type='table' AND name='workspace_sync_only_folders'"
-        ).fetchone()
-        if legacy_sof is not None:
-            self.conn.execute(
-                """INSERT OR IGNORE INTO workspace_sync_only_photos
-                       (workspace_id, photo_id)
-                   SELECT DISTINCT pc.workspace_id, pc.photo_id
-                   FROM pending_changes pc
-                   JOIN photos p ON p.id = pc.photo_id
-                   JOIN workspace_sync_only_folders sof
-                     ON sof.workspace_id = pc.workspace_id
-                   LEFT JOIN folders granted
-                     ON granted.id = sof.folder_id
-                   WHERE sof.folder_id = p.folder_id
-                      OR (granted.path IS NOT NULL
-                          AND granted.path
-                              = p.last_move_source_folder_path)"""
-            )
-        # Migration: working-copy failure markers. Backfill (and the inline
-        # scan extraction) record a failure here when extract_working_copy
-        # returns False, gated by file_mtime so a user-replaced file retries
-        # on the next pass instead of being permanently skipped.
-        try:
-            self.conn.execute("SELECT working_copy_failed_at FROM photos LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.execute(
-                "ALTER TABLE photos ADD COLUMN working_copy_failed_at TEXT"
-            )
-        try:
-            self.conn.execute("SELECT working_copy_failed_mtime FROM photos LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.execute(
-                "ALTER TABLE photos ADD COLUMN working_copy_failed_mtime REAL"
-            )
-        try:
-            self.conn.execute("SELECT working_copy_failed_source FROM photos LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.execute(
-                "ALTER TABLE photos ADD COLUMN working_copy_failed_source TEXT"
-            )
-        # Quota eviction is not an extraction failure: keep its source-mtime
-        # marker separate so startup backfill does not immediately recreate
-        # deliberately removed working copies.
-        try:
-            self.conn.execute("SELECT working_copy_evicted_mtime FROM photos LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.execute(
-                "ALTER TABLE photos ADD COLUMN working_copy_evicted_mtime REAL"
-            )
-        # Record the folder a photo most recently moved from. This lets
-        # per-photo moves prove that a same-stem file already at the
-        # destination is a RAW/JPEG sibling from the same source instead of
-        # an unrelated photo whose developed render would be overwritten.
-        # The value is the source folder's path (not its folders.id): SQLite
-        # INTEGER PRIMARY KEY without AUTOINCREMENT reuses freed rowids after
-        # ``delete_folder``, so a stale id could compare equal to an unrelated
-        # new folder and bypass the collision guard.
-        try:
-            self.conn.execute(
-                "SELECT last_move_source_folder_path FROM photos LIMIT 0"
-            )
-        except sqlite3.OperationalError:
-            self.conn.execute(
-                "ALTER TABLE photos "
-                "ADD COLUMN last_move_source_folder_path TEXT"
-            )
-        # Migration: add eye_kp_fingerprint column. Set to NULL for new
-        # photos; populated when the eye-keypoint stage runs. Phase 1 also
-        # backfills existing eye-keypoint rows to the current fingerprint
-        # in a separate migration step (see Task 2.1).
-        try:
-            self.conn.execute("SELECT eye_kp_fingerprint FROM photos LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.execute(
-                "ALTER TABLE photos ADD COLUMN eye_kp_fingerprint TEXT"
-            )
-        # One-shot backfill: stamp the current EYE_KP_FINGERPRINT_VERSION
-        # onto photos that already have eye-keypoint data, so existing
-        # users don't see "Outdated" for unchanged data on first upgrade.
-        # Gated by db_meta so it runs exactly once per DB. Probe for
-        # eye_tenengrad first — synthetic old-shape DBs in tests can
-        # predate that column, in which case there's no eye-keypoint data
-        # to backfill anyway and we just record the marker so we don't
-        # keep probing.
-        marker = self.conn.execute(
-            "SELECT value FROM db_meta WHERE key='eye_kp_fingerprint_backfill'"
-        ).fetchone()
-        if marker is None:
-            try:
-                self.conn.execute("SELECT eye_tenengrad FROM photos LIMIT 0")
-            except sqlite3.OperationalError:
-                pass
-            else:
-                from pipeline import EYE_KP_FINGERPRINT_VERSION
-                self.conn.execute(
-                    "UPDATE photos SET eye_kp_fingerprint = ? "
-                    "WHERE eye_tenengrad IS NOT NULL AND eye_kp_fingerprint IS NULL",
-                    (EYE_KP_FINGERPRINT_VERSION,),
-                )
-            self.conn.execute(
-                "INSERT INTO db_meta(key, value) VALUES ('eye_kp_fingerprint_backfill', '1')"
-            )
-        try:
-            self.conn.execute("SELECT active_mask_variant FROM photos LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.execute(
-                "ALTER TABLE photos ADD COLUMN active_mask_variant TEXT"
-            )
-        try:
-            self.conn.execute("SELECT wildlife_excluded FROM photos LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.execute(
-                "ALTER TABLE photos "
-                "ADD COLUMN wildlife_excluded INTEGER NOT NULL DEFAULT 0"
-            )
-        # Migration: quality recipe and miss-classifier columns. PHOTO_COLS/get_collection_photos
-        # and misses.py both reference these; without the fallback ALTER, any
-        # DB created before the miss-classifier feature fails every photo-list
-        # query with "no such column".
-        for column, column_type in (
-            ("quality_input_recipe", "TEXT"),
-            ("miss_no_subject", "INTEGER"),
-            ("miss_clipped", "INTEGER"),
-            ("miss_oof", "INTEGER"),
-            ("miss_computed_at", "TEXT"),
-        ):
-            try:
-                self.conn.execute(f"SELECT {column} FROM photos LIMIT 0")
-            except sqlite3.OperationalError:
-                self.conn.execute(
-                    f"ALTER TABLE photos ADD COLUMN {column} {column_type}"
-                )
-        try:
-            self.conn.execute("SELECT quality_input_recipe FROM photo_masks LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.execute("ALTER TABLE photo_masks ADD COLUMN quality_input_recipe TEXT")
-            self.conn.execute(
-                "UPDATE photo_masks SET quality_input_recipe = ("
-                "SELECT p.quality_input_recipe FROM photos p WHERE p.id=photo_masks.photo_id) "
-                "WHERE variant = (SELECT p.active_mask_variant FROM photos p WHERE p.id=photo_masks.photo_id)"
-            )
-            # Earlier experimental builds recorded only the active recipe.
-            # Inactive masks on RAW-analyzed photos have unknown provenance;
-            # force a refresh when selected instead of assuming normal scores.
-            self.conn.execute(
-                "UPDATE photo_masks SET quality_input_recipe='unknown-raw-analysis-recipe' "
-                "WHERE variant IS NOT (SELECT p.active_mask_variant FROM photos p WHERE p.id=photo_masks.photo_id) "
-                "AND photo_id IN (SELECT d.photo_id FROM subject_raw_analysis a "
-                "JOIN detections d ON d.id=a.detection_id)"
-            )
-        try:
-            self.conn.execute("SELECT input_recipe FROM classifier_runs LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.execute("ALTER TABLE classifier_runs ADD COLUMN input_recipe TEXT")
-            # Older experimental runs did not record recipe ownership.
-            self.conn.execute(
-                "UPDATE classifier_runs SET input_recipe='unknown-raw-recipe' "
-                "WHERE detection_id IN (SELECT detection_id FROM subject_raw_analysis)"
-            )
-        # Quality features belong to the mask/recipe that produced them.
-        # Only the active variant can be backfilled from the old photo row.
-        for column, column_type in (
-            ("subject_clip_high", "REAL"), ("subject_clip_low", "REAL"),
-            ("subject_y_median", "REAL"), ("bg_separation", "REAL"),
-            ("phash_crop", "TEXT"), ("noise_estimate", "REAL"),
-        ):
-            try:
-                self.conn.execute(f"SELECT {column} FROM photo_masks LIMIT 0")
-            except sqlite3.OperationalError:
-                self.conn.execute(f"ALTER TABLE photo_masks ADD COLUMN {column} {column_type}")
-                self.conn.execute(
-                    f"UPDATE photo_masks SET {column}=(SELECT p.{column} FROM photos p "
-                    "WHERE p.id=photo_masks.photo_id) WHERE variant=(SELECT p.active_mask_variant "
-                    "FROM photos p WHERE p.id=photo_masks.photo_id)"
-                )
-                self.conn.execute(
-                    "UPDATE photo_masks SET quality_input_recipe='unknown-mask-quality-recipe' "
-                    "WHERE variant IS NOT (SELECT p.active_mask_variant FROM photos p "
-                    "WHERE p.id=photo_masks.photo_id)"
-                )
-        # Migration: integrity-verification markers. hash_checked_at is when
-        # the file's content was last re-hashed against photos.file_hash;
-        # hash_status records the verdict ('ok', 'modified', 'corrupt',
-        # 'unreadable'). NULL means the file has never been verified.
-        try:
-            self.conn.execute("SELECT hash_checked_at FROM photos LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.execute(
-                "ALTER TABLE photos ADD COLUMN hash_checked_at TEXT"
-            )
-        try:
-            self.conn.execute("SELECT hash_status FROM photos LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.execute(
-                "ALTER TABLE photos ADD COLUMN hash_status TEXT"
-            )
-
-        # Migration: collections carry the universal filter's visual clause
-        # alongside rules — the clause deliberately lives outside the rule
-        # tree, so without this column a saved expression with a visual
-        # component would silently reopen as metadata-only.
-        try:
-            self.conn.execute("SELECT visual_json FROM collections LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.execute(
-                "ALTER TABLE collections ADD COLUMN visual_json TEXT"
-            )
-
-        # Migration: durable keyword-association provenance. Authorship used
-        # to be inferred from ``edit_history``, which ``_prune_edit_history``
-        # trims to ``max_edit_history`` rows, so evidence that a person added
-        # a keyword could disappear while the keyword itself survived — and
-        # provenance-driven cleanups would then misread it as generated.
-        # 'manual' on the association row cannot be pruned.
-        try:
-            self.conn.execute("SELECT source FROM photo_keywords LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.execute(
-                "ALTER TABLE photo_keywords ADD COLUMN source TEXT"
-            )
-
-        # Migration: promote EXIF camera fields out of the exif_data JSON
-        # blob into real columns so the universal filter engine can query
-        # them with indexes and plain SQL (design:
-        # docs/plans/2026-07-19-universal-filters-design.md). Scans populate
-        # these for new/changed files; the one-shot backfill below covers
-        # existing rows.
-        for column, column_type in (
-            ("camera_make", "TEXT"),
-            ("camera_model", "TEXT"),
-            ("lens", "TEXT"),
-            ("aperture", "REAL"),
-            ("shutter_speed", "REAL"),
-            ("iso", "INTEGER"),
-        ):
-            try:
-                self.conn.execute(f"SELECT {column} FROM photos LIMIT 0")
-            except sqlite3.OperationalError:
-                self.conn.execute(
-                    f"ALTER TABLE photos ADD COLUMN {column} {column_type}"
-                )
-        # One-shot backfill from stored exif_data, gated by db_meta (not
-        # user_version, which has drifted on live DBs). Rows whose exif_data
-        # is the minimal "{}" marker were scanned with
-        # ``extract_full_metadata=False`` before the promoted columns
-        # existed — nothing to backfill from the JSON, and the scanner's
-        # incremental pre-pass treats any non-NULL ``exif_data`` as
-        # "already extracted", so leaving the marker in place would keep
-        # camera/lens/iso NULL forever until a user manually forces a full
-        # non-incremental scan. Clear those rows back to NULL so the next
-        # scan re-runs ExifTool and populates the promoted columns
-        # (``scanner._compute_file_features`` writes them whenever
-        # ``file_meta`` is present, independent of the full-JSON flag).
-        marker = self.conn.execute(
-            "SELECT value FROM db_meta WHERE key='exif_summary_backfill_v1'"
-        ).fetchone()
-        if marker is None:
-            from metadata import exif_summary_columns
-            # Probe first: synthetic old-shape DBs in tests can predate the
-            # exif_data column entirely. Nothing to backfill there — just
-            # record the marker so we don't keep probing.
-            try:
-                self.conn.execute("SELECT exif_data FROM photos LIMIT 0")
-            except sqlite3.OperationalError:
-                rows = []
-                exif_column_present = False
-            else:
-                rows = self.conn.execute(
-                    "SELECT id, exif_data FROM photos "
-                    "WHERE exif_data IS NOT NULL AND exif_data != '{}'"
-                ).fetchall()
-                exif_column_present = True
-            for row in rows:
-                try:
-                    grouped = json.loads(row["exif_data"])
-                except (TypeError, ValueError):
-                    continue
-                cols = exif_summary_columns(grouped)
-                if not cols:
-                    continue
-                assignments = ", ".join(f"{col} = ?" for col in cols)
-                self.conn.execute(
-                    f"UPDATE photos SET {assignments} WHERE id = ?",
-                    [*cols.values(), row["id"]],
-                )
-            if exif_column_present:
-                # Clear the minimal ``'{}'`` marker left by older scans that
-                # ran with ``extract_full_metadata=False``. Those rows have
-                # no JSON to backfill from, and the scanner's incremental
-                # pre-pass otherwise skips them forever (their ``exif_data``
-                # is non-NULL, so they're treated as already extracted),
-                # leaving the new camera/lens/aperture/... columns
-                # permanently empty on upgraded libraries. Clearing to NULL
-                # lets the pre-pass's ``summary_needs_extract`` query pick
-                # them up on the next scan and populate the promoted
-                # columns in a single re-extraction.
-                self.conn.execute(
-                    "UPDATE photos SET exif_data = NULL WHERE exif_data = '{}'"
-                )
-            self.conn.execute(
-                "INSERT INTO db_meta(key, value) VALUES ('exif_summary_backfill_v1', '1')"
-            )
-
-        # Migration: add ON DELETE CASCADE foreign key on
-        # local_workspace_folders.folder_id. Early builds of this table
-        # declared folder_id as a bare INTEGER, so a folder DELETE on those
-        # DBs would leave a dangling local-workspace mapping and break
-        # sync/discard's catalog restore. SQLite can't add a FK via ALTER
-        # TABLE, so rebuild the table when the constraint is absent.
-        fk_rows = self.conn.execute(
-            "PRAGMA foreign_key_list(local_workspace_folders)"
-        ).fetchall()
-        has_folder_fk = any(
-            row["from"] == "folder_id" and row["table"] == "folders"
-            for row in fk_rows
-        )
-        if not has_folder_fk:
-            # Earlier migrations in this method may have executed DML (for
-            # example the db_meta backfill marker above) which sqlite3
-            # wraps in an implicit transaction. Toggling foreign_keys and
-            # starting BEGIN IMMEDIATE both require no open transaction, so
-            # commit any pending migration writes before the rebuild.
-            self.conn.commit()
-            self.conn.execute("PRAGMA foreign_keys=OFF")
-            try:
-                self.conn.execute("BEGIN IMMEDIATE")
-                self.conn.execute(
-                    """CREATE TABLE local_workspace_folders_new (
-                        workspace_id    INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-                        folder_id       INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
-                        source_path     TEXT NOT NULL,
-                        local_path      TEXT NOT NULL,
-                        original_status TEXT NOT NULL DEFAULT 'ok',
-                        is_root         INTEGER NOT NULL DEFAULT 0,
-                        root_index      INTEGER,
-                        PRIMARY KEY (workspace_id, folder_id)
-                    )"""
-                )
-                # Only carry over rows whose folder_id still exists; a
-                # concurrent-with-migration folder delete on the old shape
-                # is the exact bug this FK closes, and dragging a dangling
-                # row into the new table would immediately trip the FK.
-                self.conn.execute(
-                    """INSERT INTO local_workspace_folders_new
-                       SELECT lwf.* FROM local_workspace_folders lwf
-                       JOIN folders f ON f.id = lwf.folder_id"""
-                )
-                self.conn.execute("DROP TABLE local_workspace_folders")
-                self.conn.execute(
-                    "ALTER TABLE local_workspace_folders_new "
-                    "RENAME TO local_workspace_folders"
-                )
-                self.conn.commit()
-            except BaseException:
-                self.conn.rollback()
-                raise
-            finally:
-                self.conn.execute("PRAGMA foreign_keys=ON")
-
-        # Backfill pre-existing photos with mask_path set on the photos
-        # row but no row in photo_masks. They get migrated to
-        # variant='unknown' with a sentinel prompt; detector_model='unknown'
-        # + prompt=-1 mean the staleness check will treat these masks as
-        # stale on the next pipeline run, so they get regenerated against
-        # whatever SAM2 variant the user has configured.
-        #
-        # Resumable: gating only on the per-photo NOT EXISTS clause means
-        # a startup crash partway through (e.g. after inserting some
-        # 'unknown' rows but before completing) still finishes the rest
-        # of the legacy photos on the next startup. An earlier outer
-        # ``if total_unknown_rows == 0`` guard caused remaining photos
-        # to be skipped forever, leaving orphaned mask_path values that
-        # variant-aware APIs and cleanup logic couldn't see.
-        try:
-            rows = self.conn.execute(
-                "SELECT p.id, p.mask_path, p.subject_size, "
-                "p.subject_tenengrad, p.bg_tenengrad, p.crop_complete "
-                "FROM photos p "
-                "WHERE p.mask_path IS NOT NULL "
-                "  AND NOT EXISTS ("
-                "    SELECT 1 FROM photo_masks pm WHERE pm.photo_id = p.id"
-                "  )"
-            ).fetchall()
-        except sqlite3.OperationalError:
-            rows = []
-        now = int(time.time())
-        for r in rows:
-            self.conn.execute(
-                "INSERT OR IGNORE INTO photo_masks "
-                "(photo_id, variant, path, created_at, detector_model, "
-                "prompt_x, prompt_y, prompt_w, prompt_h, "
-                "subject_size, subject_tenengrad, bg_tenengrad, crop_complete) "
-                "VALUES (?, 'unknown', ?, ?, 'unknown', -1, -1, -1, -1, ?, ?, ?, ?)",
-                (r["id"], r["mask_path"], now,
-                 r["subject_size"], r["subject_tenengrad"],
-                 r["bg_tenengrad"], r["crop_complete"]),
-            )
-            self.conn.execute(
-                "UPDATE photos SET active_mask_variant='unknown' "
-                "WHERE id=? AND active_mask_variant IS NULL",
-                (r["id"],),
-            )
 
         # Seed user-editable saved processes once. db_meta-guarded (NOT
         # user_version-guarded) because the live DB's user_version can run
@@ -1741,105 +1041,6 @@ class CanonicalSchema:
             self.conn.execute(
                 "INSERT INTO db_meta(key, value) "
                 "VALUES ('saved_processes_seeded', '1')"
-            )
-
-        # One-shot: migrate the former per-workspace pipeline.default_strategy
-        # (a strategy name) to pipeline.default_process_id (a saved_processes
-        # id). Unknown/removed names -> unset (import only). Runs after seeding
-        # so the name->id lookup finds the seed rows; db_meta-guarded so a
-        # later manual edit of the override isn't reverted on the next handle.
-        migrated = self.conn.execute(
-            "SELECT value FROM db_meta WHERE key='default_strategy_to_process_id'"
-        ).fetchone()
-        if migrated is None:
-            name_to_id = {
-                row["name"]: row["id"]
-                for row in self.conn.execute(
-                    "SELECT id, name FROM saved_processes"
-                ).fetchall()
-            }
-            ws_rows = self.conn.execute(
-                "SELECT id, config_overrides FROM workspaces "
-                "WHERE config_overrides IS NOT NULL"
-            ).fetchall()
-            for row in ws_rows:
-                try:
-                    overrides = json.loads(row["config_overrides"])
-                except (TypeError, ValueError):
-                    continue
-                if not isinstance(overrides, dict):
-                    continue
-                pipeline_ov = overrides.get("pipeline")
-                if not isinstance(pipeline_ov, dict):
-                    continue
-                if "default_strategy" not in pipeline_ov:
-                    continue
-                old = pipeline_ov.pop("default_strategy")
-                seed_name = (
-                    ps.LEGACY_STRATEGY_NAMES.get(old)
-                    if isinstance(old, str) else None
-                )
-                pid = name_to_id.get(seed_name) if seed_name else None
-                # Always write ``default_process_id`` (even ``None``) so the
-                # workspace's explicit override intent survives the migration.
-                # An old ``default_strategy: null`` meant "import only"; without
-                # this line, popping the legacy key would let
-                # ``get_effective_config()``'s deep_merge inherit the *global*
-                # default and silently start auto-processing on imports for a
-                # workspace that had explicitly said otherwise. Same reasoning
-                # for an unrecognized legacy name — the user's explicit choice
-                # was not the current global default.
-                pipeline_ov["default_process_id"] = pid
-                self.conn.execute(
-                    "UPDATE workspaces SET config_overrides = ? WHERE id = ?",
-                    (json.dumps(overrides), row["id"]),
-                )
-            self.conn.execute(
-                "INSERT INTO db_meta(key, value) "
-                "VALUES ('default_strategy_to_process_id', '1')"
-            )
-
-        # One-shot backfill for ``duplicate_rejections``. Before this table
-        # existed the duplicate scan's reopen path un-rejected every row
-        # under a shared hash. New rejections now record provenance, but a
-        # catalog upgraded from before it does not, so groups resolved
-        # pre-upgrade would never auto-reopen — if the kept file later
-        # disappears, the surviving twin stays rejected behind a ghost
-        # winner. Adopt any existing rejection that shares a ``file_hash``
-        # with a non-rejected sibling as a resolver rejection so those
-        # groups behave the way they used to. A hand-rejection that
-        # coincidentally shared a hash gets the same treatment, which
-        # matches the pre-upgrade behaviour; new hand-rejections after
-        # this point are excluded from ``duplicate_rejections`` normally.
-        backfilled = self.conn.execute(
-            "SELECT value FROM db_meta WHERE key='duplicate_rejections_backfill_v1'"
-        ).fetchone()
-        if backfilled is None:
-            # Probe for the ``flag`` and ``file_hash`` columns before the
-            # backfill runs: synthetic old-shape DBs in tests can predate
-            # either. Nothing to backfill there — just record the marker
-            # so we don't keep probing on every open.
-            try:
-                self.conn.execute(
-                    "SELECT flag, file_hash FROM photos LIMIT 0"
-                )
-            except sqlite3.OperationalError:
-                pass
-            else:
-                self.conn.execute(
-                    "INSERT OR IGNORE INTO duplicate_rejections(photo_id) "
-                    "SELECT p.id FROM photos p "
-                    "WHERE p.flag = 'rejected' AND p.file_hash IS NOT NULL "
-                    "AND EXISTS ("
-                    "    SELECT 1 FROM photos q "
-                    "    WHERE q.file_hash = p.file_hash "
-                    "      AND q.id != p.id "
-                    "      AND (q.flag IS NULL OR q.flag != 'rejected')"
-                    ")"
-                )
-            self.conn.execute(
-                "INSERT INTO db_meta(key, value) "
-                "VALUES ('duplicate_rejections_backfill_v1', '1')"
             )
         from photo_visibility_schema import create_photo_visibility_schema
 

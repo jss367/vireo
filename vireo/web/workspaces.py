@@ -161,11 +161,7 @@ def create_workspace_blueprint(
         except Exception:
             log.warning("Could not read workspace tabs; showing defaults", exc_info=True)
             tabs = list(DEFAULT_TABS)
-        return jsonify({
-            "tabs": tabs,
-            "all_pages": all_pages,
-            "navigation_migrated": db.get_meta("navigation_consolidated") == "1",
-        })
+        return jsonify({"tabs": tabs, "all_pages": all_pages})
 
     @blueprint.route("/api/workspaces")
     def api_get_workspaces():
