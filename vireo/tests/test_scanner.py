@@ -1889,6 +1889,50 @@ def test_rescan_repairs_companion_onto_its_own_raw_not_a_new_same_stem_raw(tmp_p
     assert rows == {"IMG_001.cr3": "IMG_001.jpg", "IMG_001.arw": None}
 
 
+def test_disjoint_raw_jpeg_sets_pair_independently_in_one_group(tmp_path):
+    """Two disjoint RAW/JPEG sets with the same stem both pair in one
+    scan. Before: the reinserted companion of the already-paired RAW was
+    picked first and ``_pair_raw_jpeg_companions`` only merged one pair
+    per group, so the new ARW/JPEG set was perpetually left as two photos
+    on every rescan of this folder."""
+    from db import Database
+    from import_dedup import CatalogIndex, DuplicateChecker
+    from scanner import scan
+
+    img_dir = tmp_path / "photos"
+    img_dir.mkdir()
+    Image.new("RGB", (200, 100), color="green").save(str(img_dir / "IMG_001.jpg"))
+    (img_dir / "IMG_001.cr3").write_bytes(b"\x00" * 200)
+    db = Database(str(tmp_path / "test.db"))
+    scan(str(img_dir), db)
+
+    # Add a disjoint second RAW/JPEG set that shares the stem.
+    Image.new("RGB", (300, 100), color="blue").save(str(img_dir / "IMG_001.jpeg"))
+    (img_dir / "IMG_001.arw").write_bytes(b"\x01" * 200)
+    scan(str(img_dir), db)
+    # Rescan the same folder: the merged companion is re-inserted and must
+    # not starve the newer pair on this pass either.
+    scan(str(img_dir), db)
+
+    rows = {
+        r["filename"]: r["companion_path"]
+        for r in db.conn.execute("SELECT filename, companion_path FROM photos")
+    }
+    assert rows == {
+        "IMG_001.cr3": "IMG_001.jpg",
+        "IMG_001.arw": "IMG_001.jpeg",
+    }
+
+    # Every JPEG is still recognized on re-import of the card.
+    card = tmp_path / "card"
+    card.mkdir()
+    index = CatalogIndex.from_db(db)
+    for name in ("IMG_001.jpg", "IMG_001.jpeg"):
+        copy = card / name
+        copy.write_bytes((img_dir / name).read_bytes())
+        assert DuplicateChecker(index).match(copy) is not None, name
+
+
 def test_rescan_changed_companion_invalidates_jpeg_thumbnail_variant(tmp_path):
     """Re-pairing a changed companion drops its source-specific thumbnail
     even when the replacement preserves filesystem mtime."""
