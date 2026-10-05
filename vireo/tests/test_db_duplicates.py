@@ -423,6 +423,90 @@ def test_merge_raises_rating_rejects_losers_and_commits(db, folder):
     assert _flags(db, [w, l1, l2]) == {w: "none", l1: "rejected", l2: "rejected"}
 
 
+@pytest.mark.parametrize("hierarchical", [False, True])
+@pytest.mark.parametrize("removed", [False, True])
+def test_merge_preserves_embedded_suppression_and_survivor_removals(
+        db, folder, hierarchical, removed):
+    from scanner import _import_embedded_keywords_for_photo
+
+    fid, _ = folder
+    winner = _photo(db, fid, "winner.jpg", "H")
+    loser = _photo(db, fid, "loser.jpg", "H")
+    metadata = {"XMP": {"HierarchicalSubject": ["Birds|Robin"]}} if hierarchical else {
+        "XMP": {"Subject": ["Robin"]},
+    }
+    key = "birds|robin" if hierarchical else "robin"
+    if removed:
+        _import_embedded_keywords_for_photo(db, winner, metadata)
+        db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (winner,))
+        db.conn.commit()
+    _import_embedded_keywords_for_photo(db, loser, metadata)
+    manual = db.add_keyword("Field note")
+    db.tag_photo(loser, manual, source="manual")
+
+    db._apply_winner_loser_merge(winner, [loser])
+    names = {k["name"] for k in db.get_photo_keywords(winner)}
+    assert ("Robin" in names) is not removed
+    assert "Field note" in names
+    assert _keyword_sources(db, winner)[manual] == "manual"
+    assert db.get_embedded_keyword_offered_keys(winner) == {key}
+    # The rejected row still exists and may later be reopened.
+    assert db.get_embedded_keyword_offered_keys(loser) == {key}
+
+    db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (winner,))
+    db.conn.commit()
+    _import_embedded_keywords_for_photo(db, winner, metadata)
+    assert db.get_photo_keywords(winner) == []
+
+
+def test_merge_carries_manually_readded_loser_tag_through_survivor_removal(
+        db, folder):
+    from scanner import _import_embedded_keywords_for_photo
+
+    fid, _ = folder
+    winner = _photo(db, fid, "winner.jpg", "H")
+    loser = _photo(db, fid, "loser.jpg", "H")
+    metadata = {"XMP": {"Subject": ["Robin"]}}
+    # Both sides imported the embedded tag; the user then detached it on both.
+    _import_embedded_keywords_for_photo(db, winner, metadata)
+    _import_embedded_keywords_for_photo(db, loser, metadata)
+    db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (winner,))
+    db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (loser,))
+    db.conn.commit()
+    # Loser's user deliberately re-adds the keyword with manual provenance.
+    robin = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ?", ("Robin",),
+    ).fetchone()["id"]
+    db.tag_photo(loser, robin, source="manual")
+
+    db._apply_winner_loser_merge(winner, [loser])
+
+    names = {k["name"] for k in db.get_photo_keywords(winner)}
+    assert "Robin" in names, (
+        "A manually re-added loser tag must carry through even when the "
+        "survivor removed the embedded value it was offered under."
+    )
+    assert _keyword_sources(db, winner)[robin] == "manual"
+
+
+def test_merge_embedded_suppression_from_one_loser_does_not_block_another(db, folder):
+    from scanner import _import_embedded_keywords_for_photo
+
+    fid, _ = folder
+    winner, detached, attached = (
+        _photo(db, fid, name, "H") for name in ("w.jpg", "d.jpg", "a.jpg")
+    )
+    metadata = {"XMP": {"Subject": ["Robin"]}}
+    _import_embedded_keywords_for_photo(db, detached, metadata)
+    db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (detached,))
+    db.conn.commit()
+    _import_embedded_keywords_for_photo(db, attached, metadata)
+
+    db._apply_winner_loser_merge(winner, [detached, attached])
+    assert {k["name"] for k in db.get_photo_keywords(winner)} == {"Robin"}
+    assert db.get_embedded_keyword_offered_keys(winner) == {"robin"}
+
+
 def test_merge_leaves_a_higher_winner_rating_alone(db, folder):
     fid, _ = folder
     w = _photo(db, fid, "w.jpg", "H", rating=4)
@@ -577,7 +661,8 @@ def test_merge_chunks_loser_reads_and_rejections(db, folder):
     with _SqlRecorder(db) as rec:
         db._apply_winner_loser_merge(w, losers)
 
-    assert len(rec.matching("WHERE photo_id IN (")) == 2
+    # Two chunks each for keyword reads and suppression-state copies.
+    assert len(rec.matching("WHERE photo_id IN (")) == 4
     # Distinct texts: the trace callback re-reports the parent statement
     # each time the per-row duplicate_rejections trigger fires.
     assert len(set(rec.matching("UPDATE photos SET flag = 'rejected' WHERE id IN ("))) == 2

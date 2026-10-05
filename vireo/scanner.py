@@ -312,7 +312,8 @@ def _import_keywords_for_photo(db, photo_id, xmp_path_str):
     _import_keyword_lists(db, photo_id, flat_keywords, hier_keywords)
 
 
-def _import_embedded_keywords_for_photo(db, photo_id, file_meta):
+def _import_embedded_keywords_for_photo(db, photo_id, file_meta, *,
+                                        raise_on_conflict=False):
     """Import the keywords stored inside the image file (see ``embedded_keywords``).
 
     Additive, like the sidecar import, and run alongside it: a file can carry
@@ -324,6 +325,7 @@ def _import_embedded_keywords_for_photo(db, photo_id, file_meta):
     keywords instead of failing the scan: the sidecar import raises there, but
     the embedded copy is a second, older source, and one stale JPEG must not
     leave every folder in scope half-scanned.
+    Backfill uses ``raise_on_conflict`` to keep skipped work retryable.
 
     Durable suppression: the pending-removal filter in ``_import_keyword_lists``
     only hides a value until the next XMP sync clears the queue entry, but
@@ -386,6 +388,8 @@ def _import_embedded_keywords_for_photo(db, photo_id, file_meta):
             log.warning(
                 "Skipped keywords embedded in photo %s: %s", photo_id, exc,
             )
+            if raise_on_conflict:
+                raise
             # Deliberately do not record the suppression on ValueError: the
             # import never ran, so the user's view of these keys has not
             # changed. A follow-up scan after the conflict is resolved
@@ -516,8 +520,9 @@ def backfill_embedded_keywords(db):
     never re-read, so the keywords Lightroom wrote into JPEGs and DNGs stayed
     out of the catalog. The scan stored ExifTool's full output in
     ``exif_data``, so this pass imports them from there without touching the
-    originals. ``db_meta``-gated; returns the number of photos that gained a
-    keyword.
+    originals. Completion is ``db_meta``-gated; conflicts leave the pass
+    retryable, while durable offered keys protect prior imports and removals
+    on that retry. Returns the number of photos that gained a keyword.
     """
     if db.get_meta(EMBEDDED_KEYWORDS_BACKFILL_KEY) == "1":
         return 0
@@ -530,6 +535,7 @@ def backfill_embedded_keywords(db):
               OR exif_data LIKE '%"Keywords": %'"""
     ).fetchall()
     imported = 0
+    complete = True
     for row in rows:
         try:
             file_meta = json.loads(row["exif_data"])
@@ -538,12 +544,17 @@ def backfill_embedded_keywords(db):
         if not isinstance(file_meta, dict):
             continue
         before = _photo_keyword_count(db, row["id"])
-        if (
-            _import_embedded_keywords_for_photo(db, row["id"], file_meta)
-            and _photo_keyword_count(db, row["id"]) > before
-        ):
+        try:
+            offered = _import_embedded_keywords_for_photo(
+                db, row["id"], file_meta, raise_on_conflict=True,
+            )
+        except ValueError:
+            complete = False
+            continue
+        if offered and _photo_keyword_count(db, row["id"]) > before:
             imported += 1
-    db.set_meta(EMBEDDED_KEYWORDS_BACKFILL_KEY, "1")
+    if complete:
+        db.set_meta(EMBEDDED_KEYWORDS_BACKFILL_KEY, "1")
     return imported
 
 

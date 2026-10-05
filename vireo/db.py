@@ -3252,7 +3252,7 @@ class Database:
             # tag_photo's upsert folds against the winner's own stamp, so a
             # weak loser can never pull a stronger winner down.
             loser_keyword_sources = {}
-            for row in repo.loser_keyword_rows(loser_ids):
+            for row in repo.loser_keyword_rows(loser_ids, survivor_id=winner_id):
                 kw_id = row["keyword_id"]
                 loser_keyword_sources[kw_id] = keyword_source_max(
                     row["source"], loser_keyword_sources.get(kw_id),
@@ -3261,6 +3261,11 @@ class Database:
                 self.tag_photo(
                     winner_id, kw_id, source=merged_source, _commit=False,
                 )
+            # Rejected losers remain in the catalog and can be reopened.
+            # Copy their suppression state after choosing carried tags, so
+            # both identities retain removals and one loser's detached key
+            # cannot suppress another loser's attached tag during this merge.
+            repo.copy_loser_embedded_offered_keys(winner_id, loser_ids)
             # TODO: pending-edit copy for duplicate merge — see plan Task 7.
             # Skipped because pending_changes is workspace-scoped and its
             # value/change_token columns are non-trivial to copy safely in

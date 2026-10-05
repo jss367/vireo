@@ -1094,6 +1094,44 @@ def test_backfill_embedded_keywords_imports_stored_exiftool_output(tmp_path):
     assert db.get_photo_keywords(tagged) == []
 
 
+def test_backfill_embedded_keywords_retries_conflicts_without_restoring_removals(
+        tmp_path, monkeypatch):
+    import scanner
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path / "photos"), name="photos")
+    handled, blocked = (
+        db.add_photo(folder_id=fid, filename=name, extension=".jpg",
+                     file_size=100, file_mtime=1.0)
+        for name in ("handled.jpg", "blocked.jpg")
+    )
+    for pid, name in ((handled, "Heron"), (blocked, "Egret")):
+        db.conn.execute("UPDATE photos SET exif_data = ? WHERE id = ?",
+                        (json.dumps({"XMP": {"Subject": [name]}}), pid))
+    db.conn.commit()
+    original = scanner._import_keyword_lists
+
+    def conflict(db, pid, *args):
+        if pid == blocked:
+            raise ValueError("different linked places")
+        return original(db, pid, *args)
+
+    monkeypatch.setattr(scanner, "_import_keyword_lists", conflict)
+    assert scanner.backfill_embedded_keywords(db) == 1
+    assert db.get_meta(scanner.EMBEDDED_KEYWORDS_BACKFILL_KEY) != "1"
+    assert db.get_photo_keywords(blocked) == []
+    db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (handled,))
+    db.conn.commit()
+
+    monkeypatch.setattr(scanner, "_import_keyword_lists", original)
+    assert scanner.backfill_embedded_keywords(db) == 1
+    assert {k["name"] for k in db.get_photo_keywords(blocked)} == {"Egret"}
+    assert db.get_photo_keywords(handled) == []
+    assert db.get_meta(scanner.EMBEDDED_KEYWORDS_BACKFILL_KEY) == "1"
+    assert scanner.backfill_embedded_keywords(db) == 0
+
+
 def test_embedded_import_does_not_undo_a_user_removal_on_reimport(tmp_path):
     """Removing an embedded keyword stays removed when the file is reread.
 
