@@ -7338,3 +7338,32 @@ def test_pair_raw_jpeg_batches_collection_remap(tmp_path):
     ).fetchone()[0])
     assert stored == [{"field": "photo_ids", "value": list(primary_ids)}]
     db.close()
+
+
+def test_startup_species_thread_runs_embedded_keyword_backfill_first(tmp_path, monkeypatch):
+    """The background pass imports embedded keywords before marking species."""
+    from db import Database
+    from services.startup_tasks import StartupTasks
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
+    photo_id = db.add_photo(folder_id=folder_id, filename="a.jpg",
+                            extension=".jpg", file_size=100, file_mtime=1.0)
+    db.conn.execute(
+        "UPDATE photos SET exif_data = ? WHERE id = ?",
+        (json.dumps({"XMP": {"Subject": ["Heron"]}}), photo_id),
+    )
+    db.conn.commit()
+
+    order = []
+    tasks = StartupTasks(app=None, db_path=db_path, init_db=db)
+    monkeypatch.setattr(
+        tasks, "mark_species_and_repair",
+        lambda bg_db, _label: order.append(
+            {k["name"] for k in bg_db.get_photo_keywords(photo_id)}
+        ),
+    )
+    tasks.mark_species()
+
+    assert order == [{"Heron"}]

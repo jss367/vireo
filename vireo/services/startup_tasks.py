@@ -3,8 +3,9 @@
 ``create_app`` runs a handful of self-healing passes around startup: the
 ordered one-shot catalog repairs and config migrations
 (``run_catalog_repairs``, including the synchronous species-marking pass that
-gates the one-shot duplicate-species repair), the background species
-mark/repair thread, the catalog-wide Wildlife genre retirement, the thumb_path
+gates the one-shot duplicate-species repair), the background thread that
+imports keywords embedded in already-scanned files and then marks/repairs
+species, the catalog-wide Wildlife genre retirement, the thumb_path
 backfill job, and the teardown that stops the job runner and closes the
 startup database. ``StartupTasks`` owns them because
 they share per-app state: the startup taxonomy parse is cached on the instance
@@ -104,23 +105,6 @@ class StartupTasks:
                 "Restored %d location hierarchy nodes misclassified as taxonomy",
                 repaired_location_ancestors,
             )
-        # Import the keywords Lightroom wrote into JPEG/DNG files that were
-        # scanned before scans read embedded keywords, from the ExifTool
-        # output already stored per photo. Runs after keyword normalization
-        # so imported names meet the cleaned rows, and before the background
-        # species pass so imported species leaves get marked. A failure
-        # leaves the marker unset and retries next boot.
-        from scanner import backfill_embedded_keywords
-        try:
-            embedded = backfill_embedded_keywords(init_db)
-        except Exception:
-            log.exception("Embedded keyword backfill failed; will retry next start")
-            init_db.conn.rollback()
-        else:
-            if embedded:
-                log.info(
-                    "Imported embedded keywords onto %d photos", embedded,
-                )
         # Ungroup legacy bursts whose stored votes span more than one species.
         # Those rows display one species and, through accept_prediction's
         # vote-winner lookup, tag another; the repair makes them read as the
@@ -314,7 +298,11 @@ class StartupTasks:
             )
 
     def mark_species(self):
-        """Background species mark/repair pass on its own connection."""
+        """Background keyword backfill and species mark/repair on its own connection.
+
+        The embedded-keyword backfill runs first so the species leaves it
+        imports are typed by the marking pass right after it.
+        """
         bg_db = None
         try:
             bg_db = Database(self._db_path)
@@ -322,9 +310,35 @@ class StartupTasks:
             log.debug("Could not open background db for species marking", exc_info=True)
             return
         try:
+            self.backfill_embedded_keywords(bg_db)
             self.mark_species_and_repair(bg_db, "background")
         finally:
             bg_db.close()
+
+    def backfill_embedded_keywords(self, db):
+        """Import keywords Lightroom wrote inside already-scanned JPEG/DNG files.
+
+        One-shot and ``db_meta``-gated (see ``scanner.backfill_embedded_keywords``):
+        it reads the ExifTool output stored per photo, never the originals. Kept
+        off the startup path because a large catalog has hundreds of candidate
+        photos, each a few writes. A failure leaves the marker unset, so the
+        next start retries.
+        """
+        from scanner import backfill_embedded_keywords
+
+        started_at = time.time()
+        try:
+            imported = backfill_embedded_keywords(db)
+        except Exception:
+            log.exception("Embedded keyword backfill failed; will retry next start")
+            db.conn.rollback()
+            return 0
+        if imported:
+            log.info(
+                "Imported embedded keywords onto %d photos in %.2fs",
+                imported, time.time() - started_at,
+            )
+        return imported
 
     def cleanup_app_resources(self, job_timeout=10.0):
         """Stop background jobs, uninstall the log broadcaster, close init_db.
