@@ -42,6 +42,40 @@ def test_ensure_schema_refuses_catalog_older_than_retired_migrations(tmp_path):
         assert conn.execute("PRAGMA user_version").fetchone()[0] == old_version
 
 
+def test_ensure_schema_refuses_catalog_with_unconverted_legacy_folder_grants(tmp_path):
+    """A populated catalog carrying rows in the retired
+    ``workspace_sync_only_folders`` table is refused: those grants were only
+    convertible by the removed migration, so opening it would silently
+    discard them. Catalogs without the legacy table (or with it empty) stay
+    unaffected."""
+    from db import IncompatibleDatabaseError
+
+    db_path = str(tmp_path / "vireo.db")
+    schema.ensure_schema(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE workspace_sync_only_folders ("
+            "workspace_id INTEGER NOT NULL, folder_id INTEGER NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO workspace_sync_only_folders(workspace_id, folder_id)"
+            " VALUES (1, 2)"
+        )
+        conn.commit()
+
+    with pytest.raises(IncompatibleDatabaseError) as excinfo:
+        schema.ensure_schema(db_path)
+
+    assert "workspace_sync_only_folders" in str(excinfo.value)
+    assert not excinfo.value.newer
+
+    # An empty legacy table does not trip the guard.
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DELETE FROM workspace_sync_only_folders")
+        conn.commit()
+    schema.ensure_schema(db_path)
+
+
 def test_ensure_schema_initializes_an_empty_existing_file(tmp_path):
     db_path = tmp_path / "vireo.db"
     sqlite3.connect(db_path).close()

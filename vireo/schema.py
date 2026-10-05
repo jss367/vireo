@@ -98,6 +98,33 @@ def _has_tables(db_path):
         ).fetchone() is not None
 
 
+def _unconverted_legacy_sync_only_folder_grants(db_path):
+    """Rows left in the legacy ``workspace_sync_only_folders`` table.
+
+    The retired migration best-effort rekeyed each folder-grant to one or
+    more ``workspace_sync_only_photos`` rows, matching the granted folder
+    against each pending-change photo's current folder or its
+    ``last_move_source_folder_path``. A row that no pending photo could be
+    matched to -- for instance, after a photo was moved out of the granted
+    folder and its ``last_move_source_folder_path`` was later cleared --
+    stayed in the legacy table waiting for a future match. With the
+    read-time fallback and the migration both removed, those grants are
+    silently inert; refuse rather than lose them.
+    """
+    if not os.path.exists(db_path) or os.path.getsize(db_path) == 0:
+        return 0
+    with contextlib.closing(sqlite3.connect(db_path)) as conn:
+        legacy = conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='table' AND name='workspace_sync_only_folders'"
+        ).fetchone()
+        if legacy is None:
+            return 0
+        return conn.execute(
+            "SELECT COUNT(*) FROM workspace_sync_only_folders"
+        ).fetchone()[0]
+
+
 def _backup_path(db_path, target_version):
     return f"{db_path}.pre-v{target_version}.bak"
 
@@ -191,6 +218,17 @@ def ensure_schema(db_path):
                 cause=(
                     f"schema version {current} predates the oldest version "
                     f"this build can upgrade ({OLDEST_UPGRADABLE_VERSION})"
+                ),
+            )
+        orphan_folder_grants = _unconverted_legacy_sync_only_folder_grants(db_path)
+        if orphan_folder_grants:
+            raise IncompatibleDatabaseError(
+                db_path,
+                cause=(
+                    f"catalog has {orphan_folder_grants} unconverted row(s) "
+                    "in the legacy workspace_sync_only_folders table; open "
+                    "it with an earlier Vireo build first so those grants "
+                    "can be rekeyed into workspace_sync_only_photos"
                 ),
             )
         upgrading = current is not None and current < latest
