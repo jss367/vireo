@@ -578,71 +578,16 @@ class MovesMergeRepository:
             "  AND f.status IN ('ok', 'partial')",
             (workspace_id,),
         ).fetchall()
-        paths = {r["photo_id"]: r["path"] for r in rows}
-        legacy = self.conn.execute(
-            "SELECT 1 FROM sqlite_master "
-            "WHERE type='table' AND name='workspace_sync_only_folders'"
-        ).fetchone()
-        if legacy is not None:
-            legacy_rows = self.conn.execute(
-                """SELECT DISTINCT pc.photo_id AS photo_id,
-                          f.path AS path
-                   FROM pending_changes pc
-                   JOIN photos p ON p.id = pc.photo_id
-                   JOIN folders f ON f.id = p.folder_id
-                   JOIN workspace_sync_only_folders sof
-                     ON sof.workspace_id = pc.workspace_id
-                   LEFT JOIN folders granted
-                     ON granted.id = sof.folder_id
-                   WHERE pc.workspace_id = ?
-                     AND f.status IN ('ok', 'partial')
-                     AND (sof.folder_id = p.folder_id
-                          OR (granted.path IS NOT NULL
-                              AND granted.path
-                                  = p.last_move_source_folder_path))""",
-                (workspace_id,),
-            ).fetchall()
-            for r in legacy_rows:
-                paths.setdefault(r["photo_id"], r["path"])
-        return paths
+        return {r["photo_id"]: r["path"] for r in rows}
 
     def photo_has_sync_only_grant(self, photo_id, workspace_id):
-        """True if ``workspace_id`` holds a sync-only grant on ``photo_id``.
-
-        A ``workspace_sync_only_photos`` row, or a legacy
-        ``workspace_sync_only_folders`` grant on the photo's folder (or the
-        folder it was last moved out of) backed by a pending edit in the
-        workspace. Library membership is the façade's check
+        """True if ``workspace_id`` holds a ``workspace_sync_only_photos``
+        grant on ``photo_id``. Library membership is the façade's check
         (``Database._photo_syncable_in_workspace``), made before this one.
         """
         row = self.conn.execute(
             "SELECT 1 FROM workspace_sync_only_photos "
             "WHERE photo_id = ? AND workspace_id = ?",
-            (photo_id, workspace_id),
-        ).fetchone()
-        if row is not None:
-            return True
-        legacy = self.conn.execute(
-            "SELECT 1 FROM sqlite_master "
-            "WHERE type='table' AND name='workspace_sync_only_folders'"
-        ).fetchone()
-        if legacy is None:
-            return False
-        row = self.conn.execute(
-            """SELECT 1
-               FROM workspace_sync_only_folders sof
-               JOIN photos p ON p.id = ?
-               LEFT JOIN folders granted ON granted.id = sof.folder_id
-               WHERE sof.workspace_id = ?
-                 AND EXISTS (
-                     SELECT 1 FROM pending_changes pc
-                     WHERE pc.workspace_id = sof.workspace_id
-                       AND pc.photo_id = p.id
-                 )
-                 AND (sof.folder_id = p.folder_id
-                      OR (granted.path IS NOT NULL
-                          AND granted.path
-                              = p.last_move_source_folder_path))""",
             (photo_id, workspace_id),
         ).fetchone()
         return row is not None

@@ -897,11 +897,7 @@ class Database:
         """Build the canonical-schema setup on this connection."""
         from canonical_schema import CanonicalSchema
 
-        return CanonicalSchema(
-            self.conn,
-            folder_removal_root_ids=self._folder_removal_root_ids,
-            default_tabs=DEFAULT_TABS,
-        )
+        return CanonicalSchema(self.conn)
 
     def _create_tables(self):
         self._canonical_schema().create_tables()
@@ -1098,19 +1094,7 @@ class Database:
         Library membership, or a ``workspace_sync_only_photos`` grant --
         the narrow record that tracked-merge collision handling writes so a
         remapped edit stays syncable without the workspace gaining
-        visibility of every other photo in the folder. Falls back to
-        ``workspace_sync_only_folders`` grants that pre-date the
-        photo-keyed table (see the migration comment in ``__init__``): the
-        legacy table stays around so a photo the migration could not
-        identify -- say the survivor's ``last_move_source_folder_path`` was
-        cleared after a same-stem drain -- still resolves through the
-        legacy folder key when the photo's current folder or its
-        provenance matches AND the workspace still has a pending edit on
-        the photo (the same authorization the migration used). The
-        pending-edit gate keeps a neighbour with no queued edit from
-        gaining sync-only access just for sitting in a granted folder --
-        the exact overgrant the migration excluded, and the same one every
-        Codex review of this table has flagged.
+        visibility of every other photo in the folder.
         """
         if self._photo_in_workspace(photo_id):
             return True
@@ -2744,18 +2728,6 @@ class Database:
         sidecar written on the next sync, silently, without the workspace
         gaining a grant of its own. Absent from every browse/library query,
         which still joins on ``workspace_folders`` alone.
-
-        Falls back to ``workspace_sync_only_folders`` for grants that
-        pre-date the photo-keyed table (``#1661`` briefly recorded these
-        by folder). The migration on upgrade recovers what it can identify,
-        but ``move_photos`` clears ``last_move_source_folder_path`` after
-        draining the last same-stem move from a source folder, and a photo
-        moved out of the granted folder before upgrade can end up matching
-        neither its current folder nor its stale provenance. The legacy
-        table therefore stays around as a compatibility record, and any
-        photo the sibling workspace still has a pending edge on -- that
-        also sits in a legacy-granted folder or carries the provenance
-        stamp for one -- is authorized here too.
         """
         if workspace_id is None:
             workspace_id = self._ws_id()

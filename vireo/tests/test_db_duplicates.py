@@ -883,47 +883,6 @@ def test_reopen_returns_zero_when_nothing_is_rejected(db, folder):
 # -- pre-upgrade duplicate_rejections backfill ----------------------------------
 
 
-def test_backfill_adopts_legacy_hash_twins_as_resolver_rejections(db, folder, tmp_path):
-    """A catalog resolved before ``duplicate_rejections`` existed keeps
-    the surviving twin behind a ghost winner unless the migration adopts
-    those rejections as its own. Simulate that pre-upgrade state: a kept
-    row with a hash-twin rejected without a provenance row, plus a
-    stand-alone rejection that shares no hash. Reopening the DB fires the
-    one-shot backfill; only the hash-twin gets a row.
-    """
-    fid, _ = folder
-    kept = _photo(db, fid, "kept.jpg", "H")
-    rejected = _photo(db, fid, "twin.jpg", "H", flag="rejected")
-    lone = _photo(db, fid, "lone.jpg", "OTHER", flag="rejected")
-    # Strip the backfill row that the pre-existing test connection wrote,
-    # and clear the migration marker so re-opening runs it against the
-    # legacy shape.
-    db.conn.execute("DELETE FROM duplicate_rejections")
-    db.conn.execute(
-        "DELETE FROM db_meta WHERE key='duplicate_rejections_backfill_v1'"
-    )
-    db.conn.commit()
-    path = db._db_path
-    db.close()
-
-    from db import Database
-    db2 = Database(path)
-    try:
-        rows = {
-            r["photo_id"]
-            for r in db2.conn.execute(
-                "SELECT photo_id FROM duplicate_rejections"
-            ).fetchall()
-        }
-        assert rejected in rows
-        assert kept not in rows
-        assert lone not in rows
-        # Reopen now clears the provenance-marked row.
-        assert db2.reopen_duplicate_group("H") == 1
-    finally:
-        db2.close()
-
-
 def test_backfill_marker_makes_second_open_a_noop(db, folder):
     """Once the marker is set the migration must not re-adopt rows the
     user has manually rejected after the upgrade — the marker on

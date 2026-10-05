@@ -800,34 +800,6 @@ def test_get_sync_only_photo_paths(db):
         db.get_sync_only_photo_paths()
 
 
-def test_get_sync_only_photo_paths_legacy_folder_grants(db):
-    sibling = db.create_workspace("Sibling")
-    granted = _folder(db, "/granted", root=True)
-    moved_to = _folder(db, "/moved", root=True)
-    direct = _photo(db, granted, "direct.jpg")
-    moved = _photo(db, moved_to, "moved.jpg")
-    stray = _photo(db, moved_to, "stray.jpg")  # no pending edge: not authorized
-    explicit = _photo(db, moved_to, "explicit.jpg")
-    db.conn.execute(
-        "UPDATE photos SET last_move_source_folder_path = '/granted' "
-        "WHERE id IN (?, ?)", (moved, stray))
-    db.conn.execute(
-        "CREATE TABLE workspace_sync_only_folders "
-        "(workspace_id INTEGER, folder_id INTEGER)")
-    db.conn.execute(
-        "INSERT INTO workspace_sync_only_folders VALUES (?, ?)",
-        (sibling, granted))
-    db.conn.execute(
-        "INSERT INTO workspace_sync_only_photos (workspace_id, photo_id) "
-        "VALUES (?, ?)", (sibling, explicit))
-    db.conn.commit()
-    for pid in (direct, moved, explicit):
-        _queue(db, pid, "rating", "3", "2026-01-01 00:00:00", ws=sibling)
-
-    assert db.get_sync_only_photo_paths(sibling) == {
-        direct: "/granted", moved: "/moved", explicit: "/moved"}
-
-
 # -- query_move_rule_matches -------------------------------------------------
 
 
@@ -1444,34 +1416,6 @@ def test_photo_syncable_in_workspace(db):
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError, match="No active workspace set"):
         db._photo_syncable_in_workspace(member)
-
-
-def test_photo_syncable_in_workspace_legacy_folder_grants(db):
-    sibling = db.create_workspace("Sibling")
-    granted = _folder(db, "/granted", root=True)
-    moved_to = _folder(db, "/moved", root=True)
-    direct = _photo(db, granted, "direct.jpg")
-    moved = _photo(db, moved_to, "moved.jpg")
-    stray = _photo(db, moved_to, "stray.jpg")  # no pending edge: not authorized
-    unrelated = _photo(db, moved_to, "unrelated.jpg")  # edge but no folder match
-    db.conn.execute(
-        "UPDATE photos SET last_move_source_folder_path = '/granted' "
-        "WHERE id IN (?, ?)", (moved, stray))
-    db.conn.execute(
-        "CREATE TABLE workspace_sync_only_folders "
-        "(workspace_id INTEGER, folder_id INTEGER)")
-    db.conn.execute(
-        "INSERT INTO workspace_sync_only_folders VALUES (?, ?)",
-        (sibling, granted))
-    db.conn.commit()
-    for pid in (direct, moved, unrelated):
-        _queue(db, pid, "rating", "3", "2026-01-01 00:00:00", ws=sibling)
-
-    db.set_active_workspace(sibling)
-    assert db._photo_syncable_in_workspace(direct) is True
-    assert db._photo_syncable_in_workspace(moved) is True
-    assert db._photo_syncable_in_workspace(stray) is False
-    assert db._photo_syncable_in_workspace(unrelated) is False
 
 
 def test_photo_syncable_in_workspace_checks_membership_through_the_facade(

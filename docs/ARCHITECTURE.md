@@ -68,8 +68,9 @@ that information for interactive use.
 - Schema changes are ordered migrations in `vireo/schema.py`. They execute once
   at startup, use a transaction, advance `PRAGMA user_version`, and validate
   before committing. Request connections must use the initialized schema. The
-  legacy canonical schema they build on (`CREATE TABLE IF NOT EXISTS` plus the
-  older inline upgrades) lives in `vireo/canonical_schema.py`.
+  schema they build on (`CREATE TABLE IF NOT EXISTS` for the shape at
+  `BASELINE_VERSION`) lives in `vireo/canonical_schema.py`. A column is added
+  by a migration, not by an inline `ALTER` there.
 - Shared browser code is exposed through the `Vireo` namespace. Network calls
   use `Vireo.api`; shared DOM state uses `Vireo.dom`. New inline event handlers
   and page-global variables are not permitted.

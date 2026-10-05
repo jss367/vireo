@@ -24,7 +24,6 @@ from contextlib import closing
 if __name__ == "__main__":  # pragma: no cover - snapshot regeneration entry point
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import db as db_module
 from db import Database
 
 SNAPSHOT_PATH = os.path.join(
@@ -153,15 +152,6 @@ def test_create_tables_delegates_to_canonical_schema():
         "Database._create_tables no longer delegates to CanonicalSchema"
     )
     assert list(inspect.signature(Database._create_tables).parameters) == ["self"]
-
-
-def test_canonical_schema_receives_bound_facade_method(tmp_path):
-    """The removal-scope upgrade reaches Database through the bound method."""
-    with Database(str(tmp_path / "bound.db")) as db:
-        schema_obj = db._canonical_schema()
-        assert schema_obj.conn is db.conn
-        assert schema_obj._folder_removal_root_ids == db._folder_removal_root_ids
-        assert schema_obj.default_tabs is db_module.DEFAULT_TABS
 
 
 def test_canonical_schema_imports_no_db_code():

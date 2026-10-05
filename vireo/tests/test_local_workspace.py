@@ -1840,46 +1840,6 @@ def test_local_workspace_folders_folder_id_fk_cascades_on_folder_delete(local_wo
     assert dangling == 0
 
 
-def test_local_workspace_folders_fk_migration_backfills_existing_dbs(tmp_path):
-    """A DB whose ``local_workspace_folders`` was created without the FK
-    is rebuilt with the constraint on the next Database open."""
-    db_path = str(tmp_path / "legacy.db")
-    legacy = Database(db_path)
-    # Drop the table and re-create it in the pre-fix shape (folder_id
-    # without a REFERENCES clause) so the migration has something to fix.
-    legacy.conn.execute("DROP TABLE local_workspace_folders")
-    legacy.conn.execute(
-        """CREATE TABLE local_workspace_folders (
-            workspace_id    INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-            folder_id       INTEGER NOT NULL,
-            source_path     TEXT NOT NULL,
-            local_path      TEXT NOT NULL,
-            original_status TEXT NOT NULL DEFAULT 'ok',
-            is_root         INTEGER NOT NULL DEFAULT 0,
-            root_index      INTEGER,
-            PRIMARY KEY (workspace_id, folder_id)
-        )"""
-    )
-    legacy.conn.commit()
-    fk_before = legacy.conn.execute(
-        "PRAGMA foreign_key_list(local_workspace_folders)"
-    ).fetchall()
-    assert not any(row["from"] == "folder_id" for row in fk_before)
-    legacy.close()
-
-    # Re-open the DB: the migration inside Database.__init__ rebuilds the
-    # table with the folder_id → folders(id) FK.
-    upgraded = Database(db_path)
-    fk_after = upgraded.conn.execute(
-        "PRAGMA foreign_key_list(local_workspace_folders)"
-    ).fetchall()
-    assert any(
-        row["from"] == "folder_id" and row["table"] == "folders" and row["on_delete"] == "CASCADE"
-        for row in fk_after
-    )
-    upgraded.close()
-
-
 def test_folder_delete_route_holds_stage_boundary_lock_around_guard(tmp_path, monkeypatch):
     """``api_folder_delete`` runs its guard-plus-delete under stage_boundary_lock.
 
@@ -2048,55 +2008,6 @@ def test_status_endpoint_does_not_surface_unrelated_workspace_jobs(tmp_path, mon
         if "job" in during:
             assert during["job"] == {"id": stage_job_id, "type": "work-locally-stage"}
         wait_for_job_via_client(client, stage_job_id)
-
-
-def test_fk_migration_survives_pending_db_meta_transaction(tmp_path):
-    """The FK rebuild must not race an implicit txn from earlier migrations.
-
-    Older DBs upgraded on a build that predates the ``eye_kp_fingerprint_backfill``
-    marker: opening one runs an INSERT into ``db_meta`` (implicit sqlite3
-    transaction) immediately before the FK migration below. Without the
-    ``self.conn.commit()`` guard, ``BEGIN IMMEDIATE`` then raises
-    "cannot start a transaction within a transaction" and Vireo refuses to
-    open the DB instead of rebuilding the table.
-    """
-    db_path = str(tmp_path / "legacy.db")
-    legacy = Database(db_path)
-    legacy.conn.execute("DROP TABLE local_workspace_folders")
-    legacy.conn.execute(
-        """CREATE TABLE local_workspace_folders (
-            workspace_id    INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-            folder_id       INTEGER NOT NULL,
-            source_path     TEXT NOT NULL,
-            local_path      TEXT NOT NULL,
-            original_status TEXT NOT NULL DEFAULT 'ok',
-            is_root         INTEGER NOT NULL DEFAULT 0,
-            root_index      INTEGER,
-            PRIMARY KEY (workspace_id, folder_id)
-        )"""
-    )
-    # Force the earlier eye_kp_fingerprint_backfill migration to run on the
-    # next open — its INSERT into db_meta opens the implicit transaction
-    # that used to collide with BEGIN IMMEDIATE.
-    legacy.conn.execute(
-        "DELETE FROM db_meta WHERE key='eye_kp_fingerprint_backfill'"
-    )
-    legacy.conn.commit()
-    legacy.close()
-
-    upgraded = Database(db_path)
-    fk_after = upgraded.conn.execute(
-        "PRAGMA foreign_key_list(local_workspace_folders)"
-    ).fetchall()
-    assert any(
-        row["from"] == "folder_id" and row["table"] == "folders"
-        for row in fk_after
-    )
-    marker = upgraded.conn.execute(
-        "SELECT value FROM db_meta WHERE key='eye_kp_fingerprint_backfill'"
-    ).fetchone()
-    assert marker is not None
-    upgraded.close()
 
 
 def test_sync_recovery_republishes_restored_confirmed_deletion(local_workspace_env, monkeypatch):
