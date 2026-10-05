@@ -2431,6 +2431,8 @@ class Database:
             new_path,
             commit=commit,
             transfer_gps_review=self._transfer_gps_review_for_merge,
+            transfer_embedded_offered=(
+                self.transfer_embedded_keyword_offered_for_merge),
             relink_parents_by_path=self._relink_parents_by_path,
         )
 

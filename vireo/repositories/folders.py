@@ -511,12 +511,16 @@ class FolderRepository:
         return cascaded
 
     def merge_into_existing(self, source_folder_id, target_folder_id, new_path, *,
-                            commit=True, transfer_gps_review, relink_parents_by_path):
+                            commit=True, transfer_gps_review,
+                            transfer_embedded_offered,
+                            relink_parents_by_path):
         """Fold a missing folder into the existing folder at new_path.
 
-        ``transfer_gps_review`` is ``Database._transfer_gps_review_for_merge``
-        and ``relink_parents_by_path`` is ``Database._relink_parents_by_path``;
-        both run inside this transaction. Commits only when ``commit``.
+        ``transfer_gps_review`` is ``Database._transfer_gps_review_for_merge``,
+        ``transfer_embedded_offered`` is
+        ``Database.transfer_embedded_keyword_offered_for_merge``, and
+        ``relink_parents_by_path`` is ``Database._relink_parents_by_path``;
+        all three run inside this transaction. Commits only when ``commit``.
         """
         old_row = self.conn.execute(
             "SELECT path FROM folders WHERE id = ?", (source_folder_id,)
@@ -541,6 +545,12 @@ class FolderRepository:
             ).fetchone()
             if existing:
                 transfer_gps_review(photo["id"], existing["id"])
+                # Move the embedded-offered suppression onto the surviving
+                # row so a user's keyword removal is not resurrected by a
+                # later rescan of the same embedded value. The non-cascading
+                # FK on ``photo_embedded_keyword_offered.photo_id`` would
+                # also abort the ``DELETE FROM photos`` below without this.
+                transfer_embedded_offered(photo["id"], existing["id"])
                 drop_ids.append(photo["id"])
                 collection_remap[photo["id"]] = existing["id"]
             elif os.path.exists(os.path.join(new_path, photo["filename"])):

@@ -818,6 +818,68 @@ def test_merge_into_existing_preserves_non_root_link(db, tmp_path):
     assert _links(db, target) == {(ws, 0)}
 
 
+def test_merge_into_existing_moves_embedded_keyword_offered_onto_survivor(
+        db, tmp_path):
+    """A same-filename duplicate's embedded-offered suppression follows the survivor.
+
+    Without the transfer, the ``DELETE FROM photos`` on the losing row
+    aborts on the non-cascading FK, and a later rescan of the surviving
+    row's embedded metadata would re-tag a keyword the user had already
+    removed on the merged-in source.
+    """
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    target = db.add_folder(str(target_dir), workspace_root=False)
+    source = db.add_folder("/src")
+    db.conn.execute(
+        "UPDATE folders SET status = 'missing' WHERE id = ?", (source,))
+    db.conn.commit()
+    survivor = _photo(db, target, "bird.jpg")
+    dup = _photo(db, source, "bird.jpg")
+    db.record_embedded_keyword_offered(dup, ["robin"])
+    assert db.get_embedded_keyword_offered_keys(dup) == {"robin"}
+    assert db.get_embedded_keyword_offered_keys(survivor) == set()
+
+    db._merge_into_existing(source, target, str(target_dir))
+
+    with _reader(db) as r:
+        offered_rows = r.execute(
+            "SELECT photo_id, keyword_key "
+            "FROM photo_embedded_keyword_offered",
+        ).fetchall()
+    assert [tuple(row) for row in offered_rows] == [(survivor, "robin")]
+
+
+def test_merge_into_existing_drops_phantom_embedded_keyword_offered(
+        db, tmp_path):
+    """A phantom source row's suppression is cleared instead of transferred.
+
+    When the source photo has no matching filename on disk at the target,
+    the row is a phantom with no survivor to inherit anything, so the
+    offered record is dropped. The DELETE must still run so the FK on
+    ``photo_embedded_keyword_offered.photo_id`` does not abort the
+    ``DELETE FROM photos``.
+    """
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    target = db.add_folder(str(target_dir), workspace_root=False)
+    source = db.add_folder("/src")
+    db.conn.execute(
+        "UPDATE folders SET status = 'missing' WHERE id = ?", (source,))
+    db.conn.commit()
+    phantom = _photo(db, source, "gone.jpg")
+    db.record_embedded_keyword_offered(phantom, ["robin"])
+
+    db._merge_into_existing(source, target, str(target_dir))
+
+    with _reader(db) as r:
+        offered_rows = r.execute(
+            "SELECT photo_id, keyword_key "
+            "FROM photo_embedded_keyword_offered",
+        ).fetchall()
+    assert offered_rows == []
+
+
 # -- delete_folder ------------------------------------------------------------
 
 
@@ -1085,6 +1147,8 @@ _FACADE_CALLBACKS = {
     },
     "_merge_into_existing": {
         "transfer_gps_review": "_transfer_gps_review_for_merge",
+        "transfer_embedded_offered": (
+            "transfer_embedded_keyword_offered_for_merge"),
         "relink_parents_by_path": "_relink_parents_by_path",
     },
     "delete_folder": {
