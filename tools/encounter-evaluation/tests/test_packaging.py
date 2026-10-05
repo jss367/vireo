@@ -76,5 +76,6 @@ def test_evaluation_wheel_includes_review_page_and_command(tmp_path):
     with zipfile.ZipFile(next(tmp_path.glob('*.whl'))) as archive:
         assert 'encounter_eval/review.html' in archive.namelist()
         assert 'encounter_eval/continuity_review.html' in archive.namelist()
+        assert 'encounter_eval/merge_audit.html' in archive.namelist()
         entrypoints = next(name for name in archive.namelist() if name.endswith('/entry_points.txt'))
         assert 'vireo-review-encounters = encounter_eval.review_server:main' in archive.read(entrypoints).decode()

@@ -74,6 +74,8 @@ def comparison_cases(photos, answers, before, after):
 def _preview(pid, presentation):
     root = Path.home()/'.vireo'
     candidates = [root/'previews'/f'{pid}_{s}.jpg' for s in (960,1920,3840)]
+    # Full-size JPEG working copy: present for many photos without a preview.
+    candidates.append(root/'working'/f'{pid}.jpg')
     thumb = presentation.get('thumbnail')
     if thumb:
         path = Path(thumb)

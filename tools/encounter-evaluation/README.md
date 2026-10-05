@@ -231,6 +231,49 @@ also drives the review report's **Previous experiment** column.
 See [the combined-rule experiment](../../docs/combined-encounter-context.md) for
 the incremental results and remaining validation requirements.
 
+### Audit joins between differing species tags
+
+Every continuity experiment so far has required "no newly joined differing-label
+controls", which holds the existing joins fixed without checking them. The merge
+audit lists every adjacent pair, within sixty seconds, that the installed default
+keeps in one encounter even though the two photos carry different singleton tags.
+For each pair it shows the photos, the surrounding frames in the encounter, each
+model's leading predictions, and why the cut did not fire.
+
+```sh
+python -m encounter_eval.merge_audit build \
+  --scope /path/to/retained-scope --scope /path/to/another-scope \
+  --output ~/.vireo/encounter-evaluation/runs/merge-audit-YYYYMMDD
+```
+
+Only training and development sessions are opened. Open `Review merged
+encounters.html` and decide each pair: keep together, keep together because a
+species tag is wrong, split, or unsure. Number keys choose and arrow keys move.
+Cases are in a seeded random order, so a review stopped partway is still a random
+sample as long as no case is skipped. Pages use cached previews or working copies
+in place. `missing-previews.json` lists photos with neither; generate their
+previews in Vireo and reload the page. Rebuilding would start a new audit and
+lose the browser's saved decisions.
+
+Export the decisions, then score them:
+
+```sh
+python -m encounter_eval.merge_audit results \
+  --audit ~/.vireo/encounter-evaluation/runs/merge-audit-YYYYMMDD \
+  --decisions ~/Downloads/'Merged encounter review decisions.json' \
+  --existing /path/to/reviewed-constraints.json \
+  --output ~/.vireo/encounter-evaluation/runs/merge-audit-YYYYMMDD-results
+```
+
+The results report the wrong-merge rate with a 95% Wilson interval, broken down
+by join reason, time gap, and partition. They also estimate the count across all
+joined pairs. Each decided pair becomes an explicit two-photo constraint in the
+`expected_groups` format: `[[a, b]]` to keep together and `[[a], [b]]` to split.
+`reviewed-constraints.json` appends these to `--existing` for the next
+`continuity_followup` or `label_benchmark` run. Unsure decisions add nothing.
+`tag-corrections.json` lists pairs marked as wrong tags, to fix in Vireo; the
+audit never edits tags.
+
 `compare` evaluates the real production encounter implementation, a conservative
 per-photo species-set candidate, and a sequence candidate by default. All use
 the same materialized evidence. Production uses its existing flattened top-five
