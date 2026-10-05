@@ -4271,10 +4271,13 @@ class _ScanRun:
         self.stat_unchanged_companions = []
         # Cataloged rows the pre-pass sends for re-reading.
         self.reprocessed_row_ids = set()
-        # ``(owner_id, companion columns)`` for companions found unchanged
-        # after their metadata was read; applied to the owner once every
-        # file is indexed (see ``_refill_owners_from_companions``).
-        self.companion_gap_fills = []
+        # ``owner_id -> companion columns`` for companions found unchanged
+        # after their metadata was read. Populated as each companion is
+        # processed; drained by ``_write_photo_columns`` when the owner is
+        # re-read (so the gap fill lands in the same UPDATE as the
+        # clear-to-NULL — see ``_write_photo_columns``), and by the
+        # end-of-scan safety net ``_refill_owners_from_companions``.
+        self._pending_companion_fills = {}
 
         # Build folder cache: path -> folder_id
         self.folder_cache = {}
@@ -5062,11 +5065,25 @@ class _ScanRun:
                 " WHERE photo_id = ? AND filename = ?",
                 (file_mtime, known["owner_id"], image_path.name),
             )
-            commit_with_retry(self.db.conn)
             if meta.file_meta:
-                self.companion_gap_fills.append(
-                    (known["owner_id"], self._companion_columns(meta)),
+                companion_columns = self._companion_columns(meta)
+                # Apply the gap fill inline in this same transaction as
+                # the file_mtime update: a successful commit means both
+                # are durable, a rollback means neither. Handles the
+                # common case where the owner RAW was already re-read
+                # earlier this scan (its JPEG-only columns are already
+                # cleared, so this UPDATE fills them). When the companion
+                # comes first the fill is a no-op here (columns not
+                # cleared yet) and ``_write_photo_columns`` will fold
+                # the same fill into the owner's clear-to-NULL UPDATE
+                # via ``_pending_companion_fills`` below.
+                self._apply_companion_gap_fill(
+                    known["owner_id"], companion_columns,
                 )
+                self._pending_companion_fills[known["owner_id"]] = (
+                    companion_columns
+                )
+            commit_with_retry(self.db.conn)
         else:
             return False
         self._credit_known_companion(known["owner_id"], str(image_path))
@@ -5097,25 +5114,43 @@ class _ScanRun:
             columns[column] = summary.get(column)
         return columns
 
-    def _refill_owners_from_companions(self):
-        """Fill each RAW's gaps from the unchanged companion read this scan.
+    def _apply_companion_gap_fill(self, owner_id, companion_columns):
+        """Fill the owner's gaps from the companion in the current transaction.
 
-        Runs after every file is indexed, so a RAW re-read in the same scan
-        has already rewritten its own columns, whichever file came first.
+        Reads the owner's columns as they stand right now (so a prior
+        clear-to-NULL in this transaction is visible) and runs
+        ``_fill_primary_metadata_gaps`` without committing. The caller
+        owns the commit, so the fill lands atomically with whatever
+        other work the caller is already staging — see
+        ``_keep_known_companion`` and ``_write_photo_columns``.
         """
-        if not self.companion_gap_fills:
+        owner_columns, _ = _read_metadata_transfer_rows(
+            self.db, {"id": owner_id}, {"id": owner_id},
+        )
+        if owner_columns is None:
             return
-        for owner_id, companion_columns in self.companion_gap_fills:
-            owner_columns, _ = _read_metadata_transfer_rows(
-                self.db, {"id": owner_id}, {"id": owner_id},
-            )
-            if owner_columns is None:
-                continue
-            _fill_primary_metadata_gaps(
-                self.db, {"id": owner_id}, owner_columns, companion_columns,
-            )
+        _fill_primary_metadata_gaps(
+            self.db, {"id": owner_id}, owner_columns, companion_columns,
+        )
+
+    def _refill_owners_from_companions(self):
+        """Safety-net fill for companions whose owner wasn't re-read.
+
+        The primary paths — inline fill in ``_keep_known_companion`` when
+        the owner is already written, and the fill folded into
+        ``_write_photo_columns``'s UPDATE when the companion ran first —
+        both keep the fill transactional with the clear-to-NULL commit.
+        An entry still here is one neither path consumed (e.g. the full-
+        scan case where the owner is unchanged and never re-read, so no
+        clear happened); the fill is idempotent (only writes NULL
+        columns) so a replay here just no-ops.
+        """
+        if not self._pending_companion_fills:
+            return
+        for owner_id, companion_columns in self._pending_companion_fills.items():
+            self._apply_companion_gap_fill(owner_id, companion_columns)
         commit_with_retry(self.db.conn)
-        self.companion_gap_fills = []
+        self._pending_companion_fills = {}
 
     def _read_file_metadata(self, image_path):
         # Get pre-extracted metadata for this file
@@ -5274,6 +5309,10 @@ class _ScanRun:
             # placeholder would be worse than leaving it as-is; the
             # duplicates page already flags empty-byte groups for
             # manual review.
+        pending_companion_fill = (
+            self._pending_companion_fills.pop(photo_id, None)
+            if row_already_existed else None
+        )
         if file_meta:
             # Promoted EXIF summary columns (universal filter fields).
             # Written whenever ExifTool ran, independent of whether the
@@ -5282,10 +5321,22 @@ class _ScanRun:
             # metadata lost a field (e.g. sidecar edited, replaced with a
             # different camera's file) doesn't leave stale values that
             # /api/photos/query and /api/filters/values keep matching.
+            # When a companion gap fill is pending for this owner (its
+            # JPEG companion was processed earlier this scan and found
+            # unchanged), fold its JPEG-only values into the same UPDATE:
+            # keep the RAW's value where it has one, else fall back to
+            # the companion's. Keeps the clear-to-NULL atomic with the
+            # fill — otherwise an interruption between a standalone
+            # clear-commit and the end-of-scan refill would leave
+            # columns like ``lens`` cleared with no retry trigger on the
+            # next incremental scan.
             cols = exif_summary_columns(file_meta)
             for column in EXIF_SUMMARY_COLUMNS:
+                value = cols.get(column)
+                if value is None and pending_companion_fill is not None:
+                    value = pending_companion_fill.get(column)
                 updates.append(f"{column}=?")
-                update_params.append(cols.get(column))
+                update_params.append(value)
         if file_meta and self.extract_full_metadata:
             updates.append("exif_data=?")
             update_params.append(json.dumps(file_meta))
@@ -5322,6 +5373,26 @@ class _ScanRun:
                 f"UPDATE photos SET {', '.join(updates)} WHERE id=?",
                 update_params,
             )
+            if (
+                row_already_existed
+                and file_meta
+                and pending_companion_fill is None
+            ):
+                # The clear-to-NULL above may have erased JPEG-only
+                # columns (lens, etc.) that a prior pairing-merge filled
+                # from this owner's companion. If the companion is read
+                # later this scan it will refill them through
+                # ``_pending_companion_fills``; if the scan is
+                # interrupted first, null the companion's stored
+                # ``file_mtime`` so the next incremental scan sees a
+                # stale stat and re-reads the companion, replaying the
+                # fill. Harmless no-op when the row has no
+                # ``companion_identities`` entry (UPDATE touches 0 rows).
+                self.db.conn.execute(
+                    "UPDATE companion_identities SET file_mtime = NULL "
+                    "WHERE photo_id = ?",
+                    (photo_id,),
+                )
             commit_with_retry(self.db.conn)
 
     def _heal_changed_content(self, photo_id, item):

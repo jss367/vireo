@@ -2354,6 +2354,66 @@ def test_raw_reread_keeps_metadata_only_its_companion_carries(
     assert cat.db.conn.execute(lens, (cat.raw_id,)).fetchone()[0] == "RF 100-500mm"
 
 
+@pytest.mark.parametrize("incremental", [True, False])
+def test_raw_reread_companion_refill_survives_interrupted_scan(
+    tmp_path, monkeypatch, incremental,
+):
+    """If a RAW re-read is interrupted after its columns are cleared but
+    before the end-of-scan companion refill runs, the JPEG-only columns
+    (here: lens) are either filled in the same transaction as the clear
+    OR the companion's stored stat is nulled so the next scan is forced
+    to re-read it. Either way the next scan converges — the metadata is
+    never permanently lost until a full rescan.
+    """
+    import scanner
+
+    def fake_extract(paths, *args, **kwargs):
+        meta = {}
+        for p in paths:
+            exif = {"Make": "Canon", "Model": "EOS R5"}
+            if p.endswith(".jpg"):
+                exif["LensModel"] = "RF 100-500mm"
+            meta[p] = {"EXIF": exif, "Composite": {},
+                       "File": {"ImageWidth": 200, "ImageHeight": 100}}
+        return meta
+
+    monkeypatch.setattr(scanner, "extract_metadata", fake_extract)
+    cat = _PairedCatalog(tmp_path, monkeypatch)
+    lens = "SELECT lens FROM photos WHERE id = ?"
+    assert cat.db.conn.execute(lens, (cat.raw_id,)).fetchone()[0] == "RF 100-500mm"
+
+    # Change the RAW's bytes, then interrupt the scan right where the
+    # end-of-scan refill would have run — simulating a cancel or I/O
+    # error between the RAW's clear-to-NULL commit and any flush of
+    # pending companion fills.
+    cat.raw.write_bytes(b"\x02" * 300)
+
+    class _Boom(RuntimeError):
+        pass
+
+    original_refill = scanner._ScanRun._refill_owners_from_companions
+
+    def _boom(self):
+        raise _Boom("simulated interruption after RAW's columns were cleared")
+
+    monkeypatch.setattr(
+        scanner._ScanRun, "_refill_owners_from_companions", _boom,
+    )
+    with pytest.raises(_Boom):
+        cat.scan(incremental=incremental)
+
+    # Resume with the end-of-scan refill restored. If the fix is right,
+    # the lens is either already filled (atomic apply during the
+    # interrupted scan) or will be filled by the companion re-read the
+    # file_mtime=NULL marker forces here.
+    monkeypatch.setattr(
+        scanner._ScanRun, "_refill_owners_from_companions", original_refill,
+    )
+    cat.scan(incremental=incremental)
+    assert cat.merges == []
+    assert cat.db.conn.execute(lens, (cat.raw_id,)).fetchone()[0] == "RF 100-500mm"
+
+
 def test_scan_late_arriving_raw_pairs_with_existing_jpeg(tmp_path):
     """Importing raws after JPEGs matches them to existing photo records."""
     import os
