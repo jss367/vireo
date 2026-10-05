@@ -980,14 +980,11 @@
   ]
  ],
  "db_meta": {
-  "curation_species_case_aligned_v2": "1",
   "default_strategy_to_process_id": "1",
   "duplicate_rejections_backfill_v1": "1",
   "exif_summary_backfill_v1": "1",
   "eye_kp_fingerprint_backfill": "1",
   "folder_health_version": "0",
-  "keyword_apostrophes_folded_v1": "1",
-  "keyword_names_normalized": "1",
   "saved_processes_seeded": "1",
   "species_highlights_from_preferences_backfill": "1",
   "species_representatives_from_preferences_backfill": "1",

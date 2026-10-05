@@ -54,17 +54,6 @@ class StartupTasks:
         # File-backed startup skips Database's schema initialization. Repair old
         # move parentage here too, before Browse can serve the stale hierarchy.
         init_db.repair_stale_folder_parents()
-        # One-shot keyword-name normalization backfill. Database.__init__ only
-        # runs it when initialize_schema=True, and every file-backed connection
-        # this app opens — including this startup init_db and every per-request
-        # connection at `_get_db` — passes initialize_schema=False. Without an
-        # explicit run here, an upgraded DB can serve requests with `‘apapane`-
-        # style variant rows still present until some background job happens
-        # to construct a full `Database()` (initialize_schema=True); in that
-        # window an add/rename can miss the legacy row and create duplicate
-        # tags or stale XMP. The method is idempotent (db_meta-gated) so
-        # subsequent boots are a cheap SELECT.
-        init_db.normalize_keyword_data()
         repaired_location_ancestors = init_db.repair_misclassified_location_ancestors()
         if repaired_location_ancestors:
             log.info(

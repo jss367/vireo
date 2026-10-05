@@ -1,19 +1,16 @@
-"""Persistence for keywords: rows, tagging reads, species names, the sweeps.
+"""Persistence for keywords: rows, tagging reads, species names.
 
 This module owns the SQL behind the keyword domain:
 
 - keyword rows: ``add`` (with case conventions, taxon linking and the
-  source-taxon species path), the default genre seed, legacy type
-  migration, the keyword tree and listing reads, counts, and the rename /
-  retype statements ``Database.update_keyword`` issues;
+  source-taxon species path), the default genre seed, the keyword tree
+  and listing reads, counts, and the rename / retype statements
+  ``Database.update_keyword`` issues;
 - tagging reads (per photo, per batch, species-rank names, equivalent
   species) and ``untag``;
 - species-name resolution (``resolve_species_display``, taxon lookup,
   case-convention detection, lineage resolution, species marking);
-- the one-shot normalization sweep (``normalize_data``, the curation case
-  alignment, the prediction apostrophe fold and its merge helpers), and the
-  scope and
-  liveness reads of ``Database._merge_duplicate_keywords_pass``.
+- the scope and liveness reads of ``Database._merge_duplicate_keywords_pass``.
 
 The method bodies were moved verbatim from ``Database``. The only edits are
 ``self._ws_id()`` -> ``self.workspace_id`` and ``NAME`` -> ``self.NAME`` for
@@ -31,8 +28,8 @@ What lives in ``repositories/keyword_provenance.py`` instead: the
 (``tag_photo``, ``_merge_keyword_into``, ``retire_builtin_wildlife_genre``,
 ``link_keyword_to_place``), which ``test_keyword_provenance_contract`` keys
 to that module, and the keyword methods that call ``_merge_keyword_into``
-in the middle of their own work (``_upsert_one_keyword``,
-``_normalize_keyword_data_once``). This module writes no ``photo_keywords``
+in the middle of their own work (``_upsert_one_keyword``). This module writes
+no ``photo_keywords``
 association itself; a structural test fails if it ever references one of
 those writers.
 
@@ -49,19 +46,16 @@ What deliberately stays on ``Database``:
   ``Database`` instance under its own name (see ``FACADE_METHODS``), and the
   body calls it as ``self.<name>(...)``, so monkeypatches of ``Database``
   methods keep reaching the moved code. That includes cross-domain calls
-  (``queue_change``, ``get_meta`` / ``set_meta``, the species-curation
-  renames) and this domain's own entry points that other methods compose
-  with.
+  (the species-curation renames) and this domain's own entry points that
+  other methods compose with.
 - The methods with no SQL of their own (``_apply_case_convention``,
-  ``_sentence_case_first_word``, ``species_case_convention``,
-  ``_canonical_curation_species``).
+  ``_sentence_case_first_word``, ``species_case_convention``).
 
 ``_commit`` flags are carried through unchanged: ``_commit=False`` means the
 caller owns the transaction, and no method here commits unless the
 ``Database`` method it backs did.
 """
 
-import json
 import sqlite3
 
 from keyword_identity import identity_sql
@@ -69,28 +63,16 @@ from keyword_normalization import keyword_match_key, normalize_keyword_display
 
 # ``Database`` methods the moved bodies call through the façade.
 FACADE_METHODS = (
-    "get_meta",
-    "set_meta",
     "rename_photo_preferences_species",
     "rename_species_highlights_species",
-    "rename_species_representatives_species",
     "species_case_convention",
     "_apply_case_convention",
-    "_canonical_curation_species",
     "_merge_duplicate_keywords_pass",
-    "_normalize_keyword_data_once",
     "resolve_species_display_name",
     "detect_keyword_case_convention",
     "_lookup_taxon_id_for_keyword",
     "_add_source_species_keyword",
     "_rename_keyword_dependents",
-    "_align_curation_species_case",
-    "_align_curation_history_species",
-    "_fold_prediction_species_apostrophes",
-    "_merge_prediction_metadata_before_delete",
-    "_merge_prediction_review_before_delete",
-    "_retarget_prediction_edit_history",
-    "_species_keyword_maps",
     "_resolve_species_by_lineage",
 )
 
@@ -102,9 +84,7 @@ class KeywordRepository:
         resolve_workspace_id,
         *,
         chunks,
-        log,
         keyword_types,
-        auto_match_review_marker,
         detect_case_convention_sentinel,
         taxon_lookup_variants,
         resolve_import_alias,
@@ -115,12 +95,9 @@ class KeywordRepository:
         self._resolve_workspace_id = resolve_workspace_id
         # ``db`` module helpers and constants, kept under their module names
         # so the moved bodies read them as ``self.<name>``. ``_chunks`` is
-        # ``db._chunks`` itself (its size default is bound at import) and
-        # ``log`` is the ``db`` logger, so log records keep its name.
+        # ``db._chunks`` itself (its size default is bound at import).
         self._chunks = chunks
-        self.log = log
         self.KEYWORD_TYPES = keyword_types
-        self.AUTO_MATCH_REVIEW_MARKER = auto_match_review_marker
         self._DETECT_CASE_CONVENTION = detect_case_convention_sentinel
         self._taxon_lookup_variants = taxon_lookup_variants
         self.resolve_import_alias = resolve_import_alias
@@ -1090,22 +1067,14 @@ class KeywordRepository:
             self.conn.commit()
         return total_merged
 
-    def normalize_row_name(self, keyword_id, disambiguate_on_conflict=False):
+    def normalize_row_name(self, keyword_id):
         """Trim stray edge punctuation from a surviving keyword row name.
 
-        Post-migration, stored names are already normalized, so this is a
-        no-op in the common case — it exists so the duplicate-cleanup and
-        migration paths can canonicalize a survivor whose spelling predates
-        normalization. ``_rename_keyword_dependents`` then carries the new
-        spelling into every string that mirrors it.
-
-        ``disambiguate_on_conflict`` — when a different-type keyword already
-        occupies (cleaned, parent_id) and the UPDATE would hit
-        ``UNIQUE(name, parent_id)``, retry with a ``<cleaned> (id-<id>)``
-        suffix so no stored variant survives. Used by the one-shot
-        migration so its completion marker can honestly assert the "no
-        stored variant" invariant; the runtime dedup path leaves this
-        False and keeps the stored spelling in the collision case.
+        Stored names are already normalized, so this is a no-op in the
+        common case — it exists so the duplicate cleanup can canonicalize a
+        survivor whose spelling predates normalization.
+        ``_rename_keyword_dependents`` then carries the new spelling into
+        every string that mirrors it.
         """
         row = self.conn.execute(
             "SELECT name FROM keywords WHERE id = ?", (keyword_id,)
@@ -1119,26 +1088,13 @@ class KeywordRepository:
         # A same-name row in a different dedupe boundary (another type at
         # the same parent) can still occupy the table-level
         # UNIQUE(name, parent_id) slot. The links still merge correctly;
-        # keep the stored spelling unchanged in that case, unless the
-        # caller opts into disambiguation (migration path).
+        # keep the stored spelling unchanged in that case.
         try:
             self.conn.execute(
                 "UPDATE keywords SET name = ? WHERE id = ?", (cleaned, keyword_id)
             )
         except sqlite3.IntegrityError:
-            if not disambiguate_on_conflict:
-                return
-            # Fallback: append an id suffix so the row's name is still in
-            # normalize_keyword_display() form (the parenthesized suffix is
-            # ASCII and idempotent under the strip) while sidestepping the
-            # UNIQUE(name, parent_id) slot the different-type peer holds.
-            # The retarget below runs against this disambiguated name so
-            # pending sidecar changes and species curation stay in lockstep
-            # with the row's stored spelling.
-            cleaned = f"{cleaned} (id-{keyword_id})"
-            self.conn.execute(
-                "UPDATE keywords SET name = ? WHERE id = ?", (cleaned, keyword_id)
-            )
+            return
         # Keep every dependent name string in lockstep with the row.
         self._rename_keyword_dependents(keyword_id, old_name, cleaned)
 
@@ -1223,718 +1179,6 @@ class KeywordRepository:
                 photo_workspace_pairs=photo_workspace_pairs, _commit=False,
             )
 
-    def normalize_data(self):
-        """One-shot, db_meta-gated wrapper around the normalization backfill.
-
-        Runs at most once per database (``db_meta['keyword_names_normalized']``).
-        All-or-nothing: an exception rolls the whole sweep back — including
-        the marker — so a failed run retries on the next open instead of
-        leaving a half-normalized keyword table.
-        """
-        if self.get_meta("keyword_names_normalized") != "1":
-            try:
-                self._normalize_keyword_data_once()
-                self.set_meta("keyword_names_normalized", "1", _commit=False)
-                self.conn.commit()
-            except Exception:
-                self.conn.rollback()
-                raise
-        # Second-generation curation case alignment. The v1 sweep above ran
-        # on databases before curation writes canonicalized their species
-        # input, so highlight/preference rows starred from prediction-cased
-        # bucket labels between the v1 run and that fix are still keyed with
-        # classifier casing (e.g. `Common Waxbill` vs the `Common waxbill`
-        # keyword). Re-run just the case-alignment pass once under its own
-        # marker; with the setters now canonicalizing on write, new
-        # mismatches cannot form afterwards.
-        if self.get_meta("curation_species_case_aligned_v2") != "1":
-            try:
-                aligned = self._align_curation_species_case()
-                # Edit-history snapshots created after v1 but before the
-                # setter canonicalization fix still carry prediction-cased
-                # species in hl_prev/pref_prev/rep_prev; without this a
-                # later undo would recreate the orphaned curation rows v2
-                # is meant to repair.
-                history_aligned = self._align_curation_history_species()
-                if aligned or history_aligned:
-                    self.log.info(
-                        "curation case alignment v2: moved %d row(s), "
-                        "rewrote %d history item(s)",
-                        aligned, history_aligned,
-                    )
-                self.set_meta(
-                    "curation_species_case_aligned_v2", "1", _commit=False
-                )
-                self.conn.commit()
-            except Exception:
-                self.conn.rollback()
-                raise
-        # Third-generation sweep: typographic-apostrophe folding.
-        # normalize_keyword_display() previously kept an internal U+2019, so
-        # `Say’s phoebe` was stored as a row distinct from `Say's phoebe`
-        # under SQLite COLLATE NOCASE -- one bird, two keyword rows, two
-        # Life List cards, two lifer numbers. Now that the fold happens on
-        # write, re-run the whole normalization sweep under its own marker
-        # to merge the variants that already exist, and fold the same
-        # characters in predictions.species (joined to keywords.name with
-        # `COLLATE NOCASE`, so a curly prediction silently fails to match
-        # its accepted ASCII keyword).
-        if self.get_meta("keyword_apostrophes_folded_v1") != "1":
-            try:
-                self._normalize_keyword_data_once()
-                folded = self._fold_prediction_species_apostrophes()
-                if folded:
-                    self.log.info(
-                        "apostrophe fold: rewrote %d prediction species", folded
-                    )
-                self.set_meta(
-                    "keyword_apostrophes_folded_v1", "1", _commit=False
-                )
-                self.conn.commit()
-            except Exception:
-                self.conn.rollback()
-                raise
-
-    def fold_prediction_species_apostrophes(self):
-        """Rewrite ``predictions.species`` into normalize_keyword_display form.
-
-        Predictions are compared against ``keywords.name`` with exact and
-        ``COLLATE NOCASE`` matches (see the predicted-species subqueries in
-        :meth:`get_photos`), neither of which can fold U+2019. A prediction
-        stored as ``Swinhoe’s White-eye`` therefore never matched the
-        accepted ``Swinhoe's white-eye`` keyword, so the photo's own
-        prediction looked unaccepted in the UI.
-
-        ``predictions`` has UNIQUE(detection_id, classifier_model,
-        labels_fingerprint, species); the constraint is BINARY, so a single
-        (detection, model, fingerprint) scope can legally hold three
-        NOCASE-equivalent variants at once (e.g. ``Say's Phoebe``,
-        ``Say's phoebe``, ``Say’s phoebe``). A per-row ``fetchone`` peer
-        lookup would only merge one of the ASCII neighbours: with the
-        curly row winning by confidence, the subsequent
-        ``UPDATE ... SET species = 'Say's phoebe'`` would then collide with
-        the unmerged ASCII-lowercase row and abort the whole migration
-        under UNIQUE — and on every open thereafter. Fetch every
-        NOCASE-equivalent peer up-front and merge the entire collision set
-        around a single winner so the final UPDATE has no peer left to
-        clash with.
-
-        Before deleting any loser, migrate its workspace review rows onto
-        the surviving prediction so an accepted/rejected decision on a
-        variant (``prediction_review.prediction_id`` uses
-        ``ON DELETE CASCADE``) is not silently lost, and retarget any
-        ``prediction_accept`` edit-history references from the loser id
-        to the winner id so undo/redo can still find the prediction after
-        the DELETE.
-        """
-        folded = 0
-        processed_ids = set()
-        for row in self.conn.execute(
-            "SELECT id, detection_id, classifier_model, labels_fingerprint, "
-            "species, confidence FROM predictions WHERE species IS NOT NULL"
-        ).fetchall():
-            if row["id"] in processed_ids:
-                # Already merged (or deleted) as a peer of an earlier
-                # collision group; skip so we don't reprocess a stale row.
-                continue
-            clean = normalize_keyword_display(row["species"])
-            if clean == row["species"]:
-                continue
-            if not clean:
-                # A prediction whose label is pure stray punctuation has no
-                # canonical spelling to match; leave it rather than inventing
-                # an empty species that would join to nothing.
-                continue
-            # ``COLLATE NOCASE`` matches SQLite's ASCII case fold, which is
-            # the same equivalence downstream keyword joins already use. Without
-            # it, a DB carrying `Say's Phoebe` (ASCII, title-case) alongside a
-            # `Say’s phoebe` (curly, lowercase) misses the collision, folds only
-            # the curly row, and leaves two case-variant predictions on the same
-            # (detection, model, fingerprint) — preserving the split review state
-            # and duplicate rendering the fold was meant to erase.
-            #
-            # ``fetchall`` (not ``fetchone``) so a three-way collision such as
-            # ``Say's Phoebe`` + ``Say's phoebe`` + ``Say’s phoebe`` is merged
-            # in one pass: leaving even one NOCASE-equivalent ASCII peer would
-            # let the winner's final ``UPDATE ... SET species = clean`` collide
-            # with it and abort the migration under UNIQUE.
-            peers = self.conn.execute(
-                "SELECT id, confidence, species FROM predictions "
-                "WHERE detection_id = ? AND classifier_model = ? "
-                "AND labels_fingerprint = ? "
-                "AND species = ? COLLATE NOCASE AND id != ?",
-                (row["detection_id"], row["classifier_model"],
-                 row["labels_fingerprint"], clean, row["id"]),
-            ).fetchall()
-            if peers:
-                # Whole collision set: this row plus every NOCASE-equivalent
-                # peer. Pick the winner by highest confidence, tie-broken by
-                # (a) already-clean species (avoids a needless UPDATE and
-                # preserves the reviewer's chosen casing) then (b) lowest
-                # id for determinism.
-                candidates = [
-                    (row["id"], row["confidence"] or 0.0, row["species"]),
-                ]
-                for p in peers:
-                    candidates.append(
-                        (p["id"], p["confidence"] or 0.0, p["species"])
-                    )
-                winner_id, _, winner_species = max(
-                    candidates,
-                    key=lambda c: (
-                        c[1],
-                        normalize_keyword_display(c[2]) == c[2],
-                        -c[0],
-                    ),
-                )
-                for cid, _, _ in candidates:
-                    if cid == winner_id:
-                        continue
-                    self._merge_prediction_metadata_before_delete(
-                        loser_id=cid, winner_id=winner_id,
-                    )
-                    self._merge_prediction_review_before_delete(
-                        loser_id=cid, winner_id=winner_id,
-                    )
-                    self._retarget_prediction_edit_history(
-                        loser_id=cid, winner_id=winner_id,
-                    )
-                    self.conn.execute(
-                        "DELETE FROM predictions WHERE id = ?", (cid,)
-                    )
-                    processed_ids.add(cid)
-                # Only rewrite the survivor when it still carries curly
-                # punctuation; an already-clean winner keeps its casing.
-                if normalize_keyword_display(winner_species) != winner_species:
-                    self.conn.execute(
-                        "UPDATE predictions SET species = ? WHERE id = ?",
-                        (clean, winner_id),
-                    )
-                processed_ids.add(winner_id)
-            else:
-                self.conn.execute(
-                    "UPDATE predictions SET species = ? WHERE id = ?",
-                    (clean, row["id"]),
-                )
-                processed_ids.add(row["id"])
-            folded += 1
-        return folded
-
-    def merge_prediction_review_before_delete(self, loser_id, winner_id):
-        """Move per-workspace review rows from ``loser_id`` onto ``winner_id``.
-
-        ``prediction_review.prediction_id`` is ``ON DELETE CASCADE``, so a
-        bare ``DELETE FROM predictions`` silently drops any accepted /
-        rejected user decision (and its group metadata) attached to the
-        losing row.  Called from ``_fold_prediction_species_apostrophes``
-        just before it deletes a duplicate: the two predictions differ only
-        in spelling, so a review on either applies to the same (detection,
-        species) pair and must survive the collision-merge.
-
-        For each ``(loser_id, workspace_id)`` review row:
-
-        - If the winner has no row for that workspace, absence encodes an
-          implicit ``pending`` state, so treat it as a real row rather than
-          a slot to be filled. Move the loser's row onto the winner only
-          when the loser carries a genuine user decision
-          (``accepted``/``rejected``) or non-status metadata (``group_id``
-          etc.) worth preserving. A bare ``status='alternative'`` row on
-          the loser is dropped instead: transferring it would turn a
-          higher-confidence pending primary into an alternative, hiding
-          the sole top-1 prediction from the pending queue.  When the
-          decided loser IS itself the auto-accepted taxonomy match (its
-          ``individual`` carries ``AUTO_MATCH_REVIEW_MARKER``), the marker
-          is preserved on the transfer: it's the provenance
-          ``reconcile_match_review_state`` uses to delete the row later
-          if the XMP match goes away; scrubbing it would leave a stale
-          auto-accept looking like a manual decision no automation can
-          revisit. A pending-loser transfer still scrubs the marker
-          (a non-decided row carrying it is spurious historical state,
-          not a real auto-accept).
-        - If the winner already has a row for that workspace (both were
-          reviewed independently), keep whichever encodes the stronger
-          decision: a non-pending status beats pending, and among two
-          non-pending decisions the later ``reviewed_at`` wins.  Ties keep
-          the winner's row so the choice stays deterministic.
-        - Independently of the status choice, backfill missing group
-          metadata (``group_id`` / ``vote_count`` / ``total_votes`` /
-          ``individual``) from whichever side carries it: a pending loser
-          that carries the current burst's ``group_id`` while the winner is
-          also pending would otherwise be cascaded away and the surviving
-          prediction would silently drop out of its burst group. This is
-          safe because two rows for the same (detection, species) pair
-          across spelling variants are always about the same burst.
-          ``individual`` is filled only when the source value is not the
-          ``AUTO_MATCH_REVIEW_MARKER`` sentinel; that string is provenance
-          for auto-accepted taxonomy matches, and copying it onto a
-          manually chosen accept/reject would let later automation
-          (``preserve_manual_review`` / ``reconcile_match_review_state``)
-          overwrite or delete the user's decision.
-
-        The loser's remaining rows are removed by the caller's DELETE via
-        the ON DELETE CASCADE, so no explicit cleanup is needed here.
-        """
-        loser_rows = self.conn.execute(
-            "SELECT workspace_id, status, reviewed_at, individual, group_id, "
-            "vote_count, total_votes FROM prediction_review "
-            "WHERE prediction_id = ?",
-            (loser_id,),
-        ).fetchall()
-        for lr in loser_rows:
-            ws = lr["workspace_id"]
-            winner = self.conn.execute(
-                "SELECT status, reviewed_at, individual, group_id, "
-                "vote_count, total_votes FROM prediction_review "
-                "WHERE prediction_id = ? AND workspace_id = ?",
-                (winner_id, ws),
-            ).fetchone()
-            loser_status = lr["status"] or "pending"
-            loser_decided = loser_status in ("accepted", "rejected")
-            # ``AUTO_MATCH_REVIEW_MARKER`` in ``individual`` is a
-            # taxonomy-match sentinel, not user-authored metadata worth
-            # preserving. Counting it here would let a bare
-            # ``status='alternative'`` loser row whose only "metadata" is
-            # the sentinel pass the guard below and flip the pending
-            # winner to ``alternative``.
-            loser_metadata = {
-                col: lr[col]
-                for col in ("group_id", "vote_count", "total_votes", "individual")
-                if lr[col] is not None
-                and not (
-                    col == "individual" and lr[col] == self.AUTO_MATCH_REVIEW_MARKER
-                )
-            }
-            if winner is None:
-                # Winner's absence == implicit pending. Overriding that
-                # with the loser's row makes sense only when the loser
-                # carries a real user decision or preserved metadata; a
-                # bare ``status='alternative'`` transfer would flip the
-                # higher-confidence pending primary into an alternative
-                # and hide the sole top-1 prediction from the pending
-                # queue.
-                if not loser_decided and not loser_metadata:
-                    continue
-                if loser_decided:
-                    # Move the row intact, ``individual`` included: the
-                    # loser IS the decision, not a competing manual row
-                    # the sentinel could pollute. Preserving
-                    # ``AUTO_MATCH_REVIEW_MARKER`` when it's set is what
-                    # lets ``reconcile_match_review_state`` recognize an
-                    # auto-accept later and clean it up if the XMP match
-                    # goes away; scrubbing it here would strand the
-                    # accept as an apparent manual decision no automation
-                    # can revisit.
-                    self.conn.execute(
-                        "UPDATE prediction_review SET prediction_id = ? "
-                        "WHERE prediction_id = ? AND workspace_id = ?",
-                        (winner_id, loser_id, ws),
-                    )
-                else:
-                    # Undecided loser with real burst metadata: keep the
-                    # metadata but leave the winner implicit-pending by
-                    # downgrading the transferred status. ``individual``
-                    # on a pending row can be the JSON vote breakdown
-                    # ``_store_grouped_predictions`` stores alongside
-                    # ``group_id`` / ``vote_count`` / ``total_votes``,
-                    # so preserve it verbatim; only the auto-match
-                    # sentinel gets scrubbed so future automation
-                    # doesn't misread provenance on a row the user has
-                    # never reviewed.
-                    scrubbed_individual = (
-                        None
-                        if lr["individual"] == self.AUTO_MATCH_REVIEW_MARKER
-                        else lr["individual"]
-                    )
-                    self.conn.execute(
-                        "UPDATE prediction_review "
-                        "SET prediction_id = ?, status = 'pending', "
-                        "    individual = ? "
-                        "WHERE prediction_id = ? AND workspace_id = ?",
-                        (winner_id, scrubbed_individual, loser_id, ws),
-                    )
-                continue
-            winner_status = winner["status"] or "pending"
-            winner_decided = winner_status in ("accepted", "rejected")
-            prefer_loser = loser_decided and (
-                not winner_decided
-                or (lr["reviewed_at"] or "") > (winner["reviewed_at"] or "")
-            )
-            chosen = lr if prefer_loser else winner
-            other = winner if prefer_loser else lr
-            # ``prefer_loser`` only reflects the accepted/rejected decision,
-            # so a pending winner whose row lacks ``group_id`` while a
-            # pending loser carries the current burst's grouping would lose
-            # it via CASCADE without this backfill. Symmetric across sides:
-            # whichever side supplied the decision, missing group metadata
-            # is filled from the other so the surviving prediction stays
-            # inside its burst group. ``individual`` intentionally skips
-            # the ``AUTO_MATCH_REVIEW_MARKER`` fill-in: the chosen row is
-            # the surviving decision (a manual accept/reject may store
-            # ``individual=NULL``), and copying the auto-match sentinel
-            # from a stale auto-accepted row would let later runs of
-            # ``reconcile_match_review_state`` delete the user's decision
-            # or let ``preserve_manual_review`` overwrite it.
-            other_individual = other["individual"]
-            if other_individual == self.AUTO_MATCH_REVIEW_MARKER:
-                other_individual = None
-            self.conn.execute(
-                """UPDATE prediction_review
-                   SET status = ?, reviewed_at = ?, individual = ?,
-                       group_id = ?, vote_count = ?, total_votes = ?
-                   WHERE prediction_id = ? AND workspace_id = ?""",
-                (chosen["status"], chosen["reviewed_at"],
-                 chosen["individual"] if chosen["individual"] is not None
-                 else other_individual,
-                 chosen["group_id"] if chosen["group_id"] is not None
-                 else other["group_id"],
-                 chosen["vote_count"] if chosen["vote_count"] is not None
-                 else other["vote_count"],
-                 chosen["total_votes"] if chosen["total_votes"] is not None
-                 else other["total_votes"],
-                 winner_id, ws),
-            )
-
-    def merge_prediction_metadata_before_delete(self, loser_id, winner_id):
-        """Backfill non-null loser columns onto the winner before DELETE.
-
-        Two colliding predictions (same detection / model / fingerprint,
-        spellings that differ only by apostrophe) can hold different amounts
-        of enrichment if they were written by different code paths: the
-        classifier-with-taxonomy path fills ``category`` / ``scientific_name``
-        / ``taxonomy_*``, but a raw-classifier path (or an older insert made
-        before the taxonomy lookup existed) can leave those NULL.  When the
-        row selected as the winner (by ``confidence``) happens to be the
-        one without the enrichment, deleting the loser strips fields that
-        taxonomy filters and review displays rely on.
-
-        Backfills a column only when the winner is currently NULL, so a
-        deliberate override on the winner is preserved.  ``category`` also
-        promotes from the schema default ``'new'`` to a more specific
-        ``'match'`` / ``'change'`` when only the loser carried it, but
-        never overrides an explicit non-default winner category.  Called
-        from ``_fold_prediction_species_apostrophes`` right before the
-        CASCADEd DELETE removes the loser row.
-        """
-        if loser_id == winner_id:
-            return
-        winner = self.conn.execute(
-            """SELECT category, scientific_name,
-                      taxonomy_kingdom, taxonomy_phylum, taxonomy_class,
-                      taxonomy_order, taxonomy_family, taxonomy_genus
-               FROM predictions WHERE id = ?""",
-            (winner_id,),
-        ).fetchone()
-        loser = self.conn.execute(
-            """SELECT category, scientific_name,
-                      taxonomy_kingdom, taxonomy_phylum, taxonomy_class,
-                      taxonomy_order, taxonomy_family, taxonomy_genus
-               FROM predictions WHERE id = ?""",
-            (loser_id,),
-        ).fetchone()
-        if winner is None or loser is None:
-            return
-        updates = []
-        values = []
-        winner_cat = winner["category"]
-        loser_cat = loser["category"]
-        if (
-            loser_cat
-            and loser_cat != "new"
-            and (winner_cat is None or winner_cat == "new")
-        ):
-            updates.append("category = ?")
-            values.append(loser_cat)
-        for field in (
-            "scientific_name",
-            "taxonomy_kingdom",
-            "taxonomy_phylum",
-            "taxonomy_class",
-            "taxonomy_order",
-            "taxonomy_family",
-            "taxonomy_genus",
-        ):
-            if winner[field] is None and loser[field] is not None:
-                updates.append(f"{field} = ?")
-                values.append(loser[field])
-        if updates:
-            values.append(winner_id)
-            self.conn.execute(
-                "UPDATE predictions SET " + ", ".join(updates) + " WHERE id = ?",
-                values,
-            )
-
-    def retarget_prediction_edit_history(self, loser_id, winner_id):
-        """Rewrite prediction-id references in edit history from loser to winner.
-
-        Three action types anchor prediction ids into
-        ``edit_history_items.old_value``:
-
-        - ``prediction_accept`` (``api_accept_prediction`` /
-          ``api_accept_subject_species``): stores either a bare-int string
-          (single-model, changed-tag accept), JSON
-          ``{"prediction_id": N, "no_tag": true}`` (single no-op accept),
-          or JSON ``{"prediction_ids": [N, ...], "no_tag"?: true}``
-          (accept-subject collecting agreeing sibling classifier models).
-        - ``keyword_add`` and ``species_replace``
-          (``api_highlights_relabel``): store a JSON payload whose
-          ``prediction_id`` field points at the top prediction captured
-          when the relabel ran, so undo can restore its ``pending`` status
-          via ``_restore_edit_prediction_status`` (and redo can re-reject
-          it via ``_reject_edit_prediction``). Bare-int ``old_value`` for
-          these two action types encodes the previous keyword id, not a
-          prediction id, so it is left alone.
-
-        When the fold migration deletes a colliding prediction row, an
-        undo/redo later would call ``update_prediction_status(loser_id,
-        ...)`` on the vanished id: the ``INSERT`` into ``prediction_review``
-        then fails the FK to ``predictions``, aborting the undo/redo, and
-        for the ``prediction_accept`` accept-subject variant the missing
-        id would silently be skipped by ``_apply_undo`` so the surviving
-        prediction stays anchored in its accepted state.
-
-        Retargeting the reference from ``loser_id`` -> ``winner_id`` before
-        the DELETE keeps undo/redo sound: the two predictions differ only
-        in spelling, so any status flip captured on either applies to the
-        same (detection, model, labels_fingerprint) scope after the merge.
-        """
-        if loser_id == winner_id:
-            return
-        loser_str = str(loser_id)
-        winner_str = str(winner_id)
-        # (1) Bare-int old_value: rewrite in place.  Scoped strictly to
-        #     ``prediction_accept`` because ``keyword_add`` /
-        #     ``species_replace`` / ``keyword_remove`` store keyword ids
-        #     in these columns and a blanket UPDATE would corrupt any
-        #     keyword id that happened to equal loser_id.
-        self.conn.execute(
-            """UPDATE edit_history_items
-               SET old_value = ?
-               WHERE old_value = ?
-                 AND edit_id IN (
-                     SELECT id FROM edit_history
-                     WHERE action_type = 'prediction_accept'
-                 )""",
-            (winner_str, loser_str),
-        )
-        # (2) JSON old_value: parse, rewrite ``prediction_id`` and every
-        #     ``prediction_ids`` entry that matches the loser, re-serialize.
-        #     The ``LIKE '{%'`` prefix skips the bare-int rows handled above
-        #     without loading them into Python. Scoped to the three action
-        #     types that carry prediction ids in their JSON payload so a
-        #     ``keyword_remove`` JSON blob (which happens to also start with
-        #     ``{`` if it ever gains structured payloads) is unaffected.
-        json_rows = self.conn.execute(
-            """SELECT ehi.id, ehi.old_value
-               FROM edit_history_items ehi
-               JOIN edit_history eh ON eh.id = ehi.edit_id
-               WHERE eh.action_type IN (
-                       'prediction_accept', 'keyword_add', 'species_replace'
-                     )
-                 AND ehi.old_value IS NOT NULL
-                 AND ehi.old_value LIKE ?""",
-            ('{%',),
-        ).fetchall()
-        for row in json_rows:
-            try:
-                data = json.loads(row["old_value"])
-            except (TypeError, ValueError):
-                continue
-            if not isinstance(data, dict):
-                continue
-            changed = False
-            raw_pid = data.get("prediction_id")
-            if raw_pid is not None:
-                try:
-                    if int(raw_pid) == loser_id:
-                        data["prediction_id"] = winner_id
-                        changed = True
-                except (TypeError, ValueError):
-                    pass
-            raw_pids = data.get("prediction_ids")
-            if isinstance(raw_pids, list):
-                new_list = []
-                list_changed = False
-                for raw in raw_pids:
-                    try:
-                        if int(raw) == loser_id:
-                            new_list.append(winner_id)
-                            list_changed = True
-                            continue
-                    except (TypeError, ValueError):
-                        pass
-                    new_list.append(raw)
-                if list_changed:
-                    data["prediction_ids"] = new_list
-                    changed = True
-            if changed:
-                self.conn.execute(
-                    "UPDATE edit_history_items SET old_value = ? WHERE id = ?",
-                    (json.dumps(data), row["id"]),
-                )
-
-    def align_curation_species_case(self):
-        """Re-key curation rows whose species differs from the canonical
-        spelling only by case.
-
-        ``normalize_keyword_display()`` preserves case, so the punctuation
-        sweep leaves a curation row keyed ``Saffron Finch`` untouched while
-        the species keyword row is ``Saffron finch`` — and the eligible
-        highlight/life-list queries compare those strings EXACT against
-        ``keywords.name``, so the curated selection silently drops out.
-
-        Two sources of the canonical spelling, mirroring
-        ``resolve_species_display_name`` (the function
-        ``collect_highlight_buckets`` uses to canonicalize prediction
-        labels):
-
-        1. A single surviving root species keyword for the match_key.
-           Intentionally-distinct same-key homonyms (e.g. a legacy
-           ``type='general', is_species=1`` ``Robin`` alongside a taxonomy
-           ``robin``) must not have every curation row for the other
-           spelling rewritten onto the picked one — the joined queries
-           would then match a species keyword the photo doesn't carry.
-           Ambiguous case-variant homonyms are left as-is.
-        2. If no keyword row exists at all — e.g. a highlight starred from
-           an unconfirmed prediction bucket before the photo was accepted
-           — apply the detected case convention so the row lands on the
-           string the bucket will produce after this migration. Without
-           this, the bucket-side canonicalization drifts to (say)
-           ``Common waxbill`` while the highlight stays at
-           ``Common Waxbill``, silently un-starring the photo.
-
-        Returns the number of rows moved; caller commits.
-        """
-        moved = 0
-        unique_species_by_key, all_species_keys = self._species_keyword_maps()
-        for table, rename in (
-            ("photo_preferences", self.rename_photo_preferences_species),
-            ("species_representatives",
-             self.rename_species_representatives_species),
-            ("species_highlights", self.rename_species_highlights_species),
-        ):
-            names = [
-                r["species"] for r in self.conn.execute(
-                    f"SELECT DISTINCT species FROM {table}"
-                ).fetchall()
-            ]
-            for old in names:
-                stored = self._canonical_curation_species(
-                    old, unique_species_by_key, all_species_keys
-                )
-                if not stored or stored == old:
-                    continue
-                moved += rename(old, stored, _commit=False) or 0
-                self.conn.execute(
-                    f"DELETE FROM {table} WHERE species = ?", (old,)
-                )
-        return moved
-
-    def align_curation_history_species(self):
-        """Rewrite curation species snapshots in edit_history_items.old_value.
-
-        Relabel undo/redo payloads carry snapshots of curation rows keyed
-        by species name. Normalizing only the live tables leaves those
-        JSON snapshots pointing at the legacy spelling, so a later undo
-        would recreate orphaned curation rows that no longer compare
-        equal to the string the bucket / eligibility queries expect.
-        Route every species value captured by hl_prev/pref_prev/rep_prev
-        through the same canonicalization ``_align_curation_species_case``
-        applies to the live tables (unambiguous stored spelling, ambiguous
-        homonyms left alone, no-keyword predictions case-converted).
-        Idempotent on already-normalized rows, so it's safe to re-run in
-        the v2 gate after v1 has already normalized the punctuation.
-        Returns the number of history rows rewritten; caller commits.
-        """
-        rewritten = 0
-        unique_species_by_key, all_species_keys = self._species_keyword_maps()
-
-        def _normalized_curation_species(value):
-            return self._canonical_curation_species(
-                value, unique_species_by_key, all_species_keys
-            )
-
-        history_rows = self.conn.execute(
-            "SELECT id, old_value FROM edit_history_items "
-            "WHERE old_value IS NOT NULL AND old_value LIKE ?",
-            ('{%curation%',),
-        ).fetchall()
-        for row in history_rows:
-            try:
-                payload = json.loads(row["old_value"])
-            except (TypeError, ValueError):
-                continue
-            if not isinstance(payload, dict):
-                continue
-            curation = payload.get("curation")
-            if not isinstance(curation, dict):
-                continue
-            dirty = False
-            highlights = curation.get("hl_prev")
-            if isinstance(highlights, list):
-                for index, entry in enumerate(highlights):
-                    if isinstance(entry, str):
-                        normalized = _normalized_curation_species(entry)
-                        if normalized != entry:
-                            highlights[index] = normalized
-                            dirty = True
-                    elif isinstance(entry, dict):
-                        old = entry.get("species")
-                        if isinstance(old, str):
-                            normalized = _normalized_curation_species(old)
-                            if normalized != old:
-                                entry["species"] = normalized
-                                dirty = True
-            for key in ("pref_prev", "rep_prev"):
-                entries = curation.get(key)
-                if not isinstance(entries, list):
-                    continue
-                for entry in entries:
-                    if not isinstance(entry, dict):
-                        continue
-                    old = entry.get("species")
-                    if not isinstance(old, str):
-                        continue
-                    normalized = _normalized_curation_species(old)
-                    if normalized != old:
-                        entry["species"] = normalized
-                        dirty = True
-            if dirty:
-                self.conn.execute(
-                    "UPDATE edit_history_items SET old_value = ? WHERE id = ?",
-                    (json.dumps(payload, sort_keys=True), row["id"]),
-                )
-                rewritten += 1
-        return rewritten
-
-    def species_maps(self):
-        """Return ``(unique_species_by_key, all_species_keys)`` for
-        curation alignment.
-
-        ``unique_species_by_key``: match_key → stored root species
-        spelling, ONLY for keys resolving to a single distinct spelling.
-        Homonyms (multiple distinct spellings for the same key) are
-        omitted so callers can't rewrite curation across genuinely
-        different keyword rows.
-
-        ``all_species_keys``: set of match_keys with any root species
-        keyword row (ambiguous or not). Used to distinguish "no keyword
-        row at all" — safe to canonicalize a curation species via the
-        detected case convention — from "ambiguous homonym", which
-        must be left alone.
-        """
-        species_by_key = {}
-        for row in self.conn.execute(
-            "SELECT name FROM keywords "
-            "WHERE parent_id IS NULL AND (is_species = 1 OR type = 'taxonomy')"
-        ).fetchall():
-            species_by_key.setdefault(keyword_match_key(row["name"]), []).append(
-                row["name"]
-            )
-        unique = {
-            key: names[0] for key, names in species_by_key.items()
-            if len(set(names)) == 1
-        }
-        return unique, set(species_by_key.keys())
 
     def reparent_disambiguated(self, child, dst_id, new_name):
         """Move a colliding child under ``dst_id`` under a free name.

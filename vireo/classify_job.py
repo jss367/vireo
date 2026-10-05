@@ -3051,8 +3051,8 @@ def _store_match_prediction(
         # so alternatives-that-are-actually-the-primary stay unwritten.
         #
         # Comparison uses ``_species_match_key`` (ASCII-only case fold):
-        # downstream keyword joins already use SQLite ``COLLATE NOCASE``
-        # (see ``_fold_prediction_species_apostrophes``), so a merged
+        # downstream keyword joins already use SQLite ``COLLATE NOCASE``,
+        # so a merged
         # label set yielding primary `Say's Phoebe` and alternative
         # `Say's phoebe` is semantically one bird — but
         # ``_folded_species_key`` preserves case, letting them survive as
