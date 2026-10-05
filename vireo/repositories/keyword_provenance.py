@@ -1990,32 +1990,13 @@ class KeywordProvenanceRepository:
         list carries the ``old_species`` names that were stripped from that
         photo (empty when ``replace_species`` is False).
 
-        When ``photo_ids`` is provided for a grouped prediction, only matching
-        group members are tagged and marked accepted. This lets callers apply a
-        grouped accept to a filtered subset without changing hidden photos.
-
-        ``prediction_ids`` is the stricter form of the same limit, for callers
-        that already know the exact prediction rows they are acting on: the
-        grouped accept touches only those rows. Prefer it over ``photo_ids``
-        whenever the caller has a submitted id list. A photo is not a unique
-        key for a prediction — one photo can carry several rows in the same
-        burst group (one per classifier model, or per detection) — so a
-        photo-id limit lets a grouped accept reach a row on an allowed photo
-        that the caller never submitted. ``photo_ids`` remains for callers
-        whose intent really is "these photos" (highlight confirm, accept
-        subject), where the row set is chosen by this method.
-
-        Independently of either limit, group expansion only ever *discovers*
-        undecided rows: a group member already ``accepted`` or ``rejected`` is
-        left alone unless the caller named it (as the entry row, or in
-        ``prediction_ids``). Accepting one burst member must not resurrect a
-        sibling the user rejected in Review, nor re-flip a long-accepted one
-        into a history item whose "previous" status never happened.
-
-        Both limits are settled before the first write, so a call whose scope
-        excludes every candidate row is a true no-op: no keyword row is
-        created, no sibling alternative is rejected, no status is flipped. It
-        returns ``accepted_prediction_ids: []`` with ``keyword_id`` set to the
+        ``photo_ids`` limits a grouped accept to matching group members;
+        ``prediction_ids`` is the stricter, row-level form of the same limit.
+        Independently of either, group expansion only ever *discovers*
+        undecided rows (see ``_acceptance_targets``). Both limits are settled
+        before the first write, so a call whose scope excludes every
+        candidate row is a true no-op: it returns
+        ``accepted_prediction_ids: []`` with ``keyword_id`` set to the
         existing keyword for the resolved species (``None`` when no such
         keyword exists yet).
 
@@ -2039,249 +2020,33 @@ class KeywordProvenanceRepository:
         limited_pred_ids = None
         if prediction_ids is not None:
             limited_pred_ids = {int(pid) for pid in prediction_ids}
-        # Load taxonomy once for the whole call so replace_species can protect
-        # keywords whose relationship to a neighbouring subject's prediction is
-        # broader/same/narrower — not just exact-text matches. Loaded here
-        # rather than inside _accept_for_photo so grouped accepts don't repeat
-        # the JSON parse per photo. None (missing/corrupt file, or unrelated
-        # import failure) cleanly degrades to exact-text protection.
-        _replace_taxonomy = None
-        _compare_pred_to_kws = None
+        replace_taxonomy = (None, None)
         if replace_species:
-            try:
-                from compare import compare_prediction_to_keywords as _cpk
-                from taxonomy import load_local_taxonomy as _llt
-                _replace_taxonomy = _llt()
-                _compare_pred_to_kws = _cpk
-            except Exception:
-                log.warning(
-                    "Taxonomy unavailable for species replacement; "
-                    "protecting only exact-name keywords",
-                    exc_info=True,
-                )
-                _replace_taxonomy = None
-                _compare_pred_to_kws = None
-        pred = self.conn.execute(
-            """SELECT pr.*,
-                      pr.classifier_model AS model,
-                      pr_rev.group_id AS group_id,
-                      pr_rev.individual AS individual,
-                      d.photo_id
-               FROM predictions pr
-               JOIN detections d ON d.id = pr.detection_id
-               LEFT JOIN prediction_review pr_rev
-                 ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
-               WHERE pr.id = ?""",
-            (ws, prediction_id),
-        ).fetchone()
+            replace_taxonomy = _taxonomy_for_species_replacement()
+        pred = _fetch_entry_prediction(self.conn, ws, prediction_id)
         if not pred:
             return None
         from species_identity import SpeciesResolver
         identity = SpeciesResolver(db=self.db).consensus(pred)
-        # A pure name lookup can flag a same-name keyword the async
-        # ``mark_species_keywords`` pass has not linked yet. Routing the
-        # accept through ``_add_source_species_keyword`` on that inferred
-        # id refuses to reuse the unlinked row and mints a suffixed
-        # duplicate; only explicit prediction evidence (a stored
-        # ``source_taxon_id`` or a native tol/iNat scientific name)
-        # earns that source-specific path.
-        native_scientific = pred["scientific_name"] if (
-            pred["labels_fingerprint"] == "tol" or pred["model"].startswith("iNat")
-        ) else None
-        has_explicit_evidence = pred["source_taxon_id"] is not None or bool(native_scientific)
-        source_taxon_id = identity.taxon_id if has_explicit_evidence else None
-
-        def _reject_siblings_of(this_pred_id):
-            """Resolve the losing rows on one accepted row's detection.
-
-            Rejects siblings for the same
-            (detection, classifier_model, labels_fingerprint) in this
-            workspace (covers both accepting an alternative and accepting the
-            top-1). Scoping by fingerprint is critical — without it, accepting
-            a prediction from a new label set would mark old label-set rows as
-            rejected, silently rewriting review state for unrelated
-            fingerprints. Review state is workspace-scoped, so we upsert each
-            row rather than UPDATE the base predictions table.
-
-            Run per accepted row, and only for rows this call accepts: a
-            grouped accept decides every member's detection, so leaving the
-            other members' alternatives at 'alternative' would keep photos in
-            Review's queue that this call already settled — and would make it
-            unsafe for a batch caller to skip a submitted row that a grouped
-            accept covered. Equally, a row the caller's scope excludes must
-            not have its alternatives resolved, so this never runs for the
-            entry row before scope is settled.
-            """
-            row = self.conn.execute(
-                """SELECT detection_id, classifier_model, labels_fingerprint
-                   FROM predictions WHERE id = ?""",
-                (this_pred_id,),
-            ).fetchone()
-            if row is None:
-                return
-            sibs = self.conn.execute(
-                """SELECT pr.id FROM predictions pr
-                   LEFT JOIN prediction_review pr_rev
-                     ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
-                   WHERE pr.detection_id = ?
-                     AND pr.classifier_model = ?
-                     AND pr.labels_fingerprint = ?
-                     AND pr.id != ?
-                     AND COALESCE(pr_rev.status, 'pending') IN ('pending', 'alternative')""",
-                (ws, row["detection_id"], row["classifier_model"],
-                 row["labels_fingerprint"], this_pred_id),
-            ).fetchall()
-            for s in sibs:
-                self.conn.execute(
-                    """INSERT INTO prediction_review
-                         (prediction_id, workspace_id, status, reviewed_at)
-                       VALUES (?, ?, 'rejected', datetime('now'))
-                       ON CONFLICT(prediction_id, workspace_id)
-                       DO UPDATE SET status = 'rejected',
-                                     reviewed_at = datetime('now')""",
-                    (s["id"], ws),
-                )
+        has_explicit_evidence, source_taxon_id = _explicit_source_taxon(
+            pred, identity,
+        )
 
         try:
-            if has_explicit_evidence:
-                species = identity.display_name if source_taxon_id else (identity.scientific_name or identity.display_name)
-            else:
-                # Preserve the raw label (or burst winner) for legacy
-                # predictions: ``add_keyword``'s name-based dedup will
-                # reuse an existing same-name keyword, even one
-                # ``mark_species_keywords`` has not linked yet, without
-                # introducing a suffixed duplicate.
-                species = pred["species"]
-                if pred["group_id"] and pred["individual"]:
-                    try:
-                        votes = json.loads(pred["individual"])
-                        if isinstance(votes, dict) and votes:
-                            species = max(votes, key=lambda sp: votes[sp])
-                    except (TypeError, ValueError):
-                        pass
-
-            # Settle scope before the first write.
-            #
-            # ``limited_photo_ids`` / ``limited_pred_ids`` exist to make this
-            # call a no-op outside the caller's submitted scope, so *every*
-            # mutation — sibling rejection, keyword creation, status flips —
-            # has to sit behind that decision rather than beside it. This
-            # method used to reject the entry row's alternatives up front,
-            # which silently resolved rows the caller never submitted while
-            # the return value truthfully reported no accepts. The row set is
-            # therefore computed from reads only; nothing below writes until
-            # it is non-empty.
-            def _in_scope(photo_id, this_pred_id):
-                photo_allowed = (
-                    limited_photo_ids is None
-                    or photo_id in limited_photo_ids
-                )
-                # The row-level limit, checked independently: a group
-                # member's photo being in scope does not make every row
-                # that member carries in scope.
-                row_allowed = (
-                    limited_pred_ids is None
-                    or this_pred_id in limited_pred_ids
-                )
-                return photo_allowed and row_allowed
-
-            def _expansion_allowed(this_pred_id, status):
-                """May group expansion *discover* this row?
-
-                Group expansion reaches rows the caller never named — that is
-                its whole point — so it must not reach rows whose decision is
-                already made. Without this, accepting one burst member from
-                Review re-accepts a sibling the user explicitly rejected
-                earlier (tagging that photo with the species it was denied)
-                and re-flips long-accepted siblings, whose "previous" status
-                in the resulting history item is then a fiction: undo would
-                knock them back to pending. ``reviewed`` is treated the same
-                as ``accepted`` / ``rejected`` here: the user marked the row
-                reviewed to say "I looked and chose not to act", and
-                expanding a group into it would silently flip that decision
-                to ``accepted`` without any audit trail describing the
-                overwrite.
-
-                Rows the caller *named* are exempt, because then the caller,
-                not the expansion, chose them: the entry row itself, and any
-                row listed in ``limited_pred_ids``. ``batch-accept`` never
-                lists a decided row (``_decided_prediction_ids`` filters them
-                out first), so in practice this only ever exempts a row a
-                route was pointed at directly.
-                """
-                if this_pred_id == prediction_id:
-                    return True
-                if (
-                    limited_pred_ids is not None
-                    and this_pred_id in limited_pred_ids
-                ):
-                    return True
-                return status not in self.DECIDED_PREDICTION_STATUSES
-
-            # If grouped, accept every prediction in the group (in this
-            # workspace) that survives the caller's scope.
-            if pred["group_id"]:
-                group_preds = self.conn.execute(
-                    """SELECT pr.id, d.photo_id, pr_rev.status AS status
-                       FROM predictions pr
-                       JOIN prediction_review pr_rev
-                         ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
-                       JOIN detections d ON d.id = pr.detection_id
-                       JOIN photos ph ON ph.id = d.photo_id
-                       JOIN photo_workspace_visibility wf
-                         ON wf.photo_id = ph.id AND wf.workspace_id = ?
-                       WHERE pr_rev.group_id = ? AND pr.classifier_model = ?""",
-                    (ws, ws, pred["group_id"], pred["model"]),
-                ).fetchall()
-                targets = [
-                    (gp["photo_id"], gp["id"])
-                    for gp in group_preds
-                    if _in_scope(gp["photo_id"], gp["id"])
-                    and _expansion_allowed(gp["id"], gp["status"])
-                ]
-            elif _in_scope(pred["photo_id"], prediction_id):
-                targets = [(pred["photo_id"], prediction_id)]
-            else:
-                targets = []
-
+            species = _species_label_to_accept(
+                pred, identity, has_explicit_evidence, source_taxon_id,
+            )
+            targets = _acceptance_targets(
+                self.conn, ws, pred, prediction_id,
+                limited_photo_ids, limited_pred_ids,
+                self.DECIDED_PREDICTION_STATUSES,
+            )
             if not targets:
-                # Nothing this caller submitted is acceptable here, so leave
-                # the database exactly as it was and report no changes.
-                # ``add_keyword`` is a write too (it creates the species row),
-                # so it also waits behind the scope decision; the read-only
-                # lookup keeps ``keyword_id``/``species`` meaningful for
-                # callers reconciling one batch's species without inventing a
-                # keyword for an accept that never happened.
-                display = normalize_keyword_display(species)
-                existing = self.conn.execute(
-                    """SELECT id, name FROM keywords
-                       WHERE name = ? COLLATE NOCASE
-                       ORDER BY id LIMIT 1""",
-                    (display,),
-                ).fetchone()
-                return {
-                    "species": existing["name"] if existing else display,
-                    "species_key": identity.key,
-                    "keyword_id": existing["id"] if existing else None,
-                    "affected": [],
-                    "accepted_prediction_ids": [],
-                    "photo_ids": [],
-                }
+                return _out_of_scope_result(self.conn, species, identity)
 
             source_args = {"source_taxon_id": source_taxon_id} if source_taxon_id is not None else {}
             kid = self.add_keyword(species, is_species=True, _commit=False, **source_args)
-            # Re-read the stored keyword name so the queued sidecar changes,
-            # curation renames, and returned history payload all reflect the
-            # row actually tagged. add_keyword normalizes punctuation and
-            # applies the species casing convention, so the stored spelling
-            # can differ from the raw prediction label; using the raw value
-            # downstream would queue pending add/remove pairs that no longer
-            # cancel and write the un-normalized label to XMP.
-            stored = self.conn.execute(
-                "SELECT name FROM keywords WHERE id = ?", (kid,)
-            ).fetchone()
-            if stored and stored["name"]:
-                species = stored["name"]
+            species = _stored_keyword_name(self.conn, kid, species)
             # list of {"photo_id", "prediction_id", "old_species"}
             affected = []
             # Every row this call flips to accepted, including ones that
@@ -2291,324 +2056,45 @@ class KeywordProvenanceRepository:
             accepted_pred_ids = []
 
             def _accept_for_photo(photo_id, this_pred_id):
-                accepted_pred_ids.append(this_pred_id)
+                """Accept one target row and tag its photo; return its
+                ``affected`` entry, or ``None`` when there is nothing to
+                record (see ``_affected_entry``)."""
                 # Every accepted row resolves its own detection's losers,
                 # including the entry row. Doing it here rather than up front
                 # is what keeps an out-of-scope entry row untouched.
-                _reject_siblings_of(this_pred_id)
+                _reject_detection_alternatives(self.conn, ws, this_pred_id)
                 self.update_prediction_status(this_pred_id, "accepted", _commit=False)
                 old_species = []
                 already_has_species = photo_id in self.get_photos_with_equivalent_species(
                     [photo_id], kid
                 )
                 if replace_species:
-                    # Replace corrects *this subject's* identity, so it must
-                    # not strip a species that belongs to a different detection
-                    # (another subject) on the same photo. Any species named by
-                    # a live prediction on another box is protected; without
-                    # this, correcting the teal's ID wiped the American Wigeon
-                    # confirmed on the neighbouring box. On a single-detection
-                    # photo no box is protected, so every species keyword is
-                    # replaced exactly as before.
-                    this_det = self.conn.execute(
-                        "SELECT detection_id FROM predictions WHERE id = ?",
-                        (this_pred_id,),
-                    ).fetchone()
-                    this_det_id = this_det["detection_id"] if this_det else None
-                    # Mirror Compare's visibility filter when picking which
-                    # neighbouring predictions may protect a species keyword:
-                    #   * skip 'alternative' rows (Compare drops them at
-                    #     web/predictions.py's api_predictions_compare, alongside
-                    #     'rejected');
-                    #   * skip detections below the workspace's effective
-                    #     detector_confidence — Compare marks those "dormant"
-                    #     and excludes their subjects entirely.
-                    # Without this, a below-threshold neighbour or an
-                    # alternative row on a real neighbour would keep an
-                    # already-stale species keyword on the photo — replace
-                    # would leave it in place and never queue a
-                    # keyword_remove, so the sidecar would still list the
-                    # dead species.
-                    import config as _cfg
-                    _det_threshold = self.get_effective_config(
-                        _cfg.load()
-                    ).get("detector_confidence", 0.2)
-                    # Restrict to the latest labels_fingerprint per
-                    # (detection, classifier_model) — mirrors get_predictions
-                    # and the review/summary paths so stale rows from a prior
-                    # label set on a re-classified neighbouring detection do
-                    # not spuriously protect an obsolete species keyword.
-                    # Fold both sides through keyword_match_key so a raw
-                    # prediction species like `‘apapane` matches the stored
-                    # keyword `apapane` (add_keyword normalizes on write, so
-                    # a lower(trim(species)) SQL fold would otherwise miss
-                    # the still-live neighbour and queue its removal).
-                    neighbour_species = [
-                        row["species"] for row in self.conn.execute(
-                            """SELECT DISTINCT pr.species AS species
-                               FROM predictions pr
-                               JOIN detections d ON d.id = pr.detection_id
-                               LEFT JOIN prediction_review pr_rev
-                                 ON pr_rev.prediction_id = pr.id
-                                AND pr_rev.workspace_id = ?
-                               WHERE d.photo_id = ?
-                                 AND pr.detection_id IS NOT ?
-                                 AND COALESCE(pr_rev.status, 'pending')
-                                     NOT IN ('rejected', 'alternative')
-                                 AND d.detector_confidence >= ?
-                                 AND pr.labels_fingerprint = (
-                                     SELECT pr2.labels_fingerprint
-                                     FROM predictions pr2
-                                     WHERE pr2.detection_id = pr.detection_id
-                                       AND pr2.classifier_model
-                                           = pr.classifier_model
-                                     ORDER BY pr2.created_at DESC, pr2.id DESC
-                                     LIMIT 1
-                                 )""",
-                            (ws, photo_id, this_det_id, _det_threshold),
-                        ).fetchall()
-                        if row["species"]
-                    ]
-                    protected = {
-                        keyword_match_key(s) for s in neighbour_species
-                    }
-                    existing = self.conn.execute(
-                        """SELECT k.id, k.name, k.taxon_id
-                           FROM photo_keywords pk
-                           JOIN keywords k ON k.id = pk.keyword_id
-                           LEFT JOIN taxa t ON t.id = k.taxon_id
-                           WHERE pk.photo_id = ?
-                             AND (k.is_species = 1 OR k.type = 'taxonomy')
-                             AND (t.rank = 'species' OR t.rank IS NULL)""",
-                        (photo_id,),
-                    ).fetchall()
-                    target_row = self.conn.execute(
-                        "SELECT name, taxon_id FROM keywords WHERE id = ?",
-                        (kid,),
-                    ).fetchone()
-                    # Mirror get_photos_with_equivalent_species: when another
-                    # taxonomy/species keyword row shares the target's match
-                    # key but points at a different taxon (e.g. legacy
-                    # ``Robin`` alongside taxonomy ``robin``), the unlinked
-                    # same-key row on the photo is ambiguous — it could be
-                    # either species. Treating it as the target here would
-                    # exclude it from ``to_remove``, so Replace Keywords
-                    # would leave the wrong species attached while adding
-                    # the correct one. Detect the homonym conflict once and
-                    # gate the NULL-taxon fallback below.
-                    #
-                    # The same guard applies when the *target* is unlinked:
-                    # a linked same-key row is a distinct species that must
-                    # not be folded into the unlinked target, or Replace
-                    # Keywords would exclude the linked homonym from
-                    # ``to_remove`` and leave the wrong species attached.
-                    _target_key = keyword_match_key(target_row["name"])
-                    _target_homonym_conflict = False
-                    if target_row["taxon_id"] is not None:
-                        for _hrow in self.conn.execute(
-                            """SELECT name FROM keywords
-                               WHERE (is_species = 1 OR type = 'taxonomy')
-                                 AND taxon_id IS NOT NULL
-                                 AND taxon_id != ?""",
-                            (target_row["taxon_id"],),
-                        ).fetchall():
-                            if keyword_match_key(_hrow["name"]) == _target_key:
-                                _target_homonym_conflict = True
-                                break
-                    else:
-                        for _hrow in self.conn.execute(
-                            """SELECT name FROM keywords
-                               WHERE (is_species = 1 OR type = 'taxonomy')
-                                 AND taxon_id IS NOT NULL
-                                 AND id != ?""",
-                            (kid,),
-                        ).fetchall():
-                            if keyword_match_key(_hrow["name"]) == _target_key:
-                                _target_homonym_conflict = True
-                                break
-
-                    def _is_target_species(row):
-                        if target_row["taxon_id"] is not None:
-                            if row["taxon_id"] == target_row["taxon_id"]:
-                                return True
-                            return (
-                                row["taxon_id"] is None
-                                and not _target_homonym_conflict
-                                and keyword_match_key(row["name"])
-                                == _target_key
-                            )
-                        # Unlinked target: when a distinct linked row shares
-                        # this match key, only the exact target keyword row
-                        # is safe to treat as equivalent.
-                        if _target_homonym_conflict:
-                            return row["id"] == kid
-                        return (
-                            keyword_match_key(row["name"]) == _target_key
-                        )
-                    # Compare treats a neighbouring subject's prediction as
-                    # supporting an existing keyword under the taxonomy —
-                    # match (same taxon), refinement (existing is broader
-                    # than the prediction), broader (existing is more
-                    # specific than the prediction). See compare.py's
-                    # compare_prediction_to_keywords and the "keyword
-                    # support" counters in templates/id_conflicts.html. Without
-                    # this, a photo tagged with a broader ancestor keyword
-                    # (e.g. Anatidae) that is only "held down" by a
-                    # neighbour's American Wigeon prediction is stripped
-                    # when a different box is replaced, and its curation
-                    # (highlights, representatives) gets migrated onto the
-                    # new species — the wrong subject. With no taxonomy
-                    # available the check quietly no-ops and we fall back
-                    # to exact-text protection, matching prior behaviour.
-                    def _supported_by_neighbour_taxonomy(kw_name):
-                        if not _replace_taxonomy or not neighbour_species:
-                            return False
-                        if _compare_pred_to_kws is None:
-                            return False
-                        for pred_species in neighbour_species:
-                            cmp_result = _compare_pred_to_kws(
-                                pred_species, [kw_name], _replace_taxonomy,
-                            )
-                            if cmp_result["category"] in (
-                                "match", "refinement", "broader",
-                            ):
-                                return True
-                        return False
-
-                    to_remove = [
-                        row for row in existing
-                        if not _is_target_species(row)
-                        and keyword_match_key(row["name"]) not in protected
-                        and not _supported_by_neighbour_taxonomy(row["name"])
-                    ]
-                    old_species = [row["name"] for row in to_remove]
-                    for row in to_remove:
-                        self.conn.execute(
-                            """DELETE FROM photo_keywords
-                               WHERE photo_id = ? AND keyword_id = ?""",
-                            (photo_id, row["id"]),
-                        )
-                    # The DB rows are gone, but sync_to_xmp only strips a
-                    # keyword from the sidecar when a matching keyword_remove
-                    # pending change exists. Queue one per removed species so a
-                    # "replace" actually clears the stale tags downstream. A
-                    # still-pending add for the same keyword cancels out
-                    # instead of stacking (mirrors queue_keyword_remove).
-                    new_species_lower = species.lower()
-                    for old_name in old_species:
-                        if old_name.lower() == new_species_lower:
-                            continue
-                        cancelled = self.remove_pending_changes(
-                            photo_id, "keyword_add", old_name, _commit=False,
-                        )
-                        if cancelled == 0:
-                            self.queue_change(
-                                photo_id, "keyword_remove", old_name,
-                                _commit=False,
-                            )
-                    # Migrate curated species state (representatives and
-                    # ordered highlights) alongside the replaced species
-                    # tag. Without this, a photo highlighted or set as
-                    # representative under the old species keeps rows in
-                    # species_highlights / photo_preferences under a name
-                    # it no longer carries, so it stops driving Highlights
-                    # and Life List for the new species. Mirrors the
-                    # migration in api_highlights_relabel.
-                    #
-                    # Curation is canonicalized on write, so when
-                    # the retired duplicate-species repair detached the
-                    # root ``Verdin`` and leaves a hierarchy alias like
-                    # ``Desert Verdin`` attached, existing highlights and
-                    # representatives remain keyed on the canonical root
-                    # ``Verdin``. Renaming only from the raw removed row
-                    # name (the alias) would miss those rows and strand
-                    # the curation under the old species. Look up the
-                    # canonical root spelling for each removed row's
-                    # taxon and rename from both source names so either
-                    # layout migrates. Sidecar removes above still use
-                    # the raw ``old_name`` because the XMP file carries
-                    # the alias, not the root spelling.
-                    # Dedupe by exact source name. Both Python's
-                    # ``str.lower()`` and the ASCII-fold ``keyword_match_key``
-                    # collapse intentionally distinct rows: ``str.lower()``
-                    # folds non-ASCII case (``"Éclair".lower() == "éclair"``),
-                    # and ``keyword_match_key`` folds ASCII case-variant
-                    # homonyms like legacy ``Robin`` vs taxonomy ``robin``
-                    # that ``add_keyword`` deliberately keeps as separate
-                    # rows. Either fold would drop the second distinct
-                    # removed row's spelling from the curation rename source
-                    # list, leaving highlights / representatives keyed on it
-                    # stranded under a species the photo no longer carries.
-                    # Curation rows are keyed by the exact stored species
-                    # name, so exact-string dedup preserves every distinct
-                    # source without renaming the same source twice.
-                    curation_sources = []
-                    seen_sources = set()
-                    for row in to_remove:
-                        for candidate in (row["name"], self._species_root_name_for_taxon(row["taxon_id"])):
-                            if not candidate or candidate in seen_sources:
-                                continue
-                            seen_sources.add(candidate)
-                            curation_sources.append(candidate)
-                    for source_name in curation_sources:
-                        self.rename_species_highlights_species(
-                            source_name, species, [(photo_id, ws)],
-                            _commit=False,
-                        )
-                        self.rename_photo_preferences_species(
-                            source_name, species, [(photo_id, ws)],
-                            _commit=False,
-                        )
+                    old_species = _strip_replaced_species(
+                        self.conn, ws, photo_id, this_pred_id, kid, species,
+                        replace_taxonomy,
+                        get_effective_config=self.get_effective_config,
+                        remove_pending_changes=self.remove_pending_changes,
+                        queue_change=self.queue_change,
+                        species_root_name_for_taxon=self._species_root_name_for_taxon,
+                        rename_species_highlights_species=self.rename_species_highlights_species,
+                        rename_photo_preferences_species=self.rename_photo_preferences_species,
+                    )
                 changed_tag = not already_has_species
                 if changed_tag:
                     self.tag_photo(
                         photo_id, kid, source="manual", _commit=False,
                     )
                     self.queue_change(photo_id, "keyword_add", species, _commit=False)
-                # Record every mutation, and — for regular accepts — also
-                # record status-only no-ops so the prediction-status flip
-                # is auditable and undoable. Three cases feed ``affected``:
-                #   * ``changed_tag`` — the target species tag was newly
-                #     added and undo must untag it;
-                #   * ``old_species`` — replace_species stripped stale
-                #     species rows and undo must retag them;
-                #   * neither, with ``replace_species=False`` — the photo
-                #     already carried the target via an equivalent
-                #     hierarchical/root row so nothing was tagged or
-                #     untagged, but ``update_prediction_status`` still
-                #     flipped this prediction to ``accepted``. The accept
-                #     API records ``prediction_accept`` history from
-                #     ``affected`` alone, so without this branch the
-                #     status change would be silently non-auditable and
-                #     undo could not restore ``pending`` on the accepted
-                #     prediction (or its siblings). ``changed_tag=False``
-                #     with empty ``old_species`` marks the entry as
-                #     status-only so ``_apply_undo`` / ``_apply_redo``
-                #     skip tag mutations while still reversing the review
-                #     state.
-                # For ``replace_species=True``, a total no-op (photo
-                # already has the target and nothing to remove) is left
-                # out — the replace endpoint records
-                # ``prediction_replace_species``, which is not undoable,
-                # so a status-only aggregate would only produce a
-                # misleading audit entry with an empty ``old_value``.
-                if changed_tag or old_species:
-                    affected.append({
-                        "photo_id": photo_id,
-                        "prediction_id": this_pred_id,
-                        "old_species": old_species,
-                        "changed_tag": changed_tag,
-                    })
-                elif not replace_species:
-                    affected.append({
-                        "photo_id": photo_id,
-                        "prediction_id": this_pred_id,
-                        "old_species": [],
-                        "changed_tag": False,
-                    })
+                return _affected_entry(
+                    photo_id, this_pred_id, old_species, changed_tag,
+                    replace_species,
+                )
 
             for target_photo_id, target_pred_id in targets:
-                _accept_for_photo(target_photo_id, target_pred_id)
+                accepted_pred_ids.append(target_pred_id)
+                entry = _accept_for_photo(target_photo_id, target_pred_id)
+                if entry is not None:
+                    affected.append(entry)
 
             if _commit:
                 self.conn.commit()
@@ -2626,3 +2112,713 @@ class KeywordProvenanceRepository:
             if _commit:
                 self.conn.rollback()
             raise
+
+
+# ``accept_prediction``'s steps. They are module functions rather than
+# methods because repository methods may not call one another through
+# ``self`` (``test_moved_writers_reach_each_other_only_through_the_facade``)
+# nor hand ``self`` to a helper; each takes the connection and the bound
+# façade methods it calls explicitly.
+
+
+def _taxonomy_for_species_replacement():
+    """Return ``(taxonomy, compare_prediction_to_keywords)`` for replace.
+
+    Load taxonomy once for the whole call so replace_species can protect
+    keywords whose relationship to a neighbouring subject's prediction is
+    broader/same/narrower — not just exact-text matches. Loaded once per
+    accept rather than inside ``_accept_for_photo`` so grouped accepts don't
+    repeat the JSON parse per photo. ``(None, None)`` (missing/corrupt file,
+    or unrelated import failure) cleanly degrades to exact-text protection.
+    """
+    try:
+        from compare import compare_prediction_to_keywords as _cpk
+        from taxonomy import load_local_taxonomy as _llt
+        _replace_taxonomy = _llt()
+        _compare_pred_to_kws = _cpk
+    except Exception:
+        log.warning(
+            "Taxonomy unavailable for species replacement; "
+            "protecting only exact-name keywords",
+            exc_info=True,
+        )
+        _replace_taxonomy = None
+        _compare_pred_to_kws = None
+    return _replace_taxonomy, _compare_pred_to_kws
+
+
+def _fetch_entry_prediction(conn, ws, prediction_id):
+    """The prediction row the caller named, with its review group and photo."""
+    return conn.execute(
+        """SELECT pr.*,
+                  pr.classifier_model AS model,
+                  pr_rev.group_id AS group_id,
+                  pr_rev.individual AS individual,
+                  d.photo_id
+           FROM predictions pr
+           JOIN detections d ON d.id = pr.detection_id
+           LEFT JOIN prediction_review pr_rev
+             ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
+           WHERE pr.id = ?""",
+        (ws, prediction_id),
+    ).fetchone()
+
+
+def _explicit_source_taxon(pred, identity):
+    """Return ``(has_explicit_evidence, source_taxon_id)`` for the accept.
+
+    A pure name lookup can flag a same-name keyword the async
+    ``mark_species_keywords`` pass has not linked yet. Routing the
+    accept through ``_add_source_species_keyword`` on that inferred
+    id refuses to reuse the unlinked row and mints a suffixed
+    duplicate; only explicit prediction evidence (a stored
+    ``source_taxon_id`` or a native tol/iNat scientific name)
+    earns that source-specific path.
+    """
+    native_scientific = pred["scientific_name"] if (
+        pred["labels_fingerprint"] == "tol" or pred["model"].startswith("iNat")
+    ) else None
+    has_explicit_evidence = pred["source_taxon_id"] is not None or bool(native_scientific)
+    source_taxon_id = identity.taxon_id if has_explicit_evidence else None
+    return has_explicit_evidence, source_taxon_id
+
+
+def _species_label_to_accept(pred, identity, has_explicit_evidence, source_taxon_id):
+    """The species name the accept tags, before ``add_keyword`` normalizes it."""
+    if has_explicit_evidence:
+        species = identity.display_name if source_taxon_id else (identity.scientific_name or identity.display_name)
+    else:
+        # Preserve the raw label (or burst winner) for legacy
+        # predictions: ``add_keyword``'s name-based dedup will
+        # reuse an existing same-name keyword, even one
+        # ``mark_species_keywords`` has not linked yet, without
+        # introducing a suffixed duplicate.
+        species = pred["species"]
+        if pred["group_id"] and pred["individual"]:
+            try:
+                votes = json.loads(pred["individual"])
+                if isinstance(votes, dict) and votes:
+                    species = max(votes, key=lambda sp: votes[sp])
+            except (TypeError, ValueError):
+                pass
+    return species
+
+
+def _acceptance_targets(
+    conn, ws, pred, prediction_id, limited_photo_ids, limited_pred_ids,
+    decided_statuses,
+):
+    """The ``(photo_id, prediction_id)`` rows this accept will act on.
+
+    Settle scope before the first write.
+
+    ``limited_photo_ids`` / ``limited_pred_ids`` exist to make this
+    call a no-op outside the caller's submitted scope, so *every*
+    mutation — sibling rejection, keyword creation, status flips —
+    has to sit behind that decision rather than beside it. This
+    method used to reject the entry row's alternatives up front,
+    which silently resolved rows the caller never submitted while
+    the return value truthfully reported no accepts. The row set is
+    therefore computed from reads only; nothing writes until it is
+    non-empty.
+
+    ``limited_photo_ids`` (the caller's ``photo_ids``) lets callers apply a
+    grouped accept to a filtered subset without changing hidden photos.
+    ``limited_pred_ids`` (``prediction_ids``) is the stricter form of the
+    same limit, for callers that already know the exact prediction rows
+    they are acting on: the grouped accept touches only those rows. Prefer
+    it over ``photo_ids`` whenever the caller has a submitted id list. A
+    photo is not a unique key for a prediction — one photo can carry
+    several rows in the same burst group (one per classifier model, or per
+    detection) — so a photo-id limit lets a grouped accept reach a row on
+    an allowed photo that the caller never submitted. ``photo_ids``
+    remains for callers whose intent really is "these photos" (highlight
+    confirm, accept subject), where the row set is chosen by this method.
+
+    Independently of either limit, group expansion only ever *discovers*
+    undecided rows: a group member already ``accepted`` or ``rejected`` is
+    left alone unless the caller named it (as the entry row, or in
+    ``prediction_ids``). Accepting one burst member must not resurrect a
+    sibling the user rejected in Review, nor re-flip a long-accepted one
+    into a history item whose "previous" status never happened.
+    """
+    # If grouped, accept every prediction in the group (in this
+    # workspace) that survives the caller's scope.
+    if pred["group_id"]:
+        group_preds = conn.execute(
+            """SELECT pr.id, d.photo_id, pr_rev.status AS status
+               FROM predictions pr
+               JOIN prediction_review pr_rev
+                 ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
+               JOIN detections d ON d.id = pr.detection_id
+               JOIN photos ph ON ph.id = d.photo_id
+               JOIN photo_workspace_visibility wf
+                 ON wf.photo_id = ph.id AND wf.workspace_id = ?
+               WHERE pr_rev.group_id = ? AND pr.classifier_model = ?""",
+            (ws, ws, pred["group_id"], pred["model"]),
+        ).fetchall()
+        return [
+            (gp["photo_id"], gp["id"])
+            for gp in group_preds
+            if _in_caller_scope(
+                gp["photo_id"], gp["id"], limited_photo_ids, limited_pred_ids,
+            )
+            and _expansion_may_discover(
+                gp["id"], gp["status"], prediction_id, limited_pred_ids,
+                decided_statuses,
+            )
+        ]
+    if _in_caller_scope(
+        pred["photo_id"], prediction_id, limited_photo_ids, limited_pred_ids,
+    ):
+        return [(pred["photo_id"], prediction_id)]
+    return []
+
+
+def _in_caller_scope(photo_id, this_pred_id, limited_photo_ids, limited_pred_ids):
+    """Does the row pass both of the caller's limits?"""
+    photo_allowed = (
+        limited_photo_ids is None
+        or photo_id in limited_photo_ids
+    )
+    # The row-level limit, checked independently: a group
+    # member's photo being in scope does not make every row
+    # that member carries in scope.
+    row_allowed = (
+        limited_pred_ids is None
+        or this_pred_id in limited_pred_ids
+    )
+    return photo_allowed and row_allowed
+
+
+def _expansion_may_discover(
+    this_pred_id, status, prediction_id, limited_pred_ids, decided_statuses,
+):
+    """May group expansion *discover* this row?
+
+    Group expansion reaches rows the caller never named — that is
+    its whole point — so it must not reach rows whose decision is
+    already made. Without this, accepting one burst member from
+    Review re-accepts a sibling the user explicitly rejected
+    earlier (tagging that photo with the species it was denied)
+    and re-flips long-accepted siblings, whose "previous" status
+    in the resulting history item is then a fiction: undo would
+    knock them back to pending. ``reviewed`` is treated the same
+    as ``accepted`` / ``rejected`` here: the user marked the row
+    reviewed to say "I looked and chose not to act", and
+    expanding a group into it would silently flip that decision
+    to ``accepted`` without any audit trail describing the
+    overwrite.
+
+    Rows the caller *named* are exempt, because then the caller,
+    not the expansion, chose them: the entry row itself, and any
+    row listed in ``limited_pred_ids``. ``batch-accept`` never
+    lists a decided row (``_decided_prediction_ids`` filters them
+    out first), so in practice this only ever exempts a row a
+    route was pointed at directly.
+    """
+    if this_pred_id == prediction_id:
+        return True
+    if (
+        limited_pred_ids is not None
+        and this_pred_id in limited_pred_ids
+    ):
+        return True
+    return status not in decided_statuses
+
+
+def _out_of_scope_result(conn, species, identity):
+    """The no-op result for an accept whose scope excludes every row.
+
+    Nothing this caller submitted is acceptable here, so leave
+    the database exactly as it was and report no changes.
+    ``add_keyword`` is a write too (it creates the species row),
+    so it also waits behind the scope decision; the read-only
+    lookup keeps ``keyword_id``/``species`` meaningful for
+    callers reconciling one batch's species without inventing a
+    keyword for an accept that never happened.
+    """
+    display = normalize_keyword_display(species)
+    existing = conn.execute(
+        """SELECT id, name FROM keywords
+           WHERE name = ? COLLATE NOCASE
+           ORDER BY id LIMIT 1""",
+        (display,),
+    ).fetchone()
+    return {
+        "species": existing["name"] if existing else display,
+        "species_key": identity.key,
+        "keyword_id": existing["id"] if existing else None,
+        "affected": [],
+        "accepted_prediction_ids": [],
+        "photo_ids": [],
+    }
+
+
+def _stored_keyword_name(conn, kid, species):
+    """The stored spelling of the keyword the accept tags with.
+
+    Re-read the stored keyword name so the queued sidecar changes,
+    curation renames, and returned history payload all reflect the
+    row actually tagged. add_keyword normalizes punctuation and
+    applies the species casing convention, so the stored spelling
+    can differ from the raw prediction label; using the raw value
+    downstream would queue pending add/remove pairs that no longer
+    cancel and write the un-normalized label to XMP.
+    """
+    stored = conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    if stored and stored["name"]:
+        species = stored["name"]
+    return species
+
+
+def _reject_detection_alternatives(conn, ws, this_pred_id):
+    """Resolve the losing rows on one accepted row's detection.
+
+    Rejects siblings for the same
+    (detection, classifier_model, labels_fingerprint) in this
+    workspace (covers both accepting an alternative and accepting the
+    top-1). Scoping by fingerprint is critical — without it, accepting
+    a prediction from a new label set would mark old label-set rows as
+    rejected, silently rewriting review state for unrelated
+    fingerprints. Review state is workspace-scoped, so we upsert each
+    row rather than UPDATE the base predictions table.
+
+    Run per accepted row, and only for rows this call accepts: a
+    grouped accept decides every member's detection, so leaving the
+    other members' alternatives at 'alternative' would keep photos in
+    Review's queue that this call already settled — and would make it
+    unsafe for a batch caller to skip a submitted row that a grouped
+    accept covered. Equally, a row the caller's scope excludes must
+    not have its alternatives resolved, so this never runs for the
+    entry row before scope is settled.
+    """
+    row = conn.execute(
+        """SELECT detection_id, classifier_model, labels_fingerprint
+           FROM predictions WHERE id = ?""",
+        (this_pred_id,),
+    ).fetchone()
+    if row is None:
+        return
+    sibs = conn.execute(
+        """SELECT pr.id FROM predictions pr
+           LEFT JOIN prediction_review pr_rev
+             ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
+           WHERE pr.detection_id = ?
+             AND pr.classifier_model = ?
+             AND pr.labels_fingerprint = ?
+             AND pr.id != ?
+             AND COALESCE(pr_rev.status, 'pending') IN ('pending', 'alternative')""",
+        (ws, row["detection_id"], row["classifier_model"],
+         row["labels_fingerprint"], this_pred_id),
+    ).fetchall()
+    for s in sibs:
+        conn.execute(
+            """INSERT INTO prediction_review
+                 (prediction_id, workspace_id, status, reviewed_at)
+               VALUES (?, ?, 'rejected', datetime('now'))
+               ON CONFLICT(prediction_id, workspace_id)
+               DO UPDATE SET status = 'rejected',
+                             reviewed_at = datetime('now')""",
+            (s["id"], ws),
+        )
+
+
+def _strip_replaced_species(
+    conn, ws, photo_id, this_pred_id, kid, species, replace_taxonomy, *,
+    get_effective_config, remove_pending_changes, queue_change,
+    species_root_name_for_taxon, rename_species_highlights_species,
+    rename_photo_preferences_species,
+):
+    """Strip the photo's stale species keywords for ``replace_species``.
+
+    Removes every species/taxonomy keyword on the photo that is neither the
+    target species nor held by another subject on the photo (see
+    ``_species_rows_to_replace``), queues the matching sidecar removals, and
+    migrates curated species state onto the new species. Returns the names
+    of the stripped rows (``old_species``).
+    """
+    to_remove = _species_rows_to_replace(
+        conn, ws, photo_id, this_pred_id, kid, replace_taxonomy,
+        get_effective_config=get_effective_config,
+    )
+    old_species = [row["name"] for row in to_remove]
+    for row in to_remove:
+        conn.execute(
+            """DELETE FROM photo_keywords
+               WHERE photo_id = ? AND keyword_id = ?""",
+            (photo_id, row["id"]),
+        )
+    _queue_replaced_species_removals(
+        photo_id, old_species, species,
+        remove_pending_changes=remove_pending_changes,
+        queue_change=queue_change,
+    )
+    _migrate_replaced_species_curation(
+        ws, photo_id, to_remove, species,
+        species_root_name_for_taxon=species_root_name_for_taxon,
+        rename_species_highlights_species=rename_species_highlights_species,
+        rename_photo_preferences_species=rename_photo_preferences_species,
+    )
+    return old_species
+
+
+def _species_rows_to_replace(
+    conn, ws, photo_id, this_pred_id, kid, replace_taxonomy, *,
+    get_effective_config,
+):
+    """The photo's species keyword rows a replace should strip.
+
+    Replace corrects *this subject's* identity, so it must
+    not strip a species that belongs to a different detection
+    (another subject) on the same photo. Any species named by
+    a live prediction on another box is protected; without
+    this, correcting the teal's ID wiped the American Wigeon
+    confirmed on the neighbouring box. On a single-detection
+    photo no box is protected, so every species keyword is
+    replaced exactly as before.
+    """
+    neighbour_species = _live_neighbour_species(
+        conn, ws, photo_id, this_pred_id,
+        get_effective_config=get_effective_config,
+    )
+    protected = {
+        keyword_match_key(s) for s in neighbour_species
+    }
+    existing = conn.execute(
+        """SELECT k.id, k.name, k.taxon_id
+           FROM photo_keywords pk
+           JOIN keywords k ON k.id = pk.keyword_id
+           LEFT JOIN taxa t ON t.id = k.taxon_id
+           WHERE pk.photo_id = ?
+             AND (k.is_species = 1 OR k.type = 'taxonomy')
+             AND (t.rank = 'species' OR t.rank IS NULL)""",
+        (photo_id,),
+    ).fetchall()
+    _is_target_species = _target_species_matcher(conn, kid)
+    return [
+        row for row in existing
+        if not _is_target_species(row)
+        and keyword_match_key(row["name"]) not in protected
+        and not _supported_by_neighbour_taxonomy(
+            row["name"], neighbour_species, replace_taxonomy,
+        )
+    ]
+
+
+def _live_neighbour_species(conn, ws, photo_id, this_pred_id, *, get_effective_config):
+    """Species named by live predictions on the photo's *other* detections.
+
+    Mirror Compare's visibility filter when picking which
+    neighbouring predictions may protect a species keyword:
+      * skip 'alternative' rows (Compare drops them at
+        web/predictions.py's api_predictions_compare, alongside
+        'rejected');
+      * skip detections below the workspace's effective
+        detector_confidence — Compare marks those "dormant"
+        and excludes their subjects entirely.
+    Without this, a below-threshold neighbour or an
+    alternative row on a real neighbour would keep an
+    already-stale species keyword on the photo — replace
+    would leave it in place and never queue a
+    keyword_remove, so the sidecar would still list the
+    dead species.
+    """
+    this_det = conn.execute(
+        "SELECT detection_id FROM predictions WHERE id = ?",
+        (this_pred_id,),
+    ).fetchone()
+    this_det_id = this_det["detection_id"] if this_det else None
+    import config as _cfg
+    _det_threshold = get_effective_config(
+        _cfg.load()
+    ).get("detector_confidence", 0.2)
+    # Restrict to the latest labels_fingerprint per
+    # (detection, classifier_model) — mirrors get_predictions
+    # and the review/summary paths so stale rows from a prior
+    # label set on a re-classified neighbouring detection do
+    # not spuriously protect an obsolete species keyword.
+    # Fold both sides through keyword_match_key so a raw
+    # prediction species like `‘apapane` matches the stored
+    # keyword `apapane` (add_keyword normalizes on write, so
+    # a lower(trim(species)) SQL fold would otherwise miss
+    # the still-live neighbour and queue its removal).
+    return [
+        row["species"] for row in conn.execute(
+            """SELECT DISTINCT pr.species AS species
+               FROM predictions pr
+               JOIN detections d ON d.id = pr.detection_id
+               LEFT JOIN prediction_review pr_rev
+                 ON pr_rev.prediction_id = pr.id
+                AND pr_rev.workspace_id = ?
+               WHERE d.photo_id = ?
+                 AND pr.detection_id IS NOT ?
+                 AND COALESCE(pr_rev.status, 'pending')
+                     NOT IN ('rejected', 'alternative')
+                 AND d.detector_confidence >= ?
+                 AND pr.labels_fingerprint = (
+                     SELECT pr2.labels_fingerprint
+                     FROM predictions pr2
+                     WHERE pr2.detection_id = pr.detection_id
+                       AND pr2.classifier_model
+                           = pr.classifier_model
+                     ORDER BY pr2.created_at DESC, pr2.id DESC
+                     LIMIT 1
+                 )""",
+            (ws, photo_id, this_det_id, _det_threshold),
+        ).fetchall()
+        if row["species"]
+    ]
+
+
+def _target_species_matcher(conn, kid):
+    """Return a predicate: is this keyword row the target species ``kid``?
+
+    Mirror get_photos_with_equivalent_species: when another
+    taxonomy/species keyword row shares the target's match
+    key but points at a different taxon (e.g. legacy
+    ``Robin`` alongside taxonomy ``robin``), the unlinked
+    same-key row on the photo is ambiguous — it could be
+    either species. Treating it as the target here would
+    exclude it from ``to_remove``, so Replace Keywords
+    would leave the wrong species attached while adding
+    the correct one. Detect the homonym conflict once and
+    gate the NULL-taxon fallback below.
+
+    The same guard applies when the *target* is unlinked:
+    a linked same-key row is a distinct species that must
+    not be folded into the unlinked target, or Replace
+    Keywords would exclude the linked homonym from
+    ``to_remove`` and leave the wrong species attached.
+    """
+    target_row = conn.execute(
+        "SELECT name, taxon_id FROM keywords WHERE id = ?",
+        (kid,),
+    ).fetchone()
+    _target_key = keyword_match_key(target_row["name"])
+    _target_homonym_conflict = False
+    if target_row["taxon_id"] is not None:
+        for _hrow in conn.execute(
+            """SELECT name FROM keywords
+               WHERE (is_species = 1 OR type = 'taxonomy')
+                 AND taxon_id IS NOT NULL
+                 AND taxon_id != ?""",
+            (target_row["taxon_id"],),
+        ).fetchall():
+            if keyword_match_key(_hrow["name"]) == _target_key:
+                _target_homonym_conflict = True
+                break
+    else:
+        for _hrow in conn.execute(
+            """SELECT name FROM keywords
+               WHERE (is_species = 1 OR type = 'taxonomy')
+                 AND taxon_id IS NOT NULL
+                 AND id != ?""",
+            (kid,),
+        ).fetchall():
+            if keyword_match_key(_hrow["name"]) == _target_key:
+                _target_homonym_conflict = True
+                break
+
+    def _is_target_species(row):
+        if target_row["taxon_id"] is not None:
+            if row["taxon_id"] == target_row["taxon_id"]:
+                return True
+            return (
+                row["taxon_id"] is None
+                and not _target_homonym_conflict
+                and keyword_match_key(row["name"])
+                == _target_key
+            )
+        # Unlinked target: when a distinct linked row shares
+        # this match key, only the exact target keyword row
+        # is safe to treat as equivalent.
+        if _target_homonym_conflict:
+            return row["id"] == kid
+        return (
+            keyword_match_key(row["name"]) == _target_key
+        )
+
+    return _is_target_species
+
+
+def _supported_by_neighbour_taxonomy(kw_name, neighbour_species, replace_taxonomy):
+    """Does a neighbouring subject's prediction support this keyword?
+
+    Compare treats a neighbouring subject's prediction as
+    supporting an existing keyword under the taxonomy —
+    match (same taxon), refinement (existing is broader
+    than the prediction), broader (existing is more
+    specific than the prediction). See compare.py's
+    compare_prediction_to_keywords and the "keyword
+    support" counters in templates/id_conflicts.html. Without
+    this, a photo tagged with a broader ancestor keyword
+    (e.g. Anatidae) that is only "held down" by a
+    neighbour's American Wigeon prediction is stripped
+    when a different box is replaced, and its curation
+    (highlights, representatives) gets migrated onto the
+    new species — the wrong subject. With no taxonomy
+    available the check quietly no-ops and we fall back
+    to exact-text protection, matching prior behaviour.
+    """
+    _replace_taxonomy, _compare_pred_to_kws = replace_taxonomy
+    if not _replace_taxonomy or not neighbour_species:
+        return False
+    if _compare_pred_to_kws is None:
+        return False
+    for pred_species in neighbour_species:
+        cmp_result = _compare_pred_to_kws(
+            pred_species, [kw_name], _replace_taxonomy,
+        )
+        if cmp_result["category"] in (
+            "match", "refinement", "broader",
+        ):
+            return True
+    return False
+
+
+def _queue_replaced_species_removals(
+    photo_id, old_species, species, *, remove_pending_changes, queue_change,
+):
+    """Queue a sidecar ``keyword_remove`` for each stripped species.
+
+    The DB rows are gone, but sync_to_xmp only strips a
+    keyword from the sidecar when a matching keyword_remove
+    pending change exists. Queue one per removed species so a
+    "replace" actually clears the stale tags downstream. A
+    still-pending add for the same keyword cancels out
+    instead of stacking (mirrors queue_keyword_remove).
+    """
+    new_species_lower = species.lower()
+    for old_name in old_species:
+        if old_name.lower() == new_species_lower:
+            continue
+        cancelled = remove_pending_changes(
+            photo_id, "keyword_add", old_name, _commit=False,
+        )
+        if cancelled == 0:
+            queue_change(
+                photo_id, "keyword_remove", old_name,
+                _commit=False,
+            )
+
+
+def _migrate_replaced_species_curation(
+    ws, photo_id, to_remove, species, *, species_root_name_for_taxon,
+    rename_species_highlights_species, rename_photo_preferences_species,
+):
+    """Move the photo's curated species state onto the new species.
+
+    Migrate curated species state (representatives and
+    ordered highlights) alongside the replaced species
+    tag. Without this, a photo highlighted or set as
+    representative under the old species keeps rows in
+    species_highlights / photo_preferences under a name
+    it no longer carries, so it stops driving Highlights
+    and Life List for the new species. Mirrors the
+    migration in api_highlights_relabel.
+    """
+    curation_sources = _curation_source_names(
+        to_remove, species_root_name_for_taxon,
+    )
+    for source_name in curation_sources:
+        rename_species_highlights_species(
+            source_name, species, [(photo_id, ws)],
+            _commit=False,
+        )
+        rename_photo_preferences_species(
+            source_name, species, [(photo_id, ws)],
+            _commit=False,
+        )
+
+
+def _curation_source_names(to_remove, species_root_name_for_taxon):
+    """Every exact species name curation rows for the stripped rows may use.
+
+    Curation is canonicalized on write, so when
+    the retired duplicate-species repair detached the
+    root ``Verdin`` and leaves a hierarchy alias like
+    ``Desert Verdin`` attached, existing highlights and
+    representatives remain keyed on the canonical root
+    ``Verdin``. Renaming only from the raw removed row
+    name (the alias) would miss those rows and strand
+    the curation under the old species. Look up the
+    canonical root spelling for each removed row's
+    taxon and rename from both source names so either
+    layout migrates. Sidecar removes still use
+    the raw ``old_name`` because the XMP file carries
+    the alias, not the root spelling.
+    Dedupe by exact source name. Both Python's
+    ``str.lower()`` and the ASCII-fold ``keyword_match_key``
+    collapse intentionally distinct rows: ``str.lower()``
+    folds non-ASCII case (``"Éclair".lower() == "éclair"``),
+    and ``keyword_match_key`` folds ASCII case-variant
+    homonyms like legacy ``Robin`` vs taxonomy ``robin``
+    that ``add_keyword`` deliberately keeps as separate
+    rows. Either fold would drop the second distinct
+    removed row's spelling from the curation rename source
+    list, leaving highlights / representatives keyed on it
+    stranded under a species the photo no longer carries.
+    Curation rows are keyed by the exact stored species
+    name, so exact-string dedup preserves every distinct
+    source without renaming the same source twice.
+    """
+    curation_sources = []
+    seen_sources = set()
+    for row in to_remove:
+        for candidate in (row["name"], species_root_name_for_taxon(row["taxon_id"])):
+            if not candidate or candidate in seen_sources:
+                continue
+            seen_sources.add(candidate)
+            curation_sources.append(candidate)
+    return curation_sources
+
+
+def _affected_entry(photo_id, this_pred_id, old_species, changed_tag, replace_species):
+    """The ``affected`` entry for one accepted row, or ``None``.
+
+    Record every mutation, and — for regular accepts — also
+    record status-only no-ops so the prediction-status flip
+    is auditable and undoable. Three cases feed ``affected``:
+      * ``changed_tag`` — the target species tag was newly
+        added and undo must untag it;
+      * ``old_species`` — replace_species stripped stale
+        species rows and undo must retag them;
+      * neither, with ``replace_species=False`` — the photo
+        already carried the target via an equivalent
+        hierarchical/root row so nothing was tagged or
+        untagged, but ``update_prediction_status`` still
+        flipped this prediction to ``accepted``. The accept
+        API records ``prediction_accept`` history from
+        ``affected`` alone, so without this branch the
+        status change would be silently non-auditable and
+        undo could not restore ``pending`` on the accepted
+        prediction (or its siblings). ``changed_tag=False``
+        with empty ``old_species`` marks the entry as
+        status-only so ``_apply_undo`` / ``_apply_redo``
+        skip tag mutations while still reversing the review
+        state.
+    For ``replace_species=True``, a total no-op (photo
+    already has the target and nothing to remove) is left
+    out — the replace endpoint records
+    ``prediction_replace_species``, which is not undoable,
+    so a status-only aggregate would only produce a
+    misleading audit entry with an empty ``old_value``.
+    """
+    if changed_tag or old_species:
+        return {
+            "photo_id": photo_id,
+            "prediction_id": this_pred_id,
+            "old_species": old_species,
+            "changed_tag": changed_tag,
+        }
+    if not replace_species:
+        return {
+            "photo_id": photo_id,
+            "prediction_id": this_pred_id,
+            "old_species": [],
+            "changed_tag": False,
+        }
+    return None
