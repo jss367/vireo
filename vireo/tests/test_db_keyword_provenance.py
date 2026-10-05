@@ -345,6 +345,43 @@ def test_merge_keyword_into_retargets_edit_history(db, lib):
     ).fetchone()[0] == str(dst)
 
 
+def test_merge_keyword_into_ignores_non_list_history_keyword_ids(db, lib):
+    """A malformed ``keyword_ids`` (bare int or string) must not abort the
+    merge, and a string must not be matched character by character."""
+    p0, p1 = lib["p"][:2]
+    src = db.add_keyword("Egret")
+    dst = db.add_keyword("Heron")
+    other = db.add_keyword("Gull")
+    # The string case only mis-matched when one of its characters equals src.
+    assert src < 10
+    db.tag_photo(p0, src)
+    db.tag_photo(p0, dst)  # p0 already carries the survivor
+    db.tag_photo(p1, src)
+    as_str = json.dumps({"keyword_id": other, "keyword_ids": f"{other}{src}"})
+    as_int = json.dumps({"keyword_id": other, "keyword_ids": src})
+    for pid, payload in ((p0, as_str), (p1, as_int)):
+        db.record_edit(
+            "species_replace", "Replaced species", str(other),
+            [{"photo_id": pid, "old_value": payload, "new_value": str(other)}],
+        )
+
+    db._merge_keyword_into(src, dst)
+    db.conn.commit()
+
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM keywords WHERE id = ?", (src,),
+    ).fetchone()[0] == 0
+    assert sorted(_visible(
+        db, "SELECT photo_id, keyword_id FROM photo_keywords",
+    )) == sorted([(p0, dst), (p1, dst)])
+    # Neither payload names src as a list entry, so both items survive as-is.
+    items = dict(db.conn.execute(
+        "SELECT photo_id, old_value FROM edit_history_items "
+        "WHERE photo_id IN (?, ?)", (p0, p1),
+    ).fetchall())
+    assert items == {p0: as_str, p1: as_int}
+
+
 # -- _upsert_one_keyword --------------------------------------------------------------------
 
 
