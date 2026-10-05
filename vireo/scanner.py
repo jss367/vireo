@@ -664,29 +664,12 @@ def _companions_compatible(raw, jpeg):
     return True
 
 
-def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
-    """Find raw+JPEG pairs in the same folder and merge them.
+def _group_photos_by_folder_and_stem(db):
+    """Group pairing candidates by folder_id + base name (without extension).
 
-    When both IMG_001.cr3 and IMG_001.jpg exist in the same folder,
-    keep the raw as the primary photo and set companion_path to the JPEG filename.
-    Delete the duplicate JPEG-only photo record.
-
-    Returns the set of companion photo ids merged away. Callers that count
-    indexed photos must discount these: both files were counted on the way
-    in, but only the RAW row survives, so the scan would otherwise claim
-    two photos where the catalog holds one — and RAW+JPEG is the common
-    shooting mode, so that overstates nearly every import.
-
-    Ids, not a bare count, because this query covers the *whole* photos
-    table: it also merges pairs left pending anywhere else in the catalog
-    (an interrupted earlier scan, an older build). A caller must intersect
-    with the ids it actually counted, or a scoped scan would be debited
-    for merges it had nothing to do with and could report a negative
-    total.
+    Candidates are every photo not yet paired, plus RAW rows that already
+    carry a companion_path (so a second same-stem JPEG still meets its RAW).
     """
-    raw_exts = {".nef", ".cr2", ".cr3", ".arw", ".raf", ".dng", ".rw2", ".orf"}
-    jpeg_exts = {".jpg", ".jpeg"}
-
     rows = db.conn.execute(
         "SELECT id, folder_id, filename, extension, timestamp,"
         " camera_make, camera_model FROM photos"
@@ -701,256 +684,261 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
     for row in rows:
         base = os.path.splitext(row["filename"])[0]
         groups[(row["folder_id"], base)].append(dict(row))
+    return groups
 
-    # Filesystem changes are collected here and executed only after
-    # commit_with_retry succeeds. All pairs share one transaction, so a
-    # failure on any later iteration (or on the commit itself) rolls back
-    # every companion row that was DELETEd earlier — but any files we'd
-    # already unlinked inline are gone for good, leaving the restored
-    # companion rows pointing at missing thumbnails, working copies,
-    # masks, offline originals, and moved mask snapshots. Deferring gives
-    # us "all DB changes durable, then all FS changes" — commit failure
-    # aborts both halves.
-    post_commit_fs_actions = []
-    # Companion rows merged away, reported to the caller so it can correct
-    # its indexed count. Collected at the DELETE but only returned after
-    # the commit below succeeds — the whole loop shares one transaction,
-    # so a commit failure rolls every deletion back and none of them
-    # happened.
-    merged_ids = set()
-    # ``companion_id -> primary_id`` accumulated across every pair so we can
-    # remap collection ``photo_ids`` rules once at the end of the loop.
-    # ``remap_collection_photo_ids`` scans and JSON-parses every collection
-    # that carries ``photo_ids``, then writes each rewritten row; a per-pair
-    # call would repeat that O(collections) work N times and, for a static
-    # collection containing many companions, rewrite the same row once per
-    # deletion. One post-loop call is O(pairs + collections) instead of
-    # O(pairs * collections). The remap runs in the same transaction as the
-    # pair deletes below and is rolled back with them if the commit fails.
-    collection_remap = {}
 
-    for (_folder_id, _base), members in groups.items():
-        if len(members) < 2:
-            continue
+def _pick_compatible_raw_jpeg_pair(members):
+    """Return the ``(raw, jpeg)`` to merge from one same-stem group, or None.
 
-        raws = [m for m in members if m["extension"] in raw_exts]
-        jpegs = [m for m in members if m["extension"] in jpeg_exts]
+    A group needs at least one RAW and one JPEG, and the pair must not be
+    contradicted by capture metadata (see ``_companions_compatible``).
+    """
+    raw_exts = {".nef", ".cr2", ".cr3", ".arw", ".raf", ".dng", ".rw2", ".orf"}
+    jpeg_exts = {".jpg", ".jpeg"}
 
-        if not raws or not jpegs:
-            continue
+    if len(members) < 2:
+        return None
 
-        # A shared stem alone does not make a pair: two bodies shooting
-        # the same day with overlapping counters (or an import that
-        # renamed one side of a collision) put unrelated IMG_0001.CR3 and
-        # IMG_0001.JPG side by side. Pair the first RAW/JPEG whose capture
-        # metadata does not contradict it; with no such pair, leave both
-        # as separate photos.
-        pair = next(
-            (
-                (raw, jpeg)
-                for raw in raws
-                for jpeg in jpegs
-                if _companions_compatible(raw, jpeg)
-            ),
-            None,
+    raws = [m for m in members if m["extension"] in raw_exts]
+    jpegs = [m for m in members if m["extension"] in jpeg_exts]
+
+    if not raws or not jpegs:
+        return None
+
+    # A shared stem alone does not make a pair: two bodies shooting
+    # the same day with overlapping counters (or an import that
+    # renamed one side of a collision) put unrelated IMG_0001.CR3 and
+    # IMG_0001.JPG side by side. Pair the first RAW/JPEG whose capture
+    # metadata does not contradict it; with no such pair, leave both
+    # as separate photos.
+    pair = next(
+        (
+            (raw, jpeg)
+            for raw in raws
+            for jpeg in jpegs
+            if _companions_compatible(raw, jpeg)
+        ),
+        None,
+    )
+    if pair is None:
+        log.info(
+            "Not pairing same-stem RAW and JPEG with conflicting capture "
+            "metadata: %s",
+            ", ".join(m["filename"] for m in raws + jpegs),
         )
-        if pair is None:
-            log.info(
-                "Not pairing same-stem RAW and JPEG with conflicting capture "
-                "metadata: %s",
-                ", ".join(m["filename"] for m in raws + jpegs),
-            )
-            continue
-        primary, companion = pair
+        return None
+    return pair
 
-        # Transfer metadata from companion to primary if primary lacks it.
-        # Includes the promoted EXIF summary columns
-        # (``EXIF_SUMMARY_COLUMNS``) so a RAW row that got merged with its
-        # JPEG companion doesn't lose ``camera_make``/``camera_model``/
-        # ``lens``/``aperture``/``shutter_speed``/``iso`` when the JPEG row
-        # is deleted — otherwise the new universal filters miss the paired
-        # photo even though ExifTool extracted those values.
-        # ``focal_length`` is part of ``EXIF_SUMMARY_COLUMNS`` — do not name it
-        # again here or the loop below would append a second ``focal_length=?``
-        # assignment and SQLite would reject the UPDATE for duplicate columns.
-        transfer_cols = (
-            "timestamp, rating, flag, latitude, longitude, exif_data, "
-            "width, height, "
-            + ", ".join(EXIF_SUMMARY_COLUMNS)
-        )
-        primary_full = db.conn.execute(
-            f"SELECT {transfer_cols} FROM photos WHERE id = ?",
-            (primary["id"],),
-        ).fetchone()
-        companion_full = db.conn.execute(
-            f"SELECT {transfer_cols} FROM photos WHERE id = ?",
-            (companion["id"],),
-        ).fetchone()
-        # Pairing hides the JPEG row, not the JPEG's import identity. Keep
-        # it attached to the RAW so re-importing a card still skips both.
+
+def _read_metadata_transfer_rows(db, primary, companion):
+    """Read the columns a merge may carry from companion to primary.
+
+    Returns ``(primary_full, companion_full)``.
+    """
+    # Transfer metadata from companion to primary if primary lacks it.
+    # Includes the promoted EXIF summary columns
+    # (``EXIF_SUMMARY_COLUMNS``) so a RAW row that got merged with its
+    # JPEG companion doesn't lose ``camera_make``/``camera_model``/
+    # ``lens``/``aperture``/``shutter_speed``/``iso`` when the JPEG row
+    # is deleted — otherwise the new universal filters miss the paired
+    # photo even though ExifTool extracted those values.
+    # ``focal_length`` is part of ``EXIF_SUMMARY_COLUMNS`` — do not name it
+    # again here or the loop below would append a second ``focal_length=?``
+    # assignment and SQLite would reject the UPDATE for duplicate columns.
+    transfer_cols = (
+        "timestamp, rating, flag, latitude, longitude, exif_data, "
+        "width, height, "
+        + ", ".join(EXIF_SUMMARY_COLUMNS)
+    )
+    primary_full = db.conn.execute(
+        f"SELECT {transfer_cols} FROM photos WHERE id = ?",
+        (primary["id"],),
+    ).fetchone()
+    companion_full = db.conn.execute(
+        f"SELECT {transfer_cols} FROM photos WHERE id = ?",
+        (companion["id"],),
+    ).fetchone()
+    return primary_full, companion_full
+
+
+def _keep_companion_import_identity(db, primary, companion):
+    """Attach the companion's import identity to the primary."""
+    # Pairing hides the JPEG row, not the JPEG's import identity. Keep
+    # it attached to the RAW so re-importing a card still skips both.
+    db.conn.execute(
+        "INSERT OR REPLACE INTO companion_identities "
+        "(photo_id, filename, file_size, timestamp, file_hash) "
+        "SELECT ?, filename, file_size, timestamp, file_hash FROM photos WHERE id=?",
+        (primary["id"], companion["id"]),
+    )
+
+
+def _fill_primary_metadata_gaps(db, primary, primary_full, companion_full):
+    """Copy companion metadata onto the primary only where the primary lacks it."""
+    updates = []
+    params = []
+    if not primary_full["timestamp"] and companion_full["timestamp"]:
+        updates.append("timestamp = ?")
+        params.append(companion_full["timestamp"])
+    if primary_full["rating"] == 0 and companion_full["rating"] != 0:
+        updates.append("rating = ?")
+        params.append(companion_full["rating"])
+    if (
+        primary_full["flag"] == "none"
+        and companion_full["flag"] not in ("none", "rejected")
+    ):
+        # Never copy 'rejected': the duplicate auto-resolver runs earlier
+        # in the same scan and rejects companion JPEGs that lose to a
+        # byte-identical twin elsewhere — stamping that onto the RAW
+        # would silently hide a unique photo.
+        updates.append("flag = ?")
+        params.append(companion_full["flag"])
+    if primary_full["latitude"] is None and companion_full["latitude"] is not None:
+        updates.extend(["latitude = ?", "longitude = ?"])
+        params.extend([companion_full["latitude"], companion_full["longitude"]])
+    if not primary_full["exif_data"] and companion_full["exif_data"]:
+        updates.append("exif_data = ?")
+        params.append(companion_full["exif_data"])
+    # Fill any promoted EXIF summary column the RAW row is missing but
+    # its JPEG companion has. ``EXIF_SUMMARY_COLUMNS`` already contains
+    # ``focal_length`` alongside the camera/exposure fields, so a single
+    # loop covers all promoted columns — a separate ``focal_length``
+    # transfer would fire twice and SQLite would reject the UPDATE for
+    # assigning the same column twice. Only writes when the primary is
+    # NULL — a non-NULL primary already reflects a rescan (which clears
+    # absent columns to NULL via ``EXIF_SUMMARY_COLUMNS``), so
+    # overwriting it would trample fresh metadata.
+    for column in EXIF_SUMMARY_COLUMNS:
+        if primary_full[column] is None and companion_full[column] is not None:
+            updates.append(f"{column} = ?")
+            params.append(companion_full[column])
+    if not primary_full["width"] and companion_full["width"]:
+        updates.extend(["width = ?", "height = ?"])
+        params.extend([companion_full["width"], companion_full["height"]])
+    if updates:
+        params.append(primary["id"])
         db.conn.execute(
-            "INSERT OR REPLACE INTO companion_identities "
-            "(photo_id, filename, file_size, timestamp, file_hash) "
-            "SELECT ?, filename, file_size, timestamp, file_hash FROM photos WHERE id=?",
-            (primary["id"], companion["id"]),
+            f"UPDATE photos SET {', '.join(updates)} WHERE id = ?", params
         )
 
-        updates = []
-        params = []
-        if not primary_full["timestamp"] and companion_full["timestamp"]:
-            updates.append("timestamp = ?")
-            params.append(companion_full["timestamp"])
-        if primary_full["rating"] == 0 and companion_full["rating"] != 0:
-            updates.append("rating = ?")
-            params.append(companion_full["rating"])
-        if (
-            primary_full["flag"] == "none"
-            and companion_full["flag"] not in ("none", "rejected")
-        ):
-            # Never copy 'rejected': the duplicate auto-resolver runs earlier
-            # in the same scan and rejects companion JPEGs that lose to a
-            # byte-identical twin elsewhere — stamping that onto the RAW
-            # would silently hide a unique photo.
-            updates.append("flag = ?")
-            params.append(companion_full["flag"])
-        if primary_full["latitude"] is None and companion_full["latitude"] is not None:
-            updates.extend(["latitude = ?", "longitude = ?"])
-            params.extend([companion_full["latitude"], companion_full["longitude"]])
-        if not primary_full["exif_data"] and companion_full["exif_data"]:
-            updates.append("exif_data = ?")
-            params.append(companion_full["exif_data"])
-        # Fill any promoted EXIF summary column the RAW row is missing but
-        # its JPEG companion has. ``EXIF_SUMMARY_COLUMNS`` already contains
-        # ``focal_length`` alongside the camera/exposure fields, so a single
-        # loop covers all promoted columns — a separate ``focal_length``
-        # transfer would fire twice and SQLite would reject the UPDATE for
-        # assigning the same column twice. Only writes when the primary is
-        # NULL — a non-NULL primary already reflects a rescan (which clears
-        # absent columns to NULL via ``EXIF_SUMMARY_COLUMNS``), so
-        # overwriting it would trample fresh metadata.
-        for column in EXIF_SUMMARY_COLUMNS:
-            if primary_full[column] is None and companion_full[column] is not None:
-                updates.append(f"{column} = ?")
-                params.append(companion_full[column])
-        if not primary_full["width"] and companion_full["width"]:
-            updates.extend(["width = ?", "height = ?"])
-            params.extend([companion_full["width"], companion_full["height"]])
-        if updates:
-            params.append(primary["id"])
-            db.conn.execute(
-                f"UPDATE photos SET {', '.join(updates)} WHERE id = ?", params
-            )
 
-        # Transfer keywords from companion to primary
-        companion_keywords = embedded_keyword_associations_for_merge(
-            db.conn, companion["id"], primary["id"], include_non_embedded=True,
-        )
-        for kw in companion_keywords:
-            # Move the association's provenance with it: pairing a RAW with
-            # its camera JPEG must not turn the user's hand-added keywords
-            # into "unknown" rows a retirement pass would treat as generated.
-            # The shared conflict clause keeps whichever side's claim is
-            # stronger when the primary already carries the keyword.
-            db.conn.execute(
-                "INSERT INTO photo_keywords (photo_id, keyword_id, source) "
-                "VALUES (?, ?, ?) " + KEYWORD_SOURCE_CONFLICT_SQL,
-                (primary["id"], kw["id"], kw["source"]),
-            )
-
+def _transfer_companion_keywords(db, primary, companion):
+    """Transfer keywords from companion to primary, keeping the stronger provenance."""
+    companion_keywords = embedded_keyword_associations_for_merge(
+        db.conn, companion["id"], primary["id"], include_non_embedded=True,
+    )
+    for kw in companion_keywords:
+        # Move the association's provenance with it: pairing a RAW with
+        # its camera JPEG must not turn the user's hand-added keywords
+        # into "unknown" rows a retirement pass would treat as generated.
+        # The shared conflict clause keeps whichever side's claim is
+        # stronger when the primary already carries the keyword.
         db.conn.execute(
-            "UPDATE photos SET companion_path = ? WHERE id = ?",
-            (companion["filename"], primary["id"]),
+            "INSERT INTO photo_keywords (photo_id, keyword_id, source) "
+            "VALUES (?, ?, ?) " + KEYWORD_SOURCE_CONFLICT_SQL,
+            (primary["id"], kw["id"], kw["source"]),
         )
-        if vireo_dir:
-            # An unedited RAW display cache may have been rendered before the
-            # camera JPEG was paired. File mtimes cannot tell which source
-            # produced that cache, so discard it when the companion changes.
-            # Deferred to post-commit: if this pair's DB changes roll back
-            # (because a later iteration or the final commit fails), the
-            # primary's companion_path stays NULL and there's no reason to
-            # have invalidated its display cache — the RAW render is still
-            # valid.
-            _primary_id = primary["id"]
-            _thumb_dir = thumb_cache_dir or os.path.join(
-                vireo_dir, "thumbnails",
+
+
+def _defer_primary_display_cache_invalidation(
+    post_commit_fs_actions, primary, vireo_dir, thumb_cache_dir,
+):
+    """Queue removal of the primary's RAW display cache and JPEG thumbnail.
+
+    An unedited RAW display cache may have been rendered before the
+    camera JPEG was paired. File mtimes cannot tell which source
+    produced that cache, so discard it when the companion changes.
+    Deferred to post-commit: if this pair's DB changes roll back
+    (because a later iteration or the final commit fails), the
+    primary's companion_path stays NULL and there's no reason to
+    have invalidated its display cache — the RAW render is still
+    valid.
+    """
+    _primary_id = primary["id"]
+    _thumb_dir = thumb_cache_dir or os.path.join(
+        vireo_dir, "thumbnails",
+    )
+    _vireo_dir = vireo_dir
+
+    def _invalidate_primary_variants(
+        pid=_primary_id, td=_thumb_dir, vd=_vireo_dir,
+    ):
+        _invalidate_raw_display_cache(vd, pid)
+        jpeg_variant = os.path.join(td, f"{pid}_jpeg.jpg")
+        try:
+            if os.path.exists(jpeg_variant):
+                os.remove(jpeg_variant)
+        except OSError:
+            log.debug(
+                "Could not delete stale companion thumbnail %s",
+                jpeg_variant,
+                exc_info=True,
             )
-            _vireo_dir = vireo_dir
 
-            def _invalidate_primary_variants(
-                pid=_primary_id, td=_thumb_dir, vd=_vireo_dir,
-            ):
-                _invalidate_raw_display_cache(vd, pid)
-                jpeg_variant = os.path.join(td, f"{pid}_jpeg.jpg")
-                try:
-                    if os.path.exists(jpeg_variant):
-                        os.remove(jpeg_variant)
-                except OSError:
-                    log.debug(
-                        "Could not delete stale companion thumbnail %s",
-                        jpeg_variant,
-                        exc_info=True,
-                    )
+    post_commit_fs_actions.append(_invalidate_primary_variants)
 
-            post_commit_fs_actions.append(_invalidate_primary_variants)
 
-        # Transfer detections (and their cascaded predictions) from companion to primary.
-        # Detection IDs are content-addressed on (photo_id, detector_model, box,
-        # category) — see vireo/detection_id.py. A bare `UPDATE photo_id` would
-        # leave the row's `id` column stale (still hashed against the companion's
-        # photo_id); a later detector run on the primary that produced the same
-        # box would then either collide on the stale id (if SQLite reused the
-        # companion's rowid for a new photo) or, more commonly, never match and
-        # so the stale row would be reaped by the stale-cleanup DELETE in
-        # `_upsert_detection_rows`, cascading away its predictions. Recompute
-        # the id, redirect predictions to the new id, then drop the stale row.
-        from detection_id import detection_id as _detection_id
+def _rekey_companion_detections_onto_primary(db, primary, companion):
+    """Transfer detections (and their cascaded predictions) from companion to primary.
 
-        moving = db.conn.execute(
-            "SELECT id, detector_model, box_x, box_y, box_w, box_h,"
-            " detector_confidence, category"
-            " FROM detections WHERE photo_id = ?",
-            (companion["id"],),
-        ).fetchall()
-        for det in moving:
-            new_id = _detection_id(
-                primary["id"], det["detector_model"],
-                (det["box_x"], det["box_y"], det["box_w"], det["box_h"]),
-                det["category"],
-            )
-            if new_id == det["id"]:
-                # Cannot happen in practice (photo_id changed) but defensive.
-                db.conn.execute(
-                    "UPDATE detections SET photo_id = ? WHERE id = ?",
-                    (primary["id"], det["id"]),
-                )
-                continue
-            # Insert the row under the new id. If the primary already has a
-            # detection for the same (model, box, category), the UPSERT no-ops
-            # and we just discard the companion's row below.
+    Detection IDs are content-addressed on (photo_id, detector_model, box,
+    category) — see vireo/detection_id.py. A bare `UPDATE photo_id` would
+    leave the row's `id` column stale (still hashed against the companion's
+    photo_id); a later detector run on the primary that produced the same
+    box would then either collide on the stale id (if SQLite reused the
+    companion's rowid for a new photo) or, more commonly, never match and
+    so the stale row would be reaped by the stale-cleanup DELETE in
+    `_upsert_detection_rows`, cascading away its predictions. Recompute
+    the id, redirect predictions to the new id, then drop the stale row.
+    """
+    from detection_id import detection_id as _detection_id
+
+    moving = db.conn.execute(
+        "SELECT id, detector_model, box_x, box_y, box_w, box_h,"
+        " detector_confidence, category"
+        " FROM detections WHERE photo_id = ?",
+        (companion["id"],),
+    ).fetchall()
+    for det in moving:
+        new_id = _detection_id(
+            primary["id"], det["detector_model"],
+            (det["box_x"], det["box_y"], det["box_w"], det["box_h"]),
+            det["category"],
+        )
+        if new_id == det["id"]:
+            # Cannot happen in practice (photo_id changed) but defensive.
             db.conn.execute(
-                "INSERT INTO detections"
-                " (id, photo_id, detector_model, box_x, box_y, box_w, box_h,"
-                "  detector_confidence, category)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
-                " ON CONFLICT(id) DO NOTHING",
-                (new_id, primary["id"], det["detector_model"],
-                 det["box_x"], det["box_y"], det["box_w"], det["box_h"],
-                 det["detector_confidence"], det["category"]),
+                "UPDATE detections SET photo_id = ? WHERE id = ?",
+                (primary["id"], det["id"]),
             )
-            # Redirect predictions to the new detection id. ON CONFLICT in
-            # predictions is unlikely (would require the primary already had
-            # a prediction for this species against the same detection) but
-            # IGNORE keeps us defensive.
-            db.conn.execute(
-                "UPDATE OR IGNORE predictions SET detection_id = ? WHERE detection_id = ?",
-                (new_id, det["id"]),
-            )
-            # If a companion prediction collided with an existing primary
-            # prediction, its row stayed on the old detection id. Preserve any
-            # workspace review state by moving it onto the surviving prediction
-            # before the old detection delete cascades the duplicate away.
-            db.conn.execute(
-                """INSERT INTO prediction_review
+            continue
+        # Insert the row under the new id. If the primary already has a
+        # detection for the same (model, box, category), the UPSERT no-ops
+        # and we just discard the companion's row below.
+        db.conn.execute(
+            "INSERT INTO detections"
+            " (id, photo_id, detector_model, box_x, box_y, box_w, box_h,"
+            "  detector_confidence, category)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(id) DO NOTHING",
+            (new_id, primary["id"], det["detector_model"],
+             det["box_x"], det["box_y"], det["box_w"], det["box_h"],
+             det["detector_confidence"], det["category"]),
+        )
+        # Redirect predictions to the new detection id. ON CONFLICT in
+        # predictions is unlikely (would require the primary already had
+        # a prediction for this species against the same detection) but
+        # IGNORE keeps us defensive.
+        db.conn.execute(
+            "UPDATE OR IGNORE predictions SET detection_id = ? WHERE detection_id = ?",
+            (new_id, det["id"]),
+        )
+        # If a companion prediction collided with an existing primary
+        # prediction, its row stayed on the old detection id. Preserve any
+        # workspace review state by moving it onto the surviving prediction
+        # before the old detection delete cascades the duplicate away.
+        db.conn.execute(
+            """INSERT INTO prediction_review
                      (prediction_id, workspace_id, status, reviewed_at,
                       individual, group_id, vote_count, total_votes)
                    SELECT survivor.id, pr.workspace_id, pr.status,
@@ -986,189 +974,267 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
                                  )
                     WHERE prediction_review.status = 'pending'
                       AND excluded.status <> 'pending'""",
-                (new_id, det["id"]),
-            )
-            # Redirect classifier_runs too — they're the cache key the
-            # non-reclassify gate consults. Without this, paired photos with
-            # cached predictions would look unclassified to
-            # `get_classifier_run_keys(new_id)` and rerun the classifier
-            # after every pair-up. Same OR IGNORE pattern as predictions:
-            # primary's own run rows win on (detection_id, classifier_model,
-            # labels_fingerprint) conflicts.
-            db.conn.execute(
-                "UPDATE OR IGNORE classifier_runs SET detection_id = ? WHERE detection_id = ?",
-                (new_id, det["id"]),
-            )
-            # Drop any predictions/classifier_runs that lost the UPDATE race
-            # (duplicate-key) along with the now-orphan companion detection
-            # row — CASCADE on both FKs cleans up any remaining rows tied to
-            # the old id.
-            db.conn.execute(
-                "DELETE FROM detections WHERE id = ?",
-                (det["id"],),
-            )
-
-        # Transfer pending_changes from companion to primary. No dedup needed
-        # here (unlike the inat_submissions block below): pending_changes has
-        # no UNIQUE constraint that would crash on collision, and duplicate
-        # rows from a raw+JPEG pairing are harmless and vanishingly unlikely.
-        db.conn.execute(
-            "UPDATE pending_changes SET photo_id = ? WHERE photo_id = ?",
-            (primary["id"], companion["id"]),
+            (new_id, det["id"]),
         )
-        # Transfer iNaturalist submissions: deduplicate on (photo_id, observation_id)
-        # before reassigning to avoid UNIQUE constraint violation.
+        # Redirect classifier_runs too — they're the cache key the
+        # non-reclassify gate consults. Without this, paired photos with
+        # cached predictions would look unclassified to
+        # `get_classifier_run_keys(new_id)` and rerun the classifier
+        # after every pair-up. Same OR IGNORE pattern as predictions:
+        # primary's own run rows win on (detection_id, classifier_model,
+        # labels_fingerprint) conflicts.
         db.conn.execute(
-            """DELETE FROM inat_submissions
+            "UPDATE OR IGNORE classifier_runs SET detection_id = ? WHERE detection_id = ?",
+            (new_id, det["id"]),
+        )
+        # Drop any predictions/classifier_runs that lost the UPDATE race
+        # (duplicate-key) along with the now-orphan companion detection
+        # row — CASCADE on both FKs cleans up any remaining rows tied to
+        # the old id.
+        db.conn.execute(
+            "DELETE FROM detections WHERE id = ?",
+            (det["id"],),
+        )
+
+
+def _transfer_companion_pending_changes(db, primary, companion):
+    """Transfer pending_changes from companion to primary.
+
+    No dedup needed here (unlike ``_transfer_companion_inat_submissions``):
+    pending_changes has no UNIQUE constraint that would crash on
+    collision, and duplicate rows from a raw+JPEG pairing are harmless and
+    vanishingly unlikely.
+    """
+    db.conn.execute(
+        "UPDATE pending_changes SET photo_id = ? WHERE photo_id = ?",
+        (primary["id"], companion["id"]),
+    )
+
+
+def _transfer_companion_inat_submissions(db, primary, companion):
+    """Transfer iNaturalist submissions from companion to primary.
+
+    Deduplicate on (photo_id, observation_id) before reassigning to avoid
+    UNIQUE constraint violation.
+    """
+    db.conn.execute(
+        """DELETE FROM inat_submissions
                WHERE photo_id = ? AND observation_id IN (
                    SELECT observation_id FROM inat_submissions WHERE photo_id = ?
                )""",
-            (companion["id"], primary["id"]),
-        )
-        db.conn.execute(
-            "UPDATE inat_submissions SET photo_id = ? WHERE photo_id = ?",
-            (primary["id"], companion["id"]),
-        )
-        # Preserve non-destructive edits when a JPEG companion is folded into
-        # a RAW primary. If both already have recipes, the primary wins.
-        transferred_recipe = db.conn.execute(
-            """INSERT OR IGNORE INTO photo_edit_recipes
+        (companion["id"], primary["id"]),
+    )
+    db.conn.execute(
+        "UPDATE inat_submissions SET photo_id = ? WHERE photo_id = ?",
+        (primary["id"], companion["id"]),
+    )
+
+
+def _transfer_companion_edit_recipe(
+    db, primary, companion, vireo_dir, thumb_cache_dir, post_commit_fs_actions,
+):
+    """Preserve non-destructive edits when a JPEG companion is folded into a RAW primary.
+
+    If both already have recipes, the primary wins. When the companion's
+    recipe is transferred, its edit-history items follow it and the
+    primary's derived renders are invalidated (deferred to post-commit when
+    ``vireo_dir`` is set, inline DB-only otherwise).
+    """
+    transferred_recipe = db.conn.execute(
+        """INSERT OR IGNORE INTO photo_edit_recipes
                    (photo_id, recipe_json, updated_at)
                SELECT ?, recipe_json, updated_at
                FROM photo_edit_recipes
                WHERE photo_id = ?""",
-            (primary["id"], companion["id"]),
-        )
-        if transferred_recipe.rowcount:
-            db.conn.execute(
-                """UPDATE edit_history_items
+        (primary["id"], companion["id"]),
+    )
+    if transferred_recipe.rowcount:
+        db.conn.execute(
+            """UPDATE edit_history_items
                    SET photo_id = ?
                    WHERE photo_id = ?
                      AND edit_id IN (
                          SELECT id FROM edit_history
                          WHERE action_type = 'edit_recipe'
                      )""",
-                (primary["id"], companion["id"]),
-            )
-            if vireo_dir:
-                # Local-adjustment mask snapshots are looked up by
-                # (photo_id, ref); the transferred recipe now points at
-                # primary["id"], so the files must move with it or every
-                # render silently disables the local pass.
-                # Deferred to post-commit: transfer_snapshots MOVES files
-                # and _invalidate_derived_caches DELETES them. Running
-                # either before the transaction is durable risks moving
-                # the companion's snapshots onto the primary and then
-                # rolling back the recipe transfer — the render would
-                # then load snapshots the DB no longer knows about.
-                _primary_id = primary["id"]
-                _companion_id = companion["id"]
-                _tcd = thumb_cache_dir
-                _vd = vireo_dir
-
-                def _apply_recipe_transfer_fs(
-                    pid=_primary_id, cid=_companion_id, tcd=_tcd, vd=_vd,
-                ):
-                    from local_masks import transfer_snapshots
-                    # transfer_snapshots falls back to a copy when the
-                    # rename fails, so ``failed`` means the snapshot is
-                    # genuinely unreachable — ``load_snapshot`` only ever
-                    # builds snapshot_path(vireo_dir, pid, ref), so the
-                    # local pass for those refs renders without its mask.
-                    # Say so rather than degrading the image silently.
-                    transferred = transfer_snapshots(vd, cid, pid)
-                    if transferred["failed"]:
-                        log.warning(
-                            "Pairing moved photo %s's edit recipe to %s but "
-                            "could not relocate %d local-mask snapshot(s) "
-                            "(refs %s); those local adjustments will render "
-                            "without their mask until recreated",
-                            cid, pid, len(transferred["failed"]),
-                            ", ".join(transferred["failed"]),
-                        )
-                    if transferred.get("enumerate_failed"):
-                        # ``os.listdir(edit-masks/)`` failed, so the snapshot
-                        # refs are unknown. The recipe has been transferred
-                        # to the primary and load_snapshot always builds
-                        # ``snapshot_path(vireo_dir, primary_id, ref)`` — any
-                        # snapshot still under the companion's id is
-                        # unreachable, and the local pass renders without
-                        # its mask until the snapshot is recreated. Say so
-                        # (CORE_PHILOSOPHY: no black boxes) instead of
-                        # letting the exception vanish into the deferred-
-                        # action guard.
-                        log.warning(
-                            "Pairing moved photo %s's edit recipe to %s but "
-                            "could not enumerate edit-masks/ to move any "
-                            "snapshots; every affected local adjustment will "
-                            "render without its mask until recreated",
-                            cid, pid,
-                        )
-                    _invalidate_derived_caches(
-                        db, vd, pid, thumb_cache_dir=tcd,
-                    )
-
-                post_commit_fs_actions.append(_apply_recipe_transfer_fs)
-            else:
-                db.conn.execute(
-                    "UPDATE photos SET thumb_path = NULL WHERE id = ?",
-                    (primary["id"],),
-                )
-                db.conn.execute(
-                    "DELETE FROM preview_cache WHERE photo_id = ?",
-                    (primary["id"],),
-                )
-        # Remove keyword associations then the duplicate JPEG record
-        db._transfer_gps_review_for_merge(companion["id"], primary["id"])
-        db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (companion["id"],))
-        # Move the embedded-offered suppression onto the survivor so a
-        # user removal survives this pairing. The FK on
-        # ``photo_embedded_keyword_offered.photo_id`` is non-cascading, so
-        # a leftover row would also block the ``DELETE FROM photos`` below.
-        db.transfer_embedded_keyword_offered_for_merge(
-            companion["id"], primary["id"],
+            (primary["id"], companion["id"]),
         )
-        # Transfer effective visibility before cascade deletion removes the
-        # companion's photo-only grants. This shares only the surviving ID.
-        from repositories.photo_visibility import remap_photo_visibility
-
-        remap_photo_visibility(db.conn, {companion["id"]: primary["id"]})
-        db.conn.execute("DELETE FROM photos WHERE id = ?", (companion["id"],))
-        collection_remap[companion["id"]] = primary["id"]
-        merged_ids.add(companion["id"])
-        # The companion's rowid is now free for SQLite to hand to the next
-        # insert. Its derivatives must be unlinked so the next photo to
-        # inherit the id can't adopt the companion's thumbnail / working
-        # copy / masks (see ``purge_cached_files_for_recycled_id``).
-        # Deferred to post-commit: unlinking inline and then losing this
-        # pair's DELETE to a later rollback would leave a restored
-        # companion row pointing at gone-from-disk derivatives, and none
-        # of ``purge_cached_files_for_recycled_id``'s protections would
-        # help — the rowid is still occupied by that restored row, not
-        # available for reuse.
         if vireo_dir:
-            _companion_id = companion["id"]
-            _thumb_dir_for_companion = thumb_cache_dir or os.path.join(
-                vireo_dir, "thumbnails",
+            _defer_recipe_snapshot_transfer(
+                db, post_commit_fs_actions, primary, companion,
+                vireo_dir, thumb_cache_dir,
+            )
+        else:
+            db.conn.execute(
+                "UPDATE photos SET thumb_path = NULL WHERE id = ?",
+                (primary["id"],),
+            )
+            db.conn.execute(
+                "DELETE FROM preview_cache WHERE photo_id = ?",
+                (primary["id"],),
             )
 
-            def _cleanup_companion(
-                cid=_companion_id, td=_thumb_dir_for_companion,
-                vd=vireo_dir,
-            ):
-                cleanup_cached_files_for_deleted_photos(
-                    td, [{"photo_id": cid}], vireo_dir=vd,
-                )
 
-            post_commit_fs_actions.append(_cleanup_companion)
+def _defer_recipe_snapshot_transfer(
+    db, post_commit_fs_actions, primary, companion, vireo_dir, thumb_cache_dir,
+):
+    """Queue moving local-mask snapshots to the primary and invalidating its caches.
 
-    if collection_remap:
-        db.remap_collection_photo_ids(collection_remap)
-    commit_with_retry(db.conn)
-    # DB state is durable now. Run the collected filesystem operations —
-    # any exception here is per-action so a single failing unlink doesn't
-    # skip the rest, and the recycled-id purge on the next insert would
-    # eventually recover anything we missed.
+    Local-adjustment mask snapshots are looked up by
+    (photo_id, ref); the transferred recipe now points at
+    primary["id"], so the files must move with it or every
+    render silently disables the local pass.
+    Deferred to post-commit: transfer_snapshots MOVES files
+    and _invalidate_derived_caches DELETES them. Running
+    either before the transaction is durable risks moving
+    the companion's snapshots onto the primary and then
+    rolling back the recipe transfer — the render would
+    then load snapshots the DB no longer knows about.
+    """
+    _primary_id = primary["id"]
+    _companion_id = companion["id"]
+    _tcd = thumb_cache_dir
+    _vd = vireo_dir
+
+    def _apply_recipe_transfer_fs(
+        pid=_primary_id, cid=_companion_id, tcd=_tcd, vd=_vd,
+    ):
+        from local_masks import transfer_snapshots
+        # transfer_snapshots falls back to a copy when the
+        # rename fails, so ``failed`` means the snapshot is
+        # genuinely unreachable — ``load_snapshot`` only ever
+        # builds snapshot_path(vireo_dir, pid, ref), so the
+        # local pass for those refs renders without its mask.
+        # Say so rather than degrading the image silently.
+        transferred = transfer_snapshots(vd, cid, pid)
+        if transferred["failed"]:
+            log.warning(
+                "Pairing moved photo %s's edit recipe to %s but "
+                "could not relocate %d local-mask snapshot(s) "
+                "(refs %s); those local adjustments will render "
+                "without their mask until recreated",
+                cid, pid, len(transferred["failed"]),
+                ", ".join(transferred["failed"]),
+            )
+        if transferred.get("enumerate_failed"):
+            # ``os.listdir(edit-masks/)`` failed, so the snapshot
+            # refs are unknown. The recipe has been transferred
+            # to the primary and load_snapshot always builds
+            # ``snapshot_path(vireo_dir, primary_id, ref)`` — any
+            # snapshot still under the companion's id is
+            # unreachable, and the local pass renders without
+            # its mask until the snapshot is recreated. Say so
+            # (CORE_PHILOSOPHY: no black boxes) instead of
+            # letting the exception vanish into the deferred-
+            # action guard.
+            log.warning(
+                "Pairing moved photo %s's edit recipe to %s but "
+                "could not enumerate edit-masks/ to move any "
+                "snapshots; every affected local adjustment will "
+                "render without its mask until recreated",
+                cid, pid,
+            )
+        _invalidate_derived_caches(
+            db, vd, pid, thumb_cache_dir=tcd,
+        )
+
+    post_commit_fs_actions.append(_apply_recipe_transfer_fs)
+
+
+def _delete_companion_row(db, primary, companion):
+    """Move the companion's remaining per-photo state to the primary, then delete its row."""
+    # Remove keyword associations then the duplicate JPEG record
+    db._transfer_gps_review_for_merge(companion["id"], primary["id"])
+    db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (companion["id"],))
+    # Move the embedded-offered suppression onto the survivor so a
+    # user removal survives this pairing. The FK on
+    # ``photo_embedded_keyword_offered.photo_id`` is non-cascading, so
+    # a leftover row would also block the ``DELETE FROM photos`` below.
+    db.transfer_embedded_keyword_offered_for_merge(
+        companion["id"], primary["id"],
+    )
+    # Transfer effective visibility before cascade deletion removes the
+    # companion's photo-only grants. This shares only the surviving ID.
+    from repositories.photo_visibility import remap_photo_visibility
+
+    remap_photo_visibility(db.conn, {companion["id"]: primary["id"]})
+    db.conn.execute("DELETE FROM photos WHERE id = ?", (companion["id"],))
+
+
+def _defer_companion_derivative_cleanup(
+    post_commit_fs_actions, companion, vireo_dir, thumb_cache_dir,
+):
+    """Queue unlinking the deleted companion's cached derivatives.
+
+    The companion's rowid is now free for SQLite to hand to the next
+    insert. Its derivatives must be unlinked so the next photo to
+    inherit the id can't adopt the companion's thumbnail / working
+    copy / masks (see ``purge_cached_files_for_recycled_id``).
+    Deferred to post-commit: unlinking inline and then losing this
+    pair's DELETE to a later rollback would leave a restored
+    companion row pointing at gone-from-disk derivatives, and none
+    of ``purge_cached_files_for_recycled_id``'s protections would
+    help — the rowid is still occupied by that restored row, not
+    available for reuse.
+    """
+    _companion_id = companion["id"]
+    _thumb_dir_for_companion = thumb_cache_dir or os.path.join(
+        vireo_dir, "thumbnails",
+    )
+
+    def _cleanup_companion(
+        cid=_companion_id, td=_thumb_dir_for_companion,
+        vd=vireo_dir,
+    ):
+        cleanup_cached_files_for_deleted_photos(
+            td, [{"photo_id": cid}], vireo_dir=vd,
+        )
+
+    post_commit_fs_actions.append(_cleanup_companion)
+
+
+def _merge_companion_into_primary(
+    db, primary, companion, vireo_dir, thumb_cache_dir, post_commit_fs_actions,
+):
+    """Fold one JPEG companion row into its RAW primary inside the open transaction.
+
+    Every DB write joins the caller's transaction; every filesystem change
+    is appended to ``post_commit_fs_actions`` (only when ``vireo_dir`` is
+    set) for the caller to run once the commit succeeds.
+    """
+    primary_full, companion_full = _read_metadata_transfer_rows(
+        db, primary, companion,
+    )
+    _keep_companion_import_identity(db, primary, companion)
+    _fill_primary_metadata_gaps(db, primary, primary_full, companion_full)
+    _transfer_companion_keywords(db, primary, companion)
+
+    db.conn.execute(
+        "UPDATE photos SET companion_path = ? WHERE id = ?",
+        (companion["filename"], primary["id"]),
+    )
+    if vireo_dir:
+        _defer_primary_display_cache_invalidation(
+            post_commit_fs_actions, primary, vireo_dir, thumb_cache_dir,
+        )
+
+    _rekey_companion_detections_onto_primary(db, primary, companion)
+    _transfer_companion_pending_changes(db, primary, companion)
+    _transfer_companion_inat_submissions(db, primary, companion)
+    _transfer_companion_edit_recipe(
+        db, primary, companion, vireo_dir, thumb_cache_dir,
+        post_commit_fs_actions,
+    )
+    _delete_companion_row(db, primary, companion)
+
+
+def _run_post_commit_fs_actions(post_commit_fs_actions):
+    """Run the deferred filesystem changes once the pairing commit is durable.
+
+    Any exception here is per-action so a single failing unlink doesn't
+    skip the rest, and the recycled-id purge on the next insert would
+    eventually recover anything we missed.
+    """
     for action in post_commit_fs_actions:
         try:
             action()
@@ -1178,6 +1244,82 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
                 "failed; may leave stale derivative files that the "
                 "recycled-id purge or Clear Cache will reclaim later",
             )
+
+
+def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
+    """Find raw+JPEG pairs in the same folder and merge them.
+
+    When both IMG_001.cr3 and IMG_001.jpg exist in the same folder,
+    keep the raw as the primary photo and set companion_path to the JPEG filename.
+    Delete the duplicate JPEG-only photo record.
+
+    All pairs share one transaction; filesystem changes run only after it
+    commits (see ``post_commit_fs_actions`` below).
+
+    Returns the set of companion photo ids merged away. Callers that count
+    indexed photos must discount these: both files were counted on the way
+    in, but only the RAW row survives, so the scan would otherwise claim
+    two photos where the catalog holds one — and RAW+JPEG is the common
+    shooting mode, so that overstates nearly every import.
+
+    Ids, not a bare count, because this query covers the *whole* photos
+    table: it also merges pairs left pending anywhere else in the catalog
+    (an interrupted earlier scan, an older build). A caller must intersect
+    with the ids it actually counted, or a scoped scan would be debited
+    for merges it had nothing to do with and could report a negative
+    total.
+    """
+    groups = _group_photos_by_folder_and_stem(db)
+
+    # Filesystem changes are collected here and executed only after
+    # commit_with_retry succeeds. All pairs share one transaction, so a
+    # failure on any later iteration (or on the commit itself) rolls back
+    # every companion row that was DELETEd earlier — but any files we'd
+    # already unlinked inline are gone for good, leaving the restored
+    # companion rows pointing at missing thumbnails, working copies,
+    # masks, offline originals, and moved mask snapshots. Deferring gives
+    # us "all DB changes durable, then all FS changes" — commit failure
+    # aborts both halves.
+    post_commit_fs_actions = []
+    # Companion rows merged away, reported to the caller so it can correct
+    # its indexed count. Collected at the DELETE but only returned after
+    # the commit below succeeds — the whole loop shares one transaction,
+    # so a commit failure rolls every deletion back and none of them
+    # happened.
+    merged_ids = set()
+    # ``companion_id -> primary_id`` accumulated across every pair so we can
+    # remap collection ``photo_ids`` rules once at the end of the loop.
+    # ``remap_collection_photo_ids`` scans and JSON-parses every collection
+    # that carries ``photo_ids``, then writes each rewritten row; a per-pair
+    # call would repeat that O(collections) work N times and, for a static
+    # collection containing many companions, rewrite the same row once per
+    # deletion. One post-loop call is O(pairs + collections) instead of
+    # O(pairs * collections). The remap runs in the same transaction as the
+    # pair deletes below and is rolled back with them if the commit fails.
+    collection_remap = {}
+
+    for (_folder_id, _base), members in groups.items():
+        pair = _pick_compatible_raw_jpeg_pair(members)
+        if pair is None:
+            continue
+        primary, companion = pair
+
+        _merge_companion_into_primary(
+            db, primary, companion, vireo_dir, thumb_cache_dir,
+            post_commit_fs_actions,
+        )
+        collection_remap[companion["id"]] = primary["id"]
+        merged_ids.add(companion["id"])
+        if vireo_dir:
+            _defer_companion_derivative_cleanup(
+                post_commit_fs_actions, companion, vireo_dir, thumb_cache_dir,
+            )
+
+    if collection_remap:
+        db.remap_collection_photo_ids(collection_remap)
+    commit_with_retry(db.conn)
+    # DB state is durable now. Run the collected filesystem operations.
+    _run_post_commit_fs_actions(post_commit_fs_actions)
     # ``_invalidate_derived_caches`` inside a deferred action issues DB
     # updates (clears thumb_path / working_copy_path, drops preview_cache
     # rows). Those auto-opened a new transaction; commit it so the state

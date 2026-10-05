@@ -82,7 +82,7 @@ PROVENANCE_CONVERGENCE_POINTS = {
     (_PROVENANCE_MODULE, "merge_keyword_into"): "keyword merge repoints rows onto dst",
     (_PROVENANCE_MODULE, "link_keyword_to_place"): "place link repoints rows onto canonical",
     (_PROVENANCE_MODULE, "retire_builtin_wildlife_genre"): "latches sidecar verdict to the top",
-    ("scanner.py", "_pair_raw_jpeg_companions"): "pairing copies companion keywords",
+    ("scanner.py", "_transfer_companion_keywords"): "pairing copies companion keywords",
     ("repositories/folders.py", "merge_into_existing"): "folder merge carries loser's keywords onto the survivor",
     ("repositories/moves_merge.py", "_carry_embedded_keyword_associations"): "staged merge preserves embedded association stamps",
 }
