@@ -544,11 +544,27 @@ def test_new_images_leaves_out_staged_source_so_snapshot_import_runs(staged):
     assert result["local_copy_excluded"] == [staged["source"]]
 
     banner = client.get("/api/workspaces/active/new-images").get_json()
+    # A cold-cache GET returns ``pending`` when the background walk slips
+    # past the endpoint's ~500ms fast-path wait, which the Windows CI
+    # runner hits under load. Poll until the walk lands (see #1958 for
+    # the matching fix in ``test_new_images_api``).
+    deadline = time.monotonic() + 5.0
+    while banner.get("pending") and time.monotonic() < deadline:
+        time.sleep(0.05)
+        banner = client.get("/api/workspaces/active/new-images").get_json()
+    assert not banner.get("pending"), banner
     assert banner["new_count"] == result["new_count"]
     assert banner["local_copy_excluded"] == [staged["source"]]
 
-    snap = client.post("/api/workspaces/active/new-images/snapshot")
-    assert snap.status_code == 200
+    # Snapshot can likewise return 202 while the cache is still cold.
+    deadline = time.monotonic() + 5.0
+    while True:
+        snap = client.post("/api/workspaces/active/new-images/snapshot")
+        if snap.status_code == 200:
+            break
+        assert snap.status_code == 202, snap.get_data(as_text=True)
+        assert time.monotonic() < deadline, "snapshot never converged"
+        time.sleep(0.05)
     snapshot = snap.get_json()
     assert snapshot["file_count"] == banner["new_count"]
     assert staged["source"] not in snapshot["folders"]
