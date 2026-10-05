@@ -459,6 +459,36 @@ def test_merge_preserves_embedded_suppression_and_survivor_removals(
     assert db.get_photo_keywords(winner) == []
 
 
+def test_merge_carries_manually_readded_loser_tag_through_survivor_removal(
+        db, folder):
+    from scanner import _import_embedded_keywords_for_photo
+
+    fid, _ = folder
+    winner = _photo(db, fid, "winner.jpg", "H")
+    loser = _photo(db, fid, "loser.jpg", "H")
+    metadata = {"XMP": {"Subject": ["Robin"]}}
+    # Both sides imported the embedded tag; the user then detached it on both.
+    _import_embedded_keywords_for_photo(db, winner, metadata)
+    _import_embedded_keywords_for_photo(db, loser, metadata)
+    db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (winner,))
+    db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (loser,))
+    db.conn.commit()
+    # Loser's user deliberately re-adds the keyword with manual provenance.
+    robin = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ?", ("Robin",),
+    ).fetchone()["id"]
+    db.tag_photo(loser, robin, source="manual")
+
+    db._apply_winner_loser_merge(winner, [loser])
+
+    names = {k["name"] for k in db.get_photo_keywords(winner)}
+    assert "Robin" in names, (
+        "A manually re-added loser tag must carry through even when the "
+        "survivor removed the embedded value it was offered under."
+    )
+    assert _keyword_sources(db, winner)[robin] == "manual"
+
+
 def test_merge_embedded_suppression_from_one_loser_does_not_block_another(db, folder):
     from scanner import _import_embedded_keywords_for_photo
 
