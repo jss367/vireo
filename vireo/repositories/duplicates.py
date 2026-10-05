@@ -12,6 +12,8 @@ resolver this repository feeds.
 
 import os
 
+from keyword_identity import embedded_keyword_associations_for_merge
+
 
 class _DeferredPlan:
     """Singleton sentinel returned by ``resolution_plan`` when at least one
@@ -310,18 +312,38 @@ class DuplicatesRepository:
             (rating, photo_id),
         )
 
-    def loser_keyword_rows(self, loser_ids):
-        """Return every ``(keyword_id, source)`` row the losers carry, chunk by chunk."""
+    def loser_keyword_rows(self, loser_ids, *, survivor_id=None):
+        """Read loser tags in chunks, respecting the survivor's embedded removals."""
         rows = []
         for chunk in self._chunks(loser_ids):
             loser_placeholders = ",".join("?" * len(chunk))
             rows.extend(self.conn.execute(
-                f"""SELECT keyword_id, source
+                f"""SELECT photo_id, keyword_id, source
                     FROM photo_keywords
                     WHERE photo_id IN ({loser_placeholders})""",
                 chunk,
             ).fetchall())
-        return rows
+        if survivor_id is None:
+            return rows
+        eligible = {
+            photo_id: {row["id"] for row in embedded_keyword_associations_for_merge(
+                self.conn, photo_id, survivor_id, include_non_embedded=True,
+            )}
+            for photo_id in {row["photo_id"] for row in rows}
+        }
+        return [row for row in rows if row["keyword_id"] in eligible[row["photo_id"]]]
+
+    def copy_loser_embedded_offered_keys(self, winner_id, loser_ids):
+        """Keep suppression on rejected rows and copy it onto their survivor."""
+        for chunk in self._chunks(loser_ids):
+            placeholders = ",".join("?" * len(chunk))
+            self.conn.execute(
+                f"""INSERT OR IGNORE INTO photo_embedded_keyword_offered
+                    (photo_id, keyword_key)
+                    SELECT ?, keyword_key FROM photo_embedded_keyword_offered
+                    WHERE photo_id IN ({placeholders})""",
+                (winner_id, *chunk),
+            )
 
     def reject(self, loser_ids):
         """Flag ``loser_ids`` rejected. Does not commit (runs in the merge transaction)."""
