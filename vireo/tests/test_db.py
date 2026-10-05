@@ -18257,6 +18257,65 @@ def test_retire_builtin_wildlife_defers_when_sidecar_unavailable(tmp_path):
     assert db.get_meta(Database._RETIRED_WILDLIFE_GENRE_KEY) == "1"
 
 
+def test_retire_builtin_wildlife_completes_when_sidecar_deleted_but_original_present(tmp_path):
+    """A deleted sidecar on a reachable volume must not defer forever.
+
+    ``xmp_mtime`` records that a sidecar was imported once. When the
+    original is still on disk but the sidecar is gone, the volume is online
+    and no later startup will see the sidecar again, so deferring would keep
+    the completion marker unset and re-run the pass on every boot. The
+    association gets the never-imported verdict instead: preserved, latched
+    as manual, and the marker stamped.
+    """
+    from db import Database
+    from xmp import write_sidecar
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    (photo_dir / "p1.jpg").write_bytes(b"jpeg")
+    xmp_path = photo_dir / "p1.xmp"
+    write_sidecar(
+        str(xmp_path),
+        flat_keywords=set(),
+        hierarchical_keywords=set(),
+    )
+    xmp_mtime = xmp_path.stat().st_mtime
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.create_workspace("ws")
+    db.set_active_workspace(ws)
+    fid = db.add_folder(str(photo_dir), name="photos")
+    db.add_workspace_folder(ws, fid)
+    p1 = db.add_photo(
+        folder_id=fid, filename="p1.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+        xmp_mtime=xmp_mtime,
+    )
+    wildlife_id = db.conn.execute(
+        "INSERT INTO keywords (name, type) VALUES ('Wildlife', 'genre')"
+    ).lastrowid
+    species_id = db.add_keyword("House Sparrow", is_species=True)
+    db.tag_photo(p1, species_id)
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (p1, wildlife_id),
+    )
+    db.conn.commit()
+    db.set_meta(Database._RETIRED_WILDLIFE_GENRE_KEY, "0")
+
+    xmp_path.unlink()
+    assert db.retire_builtin_wildlife_genre() == 0
+    row = db.conn.execute(
+        "SELECT source FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+        (p1, wildlife_id),
+    ).fetchone()
+    assert row is not None
+    assert row["source"] == "manual"
+    assert db.conn.execute(
+        "SELECT 1 FROM pending_changes WHERE photo_id = ?", (p1,),
+    ).fetchone() is None
+    assert db.get_meta(Database._RETIRED_WILDLIFE_GENRE_KEY) == "1"
+
+
 def test_retire_builtin_wildlife_defers_when_sidecar_is_corrupt(tmp_path):
     """A malformed sidecar must defer retirement instead of stripping the tag.
 
