@@ -1124,6 +1124,52 @@ def test_merge_links_sibling_survivors_through_the_facade(
         t["survivor"]: str(tmp_path / "arch" / "day")}
 
 
+def test_merge_moves_embedded_keyword_offered_onto_the_survivor(db, tmp_path):
+    """A staged row with embedded suppression folds in without an FK abort.
+
+    ``photo_embedded_keyword_offered.photo_id`` is a non-cascading FK, so a
+    leftover row on the losing photo aborts the ``DELETE FROM photos`` with
+    ``FOREIGN KEY constraint failed``. The suppression must also follow the
+    surviving row so a later rescan of the embedded value does not re-tag
+    the archive-side photo with a keyword the user had already removed.
+    """
+    t = _collision_tree(db, tmp_path)
+    db.record_embedded_keyword_offered(t["staged"], ["robin"])
+
+    counts = db.merge_staged_tree_into_archive(t["stage_root"], t["arch"])
+
+    assert counts["dropped_photo_ids"] == [t["staged"]]
+    with _other(db) as other:
+        offered_rows = other.execute(
+            "SELECT photo_id, keyword_key "
+            "FROM photo_embedded_keyword_offered",
+        ).fetchall()
+    assert [tuple(r) for r in offered_rows] == [(t["survivor"], "robin")]
+
+
+def test_merge_moves_embedded_keyword_offered_from_phantom_target(
+        db, tmp_path):
+    """A phantom-target row with embedded suppression merges without FK abort.
+
+    Same contract as above but on the replacement path: the phantom target
+    is dropped, so its ``photo_embedded_keyword_offered`` row has to move
+    onto the staged survivor (``pid``) before the delete, or the merge
+    aborts on the FK.
+    """
+    t = _collision_tree(db, tmp_path, same_hash=False)
+    db.record_embedded_keyword_offered(t["survivor"], ["robin"])
+
+    counts = db.merge_staged_tree_into_archive(t["stage_root"], t["arch"])
+
+    assert counts["dropped_photo_ids"] == [t["survivor"]]
+    with _other(db) as other:
+        offered_rows = other.execute(
+            "SELECT photo_id, keyword_key "
+            "FROM photo_embedded_keyword_offered",
+        ).fetchall()
+    assert [tuple(r) for r in offered_rows] == [(t["staged"], "robin")]
+
+
 def test_merge_links_archive_base_through_the_facade(db, monkeypatch):
     ws = db._active_workspace_id
     base = _folder(db, "/arch", link=False)

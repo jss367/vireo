@@ -176,6 +176,29 @@ class KeywordRepository:
         if _commit:
             self.conn.commit()
 
+    def transfer_embedded_offered_keys(self, losing_id, surviving_id):
+        """Move the losing row's embedded-offered keys onto the survivor.
+
+        Used by every merge path that deletes a photo row with a different
+        row inheriting its identity: the suppression record exists so a
+        user's keyword removal survives a later rescan, and that intent must
+        follow the surviving row rather than be dropped with the losing one.
+        No commit; the caller folds this into its own transaction. The
+        non-cascading FK on ``photo_embedded_keyword_offered.photo_id``
+        would otherwise block the ``DELETE FROM photos``.
+        """
+        self.conn.execute(
+            "INSERT OR IGNORE INTO photo_embedded_keyword_offered "
+            "(photo_id, keyword_key) "
+            "SELECT ?, keyword_key FROM photo_embedded_keyword_offered "
+            "WHERE photo_id = ?",
+            (surviving_id, losing_id),
+        )
+        self.conn.execute(
+            "DELETE FROM photo_embedded_keyword_offered WHERE photo_id = ?",
+            (losing_id,),
+        )
+
     def filter_out_subject_tagged(self, photo_ids, subject_types):
         """Return the subset of photo_ids whose photos do NOT have any keyword
         of a type in subject_types. Empty subject_types or empty photo_ids

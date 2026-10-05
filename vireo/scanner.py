@@ -343,13 +343,24 @@ def _import_embedded_keywords_for_photo(db, photo_id, file_meta):
     # is what ``_import_keyword_lists`` would actually tag. Suppressing on the
     # leaf matches the shape of the tag we're guarding against -- the parent
     # chain is additive hierarchy structure, not a tag the user removed.
+    #
+    # A malformed hierarchy whose ancestor normalizes to empty (e.g.
+    # ``"Birds||Hawk"``) is skipped by ``_import_keyword_lists`` and so must
+    # not be recorded as offered either; otherwise, once Lightroom rewrites
+    # the entry to ``"Birds|Hawk"``, the leaf would already be in the
+    # suppression set and every rescan would filter it out before the tag
+    # writer ever saw it.
+    def _hier_leaf(parts):
+        if not parts or any(not keyword_match_key(part) for part in parts):
+            return None
+        return keyword_match_key(parts[-1])
+
     candidate_keys = {
         key for name in flat_keywords
         if (key := keyword_match_key(name))
     }
     for hier in hier_keywords:
-        parts = hier.split("|")
-        if parts and (leaf := keyword_match_key(parts[-1])):
+        if (leaf := _hier_leaf(hier.split("|"))) is not None:
             candidate_keys.add(leaf)
 
     fresh_flat = [
@@ -358,8 +369,8 @@ def _import_embedded_keywords_for_photo(db, photo_id, file_meta):
     ]
     fresh_hier = [
         hier for hier in hier_keywords
-        if (parts := hier.split("|"))
-        and keyword_match_key(parts[-1]) not in offered
+        if (leaf := _hier_leaf(hier.split("|"))) is not None
+        and leaf not in offered
     ]
 
     if fresh_flat or fresh_hier:
@@ -1094,6 +1105,13 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
         # Remove keyword associations then the duplicate JPEG record
         db._transfer_gps_review_for_merge(companion["id"], primary["id"])
         db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (companion["id"],))
+        # Move the embedded-offered suppression onto the survivor so a
+        # user removal survives this pairing. The FK on
+        # ``photo_embedded_keyword_offered.photo_id`` is non-cascading, so
+        # a leftover row would also block the ``DELETE FROM photos`` below.
+        db.transfer_embedded_keyword_offered_for_merge(
+            companion["id"], primary["id"],
+        )
         # Transfer effective visibility before cascade deletion removes the
         # companion's photo-only grants. This shares only the surviving ID.
         from repositories.photo_visibility import remap_photo_visibility

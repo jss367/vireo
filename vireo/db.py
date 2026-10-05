@@ -9083,6 +9083,20 @@ class Database:
             photo_id, keys, _commit=_commit,
         )
 
+    def transfer_embedded_keyword_offered_for_merge(
+            self, losing_id, surviving_id):
+        """Move suppression records onto the survivor before deleting a row.
+
+        Every merge path that drops a photo row with another row inheriting
+        its identity must call this before the ``DELETE FROM photos`` --
+        ``photo_embedded_keyword_offered``'s FK is non-cascading, so a
+        leftover row aborts the delete with ``FOREIGN KEY constraint
+        failed``. No commit; the merge folds it into its own transaction.
+        """
+        self._keyword_repository().transfer_embedded_offered_keys(
+            losing_id, surviving_id,
+        )
+
     def _pending_keyword_sidecar_alias(self, photo_id, workspace_id, value):
         """Return whether another queued keyword edit reaches this sidecar."""
         return self._sync_repository().keyword_sidecar_alias(

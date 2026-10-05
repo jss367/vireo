@@ -1159,6 +1159,36 @@ def test_embedded_import_still_picks_up_newly_added_values(tmp_path):
     assert {k["name"] for k in db.get_photo_keywords(pid)} == {"Hawk"}
 
 
+def test_embedded_import_skips_malformed_hierarchy_without_recording_leaf(tmp_path):
+    """A ``Birds||Hawk`` is skipped AND leaves ``hawk`` free for a later import.
+
+    ``_import_keyword_lists`` already filters a hierarchy whose chain has a
+    segment that normalizes to empty, so recording the leaf as offered would
+    make the next scan after Lightroom repairs the entry to ``Birds|Hawk``
+    silently drop a keyword that was never actually imported.
+    """
+    from db import Database
+    from scanner import _import_embedded_keywords_for_photo
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
+    pid = db.add_photo(folder_id=folder_id, filename="bird.jpg",
+                       extension=".jpg", file_size=100, file_mtime=1.0)
+
+    # First export carries a broken hierarchy: nothing imports, and the leaf
+    # is NOT recorded as offered.
+    broken = {"XMP": {"HierarchicalSubject": ["Birds||Hawk"]}}
+    assert _import_embedded_keywords_for_photo(db, pid, broken) is False
+    assert db.get_photo_keywords(pid) == []
+    assert db.get_embedded_keyword_offered_keys(pid) == set()
+
+    # Lightroom repairs the entry; the leaf imports normally on the next
+    # scan because the suppression set never admitted it.
+    repaired = {"XMP": {"HierarchicalSubject": ["Birds|Hawk"]}}
+    assert _import_embedded_keywords_for_photo(db, pid, repaired) is True
+    assert "Hawk" in {k["name"] for k in db.get_photo_keywords(pid)}
+
+
 def test_embedded_import_valueerror_does_not_record_offered_keys(tmp_path, monkeypatch):
     """A warn-and-skip path leaves the next scan free to retry.
 
@@ -1835,6 +1865,51 @@ def test_pairing_transfers_edit_recipe_from_companion(tmp_path):
     undone = db.undo_last_edit()
     assert undone is not None
     assert db.get_photo_edit_recipe(photo["id"]) is None
+
+
+def test_pairing_moves_embedded_keyword_offered_onto_the_survivor(tmp_path):
+    """Pairing a JPEG with embedded suppression into its RAW doesn't FK-abort.
+
+    ``photo_embedded_keyword_offered.photo_id`` is a non-cascading FK, so a
+    leftover row on the companion aborts the ``DELETE FROM photos`` with
+    ``FOREIGN KEY constraint failed``. The suppression must also follow the
+    survivor so a later rescan of the embedded Robin on the RAW does not
+    re-tag what the user had removed.
+    """
+    from db import Database
+    from scanner import _import_embedded_keywords_for_photo, _pair_raw_jpeg_companions
+
+    img_dir = tmp_path / "photos"
+    img_dir.mkdir()
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(img_dir), name="photos")
+    jpeg_id = db.add_photo(
+        folder_id=fid, filename="IMG_002.jpg", extension=".jpg",
+        file_size=1000, file_mtime=1.0,
+    )
+    raw_id = db.add_photo(
+        folder_id=fid, filename="IMG_002.cr3", extension=".cr3",
+        file_size=2000, file_mtime=1.0,
+    )
+
+    # The embedded Robin is imported into the JPEG and recorded as offered
+    # on it.
+    file_meta = {"XMP": {"Subject": ["Robin"]}}
+    assert _import_embedded_keywords_for_photo(db, jpeg_id, file_meta) is True
+    assert "robin" in db.get_embedded_keyword_offered_keys(jpeg_id)
+
+    # Pairing must not raise and must leave the suppression on the survivor.
+    _pair_raw_jpeg_companions(db)
+
+    survivors = db.conn.execute(
+        "SELECT id, filename FROM photos",
+    ).fetchall()
+    assert len(survivors) == 1
+    assert survivors[0]["filename"] == "IMG_002.cr3"
+    assert survivors[0]["id"] == raw_id
+    assert db.get_embedded_keyword_offered_keys(raw_id) == {"robin"}
+    assert db.get_embedded_keyword_offered_keys(jpeg_id) == set()
 
 
 def test_pairing_invalidates_existing_raw_display_cache(tmp_path):
