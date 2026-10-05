@@ -414,9 +414,9 @@
         formatTimeAgo(data.finished_at);
       var stale = (data.result && data.result.stale_group_count) || 0;
       document.getElementById('restoredStale').textContent = stale
-        ? ' ' + stale.toLocaleString() + ' group' + (stale === 1 ? '' : 's') +
-          ' from that scan no longer match your catalog and ' +
-          (stale === 1 ? 'is' : 'are') + ' hidden.'
+        ? ' ' + stale.toLocaleString() + (stale === 1
+            ? ' group from that scan no longer matches your catalog and is hidden.'
+            : ' groups from that scan no longer match your catalog and are hidden.')
         : '';
       banner.style.display = '';
     } catch (e) {

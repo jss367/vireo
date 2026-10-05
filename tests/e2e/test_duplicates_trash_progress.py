@@ -6,19 +6,35 @@ from playwright.sync_api import expect
 
 
 def _seed_resolved_scan(db, loser_count):
+    """Seed resolved groups over real catalog rows; returns the loser ids.
+
+    last-scan drops groups whose ids no longer name the same catalog file,
+    so every restored entry must point at a photo that exists.
+    """
+    fid = db.add_folder("/photos")
     proposals = []
+    loser_ids = []
     for i in range(loser_count):
+        kept_id = db.add_photo(
+            folder_id=fid, filename=f"kept-{i}.jpg", extension=".jpg",
+            file_size=1000, file_mtime=100.0, file_hash=f"RESOLVED{i}",
+        )
+        extra_id = db.add_photo(
+            folder_id=fid, filename=f"extra-{i}.jpg", extension=".jpg",
+            file_size=1000, file_mtime=100.0, file_hash=f"RESOLVED{i}",
+        )
+        loser_ids.append(extra_id)
         proposals.append({
             "file_hash": f"RESOLVED{i}",
             "status": "resolved",
             "winner": {
-                "id": 10_000 + i,
+                "id": kept_id,
                 "filename": f"kept-{i}.jpg",
                 "path": f"/photos/kept-{i}.jpg",
                 "file_size": 1000,
             },
             "losers": [{
-                "id": 20_000 + i,
+                "id": extra_id,
                 "filename": f"extra-{i}.jpg",
                 "path": f"/photos/extra-{i}.jpg",
                 "file_size": 1000,
@@ -45,11 +61,12 @@ def _seed_resolved_scan(db, loser_count):
         ),
     )
     db.conn.commit()
+    return loser_ids
 
 
 def test_trash_all_reports_progress_and_uses_small_batches(live_server, page):
     """A large cleanup exposes progress and never sends one giant request."""
-    _seed_resolved_scan(live_server["db"], loser_count=55)
+    loser_ids = _seed_resolved_scan(live_server["db"], loser_count=55)
     requested_batches = []
 
     def handle_trash(route):
@@ -85,9 +102,7 @@ def test_trash_all_reports_progress_and_uses_small_batches(live_server, page):
     expect(page.locator("#trashAllBtn")).to_have_count(0)
 
     assert [len(batch) for batch in requested_batches] == [25, 25, 5]
-    assert [pid for batch in requested_batches for pid in batch] == [
-        20_000 + i for i in range(55)
-    ]
+    assert [pid for batch in requested_batches for pid in batch] == loser_ids
 
 
 def test_trash_progress_excludes_file_already_missing_from_skipped_count(
