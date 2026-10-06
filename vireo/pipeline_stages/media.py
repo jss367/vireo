@@ -267,9 +267,9 @@ class _ThumbPass:
         """True if the catalog's current row at ``photo_id`` names
         ``canonical_path`` as either its own file or its companion.
 
-        SQLite reuses the row ids of deleted photos. A paired JPEG's
-        transient row is inserted during one scanner invocation and
-        then deleted by pairing at end-of-scan; _scan_in_place iterates
+        SQLite reuses the row ids of deleted photos. A JPEG photo can be
+        reported during one scanner invocation and then merged into its
+        RAW (its row deleted) by pairing at end-of-scan; _scan_in_place iterates
         sources with one do_scan per source, so a later invocation can
         insert an unrelated photo under the same reused id. Comparing
         only the basename would miss the case where the replacement
@@ -346,8 +346,8 @@ class _ThumbPass:
         # retry path diverged from the owner's filename.
         canonical_path = thumb.photo_path
         # Pre-generation ownership guard: a stale (id, companion_path)
-        # entry queued by a transient JPEG row that pairing then
-        # deleted must not touch the cache. Caching {id}.jpg from the
+        # entry queued by a JPEG photo row that pairing then merged
+        # away must not touch the cache. Caching {id}.jpg from the
         # stale companion's bytes under a reused id would pin the
         # deleted companion's pixels to the new photo and cause the
         # new row's own queue entry to skip on a pre-populated cache

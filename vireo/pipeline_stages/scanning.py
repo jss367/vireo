@@ -190,10 +190,17 @@ class _ScanPass:
         # the shared ``{owner_id}.jpg`` output — and the generated
         # pipeline collection would carry duplicate ids. ``_scan``
         # resets this set at the start of every scanner invocation,
-        # scoping dedup to one pass so SQLite's reuse of a deleted
-        # transient JPEG row id in the next source does not drop a
+        # scoping dedup to one pass so SQLite's reuse of a JPEG photo
+        # id that pairing merged away in the next source does not drop a
         # genuinely new photo's callback.
         self._reported_photo_ids: set = set()
+        # Mirror of ``collected_photo_ids`` for O(1) membership in
+        # ``_on_merged_photo``; the list keeps the collection's order.
+        self._collected_ids: set = set()
+        # Pairing covers the whole catalog, including ids reported by an
+        # earlier source. Keep identity history for the whole stage while
+        # the callback dedup set remains scoped to each scanner invocation.
+        self._reported_photo_identities = {}
 
         # Collect the scan roots actually fed to do_scan so the finally
         # clause can invalidate the new-images cache for each one,
@@ -321,12 +328,36 @@ class _ScanPass:
         # so the queued path is always the RAW's.
         canonical = self._canonical_photo_path(photo_id, path)
         self.collected_photo_ids.append(photo_id)
+        self._collected_ids.add(photo_id)
         # Abort/pause-aware: a blocking put would wedge the scanner
         # if the thumbnail consumer parked or failed on a full queue.
         self.put_scan_item((photo_id, canonical))
         run.stages["scan"]["count"] = len(self.collected_photo_ids)
         run.runner.update_step(run.job["id"], "scan",
                                current_file=os.path.basename(canonical))
+
+    def _on_merged_photo(self, old_id, new_id, path):
+        """Replace an id the scan's pairing pass merged into a RAW.
+
+        Only a JPEG that was already a photo of its own reaches that pass
+        (one cataloged before its RAW arrived); it was reported here
+        under its own id, which no longer names a photo and could be given
+        to the next insert. The collection and the scan count follow the
+        RAW instead. A thumbnail item already queued for ``old_id`` is
+        dropped by the thumbnail stage, which checks the row still owns
+        the queued path.
+        """
+        if old_id not in self._collected_ids:
+            return
+        self._collected_ids.discard(old_id)
+        self._reported_photo_ids.discard(old_id)
+        self.collected_photo_ids[:] = [
+            pid for pid in self.collected_photo_ids if pid != old_id
+        ]
+        if new_id is None or new_id in self._collected_ids:
+            self.run.stages["scan"]["count"] = len(self.collected_photo_ids)
+        else:
+            self._on_scanned_photo(new_id, path)
 
     def _canonical_photo_path(self, photo_id, path):
         """Return the catalog's own path for ``photo_id`` (RAW path for pairs).
@@ -452,15 +483,15 @@ class _ScanPass:
     def _scan(self, root, **kwargs):
         """Run scanner.scan with the callbacks and settings every scan shares."""
         # Scope the callback-id dedup set to one scanner invocation. SQLite
-        # reuses the ids of deleted rows, and a new RAW/JPEG pair's pairing
-        # pass deletes the transient JPEG row after its _on_scanned_photo
-        # callback has already added that id to the set. On the next
-        # scanner invocation (``_scan_in_place`` iterates sources, one
-        # do_scan per source), a reused id would be dropped by dedup and
-        # miss both collected_photo_ids and the thumbnail queue. A single
-        # scanner pass never reuses an id itself (pairing runs at the end),
-        # so clearing per-invocation keeps the pair/companion dedup inside
-        # one pass intact.
+        # reuses the ids of deleted rows, and the pairing pass at the end of
+        # a scan can delete a JPEG photo's row after its _on_scanned_photo
+        # callback added that id to the set (``_on_merged_photo`` takes it
+        # back out). On the next scanner invocation (``_scan_in_place``
+        # iterates sources, one do_scan per source), a reused id would be
+        # dropped by dedup and miss both collected_photo_ids and the
+        # thumbnail queue. A single scanner pass never reuses an id itself
+        # (pairing runs at the end), so clearing per-invocation keeps the
+        # pair/companion dedup inside one pass intact.
         self._reported_photo_ids.clear()
         self.do_scan(
             root, self.thread_db,
@@ -473,6 +504,7 @@ class _ScanPass:
             cancel_check=self.cancel_requested,
             pause_check=self._scan_pause_requested,
             cancel_only_check=self.run.control.cancellation_requested,
+            reported_photo_identities=self._reported_photo_identities,
             **kwargs,
         )
 
@@ -1447,6 +1479,7 @@ class _ScanPass:
         self._scan(
             self.run.params.destination,
             photo_callback=self._on_scanned_photo,
+            photo_merged_callback=self._on_merged_photo,
             restrict_dirs=restrict,
             permission_error_callback=self._on_permission_denied,
         )
@@ -1491,6 +1524,7 @@ class _ScanPass:
                 self._scan(
                     src_folder,
                     photo_callback=self._on_scanned_photo,
+                    photo_merged_callback=self._on_merged_photo,
                     skip_paths=run.params.exclude_paths,
                     recursive=run.params.recursive,
                     restrict_dirs=snapshot_restrict_dirs,
@@ -1506,12 +1540,19 @@ class _ScanPass:
             self.mark_scan_cancelled()
             return
         run.stages["scan"]["status"] = "completed"
+        # ``_on_scan_progress`` reports file-progress counts, so a RAW+JPEG
+        # pair that attaches rowlessly to the RAW leaves ``stages["scan"]
+        # ["count"]`` reading two files for one photo. The collection the
+        # pipeline runs on is ``collected_photo_ids``: take the summary from
+        # there (and reset the stage count) so "N photos" matches it.
+        photo_count = len(self.collected_photo_ids)
+        run.stages["scan"]["count"] = photo_count
         # Pipeline scans use scanner.scan exactly like the standalone
         # /api/jobs/scan path, so a missing exiftool silently strips
         # capture dates, GPS, and camera info here too. Append the
         # same warning the standalone path appends.
         scan_summary = self._summary_with_metadata_warning(
-            f"{run.stages['scan']['count']} photos"
+            f"{photo_count} photos"
         )
         run.runner.update_step(run.job["id"], "scan", status="completed",
                                summary=scan_summary)
