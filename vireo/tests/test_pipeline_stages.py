@@ -152,7 +152,7 @@ def test_on_scanned_photo_dedupes_companion_from_raw():
     assert scan_step["count"] == 2
 
 
-def test_on_scanned_photo_normalizes_companion_first_callback_to_raw_path():
+def test_on_scanned_photo_normalizes_companion_first_callback_to_raw_path(tmp_path):
     """When the companion JPEG's callback arrives *before* its RAW's own
     callback, the queued path still has to be the canonical RAW path.
     Dedup alone would queue the JPEG (first-callback-wins), which lets
@@ -191,16 +191,23 @@ def test_on_scanned_photo_normalizes_companion_first_callback_to_raw_path():
         snapshot_paths=None,
     )
 
-    # Mock thread_db to resolve photo 42 as /photos/IMG_001.cr3.
+    # Give the pair real paths so the canonical-RAW existence check
+    # (added for the "RAW missing, companion present" fallback below)
+    # passes and the normalization runs.
+    folder = tmp_path / "photos"
+    folder.mkdir()
+    (folder / "IMG_001.cr3").write_bytes(b"")
+    (folder / "IMG_001.jpg").write_bytes(b"")
+
     scan.thread_db = SimpleNamespace(
         get_photo_filenames=lambda ids: {42: (7, "IMG_001.cr3")},
-        get_folder=lambda folder_id: {"path": "/photos"},
+        get_folder=lambda folder_id: {"path": str(folder)},
     )
 
     # Companion JPEG arrives first (file ordering).
-    scan._on_scanned_photo(42, "/photos/IMG_001.jpg")
+    scan._on_scanned_photo(42, str(folder / "IMG_001.jpg"))
     # RAW's own callback arrives second — dedupes.
-    scan._on_scanned_photo(42, "/photos/IMG_001.cr3")
+    scan._on_scanned_photo(42, str(folder / "IMG_001.cr3"))
 
     assert collected == [42]
     # Must be the canonical RAW path even though the JPEG came first.
@@ -208,7 +215,67 @@ def test_on_scanned_photo_normalizes_companion_first_callback_to_raw_path():
     # separator matches the host (``/`` on POSIX, ``\\`` on Windows); use
     # the same join rather than a hardcoded slash so the assertion is not
     # OS-specific.
-    assert enqueued == [(42, os.path.join("/photos", "IMG_001.cr3"))]
+    assert enqueued == [(42, os.path.join(str(folder), "IMG_001.cr3"))]
+    assert scan_step["count"] == 1
+
+
+def test_on_scanned_photo_keeps_companion_path_when_canonical_raw_missing(tmp_path):
+    """When the catalog's RAW is unavailable (deleted or unreadable) but
+    the companion JPEG is still on disk, the scanner's companion-credit
+    callback is the pair's only report. ``_canonical_photo_path`` must
+    keep the given companion path instead of rewriting it to the missing
+    RAW: the thumbnail stage never loads ``detail_photo`` for a photo
+    without an edit recipe (``_thumbnail_scanned_photo``), so a queued
+    missing-RAW path has no path back to the companion from there and
+    would be reported as a failed thumbnail despite the available JPEG."""
+    from types import SimpleNamespace
+
+    from pipeline_stages.scanning import _ScanPass
+
+    enqueued = []
+    collected = []
+    scan_step = {"count": 0}
+
+    run = SimpleNamespace(
+        stages={"scan": scan_step},
+        job={"id": "pipeline-1"},
+        runner=SimpleNamespace(update_step=lambda *a, **k: None),
+    )
+
+    scan = _ScanPass(
+        run,
+        sentinel=object(),
+        filter_excluded=lambda *_a, **_k: None,
+        find_broken_metadata_folders=lambda *_a, **_k: [],
+        missing_archive_mount_root=lambda *_a, **_k: None,
+        put_scan_item=enqueued.append,
+        collected_photo_ids=collected,
+        effective_thumb_cache_dir=None,
+        effective_vireo_dir=None,
+        final_destination=None,
+        missing_originals_invalidator=None,
+        remote_archive=None,
+        skip_scan=False,
+        snapshot_paths=None,
+    )
+
+    # The companion JPEG is on disk, the catalog's RAW is not.
+    folder = tmp_path / "photos"
+    folder.mkdir()
+    (folder / "IMG_001.jpg").write_bytes(b"")
+
+    scan.thread_db = SimpleNamespace(
+        get_photo_filenames=lambda ids: {42: (7, "IMG_001.cr3")},
+        get_folder=lambda folder_id: {"path": str(folder)},
+    )
+
+    scan._on_scanned_photo(42, str(folder / "IMG_001.jpg"))
+
+    assert collected == [42]
+    # Companion path is kept: the thumbnail stage has an available file
+    # to render, instead of a canonical RAW path that would fail to
+    # decode with no fallback for a recipe-less photo.
+    assert enqueued == [(42, str(folder / "IMG_001.jpg"))]
     assert scan_step["count"] == 1
 
 

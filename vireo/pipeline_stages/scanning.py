@@ -339,6 +339,15 @@ class _ScanPass:
         reconstruct the canonical path from the owner's folder and
         filename so the pipeline downstream (thumbnails, collection,
         current-file display) works on the RAW rather than the companion.
+
+        When the catalog's RAW is unavailable on disk (deleted or
+        unreadable) but the companion JPEG is still here, keep the
+        given companion path. The thumbnail stage never loads
+        ``detail_photo`` for a photo without an edit recipe, so a RAW
+        path that fails to decode cannot fall back to the companion from
+        there -- reporting the companion directly lets ``_generate``
+        process the available file instead of marking the thumbnail
+        failed.
         """
         thread_db = self.thread_db
         if thread_db is None:
@@ -368,7 +377,10 @@ class _ScanPass:
         folder_path = folder["path"]
         if not folder_path:
             return path
-        return os.path.join(folder_path, filename)
+        canonical = os.path.join(folder_path, filename)
+        if not os.path.exists(canonical):
+            return path
+        return canonical
 
     def _on_scan_status(self, message, phase_current=None, phase_total=None, phase_label=None):
         run = self.run
