@@ -54,7 +54,7 @@ def test_photo_without_exif_stores_empty_text(photo):
     assert _text(db, pid) == [""]
 
 
-def test_exif_rewrite_replaces_text_and_delete_removes_it(photo):
+def test_text_follows_rewrites_renumbering_and_deletes(photo):
     db, pid = photo
     db.conn.execute("UPDATE photos SET exif_data=? WHERE id=?",
                     (json.dumps({"EXIF": {"Model": "Z9"}}), pid))
@@ -62,9 +62,13 @@ def test_exif_rewrite_replaces_text_and_delete_removes_it(photo):
                     (json.dumps({"EXIF": {"Model": "R5"}}), pid))
     db.conn.commit()
     assert _text(db, pid) == ["R5"]
-    db.conn.execute("DELETE FROM photos WHERE id=?", (pid,))
+    db.conn.execute("UPDATE photos SET id=? WHERE id=?", (pid + 100, pid))
     db.conn.commit()
     assert _text(db, pid) is None
+    assert _text(db, pid + 100) == ["R5"]
+    db.conn.execute("DELETE FROM photos WHERE id=?", (pid + 100,))
+    db.conn.commit()
+    assert _text(db, pid + 100) is None
 
 
 def test_backfill_indexes_photos_in_batches(db):

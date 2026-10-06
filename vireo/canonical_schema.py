@@ -1077,7 +1077,8 @@ class CanonicalSchema:
         from metadata_search import EXIF_SEARCH_TEXT_TABLE, exif_search_text_triggers
 
         self.conn.execute(f"""CREATE TABLE IF NOT EXISTS {EXIF_SEARCH_TEXT_TABLE} (
-            photo_id   INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
+            photo_id   INTEGER PRIMARY KEY
+                REFERENCES photos(id) ON DELETE CASCADE ON UPDATE CASCADE,
             value_text TEXT NOT NULL
         )""")
         triggers = exif_search_text_triggers()

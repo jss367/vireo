@@ -946,7 +946,7 @@
    "table",
    "photo_exif_search_text",
    "photo_exif_search_text",
-   "CREATE TABLE photo_exif_search_text (\n            photo_id   INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,\n            value_text TEXT NOT NULL\n        )"
+   "CREATE TABLE photo_exif_search_text (\n            photo_id   INTEGER PRIMARY KEY\n                REFERENCES photos(id) ON DELETE CASCADE ON UPDATE CASCADE,\n            value_text TEXT NOT NULL\n        )"
   ],
   [
    "trigger",
