@@ -257,9 +257,10 @@ def _recover_companion_batch(db, rows):
     for row in rows:
         path = Path(row["path"]) / row["companion_path"]
         try:
-            available.append((row, path, path.stat().st_size))
+            stat = path.stat()
         except OSError:
             continue
+        available.append((row, path, stat.st_size))
     if not available:
         return
     captures = source_capture_timestamps([path for _, path, _ in available])
@@ -276,9 +277,26 @@ def _recover_companion_batch(db, rows):
         return
     db.conn.execute("SAVEPOINT recover_companion_identities")
     try:
+        # ``file_mtime`` stays NULL on recovered identities. Recovery hashes
+        # the current bytes but does not read their metadata, import
+        # embedded sidecar keywords, or invalidate the owner RAW's
+        # companion-derived caches. If the companion was edited between the
+        # original pairing and this recovery, the owner's EXIF columns are
+        # stale and the owner needs the normal re-merge the next scan would
+        # perform. Storing the current mtime here would stat-skip the
+        # companion forever on incremental scans and let a full scan accept
+        # the recovered hash as unchanged — the owner would never be
+        # re-synced. A NULL ``file_mtime`` fails the incremental stat check
+        # (``scanner._companion_stat_unchanged`` requires non-NULL mtime),
+        # forcing the scanner to re-read the companion. ``needs_sync``
+        # also prevents its freshly recovered hash from being accepted as
+        # already synchronized: NULL mtime alone is also used for trusted
+        # identities whose JPEG-only metadata refill needs a retry.
+        # The hash is kept so duplicate preview recognizes a second card.
         db.conn.executemany(
             "INSERT OR REPLACE INTO companion_identities "
-            "(photo_id, filename, file_size, timestamp, file_hash) VALUES (?, ?, ?, ?, ?)",
+            "(photo_id, filename, file_size, timestamp, file_hash, file_mtime, needs_sync)"
+            " VALUES (?, ?, ?, ?, ?, NULL, 1)",
             recovered,
         )
     except BaseException:

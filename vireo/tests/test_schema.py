@@ -3,24 +3,25 @@ import threading
 
 import pytest
 import schema
+from canonical_schema import SCHEMA_VERSION
 from db import Database
 
 
-def test_ensure_schema_stamps_baseline_on_fresh_db(tmp_path):
+def test_ensure_schema_stamps_newest_version_on_fresh_db(tmp_path):
     db_path = str(tmp_path / "vireo.db")
 
     schema.ensure_schema(db_path)
 
     with sqlite3.connect(db_path) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == schema.BASELINE_VERSION
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         assert [row[1] for row in conn.execute('PRAGMA table_info(location_gps_reviews)')] == [
             'photo_id', 'fingerprint', 'reviewed_at',
         ]
 
 
-def test_database_stamps_baseline_on_a_database_it_creates(tmp_path):
+def test_database_stamps_newest_version_on_a_database_it_creates(tmp_path):
     with Database(str(tmp_path / "vireo.db")) as db:
-        assert db.conn.execute("PRAGMA user_version").fetchone()[0] == schema.BASELINE_VERSION
+        assert db.conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
 
 
 def test_ensure_schema_refuses_catalog_older_than_retired_migrations(tmp_path):
@@ -83,7 +84,7 @@ def test_ensure_schema_initializes_an_empty_existing_file(tmp_path):
     schema.ensure_schema(str(db_path))
 
     with sqlite3.connect(db_path) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == schema.BASELINE_VERSION
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
 
 
 def test_registry_migration_above_baseline_applies_once(tmp_path, monkeypatch):
@@ -95,7 +96,7 @@ def test_registry_migration_above_baseline_applies_once(tmp_path, monkeypatch):
         calls.append(1)
         conn.execute("INSERT INTO db_meta(key, value) VALUES ('next_migration', 'ok')")
 
-    migration = schema.Migration(schema.BASELINE_VERSION + 1, "next", add_marker)
+    migration = schema.Migration(SCHEMA_VERSION + 1, "next", add_marker)
     monkeypatch.setattr(schema, "MIGRATIONS", (migration,))
 
     schema.ensure_schema(db_path)
@@ -103,7 +104,7 @@ def test_registry_migration_above_baseline_applies_once(tmp_path, monkeypatch):
 
     assert calls == [1]
     with sqlite3.connect(db_path) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == schema.BASELINE_VERSION + 1
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION + 1
         assert conn.execute(
             "SELECT value FROM db_meta WHERE key='next_migration'"
         ).fetchone()[0] == "ok"
@@ -131,14 +132,14 @@ def test_failed_registry_migration_rolls_back_version_and_data(tmp_path, monkeyp
         )
         raise RuntimeError("simulated interruption")
 
-    migration = schema.Migration(13, "interrupted", fail_after_write)
+    migration = schema.Migration(SCHEMA_VERSION + 1, "interrupted", fail_after_write)
     monkeypatch.setattr(schema, "MIGRATIONS", (*schema.MIGRATIONS, migration))
 
     with pytest.raises(RuntimeError, match="simulated interruption"):
         schema.ensure_schema(db_path)
 
     with sqlite3.connect(db_path) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 12
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         assert conn.execute(
             "SELECT 1 FROM db_meta WHERE key='partial_migration'"
         ).fetchone() is None
@@ -163,7 +164,7 @@ def test_concurrent_schema_startup_is_serialized(tmp_path):
     assert not errors
     assert all(not thread.is_alive() for thread in threads)
     with sqlite3.connect(db_path) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 12
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
 
 
 def test_ensure_schema_backs_up_before_pending_migrations(tmp_path):
@@ -333,3 +334,73 @@ def test_ensure_schema_keeps_later_version_snapshots(tmp_path):
     assert not os.path.exists(older_backup)
     # The later-version backup must survive — it may be irreplaceable.
     assert os.path.exists(newer_backup)
+
+
+def test_newest_registry_migration_is_the_version_create_tables_stamps():
+    """``create_tables`` builds every migration's end state and stamps a fresh
+    database with the newest one, so the two numbers must move together."""
+    assert schema.MIGRATIONS[-1].version == SCHEMA_VERSION
+    assert schema._latest_version() == SCHEMA_VERSION
+
+
+@pytest.mark.parametrize("stamped", [11, 12])
+def test_catalog_before_companion_mtime_gains_the_column(tmp_path, stamped):
+    """A v11/v12 catalog's companion_identities has no file_mtime; the
+    migration adds it and keeps every stored identity."""
+    db_path = str(tmp_path / "vireo.db")
+    schema.ensure_schema(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute("DROP TABLE companion_identities")
+        conn.execute(
+            "CREATE TABLE companion_identities ("
+            "photo_id INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,"
+            " filename TEXT NOT NULL, file_size INTEGER, timestamp TEXT,"
+            " file_hash TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO companion_identities VALUES (7, 'IMG.jpg', 10, NULL, 'h')"
+        )
+        conn.execute(f"PRAGMA user_version = {stamped}")
+
+    schema.ensure_schema(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert conn.execute(
+            "SELECT photo_id, filename, file_size, file_hash, file_mtime"
+            " FROM companion_identities"
+        ).fetchall() == [(7, "IMG.jpg", 10, "h", None)]
+
+
+def test_v13_companion_identities_remain_trusted_after_sync_state_migration(tmp_path):
+    """Existing NULL mtimes are metadata retries, not recovered byte identities."""
+    db_path = str(tmp_path / "vireo.db")
+    schema.ensure_schema(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute("DROP TABLE companion_identities")
+        conn.execute(
+            "CREATE TABLE companion_identities (photo_id INTEGER PRIMARY KEY,"
+            " filename TEXT NOT NULL, file_size INTEGER, timestamp TEXT,"
+            " file_hash TEXT, file_mtime REAL)"
+        )
+        conn.executemany(
+            "INSERT INTO companion_identities VALUES (?, ?, ?, ?, ?, ?)",
+            [(7, "IMG.jpg", 10, None, "h", None),
+             (8, "OTHER.jpg", 20, "2024-01-15", "other", 123.0)],
+        )
+        conn.execute("PRAGMA user_version = 13")
+
+    schema.ensure_schema(db_path)
+    schema.ensure_schema(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert conn.execute(
+            "SELECT photo_id, filename, file_size, timestamp, file_hash,"
+            " file_mtime, needs_sync FROM companion_identities ORDER BY photo_id"
+        ).fetchall() == [
+            (7, "IMG.jpg", 10, None, "h", None, 0),
+            (8, "OTHER.jpg", 20, "2024-01-15", "other", 123.0, 0),
+        ]

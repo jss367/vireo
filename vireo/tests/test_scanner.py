@@ -1866,9 +1866,10 @@ def test_raw_already_paired_never_swaps_its_companion_for_a_second_jpeg(tmp_path
 
 
 def test_rescan_repairs_companion_onto_its_own_raw_not_a_new_same_stem_raw(tmp_path):
-    """A rescan re-inserts the companion JPEG's file and folds it back in; it
-    must go to the RAW that already holds it, not a same-stem RAW added since
-    (which sorts first by name), or two RAWs would claim one JPEG."""
+    """The companion stays with the RAW that already holds it, not a
+    same-stem RAW added since (which sorts first by name), or two RAWs would
+    claim one JPEG. (A changed companion, which the rescan does re-insert:
+    ``test_changed_companion_remerges_into_its_own_raw_not_a_new_same_stem_raw``.)"""
     from db import Database
     from scanner import scan
 
@@ -2005,6 +2006,1238 @@ def test_rescan_changed_companion_invalidates_jpeg_thumbnail_variant(tmp_path):
     )
 
     assert not variant.exists()
+
+
+@pytest.mark.parametrize(
+    ("primary_values", "expected"),
+    [
+        ((None, 11, None, 222), (33, 11, 555, 222)),
+        ((11, None, 222, None), (11, 44, 222, 666)),
+    ],
+)
+def test_companion_metadata_fills_each_missing_coordinate_and_dimension(
+    tmp_path, primary_values, expected,
+):
+    from db import Database
+    from scanner import _fill_primary_metadata_gaps, _read_metadata_transfer_rows
+
+    with Database(str(tmp_path / "catalog.db")) as db:
+        folder_id = db.add_folder(str(tmp_path), name="photos")
+        raw_id = db.add_photo(folder_id, "IMG.cr3", ".cr3", 2000, 1.0)
+        jpeg_id = db.add_photo(folder_id, "IMG.jpg", ".jpg", 1000, 1.0)
+        db.conn.execute(
+            "UPDATE photos SET latitude=?, longitude=?, width=?, height=? WHERE id=?",
+            (*primary_values, raw_id),
+        )
+        db.conn.execute(
+            "UPDATE photos SET latitude=?, longitude=?, width=?, height=? WHERE id=?",
+            (33, 44, 555, 666, jpeg_id),
+        )
+        primary = {"id": raw_id}
+        companion = {"id": jpeg_id}
+        primary_full, companion_full = _read_metadata_transfer_rows(
+            db, primary, companion,
+        )
+        _fill_primary_metadata_gaps(db, primary, primary_full, companion_full)
+
+        row = db.conn.execute(
+            "SELECT latitude, longitude, width, height FROM photos WHERE id=?",
+            (raw_id,),
+        ).fetchone()
+        assert tuple(row) == expected
+
+
+class _PairedCatalog:
+    """A scanned IMG_001.cr3 + IMG_001.jpg pair with a vireo dir, plus the
+    probes the no-churn rescan tests read."""
+
+    def __init__(self, tmp_path, monkeypatch):
+        import scanner
+        from db import Database
+
+        self.scanner = scanner
+        self.img_dir = tmp_path / "photos"
+        self.img_dir.mkdir()
+        self.jpeg = self.img_dir / "IMG_001.jpg"
+        self.raw = self.img_dir / "IMG_001.cr3"
+        Image.new("RGB", (200, 100), color="green").save(self.jpeg)
+        self.raw.write_bytes(b"\x00" * 200)
+        self.vireo_dir = tmp_path / "vireo"
+        self.thumb_dir = self.vireo_dir / "thumbnails"
+        self.thumb_dir.mkdir(parents=True)
+        (self.vireo_dir / "originals").mkdir()
+        self.db = Database(str(self.vireo_dir / "test.db"))
+
+        self.merges = []
+        real_merge = scanner._merge_companion_into_primary
+
+        def merge(db, primary, companion, *args, **kwargs):
+            self.merges.append(companion["filename"])
+            return real_merge(db, primary, companion, *args, **kwargs)
+
+        monkeypatch.setattr(scanner, "_merge_companion_into_primary", merge)
+        self.extracted = []
+        real_extract = scanner.extract_metadata
+        # The dummy RAW is 200 null bytes and the JPEG has no EXIF, so a
+        # real exiftool run returns only File-group tags. On runners that
+        # ship no exiftool at all (Windows CI), the result is empty: the
+        # RAW's row then has NULL exif_data and NULL summary columns, which
+        # trips ``metadata_missing`` on the next rescan and sends both the
+        # RAW and its companion back through extraction. Fill in capture
+        # metadata for any path the real extractor leaves uncovered so the
+        # no-churn rescan tests measure the pairing path, not the host's
+        # exiftool availability. Outer monkeypatches that already provide
+        # metadata (e.g. ``test_raw_reread_keeps_metadata_only_its_companion_carries``)
+        # are preserved by using ``setdefault``.
+        default_payload = {
+            "EXIF": {
+                "DateTimeOriginal": "2024:01:15 10:30:00",
+                "Make": "TestCam",
+                "Model": "TestModel",
+            },
+            "Composite": {},
+        }
+
+        def extract(paths, *args, **kwargs):
+            self.extracted.extend(os.path.basename(p) for p in paths)
+            result = dict(real_extract(paths, *args, **kwargs))
+            for path in paths:
+                result.setdefault(path, default_payload)
+            return result
+
+        monkeypatch.setattr(scanner, "extract_metadata", extract)
+        self.callbacks = []
+        self.max_rows = 0
+        self.scan()
+        self.raw_id = self.photo_id("IMG_001.cr3")
+
+    def photo_id(self, filename):
+        row = self.db.conn.execute(
+            "SELECT id FROM photos WHERE filename = ?", (filename,),
+        ).fetchone()
+        return row["id"] if row else None
+
+    def _callback(self, photo_id, path):
+        self.callbacks.append((photo_id, os.path.basename(path)))
+        self.max_rows = max(self.max_rows, self.db.conn.execute(
+            "SELECT COUNT(*) FROM photos").fetchone()[0])
+
+    def scan(self, incremental=True):
+        self.merges.clear()
+        self.extracted.clear()
+        self.callbacks.clear()
+        self.max_rows = 0
+        return self.scanner.scan(
+            str(self.img_dir), self.db, incremental=incremental,
+            vireo_dir=str(self.vireo_dir), thumb_cache_dir=str(self.thumb_dir),
+            photo_callback=self._callback,
+        )
+
+    def seed_raw_caches(self):
+        """The RAW's cached files a re-merge discards."""
+        self.jpeg_variant = self.thumb_dir / f"{self.raw_id}_jpeg.jpg"
+        self.display = self.vireo_dir / "originals" / f"{self.raw_id}.display.jpg"
+        self.jpeg_variant.write_bytes(b"companion thumbnail")
+        self.display.write_bytes(b"display rendition")
+
+    def rows(self):
+        return {
+            r["filename"]: r["companion_path"]
+            for r in self.db.conn.execute(
+                "SELECT filename, companion_path FROM photos")
+        }
+
+    def identity(self):
+        return self.db.conn.execute(
+            "SELECT photo_id, filename, file_size, file_hash, file_mtime"
+            " FROM companion_identities",
+        ).fetchall()
+
+
+@pytest.mark.parametrize("incremental", [True, False])
+def test_rescan_leaves_an_unchanged_companion_in_its_raw(
+    tmp_path, monkeypatch, incremental,
+):
+    """An unchanged companion JPEG is not inserted as a photo and merged
+    back again: no transient row, no merge, the RAW's companion caches
+    survive, and the file reports as cataloged under the RAW."""
+    cat = _PairedCatalog(tmp_path, monkeypatch)
+    cat.seed_raw_caches()
+    max_id = cat.db.conn.execute("SELECT MAX(rowid) FROM photos").fetchone()[0]
+
+    counts = cat.scan(incremental=incremental)
+
+    assert cat.merges == []
+    assert cat.max_rows == 1
+    assert cat.rows() == {"IMG_001.cr3": "IMG_001.jpg"}
+    assert cat.db.conn.execute(
+        "SELECT MAX(rowid) FROM photos").fetchone()[0] == max_id
+    assert cat.jpeg_variant.exists() and cat.display.exists()
+    assert (cat.raw_id, "IMG_001.jpg") in cat.callbacks
+    assert counts["indexed"] == 1
+    assert counts["known_companions"] == 1
+    assert counts["merged_companions"] == 0
+    if incremental:
+        # Size and mtime match the stored identity: the JPEG is not read.
+        assert cat.extracted == []
+
+
+def test_rescan_remerges_a_changed_companion(tmp_path, monkeypatch):
+    """New bytes in the companion still go through the merge, which
+    refreshes the stored identity and drops the RAW's companion thumbnail."""
+    cat = _PairedCatalog(tmp_path, monkeypatch)
+    cat.seed_raw_caches()
+    old_hash = cat.identity()[0]["file_hash"]
+    Image.new("RGB", (240, 120), color="blue").save(cat.jpeg)
+
+    counts = cat.scan()
+
+    assert cat.merges == ["IMG_001.jpg"]
+    assert cat.rows() == {"IMG_001.cr3": "IMG_001.jpg"}
+    identity = cat.identity()[0]
+    assert identity["file_hash"] != old_hash
+    assert identity["file_size"] == cat.jpeg.stat().st_size
+    assert identity["file_mtime"] == cat.jpeg.stat().st_mtime
+    assert not cat.jpeg_variant.exists()
+    assert counts["merged_companions"] == 1
+
+
+def test_rescan_rechecks_a_same_size_companion_with_a_new_mtime(
+    tmp_path, monkeypatch,
+):
+    """Same size, new mtime: the scan hashes it. Different bytes re-merge."""
+    cat = _PairedCatalog(tmp_path, monkeypatch)
+    data = bytearray(cat.jpeg.read_bytes())
+    data[-3] ^= 0xFF  # inside the JPEG, before the EOI marker
+    cat.jpeg.write_bytes(bytes(data))
+    future = time.time() + 60
+    os.utime(cat.jpeg, (future, future))
+
+    cat.scan()
+
+    assert cat.merges == ["IMG_001.jpg"]
+    assert cat.rows() == {"IMG_001.cr3": "IMG_001.jpg"}
+
+
+def test_touched_companion_is_hashed_once_then_skipped(tmp_path, monkeypatch):
+    """A companion whose mtime moved but bytes did not stays in place, and
+    the new mtime is recorded so the next incremental scan doesn't read it.
+    Identities stored before file_mtime existed take the same path."""
+    cat = _PairedCatalog(tmp_path, monkeypatch)
+    future = time.time() + 60
+    os.utime(cat.jpeg, (future, future))
+    # An identity paired before companion mtimes were stored.
+    cat.db.conn.execute("UPDATE companion_identities SET file_mtime = NULL")
+    cat.db.conn.commit()
+
+    cat.scan()
+    assert cat.merges == []
+    assert "IMG_001.jpg" in cat.extracted
+    assert cat.identity()[0]["file_mtime"] == cat.jpeg.stat().st_mtime
+
+    cat.scan()
+    assert cat.merges == []
+    assert cat.extracted == []
+
+
+def test_companion_without_a_stored_identity_remerges_once(tmp_path, monkeypatch):
+    """No identity to compare against: the merge runs and records one, so
+    the following rescan leaves the companion alone."""
+    cat = _PairedCatalog(tmp_path, monkeypatch)
+    cat.db.conn.execute("DELETE FROM companion_identities")
+    cat.db.conn.commit()
+
+    cat.scan()
+    assert cat.merges == ["IMG_001.jpg"]
+    assert len(cat.identity()) == 1
+
+    cat.scan()
+    assert cat.merges == []
+
+
+@pytest.mark.parametrize("incremental", [True, False])
+def test_recovered_changed_companion_synchronizes_before_no_churn(
+    tmp_path, monkeypatch, incremental,
+):
+    import import_dedup
+    import scanner
+
+    changed = False
+
+    def metadata(paths, *args, **kwargs):
+        result = {}
+        for path in paths:
+            result[path] = {
+                "EXIF": {"Make": "Canon", "Model": "EOS R5"},
+                "File": {"ImageWidth": 200, "ImageHeight": 100},
+            }
+            if changed and path.endswith(".jpg"):
+                result[path]["XMP"] = {"Subject": ["Recovered keyword"]}
+        return result
+
+    monkeypatch.setattr(scanner, "extract_metadata", metadata)
+    cat = _PairedCatalog(tmp_path, monkeypatch)
+    cat.seed_raw_caches()
+    Image.new("RGB", (240, 120), color="blue").save(cat.jpeg)
+    changed = True
+    cat.db.conn.execute("DELETE FROM companion_identities")
+    cat.db.conn.commit()
+
+    list(import_dedup.recover_companion_identities(cat.db))
+    # Recovery still provides the byte identity duplicate preview needs.
+    assert cat.identity()[0]["file_hash"] is not None
+    cat.scan(incremental=incremental)
+
+    assert "Recovered keyword" in {
+        keyword["name"] for keyword in cat.db.get_photo_keywords(cat.raw_id)
+    }
+    assert not cat.jpeg_variant.exists() and not cat.display.exists()
+    assert cat.rows() == {"IMG_001.cr3": "IMG_001.jpg"}
+
+    cat.seed_raw_caches()
+    cat.scan()
+    assert cat.merges == []
+    assert cat.extracted == []
+    assert cat.jpeg_variant.exists() and cat.display.exists()
+
+
+@pytest.mark.parametrize("changed_identity", ["folder", "filename", "companion"])
+def test_deferred_companion_fill_does_not_follow_a_reused_photo_id(
+    tmp_path, monkeypatch, changed_identity,
+):
+    """A different writer replaces the owner after its JPEG was processed."""
+    import sqlite3
+
+    import scanner
+
+    cat = _PairedCatalog(tmp_path, monkeypatch)
+    real_refill = scanner._ScanRun._refill_owners_from_companions
+
+    def replace_owner_then_refill(run):
+        assert cat.raw_id in run._pending_companion_fills
+        # A separate connection makes the deletion/insertion a committed
+        # concurrent edit, rather than an uncommitted change in the scan.
+        with sqlite3.connect(cat.vireo_dir / "test.db") as writer:
+            writer.execute("PRAGMA foreign_keys = ON")
+            owner = writer.execute(
+                "SELECT folder_id, filename, companion_path FROM photos WHERE id=?",
+                (cat.raw_id,),
+            ).fetchone()
+            folder, filename, companion = owner
+            if changed_identity == "folder":
+                folder = None
+            elif changed_identity == "filename":
+                filename = "different.cr3"
+            else:
+                companion = "different.jpg"
+            writer.execute("DELETE FROM photos WHERE id=?", (cat.raw_id,))
+            writer.execute(
+                "INSERT INTO photos(id, folder_id, filename, companion_path)"
+                " VALUES (?, ?, ?, ?)",
+                (cat.raw_id, folder, filename, companion),
+            )
+        real_refill(run)
+
+    monkeypatch.setattr(
+        scanner._ScanRun, "_refill_owners_from_companions",
+        replace_owner_then_refill,
+    )
+    cat.scan(incremental=False)
+    row = cat.db.conn.execute(
+        "SELECT camera_make, width, exif_data FROM photos WHERE id=?", (cat.raw_id,),
+    ).fetchone()
+    assert tuple(row) == (None, None, None)
+
+
+def test_pending_companion_fill_is_revalidated_before_owner_metadata_write(
+    tmp_path, monkeypatch,
+):
+    import sqlite3
+
+    import scanner
+
+    def metadata(paths, *args, **kwargs):
+        result = {}
+        for path in paths:
+            exif = {"Make": "Canon", "Model": "EOS R5"}
+            if path.endswith(".jpg"):
+                exif["LensModel"] = "Old owner's JPEG lens"
+            result[path] = {"EXIF": exif}
+        return result
+
+    monkeypatch.setattr(scanner, "extract_metadata", metadata)
+    cat = _PairedCatalog(tmp_path, monkeypatch)
+    # JPEG precedes NEF, so the pending fill is consumed by the RAW write.
+    cat.raw.rename(cat.img_dir / "IMG_001.nef")
+    cat.db.conn.execute(
+        "UPDATE photos SET filename='IMG_001.nef', extension='.nef' WHERE id=?",
+        (cat.raw_id,),
+    )
+    cat.db.conn.commit()
+    real_write = scanner._ScanRun._write_photo_columns
+    replaced = []
+
+    def replace_owner_then_write(run, photo_id, item):
+        if photo_id == cat.raw_id:
+            assert photo_id in run._pending_companion_fills
+            with sqlite3.connect(cat.vireo_dir / "test.db") as writer:
+                writer.execute("PRAGMA foreign_keys = ON")
+                writer.execute("DELETE FROM photos WHERE id=?", (photo_id,))
+                writer.execute(
+                    "INSERT INTO photos(id, filename) VALUES (?, 'replacement.nef')",
+                    (photo_id,),
+                )
+            replaced.append(photo_id)
+        real_write(run, photo_id, item)
+
+    monkeypatch.setattr(scanner._ScanRun, "_write_photo_columns", replace_owner_then_write)
+    cat.scan(incremental=False)
+    assert replaced == [cat.raw_id]
+    assert cat.db.conn.execute(
+        "SELECT lens FROM photos WHERE id=?", (cat.raw_id,),
+    ).fetchone()[0] is None
+
+
+def test_recovered_companion_waits_for_a_readable_scan_before_synchronizing(
+    tmp_path, monkeypatch,
+):
+    import import_dedup
+    import scanner
+
+    cat = _PairedCatalog(tmp_path, monkeypatch)
+    cat.seed_raw_caches()
+    cat.db.conn.execute("DELETE FROM companion_identities")
+    cat.db.conn.commit()
+    list(import_dedup.recover_companion_identities(cat.db))
+    recovered = [tuple(row) for row in cat.identity()]
+    real_features = scanner._compute_file_features
+
+    def unreadable_jpeg(path):
+        phash, file_hash = real_features(path)
+        return (phash, None) if path.endswith(".jpg") else (phash, file_hash)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(scanner, "_compute_file_features", unreadable_jpeg)
+        cat.scan()
+    assert cat.merges == []
+    assert [tuple(row) for row in cat.identity()] == recovered
+    assert cat.jpeg_variant.exists() and cat.display.exists()
+
+    cat.scan()
+    assert cat.merges == ["IMG_001.jpg"]
+    assert not cat.jpeg_variant.exists() and not cat.display.exists()
+    cat.scan()
+    assert cat.merges == []
+
+
+def test_unreadable_companion_keeps_its_stored_identity(tmp_path, monkeypatch):
+    """A companion that cannot be read right now is left in its RAW with the
+    identity a hash vouched for, not re-merged with an unhashed one."""
+    import scanner
+
+    cat = _PairedCatalog(tmp_path, monkeypatch)
+    before = [tuple(r) for r in cat.identity()]
+    future = time.time() + 60
+    os.utime(cat.jpeg, (future, future))
+    real_features = scanner._compute_file_features
+
+    def unreadable_jpeg(path_str):
+        phash, file_hash = real_features(path_str)
+        return (phash, None) if path_str.endswith(".jpg") else (phash, file_hash)
+
+    monkeypatch.setattr(scanner, "_compute_file_features", unreadable_jpeg)
+    counts = cat.scan()
+
+    assert cat.merges == []
+    assert cat.rows() == {"IMG_001.cr3": "IMG_001.jpg"}
+    assert [tuple(r) for r in cat.identity()] == before
+    assert counts["known_companions"] == 1
+
+
+def test_rescan_after_raw_file_deleted_keeps_the_companion_cataloged(
+    tmp_path, monkeypatch,
+):
+    """Scans never prune: with the RAW file gone its row stays (Missing
+    Originals handles it) and still holds the JPEG. Once that row is
+    removed, the next scan catalogs the JPEG as its own photo."""
+    cat = _PairedCatalog(tmp_path, monkeypatch)
+    cat.raw.unlink()
+
+    cat.scan()
+    assert cat.merges == []
+    assert cat.rows() == {"IMG_001.cr3": "IMG_001.jpg"}
+
+    cat.db.conn.execute("DELETE FROM photos WHERE id = ?", (cat.raw_id,))
+    cat.db.conn.commit()
+    counts = cat.scan()
+    assert cat.rows() == {"IMG_001.jpg": None}
+    assert counts["indexed"] == 1
+    assert counts["known_companions"] == 0
+
+
+def test_renamed_companion_is_cataloged_as_its_own_photo(tmp_path, monkeypatch):
+    """The RAW's stored companion name no longer exists; the renamed file is
+    a photo the catalog has not seen, so it gets its own row."""
+    cat = _PairedCatalog(tmp_path, monkeypatch)
+    cat.jpeg.rename(cat.img_dir / "IMG_001_edit.jpg")
+
+    cat.scan()
+
+    assert cat.rows() == {
+        "IMG_001.cr3": "IMG_001.jpg", "IMG_001_edit.jpg": None,
+    }
+
+
+def test_moved_companion_is_cataloged_in_its_new_folder(tmp_path, monkeypatch):
+    """A companion moved into another folder is not that folder's RAW's
+    companion, so it becomes a photo there."""
+    cat = _PairedCatalog(tmp_path, monkeypatch)
+    other = cat.img_dir / "picked"
+    other.mkdir()
+    cat.jpeg.rename(other / "IMG_001.jpg")
+
+    cat.scan()
+
+    rows = cat.db.conn.execute(
+        "SELECT f.path, p.filename, p.companion_path FROM photos p"
+        " JOIN folders f ON f.id = p.folder_id ORDER BY p.filename"
+    ).fetchall()
+    assert [(r["filename"], r["companion_path"]) for r in rows] == [
+        ("IMG_001.cr3", "IMG_001.jpg"), ("IMG_001.jpg", None),
+    ]
+    assert rows[1]["path"] == str(other)
+
+
+def test_changed_companion_remerges_into_its_own_raw_not_a_new_same_stem_raw(
+    tmp_path, monkeypatch,
+):
+    """With a same-stem RAW added since, a changed companion still goes back
+    to the RAW that holds it."""
+    cat = _PairedCatalog(tmp_path, monkeypatch)
+    (cat.img_dir / "IMG_001.arw").write_bytes(b"\x01" * 200)
+    Image.new("RGB", (240, 120), color="blue").save(cat.jpeg)
+
+    cat.scan()
+
+    assert cat.merges == ["IMG_001.jpg"]
+    assert cat.rows() == {"IMG_001.cr3": "IMG_001.jpg", "IMG_001.arw": None}
+
+
+def test_rescan_with_a_second_jpeg_neither_churns_nor_swaps(tmp_path, monkeypatch):
+    """IMG_001.jpeg next to the paired IMG_001.jpg stays its own photo and
+    the paired one stays put, rescan after rescan."""
+    cat = _PairedCatalog(tmp_path, monkeypatch)
+    Image.new("RGB", (300, 100), color="red").save(cat.img_dir / "IMG_001.jpeg")
+    cat.scan()
+    assert cat.rows() == {"IMG_001.cr3": "IMG_001.jpg", "IMG_001.jpeg": None}
+
+    for incremental in (True, False):
+        cat.scan(incremental=incremental)
+        assert cat.merges == []
+        assert cat.rows() == {"IMG_001.cr3": "IMG_001.jpg", "IMG_001.jpeg": None}
+
+
+@pytest.mark.parametrize("incremental", [True, False])
+def test_raw_reread_keeps_metadata_only_its_companion_carries(
+    tmp_path, monkeypatch, incremental,
+):
+    """Re-reading a RAW rewrites its EXIF summary columns from the RAW alone.
+    Columns pairing filled from the JPEG (here: lens) are refilled from the
+    unchanged companion, as the old re-merge did, without re-merging it."""
+    import scanner
+
+    def fake_extract(paths, *args, **kwargs):
+        meta = {}
+        for p in paths:
+            exif = {"Make": "Canon", "Model": "EOS R5"}
+            if p.endswith(".jpg"):
+                exif["LensModel"] = "RF 100-500mm"
+            meta[p] = {"EXIF": exif, "Composite": {},
+                       "File": {"ImageWidth": 200, "ImageHeight": 100}}
+        return meta
+
+    monkeypatch.setattr(scanner, "extract_metadata", fake_extract)
+    cat = _PairedCatalog(tmp_path, monkeypatch)
+    lens = "SELECT lens FROM photos WHERE id = ?"
+    assert cat.db.conn.execute(lens, (cat.raw_id,)).fetchone()[0] == "RF 100-500mm"
+
+    cat.raw.write_bytes(b"\x02" * 300)  # the RAW changed: it is re-read
+    cat.scan(incremental=incremental)
+
+    assert cat.merges == []
+    assert cat.db.conn.execute(lens, (cat.raw_id,)).fetchone()[0] == "RF 100-500mm"
+
+
+@pytest.mark.parametrize("incremental", [True, False])
+def test_raw_reread_companion_refill_survives_interrupted_scan(
+    tmp_path, monkeypatch, incremental,
+):
+    """If a RAW re-read is interrupted after its columns are cleared but
+    before the end-of-scan companion refill runs, the JPEG-only columns
+    (here: lens) are either filled in the same transaction as the clear
+    OR the companion's stored stat is nulled so the next scan is forced
+    to re-read it. Either way the next scan converges — the metadata is
+    never permanently lost until a full rescan.
+    """
+    import scanner
+
+    def fake_extract(paths, *args, **kwargs):
+        meta = {}
+        for p in paths:
+            exif = {"Make": "Canon", "Model": "EOS R5"}
+            if p.endswith(".jpg"):
+                exif["LensModel"] = "RF 100-500mm"
+            meta[p] = {"EXIF": exif, "Composite": {},
+                       "File": {"ImageWidth": 200, "ImageHeight": 100}}
+        return meta
+
+    monkeypatch.setattr(scanner, "extract_metadata", fake_extract)
+    cat = _PairedCatalog(tmp_path, monkeypatch)
+    lens = "SELECT lens FROM photos WHERE id = ?"
+    assert cat.db.conn.execute(lens, (cat.raw_id,)).fetchone()[0] == "RF 100-500mm"
+
+    # Change the RAW's bytes, then interrupt the scan right where the
+    # end-of-scan refill would have run — simulating a cancel or I/O
+    # error between the RAW's clear-to-NULL commit and any flush of
+    # pending companion fills.
+    cat.raw.write_bytes(b"\x02" * 300)
+
+    class _Boom(RuntimeError):
+        pass
+
+    original_refill = scanner._ScanRun._refill_owners_from_companions
+
+    def _boom(self):
+        raise _Boom("simulated interruption after RAW's columns were cleared")
+
+    monkeypatch.setattr(
+        scanner._ScanRun, "_refill_owners_from_companions", _boom,
+    )
+    with pytest.raises(_Boom):
+        cat.scan(incremental=incremental)
+
+    # Resume with the end-of-scan refill restored. If the fix is right,
+    # the lens is either already filled (atomic apply during the
+    # interrupted scan) or will be filled by the companion re-read the
+    # file_mtime=NULL marker forces here.
+    monkeypatch.setattr(
+        scanner._ScanRun, "_refill_owners_from_companions", original_refill,
+    )
+    cat.scan(incremental=incremental)
+    assert cat.merges == []
+    assert cat.db.conn.execute(lens, (cat.raw_id,)).fetchone()[0] == "RF 100-500mm"
+
+
+def test_rescan_keeps_retry_marker_when_companion_metadata_is_missing(
+    tmp_path, monkeypatch,
+):
+    """A rescan that re-reads the RAW but gets no metadata for its
+    companion (an ExifTool transient omission) must leave the companion's
+    ``file_mtime`` NULL so the next incremental scan re-reads it, instead
+    of recording the fresh stat and stat-skipping it forever with the
+    RAW's JPEG-only columns (e.g. ``lens``) left cleared."""
+    import scanner
+
+    def jpeg_populated(paths, *args, **kwargs):
+        meta = {}
+        for p in paths:
+            exif = {"Make": "Canon", "Model": "EOS R5"}
+            if p.endswith(".jpg"):
+                exif["LensModel"] = "RF 100-500mm"
+            meta[p] = {"EXIF": exif, "Composite": {},
+                       "File": {"ImageWidth": 200, "ImageHeight": 100}}
+        return meta
+
+    monkeypatch.setattr(scanner, "extract_metadata", jpeg_populated)
+    cat = _PairedCatalog(tmp_path, monkeypatch)
+    lens = "SELECT lens FROM photos WHERE id = ?"
+    assert cat.db.conn.execute(lens, (cat.raw_id,)).fetchone()[0] == "RF 100-500mm"
+
+    # Change the RAW so it is re-read (which clears the owner's JPEG-only
+    # columns and nulls the companion's stored mtime), and simulate the
+    # metadata read dropping the companion from the result.
+    cat.raw.write_bytes(b"\x02" * 300)
+
+    def jpeg_omitted(paths, *args, **kwargs):
+        return {
+            p: {"EXIF": {"Make": "Canon", "Model": "EOS R5"},
+                "Composite": {},
+                "File": {"ImageWidth": 200, "ImageHeight": 100}}
+            for p in paths if not p.endswith(".jpg")
+        }
+
+    monkeypatch.setattr(scanner, "extract_metadata", jpeg_omitted)
+    cat.scan(incremental=True)
+    assert cat.merges == []
+    # The companion's file_mtime must stay NULL so the next incremental
+    # scan re-reads it; otherwise ``lens`` would be stat-skipped forever.
+    assert cat.identity()[0]["file_mtime"] is None
+
+    # Restore the companion's metadata and rescan. The retry marker drove
+    # a re-read, so the gap fill now runs and ``lens`` is back.
+    monkeypatch.setattr(scanner, "extract_metadata", jpeg_populated)
+    cat.scan(incremental=True)
+    assert cat.db.conn.execute(lens, (cat.raw_id,)).fetchone()[0] == "RF 100-500mm"
+
+
+def test_rescan_records_companion_mtime_when_owner_is_unchanged(
+    tmp_path, monkeypatch,
+):
+    """An unchanged owner means ``_write_photo_columns`` never cleared
+    JPEG-only columns, so recording the fresh companion ``file_mtime``
+    is safe even when metadata was transiently empty for the companion:
+    the next incremental scan can stat-skip it with no refill owed."""
+    import scanner
+
+    cat = _PairedCatalog(tmp_path, monkeypatch)
+
+    future = time.time() + 60
+    os.utime(cat.jpeg, (future, future))
+
+    def jpeg_omitted(paths, *args, **kwargs):
+        return {
+            p: {"EXIF": {}, "Composite": {},
+                "File": {"ImageWidth": 200, "ImageHeight": 100}}
+            for p in paths if not p.endswith(".jpg")
+        }
+
+    monkeypatch.setattr(scanner, "extract_metadata", jpeg_omitted)
+    cat.scan(incremental=True)
+    assert cat.merges == []
+    assert cat.identity()[0]["file_mtime"] == cat.jpeg.stat().st_mtime
+
+
+def test_consecutive_rescans_preserve_retry_marker_when_metadata_missing(
+    tmp_path, monkeypatch,
+):
+    """A pre-existing NULL ``file_mtime`` (retry marker set by an earlier
+    scan whose RAW re-read cleared JPEG-only columns while the companion
+    was transiently omitted) must survive a later scan whose owner RAW
+    is now *unchanged*. Without the fix, that later scan recorded the
+    current mtime because ``owner_id`` was no longer in
+    ``reprocessed_row_ids``, which stat-skipped the companion forever
+    and left ``lens`` (and other JPEG-only columns) empty until a full
+    rescan or a filesystem touch."""
+    import scanner
+
+    def jpeg_populated(paths, *args, **kwargs):
+        meta = {}
+        for p in paths:
+            exif = {"Make": "Canon", "Model": "EOS R5"}
+            if p.endswith(".jpg"):
+                exif["LensModel"] = "RF 100-500mm"
+            meta[p] = {"EXIF": exif, "Composite": {},
+                       "File": {"ImageWidth": 200, "ImageHeight": 100}}
+        return meta
+
+    monkeypatch.setattr(scanner, "extract_metadata", jpeg_populated)
+    cat = _PairedCatalog(tmp_path, monkeypatch)
+    lens = "SELECT lens FROM photos WHERE id = ?"
+    assert cat.db.conn.execute(lens, (cat.raw_id,)).fetchone()[0] == "RF 100-500mm"
+
+    # Scan 1: change RAW and drop JPEG from metadata — the retry marker
+    # (file_mtime=NULL) is set because JPEG-only columns got cleared and
+    # the companion refill could not run.
+    cat.raw.write_bytes(b"\x02" * 300)
+
+    def jpeg_omitted(paths, *args, **kwargs):
+        return {
+            p: {"EXIF": {"Make": "Canon", "Model": "EOS R5"},
+                "Composite": {},
+                "File": {"ImageWidth": 200, "ImageHeight": 100}}
+            for p in paths if not p.endswith(".jpg")
+        }
+
+    monkeypatch.setattr(scanner, "extract_metadata", jpeg_omitted)
+    cat.scan(incremental=True)
+    assert cat.identity()[0]["file_mtime"] is None  # marker set
+
+    # Scan 2: owner RAW is now unchanged, but ExifTool still omits the
+    # JPEG. The marker must survive — advancing the mtime would strand
+    # ``lens`` NULL forever.
+    cat.scan(incremental=True)
+    assert cat.identity()[0]["file_mtime"] is None  # marker preserved
+    assert cat.db.conn.execute(lens, (cat.raw_id,)).fetchone()[0] is None
+
+    # Scan 3: metadata restored. The NULL marker drove a re-read and the
+    # gap fill now runs; ``lens`` recovers without a full rescan.
+    monkeypatch.setattr(scanner, "extract_metadata", jpeg_populated)
+    cat.scan(incremental=True)
+    assert cat.db.conn.execute(lens, (cat.raw_id,)).fetchone()[0] == "RF 100-500mm"
+    assert cat.identity()[0]["file_mtime"] == cat.jpeg.stat().st_mtime
+
+
+def test_full_rescan_preserves_retry_marker_when_metadata_missing(
+    tmp_path, monkeypatch,
+):
+    """A full rescan whose RAW re-read cleared JPEG-only columns while
+    the companion was transiently omitted must leave the companion's
+    ``file_mtime`` NULL. ``reprocessed_row_ids`` is populated only by
+    the incremental pre-pass, so without the fix a full rescan branch
+    recorded the fresh mtime even though the clear happened — and the
+    next incremental scan then stat-skipped the companion forever."""
+    import scanner
+
+    def jpeg_populated(paths, *args, **kwargs):
+        meta = {}
+        for p in paths:
+            exif = {"Make": "Canon", "Model": "EOS R5"}
+            if p.endswith(".jpg"):
+                exif["LensModel"] = "RF 100-500mm"
+            meta[p] = {"EXIF": exif, "Composite": {},
+                       "File": {"ImageWidth": 200, "ImageHeight": 100}}
+        return meta
+
+    monkeypatch.setattr(scanner, "extract_metadata", jpeg_populated)
+    cat = _PairedCatalog(tmp_path, monkeypatch)
+    lens = "SELECT lens FROM photos WHERE id = ?"
+    assert cat.db.conn.execute(lens, (cat.raw_id,)).fetchone()[0] == "RF 100-500mm"
+
+    cat.raw.write_bytes(b"\x02" * 300)
+
+    def jpeg_omitted(paths, *args, **kwargs):
+        return {
+            p: {"EXIF": {"Make": "Canon", "Model": "EOS R5"},
+                "Composite": {},
+                "File": {"ImageWidth": 200, "ImageHeight": 100}}
+            for p in paths if not p.endswith(".jpg")
+        }
+
+    monkeypatch.setattr(scanner, "extract_metadata", jpeg_omitted)
+    cat.scan(incremental=False)
+    assert cat.merges == []
+    assert cat.identity()[0]["file_mtime"] is None  # marker set, no stat-skip
+
+
+def test_rescan_imports_differing_stem_companion_sidecar(
+    tmp_path, monkeypatch,
+):
+    """A paired JPEG whose stem differs from its RAW's (an intentionally
+    renamed companion) has its own ``<stem>.xmp`` sidecar. The RAW's
+    own-sidecar handling doesn't cover it, so new keywords in that
+    sidecar must still land on the RAW's row — otherwise rescans skip
+    them silently once the pair is cataloged. Covers both the
+    incremental stat-unchanged credit path and the full-scan
+    ``_keep_known_companion`` path."""
+    from xmp import write_sidecar
+
+    cat = _PairedCatalog(tmp_path, monkeypatch)
+    # Re-key the pair so the companion has a different stem from the RAW
+    # (``_pair_raw_jpeg_companions`` only pairs same-stem groups, so
+    # synthesize a user-renamed companion by relocating the file and
+    # updating the catalog to match).
+    other = cat.img_dir / "CAMERA_OTHER.jpg"
+    cat.jpeg.rename(other)
+    cat.jpeg = other
+    cat.db.conn.execute(
+        "UPDATE photos SET companion_path = ? WHERE id = ?",
+        ("CAMERA_OTHER.jpg", cat.raw_id),
+    )
+    cat.db.conn.execute(
+        "UPDATE companion_identities SET filename = ? WHERE photo_id = ?",
+        ("CAMERA_OTHER.jpg", cat.raw_id),
+    )
+    cat.db.conn.commit()
+
+    # The RAW already has IMG_001.cr3 as a photo row, so its own-stem
+    # ``IMG_001.xmp`` would be handled anyway. Verify the owner starts
+    # with no custom keyword.
+    def keyword_names():
+        return {
+            row["name"] for row in cat.db.conn.execute(
+                "SELECT k.name FROM photo_keywords pk"
+                " JOIN keywords k ON k.id = pk.keyword_id"
+                " WHERE pk.photo_id = ?",
+                (cat.raw_id,),
+            )
+        }
+
+    assert "Robin" not in keyword_names()
+
+    # Add a sidecar beside the renamed companion whose stem no part of
+    # the RAW's handling can discover on its own.
+    write_sidecar(
+        str(cat.img_dir / "CAMERA_OTHER.xmp"),
+        flat_keywords={"Robin"},
+        hierarchical_keywords=set(),
+    )
+
+    # Incremental: the stat-unchanged credit path owns propagation here.
+    cat.scan(incremental=True)
+    assert cat.merges == []
+    assert "Robin" in keyword_names()
+
+    # Change the companion's sidecar and rescan via the full-scan path
+    # (which routes through ``_keep_known_companion``). The new keyword
+    # must reach the owner too.
+    write_sidecar(
+        str(cat.img_dir / "CAMERA_OTHER.xmp"),
+        flat_keywords={"Robin", "Sparrow"},
+        hierarchical_keywords=set(),
+    )
+    cat.scan(incremental=False)
+    assert cat.merges == []
+    assert {"Robin", "Sparrow"} <= keyword_names()
+
+
+@pytest.mark.parametrize("incremental", [True, False])
+@pytest.mark.parametrize("owner_missing", [True, False])
+def test_companion_imports_shared_sidecar_when_raw_is_not_scanned(
+    tmp_path, monkeypatch, incremental, owner_missing,
+):
+    """A missing RAW or JPEG-only snapshot cannot import the shared XMP."""
+    from xmp import write_sidecar
+
+    cat = _PairedCatalog(tmp_path, monkeypatch)
+    identity_hash = cat.identity()[0]["file_hash"]
+    if owner_missing:
+        cat.raw.unlink()
+
+    def rescan():
+        cat.merges.clear()
+        cat.extracted.clear()
+        cat.scanner.scan(
+            str(cat.img_dir), cat.db, incremental=incremental,
+            vireo_dir=str(cat.vireo_dir), thumb_cache_dir=str(cat.thumb_dir),
+            photo_callback=cat._callback,
+            discovered_files=None if owner_missing else [str(cat.jpeg)],
+        )
+        assert cat.merges == []
+        assert cat.rows() == {"IMG_001.cr3": "IMG_001.jpg"}
+        assert cat.identity()[0]["file_hash"] == identity_hash
+        assert cat.raw.name not in cat.extracted
+        if incremental:
+            assert cat.extracted == []
+        return {k["name"] for k in cat.db.get_photo_keywords(cat.raw_id)}
+
+    sidecar = str(cat.jpeg.with_suffix(".xmp"))
+    write_sidecar(
+        sidecar, flat_keywords={"Companion sidecar"},
+        hierarchical_keywords=set(),
+    )
+    assert "Companion sidecar" in rescan()
+
+    write_sidecar(
+        sidecar, flat_keywords={"Companion sidecar", "Later keyword"},
+        hierarchical_keywords=set(),
+    )
+    assert {"Companion sidecar", "Later keyword"} <= rescan()
+
+
+@pytest.mark.parametrize("incremental", [True, False])
+def test_companion_imports_shared_sidecar_when_raw_vanishes_mid_scan(
+    tmp_path, monkeypatch, incremental,
+):
+    """A same-stem RAW discovered then deleted before the pre-pass or
+    indexing step is classified as vanished, so no RAW handler runs its
+    shared XMP; the companion must import that sidecar instead. The
+    discovered set alone cannot tell "RAW is handling it" from "RAW
+    was discovered but never processed", so the gate re-checks the RAW
+    on disk."""
+    from xmp import write_sidecar
+
+    cat = _PairedCatalog(tmp_path, monkeypatch)
+    identity_hash = cat.identity()[0]["file_hash"]
+    sidecar = str(cat.jpeg.with_suffix(".xmp"))
+    write_sidecar(
+        sidecar, flat_keywords={"Vanished RAW keyword"},
+        hierarchical_keywords=set(),
+    )
+
+    # Delete the RAW at the discovery/pre-pass seam so it stays in
+    # ``_discovered_image_paths`` but vanishes before any handler touches
+    # it. ``progress_callback(current, total)`` fires at exactly that
+    # seam (see ``test_scan_counts_report_indexed_not_discovered``).
+    def vanish_raw_after_discovery(current, total):
+        if current == 0 and cat.raw.exists():
+            cat.raw.unlink()
+
+    cat.merges.clear()
+    cat.extracted.clear()
+    cat.callbacks.clear()
+    result = cat.scanner.scan(
+        str(cat.img_dir), cat.db, incremental=incremental,
+        vireo_dir=str(cat.vireo_dir), thumb_cache_dir=str(cat.thumb_dir),
+        photo_callback=cat._callback,
+        progress_callback=vanish_raw_after_discovery,
+    )
+
+    assert result["vanished"] == 1
+    # The RAW row and its paired companion identity still vouch for the
+    # JPEG; Missing Originals owns the orphaned RAW.
+    assert cat.merges == []
+    assert cat.rows() == {"IMG_001.cr3": "IMG_001.jpg"}
+    assert cat.identity()[0]["file_hash"] == identity_hash
+    # New keywords in the shared sidecar must land on the RAW's row.
+    assert "Vanished RAW keyword" in {
+        k["name"] for k in cat.db.get_photo_keywords(cat.raw_id)
+    }
+
+    # A later edit of the same sidecar must also propagate.
+    write_sidecar(
+        sidecar,
+        flat_keywords={"Vanished RAW keyword", "Later keyword"},
+        hierarchical_keywords=set(),
+    )
+    cat.merges.clear()
+    cat.extracted.clear()
+    cat.callbacks.clear()
+    cat.scanner.scan(
+        str(cat.img_dir), cat.db, incremental=incremental,
+        vireo_dir=str(cat.vireo_dir), thumb_cache_dir=str(cat.thumb_dir),
+        photo_callback=cat._callback,
+    )
+    assert cat.merges == []
+    assert {"Vanished RAW keyword", "Later keyword"} <= {
+        k["name"] for k in cat.db.get_photo_keywords(cat.raw_id)
+    }
+
+
+def test_stat_unchanged_companion_settle_discards_stale_credit_after_owner_mutation(
+    tmp_path, monkeypatch,
+):
+    """``_needs_processing`` caches the owner lookup; by the time
+    ``_settle_stat_unchanged_companions`` runs, another connection may
+    have deleted the owner row and SQLite may have reused that id for
+    a different photo in another folder. Without ownership
+    revalidation, the settle imports the companion's XMP keywords
+    into the replacement row and reports its path to the pipeline
+    under the reused id. The lock around
+    (folder_id, filename, companion_path) makes the stale credit
+    discard: no XMP keyword lands on a mutated row and no callback
+    fires with the companion's path under the stale id.
+
+    The companion is given a differing stem so its sidecar is
+    not shared with the RAW's own-sidecar handling — that handling
+    would import the same keyword via ``_reuse_existing_row`` and
+    mask the settle path's behavior. The sidecar path for differing
+    stems is the one the P1 finding and the lock cover.
+    """
+    import scanner
+    from xmp import write_sidecar
+
+    cat = _PairedCatalog(tmp_path, monkeypatch)
+    # Rename the paired JPEG so its stem differs from the RAW's. The
+    # RAW's own ``IMG_001.xmp`` handling now has no bearing on
+    # ``CAMERA_OTHER.xmp``, which only the settle path imports.
+    other = cat.img_dir / "CAMERA_OTHER.jpg"
+    cat.jpeg.rename(other)
+    cat.jpeg = other
+    cat.db.conn.execute(
+        "UPDATE photos SET companion_path = ? WHERE id = ?",
+        ("CAMERA_OTHER.jpg", cat.raw_id),
+    )
+    cat.db.conn.execute(
+        "UPDATE companion_identities SET filename = ? WHERE photo_id = ?",
+        ("CAMERA_OTHER.jpg", cat.raw_id),
+    )
+    cat.db.conn.commit()
+    sidecar = str(cat.img_dir / "CAMERA_OTHER.xmp")
+    write_sidecar(
+        sidecar, flat_keywords={"Companion keyword"},
+        hierarchical_keywords=set(),
+    )
+
+    real_settle = scanner._ScanRun._settle_stat_unchanged_companions
+    races = {"ran": False}
+
+    def race_overlay(self, files_to_process):
+        # Only mutate once, and only when the pre-pass has actually
+        # cached a stat-unchanged companion (not during warm-up or
+        # probe scans).
+        if not self.stat_unchanged_companions or races["ran"]:
+            return real_settle(self, files_to_process)
+        races["ran"] = True
+        # Simulate the race: a concurrent connection replaced the
+        # owner row (deletion + id reuse). The row's filename no
+        # longer matches what the pre-pass cached, so the ownership
+        # lock must now fail.
+        self.db.conn.execute(
+            "UPDATE photos SET filename = 'RECYCLED.cr3',"
+            " companion_path = NULL WHERE id = ?",
+            (cat.raw_id,),
+        )
+        self.db.conn.execute(
+            "DELETE FROM companion_identities WHERE photo_id = ?",
+            (cat.raw_id,),
+        )
+        self.db.conn.commit()
+        return real_settle(self, files_to_process)
+
+    monkeypatch.setattr(
+        scanner._ScanRun, "_settle_stat_unchanged_companions",
+        race_overlay,
+    )
+    cat.merges.clear()
+    cat.extracted.clear()
+    cat.callbacks.clear()
+    cat.scanner.scan(
+        str(cat.img_dir), cat.db, incremental=True,
+        vireo_dir=str(cat.vireo_dir), thumb_cache_dir=str(cat.thumb_dir),
+        photo_callback=cat._callback,
+    )
+    assert races["ran"]
+
+    # The replacement row (same id, different identity) must NOT
+    # receive the companion's XMP keywords.
+    row_keywords = {
+        k["name"] for k in cat.db.get_photo_keywords(cat.raw_id)
+    }
+    assert "Companion keyword" not in row_keywords
+
+    # The pipeline must not see the companion's path reported under
+    # the stale id — that would feed the replacement row into the
+    # thumbnail queue and the pipeline's collection as if it were the
+    # paired JPEG.
+    assert (cat.raw_id, "CAMERA_OTHER.jpg") not in cat.callbacks
+
+
+@pytest.mark.parametrize(
+    "boundary", ["stat-settle", "before-sidecar", "after-sidecar", "keyword-created"],
+)
+def test_companion_keywords_and_credit_keep_the_same_owner_through_commits(
+    tmp_path, monkeypatch, boundary,
+):
+    """Normal deletion on another connection must not redirect an import."""
+    import sqlite3
+
+    import scanner
+    from db import Database
+    from xmp import write_sidecar
+
+    cat = _PairedCatalog(tmp_path, monkeypatch)
+    other = cat.img_dir / "OTHER.jpg"
+    cat.jpeg.rename(other)
+    cat.db.conn.execute(
+        "UPDATE photos SET companion_path=? WHERE id=?", (other.name, cat.raw_id),
+    )
+    cat.db.conn.execute(
+        "UPDATE companion_identities SET filename=? WHERE photo_id=?",
+        (other.name, cat.raw_id),
+    )
+    cat.db.conn.commit()
+    write_sidecar(
+        str(other.with_suffix(".xmp")), flat_keywords={"Ownership keyword"},
+        hierarchical_keywords=set(),
+    )
+    evidence = {"attempted": False, "replaced": False, "blocked": False}
+
+    with Database(str(cat.vireo_dir / "test.db")) as writer:
+        writer.conn.execute("PRAGMA busy_timeout=0")
+
+        def replace_owner():
+            assert not evidence["attempted"]
+            evidence["attempted"] = True
+            try:
+                writer.delete_photos([cat.raw_id])
+                replacement = writer.add_photo(None, "unrelated.jpg", ".jpg", 200, None)
+                assert replacement == cat.raw_id
+                evidence["replaced"] = True
+            except sqlite3.OperationalError as error:
+                assert "locked" in str(error).lower()
+                writer.conn.rollback()
+                evidence["blocked"] = True
+
+        if boundary == "stat-settle":
+            original = scanner._ScanRun._settle_stat_unchanged_companions
+
+            def settle(run, files):
+                assert run.stat_unchanged_companions
+                replace_owner()
+                return original(run, files)
+
+            monkeypatch.setattr(scanner._ScanRun, "_settle_stat_unchanged_companions", settle)
+        elif boundary in {"before-sidecar", "after-sidecar"}:
+            original = scanner._ScanRun._import_companion_sidecar
+
+            def sidecar(run, path, known):
+                if boundary == "before-sidecar":
+                    replace_owner()
+                result = original(run, path, known)
+                if boundary == "after-sidecar":
+                    replace_owner()
+                return result
+
+            monkeypatch.setattr(scanner._ScanRun, "_import_companion_sidecar", sidecar)
+        else:
+            original = cat.db.add_keyword
+
+            def add_keyword(name, *args, **kwargs):
+                keyword = original(name, *args, **kwargs)
+                replace_owner()
+                return keyword
+
+            monkeypatch.setattr(cat.db, "add_keyword", add_keyword)
+
+        counts = cat.scan(incremental=boundary == "stat-settle")
+        assert evidence["attempted"]
+        keywords = {keyword["name"] for keyword in cat.db.get_photo_keywords(cat.raw_id)}
+        companion_callback = (cat.raw_id, other.name)
+        if evidence["replaced"]:
+            assert "Ownership keyword" not in keywords
+            assert companion_callback not in cat.callbacks
+            # The JPEG still exists: retry against fresh state catalogs
+            # it as itself, without losing the scan's disposition.
+            assert cat.photo_id(other.name) != cat.raw_id
+            assert cat.photo_id(other.name) is not None
+            assert "Ownership keyword" in {
+                keyword["name"]
+                for keyword in cat.db.get_photo_keywords(cat.photo_id(other.name))
+            }
+            assert counts["indexed"] == counts["discovered"]
+        else:
+            assert evidence["blocked"]
+            assert "Ownership keyword" in keywords
+            assert companion_callback in cat.callbacks
+            assert cat.rows() == {"IMG_001.cr3": "OTHER.jpg"}
+
+
+@pytest.mark.parametrize("incremental", [True, False])
+def test_jpeg_first_shared_sidecar_survives_later_raw_disappearance(
+    tmp_path, monkeypatch, incremental,
+):
+    import scanner
+    from xmp import write_sidecar
+
+    cat = _PairedCatalog(tmp_path, monkeypatch)
+    raw = cat.img_dir / "IMG_001.nef"
+    cat.raw.rename(raw)
+    cat.raw = raw
+    cat.db.conn.execute(
+        "UPDATE photos SET filename='IMG_001.nef', extension='.nef' WHERE id=?",
+        (cat.raw_id,),
+    )
+    cat.db.conn.commit()
+    future = time.time() + 60
+    os.utime(raw, (future, future))
+    original_triage = scanner._ScanRun._triage_files
+    original_index = scanner._ScanRun._index_file
+
+    def sidecar_after_triage(run):
+        files = original_triage(run)
+        assert raw in files
+        write_sidecar(
+            str(cat.jpeg.with_suffix(".xmp")), flat_keywords={"Late vanished RAW"},
+            hierarchical_keywords=set(),
+        )
+        return files
+
+    def vanish_when_raw_indexes(run, path, *args):
+        if path == raw:
+            assert run.counts["known_companions"] == 1
+            raw.unlink()
+        return original_index(run, path, *args)
+
+    monkeypatch.setattr(scanner._ScanRun, "_triage_files", sidecar_after_triage)
+    monkeypatch.setattr(scanner._ScanRun, "_index_file", vanish_when_raw_indexes)
+    counts = cat.scan(incremental=incremental)
+
+    assert counts["vanished"] == 1
+    assert cat.merges == []
+    assert cat.rows() == {"IMG_001.nef": "IMG_001.jpg"}
+    assert "Late vanished RAW" in {
+        keyword["name"] for keyword in cat.db.get_photo_keywords(cat.raw_id)
+    }
 
 
 def test_scan_late_arriving_raw_pairs_with_existing_jpeg(tmp_path):
@@ -7820,3 +9053,66 @@ def test_startup_species_thread_runs_embedded_keyword_backfill_first(tmp_path, m
     tasks.mark_species()
 
     assert order == [{"Heron"}]
+
+
+@pytest.mark.parametrize("mode", ["full", "incremental-touched", "incremental-retry"])
+def test_unchanged_companion_recovers_embedded_keywords_without_churn(
+    tmp_path, monkeypatch, mode,
+):
+    """A later complete extraction recovers tags missed during initial pairing."""
+    import scanner
+
+    cat = _PairedCatalog(tmp_path, monkeypatch)
+    cat.seed_raw_caches()
+    assert cat.db.get_photo_keywords(cat.raw_id) == []
+    original_identity = dict(cat.identity()[0])
+    extract = scanner.extract_metadata
+
+    def complete_extract(paths, *args, **kwargs):
+        result = dict(extract(paths, *args, **kwargs))
+        for path in paths:
+            if str(path) == str(cat.jpeg):
+                payload = dict(result.get(path) or {})
+                payload["XMP"] = {
+                    "Subject": ["Recovered bird"],
+                    "HierarchicalSubject": ["Birds|Recovered bird"],
+                }
+                result[path] = payload
+        return result
+
+    monkeypatch.setattr(scanner, "extract_metadata", complete_extract)
+    if mode == "incremental-touched":
+        stat = cat.jpeg.stat()
+        os.utime(cat.jpeg, (stat.st_atime, stat.st_mtime + 3))
+    elif mode == "incremental-retry":
+        cat.db.conn.execute(
+            "UPDATE companion_identities SET file_mtime=NULL WHERE photo_id=?",
+            (cat.raw_id,),
+        )
+        cat.db.conn.commit()
+
+    counts = cat.scan(incremental=mode != "full")
+
+    assert {kw["name"] for kw in cat.db.get_photo_keywords(cat.raw_id)} == {
+        "Recovered bird",
+    }
+    assert cat.db.get_embedded_keyword_offered_keys(cat.raw_id) == {
+        "recovered bird", "birds|recovered bird",
+    }
+    assert cat.rows() == {cat.raw.name: cat.jpeg.name}
+    assert cat.identity()[0]["file_hash"] == original_identity["file_hash"]
+    assert cat.identity()[0]["file_mtime"] == cat.jpeg.stat().st_mtime
+    assert counts["known_companions"] == 1
+    assert counts["merged_companions"] == 0 and cat.merges == []
+    assert cat.max_rows == 1
+    assert cat.jpeg_variant.exists() and cat.display.exists()
+
+    # Once the user removes these offered tags, even a full re-extraction
+    # must respect the durable suppression, without needing a pending queue.
+    for keyword in cat.db.get_photo_keywords(cat.raw_id):
+        cat.db.untag_photo(cat.raw_id, keyword["id"])
+    assert cat.db.get_pending_keyword_removal_keys(cat.raw_id) == set()
+    cat.scan(incremental=False)
+    assert cat.db.get_photo_keywords(cat.raw_id) == []
+    assert cat.merges == []
+    assert cat.jpeg_variant.exists() and cat.display.exists()

@@ -41,7 +41,7 @@ def app_and_db(tmp_path, monkeypatch):
     return app, db, ws_id, tmp_path
 
 
-def _post_snapshot_until_ready(client, timeout=5.0):
+def _post_snapshot_until_ready(client, timeout=15.0):
     """POST the snapshot endpoint until the background walk has landed.
 
     A cold-cache POST kicks off the walk and answers 200 only when it finishes
@@ -50,6 +50,11 @@ def _post_snapshot_until_ready(client, timeout=5.0):
     demands 200 from a single POST is really asserting the runner is fast.
     Repeat POSTs coalesce onto the in-flight walk, so polling never spawns a
     second compute, and the 202 path has tests of its own.
+
+    The default budget is generous because the Windows full-suite runs this
+    file with ``-n auto`` (eight xdist workers) and has been seen to leave
+    small walks sitting past the fast-path wait for several seconds under
+    load. Normal passes still return in well under a second.
     """
     deadline = time.monotonic() + timeout
     resp = None
