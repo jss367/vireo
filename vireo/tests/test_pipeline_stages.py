@@ -264,3 +264,73 @@ def test_on_scanned_photo_leaves_matching_basename_alone():
     assert enqueued == [(42, "/root/elsewhere/IMG_001.cr3")]
     # Basename matched; folder lookup is skipped.
     assert folder_lookups == []
+
+
+def test_scan_resets_dedup_set_between_invocations():
+    """SQLite reuses the ids of rows deleted by RAW/JPEG pairing (the
+    transient JPEG row of a new RAW/JPEG pair whose RAW extension sorts
+    before ``.jpg`` becomes the maximum rowid, then pairing deletes it
+    after the JPEG's callback fired). ``_scan_in_place`` iterates sources
+    with one ``do_scan`` call per source, so if the ``_reported_photo_ids``
+    dedup set persisted across invocations, the next source's genuinely
+    new photo would be dropped by dedup when SQLite reused the same id —
+    it would appear in neither ``collected_photo_ids`` nor the thumbnail
+    queue. ``_scan`` resets the dedup set per scanner invocation."""
+    from types import SimpleNamespace
+
+    from pipeline_stages.scanning import _ScanPass
+
+    enqueued = []
+    collected = []
+    scan_step = {"count": 0}
+
+    run = SimpleNamespace(
+        stages={"scan": scan_step},
+        job={"id": "pipeline-1"},
+        runner=SimpleNamespace(update_step=lambda *a, **k: None),
+        control=SimpleNamespace(
+            should_abort=lambda _a: False,
+            cancellation_requested=lambda: False,
+        ),
+        abort=SimpleNamespace(set=lambda: None, is_set=lambda: False),
+    )
+
+    scan = _ScanPass(
+        run,
+        sentinel=object(),
+        filter_excluded=lambda *_a, **_k: None,
+        find_broken_metadata_folders=lambda *_a, **_k: [],
+        missing_archive_mount_root=lambda *_a, **_k: None,
+        put_scan_item=enqueued.append,
+        collected_photo_ids=collected,
+        effective_thumb_cache_dir=None,
+        effective_vireo_dir=None,
+        final_destination=None,
+        missing_originals_invalidator=None,
+        remote_archive=None,
+        skip_scan=False,
+        snapshot_paths=None,
+    )
+    scan.pipeline_cfg = {}
+    scan.thread_db = SimpleNamespace(
+        get_photo_filenames=lambda ids: {},
+        get_folder=lambda folder_id: None,
+    )
+
+    def do_scan_a(root, db, **kwargs):
+        kwargs["photo_callback"](42, "/A/IMG_001.jpg")
+    def do_scan_b(root, db, **kwargs):
+        # SQLite reuses id 42 for a new photo in the next source.
+        kwargs["photo_callback"](42, "/B/IMG_002.jpg")
+
+    scan.do_scan = do_scan_a
+    scan._scan("/A", photo_callback=scan._on_scanned_photo)
+    scan.do_scan = do_scan_b
+    scan._scan("/B", photo_callback=scan._on_scanned_photo)
+
+    assert collected == [42, 42]
+    assert enqueued == [
+        (42, "/A/IMG_001.jpg"),
+        (42, "/B/IMG_002.jpg"),
+    ]
+    assert scan_step["count"] == 2

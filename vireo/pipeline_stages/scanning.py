@@ -188,7 +188,11 @@ class _ScanPass:
         # item for it. Without this, the thumbnail stage would process
         # the same photo twice — whichever path sorts first would win
         # the shared ``{owner_id}.jpg`` output — and the generated
-        # pipeline collection would carry duplicate ids.
+        # pipeline collection would carry duplicate ids. ``_scan``
+        # resets this set at the start of every scanner invocation,
+        # scoping dedup to one pass so SQLite's reuse of a deleted
+        # transient JPEG row id in the next source does not drop a
+        # genuinely new photo's callback.
         self._reported_photo_ids: set = set()
 
         # Collect the scan roots actually fed to do_scan so the finally
@@ -435,6 +439,17 @@ class _ScanPass:
 
     def _scan(self, root, **kwargs):
         """Run scanner.scan with the callbacks and settings every scan shares."""
+        # Scope the callback-id dedup set to one scanner invocation. SQLite
+        # reuses the ids of deleted rows, and a new RAW/JPEG pair's pairing
+        # pass deletes the transient JPEG row after its _on_scanned_photo
+        # callback has already added that id to the set. On the next
+        # scanner invocation (``_scan_in_place`` iterates sources, one
+        # do_scan per source), a reused id would be dropped by dedup and
+        # miss both collected_photo_ids and the thumbnail queue. A single
+        # scanner pass never reuses an id itself (pairing runs at the end),
+        # so clearing per-invocation keeps the pair/companion dedup inside
+        # one pass intact.
+        self._reported_photo_ids.clear()
         self.do_scan(
             root, self.thread_db,
             progress_callback=self._on_scan_progress,

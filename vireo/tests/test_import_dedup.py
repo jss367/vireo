@@ -537,3 +537,31 @@ def test_recovered_companion_is_a_duplicate(tmp_path):
     assert DuplicateChecker(CatalogIndex.from_db(db)).match(copy) is not None
     assert _identity_count(db) == 2
     db.close()
+
+
+def test_recovered_companion_leaves_file_mtime_null(tmp_path):
+    """Recovery hashes current bytes but does not read their metadata,
+    import embedded sidecar keywords, or invalidate the owner RAW's
+    companion-derived caches. Storing the current mtime together with
+    the fresh hash would stat-skip the companion forever on incremental
+    scans (``scanner._companion_stat_unchanged`` passes when size+mtime
+    match) and let a full scan accept the recovered hash as unchanged.
+    If the JPEG was edited between the original pairing and this
+    recovery, the owner's EXIF columns are stale; the companion must
+    stay flagged for the scanner to re-read and run its own
+    synchronization. Leaving ``file_mtime`` NULL fails the
+    stat-unchanged check and forces that re-read."""
+    db, _ = _seed_paired_catalog(tmp_path, 2)
+
+    assert list(import_dedup.recover_companion_identities(db)) == [(2, 2)]
+    rows = db.conn.execute(
+        "SELECT photo_id, file_hash, file_mtime FROM companion_identities"
+        " ORDER BY photo_id"
+    ).fetchall()
+    assert len(rows) == 2
+    # Hash is kept so the duplicate-identity preview still recognizes
+    # a paired JPEG copied onto a new card.
+    assert all(row["file_hash"] is not None for row in rows)
+    # file_mtime stays NULL so the next scan re-reads and re-syncs.
+    assert all(row["file_mtime"] is None for row in rows)
+    db.close()

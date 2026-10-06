@@ -260,28 +260,41 @@ def _recover_companion_batch(db, rows):
             stat = path.stat()
         except OSError:
             continue
-        available.append((row, path, stat.st_size, stat.st_mtime))
+        available.append((row, path, stat.st_size))
     if not available:
         return
-    captures = source_capture_timestamps([path for _, path, _, _ in available])
+    captures = source_capture_timestamps([path for _, path, _ in available])
     recovered = []
-    for row, path, size, mtime in available:
+    for row, path, size in available:
         try:
             capture = captures.get(path)
             recovered.append((row["id"], row["companion_path"], size,
                               capture.isoformat() if capture else None,
-                              compute_file_hash(str(path)) if size else None,
-                              mtime))
+                              compute_file_hash(str(path)) if size else None))
         except OSError:
             continue
     if not recovered:
         return
     db.conn.execute("SAVEPOINT recover_companion_identities")
     try:
+        # ``file_mtime`` stays NULL on recovered identities. Recovery hashes
+        # the current bytes but does not read their metadata, import
+        # embedded sidecar keywords, or invalidate the owner RAW's
+        # companion-derived caches. If the companion was edited between the
+        # original pairing and this recovery, the owner's EXIF columns are
+        # stale and the owner needs the normal re-merge the next scan would
+        # perform. Storing the current mtime here would stat-skip the
+        # companion forever on incremental scans and let a full scan accept
+        # the recovered hash as unchanged — the owner would never be
+        # re-synced. A NULL ``file_mtime`` fails the incremental stat check
+        # (``scanner._companion_stat_unchanged`` requires non-NULL mtime),
+        # forcing the scanner to re-read the companion and run its own
+        # synchronization. The hash is kept so the duplicate-identity
+        # preview still recognizes paired JPEGs on a second card.
         db.conn.executemany(
             "INSERT OR REPLACE INTO companion_identities "
             "(photo_id, filename, file_size, timestamp, file_hash, file_mtime)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
+            " VALUES (?, ?, ?, ?, ?, NULL)",
             recovered,
         )
     except BaseException:
