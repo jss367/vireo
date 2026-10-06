@@ -5368,14 +5368,22 @@ class _ScanRun:
         # which handles an unchanged companion whose ``companion_path`` was
         # committed by an earlier scan, this attach is the write that first
         # makes the pairing visible.
-        if self.photo_callback:
-            self.photo_callback(owner_id, str(image_path))
+        #
+        # Invalidate the RAW's display cache before the callback: a
+        # callback that raises leaves the pairing committed, and the next
+        # incremental scan takes ``_finish_known_companion`` instead,
+        # which does not re-invalidate. Running the post-commit filesystem
+        # actions first means a stale pre-pairing render cannot survive a
+        # callback failure, and ``_run_post_commit_fs_actions`` already
+        # catches per-action errors so it will not skip the callback.
         if self.vireo_dir:
             actions = []
             _defer_primary_display_cache_invalidation(
                 actions, {"id": owner_id}, self.vireo_dir, self.thumb_cache_dir,
             )
             _run_post_commit_fs_actions(actions)
+        if self.photo_callback:
+            self.photo_callback(owner_id, str(image_path))
         if self.progress_callback:
             self.progress_callback(self.processed_count, self.total)
         return True

@@ -483,6 +483,65 @@ def test_attach_companion_commits_before_firing_callback(tmp_path):
     assert seen_companion_path == ["IMG_001.jpg"], seen_companion_path
 
 
+def test_attach_companion_invalidates_display_cache_before_firing_callback(
+    tmp_path,
+):
+    """A ``photo_callback`` that raises after the attach commit must still
+    leave the RAW's display cache invalidated.
+
+    The attach commits ``companion_path``, so the next incremental scan
+    takes ``_finish_known_companion`` for an unchanged JPEG — and that
+    path does not re-run ``_defer_primary_display_cache_invalidation``.
+    If the first-pairing invalidation ran after the external callback, a
+    callback raise would strand a pre-pairing render as the RAW's cache
+    forever. Running the cache invalidation first closes that window.
+    """
+    from db import Database
+    from scanner import scan
+
+    card = tmp_path / "card"
+    _shoot_pairs(card, ["IMG_001"])
+    vireo_dir = tmp_path / "vireo"
+    thumbs = tmp_path / "thumbs"
+    (vireo_dir / "originals").mkdir(parents=True)
+    thumbs.mkdir()
+    db = Database(str(tmp_path / "test.db"))
+    jpeg_path = str(card / "IMG_001.jpg")
+    stale_display_paths = []
+
+    def on_photo(photo_id, path):
+        if path != jpeg_path:
+            # First call: RAW is reported. Plant the stale display cache
+            # that the attach must invalidate.
+            display = vireo_dir / "originals" / f"{photo_id}.display.jpg"
+            display.write_bytes(b"stale pre-pairing render")
+            stale_display_paths.append(display)
+            return
+        # Second call: companion attach after commit. Raise to prove the
+        # cache invalidation already happened.
+        raise RuntimeError("callback failure after companion commit")
+
+    with pytest.raises(RuntimeError, match="callback failure"):
+        scan(
+            str(card), db,
+            photo_callback=on_photo,
+            vireo_dir=str(vireo_dir),
+            thumb_cache_dir=str(thumbs),
+        )
+
+    assert stale_display_paths, "RAW photo_callback never fired"
+    display_path = stale_display_paths[0]
+    assert not display_path.exists(), (
+        f"stale display cache survived callback failure: {display_path}"
+    )
+    # The attach commit itself still landed: ``companion_path`` is set.
+    raw_id = int(display_path.stem.split(".")[0])
+    row = db.conn.execute(
+        "SELECT companion_path FROM photos WHERE id = ?", (raw_id,),
+    ).fetchone()
+    assert row["companion_path"] == "IMG_001.jpg"
+
+
 def test_add_photo_losing_a_race_keeps_concurrent_collection_entry(
     tmp_path, monkeypatch,
 ):
