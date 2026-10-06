@@ -5377,6 +5377,38 @@ class _ScanRun:
                     (item.folder_id, name),
                 ).fetchone() is not None:
                     raise _CompanionAttachRefused
+                # Re-check compatibility under the writer lock. The identity
+                # predicates above (id, folder, filename, companion_path)
+                # miss a concurrent metadata UPDATE on the same row — a
+                # same-stem replacement RAW from a different exposure or
+                # camera that another scanner rewrote between
+                # ``_resolve_companion_group`` reading its timestamp/camera
+                # columns and this guarded UPDATE. Without this re-check the
+                # pairing would commit on a stale compatibility decision and
+                # permanently attach unrelated files.
+                current = db.conn.execute(
+                    "SELECT timestamp, camera_make, camera_model FROM photos"
+                    " WHERE id = ?",
+                    (owner_id,),
+                ).fetchone()
+                if current is not None:
+                    jpeg_summary = (
+                        exif_summary_columns(item.meta.file_meta)
+                        if item.meta.file_meta else {}
+                    )
+                    if not _companions_compatible(
+                        {
+                            "timestamp": current["timestamp"],
+                            "camera_make": current["camera_make"],
+                            "camera_model": current["camera_model"],
+                        },
+                        {
+                            "timestamp": item.meta.timestamp,
+                            "camera_make": jpeg_summary.get("camera_make"),
+                            "camera_model": jpeg_summary.get("camera_model"),
+                        },
+                    ):
+                        raise _CompanionAttachRefused
                 db.conn.execute(
                     "INSERT OR REPLACE INTO companion_identities"
                     " (photo_id, filename, file_size, timestamp, file_hash,"
@@ -5423,11 +5455,37 @@ class _ScanRun:
                 actions, {"id": owner_id}, self.vireo_dir, self.thumb_cache_dir,
             )
             _run_post_commit_fs_actions(actions)
-        self._reported_identities[owner_id] = (
-            owner["folder_id"], owner["filename"],
-        )
         if self.photo_callback:
-            self.photo_callback(owner_id, str(image_path))
+            # Revalidate ownership before publishing ``owner_id``. The
+            # attach commit was released above so the post-commit FS
+            # actions could see it; in that window another connection can
+            # delete the RAW and SQLite can reuse its rowid for an
+            # unrelated photo. Without this check, an incremental scan
+            # that processes only a new JPEG beside an unchanged
+            # cataloged RAW would publish the stale id to the pipeline
+            # or import collection — and no end-of-scan merge callback
+            # would correct it because the JPEG never had a row of its
+            # own. Taking the writer lock under ``_commits_held`` makes
+            # the check-then-publish atomic against concurrent deletes.
+            with db._commits_held():
+                owner_still_valid = self._lock_companion_owner(
+                    owner_id, ownership,
+                )
+            if owner_still_valid:
+                self._reported_identities[owner_id] = (
+                    owner["folder_id"], owner["filename"],
+                )
+                self.photo_callback(owner_id, str(image_path))
+            else:
+                log.warning(
+                    "Companion attach for %s lost RAW owner %s before "
+                    "publishing; the next scan will catalog the JPEG",
+                    image_path, owner_id,
+                )
+        else:
+            self._reported_identities[owner_id] = (
+                owner["folder_id"], owner["filename"],
+            )
         if self.progress_callback:
             self.progress_callback(self.processed_count, self.total)
         return True

@@ -824,6 +824,198 @@ def test_add_photo_losing_a_race_keeps_concurrent_collection_entry(
     assert _collection_photo_ids(db, coll_id) == raced_photo_ids
 
 
+def test_attach_companion_refuses_when_owner_metadata_changed_before_commit(
+    tmp_path, monkeypatch,
+):
+    """``_resolve_companion_group`` reads the RAW's capture metadata
+    (timestamp, camera_make, camera_model) and ``_pick_compatible_raw_jpeg_pairs``
+    decides compatibility from those values. Between that read and the
+    guarded UPDATE inside ``_attach_companion``, another writer can
+    rewrite the RAW's metadata — the identity predicates on the UPDATE
+    (id, folder_id, filename, companion_path) do not catch that change,
+    so without a compatibility recheck under the writer lock, the pair
+    would commit on stale evidence and permanently attach an unrelated
+    JPEG to a different-exposure RAW. Attach must refuse in that race.
+    """
+    import scanner as scanner_mod
+    from db import Database
+
+    card = tmp_path / "card"
+    _shoot_pairs(card, ["IMG_001"])
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+
+    jpeg_path = str(card / "IMG_001.jpg")
+    raw_path = str(card / "IMG_001.cr3")
+
+    # Pretend ExifTool read a Nikon camera off the JPEG and nothing off
+    # the RAW. ``_pick_compatible_raw_jpeg_pairs`` then runs with the
+    # RAW's capture columns all None (one-side-unknown → compatible), so
+    # the pair is returned. The race below rewrites the RAW's camera on
+    # a separate connection just before the attach's guarded UPDATE,
+    # making the pair incompatible by the time it commits.
+    def fake_extract(paths, progress_callback=None, checkpoint=None, **_kw):
+        meta = {}
+        for p in paths:
+            if p.endswith(".jpg"):
+                meta[p] = {
+                    "EXIF": {"Make": "Nikon", "Model": "Z9"},
+                    "File": {},
+                    "Composite": {},
+                }
+            else:
+                meta[p] = {}
+        return meta
+
+    monkeypatch.setattr(scanner_mod, "extract_metadata", fake_extract)
+
+    real_pick = scanner_mod._pick_compatible_raw_jpeg_pairs
+
+    def racing_pick(members, log_conflicts=True):
+        pairs = real_pick(members, log_conflicts=log_conflicts)
+        # Simulate a concurrent writer rewriting the RAW's capture
+        # metadata between pair decision and attach so the compat
+        # decision we return no longer holds under the writer lock.
+        for raw, jpeg in pairs:
+            if raw["id"] is None or jpeg["id"] is not None:
+                continue
+            with sqlite3.connect(db_path) as other:
+                other.execute(
+                    "UPDATE photos SET camera_make = ?, camera_model = ?"
+                    " WHERE id = ?",
+                    ("Canon", "EOS R5", raw["id"]),
+                )
+                other.commit()
+        return pairs
+
+    monkeypatch.setattr(
+        scanner_mod, "_pick_compatible_raw_jpeg_pairs", racing_pick,
+    )
+    # Keep the end-of-scan pairing pass from re-pairing after the attach
+    # refused — the test's assertion is about the attach itself. (It
+    # would also see Canon-vs-Nikon as incompatible and still refuse.)
+    monkeypatch.setattr(
+        scanner_mod, "_pair_raw_jpeg_companions", lambda *a, **k: {},
+    )
+
+    callbacks = []
+
+    def on_photo(photo_id, path):
+        callbacks.append((photo_id, path))
+
+    scanner_mod.scan(str(card), db, photo_callback=on_photo)
+
+    # The attach must refuse because the RAW's metadata diverged from
+    # the JPEG's under the writer lock. The JPEG then falls through to
+    # being cataloged as its own photo.
+    photos = _photo_ids_by_filename(db)
+    assert set(photos) == {"IMG_001.cr3", "IMG_001.jpg"}, photos
+    # No companion attachment landed.
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM companion_identities"
+    ).fetchone()[0] == 0
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM photos WHERE companion_path IS NOT NULL"
+    ).fetchone()[0] == 0
+    # The JPEG was published as its own photo (both files reported
+    # under their own ids), not merged into the RAW's id.
+    paths_in_callbacks = {c[1] for c in callbacks}
+    assert paths_in_callbacks == {raw_path, jpeg_path}, callbacks
+    for pid, path in callbacks:
+        assert pid == photos[os.path.basename(path)], (pid, path, photos)
+
+
+def test_attach_companion_skips_publishing_when_owner_vanished_before_callback(
+    tmp_path, monkeypatch,
+):
+    """``_attach_companion`` publishes the RAW's id to ``photo_callback``
+    AFTER ``_commits_held`` releases, so the thumbnail worker on another
+    connection sees ``companion_path``. In that window another connection
+    can delete the RAW and SQLite can reuse its rowid for an unrelated
+    photo; without ownership revalidation, the callback would publish
+    that stale id into the pipeline or import collection — a dangling id
+    (or one that now names a different file) that no end-of-scan merge
+    callback can correct, because the JPEG never had a row of its own.
+    """
+    import scanner as scanner_mod
+    from db import Database
+
+    card = tmp_path / "card"
+    _shoot_pairs(card, ["IMG_001"])
+    vireo_dir = tmp_path / "vireo"
+    (vireo_dir / "originals").mkdir(parents=True)
+    thumbs = tmp_path / "thumbs"
+    thumbs.mkdir()
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+
+    real_fs_actions = scanner_mod._run_post_commit_fs_actions
+
+    def racing_fs_actions(actions):
+        real_fs_actions(actions)
+        # The attach commit (and its ``_commits_held``) have landed; the
+        # callback has not fired yet. Replay the exact deletion-then-reuse
+        # race on a separate real connection.
+        with sqlite3.connect(db_path) as other:
+            other.execute("PRAGMA foreign_keys = ON")
+            other.row_factory = sqlite3.Row
+            row = other.execute(
+                "SELECT p.id FROM photos p JOIN folders f ON f.id = p.folder_id"
+                " WHERE p.filename = ? AND f.path = ?",
+                ("IMG_001.cr3", str(card)),
+            ).fetchone()
+            if row is None:
+                return
+            raw_id = row["id"]
+            other.execute("DELETE FROM photos WHERE id = ?", (raw_id,))
+            # Insert an unrelated photo into a different folder that reuses
+            # the freed rowid. ``photos`` has no AUTOINCREMENT, so an
+            # explicit id in the INSERT re-claims it.
+            unrelated = tmp_path / "unrelated"
+            unrelated.mkdir(exist_ok=True)
+            folder_id = other.execute(
+                "INSERT INTO folders (path) VALUES (?)",
+                (str(unrelated),),
+            ).lastrowid
+            other.execute(
+                "INSERT INTO photos (id, folder_id, filename, extension,"
+                " file_size, file_mtime) VALUES (?, ?, ?, ?, ?, ?)",
+                (raw_id, folder_id, "OTHER.jpg", ".jpg", 0, 0.0),
+            )
+            other.commit()
+
+    monkeypatch.setattr(
+        scanner_mod, "_run_post_commit_fs_actions", racing_fs_actions,
+    )
+    # Keep the end-of-scan pairing pass out: the attach already fired for
+    # the JPEG; the assertion is about the publication for THAT attach.
+    monkeypatch.setattr(
+        scanner_mod, "_pair_raw_jpeg_companions", lambda *a, **k: {},
+    )
+
+    jpeg_path = str(card / "IMG_001.jpg")
+    callbacks = []
+
+    def on_photo(photo_id, path):
+        callbacks.append((photo_id, path))
+
+    scanner_mod.scan(
+        str(card), db,
+        photo_callback=on_photo,
+        vireo_dir=str(vireo_dir),
+        thumb_cache_dir=str(thumbs),
+    )
+
+    # The JPEG's attach fired after the RAW was deleted and its id reused
+    # for OTHER.jpg. The publication must NOT have called photo_callback
+    # with (reused_id, companion_path) — that would adopt an unrelated row
+    # into the collection built from these callbacks.
+    jpeg_callbacks = [c for c in callbacks if c[1] == jpeg_path]
+    assert jpeg_callbacks == [], (
+        f"attach callback leaked a stale/reused id for the JPEG: {jpeg_callbacks}"
+    )
+
+
 def test_photos_repository_add_reports_whether_it_inserted(tmp_path):
     """``PhotoRepository.add`` returns ``(photo_id, inserted)``; the second
     call for the same (folder, filename) is a no-op INSERT OR IGNORE and
