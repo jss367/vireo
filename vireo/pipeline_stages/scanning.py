@@ -1535,12 +1535,19 @@ class _ScanPass:
             self.mark_scan_cancelled()
             return
         run.stages["scan"]["status"] = "completed"
+        # ``_on_scan_progress`` reports file-progress counts, so a RAW+JPEG
+        # pair that attaches rowlessly to the RAW leaves ``stages["scan"]
+        # ["count"]`` reading two files for one photo. The collection the
+        # pipeline runs on is ``collected_photo_ids``: take the summary from
+        # there (and reset the stage count) so "N photos" matches it.
+        photo_count = len(self.collected_photo_ids)
+        run.stages["scan"]["count"] = photo_count
         # Pipeline scans use scanner.scan exactly like the standalone
         # /api/jobs/scan path, so a missing exiftool silently strips
         # capture dates, GPS, and camera info here too. Append the
         # same warning the standalone path appends.
         scan_summary = self._summary_with_metadata_warning(
-            f"{run.stages['scan']['count']} photos"
+            f"{photo_count} photos"
         )
         run.runner.update_step(run.job["id"], "scan", status="completed",
                                summary=scan_summary)
