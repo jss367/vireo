@@ -24,6 +24,26 @@ from pipeline_job import (
 )
 
 
+@pytest.fixture(autouse=True)
+def isolated_config(tmp_path, monkeypatch):
+    # Pipeline runs read config.json and resolve model and cache dirs under
+    # HOME; keep both off the real ~/.vireo.
+    import config as cfg
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+
+def _open_db(tmp_path):
+    """Create the test catalog at tmp_path/test.db and return
+    ``(db_path, db, active_workspace_id)``."""
+    from db import Database
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    return db_path, db, db._active_workspace_id
+
+
 def _drop_jpeg(folder_path, filename):
     """Write a tiny valid JPEG at folder_path/filename so previews/thumbnails
     can load it. Tests that use db.add_photo need a matching file on disk now
@@ -66,6 +86,31 @@ class FakeRunner:
 
     def is_cancelled(self, job_id):
         return job_id in self.cancelled_ids
+
+
+class _ZeroEmbeddingClassifier:
+    """Stand-in for ``classifier.Classifier`` that loads nothing and embeds
+    every image as zeros."""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def encode_image(self, *args, **kwargs):
+        import numpy as np
+        return np.zeros(512, dtype=np.float32)
+
+
+class _RobinClassifier(_ZeroEmbeddingClassifier):
+    """Classifies every image as Robin (0.9) with a zero embedding."""
+
+    def classify_with_embedding(self, img, threshold=0):
+        import numpy as np
+        return ([{'species': 'Robin', 'score': 0.9}], np.zeros(512, dtype=np.float32))
+
+    def classify_batch_with_embedding(self, images, threshold=0):
+        import numpy as np
+        zero = np.zeros(512, dtype=np.float32)
+        return [([{'species': 'Robin', 'score': 0.9}], zero) for _ in images]
 
 
 def test_contextual_weak_cached_candidates_ignore_foreign_detectors():
@@ -519,12 +564,9 @@ def test_archive_stage_rejects_retired_import_archive_params_late(
 ):
     import pipeline_job
     import pytest
-    from db import Database
 
     monkeypatch.setenv("HOME", str(tmp_path))
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.add_collection("Empty", "[]")
     params = PipelineParams(
         collection_id=col_id,
@@ -544,17 +586,10 @@ def test_archive_stage_rejects_retired_import_archive_params_late(
         run_pipeline_job(_make_job(), FakeRunner(), db_path, ws_id, params)
 
 
-def test_pipeline_job_with_collection_skips_scan(tmp_path, monkeypatch):
+def test_pipeline_job_with_collection_skips_scan(tmp_path):
     """When collection_id is provided, pipeline should skip scan entirely."""
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     # Create an empty collection so classify has something to query
     col_id = db.add_collection("Test", "[]")
@@ -596,24 +631,17 @@ def test_pipeline_abort_event_stops_stages():
     assert _should_abort(abort)
 
 
-def test_pipeline_cancel_via_runner_skips_remaining_stages(tmp_path, monkeypatch):
+def test_pipeline_cancel_via_runner_skips_remaining_stages(tmp_path):
     """When runner.is_cancelled returns True, the pipeline watcher should set
     the local abort event, and remaining stages should bail without raising."""
-    import config as cfg
-    from db import Database
     from PIL import Image
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     photo_dir = tmp_path / "photos"
     photo_dir.mkdir()
     for name in ["a.jpg", "b.jpg", "c.jpg"]:
         Image.new("RGB", (50, 50), "red").save(str(photo_dir / name))
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     params = PipelineParams(
         source=str(photo_dir),
@@ -639,7 +667,7 @@ def test_pipeline_cancel_via_runner_skips_remaining_stages(tmp_path, monkeypatch
 
 
 @pytest.mark.skip(reason="retired pipeline import/archive destination path")
-def test_pipeline_abort_on_nonexistent_source(tmp_path, monkeypatch):
+def test_pipeline_abort_on_nonexistent_source(tmp_path):
     """Pipeline with nonexistent source should complete gracefully.
 
     The scanner silently returns for nonexistent dirs (no photos found).
@@ -648,15 +676,8 @@ def test_pipeline_abort_on_nonexistent_source(tmp_path, monkeypatch):
     a real failure, the fail-propagation path in run_pipeline_job now
     raises, which also fails the test.
     """
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     params = PipelineParams(
         source=str(tmp_path / "nonexistent_dir"),
@@ -678,14 +699,10 @@ def test_pipeline_abort_on_nonexistent_source(tmp_path, monkeypatch):
     # failure creeps in — the pipeline now raises, which also fails the test.
 
 
-def test_pipeline_scan_thumbnail_collection_stages(tmp_path, monkeypatch):
+def test_pipeline_scan_thumbnail_collection_stages(tmp_path):
     """Pipeline should scan photos, generate thumbnails, and create collection."""
-    import config as cfg
     from db import Database
     from PIL import Image
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     # Create test images
     photo_dir = tmp_path / "photos"
@@ -694,9 +711,7 @@ def test_pipeline_scan_thumbnail_collection_stages(tmp_path, monkeypatch):
         img = Image.new("RGB", (100, 100), "red")
         img.save(str(photo_dir / name))
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     params = PipelineParams(
         source=str(photo_dir),
@@ -729,7 +744,7 @@ def test_pipeline_scan_thumbnail_collection_stages(tmp_path, monkeypatch):
     assert len(photos) == 3
 
 
-def test_pipeline_scan_invokes_missing_originals_invalidator(tmp_path, monkeypatch):
+def test_pipeline_scan_invokes_missing_originals_invalidator(tmp_path):
     """Pipeline scans must invalidate the Missing Originals cache too.
 
     Regression: the standalone /api/jobs/scan and /api/jobs/import-* routes
@@ -741,20 +756,13 @@ def test_pipeline_scan_invokes_missing_originals_invalidator(tmp_path, monkeypat
     the pre-pipeline photo list until an unrelated Missing Originals scan
     replaced the entry. See Codex review on 63f6ac78.
     """
-    import config as cfg
-    from db import Database
     from PIL import Image
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     photo_dir = tmp_path / "photos"
     photo_dir.mkdir()
     Image.new("RGB", (32, 32), "black").save(str(photo_dir / "keep.jpg"))
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     params = PipelineParams(
         source=str(photo_dir),
@@ -788,7 +796,7 @@ def test_pipeline_scan_invokes_missing_originals_invalidator(tmp_path, monkeypat
 
 
 def test_pipeline_collection_repair_scan_invokes_missing_originals_invalidator(
-    tmp_path, monkeypatch,
+    tmp_path,
 ):
     """Collection-mode metadata repair scans must invalidate the cache too.
 
@@ -801,21 +809,14 @@ def test_pipeline_collection_repair_scan_invokes_missing_originals_invalidator(
     outer finally's Missing Originals invalidation never fired for repair
     scans. Codex review on 7fec89bd.
     """
-    import config as cfg
-    from db import Database
     from PIL import Image
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     photo_dir = tmp_path / "photos"
     photo_dir.mkdir()
     photo_path = photo_dir / "broken.jpg"
     Image.new("RGB", (32, 32), "black").save(str(photo_path))
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     folder_id = db.add_folder(str(photo_dir), name="photos")
     photo_id = db.add_photo(
         folder_id=folder_id,
@@ -862,27 +863,20 @@ def test_pipeline_collection_repair_scan_invokes_missing_originals_invalidator(
     )
 
 
-def test_pipeline_scan_invalidator_is_optional(tmp_path, monkeypatch):
+def test_pipeline_scan_invalidator_is_optional(tmp_path):
     """Callers that don't pass ``missing_originals_invalidator`` still work.
 
     The parameter defaults to None so tests and any non-Flask harness can
     call run_pipeline_job without wiring the app-level invalidator. This
     guards the default path against a NoneType-not-callable regression.
     """
-    import config as cfg
-    from db import Database
     from PIL import Image
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     photo_dir = tmp_path / "photos"
     photo_dir.mkdir()
     Image.new("RGB", (32, 32), "black").save(str(photo_dir / "keep.jpg"))
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     params = PipelineParams(
         source=str(photo_dir),
@@ -898,7 +892,7 @@ def test_pipeline_scan_invalidator_is_optional(tmp_path, monkeypatch):
     assert isinstance(result, dict)
 
 
-def test_pipeline_scan_swallows_invalidator_exceptions(tmp_path, monkeypatch):
+def test_pipeline_scan_swallows_invalidator_exceptions(tmp_path):
     """A failing invalidator must not abort the pipeline finally block.
 
     The finally block also invalidates the new-images cache; if the
@@ -907,20 +901,13 @@ def test_pipeline_scan_swallows_invalidator_exceptions(tmp_path, monkeypatch):
     pipeline would hang. Mirror the try/except log-and-continue guard
     already applied to invalidate_new_images_after_scan.
     """
-    import config as cfg
-    from db import Database
     from PIL import Image
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     photo_dir = tmp_path / "photos"
     photo_dir.mkdir()
     Image.new("RGB", (32, 32), "black").save(str(photo_dir / "keep.jpg"))
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     params = PipelineParams(
         source=str(photo_dir),
@@ -942,23 +929,16 @@ def test_pipeline_scan_swallows_invalidator_exceptions(tmp_path, monkeypatch):
     assert isinstance(result, dict)
 
 
-def test_pipeline_stages_dict_in_progress_events(tmp_path, monkeypatch):
+def test_pipeline_stages_dict_in_progress_events(tmp_path):
     """Progress events should include a 'stages' dict showing all stage statuses."""
-    import config as cfg
-    from db import Database
     from PIL import Image
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     photo_dir = tmp_path / "photos"
     photo_dir.mkdir()
     img = Image.new("RGB", (100, 100), "red")
     img.save(str(photo_dir / "test.jpg"))
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     params = PipelineParams(
         source=str(photo_dir),
@@ -990,14 +970,9 @@ def test_pipeline_stages_dict_in_progress_events(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_pipeline_scan_and_thumbnail_overlap(tmp_path, monkeypatch):
+def test_pipeline_scan_and_thumbnail_overlap(tmp_path):
     """Scan and thumbnail stages should both process photos from a real dir."""
-    import config as cfg
-    from db import Database
     from PIL import Image
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     # Create 5 test images
     photo_dir = tmp_path / "photos"
@@ -1006,9 +981,7 @@ def test_pipeline_scan_and_thumbnail_overlap(tmp_path, monkeypatch):
         img = Image.new("RGB", (100, 100), "blue")
         img.save(str(photo_dir / f"photo_{i}.jpg"))
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     params = PipelineParams(
         source=str(photo_dir),
@@ -1043,17 +1016,10 @@ def test_pipeline_scan_and_thumbnail_overlap(tmp_path, monkeypatch):
     assert len(thumb_files) == 5
 
 
-def test_pipeline_skips_scan_with_collection_id(tmp_path, monkeypatch):
+def test_pipeline_skips_scan_with_collection_id(tmp_path):
     """When collection_id is given, no scan-phase events should be emitted."""
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.add_collection("Test", json.dumps([]))
 
     params = PipelineParams(
@@ -1077,17 +1043,10 @@ def test_pipeline_skips_scan_with_collection_id(tmp_path, monkeypatch):
     assert len(scan_events) == 0
 
 
-def test_pipeline_nonexistent_source_scans_nothing(tmp_path, monkeypatch):
+def test_pipeline_nonexistent_source_scans_nothing(tmp_path):
     """Pipeline with a nonexistent source should complete with 0 photos scanned."""
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     params = PipelineParams(
         source="/nonexistent/path/that/does/not/exist",
@@ -1106,17 +1065,10 @@ def test_pipeline_nonexistent_source_scans_nothing(tmp_path, monkeypatch):
     assert result.get("collection_id") is None
 
 
-def test_pipeline_result_has_duration(tmp_path, monkeypatch):
+def test_pipeline_result_has_duration(tmp_path):
     """Pipeline result dict should always contain a positive duration."""
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.add_collection("Empty", json.dumps([]))
 
     params = PipelineParams(
@@ -1136,14 +1088,10 @@ def test_pipeline_result_has_duration(tmp_path, monkeypatch):
     assert result["duration"] >= 0
 
 
-def test_pipeline_collection_created_after_scan(tmp_path, monkeypatch):
+def test_pipeline_collection_created_after_scan(tmp_path):
     """Pipeline should create a collection from scanned photos."""
-    import config as cfg
     from db import Database
     from PIL import Image
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     # Create test images
     photo_dir = tmp_path / "photos"
@@ -1152,9 +1100,7 @@ def test_pipeline_collection_created_after_scan(tmp_path, monkeypatch):
         img = Image.new("RGB", (80, 80), "green")
         img.save(str(photo_dir / name))
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     params = PipelineParams(
         source=str(photo_dir),
@@ -1179,17 +1125,10 @@ def test_pipeline_collection_created_after_scan(tmp_path, monkeypatch):
     assert len(photos) == 3
 
 
-def test_pipeline_previews_stage_runs(tmp_path, monkeypatch):
+def test_pipeline_previews_stage_runs(tmp_path):
     """Pipeline should run a previews stage after thumbnails."""
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     # Create an empty collection so classify has something to query
     col_id = db.add_collection("Test", "[]")
@@ -1225,20 +1164,14 @@ def test_pipeline_previews_stage_writes_atomically(tmp_path, monkeypatch):
     corrupt JPEG that preview_cache claims is valid. Regression for Codex
     P2 review on PR #907.
     """
-    import config as cfg
     from db import Database
     from PIL import Image
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     photo_dir = tmp_path / "photos"
     photo_dir.mkdir()
     Image.new("RGB", (100, 100), "red").save(str(photo_dir / "a.jpg"))
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     # Capture atomic publications. The shared materializer encodes in memory,
     # fsyncs a sibling temp file, then makes that file visible with replace.
@@ -1288,22 +1221,15 @@ def test_pipeline_previews_stage_writes_atomically(tmp_path, monkeypatch):
 
 
 def test_pipeline_previews_stage_bounds_non_crop_recipe_loads(tmp_path, monkeypatch):
-    import config as cfg
     import image_loader
-    from db import Database
     from PIL import Image
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     photo_dir = tmp_path / "photos"
     photo_dir.mkdir()
     source_path = photo_dir / "edited.jpg"
     Image.new("RGB", (800, 600), "red").save(source_path, "JPEG")
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     folder_id = db.add_folder(str(photo_dir), name="photos")
     photo_id = db.add_photo(
         folder_id=folder_id,
@@ -1354,17 +1280,10 @@ def test_pipeline_params_sources_used_over_source():
     assert params.sources == ["/a", "/b"]
 
 
-def test_pipeline_skip_classify_skips_model_loader(tmp_path, monkeypatch):
+def test_pipeline_skip_classify_skips_model_loader(tmp_path):
     """When skip_classify=True, model_loader and classify should be skipped."""
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     params = PipelineParams(
         collection_id=1,
@@ -1391,16 +1310,9 @@ def test_pipeline_skip_classify_skips_model_loader(tmp_path, monkeypatch):
 
 def test_pipeline_passes_recursive_false_to_scan(tmp_path, monkeypatch):
     """Pipeline forwards recursive=False to scanner.scan()."""
-    import config as cfg
-    from db import Database
     from pipeline_job import PipelineParams, run_pipeline_job
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     src = tmp_path / "photos"
     src.mkdir()
@@ -1438,12 +1350,8 @@ def test_pipeline_passes_vireo_dir_to_scan(tmp_path, monkeypatch):
     ``if not vireo_dir: return``) and the bird/squirrel divergence this
     PR fixes still occurs for anyone using the pipeline to scan.
     """
-    import config as cfg
     from db import Database
     from pipeline_job import PipelineParams, run_pipeline_job
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     db_path = str(tmp_path / "vireo.db")
     db = Database(db_path)
@@ -1488,12 +1396,8 @@ def test_pipeline_forwards_thumb_cache_dir_to_scan(tmp_path, monkeypatch):
     (``vireo_dir/thumbnails``) targets the wrong directory on custom
     layouts and stale thumbnails survive.
     """
-    import config as cfg
     from db import Database
     from pipeline_job import PipelineParams, run_pipeline_job
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     db_path = str(tmp_path / "vireo.db")
     db = Database(db_path)
@@ -1541,12 +1445,8 @@ def test_pipeline_vireo_dir_aligns_with_thumb_cache_dir_parent(tmp_path, monkeyp
     convention, or invalidation runs against one tree while the app
     serves from another (so stale previews/working_copies survive).
     """
-    import config as cfg
     from db import Database
     from pipeline_job import PipelineParams, run_pipeline_job
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     # DB and thumb cache on *different* roots (simulates
     # --db ~/.vireo/vireo.db --thumb-dir /data/thumbs).
@@ -1598,17 +1498,10 @@ def test_pipeline_scan_progress_includes_rate_and_eta(tmp_path, monkeypatch):
     """Scan progress events should include rate and eta_seconds fields."""
     import time
 
-    import config as cfg
-    from db import Database
     from jobs import JobRunner
     from pipeline_job import PipelineParams, run_pipeline_job
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     from PIL import Image
     src = tmp_path / "photos"
@@ -1669,17 +1562,10 @@ def test_pipeline_multi_folder_scan_progress_is_monotonic(tmp_path, monkeypatch)
     """
     import time
 
-    import config as cfg
-    from db import Database
     from jobs import JobRunner
     from pipeline_job import PipelineParams, run_pipeline_job
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     from PIL import Image
     folder_a = tmp_path / "folderA"
@@ -1759,17 +1645,10 @@ def test_pipeline_multi_source_ingest_progress_is_monotonic(tmp_path, monkeypatc
     """
     import time
 
-    import config as cfg
-    from db import Database
     from jobs import JobRunner
     from pipeline_job import PipelineParams, run_pipeline_job
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     from PIL import Image
     src_a = tmp_path / "srcA"
@@ -1896,14 +1775,9 @@ def test_emit_progress_lock_held_during_push():
 
 
 @pytest.mark.skip(reason="retired pipeline import/archive destination path")
-def test_pipeline_ingest_updates_step_progress(tmp_path, monkeypatch):
+def test_pipeline_ingest_updates_step_progress(tmp_path):
     """Ingest (import) phase should call update_step so the jobs page shows progress."""
-    import config as cfg
-    from db import Database
     from PIL import Image
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     # Create source images
     src = tmp_path / "source"
@@ -1915,9 +1789,7 @@ def test_pipeline_ingest_updates_step_progress(tmp_path, monkeypatch):
     dest = tmp_path / "dest"
     dest.mkdir()
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     params = PipelineParams(
         source=str(src),
@@ -1950,24 +1822,17 @@ def test_pipeline_ingest_updates_step_progress(tmp_path, monkeypatch):
         "Ingest step should be marked completed after import finishes"
 
 
-def test_pipeline_scan_step_gets_status_updates(tmp_path, monkeypatch):
+def test_pipeline_scan_step_gets_status_updates(tmp_path):
     """Scanner should report status messages (e.g. 'Discovering files...')
     via update_step current_file during blocking phases."""
-    import config as cfg
-    from db import Database
     from PIL import Image
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     photo_dir = tmp_path / "photos"
     photo_dir.mkdir()
     img = Image.new("RGB", (100, 100), "red")
     img.save(str(photo_dir / "test.jpg"))
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     params = PipelineParams(
         source=str(photo_dir),
@@ -2000,17 +1865,12 @@ def test_pipeline_scan_step_gets_status_updates(tmp_path, monkeypatch):
 
 
 @pytest.mark.skip(reason="retired pipeline import/archive destination path")
-def test_pipeline_ingest_records_safe_to_eject_counts_on_success(tmp_path, monkeypatch):
+def test_pipeline_ingest_records_safe_to_eject_counts_on_success(tmp_path):
     """Once ingest copies everything off the source with no failures, the
     stage (and final result) should carry 'copied'/'skipped_duplicate' counts
     so the UI can tell the user the source (e.g. an SD card) is safe to eject.
     """
-    import config as cfg
-    from db import Database
     from PIL import Image
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     src = tmp_path / "source"
     src.mkdir()
@@ -2021,9 +1881,7 @@ def test_pipeline_ingest_records_safe_to_eject_counts_on_success(tmp_path, monke
     dest = tmp_path / "dest"
     dest.mkdir()
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     params = PipelineParams(
         source=str(src),
@@ -2057,13 +1915,8 @@ def test_pipeline_ingest_omits_safe_to_eject_counts_on_partial_failure(tmp_path,
     safe-to-eject counts must NOT be published in that case, since the source
     still holds a file that never made it to the destination.
     """
-    import config as cfg
     import staged_copy
-    from db import Database
     from PIL import Image
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     src = tmp_path / "source"
     src.mkdir()
@@ -2074,9 +1927,7 @@ def test_pipeline_ingest_omits_safe_to_eject_counts_on_partial_failure(tmp_path,
     dest = tmp_path / "dest"
     dest.mkdir()
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     real_copy2 = staged_copy.shutil.copy2
 
@@ -2111,23 +1962,16 @@ def test_pipeline_ingest_omits_safe_to_eject_counts_on_partial_failure(tmp_path,
 
 
 @pytest.mark.skip(reason="retired pipeline import/archive destination path")
-def test_pipeline_ingest_step_present_only_with_destination(tmp_path, monkeypatch):
+def test_pipeline_ingest_step_present_only_with_destination(tmp_path):
     """The 'ingest' step should only appear in step_defs when destination is set."""
-    import config as cfg
-    from db import Database
     from PIL import Image
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     photo_dir = tmp_path / "photos"
     photo_dir.mkdir()
     img = Image.new("RGB", (100, 100), "red")
     img.save(str(photo_dir / "test.jpg"))
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     # Without destination — no ingest step
     runner_no_dest = FakeRunner()
@@ -2162,7 +2006,7 @@ def test_pipeline_ingest_step_present_only_with_destination(tmp_path, monkeypatc
 
 
 @pytest.mark.skip(reason="retired pipeline import/archive destination path")
-def test_pipeline_all_duplicates_restricts_scan_to_existing_folders(tmp_path, monkeypatch):
+def test_pipeline_all_duplicates_restricts_scan_to_existing_folders(tmp_path):
     """When every source file is a duplicate of an existing photo in the DB,
     the scan phase must be restricted to just the folders that hold those
     existing duplicates — not left with restrict_dirs=None, which makes the
@@ -2176,12 +2020,7 @@ def test_pipeline_all_duplicates_restricts_scan_to_existing_folders(tmp_path, mo
     """
     import shutil
 
-    import config as cfg
-    from db import Database
     from PIL import Image
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     # Destination tree with two populated date folders plus an unrelated
     # folder that should NOT be walked by the restricted scan.
@@ -2197,9 +2036,7 @@ def test_pipeline_all_duplicates_restricts_scan_to_existing_folders(tmp_path, mo
     Image.new("RGB", (100, 100), "blue").save(str(unrelated / "unrelated.jpg"))
 
     # Scan so the existing photos land in the DB with their hashes.
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     from scanner import scan as do_scan
     do_scan(str(dest), db)
 
@@ -2263,19 +2100,15 @@ def test_pipeline_all_duplicates_restricts_scan_to_existing_folders(tmp_path, mo
 
 
 @pytest.mark.skip(reason="retired pipeline import/archive destination path")
-def test_pipeline_all_duplicates_links_existing_folders_to_workspace(tmp_path, monkeypatch):
+def test_pipeline_all_duplicates_links_existing_folders_to_workspace(tmp_path):
     """When every source file is a duplicate, the folders holding those
     existing duplicates should end up linked to the active workspace after
     the pipeline runs — even if the workspace had no folders linked before.
     """
     import shutil
 
-    import config as cfg
     from db import Database
     from PIL import Image
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     dest = tmp_path / "dest"
     dup_folder = dest / "2024" / "2024-06-15"
@@ -2327,15 +2160,10 @@ def test_pipeline_all_duplicates_links_existing_folders_to_workspace(tmp_path, m
 
 
 @pytest.mark.skip(reason="retired pipeline import/archive destination path")
-def test_pipeline_copy_mode_scans_subfolders(tmp_path, monkeypatch):
+def test_pipeline_copy_mode_scans_subfolders(tmp_path):
     """After ingest, scan should use restrict_dirs to target only subfolders
     that received files, while keeping the destination as root for folder hierarchy."""
-    import config as cfg
-    from db import Database
     from PIL import Image
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     # Create source images
     src = tmp_path / "source"
@@ -2353,9 +2181,7 @@ def test_pipeline_copy_mode_scans_subfolders(tmp_path, monkeypatch):
         img = Image.new("RGB", (100, 100), "blue")
         img.save(str(existing_folder / f"existing_{i}.jpg"))
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     params = PipelineParams(
         source=str(src),
@@ -2395,16 +2221,11 @@ def test_pipeline_copy_mode_scans_subfolders(tmp_path, monkeypatch):
             f"restrict_dirs should not include pre-existing folder {existing_folder}"
 
 
-def test_pipeline_progress_events_carry_stage_id(tmp_path, monkeypatch):
+def test_pipeline_progress_events_carry_stage_id(tmp_path):
     """Each per-stage progress event should carry a stage_id so the
     Pipeline UI can route concurrent stages (scan + thumbnails) to their
     own progress bars instead of colliding."""
-    import config as cfg
-    from db import Database
     from PIL import Image
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     photo_dir = tmp_path / "photos"
     photo_dir.mkdir()
@@ -2412,9 +2233,7 @@ def test_pipeline_progress_events_carry_stage_id(tmp_path, monkeypatch):
         img = Image.new("RGB", (100, 100), "green")
         img.save(str(photo_dir / f"p_{i}.jpg"))
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     params = PipelineParams(
         source=str(photo_dir),
@@ -2442,15 +2261,10 @@ def test_pipeline_progress_events_carry_stage_id(tmp_path, monkeypatch):
 
 
 @pytest.mark.skip(reason="retired pipeline import/archive destination path")
-def test_pipeline_scan_not_running_during_ingest(tmp_path, monkeypatch):
+def test_pipeline_scan_not_running_during_ingest(tmp_path):
     """In copy mode, stages.scan should stay 'pending' while ingest runs,
     so the Scan card doesn't pulse during the import sub-phase."""
-    import config as cfg
-    from db import Database
     from PIL import Image
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     src = tmp_path / "source"
     src.mkdir()
@@ -2461,9 +2275,7 @@ def test_pipeline_scan_not_running_during_ingest(tmp_path, monkeypatch):
     dest = tmp_path / "dest"
     dest.mkdir()
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     params = PipelineParams(
         source=str(src),
@@ -2492,18 +2304,11 @@ def test_pipeline_scan_not_running_during_ingest(tmp_path, monkeypatch):
             f"scan should be 'pending' while ingest is running, got: {scan_status}"
 
 
-def test_pipeline_collection_mode_marks_scan_skipped(tmp_path, monkeypatch):
+def test_pipeline_collection_mode_marks_scan_skipped(tmp_path):
     """In collection mode, stages.scan should be 'skipped' (not stuck
     on 'pending') so the Scan card renders as resolved."""
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     # Create an empty collection to reference
     coll_id = db.add_collection("test collection", json.dumps([]))
@@ -2529,25 +2334,18 @@ def test_pipeline_collection_mode_marks_scan_skipped(tmp_path, monkeypatch):
         f"scan should be 'skipped' in collection mode, saw: {scan_statuses}"
 
 
-def test_pipeline_collection_mode_generates_missing_thumbnails(tmp_path, monkeypatch):
+def test_pipeline_collection_mode_generates_missing_thumbnails(tmp_path):
     """In collection mode the thumbnail stage must still process the collection's
     photos. Previously it drained an empty queue (only fed by the scanner) and
     completed with '0 thumbnails' even when photos were missing thumbs."""
-    import config as cfg
-    from db import Database
     from PIL import Image
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     photo_dir = tmp_path / "photos"
     photo_dir.mkdir()
     for name in ["a.jpg", "b.jpg", "c.jpg"]:
         Image.new("RGB", (100, 100), "red").save(str(photo_dir / name))
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     # First pipeline run: scan + build collection + generate thumbnails.
     runner = FakeRunner()
@@ -2588,24 +2386,17 @@ def test_pipeline_collection_mode_generates_missing_thumbnails(tmp_path, monkeyp
 
 
 def test_pipeline_collection_mode_edited_thumbnail_uses_working_copy(
-    tmp_path, monkeypatch,
+    tmp_path,
 ):
     """Collection thumbnail replay should fall back to usable working copies."""
-    import config as cfg
-    from db import Database
     from PIL import Image
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     photo_dir = tmp_path / "photos"
     photo_dir.mkdir()
     original = photo_dir / "a.jpg"
     Image.new("RGB", (100, 100), "red").save(str(original))
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     runner = FakeRunner()
     job = _make_job()
@@ -2771,15 +2562,8 @@ def test_pipeline_raises_when_stage_fails(tmp_path, monkeypatch):
     run as 'completed' despite the failure. Now stage failures propagate.
     """
     import classifier as classifier_mod
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.add_collection("Test", "[]")
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
@@ -2827,16 +2611,9 @@ def test_pipeline_translates_verify_failure_to_repair_message(tmp_path, monkeypa
     with an actionable recovery hint for the user.
     """
     import classifier as classifier_mod
-    import config as cfg
     import model_verify
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.add_collection("Test", "[]")
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
@@ -2889,16 +2666,9 @@ def test_pipeline_preflight_accepts_unverified_model(tmp_path, monkeypatch):
     to clear it short of deleting and redownloading the model.
     """
     import classifier as classifier_mod
-    import config as cfg
     import model_verify
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.add_collection("Test", "[]")
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
@@ -2948,15 +2718,8 @@ def test_pipeline_translates_incomplete_model_error(tmp_path, monkeypatch):
     the raw ONNXRuntime stack.
     """
     import classifier as classifier_mod
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.add_collection("Test", "[]")
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
@@ -3000,15 +2763,8 @@ def test_pipeline_cancellation_takes_precedence_over_failure(tmp_path, monkeypat
     crashed on the way down. Cancellation intent beats failure.
     """
     import classifier as classifier_mod
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.add_collection("Test", "[]")
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
@@ -3040,15 +2796,8 @@ def test_pipeline_loops_over_multiple_models(tmp_path, monkeypatch):
     the pipeline page collects multiple checked models but only the first one
     was forwarded to the backend. The backend now honors model_ids."""
     import classifier as classifier_mod
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.add_collection("Test", "[]")
 
     model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
@@ -3109,15 +2858,8 @@ def test_pipeline_classify_step_names_the_label_set(tmp_path, monkeypatch):
     """
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.add_collection("Test", "[]")
 
     model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
@@ -3134,15 +2876,7 @@ def test_pipeline_classify_step_names_the_label_set(tmp_path, monkeypatch):
         lambda: [{"labels_file": "/l/birds.txt", "name": "California, US Birds"}],
     )
 
-    class FakeClassifier:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def encode_image(self, *args, **kwargs):
-            import numpy as np
-            return np.zeros(512, dtype=np.float32)
-
-    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+    monkeypatch.setattr(classifier_mod, "Classifier", _ZeroEmbeddingClassifier)
 
     params = PipelineParams(
         collection_id=col_id,
@@ -3174,16 +2908,9 @@ def test_pipeline_pause_during_classifier_load_parks_and_resumes(
     again after Resume. The run then completes normally.
     """
     import classifier as classifier_mod
-    import config as cfg
     from classifier import ClassifierLoadPaused
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.add_collection("Test", "[]")
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
@@ -3255,15 +2982,8 @@ def test_pipeline_model_ids_back_compat_with_model_id(tmp_path, monkeypatch):
     """A job with only the legacy `model_id` field (no `model_ids`) must still
     load exactly that one model — preserving back-compat with older callers."""
     import classifier as classifier_mod
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.add_collection("Test", "[]")
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
@@ -3307,16 +3027,10 @@ def test_pipeline_classifies_full_image_when_detector_finds_nothing(
     """
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
     import detector
     from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
@@ -3448,15 +3162,9 @@ def test_pipeline_honors_measured_zero_candidate_run_in_combined_gate(
     """
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
     from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
@@ -3584,16 +3292,10 @@ def test_pipeline_classifies_full_image_when_only_raw_noise_boxes_exist(
     """
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
     from db import Database
     from PIL import Image
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
@@ -3701,16 +3403,10 @@ def test_pipeline_skips_full_image_when_only_confident_non_animal_box(
     """
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
     from db import Database
     from PIL import Image
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
@@ -3825,16 +3521,9 @@ def test_pipeline_precreates_full_image_anchor_for_noise_only_photo(
     import classifier as classifier_mod
     import classify_job
     import computation_cache as cc
-    import config as cfg
-    from db import Database
     from PIL import Image
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
@@ -3957,12 +3646,7 @@ def test_pipeline_redownloads_taxonomy_when_existing_file_is_corrupt(
     page-init change targets, leaving users with no in-app recovery path.
     """
     import classifier as classifier_mod
-    import config as cfg
     import taxonomy as taxonomy_mod
-    from db import Database
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     fake_path = tmp_path / "taxonomy.json"
     fake_path.write_bytes(b"")  # 0-byte stub from an interrupted download
@@ -3972,9 +3656,7 @@ def test_pipeline_redownloads_taxonomy_when_existing_file_is_corrupt(
     )
     monkeypatch.setattr(taxonomy_mod, "load_local_taxonomy", lambda: None)
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.add_collection("Test", "[]")
 
     # Helper installs a no-op download_taxonomy stub; override it AFTER the
@@ -3989,15 +3671,7 @@ def test_pipeline_redownloads_taxonomy_when_existing_file_is_corrupt(
 
     monkeypatch.setattr(taxonomy_mod, "download_taxonomy", fake_download)
 
-    class FakeClassifier:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def encode_image(self, *args, **kwargs):
-            import numpy as np
-            return np.zeros(512, dtype=np.float32)
-
-    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+    monkeypatch.setattr(classifier_mod, "Classifier", _ZeroEmbeddingClassifier)
 
     params = PipelineParams(
         collection_id=col_id,
@@ -4024,12 +3698,7 @@ def test_pipeline_skips_taxonomy_download_when_file_is_usable(
     set, otherwise the checkbox would silently re-download on every run.
     """
     import classifier as classifier_mod
-    import config as cfg
     import taxonomy as taxonomy_mod
-    from db import Database
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     fake_path = tmp_path / "taxonomy.json"
     with open(fake_path, "wb") as f:
@@ -4040,9 +3709,7 @@ def test_pipeline_skips_taxonomy_download_when_file_is_usable(
     )
     monkeypatch.setattr(taxonomy_mod, "load_local_taxonomy", lambda: None)
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.add_collection("Test", "[]")
 
     # Override the helper's no-op download stub AFTER calling the helper, so
@@ -4058,15 +3725,7 @@ def test_pipeline_skips_taxonomy_download_when_file_is_usable(
         ),
     )
 
-    class FakeClassifier:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def encode_image(self, *args, **kwargs):
-            import numpy as np
-            return np.zeros(512, dtype=np.float32)
-
-    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+    monkeypatch.setattr(classifier_mod, "Classifier", _ZeroEmbeddingClassifier)
 
     params = PipelineParams(
         collection_id=col_id,
@@ -4102,15 +3761,8 @@ def test_pipeline_reclassify_multimodel_ignores_stale_detection_ids(
 
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     # Create a folder + photo and insert a prior-run detection row so that
     # get_existing_detection_photo_ids() returns this photo's id.
@@ -4152,29 +3804,7 @@ def test_pipeline_reclassify_multimodel_ignores_stale_detection_ids(
 
     monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
 
-    class FakeClassifier:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def encode_image(self, *args, **kwargs):
-            import numpy as np
-            return np.zeros(512, dtype=np.float32)
-
-        def classify_with_embedding(self, img, threshold=0):
-            import numpy as np
-            return [{"species": "Robin", "score": 0.9}], np.zeros(
-                512, dtype=np.float32,
-            )
-
-        def classify_batch_with_embedding(self, images, threshold=0):
-            import numpy as np
-            zero = np.zeros(512, dtype=np.float32)
-            return [(
-                [{"species": "Robin", "score": 0.9}],
-                zero,
-            ) for _ in images]
-
-    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+    monkeypatch.setattr(classifier_mod, "Classifier", _RobinClassifier)
 
     params = PipelineParams(
         collection_id=col_id,
@@ -4280,15 +3910,8 @@ def test_pipeline_classify_passes_each_qualifying_detection_to_prepare_image(
     """
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -4341,29 +3964,7 @@ def test_pipeline_classify_passes_each_qualifying_detection_to_prepare_image(
 
     monkeypatch.setattr(classify_job, "_prepare_image", capturing_prepare_image)
 
-    class FakeClassifier:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def encode_image(self, *args, **kwargs):
-            import numpy as np
-            return np.zeros(512, dtype=np.float32)
-
-        def classify_with_embedding(self, img, threshold=0):
-            import numpy as np
-            return [{"species": "Robin", "score": 0.9}], np.zeros(
-                512, dtype=np.float32,
-            )
-
-        def classify_batch_with_embedding(self, images, threshold=0):
-            import numpy as np
-            zero = np.zeros(512, dtype=np.float32)
-            return [(
-                [{"species": "Robin", "score": 0.9}],
-                zero,
-            ) for _ in images]
-
-    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+    monkeypatch.setattr(classifier_mod, "Classifier", _RobinClassifier)
 
     params = PipelineParams(
         collection_id=col_id,
@@ -4408,13 +4009,10 @@ def test_pipeline_classify_passes_each_qualifying_detection_to_prepare_image(
 def test_raw_reinference_replaces_stored_predictions(tmp_path, monkeypatch, species):
     import classifier
     import classify_job
-    import config as cfg
     import labels_fingerprint
     from db import Database
     from PIL import Image
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
     db_path = str(tmp_path / "refresh.db")
     db = Database(db_path)
     folder_path = str(tmp_path / "photos")
@@ -4485,15 +4083,8 @@ def test_pipeline_classifies_bracketed_weak_detection_without_lowering_threshold
     """
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
@@ -4571,15 +4162,9 @@ def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch):
 
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
     from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -4613,29 +4198,7 @@ def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch):
 
     monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
 
-    class FakeClassifier:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def encode_image(self, *args, **kwargs):
-            import numpy as np
-            return np.zeros(512, dtype=np.float32)
-
-        def classify_with_embedding(self, img, threshold=0):
-            import numpy as np
-            return [{"species": "Robin", "score": 0.9}], np.zeros(
-                512, dtype=np.float32,
-            )
-
-        def classify_batch_with_embedding(self, images, threshold=0):
-            import numpy as np
-            zero = np.zeros(512, dtype=np.float32)
-            return [(
-                [{"species": "Robin", "score": 0.9}],
-                zero,
-            ) for _ in images]
-
-    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+    monkeypatch.setattr(classifier_mod, "Classifier", _RobinClassifier)
 
     params = PipelineParams(
         collection_id=col_id,
@@ -4683,15 +4246,9 @@ def test_pipeline_reclassify_same_boxes_preserves_predictions(
     """
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
     from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
@@ -4782,15 +4339,9 @@ def test_detect_batch_skips_empty_photo_on_rerun(tmp_path, monkeypatch):
 
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
     from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -4845,29 +4396,7 @@ def test_detect_batch_skips_empty_photo_on_rerun(tmp_path, monkeypatch):
         lambda self, model_name: set(),
     )
 
-    class FakeClassifier:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def encode_image(self, *args, **kwargs):
-            import numpy as np
-            return np.zeros(512, dtype=np.float32)
-
-        def classify_with_embedding(self, img, threshold=0):
-            import numpy as np
-            return [{"species": "Robin", "score": 0.9}], np.zeros(
-                512, dtype=np.float32,
-            )
-
-        def classify_batch_with_embedding(self, images, threshold=0):
-            import numpy as np
-            zero = np.zeros(512, dtype=np.float32)
-            return [(
-                [{"species": "Robin", "score": 0.9}],
-                zero,
-            ) for _ in images]
-
-    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+    monkeypatch.setattr(classifier_mod, "Classifier", _RobinClassifier)
 
     params = PipelineParams(
         collection_id=col_id,
@@ -4917,16 +4446,10 @@ def test_pipeline_reclassify_partial_abort_preserves_unprocessed_detections(
 
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
     import pipeline_job as pj
     from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -4981,29 +4504,7 @@ def test_pipeline_reclassify_partial_abort_preserves_unprocessed_detections(
 
     monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
 
-    class FakeClassifier:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def encode_image(self, *args, **kwargs):
-            import numpy as np
-            return np.zeros(512, dtype=np.float32)
-
-        def classify_with_embedding(self, img, threshold=0):
-            import numpy as np
-            return [{"species": "Robin", "score": 0.9}], np.zeros(
-                512, dtype=np.float32,
-            )
-
-        def classify_batch_with_embedding(self, images, threshold=0):
-            import numpy as np
-            zero = np.zeros(512, dtype=np.float32)
-            return [(
-                [{"species": "Robin", "score": 0.9}],
-                zero,
-            ) for _ in images]
-
-    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+    monkeypatch.setattr(classifier_mod, "Classifier", _RobinClassifier)
 
     params = PipelineParams(
         collection_id=col_id,
@@ -5068,15 +4569,9 @@ def test_pipeline_reclassify_partial_batch_exception_preserves_detections(
 
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
     from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -5119,29 +4614,7 @@ def test_pipeline_reclassify_partial_batch_exception_preserves_detections(
 
     monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
 
-    class FakeClassifier:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def encode_image(self, *args, **kwargs):
-            import numpy as np
-            return np.zeros(512, dtype=np.float32)
-
-        def classify_with_embedding(self, img, threshold=0):
-            import numpy as np
-            return [{"species": "Robin", "score": 0.9}], np.zeros(
-                512, dtype=np.float32,
-            )
-
-        def classify_batch_with_embedding(self, images, threshold=0):
-            import numpy as np
-            zero = np.zeros(512, dtype=np.float32)
-            return [(
-                [{"species": "Robin", "score": 0.9}],
-                zero,
-            ) for _ in images]
-
-    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+    monkeypatch.setattr(classifier_mod, "Classifier", _RobinClassifier)
 
     params = PipelineParams(
         collection_id=col_id,
@@ -5191,16 +4664,9 @@ def test_pipeline_classify_mid_batch_cancel_skips_storage(tmp_path, monkeypatch)
 
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
     import pipeline_job as pj
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -5305,15 +4771,7 @@ def test_pipeline_classify_mid_batch_cancel_skips_storage(tmp_path, monkeypatch)
 
     monkeypatch.setattr(pj, "_should_abort", patched_should_abort)
 
-    class FakeClassifier:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def encode_image(self, *args, **kwargs):
-            import numpy as np
-            return np.zeros(512, dtype=np.float32)
-
-    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+    monkeypatch.setattr(classifier_mod, "Classifier", _ZeroEmbeddingClassifier)
 
     params = PipelineParams(
         collection_id=col_id,
@@ -5383,16 +4841,10 @@ def test_pipeline_reclassify_cancel_preserves_existing_predictions(
 
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
     import pipeline_job as pj
     from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -5493,15 +4945,7 @@ def test_pipeline_reclassify_cancel_preserves_existing_predictions(
 
     monkeypatch.setattr(pj, "_should_abort", patched_should_abort)
 
-    class FakeClassifier:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def encode_image(self, *args, **kwargs):
-            import numpy as np
-            return np.zeros(512, dtype=np.float32)
-
-    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+    monkeypatch.setattr(classifier_mod, "Classifier", _ZeroEmbeddingClassifier)
 
     params = PipelineParams(
         collection_id=col_id,
@@ -5547,15 +4991,8 @@ def test_pipeline_reclassify_success_preserves_classifier_run_keys(
     """
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -5666,15 +5103,7 @@ def test_pipeline_reclassify_success_preserves_classifier_run_keys(
 
     monkeypatch.setattr(classify_job, "_flush_batch", fake_flush_batch)
 
-    class FakeClassifier:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def encode_image(self, *args, **kwargs):
-            import numpy as np
-            return np.zeros(512, dtype=np.float32)
-
-    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+    monkeypatch.setattr(classifier_mod, "Classifier", _ZeroEmbeddingClassifier)
 
     params = PipelineParams(
         collection_id=col_id,
@@ -5725,16 +5154,9 @@ def test_pipeline_classify_cancel_does_not_raise_when_earlier_model_load_failed(
 
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
     import pipeline_job as pj
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -5880,15 +5302,8 @@ def test_pipeline_later_model_load_cancel_marks_model_skipped(
     """
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -5934,15 +5349,7 @@ def test_pipeline_later_model_load_cancel_marks_model_skipped(
 
     monkeypatch.setattr(classify_job, "_prepare_image", fake_prepare_image)
 
-    class FakeClassifier:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def encode_image(self, *args, **kwargs):
-            import numpy as np
-            return np.zeros(512, dtype=np.float32)
-
-    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+    monkeypatch.setattr(classifier_mod, "Classifier", _ZeroEmbeddingClassifier)
 
     runner = FakeRunner()
     job = _make_job()
@@ -6012,17 +5419,10 @@ def test_onnx_load_failure_writes_verify_failed_sentinel(tmp_path, monkeypatch):
     model as healthy because no sentinel was written.
     """
     import classifier as classifier_mod
-    import config as cfg
     import model_verify
     import models
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.add_collection("Test", "[]")
 
     model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
@@ -6094,16 +5494,9 @@ def test_onnx_load_failure_skips_sentinel_when_files_verify_ok(
     but the sentinel came back on the next transient failure.
     """
     import classifier as classifier_mod
-    import config as cfg
     import model_verify
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.add_collection("Test", "[]")
 
     model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
@@ -6164,15 +5557,8 @@ def test_pipeline_continues_when_first_model_fails(tmp_path, monkeypatch):
     entire pipeline even when other models were available.
     """
     import classifier as classifier_mod
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.add_collection("Test", "[]")
 
     model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
@@ -6255,15 +5641,8 @@ def test_pipeline_continues_when_secondary_model_fails(tmp_path, monkeypatch):
     model's results are kept and the pipeline completes with a partial success.
     """
     import classifier as classifier_mod
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.add_collection("Test", "[]")
 
     model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
@@ -6333,15 +5712,8 @@ def test_pipeline_single_model_still_aborts_on_failure(tmp_path, monkeypatch):
     test_pipeline_raises_when_stage_fails.
     """
     import classifier as classifier_mod
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.add_collection("Test", "[]")
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
@@ -6395,16 +5767,9 @@ def test_pipeline_classify_stores_predictions_with_detection_id(
     """
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
-    from db import Database
     from PIL import Image
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -6571,15 +5936,8 @@ def test_extract_masks_stage_ignores_synthetic_full_image_detections(
     """
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -6680,15 +6038,8 @@ def test_extract_masks_stage_warns_when_all_detections_below_threshold(
     """
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -6775,16 +6126,10 @@ def test_extract_masks_stage_warns_on_mixed_already_masked_and_subthreshold(
     """
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
     _stub_extract_masks_heavy_ops(monkeypatch)
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -6883,18 +6228,12 @@ def test_extract_masks_with_only_subthreshold_detections_keeps_process_green(
     """
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
-    from db import Database
     from jobs import JobRunner
     from wait import wait_for_job_via_runner
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
     _stub_extract_masks_heavy_ops(monkeypatch)
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -6974,16 +6313,9 @@ def test_pipeline_rerun_with_existing_prediction_and_bursts_does_not_crash(
     """
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
-    from db import Database
     from PIL import Image
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -7096,42 +6428,13 @@ def test_pipeline_step_defs_include_detect_and_per_model_classify(
     one 'classify:<model_id>' row per model. The detect row must come before
     every classify row so users see detection progress as its own phase."""
     import classifier as classifier_mod
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.add_collection("Test", "[]")
 
     model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
 
-    class FakeClassifier:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def encode_image(self, *args, **kwargs):
-            import numpy as np
-            return np.zeros(512, dtype=np.float32)
-
-        def classify_with_embedding(self, img, threshold=0):
-            import numpy as np
-            return [{"species": "Robin", "score": 0.9}], np.zeros(
-                512, dtype=np.float32,
-            )
-
-        def classify_batch_with_embedding(self, images, threshold=0):
-            import numpy as np
-            zero = np.zeros(512, dtype=np.float32)
-            return [(
-                [{"species": "Robin", "score": 0.9}],
-                zero,
-            ) for _ in images]
-
-    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+    monkeypatch.setattr(classifier_mod, "Classifier", _RobinClassifier)
 
     params = PipelineParams(
         collection_id=col_id,
@@ -7184,15 +6487,8 @@ def test_pipeline_step_defs_cover_every_requested_id_on_partial_resolution(
 
     Regression test for Codex P2 on PR #566 (step_defs at line 203).
     """
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.add_collection("Test", "[]")
 
     # Install the first model as downloaded; second is requested but not
@@ -7232,42 +6528,13 @@ def test_pipeline_single_model_gets_per_model_classify_row(tmp_path, monkeypatch
     """Even a single-model run uses one 'classify:<model_id>' row — labeled
     with the model's display name — for consistency with multi-model runs."""
     import classifier as classifier_mod
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.add_collection("Test", "[]")
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
-    class FakeClassifier:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def encode_image(self, *args, **kwargs):
-            import numpy as np
-            return np.zeros(512, dtype=np.float32)
-
-        def classify_with_embedding(self, img, threshold=0):
-            import numpy as np
-            return [{"species": "Robin", "score": 0.9}], np.zeros(
-                512, dtype=np.float32,
-            )
-
-        def classify_batch_with_embedding(self, images, threshold=0):
-            import numpy as np
-            zero = np.zeros(512, dtype=np.float32)
-            return [(
-                [{"species": "Robin", "score": 0.9}],
-                zero,
-            ) for _ in images]
-
-    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+    monkeypatch.setattr(classifier_mod, "Classifier", _RobinClassifier)
 
     params = PipelineParams(
         collection_id=col_id,
@@ -7301,19 +6568,12 @@ def test_pipeline_detect_runs_once_before_any_classifier_loads(
     rather than interleaved with model 1's classify loop."""
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
-    from db import Database
     from PIL import Image
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     # Create real photos so collection has something to iterate.
     photo_dir = tmp_path / "photos"
     photo_dir.mkdir()
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     folder_id = db.add_folder(str(photo_dir))
     photo_ids = []
     import json
@@ -7422,18 +6682,11 @@ def test_pipeline_one_model_fails_to_load_other_model_still_runs(
     model's row must be marked 'failed' so users see exactly which model
     broke, not a buried note inside an aggregate summary."""
     import classifier as classifier_mod
-    import config as cfg
-    from db import Database
     from PIL import Image
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     photo_dir = tmp_path / "photos"
     photo_dir.mkdir()
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     folder_id = db.add_folder(str(photo_dir))
     import json
     Image.new("RGB", (64, 64), "red").save(str(photo_dir / "x.jpg"))
@@ -7518,18 +6771,11 @@ def test_pipeline_per_model_step_summary_includes_prediction_count(
     counts (predictions stored, detections reused, etc.) so users can see
     which model found what without reading the aggregate."""
     import classifier as classifier_mod
-    import config as cfg
-    from db import Database
     from PIL import Image
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     photo_dir = tmp_path / "photos"
     photo_dir.mkdir()
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     folder_id = db.add_folder(str(photo_dir))
     import json
     Image.new("RGB", (64, 64), "red").save(str(photo_dir / "p.jpg"))
@@ -7541,29 +6787,7 @@ def test_pipeline_per_model_step_summary_includes_prediction_count(
 
     model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
 
-    class FakeClassifier:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def encode_image(self, *args, **kwargs):
-            import numpy as np
-            return np.zeros(512, dtype=np.float32)
-
-        def classify_with_embedding(self, img, threshold=0):
-            import numpy as np
-            return [{"species": "Robin", "score": 0.9}], np.zeros(
-                512, dtype=np.float32,
-            )
-
-        def classify_batch_with_embedding(self, images, threshold=0):
-            import numpy as np
-            zero = np.zeros(512, dtype=np.float32)
-            return [(
-                [{"species": "Robin", "score": 0.9}],
-                zero,
-            ) for _ in images]
-
-    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+    monkeypatch.setattr(classifier_mod, "Classifier", _RobinClassifier)
 
     params = PipelineParams(
         collection_id=col_id,
@@ -7607,15 +6831,8 @@ def test_pipeline_reclassify_purge_deferred_until_a_model_succeeds(
     import json
 
     import classifier as classifier_mod
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     # Seed a prior-run detection so the reclassify purge has something to
     # potentially delete.
@@ -7697,18 +6914,11 @@ def test_pipeline_fatal_error_does_not_overwrite_completed_model_rows(
 
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
-    from db import Database
     from PIL import Image
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     photo_dir = tmp_path / "photos"
     photo_dir.mkdir()
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     folder_id = db.add_folder(str(photo_dir))
     Image.new("RGB", (64, 64), "red").save(str(photo_dir / "p.jpg"))
     photo_id = db.add_photo(folder_id, "p.jpg", ".jpg", 1000, 1_000_000.0)
@@ -7720,29 +6930,7 @@ def test_pipeline_fatal_error_does_not_overwrite_completed_model_rows(
     model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
     first_id, second_id = model_ids
 
-    class FakeClassifier:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def encode_image(self, *args, **kwargs):
-            import numpy as np
-            return np.zeros(512, dtype=np.float32)
-
-        def classify_with_embedding(self, img, threshold=0):
-            import numpy as np
-            return [{"species": "Robin", "score": 0.9}], np.zeros(
-                512, dtype=np.float32,
-            )
-
-        def classify_batch_with_embedding(self, images, threshold=0):
-            import numpy as np
-            zero = np.zeros(512, dtype=np.float32)
-            return [(
-                [{"species": "Robin", "score": 0.9}],
-                zero,
-            ) for _ in images]
-
-    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+    monkeypatch.setattr(classifier_mod, "Classifier", _RobinClassifier)
 
     # Let the first model's grouping/storage succeed normally, then blow
     # up when the SECOND model asks _store_grouped_predictions to run.
@@ -7797,15 +6985,8 @@ def test_pipeline_loader_abort_finalizes_detect_and_classify_rows(
     Regression test for Codex P2 on PR #566 (line 1781).
     """
     import classifier as classifier_mod
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.add_collection("Test", "[]")
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
@@ -7868,15 +7049,8 @@ def test_pipeline_loader_failure_marks_classify_rows_failed_not_skipped(
     Regression test for Codex P2 on PR #566 (pipeline_job.py:1173).
     """
     import classifier as classifier_mod
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     col_id = db.add_collection("Test", "[]")
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
@@ -7939,16 +7113,10 @@ def test_pipeline_loader_failure_does_not_cancel_scan(tmp_path, monkeypatch):
     import time
 
     import classifier as classifier_mod
-    import config as cfg
     import scanner
     from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     photo_dir = tmp_path / "photos"
     photo_dir.mkdir()
     for i in range(3):
@@ -8013,15 +7181,9 @@ def test_pipeline_collection_failure_fails_job(tmp_path, monkeypatch):
     stage failed, so every downstream stage read "Skipped" and the run was
     recorded as completed with nothing processed.
     """
-    import config as cfg
     from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     photo_dir = tmp_path / "photos"
     photo_dir.mkdir()
     _drop_jpeg(str(photo_dir), "a.jpg")
@@ -8057,16 +7219,9 @@ def test_pipeline_snapshot_resolution_failure_does_not_hang(tmp_path, monkeypatc
     import sqlite3
     import traceback
 
-    import config as cfg
     import pipeline_job
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     folder = tmp_path / "folder"
     folder.mkdir()
     db.add_folder(str(folder))
@@ -8126,16 +7281,10 @@ def _make_photo_dir(tmp_path, n):
 
 def test_thumbnail_failures_complete_stage_with_repair_warnings(tmp_path, monkeypatch):
     """Per-photo gaps warn without invalidating successful thumbnails."""
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
     photo_dir = _make_photo_dir(tmp_path, 4)
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     # Make every second thumbnail "fail" by returning None.
     import thumbnails as thumbnails_mod
@@ -8189,16 +7338,10 @@ def test_thumbnail_failures_complete_stage_with_repair_warnings(tmp_path, monkey
 
 def test_thumbnail_failures_append_rollup_warning_not_job_error(tmp_path, monkeypatch):
     """Coverage gaps surface once as warnings without failing the job."""
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
     photo_dir = _make_photo_dir(tmp_path, 3)
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     # All thumbnails fail.
     import thumbnails as thumbnails_mod
@@ -8261,16 +7404,10 @@ def test_pipeline_thumbnail_retry_uses_near_full_working_copy(tmp_path):
 def test_thumbnail_progress_counter_includes_failed(tmp_path, monkeypatch):
     """stages['thumbnails']['count'] must include failed items so the UI
     progress bar reflects work actually attempted, not just successes."""
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
     photo_dir = _make_photo_dir(tmp_path, 2)
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     import thumbnails as thumbnails_mod
     monkeypatch.setattr(
@@ -8306,19 +7443,13 @@ def test_thumbnail_progress_counter_includes_failed(tmp_path, monkeypatch):
     )
 
 
-def test_pipeline_with_snapshot_scans_only_snapshot_folders(tmp_path, monkeypatch):
+def test_pipeline_with_snapshot_scans_only_snapshot_folders(tmp_path):
     """When source_snapshot_id is provided, the scan stage must walk only the
     parent directories of the snapshot's files — sibling folders registered
     with the workspace but not in the snapshot must NOT be scanned."""
-    import config as cfg
     from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     # Two sibling folders each with one JPEG. Only folder A is in the snapshot.
     folder_a = tmp_path / "folderA"
@@ -8372,16 +7503,10 @@ def test_pipeline_snapshot_excludes_late_arriving_files(tmp_path, monkeypatch):
     """
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
     from db import Database
     from PIL import Image
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder = tmp_path / "photos"
     folder.mkdir()
@@ -8529,15 +7654,8 @@ def test_pipeline_snapshot_collapses_overlapping_scan_roots(tmp_path, monkeypatc
     produce overlapping paths (/root and /root/sub). The scanner would then
     walk the subtree twice. params.sources must be collapsed to the minimal
     non-overlapping ancestor set."""
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     root = tmp_path / "root"
     sub = root / "sub"
@@ -8618,21 +7736,15 @@ def test_pipeline_miss_stage_skipped_when_regroup_fails(tmp_path, monkeypatch):
     context during an already-failing job. The gate must check the
     stage's failed status, not just the global abort flag (regroup_stage
     marks itself failed without setting abort)."""
-    import config as cfg
     from db import Database
     from PIL import Image
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     photo_dir = tmp_path / "photos"
     photo_dir.mkdir()
     for name in ("a.jpg", "b.jpg"):
         Image.new("RGB", (16, 16), "black").save(str(photo_dir / name))
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     # Force regroup to fail before it finishes. pipeline_job imports
     # run_full_pipeline lazily inside regroup_stage; patch at module level.
@@ -8693,23 +7805,16 @@ def test_workspace_regroup_lock_spans_regroup_and_miss(tmp_path, monkeypatch):
 
     Trace acquire/release vs. regroup-work and miss-step events and
     verify release happens AFTER the miss step, not between them."""
-    import config as cfg
     import pipeline as pipeline_mod
     import pipeline_job as pj
     import pipeline_locks
-    from db import Database
     from PIL import Image
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     photo_dir = tmp_path / "photos"
     photo_dir.mkdir()
     Image.new("RGB", (16, 16), "black").save(str(photo_dir / "a.jpg"))
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     events = []
     pause_state = {
@@ -8844,17 +7949,12 @@ def test_pipeline_regroup_stamps_workspace_group_fingerprint(tmp_path, monkeypat
     from db import Database
     from PIL import Image
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
     photo_dir = tmp_path / "photos"
     photo_dir.mkdir()
     for name in ("a.jpg", "b.jpg"):
         Image.new("RGB", (16, 16), "black").save(str(photo_dir / name))
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     # Stub run_full_pipeline + save_results so regroup completes deterministically.
     import pipeline as pipeline_mod
@@ -8911,21 +8011,15 @@ def test_pipeline_regroup_does_not_stamp_for_partial_run(tmp_path, monkeypatch):
     must NOT stamp last_group_fingerprint — those excluded photos are still
     ungrouped under the current settings, so claiming workspace-level
     freshness would let the pipeline page hide a real stale state."""
-    import config as cfg
     from db import Database
     from PIL import Image
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     photo_dir = tmp_path / "photos"
     photo_dir.mkdir()
     for name in ("a.jpg", "b.jpg"):
         Image.new("RGB", (16, 16), "black").save(str(photo_dir / name))
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     import pipeline as pipeline_mod
 
@@ -8975,21 +8069,15 @@ def test_pipeline_regroup_invalidates_stamp_on_partial_run(tmp_path, monkeypatch
     reflects the full workspace, so the pipeline page would falsely report
     Group as 'done-prior'. The stamp must be invalidated (NULL'd) on
     partial runs so pipeline_plan treats the resulting state as outdated."""
-    import config as cfg
     from db import Database
     from PIL import Image
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     photo_dir = tmp_path / "photos"
     photo_dir.mkdir()
     for name in ("a.jpg", "b.jpg"):
         Image.new("RGB", (16, 16), "black").save(str(photo_dir / name))
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     # Pre-stamp a fingerprint as if a prior FULL workspace regroup had
     # completed cleanly. The partial run we're about to do must wipe
@@ -9050,8 +8138,6 @@ def test_pipeline_regroup_does_not_stamp_when_eye_override_differs(
     from db import Database
     from PIL import Image
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
     # Workspace default: eye detection off. The Process-page checkbox on
     # this run flips it via ``eye_detect_override=True``.
     with open(cfg.CONFIG_PATH, "w") as f:
@@ -9062,9 +8148,7 @@ def test_pipeline_regroup_does_not_stamp_when_eye_override_differs(
     for name in ("a.jpg", "b.jpg"):
         Image.new("RGB", (16, 16), "black").save(str(photo_dir / name))
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     # Pre-stamp a fingerprint as if a prior FULL default-off regroup had
     # completed cleanly. The one-off eye-on run must NOT overwrite this
     # with a fresh stamp — that would lie about workspace freshness.
@@ -9127,8 +8211,6 @@ def test_pipeline_regroup_stamps_when_eye_override_matches_workspace(
     from db import Database
     from PIL import Image
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
     with open(cfg.CONFIG_PATH, "w") as f:
         json.dump({"pipeline": {"eye_detect_enabled": True}}, f)
 
@@ -9137,9 +8219,7 @@ def test_pipeline_regroup_stamps_when_eye_override_matches_workspace(
     for name in ("a.jpg", "b.jpg"):
         Image.new("RGB", (16, 16), "black").save(str(photo_dir / name))
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     import pipeline as pipeline_mod
     monkeypatch.setattr(
@@ -9333,21 +8413,16 @@ def test_weighted_progress_monotonic_through_pipeline():
     assert last_pct == 100.0
 
 
-def test_pipeline_thumbnail_stage_records_thumb_path_in_db(tmp_path, monkeypatch):
+def test_pipeline_thumbnail_stage_records_thumb_path_in_db(tmp_path):
     """Each successful generate_thumbnail in the pipeline thumbnail_stage must
     set photos.thumb_path so the dashboard's coverage query reflects it.
     Without this, scanning produces JPEGs on disk but the column stays NULL
     and "0 of N thumbnails made" is reported forever."""
-    import config as cfg
     from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
     photo_dir = _make_photo_dir(tmp_path, 3)
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     params = PipelineParams(
         source=str(photo_dir),
@@ -9568,15 +8643,8 @@ def test_extract_masks_stage_gates_weak_detection_on_matching_anchor_species(
     Classification already lowers its crop floor for a bracketed weak frame;
     mask extraction must also apply grouping's matching-anchor-species gate.
     """
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
@@ -9652,16 +8720,9 @@ def test_pipeline_extract_masks_cancel_marks_stage_cancelled(
     abort. The user saw a green "completed" summary on a stage that had
     only processed 173 of 11,285 photos.
     """
-    import config as cfg
     import pipeline_job as pj
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -9834,15 +8895,8 @@ def test_extract_masks_source_lost_midrun_fails_stage(tmp_path, monkeypatch):
     library was never masked was a skipped count indistinguishable from
     "SAM found no subject here".
     """
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
@@ -9914,15 +8968,8 @@ def test_extract_masks_offline_folder_does_not_stop_healthy_folder(
     """One dead folder must not strand photos in the collection's other,
     still-reachable folders — the outage is folder-scoped, so the stage keeps
     working through the rest and reports the unreadable ones."""
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     dead_path = str(tmp_path / "dead")
     live_path = str(tmp_path / "live")
@@ -9986,16 +9033,9 @@ def test_extract_masks_mount_outage_still_processes_other_sources(
     masks that could have been made and file those photos under an outage
     they were never affected by (Codex #1392 P1).
     """
-    import config as cfg
     import pipeline_job as pj
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     # Names chosen so the share sorts first: the worklist is ordered by
     # path, and a stage that abandons the whole worklist after the outage
@@ -10084,14 +9124,8 @@ def test_extract_masks_offline_folder_still_counts_cached_masks(
     when the source volume is gone (Codex #1392 P2).
     """
     import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
@@ -10162,15 +9196,8 @@ def test_extract_masks_preflight_offline_photos_are_counted_unreadable(
     had failed with unreachable photos — which the Extract card rendered as
     "No photos needed masks" (Codex #1392 P2).
     """
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
@@ -10217,15 +9244,8 @@ def test_extract_masks_single_unreadable_file_is_reported_not_skipped(
     """A corrupt file in an otherwise healthy folder is a per-photo failure:
     the stage works through the rest, but the photo is reported as unreadable
     rather than counted as a benign "no subject found" skip."""
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
@@ -10277,15 +9297,8 @@ def test_extract_masks_no_subject_still_counts_as_benign_skip(
     """Guard against over-correction: SAM returning no mask for a readable
     photo means "no subject found here", which is a legitimate outcome. It
     stays in ``skipped`` and leaves the stage completed."""
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
@@ -11421,17 +10434,11 @@ def test_pipeline_eye_keypoints_cancel_marks_stage_cancelled(
     'Cancelled' summary, not the default 'X of N photos processed' which
     looks indistinguishable from a clean run that happened to process X.
     """
-    import config as cfg
     import pipeline as pipeline_mod
     import pipeline_job as pj
     from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -11535,16 +10542,10 @@ def test_pipeline_eye_keypoints_stage_auto_downloads_superanimal_weights(
     a fresh install would silently produce zero eye keypoints because the
     per-photo Gate 2 check would skip every photo.
     """
-    import config as cfg
     import pipeline as pipeline_mod
     from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -11617,16 +10618,10 @@ def test_pipeline_eye_keypoints_stage_only_downloads_routable_variants(
     collection pays the full quadruped download cost for weights it would
     never use.
     """
-    import config as cfg
     import pipeline as pipeline_mod
     from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -11691,16 +10686,10 @@ def test_pipeline_eye_keypoints_stage_skips_download_for_out_of_scope_only(
     the prior `if total > 0` guard would still pull both ~hundreds-of-MB
     variants even though `_resolve_keypoint_model` skips every photo.
     """
-    import config as cfg
     import pipeline as pipeline_mod
     from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -11769,17 +10758,11 @@ def test_pipeline_eye_keypoints_stage_download_progress_isolated_from_photo_coun
     download surfaces e.g. "Cancelled (1 of N processed)" before any
     photo has actually been touched, misreporting stage outcomes.
     """
-    import config as cfg
     import pipeline as pipeline_mod
     import pipeline_job as pj
     from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -11884,16 +10867,10 @@ def test_pipeline_eye_keypoints_stage_skips_download_when_no_eligible_photos(
 ):
     """When no photos are eligible (total == 0), the stage must NOT trigger
     a multi-hundred-MB download — gate matches the SAM2/DINOv2 pattern."""
-    import config as cfg
     import pipeline as pipeline_mod
     from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -11955,16 +10932,10 @@ def test_pipeline_eye_keypoints_stage_skips_download_when_all_below_conf_gate(
     threshold so an all-low-confidence collection doesn't pull
     multi-hundred-MB SuperAnimal weights that no photo can use.
     """
-    import config as cfg
     import pipeline as pipeline_mod
     from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -12028,17 +10999,11 @@ def test_pipeline_eye_keypoints_stage_aborts_between_keypoint_downloads(
     the user waits through tens-to-hundreds of MB of unwanted bandwidth
     before the stage exits.
     """
-    import config as cfg
     import pipeline as pipeline_mod
     import pipeline_job as pj
     from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -12120,16 +11085,10 @@ def test_pipeline_eye_keypoints_stage_download_failure_skips_stage_not_pipeline(
     offline users who never asked to opt out of eye keypoints get a hard
     RuntimeError out of run_pipeline_job for an optional stage.
     """
-    import config as cfg
     import pipeline as pipeline_mod
     from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -12358,9 +11317,7 @@ def test_pipeline_eye_keypoints_download_cancel_finalizes_as_cancelled_not_failu
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -12478,16 +11435,10 @@ def test_pipeline_eye_keypoints_stage_excluded_photos_do_not_influence_downloads
     skips them per-photo, so pulling weights to satisfy a deselected row
     wastes bandwidth on a variant that no included photo will use.
     """
-    import config as cfg
     import pipeline as pipeline_mod
     from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -12566,14 +11517,10 @@ def test_pipeline_eye_keypoints_per_run_optin_overrides_config_disabled(
     import pipeline as pipeline_mod
     from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
     with open(cfg.CONFIG_PATH, "w") as f:
         json.dump({"pipeline": {"eye_detect_enabled": False}}, f)
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -12657,16 +11604,11 @@ def test_pipeline_eye_keypoints_full_strategy_does_not_force_optin(
     """
     import config as cfg
     import pipeline as pipeline_mod
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
     with open(cfg.CONFIG_PATH, "w") as f:
         json.dump({"pipeline": {"eye_detect_enabled": False}}, f)
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -12738,16 +11680,11 @@ def test_pipeline_regroup_per_run_eye_optin_reaches_scoring_config(
     """
     import config as cfg
     import pipeline as pipeline_mod
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
     with open(cfg.CONFIG_PATH, "w") as f:
         json.dump({"pipeline": {"eye_detect_enabled": False}}, f)
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -12818,16 +11755,11 @@ def test_pipeline_regroup_full_strategy_default_does_not_force_scoring_config(
     """
     import config as cfg
     import pipeline as pipeline_mod
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
     with open(cfg.CONFIG_PATH, "w") as f:
         json.dump({"pipeline": {"eye_detect_enabled": False}}, f)
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -12894,16 +11826,11 @@ def test_pipeline_regroup_no_optin_leaves_scoring_config_untouched(
     """
     import config as cfg
     import pipeline as pipeline_mod
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
     with open(cfg.CONFIG_PATH, "w") as f:
         json.dump({"pipeline": {"eye_detect_enabled": False}}, f)
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -12969,16 +11896,11 @@ def test_pipeline_regroup_no_optin_preserves_settings_eye_on(
     """
     import config as cfg
     import pipeline as pipeline_mod
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
     with open(cfg.CONFIG_PATH, "w") as f:
         json.dump({"pipeline": {"eye_detect_enabled": True}}, f)
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -13205,19 +12127,15 @@ import pytest
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions required")
-def test_pipeline_scan_surfaces_permission_denied(tmp_path, monkeypatch):
+def test_pipeline_scan_surfaces_permission_denied(tmp_path):
     """Pipeline scan stage must surface kernel-level enumeration denials
     (EPERM / EACCES) into job["errors"] as a typed PERMISSION_DENIED entry,
     and accessible siblings must still be scanned. Regression: real-world
     May2026 run on /Volumes/Photography/.../2026-05-01 reported "0 photos"
     while macOS TCC was silently blocking the read.
     """
-    import config as cfg
     from db import Database
     from PIL import Image
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     photo_root = tmp_path / "photos"
     ok_dir = photo_root / "ok"
@@ -13495,21 +12413,14 @@ def test_thumbnail_setup_failure_does_not_deadlock_scanner(tmp_path, monkeypatch
     """
     import queue as queue_mod
 
-    import config as cfg
-    from db import Database
     from PIL import Image
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     photo_dir = tmp_path / "photos"
     photo_dir.mkdir()
     for i in range(8):
         Image.new("RGB", (16, 16), "red").save(str(photo_dir / f"p{i}.jpg"))
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     # Shrink only the pipeline's scan→thumb queue (created with maxsize=200)
     # so the scanner outruns the dead consumer after 2 photos.
@@ -13568,7 +12479,7 @@ def test_thumbnail_setup_failure_does_not_deadlock_scanner(tmp_path, monkeypatch
 # ---------------------------------------------------------------------------
 
 
-def test_previews_stage_uses_thumb_cache_dir_parent(tmp_path, monkeypatch):
+def test_previews_stage_uses_thumb_cache_dir_parent(tmp_path):
     """With a custom --thumb-dir, previews_stage must write preview files,
     preview_cache rows, and run quota eviction under
     dirname(thumb_cache_dir)/previews — the root app.py serves, reconciles,
@@ -13576,12 +12487,8 @@ def test_previews_stage_uses_thumb_cache_dir_parent(tmp_path, monkeypatch):
     warmed previews that are never served, rows reaped as ghosts, and
     orphan JPEGs outside the quota.
     """
-    import config as cfg
     from db import Database
     from PIL import Image
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     photo_dir = tmp_path / "photos"
     photo_dir.mkdir()
@@ -13631,23 +12538,16 @@ def test_previews_stage_uses_thumb_cache_dir_parent(tmp_path, monkeypatch):
 def test_pipeline_previews_honor_raw_failure_marker_after_source_selection(
     tmp_path, monkeypatch,
 ):
-    import config as cfg
     import image_loader
     import scanner
     import thumbnails
-    from db import Database
     from PIL import Image
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     photo_dir = tmp_path / "photos"
     photo_dir.mkdir()
     raw_path = photo_dir / "source.NEF"
     raw_path.write_bytes(b"raw")
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     folder_id = db.add_folder(str(photo_dir), name="photos")
     photo_id = db.add_photo(
         folder_id=folder_id,
@@ -13726,23 +12626,16 @@ def test_pipeline_previews_warm_unedited_raw_from_camera_rendered_source(
     highlight-preserving working copy. Otherwise the tracked preview cache
     locks in the dark render and /photos/<id>/preview returns those cache
     hits before its own RAW-source branch ever runs."""
-    import config as cfg
     import image_loader
     import scanner
     import thumbnails
-    from db import Database
     from PIL import Image
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     photo_dir = tmp_path / "photos"
     photo_dir.mkdir()
     raw_path = photo_dir / "source.NEF"
     raw_path.write_bytes(b"raw bytes decoded by the test double")
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     folder_id = db.add_folder(str(photo_dir), name="photos")
     photo_id = db.add_photo(
         folder_id=folder_id,
@@ -13822,14 +12715,9 @@ def test_pipeline_previews_warm_unedited_raw_from_camera_rendered_source(
 def test_pipeline_scan_thumbnails_use_recipe_source_before_live_raw(
     tmp_path, monkeypatch,
 ):
-    import config as cfg
     import scanner
     import thumbnails
-    from db import Database
     from PIL import Image
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     photo_dir = tmp_path / "photos"
     photo_dir.mkdir()
@@ -13838,9 +12726,7 @@ def test_pipeline_scan_thumbnails_use_recipe_source_before_live_raw(
     companion_path = photo_dir / "source.jpg"
     Image.new("RGB", (800, 600), "blue").save(companion_path)
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     scanned = {"done": False}
 
@@ -13918,23 +12804,16 @@ def test_pipeline_scan_thumbnails_use_recipe_source_before_live_raw(
 def test_pipeline_scan_thumbnails_honor_raw_marker_after_source_selection(
     tmp_path, monkeypatch,
 ):
-    import config as cfg
     import scanner
     import thumbnails
-    from db import Database
     from PIL import Image
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     photo_dir = tmp_path / "photos"
     photo_dir.mkdir()
     raw_path = photo_dir / "source.NEF"
     raw_path.write_bytes(b"raw")
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     def fake_scan(
         root,
@@ -14010,7 +12889,7 @@ def test_pipeline_scan_thumbnails_honor_raw_marker_after_source_selection(
 # ---------------------------------------------------------------------------
 
 
-def test_pipeline_abort_finalizes_all_step_rows(tmp_path, monkeypatch):
+def test_pipeline_abort_finalizes_all_step_rows(tmp_path):
     """When the pipeline aborts early (user cancel here), every step row
     created by runner.set_steps — including previews, extract_masks,
     eye_keypoints, regroup, and misses — must reach a terminal status.
@@ -14018,21 +12897,14 @@ def test_pipeline_abort_finalizes_all_step_rows(tmp_path, monkeypatch):
     persisted as "pending" with no finished_at, forever (the same defect
     previously fixed for detect/classify).
     """
-    import config as cfg
-    from db import Database
     from PIL import Image
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     photo_dir = tmp_path / "photos"
     photo_dir.mkdir()
     for name in ("a.jpg", "b.jpg"):
         Image.new("RGB", (16, 16), "blue").save(str(photo_dir / name))
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     # All optional stages enabled so their step rows exist; classify is
     # skipped to keep the test free of model files.
@@ -14067,21 +12939,15 @@ def test_pipeline_regroup_failure_finalizes_miss_step_row(tmp_path, monkeypatch)
     persisting as pending — while still never touching miss_* DB state
     (regroup's burst_id output is its prerequisite).
     """
-    import config as cfg
     import pipeline as pipeline_mod
     from db import Database
     from PIL import Image
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
 
     photo_dir = tmp_path / "photos"
     photo_dir.mkdir()
     Image.new("RGB", (16, 16), "black").save(str(photo_dir / "a.jpg"))
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     def _boom(*args, **kwargs):
         raise RuntimeError("synthetic regroup failure")
@@ -14845,14 +13711,11 @@ def test_collection_rerun_redoes_only_missing_work(tmp_path, monkeypatch):
     import classify_job
     import config as cfg
     import numpy as np
-    from db import Database
 
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
 
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -15791,15 +14654,8 @@ def test_pipeline_classify_pauses_when_source_volume_disappears(
     """
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -15855,15 +14711,7 @@ def test_pipeline_classify_pauses_when_source_volume_disappears(
 
     monkeypatch.setattr(classify_job, "_prepare_image", offline_prepare_image)
 
-    class FakeClassifier:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def encode_image(self, *args, **kwargs):
-            import numpy as np
-            return np.zeros(512, dtype=np.float32)
-
-    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+    monkeypatch.setattr(classifier_mod, "Classifier", _ZeroEmbeddingClassifier)
 
     class PausingRunner(FakeRunner):
         def __init__(self):
@@ -15973,15 +14821,8 @@ def test_pipeline_classify_resumes_after_source_volume_reconnects(
     """
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -16068,15 +14909,7 @@ def test_pipeline_classify_resumes_after_source_volume_reconnects(
 
     monkeypatch.setattr(classify_job, "_flush_batch", fake_flush_batch)
 
-    class FakeClassifier:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def encode_image(self, *args, **kwargs):
-            import numpy as np
-            return np.zeros(512, dtype=np.float32)
-
-    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+    monkeypatch.setattr(classifier_mod, "Classifier", _ZeroEmbeddingClassifier)
 
     class ReconnectingRunner(FakeRunner):
         """Models the user remounting the share, then pressing Resume."""
@@ -16174,16 +15007,9 @@ def test_pipeline_classify_resets_pause_budget_after_successful_recovery(
     """
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
     import pipeline_job as pj
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -16277,15 +15103,7 @@ def test_pipeline_classify_resets_pause_budget_after_successful_recovery(
 
     monkeypatch.setattr(classify_job, "_flush_batch", fake_flush_batch)
 
-    class FakeClassifier:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def encode_image(self, *args, **kwargs):
-            import numpy as np
-            return np.zeros(512, dtype=np.float32)
-
-    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+    monkeypatch.setattr(classifier_mod, "Classifier", _ZeroEmbeddingClassifier)
 
     class ReconnectingRunner(FakeRunner):
         """The user genuinely remounts the share on every pause."""
@@ -16370,15 +15188,8 @@ def test_pipeline_classify_offline_source_is_not_a_clean_success(
     """
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -16430,15 +15241,7 @@ def test_pipeline_classify_offline_source_is_not_a_clean_success(
 
     monkeypatch.setattr(classify_job, "_prepare_image", offline_prepare_image)
 
-    class FakeClassifier:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def encode_image(self, *args, **kwargs):
-            import numpy as np
-            return np.zeros(512, dtype=np.float32)
-
-    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+    monkeypatch.setattr(classifier_mod, "Classifier", _ZeroEmbeddingClassifier)
 
     params = PipelineParams(
         collection_id=col_id,
@@ -16482,15 +15285,8 @@ def test_pipeline_classify_source_offline_publishes_pause_reason(
     """
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -16542,15 +15338,7 @@ def test_pipeline_classify_source_offline_publishes_pause_reason(
 
     monkeypatch.setattr(classify_job, "_prepare_image", offline_prepare_image)
 
-    class FakeClassifier:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def encode_image(self, *args, **kwargs):
-            import numpy as np
-            return np.zeros(512, dtype=np.float32)
-
-    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+    monkeypatch.setattr(classifier_mod, "Classifier", _ZeroEmbeddingClassifier)
 
     class PausingRunner(FakeRunner):
         def __init__(self):
@@ -16643,16 +15431,9 @@ def test_pipeline_classify_source_offline_honors_prior_user_pause(
     """
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
-    from db import Database
     from PIL import Image as _PILImage
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -16747,15 +15528,7 @@ def test_pipeline_classify_source_offline_honors_prior_user_pause(
 
     monkeypatch.setattr(classify_job, "_flush_batch", fake_flush_batch)
 
-    class FakeClassifier:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def encode_image(self, *args, **kwargs):
-            import numpy as np
-            return np.zeros(512, dtype=np.float32)
-
-    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+    monkeypatch.setattr(classifier_mod, "Classifier", _ZeroEmbeddingClassifier)
 
     class PriorPauseRunner(FakeRunner):
         """Models the user pressing Pause while classify was blocked on EIO.
@@ -16844,15 +15617,8 @@ def test_pipeline_classify_missing_folder_does_not_stop_healthy_folders(
     """
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     # Two local folders whose files stay on disk (previews/thumbnails read
     # them). The classify-time _prepare_image mock below simulates one
@@ -16964,15 +15730,7 @@ def test_pipeline_classify_missing_folder_does_not_stop_healthy_folders(
 
     monkeypatch.setattr(classify_job, "_flush_batch", fake_flush_batch)
 
-    class FakeClassifier:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def encode_image(self, *args, **kwargs):
-            import numpy as np
-            return np.zeros(512, dtype=np.float32)
-
-    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+    monkeypatch.setattr(classifier_mod, "Classifier", _ZeroEmbeddingClassifier)
 
     # A pausing runner would let the whole run stop; use a plain FakeRunner
     # so the folder-scoped branch has to keep going on its own rather than
@@ -17066,15 +15824,8 @@ def test_pipeline_classify_folder_outage_is_not_a_clean_success(
     """
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -17133,15 +15884,7 @@ def test_pipeline_classify_folder_outage_is_not_a_clean_success(
         classify_job, "_prepare_image", folder_missing_prepare_image,
     )
 
-    class FakeClassifier:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def encode_image(self, *args, **kwargs):
-            import numpy as np
-            return np.zeros(512, dtype=np.float32)
-
-    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+    monkeypatch.setattr(classifier_mod, "Classifier", _ZeroEmbeddingClassifier)
 
     params = PipelineParams(
         collection_id=col_id,
@@ -17198,15 +15941,8 @@ def test_pipeline_classify_folder_outage_counts_each_photo_once(
     """
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -17271,15 +16007,7 @@ def test_pipeline_classify_folder_outage_counts_each_photo_once(
         classify_job, "_prepare_image", folder_missing_prepare_image,
     )
 
-    class FakeClassifier:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def encode_image(self, *args, **kwargs):
-            import numpy as np
-            return np.zeros(512, dtype=np.float32)
-
-    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+    monkeypatch.setattr(classifier_mod, "Classifier", _ZeroEmbeddingClassifier)
 
     params = PipelineParams(
         collection_id=col_id,
@@ -17333,16 +16061,9 @@ def test_pipeline_classify_give_up_skips_downstream_stages(
     """
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
     import pipeline_job as pj
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -17395,15 +16116,7 @@ def test_pipeline_classify_give_up_skips_downstream_stages(
 
     monkeypatch.setattr(classify_job, "_prepare_image", offline_prepare_image)
 
-    class FakeClassifier:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def encode_image(self, *args, **kwargs):
-            import numpy as np
-            return np.zeros(512, dtype=np.float32)
-
-    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+    monkeypatch.setattr(classifier_mod, "Classifier", _ZeroEmbeddingClassifier)
 
     # Spy on the exact function extract_masks_stage would call to re-open
     # source images (masking.render_proxy). If classify's give-up path
@@ -17505,15 +16218,8 @@ def test_pipeline_classify_reclassify_preserves_predictions_for_unreachable_phot
     """
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     gone_folder_path = str(tmp_path / "vanished")
     healthy_folder_path = str(tmp_path / "still_here")
@@ -17634,15 +16340,7 @@ def test_pipeline_classify_reclassify_preserves_predictions_for_unreachable_phot
 
     monkeypatch.setattr(classify_job, "_flush_batch", fake_flush_batch)
 
-    class FakeClassifier:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def encode_image(self, *args, **kwargs):
-            import numpy as np
-            return np.zeros(512, dtype=np.float32)
-
-    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+    monkeypatch.setattr(classifier_mod, "Classifier", _ZeroEmbeddingClassifier)
 
     class NoPauseRunner(FakeRunner):
         def pause_job(self, job_id):
@@ -17715,15 +16413,8 @@ def test_pipeline_classify_multimodel_reclassify_per_spec_source_skips(
     """
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     gone_folder_path = str(tmp_path / "gone_for_model_a")
     healthy_folder_path = str(tmp_path / "always_here")
@@ -17944,15 +16635,8 @@ def test_pipeline_classify_stale_purge_preserves_source_skipped_photos(
     """
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     gone_folder_path = str(tmp_path / "vanishes_at_classify")
     healthy_folder_path = str(tmp_path / "always_here")
@@ -18090,15 +16774,7 @@ def test_pipeline_classify_stale_purge_preserves_source_skipped_photos(
 
     monkeypatch.setattr(classify_job, "_flush_batch", fake_flush_batch)
 
-    class FakeClassifier:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def encode_image(self, *args, **kwargs):
-            import numpy as np
-            return np.zeros(512, dtype=np.float32)
-
-    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+    monkeypatch.setattr(classifier_mod, "Classifier", _ZeroEmbeddingClassifier)
 
     # NoPauseRunner keeps the gone photo on the folder-scoped path so
     # the healthy photo still gets classified (``models_succeeded == 1``
@@ -18177,15 +16853,8 @@ def test_pipeline_classify_recovered_pause_leaves_no_terminal_classify_error(
     """
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -18271,15 +16940,7 @@ def test_pipeline_classify_recovered_pause_leaves_no_terminal_classify_error(
 
     monkeypatch.setattr(classify_job, "_flush_batch", fake_flush_batch)
 
-    class FakeClassifier:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def encode_image(self, *args, **kwargs):
-            import numpy as np
-            return np.zeros(512, dtype=np.float32)
-
-    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+    monkeypatch.setattr(classifier_mod, "Classifier", _ZeroEmbeddingClassifier)
 
     class ReconnectingRunner(FakeRunner):
         def __init__(self):
@@ -18374,16 +17035,9 @@ def test_pipeline_classify_failed_retry_on_last_photo_latches_source_offline(
     """
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
     import pipeline_job as pj
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -18437,15 +17091,7 @@ def test_pipeline_classify_failed_retry_on_last_photo_latches_source_offline(
 
     monkeypatch.setattr(classify_job, "_prepare_image", offline_prepare_image)
 
-    class FakeClassifier:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def encode_image(self, *args, **kwargs):
-            import numpy as np
-            return np.zeros(512, dtype=np.float32)
-
-    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+    monkeypatch.setattr(classifier_mod, "Classifier", _ZeroEmbeddingClassifier)
 
     # Spy on masking.render_proxy — the exact call extract_masks_stage
     # makes to re-open source images. If the fix regresses, abort stays
@@ -18570,15 +17216,8 @@ def test_pipeline_classify_folder_outage_skips_unreachable_photos_in_downstream_
     """
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     gone_folder_path = str(tmp_path / "vanished")
     healthy_folder_path = str(tmp_path / "still_here")
@@ -18691,15 +17330,7 @@ def test_pipeline_classify_folder_outage_skips_unreachable_photos_in_downstream_
 
     monkeypatch.setattr(classify_job, "_flush_batch", fake_flush_batch)
 
-    class FakeClassifier:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def encode_image(self, *args, **kwargs):
-            import numpy as np
-            return np.zeros(512, dtype=np.float32)
-
-    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+    monkeypatch.setattr(classifier_mod, "Classifier", _ZeroEmbeddingClassifier)
 
     # Stub SAM2 / DINOv2 so extract_masks runs end-to-end. Record every
     # render_proxy image_path so the assertion below can distinguish
@@ -18781,15 +17412,8 @@ def test_pipeline_classify_folder_outage_marks_per_model_step_failed(
     """
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -18846,15 +17470,7 @@ def test_pipeline_classify_folder_outage_marks_per_model_step_failed(
         classify_job, "_prepare_image", folder_missing_prepare_image,
     )
 
-    class FakeClassifier:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def encode_image(self, *args, **kwargs):
-            import numpy as np
-            return np.zeros(512, dtype=np.float32)
-
-    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+    monkeypatch.setattr(classifier_mod, "Classifier", _ZeroEmbeddingClassifier)
 
     params = PipelineParams(
         collection_id=col_id,
@@ -18916,15 +17532,8 @@ def test_pipeline_classify_source_offline_give_up_marks_per_model_step_failed(
     """
     import classifier as classifier_mod
     import classify_job
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -18978,15 +17587,7 @@ def test_pipeline_classify_source_offline_give_up_marks_per_model_step_failed(
 
     monkeypatch.setattr(classify_job, "_prepare_image", offline_prepare_image)
 
-    class FakeClassifier:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def encode_image(self, *args, **kwargs):
-            import numpy as np
-            return np.zeros(512, dtype=np.float32)
-
-    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+    monkeypatch.setattr(classifier_mod, "Classifier", _ZeroEmbeddingClassifier)
 
     # Plain FakeRunner has no pause support, so classify hits the
     # "can't park → latch source_offline['reason'] and stop" branch.
@@ -19032,7 +17633,7 @@ def test_pipeline_classify_source_offline_give_up_marks_per_model_step_failed(
 
 
 def test_pipeline_extract_masks_offline_survives_finalizer_override(
-    tmp_path, monkeypatch,
+    tmp_path,
 ):
     """A mask-stage-owned outage must stay ``failed`` through finalization.
 
@@ -19055,15 +17656,7 @@ def test_pipeline_extract_masks_offline_survives_finalizer_override(
     """
     import shutil
 
-    import config as cfg
-    from db import Database
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
@@ -19226,16 +17819,9 @@ def test_extract_masks_outage_rollup_counts_only_offline_photos(
     the user that plugging the drive back in recovers files it cannot touch
     (Codex #1392 P2).
     """
-    import config as cfg
     import pipeline_job as pj
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     # Sorted so the corrupt file in the healthy folder is hit first, which is
     # the ordering that produced the misattribution.
@@ -19308,14 +17894,8 @@ def test_extract_masks_preflight_skips_photos_that_already_have_a_mask(
     the damage from an outage it was never harmed by (Codex #1392 P2).
     """
     import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
@@ -19382,14 +17962,8 @@ def test_extract_masks_preflight_fully_cached_folder_does_not_fail_stage(
     reconnect instruction that would change nothing (Codex #1392 P2).
     """
     import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
@@ -19453,16 +18027,9 @@ def test_extract_masks_cancelled_total_covers_preflight_drops(
     the post-filter loop total beside it, so a cancel after an outage could
     persist "3 unreadable, total: 1" (Codex #1392 P2).
     """
-    import config as cfg
     import pipeline_job as pj
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     dead_path = str(tmp_path / "aa_dead")
     live_path = str(tmp_path / "zz_live")
@@ -19528,16 +18095,9 @@ def test_extract_masks_cancelled_step_warning_covers_unreadable(
     Extract row with a zero warning count next to a result that recorded
     positive ``unreadable`` (Codex #1392 P2 r3687499188).
     """
-    import config as cfg
     import pipeline_job as pj
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     dead_path = str(tmp_path / "aa_dead")
     live_path = str(tmp_path / "zz_live")
@@ -19619,15 +18179,8 @@ def test_extract_masks_preflight_error_denominator_matches_stage_total(
     ``total: 2``, and the reader had no way to reconcile them
     (Codex #1392 P2 r3687499184).
     """
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
 
     dead_path = str(tmp_path / "aa_dead")
     live_path = str(tmp_path / "zz_live")
@@ -19722,14 +18275,8 @@ def test_extract_masks_preflight_stale_cached_mask_is_still_at_risk(
     a detection that no longer applies (Codex #1392 P1).
     """
     import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
@@ -19775,15 +18322,8 @@ def test_extract_masks_preflight_ignores_photos_with_no_detection(
     failure and tells the user to reconnect for photos that would still have
     no mask candidate (Codex #1392 P2).
     """
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
@@ -19895,15 +18435,8 @@ def test_extract_masks_preflight_counts_rescued_weak_detections(
     read by the mask loop, so it must NOT inflate the outage report
     (Codex #1392 P2 r3687403366).
     """
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
@@ -19986,15 +18519,8 @@ def test_extract_masks_preflight_ignores_isolated_weak_detections(
     outage into a Fatal Extract failure and demanding a reconnect for a
     photo that still wouldn't get a mask (Codex #1392 P2 r3687403366).
     """
-    import config as cfg
-    from db import Database
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
-
-    db_path = str(tmp_path / "test.db")
-    db = Database(db_path)
-    ws_id = db._active_workspace_id
+    db_path, db, ws_id = _open_db(tmp_path)
     folder_path = str(tmp_path / "photos")
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
