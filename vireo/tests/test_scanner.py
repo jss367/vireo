@@ -2068,14 +2068,28 @@ class _PairedCatalog:
         (self.vireo_dir / "originals").mkdir()
         self.db = Database(str(self.vireo_dir / "test.db"))
 
+        # Every time the scan (re)pairs a JPEG with its RAW: by recording an
+        # uncataloged JPEG straight onto the RAW's row, or by merging a JPEG
+        # photo's row into it. ``row_merges`` counts the second kind, which a
+        # companion file without a row of its own must never take.
         self.merges = []
+        self.row_merges = []
         real_merge = scanner._merge_companion_into_primary
+        real_attach = scanner._ScanRun._attach_companion
 
         def merge(db, primary, companion, *args, **kwargs):
             self.merges.append(companion["filename"])
+            self.row_merges.append(companion["filename"])
             return real_merge(db, primary, companion, *args, **kwargs)
 
+        def attach(run, item, owner):
+            attached = real_attach(run, item, owner)
+            if attached:
+                self.merges.append(item.image_path.name)
+            return attached
+
         monkeypatch.setattr(scanner, "_merge_companion_into_primary", merge)
+        monkeypatch.setattr(scanner._ScanRun, "_attach_companion", attach)
         self.extracted = []
         real_extract = scanner.extract_metadata
         # The dummy RAW is 200 null bytes and the JPEG has no EXIF, so a
@@ -2124,6 +2138,7 @@ class _PairedCatalog:
 
     def scan(self, incremental=True):
         self.merges.clear()
+        self.row_merges.clear()
         self.extracted.clear()
         self.callbacks.clear()
         self.max_rows = 0
@@ -2183,8 +2198,9 @@ def test_rescan_leaves_an_unchanged_companion_in_its_raw(
 
 
 def test_rescan_remerges_a_changed_companion(tmp_path, monkeypatch):
-    """New bytes in the companion still go through the merge, which
-    refreshes the stored identity and drops the RAW's companion thumbnail."""
+    """New bytes in the companion re-pair it, which refreshes the stored
+    identity and drops the RAW's companion thumbnail, without inserting the
+    JPEG as a photo of its own on the way."""
     cat = _PairedCatalog(tmp_path, monkeypatch)
     cat.seed_raw_caches()
     old_hash = cat.identity()[0]["file_hash"]
@@ -2193,6 +2209,9 @@ def test_rescan_remerges_a_changed_companion(tmp_path, monkeypatch):
     counts = cat.scan()
 
     assert cat.merges == ["IMG_001.jpg"]
+    assert cat.row_merges == []
+    assert cat.max_rows == 1
+    assert cat.callbacks == [(cat.raw_id, "IMG_001.cr3"), (cat.raw_id, "IMG_001.jpg")]
     assert cat.rows() == {"IMG_001.cr3": "IMG_001.jpg"}
     identity = cat.identity()[0]
     assert identity["file_hash"] != old_hash
@@ -8815,8 +8834,10 @@ def _leave_unpaired_pair(db, monkeypatch, folder, basename="OLD_001"):
     with open(str(folder / f"{basename}.cr3"), "wb") as f:
         f.write(b"\x00" * 200)
 
+    # Refuse every pairing, both the scan's own decision before inserting
+    # the JPEG and the end-of-scan pass, so both files stay photos.
     monkeypatch.setattr(
-        _sc, "_pair_raw_jpeg_companions", lambda *a, **k: set())
+        _sc, "_pick_compatible_raw_jpeg_pairs", lambda *a, **k: [])
     scan(str(folder), db)
     monkeypatch.undo()
 

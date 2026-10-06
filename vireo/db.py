@@ -9517,6 +9517,11 @@ class Database:
         from repositories.collections import remap_collection_photo_ids
         return remap_collection_photo_ids(self.conn, mapping)
 
+    def photo_ids_named_by_collections(self):
+        """Every photo id named by a ``photo_ids`` rule in any workspace."""
+        from repositories.collections import photo_ids_named_by_collections
+        return photo_ids_named_by_collections(self.conn)
+
     def rename_collection(self, collection_id, new_name):
         """Rename a collection within the active workspace.
 
