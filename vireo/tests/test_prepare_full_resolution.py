@@ -76,13 +76,13 @@ def test_prepare_full_resolution_reuses_edited_render(
     )
     job = wait_for_job_via_client(client, started.get_json()["job_id"])
     assert job["status"] == "completed", job
-    assert len(load_calls) == 1
+    prepared_loads = len(load_calls)
 
     # The next lightbox request must serve the prepared JPEG rather than
     # decoding and applying the edit recipe again.
     rendered = client.get(f"/photos/{photo_id}/original")
     assert rendered.status_code == 200
-    assert len(load_calls) == 1
+    assert len(load_calls) == prepared_loads
     with Image.open(io.BytesIO(rendered.data)) as image:
         assert image.size == (600, 800)
 
@@ -839,6 +839,16 @@ def test_preparation_publishes_current_source_extraction(client_with_photo, monk
         return True
 
     monkeypatch.setattr(image_loader, "extract_working_copy", extract)
+    # The renamed JPEG is not a decodable RAW, and unedited RAW previews
+    # decode the source itself; this test is about the /original extraction.
+    import preview_materializer
+
+    def stub_preview(*args, **kwargs):
+        buf = io.BytesIO()
+        Image.new("RGB", (80, 60), "blue").save(buf, "JPEG")
+        return buf.getvalue()
+
+    monkeypatch.setattr(preview_materializer, "render_preview_bytes", stub_preview)
     client = app.test_client()
     started = client.post("/api/jobs/prepare-full-resolution", json={"photo_ids": [photo_id]})
     job = wait_for_job_via_client(client, started.get_json()["job_id"])
@@ -853,3 +863,142 @@ def test_preparation_publishes_current_source_extraction(client_with_photo, monk
         rendered = vireo_dir / db.get_photo(photo_id)["working_copy_path"]
     with Image.open(rendered) as image:
         assert image.size == (800, 600)
+
+
+def test_lightbox_fit_preview_sizes_follow_preview_max_size():
+    from preview_cache import lightbox_fit_preview_sizes
+
+    assert lightbox_fit_preview_sizes(None) == [1920, 2560, 3840]
+    assert lightbox_fit_preview_sizes(1920) == [1920, 2560, 3840]
+    # /full already covers 2560, so the lightbox never asks for that tier.
+    assert lightbox_fit_preview_sizes(3000) == [3000, 3840]
+    assert lightbox_fit_preview_sizes(4096) == [4096]
+    # /full redirects to /original, which preparation already renders.
+    assert lightbox_fit_preview_sizes(0) == []
+
+
+def test_preparation_warms_every_lightbox_fit_preview(client_with_photo, monkeypatch):
+    import image_loader
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    started = client.post(
+        "/api/jobs/prepare-full-resolution", json={"photo_ids": [photo_id]},
+    )
+    job = wait_for_job_via_client(client, started.get_json()["job_id"])
+    assert job["status"] == "completed", job
+    assert job["result"]["ready"] == 1
+
+    preview_dir = Path(os.path.dirname(app.config["THUMB_CACHE_DIR"]), "previews")
+    for size in (1920, 2560, 3840):
+        assert (preview_dir / f"{photo_id}_{size}.jpg").is_file(), size
+        assert db.preview_cache_get(photo_id, size), size
+
+    # Flipping through the lightbox at fit is now a cache hit on every tier.
+    def no_decode(*args, **kwargs):
+        raise AssertionError("lightbox fit view decoded after preparation")
+
+    monkeypatch.setattr(image_loader, "load_image", no_decode)
+    for url in (
+        f"/photos/{photo_id}/full",
+        f"/photos/{photo_id}/preview?size=2560",
+        f"/photos/{photo_id}/preview?size=3840",
+    ):
+        response = client.get(url)
+        assert response.status_code == 200, url
+        with Image.open(io.BytesIO(response.data)) as image:
+            assert image.size == (600, 800), url
+        response.close()
+
+
+def test_preparation_skips_previews_when_full_is_original(client_with_photo):
+    import config as cfg
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    saved = cfg.load()
+    saved["preview_max_size"] = 0
+    cfg.save(saved)
+
+    started = client.post(
+        "/api/jobs/prepare-full-resolution", json={"photo_ids": [photo_id]},
+    )
+    job = wait_for_job_via_client(client, started.get_json()["job_id"])
+    assert job["status"] == "completed", job
+    assert job["result"]["ready"] == 1
+    preview_dir = Path(os.path.dirname(app.config["THUMB_CACHE_DIR"]), "previews")
+    assert not list(preview_dir.glob(f"{photo_id}_*.jpg"))
+
+
+def test_preview_failure_marks_photo_failed(client_with_photo, monkeypatch):
+    import preview_materializer
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+
+    def broken_render(*args, **kwargs):
+        raise preview_materializer.PreviewMaterializationError("decode failed")
+
+    monkeypatch.setattr(preview_materializer, "render_preview_bytes", broken_render)
+    started = client.post(
+        "/api/jobs/prepare-full-resolution", json={"photo_ids": [photo_id]},
+    )
+    job = wait_for_job_via_client(client, started.get_json()["job_id"])
+    result = job["result"]
+    assert result["ok"] is False
+    assert result["ready"] == 0
+    assert result["failed"] == 1
+    assert len(result["errors"]) == 1
+
+
+def test_preview_publication_refused_after_photo_id_recycled(client_with_photo, monkeypatch):
+    import preview_materializer
+    from db import Database
+    from preview_cache import cleanup_cached_files_for_deleted_photos
+
+    app, db, photo_id = client_with_photo
+    selected = db.get_photo(photo_id)
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id=?", (selected["folder_id"],),
+    ).fetchone()["path"]
+    preview_dir = Path(os.path.dirname(app.config["THUMB_CACHE_DIR"]), "previews")
+    original_render = preview_materializer.render_preview_bytes
+    replaced = []
+
+    def render_then_replace(*args, **kwargs):
+        data = original_render(*args, **kwargs)
+        if not replaced:
+            other_db = Database(app.config["DB_PATH"])
+            try:
+                deleted = other_db.delete_photos([photo_id])
+                cleanup_cached_files_for_deleted_photos(
+                    app.config["THUMB_CACHE_DIR"], deleted["files"],
+                )
+                Image.new("RGB", (800, 600), "blue").save(
+                    os.path.join(folder, "replacement.jpg"),
+                )
+                new_id = other_db.add_photo(
+                    folder_id=selected["folder_id"], filename="replacement.jpg",
+                    extension=".jpg", file_size=selected["file_size"],
+                    file_mtime=selected["file_mtime"], width=800, height=600,
+                )
+                assert new_id == photo_id
+            finally:
+                other_db.close()
+            replaced.append(True)
+        return data
+
+    monkeypatch.setattr(preview_materializer, "render_preview_bytes", render_then_replace)
+    client = app.test_client()
+    started = client.post(
+        "/api/jobs/prepare-full-resolution", json={"photo_ids": [photo_id]},
+    )
+    job = wait_for_job_via_client(client, started.get_json()["job_id"])
+    assert replaced
+    assert job["status"] == "completed", job
+    assert job["result"]["skipped_deleted"] == 1
+    assert job["result"]["ready"] == 0
+    # The old photo's pixels never reached the recycled ID's preview cache.
+    assert not list(preview_dir.glob(f"{photo_id}_*.jpg"))
+    assert db.preview_cache_get(photo_id, 1920) is None

@@ -14,6 +14,27 @@ import shutil
 
 log = logging.getLogger(__name__)
 
+# The fixed ``/photos/<id>/preview?size=N`` tiers. The lightbox shows
+# ``/full`` (``preview_max_size``) when that covers the displayed long edge,
+# then steps up through these (``_lbPickSourceKey`` in
+# ``static/lightbox/source-loading.js``), and only past the last one does it
+# load ``/original``.
+PREVIEW_TIER_SIZES = (1920, 2560, 3840)
+
+
+def lightbox_fit_preview_sizes(preview_max_size):
+    """Preview sizes the lightbox can request before falling back to /original.
+
+    ``preview_max_size == 0`` makes ``/full`` redirect to ``/original``, so
+    no preview size is in play. Otherwise ``/full`` serves
+    ``preview_max_size`` and the lightbox only picks a fixed tier larger
+    than that.
+    """
+    if preview_max_size == 0:
+        return []
+    full = int(preview_max_size or 1920)
+    return [full] + [size for size in PREVIEW_TIER_SIZES if size > full]
+
 
 def cleanup_cached_files_for_deleted_photos(
     thumb_cache_dir, files, progress_callback=None, vireo_dir=None,

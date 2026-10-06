@@ -26,6 +26,7 @@ from flask import Blueprint, current_app, jsonify, request
 from preview_cache import (
     evict_if_over_quota as evict_preview_cache_if_over_quota,
 )
+from preview_cache import lightbox_fit_preview_sizes
 from preview_materializer import (
     PreviewMaterializationError,
     materialize_preview,
@@ -78,6 +79,7 @@ def create_job_launchers_blueprint(
     guard_move_folder,
     start_move_folder_job,
     serve_original_photo,
+    serve_photo_preview,
     sync_job_lock,
 ):
     """Build the job-launchers blueprint.
@@ -96,7 +98,8 @@ def create_job_launchers_blueprint(
       ``/api/batch/delete`` and ``/api/photos/missing/remove`` too;
       ``invalidate_missing_originals`` is the app's ``MissingOriginals``
       cache reset.
-    - ``serve_original_photo`` is the ``/photos/<id>/original`` view, which
+    - ``serve_original_photo`` and ``serve_photo_preview`` are the
+      ``/photos/<id>/original`` and ``/photos/<id>/preview`` views, which
       full-resolution preparation drives so it renders exactly what the
       lightbox would.
     - ``sync_job_lock`` is ``app._sync_job_lock``, which serializes XMP sync
@@ -1184,9 +1187,11 @@ def create_job_launchers_blueprint(
         """Prepare selected photos for uninterrupted full-resolution review.
 
         The job first copies source assets into Vireo's managed local cache,
-        then drives the exact /original render path used by the lightbox. RAW
-        working copies and edited full-resolution renders are therefore ready
-        before the user begins inspecting the selection.
+        then drives the exact /original and /preview render paths used by the
+        lightbox. RAW working copies, edited full-resolution renders, and every
+        preview size the lightbox shows at fit (``/full`` and the larger tiers
+        it steps through before /original) are therefore ready before the user
+        begins flipping through the selection.
         """
         body = request.get_json(silent=True)
         if not isinstance(body, dict):
@@ -1232,6 +1237,7 @@ def create_job_launchers_blueprint(
         flask_app = current_app._get_current_object()
 
         def work(job):
+            import config as cfg
             from offline_cache import (
                 cache_photo_original,
                 cleanup_preparation_offline_files,
@@ -1240,7 +1246,36 @@ def create_job_launchers_blueprint(
             )
 
             thread_db = ctx.thread_db()
+
+            def render_through_view(path, view, photo_id, photo, label):
+                """Run a lightbox view in an isolated request context.
+
+                Returns an error string, or None when the view succeeded.
+                """
+                with flask_app.test_request_context(path):
+                    request_db = get_db()
+                    request_db.set_active_workspace(ctx.workspace_id)
+                    response = flask_app.make_response(
+                        view(photo_id, _prepare_source=photo)
+                    )
+                    try:
+                        if 200 <= response.status_code < 300:
+                            return None
+                        response.direct_passthrough = False
+                        detail = response.get_data(as_text=True).strip()
+                        return detail or (
+                            f"{label} render failed with status "
+                            f"{response.status_code}"
+                        )
+                    finally:
+                        response.close()
+
             try:
+                preview_sizes = lightbox_fit_preview_sizes(
+                    thread_db.get_effective_config(cfg.load()).get(
+                        "preview_max_size",
+                    ),
+                )
                 folders = {
                     folder["id"]: folder["path"]
                     for folder in thread_db.get_folder_tree()
@@ -1281,30 +1316,25 @@ def create_job_launchers_blueprint(
                                 if error is None and photo_source_matches(
                                     photo, thread_db.get_photo(photo_id),
                                 ):
-                                    # Execute the canonical renderer inside an
-                                    # isolated request context. This avoids a
+                                    # Execute the canonical renderers inside
+                                    # isolated request contexts. This avoids a
                                     # second implementation drifting from the
                                     # lightbox's RAW/companion/edit fallbacks.
-                                    with flask_app.test_request_context(
-                                        f"/photos/{photo_id}/original"
-                                    ):
-                                        request_db = get_db()
-                                        request_db.set_active_workspace(ctx.workspace_id)
-                                        response = flask_app.make_response(
-                                            serve_original_photo(photo_id, _prepare_source=photo)
+                                    # /original backs 1:1 zoom; the previews
+                                    # are what flipping at fit loads.
+                                    error = render_through_view(
+                                        f"/photos/{photo_id}/original",
+                                        serve_original_photo, photo_id, photo,
+                                        "full-resolution",
+                                    )
+                                    for size in preview_sizes:
+                                        if error is not None:
+                                            break
+                                        error = render_through_view(
+                                            f"/photos/{photo_id}/preview?size={size}",
+                                            serve_photo_preview, photo_id, photo,
+                                            f"{size}px preview",
                                         )
-                                        try:
-                                            if not 200 <= response.status_code < 300:
-                                                response.direct_passthrough = False
-                                                detail = response.get_data(
-                                                    as_text=True,
-                                                ).strip()
-                                                error = detail or (
-                                                    "full-resolution render failed "
-                                                    f"with status {response.status_code}"
-                                                )
-                                        finally:
-                                            response.close()
                             except Exception as exc:
                                 thread_db.conn.rollback()
                                 error = str(exc) or exc.__class__.__name__

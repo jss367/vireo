@@ -45,7 +45,7 @@ from flask import (
     request,
     send_from_directory,
 )
-from preview_cache import ensure_preview_cache_invalidations_table
+from preview_cache import PREVIEW_TIER_SIZES, ensure_preview_cache_invalidations_table
 from preview_cache import (
     evict_if_over_quota as evict_preview_cache_if_over_quota,
 )
@@ -421,6 +421,38 @@ def _run_original_artifact_flight(artifact_key, producer, consumer):
             preview_prefetch_slots.release()
 
 
+def _source_changed_response():
+    return _ArtifactResponseError(make_response(("Photo source changed", 404)))
+
+
+@contextlib.contextmanager
+def _preparation_publication(db, photo_id, prepare_source):
+    """Hold a catalog-writer transaction while a preparation render publishes.
+
+    Refuses late preparation writes after deletion/reimport, so a recycled
+    photo ID never receives the previous owner's pixels. Decode and encode
+    stay outside this short transaction. ``prepare_source=None`` (an
+    interactive request) publishes unguarded.
+    """
+    if prepare_source is None:
+        yield
+        return
+    from offline_cache import photo_source_matches
+
+    def check_source():
+        if not photo_source_matches(prepare_source, db.get_photo(photo_id)):
+            raise _source_changed_response()
+
+    if db.conn.in_transaction:
+        check_source()
+        yield
+    else:
+        with db.conn:
+            db.conn.execute("BEGIN IMMEDIATE")
+            check_source()
+            yield
+
+
 @dataclass
 class _EditSource:
     """The file an edited ``/original`` render decodes, and how it was found."""
@@ -478,29 +510,8 @@ class _OriginalPhotoRequest:
         self.source_for_extraction = None
         self.extraction_decode = None
 
-    @contextlib.contextmanager
     def _preparation_publication(self):
-        # Refuse late preparation writes after deletion/reimport. Decode
-        # and encode stay outside this short catalog-writer transaction.
-        if self.prepare_source is None:
-            yield
-            return
-        from offline_cache import photo_source_matches
-
-        db = self.db
-
-        def check_source():
-            if not photo_source_matches(self.prepare_source, db.get_photo(self.photo_id)):
-                raise _ArtifactResponseError(make_response(("Photo source changed", 404)))
-
-        if db.conn.in_transaction:
-            check_source()
-            yield
-        else:
-            with db.conn:
-                db.conn.execute("BEGIN IMMEDIATE")
-                check_source()
-                yield
+        return _preparation_publication(self.db, self.photo_id, self.prepare_source)
 
     def _reenter(self, *, guarded):
         response = make_response(
@@ -3246,18 +3257,24 @@ def create_media_blueprint(
         """
         import config as cfg
         effective = get_db().get_effective_config(cfg.load())
-        fixed = {1920, 2560, 3840}
+        fixed = set(PREVIEW_TIER_SIZES)
         pm = effective.get("preview_max_size") or 1920
         if pm == 0:
             return fixed  # 0 = "full" — handled by /original path
         return fixed | {int(pm)}
 
 
-    def _serve_preview(photo_id, size, *, _artifact_flight_guarded=False):
+    def _serve_preview(
+        photo_id, size, *, _artifact_flight_guarded=False, _prepare_source=None,
+    ):
         """Serve a preview at the given size, using the preview_cache LRU.
 
         This is the single code path behind both /photos/<id>/preview and
         /photos/<id>/full. Callers have already validated size.
+
+        ``_prepare_source`` is the photo row full-resolution preparation
+        selected: the render publishes only while the catalog still holds
+        that source (see ``_preparation_publication``).
         """
         import config as cfg
         from flask import send_file
@@ -3271,6 +3288,11 @@ def create_media_blueprint(
         photo = db.get_photo(photo_id, verify_workspace=True)
         if not photo:
             return "Not found", 404
+        if _prepare_source is not None:
+            from offline_cache import photo_source_matches
+
+            if not photo_source_matches(_prepare_source, photo):
+                return "Photo source changed", 404
 
         vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
         preview_dir = os.path.join(vireo_dir, "previews")
@@ -3446,6 +3468,7 @@ def create_media_blueprint(
                 response = make_response(
                     _serve_preview(
                         photo_id, size, _artifact_flight_guarded=guarded,
+                        _prepare_source=_prepare_source,
                     )
                 )
                 if response.status_code >= 400:
@@ -3489,6 +3512,9 @@ def create_media_blueprint(
                 pair_source_path=pair_source_path,
                 coordinate=False,
                 publish_best_effort=True,
+                publication_guard=lambda: _preparation_publication(
+                    db, photo_id, _prepare_source,
+                ),
             )
         except PreviewMaterializationError:
             return "Could not load image", 500
@@ -3549,7 +3575,7 @@ def create_media_blueprint(
         return _serve_preview(photo_id, int(pm or 1920))
 
     @blueprint.route("/photos/<int:photo_id>/preview")
-    def serve_photo_preview(photo_id):
+    def serve_photo_preview(photo_id, *, _prepare_source=None):
         """Serve a JPEG preview at a chosen max-size.
 
         Cache is LRU-tracked in the preview_cache table; on-disk files that
@@ -3567,7 +3593,7 @@ def create_media_blueprint(
             return "Invalid size", 400
         if size not in allowed_preview_sizes():
             return "Unsupported size", 400
-        return _serve_preview(photo_id, size)
+        return _serve_preview(photo_id, size, _prepare_source=_prepare_source)
 
     @blueprint.route("/photos/<int:photo_id>/edit-mask-preview")
     def serve_edit_mask_preview(photo_id):
