@@ -5141,6 +5141,12 @@ class _ScanRun:
             )
         elif _companion_bytes_unchanged(known, file_size, file_hash):
             if meta.file_meta:
+                # A previous extraction may have omitted JPEG keywords. The
+                # fresh metadata is authoritative even when bytes match;
+                # reuse durable offered-key suppression for user removals.
+                _import_embedded_keywords_for_photo(
+                    self.db, known["owner_id"], meta.file_meta,
+                )
                 companion_columns = self._companion_columns(meta)
                 # Apply the gap fill inline in this same transaction as
                 # the file_mtime update: a successful commit means both

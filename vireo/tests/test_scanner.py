@@ -9053,3 +9053,66 @@ def test_startup_species_thread_runs_embedded_keyword_backfill_first(tmp_path, m
     tasks.mark_species()
 
     assert order == [{"Heron"}]
+
+
+@pytest.mark.parametrize("mode", ["full", "incremental-touched", "incremental-retry"])
+def test_unchanged_companion_recovers_embedded_keywords_without_churn(
+    tmp_path, monkeypatch, mode,
+):
+    """A later complete extraction recovers tags missed during initial pairing."""
+    import scanner
+
+    cat = _PairedCatalog(tmp_path, monkeypatch)
+    cat.seed_raw_caches()
+    assert cat.db.get_photo_keywords(cat.raw_id) == []
+    original_identity = dict(cat.identity()[0])
+    extract = scanner.extract_metadata
+
+    def complete_extract(paths, *args, **kwargs):
+        result = dict(extract(paths, *args, **kwargs))
+        for path in paths:
+            if str(path) == str(cat.jpeg):
+                payload = dict(result.get(path) or {})
+                payload["XMP"] = {
+                    "Subject": ["Recovered bird"],
+                    "HierarchicalSubject": ["Birds|Recovered bird"],
+                }
+                result[path] = payload
+        return result
+
+    monkeypatch.setattr(scanner, "extract_metadata", complete_extract)
+    if mode == "incremental-touched":
+        stat = cat.jpeg.stat()
+        os.utime(cat.jpeg, (stat.st_atime, stat.st_mtime + 3))
+    elif mode == "incremental-retry":
+        cat.db.conn.execute(
+            "UPDATE companion_identities SET file_mtime=NULL WHERE photo_id=?",
+            (cat.raw_id,),
+        )
+        cat.db.conn.commit()
+
+    counts = cat.scan(incremental=mode != "full")
+
+    assert {kw["name"] for kw in cat.db.get_photo_keywords(cat.raw_id)} == {
+        "Recovered bird",
+    }
+    assert cat.db.get_embedded_keyword_offered_keys(cat.raw_id) == {
+        "recovered bird", "birds|recovered bird",
+    }
+    assert cat.rows() == {cat.raw.name: cat.jpeg.name}
+    assert cat.identity()[0]["file_hash"] == original_identity["file_hash"]
+    assert cat.identity()[0]["file_mtime"] == cat.jpeg.stat().st_mtime
+    assert counts["known_companions"] == 1
+    assert counts["merged_companions"] == 0 and cat.merges == []
+    assert cat.max_rows == 1
+    assert cat.jpeg_variant.exists() and cat.display.exists()
+
+    # Once the user removes these offered tags, even a full re-extraction
+    # must respect the durable suppression, without needing a pending queue.
+    for keyword in cat.db.get_photo_keywords(cat.raw_id):
+        cat.db.untag_photo(cat.raw_id, keyword["id"])
+    assert cat.db.get_pending_keyword_removal_keys(cat.raw_id) == set()
+    cat.scan(incremental=False)
+    assert cat.db.get_photo_keywords(cat.raw_id) == []
+    assert cat.merges == []
+    assert cat.jpeg_variant.exists() and cat.display.exists()
