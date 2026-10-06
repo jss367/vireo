@@ -149,3 +149,113 @@ def test_on_scanned_photo_dedupes_companion_from_raw():
         (43, "/photos/IMG_002.jpg"),
     ]
     assert scan_step["count"] == 2
+
+
+def test_on_scanned_photo_normalizes_companion_first_callback_to_raw_path():
+    """When the companion JPEG's callback arrives *before* its RAW's own
+    callback, the queued path still has to be the canonical RAW path.
+    Dedup alone would queue the JPEG (first-callback-wins), which lets
+    the thumbnail stage render the shared ``{owner_id}.jpg`` from the
+    companion instead of the RAW, bypassing the normal RAW-first/fallback
+    selection. Look the catalog's own filename up and reconstruct the
+    RAW's path when the given callback path's basename differs."""
+    from types import SimpleNamespace
+
+    from pipeline_stages.scanning import _ScanPass
+
+    enqueued = []
+    collected = []
+    scan_step = {"count": 0}
+
+    run = SimpleNamespace(
+        stages={"scan": scan_step},
+        job={"id": "pipeline-1"},
+        runner=SimpleNamespace(update_step=lambda *a, **k: None),
+    )
+
+    scan = _ScanPass(
+        run,
+        sentinel=object(),
+        filter_excluded=lambda *_a, **_k: None,
+        find_broken_metadata_folders=lambda *_a, **_k: [],
+        missing_archive_mount_root=lambda *_a, **_k: None,
+        put_scan_item=enqueued.append,
+        collected_photo_ids=collected,
+        effective_thumb_cache_dir=None,
+        effective_vireo_dir=None,
+        final_destination=None,
+        missing_originals_invalidator=None,
+        remote_archive=None,
+        skip_scan=False,
+        snapshot_paths=None,
+    )
+
+    # Mock thread_db to resolve photo 42 as /photos/IMG_001.cr3.
+    scan.thread_db = SimpleNamespace(
+        get_photo_filenames=lambda ids: {42: (7, "IMG_001.cr3")},
+        get_folder=lambda folder_id: {"path": "/photos"},
+    )
+
+    # Companion JPEG arrives first (file ordering).
+    scan._on_scanned_photo(42, "/photos/IMG_001.jpg")
+    # RAW's own callback arrives second — dedupes.
+    scan._on_scanned_photo(42, "/photos/IMG_001.cr3")
+
+    assert collected == [42]
+    # Must be the canonical RAW path even though the JPEG came first.
+    assert enqueued == [(42, "/photos/IMG_001.cr3")]
+    assert scan_step["count"] == 1
+
+
+def test_on_scanned_photo_leaves_matching_basename_alone():
+    """When the given path's basename matches the catalog's filename, use
+    it directly. Avoids a folder lookup on the common same-filename case
+    (every non-companion scan callback) and keeps paths with trailing
+    slashes or OS-specific separators untouched."""
+    from types import SimpleNamespace
+
+    from pipeline_stages.scanning import _ScanPass
+
+    enqueued = []
+    collected = []
+    scan_step = {"count": 0}
+    folder_lookups: list = []
+
+    run = SimpleNamespace(
+        stages={"scan": scan_step},
+        job={"id": "pipeline-1"},
+        runner=SimpleNamespace(update_step=lambda *a, **k: None),
+    )
+
+    scan = _ScanPass(
+        run,
+        sentinel=object(),
+        filter_excluded=lambda *_a, **_k: None,
+        find_broken_metadata_folders=lambda *_a, **_k: [],
+        missing_archive_mount_root=lambda *_a, **_k: None,
+        put_scan_item=enqueued.append,
+        collected_photo_ids=collected,
+        effective_thumb_cache_dir=None,
+        effective_vireo_dir=None,
+        final_destination=None,
+        missing_originals_invalidator=None,
+        remote_archive=None,
+        skip_scan=False,
+        snapshot_paths=None,
+    )
+
+    def record_folder(folder_id):
+        folder_lookups.append(folder_id)
+        return {"path": "/photos"}
+
+    scan.thread_db = SimpleNamespace(
+        get_photo_filenames=lambda ids: {42: (7, "IMG_001.cr3")},
+        get_folder=record_folder,
+    )
+
+    scan._on_scanned_photo(42, "/root/elsewhere/IMG_001.cr3")
+
+    assert collected == [42]
+    assert enqueued == [(42, "/root/elsewhere/IMG_001.cr3")]
+    # Basename matched; folder lookup is skipped.
+    assert folder_lookups == []

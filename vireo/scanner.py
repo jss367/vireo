@@ -3576,7 +3576,8 @@ class _KnownCompanions:
     """
 
     _OWNER_SQL = (
-        "SELECT p.id AS owner_id, c.file_size, c.file_mtime, c.file_hash"
+        "SELECT p.id AS owner_id, p.filename AS owner_filename,"
+        " c.file_size, c.file_mtime, c.file_hash"
         " FROM photos p LEFT JOIN companion_identities c"
         " ON c.photo_id = p.id AND c.filename = p.companion_path"
         " WHERE p.folder_id = ? AND p.companion_path = ?"
@@ -4527,7 +4528,7 @@ class _ScanRun:
                 known = self.known_companions.lookup_path(image_path)
                 if known is not None and _companion_stat_unchanged(known, stat):
                     self.stat_unchanged_companions.append(
-                        (image_path, known["owner_id"]),
+                        (image_path, known),
                     )
                     return False
         return True
@@ -4543,14 +4544,56 @@ class _ScanRun:
         added to ``files_to_process``.
         """
         added = False
-        for image_path, owner_id in self.stat_unchanged_companions:
+        for image_path, known in self.stat_unchanged_companions:
+            owner_id = known["owner_id"]
             if owner_id in self.reprocessed_row_ids:
                 files_to_process.append(image_path)
                 added = True
             else:
+                self._import_differing_stem_companion_sidecar(image_path, known)
                 self._credit_known_companion(owner_id, str(image_path))
         self.stat_unchanged_companions = []
         return added
+
+    def _import_differing_stem_companion_sidecar(self, image_path, known):
+        """Fold a companion's own-stem XMP sidecar into its owner RAW.
+
+        When the companion JPEG's stem matches the owning RAW's stem
+        (``IMG.cr3`` + ``IMG.jpg``), both share a single ``IMG.xmp`` and
+        the RAW's own main-loop sidecar handling covers it: an unchanged
+        RAW with an unchanged sidecar is skipped, and a changed sidecar
+        is caught by ``_reuse_existing_row``'s ``xmp_unchanged`` guard,
+        which also pulls the companion into reprocessing.
+
+        When the companion's stem differs from the RAW's (an
+        intentionally renamed JPEG beside its RAW, or a separate shared
+        file whose basename is not shared), the sidecar beside the
+        companion (e.g. ``OTHER.xmp``) is not any photo row's sidecar.
+        Before this hook the stat-unchanged credit path and
+        ``_keep_known_companion`` both returned without touching it, so
+        new keywords in that sidecar never reached the owning RAW. Run
+        the keyword import for the owner id so a later sidecar edit
+        propagates, as the pre-#1970 transient-row + merge path did.
+        """
+        owner_filename = known["owner_filename"]
+        if not owner_filename:
+            return
+        if Path(owner_filename).stem == image_path.stem:
+            return
+        xmp_path = image_path.with_suffix(".xmp")
+        if not xmp_path.exists():
+            return
+        try:
+            _import_keywords_for_photo(
+                self.db, known["owner_id"], str(xmp_path),
+            )
+        except Exception:
+            log.exception(
+                "Failed to import companion sidecar %s for owner %s",
+                xmp_path, known["owner_id"],
+            )
+            return
+        commit_with_retry(self.db.conn)
 
     def _reuse_existing_row(self, existing, full_path_str, stat, xmp_path, xmp_mtime):
         """``True`` when the cataloged row still vouches for the file."""
@@ -5083,18 +5126,23 @@ class _ScanRun:
                     companion_columns
                 )
             # Only record the fresh stat when the fill actually ran, or
-            # when the owner is unchanged this scan (so nothing was
-            # cleared that would need a refill). If ExifTool transiently
-            # omits this companion from the metadata result and the
-            # owner was re-read earlier this scan, ``_write_photo_columns``
-            # has nulled this identity's file_mtime so a retry fires on
-            # the next incremental scan; writing the current mtime here
-            # would stat-skip the companion forever and the JPEG-only
-            # columns (e.g. ``lens``) would stay cleared until a full
-            # rescan.
-            if (
-                meta.file_meta
-                or known["owner_id"] not in self.reprocessed_row_ids
+            # when the owner is unchanged this scan and no retry marker
+            # is already pending (so nothing was cleared that would need
+            # a refill). If ExifTool transiently omits this companion
+            # from the metadata result and the owner was re-read earlier
+            # this scan, ``_write_photo_columns`` has nulled this
+            # identity's file_mtime so a retry fires on the next
+            # incremental scan; writing the current mtime here would
+            # stat-skip the companion forever and the JPEG-only columns
+            # (e.g. ``lens``) would stay cleared until a full rescan.
+            # ``reprocessed_row_ids`` is populated only by the incremental
+            # pre-pass, so on a full rescan or on a later incremental
+            # scan where the owner's row is unchanged, the companion's
+            # already-NULL ``file_mtime`` is itself the signal that a
+            # retry is pending: respect it until metadata is available.
+            if meta.file_meta or (
+                known["file_mtime"] is not None
+                and known["owner_id"] not in self.reprocessed_row_ids
             ):
                 self.db.conn.execute(
                     "UPDATE companion_identities SET file_mtime = ?"
@@ -5104,6 +5152,7 @@ class _ScanRun:
             commit_with_retry(self.db.conn)
         else:
             return False
+        self._import_differing_stem_companion_sidecar(image_path, known)
         self._credit_known_companion(known["owner_id"], str(image_path))
         return True
 

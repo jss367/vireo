@@ -307,13 +307,64 @@ class _ScanPass:
             # and the collection it builds from these ids.
             return
         self._reported_photo_ids.add(photo_id)
+        # When a paired JPEG's callback arrives before its RAW's own
+        # callback (file ordering is filesystem-dependent), ``path``
+        # is the companion's path, not the canonical RAW. The thumbnail
+        # stage keys its output file on the owner id and whichever path
+        # it processes first wins the shared ``{owner_id}.jpg``, so a
+        # JPEG-first queue entry bypasses the normal RAW-first/fallback
+        # selection. Normalize to the catalog's own filename for the id
+        # so the queued path is always the RAW's.
+        canonical = self._canonical_photo_path(photo_id, path)
         self.collected_photo_ids.append(photo_id)
         # Abort/pause-aware: a blocking put would wedge the scanner
         # if the thumbnail consumer parked or failed on a full queue.
-        self.put_scan_item((photo_id, path))
+        self.put_scan_item((photo_id, canonical))
         run.stages["scan"]["count"] = len(self.collected_photo_ids)
         run.runner.update_step(run.job["id"], "scan",
-                               current_file=os.path.basename(path))
+                               current_file=os.path.basename(canonical))
+
+    def _canonical_photo_path(self, photo_id, path):
+        """Return the catalog's own path for ``photo_id`` (RAW path for pairs).
+
+        When the scanner's companion-credit callback hands us a JPEG path
+        whose basename matches the owner's filename, use ``path`` unchanged
+        (the common case where companion and owner share a stem is still
+        covered by the plain basename compare). When the basename differs,
+        the given path belongs to a companion with a different-stem JPEG;
+        reconstruct the canonical path from the owner's folder and
+        filename so the pipeline downstream (thumbnails, collection,
+        current-file display) works on the RAW rather than the companion.
+        """
+        thread_db = self.thread_db
+        if thread_db is None:
+            return path
+        try:
+            filenames = thread_db.get_photo_filenames([photo_id])
+        except Exception:
+            log.exception(
+                "Failed to resolve canonical filename for photo %s", photo_id,
+            )
+            return path
+        entry = filenames.get(photo_id)
+        if not entry:
+            return path
+        folder_id, filename = entry
+        if os.path.basename(path) == filename:
+            return path
+        try:
+            folder = thread_db.get_folder(folder_id)
+        except Exception:
+            log.exception(
+                "Failed to resolve folder %s for photo %s", folder_id, photo_id,
+            )
+            return path
+        if folder is None:
+            return path
+        folder_path = folder["path"]
+        if not folder_path:
+            return path
+        return os.path.join(folder_path, filename)
 
     def _on_scan_status(self, message, phase_current=None, phase_total=None, phase_label=None):
         run = self.run
