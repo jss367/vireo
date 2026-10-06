@@ -2,6 +2,7 @@
 
 import ast
 import inspect
+import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -203,7 +204,11 @@ def test_on_scanned_photo_normalizes_companion_first_callback_to_raw_path():
 
     assert collected == [42]
     # Must be the canonical RAW path even though the JPEG came first.
-    assert enqueued == [(42, "/photos/IMG_001.cr3")]
+    # ``_canonical_photo_path`` reconstructs it via ``os.path.join``, so the
+    # separator matches the host (``/`` on POSIX, ``\\`` on Windows); use
+    # the same join rather than a hardcoded slash so the assertion is not
+    # OS-specific.
+    assert enqueued == [(42, os.path.join("/photos", "IMG_001.cr3"))]
     assert scan_step["count"] == 1
 
 
