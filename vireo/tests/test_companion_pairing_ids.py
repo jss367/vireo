@@ -275,6 +275,55 @@ def test_new_photo_drops_a_stale_collection_entry_for_its_reused_id(tmp_path):
     assert _collection_photo_ids(db, stale) == [kept_id]
 
 
+def test_new_photo_preserves_collection_created_after_insert(
+    tmp_path, monkeypatch,
+):
+    """A separate writer may name a new photo once its insert is visible."""
+    from db import Database
+    from scanner import scan
+
+    card = tmp_path / "card"
+    card.mkdir()
+    Image.new("RGB", (32, 32), "green").save(card / "bird.jpg")
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    writer = Database(db_path)
+    writer.conn.execute("PRAGMA busy_timeout=0")
+    real_add = db.add_photo
+    state = {}
+
+    def add_membership(photo_id):
+        return writer.add_collection(
+            "User selected bird",
+            json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
+        )
+
+    def insert_then_user_selection(*args, **kwargs):
+        result = real_add(*args, **kwargs)
+        photo_id, inserted = result
+        assert inserted
+        state["photo_id"] = photo_id
+        try:
+            state["collection_id"] = add_membership(photo_id)
+        except sqlite3.OperationalError as error:
+            assert "locked" in str(error).lower()
+            writer.conn.rollback()
+        return result
+
+    monkeypatch.setattr(db, "add_photo", insert_then_user_selection)
+    try:
+        scan(str(card), db)
+        if "collection_id" not in state:
+            state["collection_id"] = add_membership(state["photo_id"])
+        assert _photo_ids_by_filename(db)["bird.jpg"] == state["photo_id"]
+        assert _collection_photo_ids(writer, state["collection_id"]) == [
+            state["photo_id"],
+        ]
+    finally:
+        writer.close()
+        db.close()
+
+
 def test_jpeg_becomes_its_own_photo_when_its_raw_changes_under_it(
     tmp_path, monkeypatch,
 ):
