@@ -31,7 +31,11 @@ function autoToneMessage(result, changedControls) {
       ? ' (metered on the detected subject)'
       : ' (metered on the subject mask)';
   }
-  if (!changedControls) return name + metering + ': already balanced, nothing changed';
+  // Subject style without a subject meters like Balanced; say so even when
+  // that fit changes nothing, or the click looks like a subject fit.
+  var fallback = result && result.style === 'subject' && result.metering !== 'subject'
+    ? 'no subject found, so metered the whole frame as Balanced does; ' : '';
+  if (!changedControls) return name + metering + ': ' + fallback + 'already balanced, nothing changed';
   if (!notes.length) {
     return name + metering + ': Reset previous tone adjustments; source already balanced. White balance left unchanged.';
   }

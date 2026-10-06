@@ -139,3 +139,21 @@ def test_style_buttons_request_their_style_and_name_it(live_server, page, dark_p
     expect(toast).to_contain_text(label + ' (metered on the detected subject):')
     expect(page.locator('#autoToneBtn')).to_be_enabled()
     expect(page.locator(button)).not_to_have_text('Analyzing...')
+
+
+def test_subject_fallback_is_named_when_nothing_changes(live_server, page, dark_photo):
+    page.goto(f"{live_server['url']}/edit/{dark_photo}")
+    expect(page.locator('#editorFilename')).to_have_text('dim-meadow.png')
+    page.wait_for_function('!editorState.loading')
+    page.route('**/api/photos/*/auto-tone?*', lambda route: route.fulfill(json={
+        'adjustments': {key: 0 for key in (
+            'exposure', 'highlights', 'shadows', 'contrast', 'whites', 'blacks', 'vibrance', 'saturation',
+        )},
+        'notes': ['no subject found, so metered the whole frame as Balanced does'],
+        'metering': 'frame', 'style': 'subject', 'subject_source': None,
+    }))
+    page.locator('#autoToneSubjectBtn').click()
+    expect(page.locator('#toastContainer')).to_contain_text(
+        'Auto Tone (Subject style): no subject found, so metered the whole frame as Balanced does; '
+        'already balanced, nothing changed'
+    )
