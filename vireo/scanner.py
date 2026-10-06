@@ -4267,6 +4267,7 @@ class _ScanRun:
 
     def _load_catalog_state(self):
         db = self.db
+        self._discovered_image_paths = set(self.image_files)
         self.existing_by_path = (
             _incremental_photo_index(db, self.image_files)
             if self.incremental else {}
@@ -4550,20 +4551,23 @@ class _ScanRun:
                 files_to_process.append(image_path)
                 added = True
             else:
-                self._import_differing_stem_companion_sidecar(image_path, known)
+                self._import_companion_sidecar(image_path, known)
                 self._credit_known_companion(owner_id, str(image_path))
         self.stat_unchanged_companions = []
         return added
 
-    def _import_differing_stem_companion_sidecar(self, image_path, known):
-        """Fold a companion's own-stem XMP sidecar into its owner RAW.
+    def _import_companion_sidecar(self, image_path, known):
+        """Import companion XMP when the owner cannot handle it this scan.
 
         When the companion JPEG's stem matches the owning RAW's stem
         (``IMG.cr3`` + ``IMG.jpg``), both share a single ``IMG.xmp`` and
-        the RAW's own main-loop sidecar handling covers it: an unchanged
+        the RAW's own main-loop sidecar handling covers it if that RAW
+        was discovered in this scan: an unchanged
         RAW with an unchanged sidecar is skipped, and a changed sidecar
         is caught by ``_reuse_existing_row``'s ``xmp_unchanged`` guard,
-        which also pulls the companion into reprocessing.
+        which also pulls the companion into reprocessing. A missing RAW,
+        or a frozen JPEG-only scan, needs the companion to import even a
+        shared-stem sidecar because the RAW receives no scan callback.
 
         When the companion's stem differs from the RAW's (an
         intentionally renamed JPEG beside its RAW, or a separate shared
@@ -4578,7 +4582,10 @@ class _ScanRun:
         owner_filename = known["owner_filename"]
         if not owner_filename:
             return
-        if Path(owner_filename).stem == image_path.stem:
+        if (
+            Path(owner_filename).stem == image_path.stem
+            and image_path.with_name(owner_filename) in self._discovered_image_paths
+        ):
             return
         xmp_path = image_path.with_suffix(".xmp")
         if not xmp_path.exists():
@@ -5152,7 +5159,7 @@ class _ScanRun:
             commit_with_retry(self.db.conn)
         else:
             return False
-        self._import_differing_stem_companion_sidecar(image_path, known)
+        self._import_companion_sidecar(image_path, known)
         self._credit_known_companion(known["owner_id"], str(image_path))
         return True
 

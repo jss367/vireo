@@ -2705,6 +2705,50 @@ def test_rescan_imports_differing_stem_companion_sidecar(
     assert {"Robin", "Sparrow"} <= keyword_names()
 
 
+@pytest.mark.parametrize("incremental", [True, False])
+@pytest.mark.parametrize("owner_missing", [True, False])
+def test_companion_imports_shared_sidecar_when_raw_is_not_scanned(
+    tmp_path, monkeypatch, incremental, owner_missing,
+):
+    """A missing RAW or JPEG-only snapshot cannot import the shared XMP."""
+    from xmp import write_sidecar
+
+    cat = _PairedCatalog(tmp_path, monkeypatch)
+    identity_hash = cat.identity()[0]["file_hash"]
+    if owner_missing:
+        cat.raw.unlink()
+
+    def rescan():
+        cat.merges.clear()
+        cat.extracted.clear()
+        cat.scanner.scan(
+            str(cat.img_dir), cat.db, incremental=incremental,
+            vireo_dir=str(cat.vireo_dir), thumb_cache_dir=str(cat.thumb_dir),
+            photo_callback=cat._callback,
+            discovered_files=None if owner_missing else [str(cat.jpeg)],
+        )
+        assert cat.merges == []
+        assert cat.rows() == {"IMG_001.cr3": "IMG_001.jpg"}
+        assert cat.identity()[0]["file_hash"] == identity_hash
+        assert cat.raw.name not in cat.extracted
+        if incremental:
+            assert cat.extracted == []
+        return {k["name"] for k in cat.db.get_photo_keywords(cat.raw_id)}
+
+    sidecar = str(cat.jpeg.with_suffix(".xmp"))
+    write_sidecar(
+        sidecar, flat_keywords={"Companion sidecar"},
+        hierarchical_keywords=set(),
+    )
+    assert "Companion sidecar" in rescan()
+
+    write_sidecar(
+        sidecar, flat_keywords={"Companion sidecar", "Later keyword"},
+        hierarchical_keywords=set(),
+    )
+    assert {"Companion sidecar", "Later keyword"} <= rescan()
+
+
 def test_scan_late_arriving_raw_pairs_with_existing_jpeg(tmp_path):
     """Importing raws after JPEGs matches them to existing photo records."""
     import os
