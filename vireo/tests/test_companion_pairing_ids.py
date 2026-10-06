@@ -36,6 +36,45 @@ def _photo_ids_by_filename(db):
     }
 
 
+@pytest.mark.parametrize("already_cataloged", [False, True])
+def test_pair_survivor_does_not_add_a_second_snapshot_outcome(tmp_path, already_cataloged):
+    from types import SimpleNamespace
+
+    import scanner
+    from db import Database
+    from services.import_in_place import _InPlaceImportRun
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(tmp_path))
+    raw_id = db.add_photo(folder_id, "PAIR.cr3", ".cr3", 256, None)
+    jpeg_id = db.add_photo(folder_id, "PAIR.jpg", ".jpg", 256, None)
+    jpeg_path = str(tmp_path / "PAIR.jpg")
+    imported = _InPlaceImportRun.__new__(_InPlaceImportRun)
+    imported.photo_ids, imported.seen_photo_ids, imported.indexed_paths = [], set(), set()
+    imported.runner = SimpleNamespace(update_step=lambda *a, **k: None)
+    imported.job, imported.plan = {"id": "snapshot-import"}, SimpleNamespace(source_snapshot_id="frozen")
+    imported.snapshot_known_before = {jpeg_path: jpeg_id} if already_cataloged else {}
+    imported.snapshot_requested = 1
+    imported.snapshot_missing, imported.snapshot_unreadable = [], []
+    try:
+        imported._photo_cb(jpeg_id, jpeg_path)
+        merged = scanner._pair_raw_jpeg_companions(db)
+        assert merged == {jpeg_id: raw_id}
+        scanner._ScanRun._report_merged_photos(SimpleNamespace(
+            db=db, photo_merged_callback=imported._photo_merged_cb,
+            _reported_identities={jpeg_id: (folder_id, "PAIR.jpg")},
+        ), merged)
+        result = imported._snapshot_result_fields([])
+        assert result["imported"] == (0 if already_cataloged else 1)
+        assert result["already_cataloged"] == (1 if already_cataloged else 0)
+        assert result["imported"] + result["already_cataloged"] == result["requested"]
+        assert imported.photo_ids == [raw_id]
+        assert imported.seen_photo_ids == {raw_id}
+        assert imported.indexed_paths == {jpeg_path}
+    finally:
+        db.close()
+
+
 def test_later_scan_root_cannot_substitute_an_unrelated_reused_id(tmp_path):
     """A receiver spans roots even though each root creates its own ScanRun."""
     from types import SimpleNamespace

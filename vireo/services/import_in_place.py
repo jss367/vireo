@@ -733,8 +733,12 @@ class _InPlaceImportRun:
             return
         self.seen_photo_ids.discard(old_id)
         self.photo_ids = [pid for pid in self.photo_ids if pid != old_id]
-        if new_id is not None:
-            self._photo_cb(new_id, path)
+        # Pairing changes catalog membership, not which source files the
+        # import scanned. The survivor may be outside a frozen snapshot;
+        # recording its path would count a second outcome for one JPEG.
+        if new_id is not None and new_id not in self.seen_photo_ids:
+            self.seen_photo_ids.add(new_id)
+            self.photo_ids.append(new_id)
 
     def _progress_cb(self, current, total):
         job = self.job
