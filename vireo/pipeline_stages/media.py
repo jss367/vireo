@@ -263,9 +263,9 @@ class _ThumbPass:
             scan_total = run.stages["scan"].get("count", 0)
             self._report_progress(thumb.photo_path, scan_total)
 
-    def _still_owns(self, photo_id, photo_path):
+    def _still_owns(self, photo_id, canonical_path):
         """True if the catalog's current row at ``photo_id`` still names
-        the folder + filename behind ``photo_path``.
+        the folder + filename behind ``canonical_path``.
 
         SQLite reuses the row ids of deleted photos. A paired JPEG's
         transient row is inserted during one scanner invocation and
@@ -276,25 +276,36 @@ class _ThumbPass:
         photo happens to share the companion's filename but lives in
         a different folder, so this validates folder + filename
         together — the two columns that identify a row for pairing
-        and for ``_canonical_photo_path`` at queue time.
+        and for ``_canonical_photo_path`` at queue time. ``canonical``
+        here means the owner's path (the RAW path for pairs), captured
+        before any render-source mutation; the retry paths rewrite
+        ``thumb.photo_path`` to a companion or working-copy path and
+        validating against that would false-reject a live row.
         """
         filenames = self.thread_db.get_photo_filenames([photo_id])
         entry = filenames.get(photo_id)
         if entry is None:
             return False
         folder_id, filename = entry
-        if os.path.basename(photo_path) != filename:
+        if os.path.basename(canonical_path) != filename:
             return False
         folder = self.thread_db.get_folder(folder_id)
-        if folder is None or not folder.get("path"):
-            # Row exists but the folder is missing or has no path:
-            # treat as not-owned rather than silently proceed on a
-            # weaker check.
+        if folder is None:
             return False
-        catalog_path = os.path.normpath(
-            os.path.join(folder["path"], filename)
-        )
-        return os.path.normpath(photo_path) == catalog_path
+        # ``Database.get_folder`` returns a ``sqlite3.Row`` whose
+        # columns are the SELECT list; use subscript access (``Row``
+        # supports ``__getitem__`` but not ``dict.get``). A missing or
+        # NULL path column — unusual, but survivable — leaves the
+        # catalog without a way to reconstruct the owner path, so
+        # treat it as not-owned rather than silently proceed.
+        try:
+            folder_path = folder["path"]
+        except (KeyError, IndexError):
+            return False
+        if not folder_path:
+            return False
+        catalog_path = os.path.normpath(os.path.join(folder_path, filename))
+        return os.path.normpath(canonical_path) == catalog_path
 
     def _thumbnail_scanned_photo(self, thumb):
         """Thumbnail one photo taken from the scan queue.
@@ -305,6 +316,15 @@ class _ThumbPass:
         already counted as failed, so the per-photo progress update
         must be skipped.
         """
+        # The retry paths (`_resolve_recipe_source`,
+        # `_retry_after_working_copy_eviction`) rewrite
+        # ``thumb.photo_path`` to a companion or working-copy render
+        # source. Capture the canonical owner path once up front so
+        # the pre- and post-generation ownership checks both compare
+        # against what was queued, not what is being rendered — else
+        # the post-check would delete a valid thumbnail whenever a
+        # retry path diverged from the owner's filename.
+        canonical_path = thumb.photo_path
         # Pre-generation ownership guard: a stale (id, companion_path)
         # entry queued by a transient JPEG row that pairing then
         # deleted must not touch the cache. Caching {id}.jpg from the
@@ -312,7 +332,7 @@ class _ThumbPass:
         # deleted companion's pixels to the new photo and cause the
         # new row's own queue entry to skip on a pre-populated cache
         # file.
-        if not self._still_owns(thumb.photo_id, thumb.photo_path):
+        if not self._still_owns(thumb.photo_id, canonical_path):
             return False
         thumb_path = os.path.join(self.cache_dir, f"{thumb.photo_id}.jpg")
         thumb.already_exists = os.path.exists(thumb_path)
@@ -350,16 +370,18 @@ class _ThumbPass:
                 thumb, detail_photo, thumb.folders.get(detail_photo["folder_id"]),
             )
         result_path = self._retry_with_working_copy(thumb, result_path)
-        # Post-generation ownership re-check: ownership can change
-        # during ``generate_thumbnail`` (pairing commits a row delete
-        # and the next scanner invocation inserts under the reused id).
-        # If the row at this id no longer names the file we rendered
-        # from, delete the cache file we just published so it does not
-        # pin the stale pixels to the id — the new row's own queue
-        # entry will regenerate from the correct source.
+        # Post-generation ownership re-check against the ORIGINAL
+        # canonical path, not ``thumb.photo_path`` (which the retry
+        # paths may have rewritten). Ownership can change during
+        # ``generate_thumbnail`` — pairing commits a row delete and
+        # the next scanner invocation inserts under the reused id —
+        # so if the row at this id no longer names the owner we
+        # queued, delete the cache file we just published; the new
+        # row's own queue entry will regenerate from the correct
+        # source.
         if (
             result_path is not None
-            and not self._still_owns(thumb.photo_id, thumb.photo_path)
+            and not self._still_owns(thumb.photo_id, canonical_path)
         ):
             with contextlib.suppress(OSError):
                 os.remove(result_path)

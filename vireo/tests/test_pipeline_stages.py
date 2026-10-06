@@ -444,6 +444,26 @@ def _make_thumb_pass(tmp_path):
     return thumbs
 
 
+class _RowLike:
+    """Stand-in for ``sqlite3.Row``: subscript access only, no ``dict.get``.
+
+    ``Database.get_folder`` returns a real ``sqlite3.Row``, so test
+    mocks that return plain ``dict`` instances hide a production-only
+    ``AttributeError`` on ``.get()``. Using this fake in every
+    ``_still_owns`` test shape makes the mocks fail the same way the
+    real DB would if the production code ever reaches for ``.get``.
+    """
+
+    def __init__(self, **cols):
+        self._cols = cols
+
+    def __getitem__(self, key):
+        return self._cols[key]
+
+    def keys(self):
+        return self._cols.keys()
+
+
 def test_thumbnail_skips_stale_queue_entry_after_id_reuse(tmp_path):
     """A transient JPEG row inserted in one scanner invocation is deleted
     by RAW/JPEG pairing at the end of that pass, but its ``(id,
@@ -475,7 +495,7 @@ def test_thumbnail_skips_stale_queue_entry_after_id_reuse(tmp_path):
         get_photo_filenames=lambda ids: (
             {42: (99, "IMG_002.jpg")} if 42 in ids else {}
         ),
-        get_folder=lambda fid: {"id": fid, "path": "/B"} if fid == 99 else None,
+        get_folder=lambda fid: _RowLike(id=fid, path="/B") if fid == 99 else None,
         get_photo_edit_recipe=lambda _id: None,
     )
     thumbs.generate_thumbnail = _generate_must_not_run
@@ -510,7 +530,7 @@ def test_thumbnail_skips_stale_queue_entry_after_id_reuse(tmp_path):
         get_photo_filenames=lambda ids: (
             {42: (99, "IMG_002.jpg")} if 42 in ids else {}
         ),
-        get_folder=lambda fid: {"id": fid, "path": "/B"} if fid == 99 else None,
+        get_folder=lambda fid: _RowLike(id=fid, path="/B") if fid == 99 else None,
         get_photo_edit_recipe=lambda _id: None,
     )
     thumbs.generate_thumbnail = lambda *_a, **_k: generated_path
@@ -547,7 +567,7 @@ def test_thumbnail_skips_queue_entry_when_folder_differs(tmp_path):
         get_photo_filenames=lambda ids: (
             {42: (7, "IMG_001.jpg")} if 42 in ids else {}
         ),
-        get_folder=lambda fid: {"id": fid, "path": "/B"} if fid == 7 else None,
+        get_folder=lambda fid: _RowLike(id=fid, path="/B") if fid == 7 else None,
         get_photo_edit_recipe=lambda _id: None,
     )
     # Queue entry is /A/IMG_001.jpg (same basename, folder A).
@@ -591,9 +611,9 @@ def test_thumbnail_discards_cache_when_ownership_changes_during_generate(tmp_pat
 
     def get_folder(fid):
         if fid == 7:
-            return {"id": 7, "path": "/A"}
+            return _RowLike(id=7, path="/A")
         if fid == 99:
-            return {"id": 99, "path": "/B"}
+            return _RowLike(id=99, path="/B")
         return None
 
     thumbs.thread_db = SimpleNamespace(
@@ -619,3 +639,96 @@ def test_thumbnail_discards_cache_when_ownership_changes_during_generate(tmp_pat
     assert not os.path.exists(published_path)
     # No tally advanced; the new row's own queue entry will regenerate.
     assert thumbs.generated == 0 and thumbs.skipped == 0 and thumbs.failed == 0
+
+
+def test_thumbnail_still_owns_works_with_real_sqlite_row_folders(tmp_path):
+    """``Database.get_folder`` returns a real ``sqlite3.Row``, not a dict.
+    ``_still_owns`` must use subscript access rather than ``dict.get``
+    — reaching for ``folder.get("path")`` would raise AttributeError
+    on every live thumbnail and fail the entire scanned queue. Drive
+    the guard with an on-disk SQLite database so the row behaves like
+    the production one, not the mocked dicts the other tests use.
+    """
+    import sqlite3
+    from types import SimpleNamespace
+
+    from pipeline_stages.media import _ThumbPhoto
+
+    conn = sqlite3.connect(str(tmp_path / "catalog.db"))
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE folders (id INTEGER PRIMARY KEY, path TEXT)")
+    conn.execute("INSERT INTO folders (id, path) VALUES (?, ?)", (99, "/B"))
+    conn.commit()
+
+    def get_folder(fid):
+        return conn.execute(
+            "SELECT id, path FROM folders WHERE id = ?", (fid,),
+        ).fetchone()
+
+    thumbs = _make_thumb_pass(tmp_path)
+    thumbs.thread_db = SimpleNamespace(
+        get_photo_filenames=lambda ids: (
+            {42: (99, "IMG_002.jpg")} if 42 in ids else {}
+        ),
+        get_folder=get_folder,
+        get_photo_edit_recipe=lambda _id: None,
+    )
+    generated_path = os.path.join(str(tmp_path), "42.jpg")
+    thumbs.generate_thumbnail = lambda *_a, **_k: generated_path
+
+    live = _ThumbPhoto(photo_id=42, photo_path="/B/IMG_002.jpg")
+    # The guard must traverse the real sqlite3.Row without raising:
+    # a bare ``folder.get("path")`` call would blow up here.
+    assert thumbs._thumbnail_scanned_photo(live) is True
+    assert thumbs.generated == 1
+
+
+def test_thumbnail_post_check_uses_canonical_queued_path_not_mutated_render_source(tmp_path):
+    """The retry paths (``_resolve_recipe_source``,
+    ``_retry_after_working_copy_eviction``) rewrite ``thumb.photo_path``
+    to a companion or working-copy render source. The post-generation
+    ownership re-check must still compare against the ORIGINAL queued
+    (owner) path — validating against the mutated render source
+    (e.g. a RAW's companion JPEG that lives next to the RAW but has
+    its own basename) would delete every valid thumbnail whenever a
+    retry path produced the pixels.
+    """
+    from types import SimpleNamespace
+
+    from pipeline_stages.media import _ThumbPhoto
+
+    thumbs = _make_thumb_pass(tmp_path)
+
+    # Catalog says id 42 is /B/IMG_001.cr3 (a RAW). The queued path
+    # is the RAW's canonical path; a retry path will rewrite
+    # ``thumb.photo_path`` to its companion JPEG, which has a
+    # different basename.
+    thumbs.thread_db = SimpleNamespace(
+        get_photo_filenames=lambda ids: (
+            {42: (99, "IMG_001.cr3")} if 42 in ids else {}
+        ),
+        get_folder=lambda fid: (
+            _RowLike(id=99, path="/B") if fid == 99 else None
+        ),
+        get_photo_edit_recipe=lambda _id: None,
+    )
+    generated_path = os.path.join(str(tmp_path), "42.jpg")
+
+    def generate_and_mutate(*_a, **_k):
+        # Simulate a retry-path mutation: the companion is used as
+        # the actual render source. If the post-check compared
+        # against thumb.photo_path, "COMPANION.jpg" would not match
+        # the catalog's "IMG_001.cr3" and this valid thumbnail
+        # would be deleted.
+        entry.photo_path = "/B/COMPANION.jpg"
+        return generated_path
+
+    thumbs.generate_thumbnail = generate_and_mutate
+
+    entry = _ThumbPhoto(photo_id=42, photo_path="/B/IMG_001.cr3")
+    assert thumbs._thumbnail_scanned_photo(entry) is True
+    # The published cache file survived — the post-check validated
+    # against the ORIGINAL /B/IMG_001.cr3, not the mutated
+    # /B/COMPANION.jpg.
+    assert thumbs.generated == 1
+    assert thumbs.failed == 0
