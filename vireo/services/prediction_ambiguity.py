@@ -52,6 +52,16 @@ def effective_category_resolver(db, photo_ids):
     * the comparison runs on the species the accept path would actually
       apply (the burst consensus), not the row's own label.
 
+    Keywords are photo-level but predictions belong to a detection, so a
+    photo with two birds in it carries both birds' species. Given the
+    prediction's ``detection_id``, a species keyword that live predictions
+    on *other* detections name, and this detection's do not, belongs to
+    another subject and is left out of the comparison: tagging the
+    redshank must not make the egret beside it read as a conflict. "Live"
+    is the rule Replace uses to protect a neighbour's species
+    (``get_live_prediction_rows_by_photo``). A keyword no detection names
+    stays in, because nothing says which subject it describes.
+
     Returns None when no comparison is possible (compare or the photo set
     unavailable) so callers can fall back to the stored snapshot.
     """
@@ -95,21 +105,38 @@ def effective_category_resolver(db, photo_ids):
         for entry in entries:
             source = {"taxon_id": int(entry["key"][6:])} if entry["key"].startswith("taxon:") else None
             identity = resolver.resolve(entry["name"], source=source) if source else resolver.display(entry["name"])
-            names.append(comparison_name(entry["name"], identity))
+            names.append((entry["key"], comparison_name(entry["name"], identity)))
         keyword_names[photo_id] = names
 
-    def _category(photo_id, species, identity=None):
+    # Which detections on each photo name each species identity.
+    detections_by_key = {}
+    for photo_id, rows in db.get_live_prediction_rows_by_photo(
+        [pid for pid in photo_ids if pid in species_by_photo]
+    ).items():
+        held = detections_by_key.setdefault(photo_id, {})
+        for row in rows:
+            held.setdefault(resolver.prediction(row).key, set()).add(row["detection_id"])
+
+    def _held_by_other_subject(photo_id, keyword_key, detection_id):
+        holders = detections_by_key.get(photo_id, {}).get(keyword_key)
+        return bool(holders) and detection_id not in holders
+
+    def _category(photo_id, species, identity=None, detection_id=None):
         if not species or photo_id is None:
             return None
         identity = identity or resolver.display(species)
-        key = (photo_id, identity.key)
+        key = (photo_id, identity.key, detection_id)
         if key not in cache:
             if any(entry["key"] == identity.key for entry in species_by_photo.get(photo_id, [])):
                 cache[key] = "match"
             else:
                 comparison = compare_prediction_to_keywords(
                     comparison_name(species, identity),
-                    keyword_names.get(photo_id, []),
+                    [
+                        name for keyword_key, name in keyword_names.get(photo_id, [])
+                        if detection_id is None
+                        or not _held_by_other_subject(photo_id, keyword_key, detection_id)
+                    ],
                     taxonomy,
                 )
                 cache[key] = (
@@ -202,7 +229,9 @@ def ambiguous_prediction_ids(db, rows):
         identity = resolver.consensus(row)
         species = identity.display_name
         effective_category = (
-            effective_category_of(row["photo_id"], species, identity)
+            effective_category_of(
+                row["photo_id"], species, identity, row["detection_id"],
+            )
             if effective_category_of is not None and species else None
         )
         if (

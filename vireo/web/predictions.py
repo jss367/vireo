@@ -249,6 +249,7 @@ def create_predictions_blueprint(
             effective_category = (
                 effective_category_of(
                     d.get("photo_id"), d.get("consensus_species"), identity,
+                    d.get("detection_id"),
                 )
                 if effective_category_of is not None else None
             )

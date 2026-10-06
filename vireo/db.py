@@ -7544,6 +7544,10 @@ class Database:
             photo_id, min_detector_confidence=min_detector_confidence,
         )
 
+    def get_live_prediction_rows_by_photo(self, photo_ids):
+        """Map photo id → the live prediction rows on each of its detections."""
+        return self._prediction_repository().get_live_rows_by_photo(photo_ids)
+
     def get_top_prediction_confidences(self, photo_ids):
         """Map photo id → the confidence the Browse sorts rank on.
 

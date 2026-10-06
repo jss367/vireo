@@ -21719,6 +21719,117 @@ def test_browse_clears_stale_ambiguity_when_keywords_no_longer_conflict(app_and_
     assert det_id is not None
 
 
+def _seed_two_subject_photo(db, filename, first_species, second_species):
+    """A photo with two detections, each carrying one pending prediction."""
+    folder_id = db.get_folder_tree()[0]["id"]
+    photo_id = db.add_photo(
+        folder_id=folder_id, filename=filename, extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    det_ids = db.save_detections(
+        photo_id,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3},
+          "confidence": 0.9, "category": "animal"},
+         {"box": {"x": 0.6, "y": 0.6, "w": 0.3, "h": 0.3},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )
+    db.add_prediction(det_ids[0], first_species, 0.9, "bioclip",
+                      labels_fingerprint="fp1")
+    db.add_prediction(det_ids[1], second_species, 0.9, "bioclip",
+                      labels_fingerprint="fp1")
+    return photo_id, det_ids
+
+
+def _suggestion_for(client, photo_ids, species):
+    resp = client.post(
+        "/api/selection/prediction-suggestions", json={"photo_ids": photo_ids},
+    )
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    return next(
+        p for p in resp.get_json()["predictions"] if p["species"] == species
+    )
+
+
+def test_accepting_one_subject_keeps_the_other_subject_acceptable(app_and_db):
+    """Tagging one bird must not turn the other bird's ID into a conflict.
+
+    A redshank and an egret in one frame are two detections. Accepting the
+    redshank tags the photo ``Spotted Redshank``; the egret's pending
+    prediction lives on the other detection, so comparing it against that
+    keyword and calling it a conflict hid its Accept button — from Browse
+    it looked as if the egret ID had been removed.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    photo_id, _ = _seed_two_subject_photo(
+        db, "redshank-egret.jpg", "Spotted Redshank", "Little Egret",
+    )
+    redshank = _prediction_id(db, photo_id, "Spotted Redshank")
+    egret = _prediction_id(db, photo_id, "Little Egret")
+
+    resp = client.post(
+        "/api/predictions/batch-accept", json={"prediction_ids": [redshank]},
+    )
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+
+    entry = _suggestion_for(client, [photo_id], "Little Egret")
+    assert entry["acceptable_prediction_ids"] == [egret]
+    assert entry["ambiguous_prediction_ids"] == []
+
+    resp = client.get(f"/api/predictions?photo_ids={photo_id}")
+    row = next(p for p in resp.get_json()["predictions"] if p["id"] == egret)
+    assert row["effective_category"] == "new"
+
+    resp = client.post(
+        "/api/predictions/batch-accept", json={"prediction_ids": [egret]},
+    )
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    names = {k["name"] for k in db.get_photo_keywords(photo_id)}
+    assert {"Spotted Redshank", "Little Egret"} <= names
+
+
+def test_keyword_no_subject_names_still_conflicts(app_and_db):
+    """A species keyword no detection predicts could describe either bird.
+
+    Only a keyword another detection accounts for is set aside; a keyword
+    typed by hand that no prediction names keeps both subjects' differing
+    predictions ambiguous.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    photo_id, _ = _seed_two_subject_photo(
+        db, "unexplained.jpg", "Common Greenshank", "Little Egret",
+    )
+    egret = _prediction_id(db, photo_id, "Little Egret")
+    db.tag_photo(photo_id, db.add_keyword("Spotted Redshank", is_species=True))
+
+    entry = _suggestion_for(client, [photo_id], "Little Egret")
+    assert entry["ambiguous_prediction_ids"] == [egret]
+
+
+def test_same_subject_disagreement_stays_ambiguous(app_and_db):
+    """A keyword this detection itself names still conflicts on it.
+
+    Two models disagree on the first bird; the second bird happens to share
+    the accepted species. The keyword is held by both detections, so it is
+    not "another subject's" for the first one, and the second model's
+    differing ID on the first bird must still go to Review.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    photo_id, det_ids = _seed_two_subject_photo(
+        db, "two-models.jpg", "Spotted Redshank", "Spotted Redshank",
+    )
+    db.add_prediction(det_ids[0], "Common Redshank", 0.8, "inat21",
+                      labels_fingerprint="fp2")
+    common = _prediction_id(db, photo_id, "Common Redshank")
+    db.tag_photo(photo_id, db.add_keyword("Spotted Redshank", is_species=True))
+
+    entry = _suggestion_for(client, [photo_id], "Common Redshank")
+    assert entry["ambiguous_prediction_ids"] == [common]
+
+
 def test_batch_accept_leaves_earlier_accept_untouched_when_resubmitted(app_and_db):
     """Filtering already-accepted ids must not leak their photos into a
     sibling's grouped scope.
