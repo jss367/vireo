@@ -806,12 +806,11 @@ def test_logs_page(app_and_db):
 def test_jobs_page_uses_cache_aware_classification_eta(app_and_db):
     """Classification must not estimate throughput from cache-hit progress."""
     app, _ = app_and_db
-    resp = app.test_client().get('/jobs')
+    html = _page_with_scripts(app.test_client(), '/jobs')
 
-    assert resp.status_code == 200
-    assert b"step.progress.eta_kind === 'classification'" in resp.data
-    assert b"newly classified" in resp.data
-    assert b"first uncached batch" in resp.data
+    assert "step.progress.eta_kind === 'classification'" in html
+    assert "newly classified" in html
+    assert "first uncached batch" in html
 
 
 def test_storage_page_has_preview_cache_field(app_and_db):
@@ -4693,19 +4692,18 @@ def test_pipeline_has_model_checkboxes(app_and_db):
     """Pipeline page uses checkboxes for model selection, not a single select."""
     app, _ = app_and_db
     client = app.test_client()
-    resp = client.get('/pipeline')
-    assert resp.status_code == 200
-    assert b'model-checkbox' in resp.data
-    assert b'id="cfgModel"' not in resp.data  # old single select removed
+    assert client.get('/pipeline').status_code == 200
+    html = _page_with_scripts(client, '/pipeline')
+    assert 'model-checkbox' in html
+    assert 'id="cfgModel"' not in html  # old single select removed
 
 
 def test_pipeline_exposes_inline_label_download_modal(app_and_db):
     """Pipeline page lets users download species labels without leaving."""
     app, _ = app_and_db
     client = app.test_client()
-    resp = client.get('/pipeline')
-    assert resp.status_code == 200
-    html = resp.data.decode()
+    assert client.get('/pipeline').status_code == 200
+    html = _page_with_scripts(client, '/pipeline')
     assert 'openPipelineLabelsModal()' in html
     assert 'id="pipelineLabelsModal"' in html
     assert 'id="pipelineFetchLabelsBtn"' in html
@@ -16970,7 +16968,7 @@ def test_pipeline_picker_disables_degraded_collections(app_and_db):
     """
     app, _db = app_and_db
     client = app.test_client()
-    html = client.get("/pipeline").get_data(as_text=True)
+    html = _page_with_scripts(client, "/pipeline")
     # The renderer keys off c.count_error and adds ' disabled' to the option
     # (plus a tooltip explaining why it's unavailable). Assert the branch is
     # actually in the template rather than probing it from the DOM.
@@ -17189,15 +17187,14 @@ def test_browse_export_started_uses_info_toast():
     assert "showToast('Export started (' + count + ' photo' + (count === 1 ? '' : 's') + ')', 'info')" in body
 
 
-def test_review_switch_collection_does_not_silently_widen_scope():
+def test_review_switch_collection_does_not_silently_widen_scope(app_and_db):
     """When /api/collections/<id>/photos fails, the review page must not fall
     back to `allPredictions.slice()` — that silently widened the scope back
     to every prediction, the opposite of what the user asked for. Regression
-    guard on the template source itself.
+    guard on the page's script source itself.
     """
-    from pathlib import Path
-    src = Path(__file__).parent.parent / "templates" / "review.html"
-    text = src.read_text(encoding="utf-8")
+    app, _ = app_and_db
+    text = _page_with_scripts(app.test_client(), "/review")
     # Locate the switchCollection function and the catch branch inside it.
     fn_start = text.find("async function switchCollection")
     assert fn_start != -1, "switchCollection function not found"
@@ -17207,7 +17204,7 @@ def test_review_switch_collection_does_not_silently_widen_scope():
     # The old silent fallback assigned allPredictions.slice() from the catch;
     # the new behavior keeps the scope empty and surfaces a toast.
     assert "predictions = allPredictions.slice()" not in body.split("catch")[1], (
-        "review.html still silently widens scope on collection load failure"
+        "Review still silently widens scope on collection load failure"
     )
     assert "predictions = []" in body
     assert "showToast" in body
@@ -18204,7 +18201,7 @@ def test_process_page_has_no_import_source(app_and_db):
     admission control, including newly detected images, lives at Import."""
     app, _ = app_and_db
     client = app.test_client()
-    html = client.get("/pipeline").data.decode()
+    html = _page_with_scripts(client, "/pipeline")
     assert 'id="radioImport"' not in html
     assert "/api/jobs/import-full" not in html
     assert 'id="radioFolders"' in html
@@ -19608,7 +19605,7 @@ def test_review_supports_photo_id_deep_link(app_and_db):
     """Browse routes ambiguous predictions to Review filtered to one photo."""
     app, _ = app_and_db
     client = app.test_client()
-    html = client.get("/review").get_data(as_text=True)
+    html = _page_with_scripts(client, "/review")
     assert "currentPhotoIdFilter" in html
     # The narrowing must be visible, or a one-photo queue reads as "empty".
     assert "photoFilterPill" in html
@@ -21717,6 +21714,175 @@ def test_browse_clears_stale_ambiguity_when_keywords_no_longer_conflict(app_and_
         "stored snapshot, not OR them together"
     )
     assert det_id is not None
+
+
+def _seed_two_subject_photo(db, filename, first_species, second_species):
+    """A photo with two detections, each carrying one pending prediction."""
+    folder_id = db.get_folder_tree()[0]["id"]
+    photo_id = db.add_photo(
+        folder_id=folder_id, filename=filename, extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    det_ids = db.save_detections(
+        photo_id,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3},
+          "confidence": 0.9, "category": "animal"},
+         {"box": {"x": 0.6, "y": 0.6, "w": 0.3, "h": 0.3},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )
+    db.add_prediction(det_ids[0], first_species, 0.9, "bioclip",
+                      labels_fingerprint="fp1")
+    db.add_prediction(det_ids[1], second_species, 0.9, "bioclip",
+                      labels_fingerprint="fp1")
+    return photo_id, det_ids
+
+
+def _suggestion_for(client, photo_ids, species):
+    resp = client.post(
+        "/api/selection/prediction-suggestions", json={"photo_ids": photo_ids},
+    )
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    return next(
+        p for p in resp.get_json()["predictions"] if p["species"] == species
+    )
+
+
+def test_accepting_one_subject_keeps_the_other_subject_acceptable(app_and_db):
+    """Tagging one bird must not turn the other bird's ID into a conflict.
+
+    A redshank and an egret in one frame are two detections. Accepting the
+    redshank tags the photo ``Spotted Redshank``; the egret's pending
+    prediction lives on the other detection, so comparing it against that
+    keyword and calling it a conflict hid its Accept button — from Browse
+    it looked as if the egret ID had been removed.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    photo_id, _ = _seed_two_subject_photo(
+        db, "redshank-egret.jpg", "Spotted Redshank", "Little Egret",
+    )
+    redshank = _prediction_id(db, photo_id, "Spotted Redshank")
+    egret = _prediction_id(db, photo_id, "Little Egret")
+
+    resp = client.post(
+        "/api/predictions/batch-accept", json={"prediction_ids": [redshank]},
+    )
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+
+    entry = _suggestion_for(client, [photo_id], "Little Egret")
+    assert entry["acceptable_prediction_ids"] == [egret]
+    assert entry["ambiguous_prediction_ids"] == []
+
+    resp = client.get(f"/api/predictions?photo_ids={photo_id}")
+    row = next(p for p in resp.get_json()["predictions"] if p["id"] == egret)
+    assert row["effective_category"] == "new"
+
+    resp = client.post(
+        "/api/predictions/batch-accept", json={"prediction_ids": [egret]},
+    )
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    names = {k["name"] for k in db.get_photo_keywords(photo_id)}
+    assert {"Spotted Redshank", "Little Egret"} <= names
+
+
+def test_keyword_no_subject_names_still_conflicts(app_and_db):
+    """A species keyword no detection predicts could describe either bird.
+
+    Only a keyword another detection accounts for is set aside; a keyword
+    typed by hand that no prediction names keeps both subjects' differing
+    predictions ambiguous.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    photo_id, _ = _seed_two_subject_photo(
+        db, "unexplained.jpg", "Common Greenshank", "Little Egret",
+    )
+    egret = _prediction_id(db, photo_id, "Little Egret")
+    db.tag_photo(photo_id, db.add_keyword("Spotted Redshank", is_species=True))
+
+    entry = _suggestion_for(client, [photo_id], "Little Egret")
+    assert entry["ambiguous_prediction_ids"] == [egret]
+
+
+def test_same_subject_disagreement_stays_ambiguous(app_and_db):
+    """A keyword this detection itself names still conflicts on it.
+
+    Two models disagree on the first bird; the second bird happens to share
+    the accepted species. The keyword is held by both detections, so it is
+    not "another subject's" for the first one, and the second model's
+    differing ID on the first bird must still go to Review.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    photo_id, det_ids = _seed_two_subject_photo(
+        db, "two-models.jpg", "Spotted Redshank", "Spotted Redshank",
+    )
+    db.add_prediction(det_ids[0], "Common Redshank", 0.8, "inat21",
+                      labels_fingerprint="fp2")
+    common = _prediction_id(db, photo_id, "Common Redshank")
+    db.tag_photo(photo_id, db.add_keyword("Spotted Redshank", is_species=True))
+
+    entry = _suggestion_for(client, [photo_id], "Common Redshank")
+    assert entry["ambiguous_prediction_ids"] == [common]
+
+
+def test_burst_consensus_attributes_species_to_its_detection(app_and_db):
+    """A mixed-label burst minority frame must index under its consensus.
+
+    Codex flagged this on the multi-subject fix: ``accept_prediction`` tags
+    a burst's consensus species, not the row's raw label, so the index of
+    "which detection holds which species on this photo" has to key on the
+    consensus too. Otherwise a Sparrow-labelled frame whose burst votes
+    make Robin the winner would be indexed as holding Sparrow; after accept
+    tags Robin on the photo, a neighbouring detection's Little Egret sees
+    an unattributed Robin keyword and goes to Review as a conflict.
+    """
+    import json as _json
+    app, db = app_and_db
+    client = app.test_client()
+    # Seed the Little Egret detection first; then promote the sparrow
+    # row to a burst-minority frame whose consensus is Robin.
+    folder_id = db.get_folder_tree()[0]["id"]
+    photo_id = db.add_photo(
+        folder_id=folder_id, filename="mixed-burst.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    det_ids = db.save_detections(
+        photo_id,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3},
+          "confidence": 0.9, "category": "animal"},
+         {"box": {"x": 0.6, "y": 0.6, "w": 0.3, "h": 0.3},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )
+    db.add_prediction(
+        det_ids[0], "Sparrow", 0.9, "bioclip",
+        labels_fingerprint="fp1",
+        group_id="mixed-burst-1",
+        individual=_json.dumps({"Robin": 2, "Sparrow": 1}),
+    )
+    db.add_prediction(
+        det_ids[1], "Little Egret", 0.9, "bioclip",
+        labels_fingerprint="fp1",
+    )
+
+    sparrow_pred = _prediction_id(db, photo_id, "Sparrow")
+    egret = _prediction_id(db, photo_id, "Little Egret")
+
+    # Accepting the minority frame tags Robin (the consensus), not Sparrow.
+    resp = client.post(
+        "/api/predictions/batch-accept", json={"prediction_ids": [sparrow_pred]},
+    )
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    names = {k["name"] for k in db.get_photo_keywords(photo_id)}
+    assert "Robin" in names and "Sparrow" not in names
+
+    # The egret ID on the other detection must still be acceptable: Robin
+    # belongs to the other subject, so it must not surface as a conflict.
+    entry = _suggestion_for(client, [photo_id], "Little Egret")
+    assert entry["acceptable_prediction_ids"] == [egret]
+    assert entry["ambiguous_prediction_ids"] == []
 
 
 def test_batch_accept_leaves_earlier_accept_untouched_when_resubmitted(app_and_db):
@@ -24153,15 +24319,17 @@ function __report() {
 
 def _run_review_accept(html, payload, call):
     """Run Review's real accept handlers against the stub server."""
+    # ``html`` comes from ``_page_with_scripts``: the actions run to the end
+    # of static/review/decisions.js.
     start = html.find("/* ---------- Actions ---------- */")
-    end = html.find("/* ---------- Keyboard Shortcuts ---------- */")
+    end = html.find("</script>", start)
     assert start != -1 and end > start, (
-        "review.html's accept actions could not be located"
+        "Review's accept actions could not be located"
     )
     grid_start = html.find("function getVisibleItems(")
     grid_end = html.find("function renderGrid(")
     assert grid_start != -1 and grid_end > grid_start, (
-        "review.html's getVisibleItems could not be located"
+        "Review's getVisibleItems could not be located"
     )
     import json as _json
 
@@ -24193,10 +24361,10 @@ def test_review_accept_all_consumes_grouped_accept_expansion(app_and_db):
     """
     app, _ = app_and_db
     client = app.test_client()
-    html = client.get("/review").get_data(as_text=True)
-    assert "/static/vireo-predictions.js" in html, (
-        "Review must load the shared grouped-decision module"
-    )
+    assert "/static/vireo-predictions.js" in client.get("/review").get_data(
+        as_text=True
+    ), "Review must load the shared grouped-decision module"
+    html = _page_with_scripts(client, "/review")
     # 11 and 12 are one burst; 13 is unrelated and queued behind them.
     predictions = [
         {"id": 11, "status": "pending"},
@@ -24250,7 +24418,7 @@ def test_review_single_accept_marks_expanded_group_members(app_and_db):
     """
     app, _ = app_and_db
     client = app.test_client()
-    html = client.get("/review").get_data(as_text=True)
+    html = _page_with_scripts(client, "/review")
 
     result = _run_review_accept(html, {
         "predictions": [
@@ -24279,7 +24447,7 @@ def test_review_accept_all_accepts_only_the_cards_the_filters_show(app_and_db):
     model's species on photos the user never saw.
     """
     app, _ = app_and_db
-    html = app.test_client().get("/review").get_data(as_text=True)
+    html = _page_with_scripts(app.test_client(), "/review")
     predictions = [
         {"id": 11, "status": "pending", "confidence": 0.95, "model": "m1"},
         {"id": 12, "status": "pending", "confidence": 0.30, "model": "m1"},
@@ -24308,7 +24476,7 @@ def test_review_reject_marks_burst_members_outside_the_filter(app_and_db):
     unfiltered copy claiming it is still pending.
     """
     app, _ = app_and_db
-    html = app.test_client().get("/review").get_data(as_text=True)
+    html = _page_with_scripts(app.test_client(), "/review")
 
     result = _run_review_accept(html, {
         "predictions": [

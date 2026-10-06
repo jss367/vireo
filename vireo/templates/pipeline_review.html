@@ -1460,6 +1460,26 @@ input[type="range"]::-moz-range-thumb {
   border-top: 1px solid var(--border-primary);
   text-align: center;
 }
+.grm-eye-align-btn {
+  margin: 6px 12px 0;
+  background: var(--bg-tertiary);
+  color: var(--text-muted);
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 11px;
+  cursor: pointer;
+  align-self: center;
+}
+.grm-eye-align-btn:hover:not(:disabled) { color: var(--text-primary); }
+.grm-eye-align-btn.active {
+  color: #ffb432;
+  border-color: rgba(255, 180, 50, 0.7);
+}
+.grm-eye-align-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
 .grm-region-sharpness-btn {
   margin: 6px 12px 0;
   background: var(--bg-tertiary);
@@ -1951,6 +1971,7 @@ input[type="range"]::-moz-range-thumb {
       </div>
       <div class="grm-loupe-info" id="grmLoupeInfo">Select a photo to preview. Hover to compare sharpness across all frames.</div>
       <button type="button" class="grm-reset-offsets-btn" id="grmResetAllOffsets" onclick="grmResetAllOffsets()">Reset pan offsets</button>
+      <button type="button" class="grm-eye-align-btn" id="grmEyeAlignBtn" aria-pressed="false" onclick="grmToggleEyeAlign()">Center on eyes</button>
       <button type="button" class="grm-region-sharpness-btn" id="grmBoxSharpnessBtn" onclick="grmCalculateBoxSharpness()">Score box sharpness</button>
       <div class="grm-loupe-detail" id="grmLoupeDetail"></div>
     </div>

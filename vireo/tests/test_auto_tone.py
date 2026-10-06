@@ -2,6 +2,7 @@ import os
 import sys
 
 import numpy as np
+import pytest
 from PIL import Image
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -159,11 +160,49 @@ def test_bright_areas_get_highlight_recovery():
 
 
 def test_overexposed_raw_is_darkened_in_linear_light():
-    rgb = np.full((H, W, 3), 0.6, dtype=np.float32)
-    rgb *= np.linspace(0.5, 1.5, W, dtype=np.float32)[None, :, None]
+    # Scene-linear values up to two stops over display white.
+    rgb = np.full((H, W, 3), 1.0, dtype=np.float32)
+    rgb *= np.linspace(0.5, 4.0, W, dtype=np.float32)[None, :, None]
     result = auto_tone.fit(rgb, input_linear=True)
     assert result['adjustments']['exposure'] < 0
     assert result['notes'][0].startswith('darkened')
+
+
+def test_raw_darkening_stops_once_its_headroom_is_recovered():
+    # A bright RAW frame whose top tones sit just one stop past the knee.
+    rgb = np.full((H, W, 3), 1.0, dtype=np.float32)
+    rgb *= np.linspace(0.8, 2 * 0.85, W, dtype=np.float32)[None, :, None]
+    exposure = auto_tone.fit(rgb, input_linear=True)['adjustments']['exposure']
+    assert -1.0 <= exposure < 0
+
+
+def test_bright_raw_within_white_is_not_darkened():
+    # Bright, but nothing above the highlight knee: no detail to recover.
+    rgb = np.full((H, W, 3), 0.6, dtype=np.float32)
+    rgb *= np.linspace(0.9, 1.4, W, dtype=np.float32)[None, :, None]
+    assert auto_tone.fit(rgb, input_linear=True)['adjustments']['exposure'] >= 0
+
+
+def test_bright_display_referred_sky_is_not_darkened_to_grey():
+    # A JPEG (or camera-embedded preview) of a bright cyan sky: nothing is
+    # clipped, but a display-referred source has no headroom to recover.
+    sky = np.zeros((H, W, 3), dtype=np.float32)
+    sky[...] = (0.62, 0.9, 0.98)
+    sky *= np.random.default_rng(4).uniform(0.95, 1.0, (H, W, 1)).astype(np.float32)
+    assert auto_tone.fit(sky)['adjustments']['exposure'] >= 0
+
+
+def test_dark_bird_on_white_overcast_sky_keeps_the_sky_white():
+    # Metering the frame alone would pull the white sky toward mid-grey.
+    levels = np.full((H, W), 0.97, dtype=np.float32)
+    levels[:40] = 1.0
+    levels[55:65, 85:100] = 0.12
+    rgb = _grey(levels)
+    result = auto_tone.fit(rgb, subject=_box(55, 85, 10, 15))
+    assert result['metering'] == 'subject'
+    assert result['adjustments']['exposure'] >= 0
+    rendered = _luma(_render(rgb, result['adjustments']))
+    assert np.median(rendered[70:]) >= 0.9
 
 
 def test_neutral_frame_gets_no_colour_boost():
@@ -258,3 +297,72 @@ def test_fit_loaded_image_reads_raw_in_linear_light():
     assert result['adjustments']['exposure'] > 0
     # Sanity: the same pixels as display-encoded sRGB are much brighter.
     assert float(linear_to_srgb(0.02)) > 0.1
+
+
+def _bird_on_sky():
+    """A dark bird (rows 55-65) against a bright, slightly textured sky."""
+    levels = np.full((H, W), 0.8, dtype=np.float32)
+    levels += np.random.default_rng(5).uniform(-0.03, 0.03, (H, W)).astype(np.float32)
+    levels[55:65, 80:110] = 0.05
+    return _grey(levels), _box(55, 80, 10, 30)
+
+
+def test_unknown_style_is_rejected():
+    with pytest.raises(ValueError):
+        auto_tone.fit(_ramp(0.1, 0.6), style='dramatic')
+
+
+def test_every_result_names_its_style():
+    for style in auto_tone.STYLES:
+        assert auto_tone.fit(_ramp(0.1, 0.6), style=style)['style'] == style
+
+
+def test_subject_style_exposes_for_the_subject_and_lets_the_sky_go():
+    rgb, subject = _bird_on_sky()
+    balanced = auto_tone.fit(rgb, subject=subject)
+    exposed = auto_tone.fit(rgb, subject=subject, style='subject')
+    assert exposed['metering'] == 'subject'
+    assert exposed['adjustments']['exposure'] > balanced['adjustments']['exposure'] + 1.0
+    rendered = _luma(_render(rgb, exposed['adjustments']))
+    bird = rendered[55:65, 80:110]
+    assert np.median(bird) > np.median(_luma(_render(rgb, balanced['adjustments']))[55:65, 80:110])
+    # The sky may go to white; the bird itself stays below the guard.
+    assert np.quantile(bird, auto_tone.SUBJECT_STYLE_GUARD_QUANTILE) <= auto_tone.HIGHLIGHT_GUARD
+
+
+def test_subject_style_keeps_a_white_bird_out_of_the_shoulder():
+    levels = np.full((H, W), 0.3, dtype=np.float32)
+    levels[50:70, 80:110] = 0.93
+    rgb = _grey(levels)
+    adj = auto_tone.fit(rgb, subject=_box(50, 80, 20, 30), style='subject')['adjustments']
+    # Exposure is metered on the bird, which is already bright: no push.
+    assert adj['exposure'] <= 0.1
+    bird = _luma(_render(rgb, adj))[50:70, 80:110]
+    assert np.median(bird) < auto_tone.CLIPPED
+
+
+def test_subject_style_without_a_subject_meters_like_balanced():
+    rgb = _ramp(0.05, 0.4)
+    balanced = auto_tone.fit(rgb)
+    subject = auto_tone.fit(rgb, style='subject')
+    assert subject['adjustments'] == balanced['adjustments']
+    assert subject['notes'][0] == 'no subject found, so metered the whole frame as Balanced does'
+    assert subject['notes'][1:] == balanced['notes']
+
+
+def test_gentle_style_moves_every_control_half_as_far():
+    rng = np.random.default_rng(6)
+    rgb = np.clip(rng.normal(0.22, 0.08, (H, W, 3)), 0, 1).astype(np.float32)
+    rgb[..., 0] *= 1.08
+    rgb = np.clip(rgb, 0, 1)
+    balanced = auto_tone.fit(rgb)['adjustments']
+    gentle = auto_tone.fit(rgb, style='gentle')
+    assert any(balanced.values())
+    for key, value in balanced.items():
+        step = 0.1 if key == 'exposure' else 1.0
+        half = gentle['adjustments'][key]
+        assert abs(half) <= abs(value) / 2 + 1e-9
+        assert abs(value) / 2 - abs(half) < step
+        assert half == 0 or np.sign(half) == np.sign(value)
+    assert gentle['adjustments']['exposure'] == round(gentle['adjustments']['exposure'], 1)
+    assert gentle['notes'] == auto_tone._describe(gentle['adjustments'])

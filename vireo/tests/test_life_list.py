@@ -5,6 +5,7 @@ import json
 import os
 
 import pytest
+from page_scripts import page_with_scripts
 from PIL import Image
 
 
@@ -119,26 +120,30 @@ def _add_cardinal_photos(db, ids, count, prefix="card-extra"):
 
 def test_page_renders(life_app):
     app, _, _ = life_app
-    resp = app.test_client().get("/life-list")
+    client = app.test_client()
+    resp = client.get("/life-list")
     assert resp.status_code == 200
-    assert b"Life List" in resp.data
-    assert b"Export Life List" in resp.data
-    assert b"Life List numbering" in resp.data
-    assert b"Renumber for each view" in resp.data
-    assert b"Taxonomic group" in resp.data
-    assert b"Identification level" in resp.data
-    assert b'id="exportColumns"' in resp.data
-    assert b"Representative filename" in resp.data
-    assert b"Quality score" in resp.data
-    assert b'id="publishLifeList" type="checkbox" checked' in resp.data
-    assert b"Representative photo only" in resp.data
-    assert b'id="publishHighlights" type="checkbox"' in resp.data
-    assert b"Include Highlights" in resp.data
-    assert b"/api/jobs/publish-site/preflight" in resp.data
-    assert b"Calculating what will be published" in resp.data
-    assert b"link.download = ''" in resp.data
-    assert b'id="folderBrowser"' in resp.data
-    assert b"publishFolderBrowser.open('destination')" in resp.data
+    # The page script lives in vireo/static/life-list/; read the page the way
+    # the browser assembles it.
+    html = page_with_scripts(client, "/life-list")
+    assert "Life List" in html
+    assert "Export Life List" in html
+    assert "Life List numbering" in html
+    assert "Renumber for each view" in html
+    assert "Taxonomic group" in html
+    assert "Identification level" in html
+    assert 'id="exportColumns"' in html
+    assert "Representative filename" in html
+    assert "Quality score" in html
+    assert 'id="publishLifeList" type="checkbox" checked' in html
+    assert "Representative photo only" in html
+    assert 'id="publishHighlights" type="checkbox"' in html
+    assert "Include Highlights" in html
+    assert "/api/jobs/publish-site/preflight" in html
+    assert "Calculating what will be published" in html
+    assert "link.download = ''" in html
+    assert 'id="folderBrowser"' in html
+    assert "publishFolderBrowser.open('destination')" in html
 
 
 def test_groups_by_species_and_counts(life_app):

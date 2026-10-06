@@ -304,11 +304,15 @@ def materialize_preview(
     pair_source_path=None,
     coordinate=True,
     publish_best_effort=False,
+    publication_guard=None,
 ):
     """Render and atomically publish one preview, joining equal-key work.
 
     ``cache_path=None`` is used by explicit paired-source views, whose bytes
     must never enter the ordinary ``(photo_id, size)`` cache.
+    ``publication_guard`` returns a context manager held around the cache
+    write; an exception it raises is the caller's, never swallowed as a
+    best-effort publish failure.
     """
     photo_id = photo["id"]
     if coordinate and publish_best_effort:
@@ -350,17 +354,23 @@ def materialize_preview(
         )
         published = False
         if cache_path:
-            try:
-                atomic_write_bytes(data, cache_path)
-            except Exception:
-                if not publish_best_effort:
-                    raise
-                log.warning(
-                    "Failed to persist preview cache %s", cache_path,
-                    exc_info=True,
-                )
-            else:
-                published = True
+            guard = (
+                publication_guard() if publication_guard
+                else contextlib.nullcontext()
+            )
+            with guard:
+                try:
+                    atomic_write_bytes(data, cache_path)
+                except Exception:
+                    if not publish_best_effort:
+                        raise
+                    log.warning(
+                        "Failed to persist preview cache %s", cache_path,
+                        exc_info=True,
+                    )
+                else:
+                    published = True
+            if published:
                 try:
                     # Standalone renders (no catalog) pass db=None.
                     if db is not None:

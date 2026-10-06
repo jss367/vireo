@@ -19,6 +19,12 @@
  * updated and the page stops so the user sees it before clicking again.
  * This replaces a window.confirm, which the desktop webview never shows
  * (it returns a truthy promise, so the export started unannounced).
+ *
+ * The same preflight reports the folder(s) the export writes into, which
+ * #exportLocation shows under the filename preview. Only the photos and the
+ * destination decide that folder, so editing the template or format keeps
+ * the location on screen; changing the destination shows "checking" until
+ * the server answers.
  */
 var VireoExportCollisions = (function() {
   var DEBOUNCE_MS = 350;
@@ -30,10 +36,42 @@ var VireoExportCollisions = (function() {
   // that do not change names (quality, metadata) leave it unchanged, so
   // editing them neither re-checks nor flickers the notice.
   var checkedKey = null;
+  // The photos + destination the location line describes; null while it
+  // is pending, failed, or blank.
+  var locationShownKey = null;
 
   function $(id) { return document.getElementById(id); }
   function overlay() { return $('exportOverlay'); }
   function notice() { return $('exportCollisionNotice'); }
+  function locationLine() { return $('exportLocation'); }
+
+  function locationKey(body) {
+    return body ? JSON.stringify([body.photo_ids, body.destination]) : null;
+  }
+
+  function setLocation(text) {
+    var el = locationLine();
+    if (!el) return;
+    el.textContent = text;
+    el.hidden = !text;
+  }
+
+  function renderLocation(preflight, key) {
+    var folders = (preflight && preflight.destination_folders) || [];
+    var count = (preflight && preflight.destination_folder_count) || 0;
+    locationShownKey = key;
+    if (!count || !folders.length) {
+      setLocation('Location unavailable: Vireo could not find the original files.');
+      return;
+    }
+    var text = 'Location: ' + folders[0];
+    if (count > 1) {
+      var others = count - 1;
+      text += ' and ' + others.toLocaleString() + ' other folder' + (others === 1 ? '' : 's') +
+        ' (each photo is saved next to its original)';
+    }
+    setLocation(text);
+  }
 
   function signature(preflight) {
     return JSON.stringify([preflight.rename_count, preflight.renames || []]);
@@ -106,14 +144,22 @@ var VireoExportCollisions = (function() {
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(body),
       }, {toast: false});
-    } catch (_) {
+    } catch (error) {
       // Typing a destination passes through relative and missing paths.
-      // Say nothing here: the check at submit reports a real failure.
+      // Keep the collision notice quiet (the check at submit reports a real
+      // failure), but say why there is no location rather than leave it on
+      // "checking".
+      if (generation !== checkGeneration || !isOpen()) return;
+      setLocation('Location unavailable: ' + error.message);
       return;
     }
     if (generation !== checkGeneration || !isOpen()) return;
-    if (!preflight || preflight.error) return;
+    if (!preflight || preflight.error) {
+      setLocation(preflight && preflight.error ? 'Location unavailable: ' + preflight.error : '');
+      return;
+    }
     render(preflight);
+    renderLocation(preflight, locationKey(body));
   }
 
   function isOpen() {
@@ -132,6 +178,13 @@ var VireoExportCollisions = (function() {
     checkedKey = key;
     var generation = ++checkGeneration;
     hide();
+    if (!body) {
+      locationShownKey = null;
+      setLocation('');
+    } else if (locationKey(body) !== locationShownKey) {
+      locationShownKey = null;
+      setLocation('Location: checking\u2026');
+    }
     if (timer) clearTimeout(timer);
     timer = null;
     if (body) {
@@ -142,9 +195,11 @@ var VireoExportCollisions = (function() {
   function reset() {
     checkGeneration++;
     checkedKey = null;
+    locationShownKey = null;
     if (timer) clearTimeout(timer);
     timer = null;
     hide();
+    setLocation('');
   }
 
   // Export was clicked: its own preflight supersedes any live check, so a
@@ -153,11 +208,18 @@ var VireoExportCollisions = (function() {
     checkGeneration++;
     if (timer) clearTimeout(timer);
     timer = null;
+    // A location still "checking" would otherwise stay that way if the
+    // submit fails; blank it and let the next edit check again.
+    if (locationShownKey === null) {
+      checkedKey = null;
+      setLocation('');
+    }
   }
 
   // Called with the submit-time preflight.
   function acknowledged(preflight) {
     cancelPending();
+    renderLocation(preflight, locationKey(currentRequest()));
     if (!preflight.rename_count) {
       hide();
       return true;

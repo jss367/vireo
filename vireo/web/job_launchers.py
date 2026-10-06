@@ -26,6 +26,7 @@ from flask import Blueprint, current_app, jsonify, request
 from preview_cache import (
     evict_if_over_quota as evict_preview_cache_if_over_quota,
 )
+from preview_cache import lightbox_fit_preview_sizes
 from preview_materializer import (
     PreviewMaterializationError,
     materialize_preview,
@@ -78,6 +79,7 @@ def create_job_launchers_blueprint(
     guard_move_folder,
     start_move_folder_job,
     serve_original_photo,
+    serve_photo_preview,
     sync_job_lock,
 ):
     """Build the job-launchers blueprint.
@@ -96,7 +98,8 @@ def create_job_launchers_blueprint(
       ``/api/batch/delete`` and ``/api/photos/missing/remove`` too;
       ``invalidate_missing_originals`` is the app's ``MissingOriginals``
       cache reset.
-    - ``serve_original_photo`` is the ``/photos/<id>/original`` view, which
+    - ``serve_original_photo`` and ``serve_photo_preview`` are the
+      ``/photos/<id>/original`` and ``/photos/<id>/preview`` views, which
       full-resolution preparation drives so it renders exactly what the
       lightbox would.
     - ``sync_job_lock`` is ``app._sync_job_lock``, which serializes XMP sync
@@ -1184,9 +1187,11 @@ def create_job_launchers_blueprint(
         """Prepare selected photos for uninterrupted full-resolution review.
 
         The job first copies source assets into Vireo's managed local cache,
-        then drives the exact /original render path used by the lightbox. RAW
-        working copies and edited full-resolution renders are therefore ready
-        before the user begins inspecting the selection.
+        then drives the exact /original and /preview render paths used by the
+        lightbox. RAW working copies, edited full-resolution renders, and every
+        preview size the lightbox shows at fit (``/full`` and the larger tiers
+        it steps through before /original) are therefore ready before the user
+        begins flipping through the selection.
         """
         body = request.get_json(silent=True)
         if not isinstance(body, dict):
@@ -1232,6 +1237,7 @@ def create_job_launchers_blueprint(
         flask_app = current_app._get_current_object()
 
         def work(job):
+            import config as cfg
             from offline_cache import (
                 cache_photo_original,
                 cleanup_preparation_offline_files,
@@ -1240,7 +1246,36 @@ def create_job_launchers_blueprint(
             )
 
             thread_db = ctx.thread_db()
+
+            def render_through_view(path, view, photo_id, photo, label):
+                """Run a lightbox view in an isolated request context.
+
+                Returns an error string, or None when the view succeeded.
+                """
+                with flask_app.test_request_context(path):
+                    request_db = get_db()
+                    request_db.set_active_workspace(ctx.workspace_id)
+                    response = flask_app.make_response(
+                        view(photo_id, _prepare_source=photo)
+                    )
+                    try:
+                        if 200 <= response.status_code < 300:
+                            return None
+                        response.direct_passthrough = False
+                        detail = response.get_data(as_text=True).strip()
+                        return detail or (
+                            f"{label} render failed with status "
+                            f"{response.status_code}"
+                        )
+                    finally:
+                        response.close()
+
             try:
+                preview_sizes = lightbox_fit_preview_sizes(
+                    thread_db.get_effective_config(cfg.load()).get(
+                        "preview_max_size",
+                    ),
+                )
                 folders = {
                     folder["id"]: folder["path"]
                     for folder in thread_db.get_folder_tree()
@@ -1251,6 +1286,10 @@ def create_job_launchers_blueprint(
                 failed = 0
                 skipped_deleted = 0
                 copied_bytes = 0
+                # Photos counted ready by the in-loop pass: a final
+                # cross-selection check verifies no later photo's warming
+                # evicted their tiers before the job reports them ready.
+                pending_ready_meta = {}
                 total = len(photo_ids)
                 job["_start_time"] = time.time()
                 job["progress"]["total"] = total
@@ -1281,30 +1320,58 @@ def create_job_launchers_blueprint(
                                 if error is None and photo_source_matches(
                                     photo, thread_db.get_photo(photo_id),
                                 ):
-                                    # Execute the canonical renderer inside an
-                                    # isolated request context. This avoids a
+                                    # Execute the canonical renderers inside
+                                    # isolated request contexts. This avoids a
                                     # second implementation drifting from the
                                     # lightbox's RAW/companion/edit fallbacks.
-                                    with flask_app.test_request_context(
-                                        f"/photos/{photo_id}/original"
-                                    ):
-                                        request_db = get_db()
-                                        request_db.set_active_workspace(ctx.workspace_id)
-                                        response = flask_app.make_response(
-                                            serve_original_photo(photo_id, _prepare_source=photo)
+                                    # /original backs 1:1 zoom; the previews
+                                    # are what flipping at fit loads.
+                                    error = render_through_view(
+                                        f"/photos/{photo_id}/original",
+                                        serve_original_photo, photo_id, photo,
+                                        "full-resolution",
+                                    )
+                                    for size in preview_sizes:
+                                        if error is not None:
+                                            break
+                                        error = render_through_view(
+                                            f"/photos/{photo_id}/preview?size={size}",
+                                            serve_photo_preview, photo_id, photo,
+                                            f"{size}px preview",
                                         )
-                                        try:
-                                            if not 200 <= response.status_code < 300:
-                                                response.direct_passthrough = False
-                                                detail = response.get_data(
-                                                    as_text=True,
-                                                ).strip()
-                                                error = detail or (
-                                                    "full-resolution render failed "
-                                                    f"with status {response.status_code}"
+                                    # Eviction can delete a just-warmed
+                                    # preview the moment it is published
+                                    # (preview_cache_max_mb too small for the
+                                    # combined tiers, or 0). _serve_preview
+                                    # still returns 200 from the in-memory
+                                    # bytes, so a successful render alone is
+                                    # not proof that the next lightbox
+                                    # request will be a cache hit — check
+                                    # after warming instead of calling the
+                                    # photo ready prematurely.
+                                    if error is None and preview_sizes:
+                                        preview_dir = os.path.join(
+                                            vireo_dir, "previews",
+                                        )
+                                        for size in preview_sizes:
+                                            cache_file = os.path.join(
+                                                preview_dir,
+                                                f"{photo_id}_{size}.jpg",
+                                            )
+                                            if not (
+                                                thread_db.preview_cache_get(
+                                                    photo_id, size,
                                                 )
-                                        finally:
-                                            response.close()
+                                                and os.path.exists(cache_file)
+                                            ):
+                                                error = (
+                                                    f"{size}px preview was "
+                                                    "evicted during warming "
+                                                    "(preview_cache_max_mb "
+                                                    "too small for the "
+                                                    "lightbox tiers)"
+                                                )
+                                                break
                             except Exception as exc:
                                 thread_db.conn.rollback()
                                 error = str(exc) or exc.__class__.__name__
@@ -1346,11 +1413,17 @@ def create_job_launchers_blueprint(
                                         )
                             elif error is None:
                                 ready += 1
+                                cache_bytes = int(cached.get("bytes") or 0)
                                 if cached["status"] == "cached":
                                     copied += 1
-                                    copied_bytes += int(cached.get("bytes") or 0)
+                                    copied_bytes += cache_bytes
                                 elif cached["status"] == "skipped":
                                     reused += 1
+                                pending_ready_meta[photo_id] = {
+                                    "filename": filename,
+                                    "cached_status": cached["status"],
+                                    "cached_bytes": cache_bytes,
+                                }
                             else:
                                 failed += 1
                                 job["errors"].append(f"{filename}: {error}")
@@ -1368,6 +1441,42 @@ def create_job_launchers_blueprint(
                     }
                     job["progress"].update(progress)
                     ctx.runner.push_event(job["id"], "progress", progress)
+
+                # Final cross-selection verification: later photos' warming
+                # may have evicted earlier photos' tiers once the combined
+                # selection exceeds preview_cache_max_mb. The in-loop check
+                # cannot see this — it runs before subsequent photos touch
+                # the cache. Reclassify any photo whose tiers no longer
+                # exist on disk / in the preview_cache table as failed.
+                if preview_sizes and pending_ready_meta:
+                    preview_dir = os.path.join(vireo_dir, "previews")
+                    for photo_id, info in pending_ready_meta.items():
+                        missing_size = None
+                        for size in preview_sizes:
+                            cache_file = os.path.join(
+                                preview_dir, f"{photo_id}_{size}.jpg",
+                            )
+                            if not (
+                                thread_db.preview_cache_get(photo_id, size)
+                                and os.path.exists(cache_file)
+                            ):
+                                missing_size = size
+                                break
+                        if missing_size is None:
+                            continue
+                        ready -= 1
+                        failed += 1
+                        if info["cached_status"] == "cached":
+                            copied -= 1
+                            copied_bytes -= info["cached_bytes"]
+                        elif info["cached_status"] == "skipped":
+                            reused -= 1
+                        job["errors"].append(
+                            f"{info['filename']}: {missing_size}px preview "
+                            "was evicted during warming "
+                            "(preview_cache_max_mb too small for the "
+                            "lightbox tiers)"
+                        )
 
                 return {
                     "ok": failed == 0,

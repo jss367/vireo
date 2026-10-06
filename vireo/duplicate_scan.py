@@ -183,6 +183,29 @@ def _attach_edit_recipes(db, proposals):
     return proposals
 
 
+def attach_workspace_names(db, proposals):
+    """Set ``workspaces`` on every winner and loser to the names of the
+    workspaces that show that copy.
+
+    The scan is library-wide, so a group can pair a copy in the active
+    workspace with one only another workspace shows; the card says which.
+    Workspace membership changes after a scan, so a restored scan result
+    gets this recomputed rather than trusting the stored names.
+    """
+    entries = [
+        entry
+        for p in proposals
+        for entry in [p.get("winner")] + list(p.get("losers") or [])
+        if isinstance(entry, dict)
+        and isinstance(entry.get("id"), int)
+        and not isinstance(entry.get("id"), bool)
+    ]
+    names = db.photo_workspace_names(sorted({e["id"] for e in entries}))
+    for entry in entries:
+        entry["workspaces"] = names.get(entry["id"], [])
+    return proposals
+
+
 def _is_empty_file_group(file_hash, infos):
     return (
         file_hash == _EMPTY_FILE_SHA256
@@ -366,6 +389,7 @@ def run_duplicate_scan(job, db, include_resolved=True, cancel_check=None):
         job["progress"]["current_file"] = proposal["winner"]["path"]
 
     _attach_edit_recipes(db, proposals)
+    attach_workspace_names(db, proposals)
     return {
         "proposals": proposals,
         "buckets": bucket_unresolved_proposals(proposals),

@@ -721,6 +721,30 @@ def test_last_scan_returns_completed_scan_result(app_and_db):
     assert "HLAST" in hashes
 
 
+def test_scan_and_last_scan_name_each_copys_workspaces(app_and_db):
+    """The scan is library-wide, so each card says which workspaces show
+    that copy; a restored scan reflects membership as it is now."""
+    app, db = app_and_db
+    fid = db.add_folder("/tmp/dupscanws")
+    _seed_pair(db, "HWS", fid)
+
+    client = app.test_client()
+    job_id = client.post("/api/duplicates/scan").get_json()["job_id"]
+    data = wait_for_job_via_client(client, job_id, wait_for_history=True)
+    (proposal,) = [p for p in data["result"]["proposals"] if p["file_hash"] == "HWS"]
+    for entry in [proposal["winner"]] + proposal["losers"]:
+        assert entry["workspaces"] == ["Default"]
+
+    zeta = db.create_workspace("Zeta")
+    db.add_workspace_folder(zeta, fid)
+    db.remove_workspace_folder(db._active_workspace_id, fid)
+
+    body = client.get("/api/duplicates/last-scan").get_json()
+    (proposal,) = [p for p in body["result"]["proposals"] if p["file_hash"] == "HWS"]
+    for entry in [proposal["winner"]] + proposal["losers"]:
+        assert entry["workspaces"] == ["Zeta"]
+
+
 def test_last_scan_picks_most_recent_completed(app_and_db):
     """Two scans -> last-scan reflects the newer one."""
     app, db = app_and_db

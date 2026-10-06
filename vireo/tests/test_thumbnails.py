@@ -1624,6 +1624,61 @@ def test_serve_thumbnail_does_not_unlink_cross_workspace_cache(
     )
 
 
+def _switch_to_workspace_without_photo(db):
+    other_ws = db.create_workspace("Other")
+    db.update_workspace(other_ws, last_opened_at="2030-01-01T00:00:00Z")
+    db.set_active_workspace(other_ws)
+
+
+def test_duplicate_thumbnail_serves_group_member_outside_active_workspace(
+    tmp_path, monkeypatch,
+):
+    """The duplicate scan is library-wide, so the Duplicates page shows
+    copies the active workspace does not. ``/thumbnails/<id>.jpg`` 404s on
+    those; ``/thumbnails/duplicate/<id>.jpg`` must serve (and self-heal)
+    any member of a duplicate group."""
+    app, db, pid, thumb_dir = _make_app_with_real_photo(tmp_path, monkeypatch)
+    row = db.conn.execute(
+        "SELECT folder_id, file_size, file_mtime FROM photos WHERE id=?", (pid,),
+    ).fetchone()
+    twin = db.add_photo(
+        folder_id=row["folder_id"], filename="bird-2.jpg", extension=".jpg",
+        file_size=row["file_size"], file_mtime=row["file_mtime"],
+    )
+    db.conn.execute(
+        "UPDATE photos SET file_hash='HDUP' WHERE id IN (?, ?)", (pid, twin),
+    )
+    db.conn.commit()
+    _switch_to_workspace_without_photo(db)
+
+    client = app.test_client()
+    assert client.get(f"/thumbnails/{pid}.jpg").status_code == 404
+
+    resp = client.get(f"/thumbnails/duplicate/{pid}.jpg")
+    assert resp.status_code == 200
+    assert resp.data[:2] == b"\xff\xd8"
+    assert os.path.exists(os.path.join(thumb_dir, f"{pid}.jpg"))
+    assert db.conn.execute(
+        "SELECT thumb_path FROM photos WHERE id=?", (pid,),
+    ).fetchone()["thumb_path"] == f"{pid}.jpg"
+
+
+def test_duplicate_thumbnail_refuses_photo_outside_any_duplicate_group(
+    tmp_path, monkeypatch,
+):
+    """Without a hash twin the photo is not on the Duplicates page, so the
+    route keeps the workspace boundary and 404s without generating."""
+    app, db, pid, thumb_dir = _make_app_with_real_photo(tmp_path, monkeypatch)
+    db.conn.execute("UPDATE photos SET file_hash='HSOLO' WHERE id=?", (pid,))
+    db.conn.commit()
+    _switch_to_workspace_without_photo(db)
+
+    client = app.test_client()
+    assert client.get(f"/thumbnails/duplicate/{pid}.jpg").status_code == 404
+    assert client.get("/thumbnails/duplicate/nope.jpg").status_code == 404
+    assert not os.path.exists(os.path.join(thumb_dir, f"{pid}.jpg"))
+
+
 def test_serve_thumbnail_does_not_pin_stale_when_unlink_fails(
     tmp_path, monkeypatch,
 ):

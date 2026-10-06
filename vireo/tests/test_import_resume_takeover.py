@@ -1,7 +1,7 @@
 """The rule that stops Resume on an interrupted import, and Retry on one
 that failed files, once a later run took it over: on the server
 (``import_resume_takeover``) and on the Jobs page (``importResumeTakeover``
-in templates/jobs.html), which must agree."""
+in vireo/static/jobs/import-retry.js), which must agree."""
 import json
 import shutil
 import subprocess

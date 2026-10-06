@@ -3098,6 +3098,15 @@ class Database:
             include_resolved=include_resolved,
         )
 
+    def is_duplicate_group_member(self, photo_id):
+        """Whether ``photo_id`` shares its ``file_hash`` with another photo
+        (rejected rows included). Catalog-wide, like the duplicate scan."""
+        return self._duplicates_repository().is_group_member(photo_id)
+
+    def photo_workspace_names(self, photo_ids):
+        """Return ``{photo_id: [names of the workspaces that show it]}``."""
+        return self._duplicates_repository().workspace_names(photo_ids)
+
     def apply_duplicate_resolution(self, photo_ids):
         """Resolve a group of photos sharing a file_hash.
 
@@ -6243,6 +6252,20 @@ class Database:
         """Upsert a db_meta row."""
         self._meta_repository().set(key, value, _commit=_commit)
 
+    def _exif_search_repository(self):
+        """Build the (catalog-wide) EXIF search text backfill on this connection."""
+        from repositories.exif_search import ExifSearchRepository
+
+        return ExifSearchRepository(self.conn, commit_with_retry)
+
+    def count_exif_search_unindexed(self):
+        """Photos metadata search cannot prefilter by stored EXIF values yet."""
+        return self._exif_search_repository().count_unindexed()
+
+    def index_exif_search_batch(self, after_id, limit):
+        """Store search text for the next unindexed photos; see ``ExifSearchRepository``."""
+        return self._exif_search_repository().index_batch(after_id, limit)
+
     def untag_photo(self, photo_id, keyword_id, _commit=True):
         """Remove a keyword association from a photo.
 
@@ -7553,6 +7576,10 @@ class Database:
         return self._prediction_repository().get_top_for_photo(
             photo_id, min_detector_confidence=min_detector_confidence,
         )
+
+    def get_live_prediction_rows_by_photo(self, photo_ids):
+        """Map photo id → the live prediction rows on each of its detections."""
+        return self._prediction_repository().get_live_rows_by_photo(photo_ids)
 
     def get_top_prediction_confidences(self, photo_ids):
         """Map photo id → the confidence the Browse sorts rank on.

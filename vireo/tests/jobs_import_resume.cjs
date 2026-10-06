@@ -1,4 +1,4 @@
-// Runs the Jobs page's import Resume gate (templates/jobs.html) over the
+// Runs the Jobs page's import Resume gate (vireo/static/jobs/) over the
 // scenarios in the JSON file named by argv[2] and prints one result per
 // scenario, so test_import_resume_takeover.py can hold it equal to the
 // server's ``import_resume_takeover``.
@@ -6,10 +6,11 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
 
-const src = fs.readFileSync('vireo/templates/jobs.html', 'utf8');
+const src = ['format.js', 'import-retry.js']
+  .map(file => fs.readFileSync('vireo/static/jobs/' + file, 'utf8')).join('\n');
 function fn(name) {
-  // Top-level page functions are indented two spaces inside the script.
-  const found = src.match(new RegExp('\\n  function ' + name + '\\([^]*?\\n  \\}\\n'));
+  // Page functions are declared at the top level of their classic script.
+  const found = src.match(new RegExp('(?:^|\\n)function ' + name + '\\([^]*?\\n\\}\\n'));
   assert(found, name);
   return found[0];
 }

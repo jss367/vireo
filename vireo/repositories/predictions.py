@@ -656,6 +656,60 @@ class PredictionRepository:
                 states[row["photo_id"]]["classifier_ran"] = row["n"] > 0
         return states
 
+    def get_live_rows_by_photo(self, photo_ids):
+        """Map photo id → the live prediction rows on each of its detections.
+
+        "Live" is the rule ``accept_prediction(replace_species=True)`` uses
+        to decide which species another subject on the photo still holds
+        (``keyword_provenance._live_neighbour_species``): the latest
+        ``labels_fingerprint`` per ``(detection, model)``, not rejected or an
+        alternative in the active workspace, on a detection at or above the
+        workspace's ``detector_confidence``. Rows carry the columns
+        ``SpeciesResolver.consensus`` reads — including ``group_id`` and
+        ``individual`` from ``prediction_review`` — so a mixed-label burst
+        minority frame is indexed under the species acceptance would actually
+        apply (the burst consensus), not its own raw label.
+        """
+        if not photo_ids:
+            return {}
+        import config as cfg
+        detector_floor = self.get_effective_config(cfg.load()).get(
+            "detector_confidence", 0.2
+        )
+        ws = self.workspace_id
+        ids = list(dict.fromkeys(int(pid) for pid in photo_ids))
+        rows_by_photo = {}
+        for chunk in self._chunks(ids):
+            placeholders = ",".join("?" for _ in chunk)
+            for row in self.conn.execute(
+                f"""SELECT d.photo_id, pr.detection_id, pr.species,
+                           pr.scientific_name, pr.source_taxon_id,
+                           pr.classifier_model, pr.labels_fingerprint,
+                           pr_rev.group_id AS group_id,
+                           pr_rev.individual AS individual
+                    FROM predictions pr
+                    JOIN detections d ON d.id = pr.detection_id
+                    LEFT JOIN prediction_review pr_rev
+                      ON pr_rev.prediction_id = pr.id
+                     AND pr_rev.workspace_id = ?
+                    WHERE d.photo_id IN ({placeholders})
+                      AND pr.species IS NOT NULL AND pr.species != ''
+                      AND COALESCE(pr_rev.status, 'pending')
+                          NOT IN ('rejected', 'alternative')
+                      AND d.detector_confidence >= ?
+                      AND pr.labels_fingerprint = (
+                          SELECT pr2.labels_fingerprint
+                          FROM predictions pr2
+                          WHERE pr2.detection_id = pr.detection_id
+                            AND pr2.classifier_model = pr.classifier_model
+                          ORDER BY pr2.created_at DESC, pr2.id DESC
+                          LIMIT 1
+                      )""",
+                [ws, *chunk, detector_floor],
+            ):
+                rows_by_photo.setdefault(row["photo_id"], []).append(row)
+        return rows_by_photo
+
     def get_rows(self, photo_ids=None, model=None, status=None,
                         rules=None):
         """Get predictions with photo, detection and review info.

@@ -100,7 +100,7 @@ async function testReadinessAndRegroupRaces() {
     document: {getElementById: () => panel, querySelectorAll: s => s.includes('model-checkbox') ? selected : []},
     safeFetch: url => new Promise(resolve => requests.push({url, resolve})),
   });
-  vm.runInContext(fn('vireo/templates/pipeline.html', 'updateReadiness'), ctx);
+  vm.runInContext(fn('vireo/static/pipeline/readiness.js', 'updateReadiness'), ctx);
   const old = ctx.updateReadiness();
   assert.equal(requests.length, 2);
   assert(requests[0].url.includes('model-a'));
@@ -171,13 +171,12 @@ Promise.all([testAsyncModalOwnership(), testReadinessAndRegroupRaces(), testSave
   .catch(err => { console.error(err); process.exitCode = 1; });
 
 const noteFilter = vm.createContext({});
-vm.runInContext(fn('vireo/templates/pipeline.html', '_pipelineFailureErrors'), noteFilter);
+vm.runInContext(fn('vireo/static/pipeline/completion.js', '_pipelineFailureErrors'), noteFilter);
 const note = '[extract_masks] No detections to mask';
 assert.equal(noteFilter._pipelineFailureErrors({errors: [note], notes: [note]}).length, 0);
 assert.deepEqual(Array.from(noteFilter._pipelineFailureErrors({errors: [note, '[scan] failed'], notes: [note]})), ['[scan] failed']);
 
-const dateSource = fs.readFileSync('vireo/templates/jobs.html', 'utf8');
-const dateViewCode = dateSource.match(/  function moveDateView\([^]*?\n  \}/)[0];
+const dateViewCode = fn('vireo/static/jobs/move-route.js', 'moveDateView');
 const dateView = vm.createContext({
   isLiveStatus: status => ['running', 'queued'].includes(status),
   DATE_FOLDER_ROWS: 10,

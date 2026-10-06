@@ -701,38 +701,41 @@ def test_jobs_page_returns_200(app_and_db):
     client = app.test_client()
     resp = client.get('/jobs')
     assert resp.status_code == 200
-    assert b'Jobs' in resp.data
-    assert b'data-pause-job' in resp.data
-    assert b'data-resume-job' in resp.data
+    # The page JS lives in vireo/static/jobs/; read the page as the
+    # browser assembles it.
+    html = page_with_scripts(client, '/jobs')
+    assert 'Jobs' in html
+    assert 'data-pause-job' in html
+    assert 'data-resume-job' in html
     # A pending pause can be withdrawn while the worker is still on its way
     # to a checkpoint. The button must reuse the resume endpoint (which
     # accepts "pausing") and must not hide the pausing status pill.
-    assert b'data-cancel-pause' in resp.data
-    assert b'>Cancel pause</button>' in resp.data
+    assert 'data-cancel-pause' in html
+    assert '>Cancel pause</button>' in html
     # But cancelling the pause is only offered when the user requested it.
     # Automatic safety pauses (pipeline_job.py's ``_handle_source_offline``
     # publishes ``pause_reason`` before flipping to ``pausing``) must still
     # render a disabled Pausing… button — cancelling one of those would
     # burn a bounded ``_MAX_SOURCE_OFFLINE_PAUSES`` attempt on a dead
     # source and can convert a recoverable outage into a failed run.
-    assert b'automaticPauseReason' in resp.data
-    assert b'job.progress && job.progress.pause_reason' in resp.data
-    assert b'data-retry-import-job' in resp.data
-    assert b'importRetryBody' in resp.data
+    assert 'automaticPauseReason' in html
+    assert 'job.progress && job.progress.pause_reason' in html
+    assert 'data-retry-import-job' in html
+    assert 'importRetryBody' in html
     # An import a restart interrupted offers Resume, but only when its
     # checkpoint recorded the photos it landed (older rows lack them).
-    assert b'data-import-resume' in resp.data
+    assert 'data-import-resume' in html
     # A retry keeps everything its parent carried, including photos a
     # resume recovered from its interrupted parent.
-    assert b"['photo_ids', 'carried_photo_ids', 'recovered_photo_ids']" in resp.data
-    assert b'result.interrupted && Array.isArray(result.photo_ids)' in resp.data
+    assert "['photo_ids', 'carried_photo_ids', 'recovered_photo_ids']" in html
+    assert 'result.interrupted && Array.isArray(result.photo_ids)' in html
     # A parent with both post-import steps done has nothing to resume;
     # a parent whose chain ran but still owes tag/GPS work stays
     # resumable as a tag-only replay. ``ok !== false`` discounts a
     # ``chained`` mark on a failed row — ``_chain_after_import`` returns
     # early via its "import failed" branch without actually enqueueing
     # processing.
-    assert b'result.chained && result.ok !== false && result.tags_applied' in resp.data
+    assert 'result.chained && result.ok !== false && result.tags_applied' in html
     # Resume must force ``skip_duplicates=true`` — a parent import
     # configured with ``skip_duplicates=false`` would otherwise carry
     # that false through ``importRetryBody`` and the collision resolver
@@ -741,19 +744,19 @@ def test_jobs_page_returns_200(app_and_db):
     # originals and the new copies.
     # Resume keeps the parent's duplicate setting (the collision walk
     # adopts the parent's landings either way).
-    assert b'retryBody.skip_duplicates = true' not in resp.data
+    assert 'retryBody.skip_duplicates = true' not in html
     # Import-in-place's overall counter pauses during discovery/metadata.
     # The jobs page must not turn that pause into a growing ETA or keep
     # rendering the previous source's filenames under the new phase.
-    assert b'step.started_at && !importInPlacePhaseActive' in resp.data
-    assert b'isRunning && !importInPlacePhaseActive' in resp.data
-    assert b'delete leafBuffers[step.id]' in resp.data
-    assert b'leafBufferSources[step.id] !== step.source_index' in resp.data
+    assert 'step.started_at && !importInPlacePhaseActive' in html
+    assert 'isRunning && !importInPlacePhaseActive' in html
+    assert 'delete leafBuffers[step.id]' in html
+    assert 'leafBufferSources[step.id] !== step.source_index' in html
     # A classify step names its model in the header; the label space it
     # compares photos against (regional lists vs Tree of Life) is published
     # as step.label_source and must render under the step.
-    assert b'step.label_source' in resp.data
-    assert b'tree-step-label-source' in resp.data
+    assert 'step.label_source' in html
+    assert 'tree-step-label-source' in html
 
 
 def test_navbar_has_jobs_link(app_and_db):
@@ -1340,8 +1343,55 @@ def test_job_export_preflight_reports_numbered_collision_name(
             "destination": str(destination),
         }],
         "truncated": False,
+        "destination_folder_count": 1,
+        "destination_folders": [str(destination)],
     }
 
+
+def test_job_export_preflight_reports_destination_folders(
+    app_and_db, tmp_path,
+):
+    """Without a custom destination each photo lands next to its original,
+    so the preflight names every folder the export writes into, in order."""
+    app, db = app_and_db
+    client = app.test_client()
+    rows = db.conn.execute(
+        "SELECT id, folder_id, filename FROM photos "
+        "WHERE filename IN ('bird1.jpg', 'bird2.jpg') ORDER BY filename"
+    ).fetchall()
+    assert rows[0]["folder_id"] != rows[1]["folder_id"]
+    folders = []
+    for index, row in enumerate(rows):
+        folder = tmp_path / f"source{index}"
+        folder.mkdir()
+        Image.new("RGB", (20, 20)).save(folder / row["filename"], "JPEG")
+        db.conn.execute(
+            "UPDATE folders SET path = ? WHERE id = ?",
+            (str(folder), row["folder_id"]),
+        )
+        folders.append(folder)
+    db.conn.commit()
+    ids = [row["id"] for row in rows]
+
+    resp = client.post("/api/jobs/export/preflight", json={
+        "photo_ids": ids,
+        "destination": "",
+        "export_to_subfolder": True,
+        "subfolder_name": "exported",
+    })
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["destination_folder_count"] == 2
+    assert data["destination_folders"] == [str(folders[0]), str(folders[1])]
+
+    resp = client.post("/api/jobs/export/preflight", json={
+        "photo_ids": ids,
+        "destination": str(tmp_path / "out"),
+    })
+    data = resp.get_json()
+    assert data["destination_folder_count"] == 1
+    assert data["destination_folders"] == [str(tmp_path / "out")]
 
 def test_job_export_preflight_reports_unverifiable_destination(
     app_and_db, monkeypatch,
@@ -1355,7 +1405,7 @@ def test_job_export_preflight_reports_unverifiable_destination(
     def fail_preflight(**_kwargs):
         raise export_mod.ExportPreflightError("destination cannot be verified")
 
-    monkeypatch.setattr(export_mod, "preview_export_renames", fail_preflight)
+    monkeypatch.setattr(export_mod, "preview_export", fail_preflight)
 
     resp = client.post("/api/jobs/export/preflight", json={
         "photo_ids": [photo["id"]],

@@ -14,7 +14,7 @@ import json
 import logging
 import os
 
-from duplicate_scan import revalidate_scan_result
+from duplicate_scan import attach_workspace_names, revalidate_scan_result
 from flask import Blueprint, jsonify, request
 from photo_payload import attach_nested_edit_recipes
 from sql_chunks import chunked
@@ -376,6 +376,7 @@ def create_duplicates_blueprint(
             return jsonify({"found": False})
         result = revalidate_scan_result(db, result)
         attach_nested_edit_recipes(db, result)
+        attach_workspace_names(db, result["proposals"])
         return jsonify({
             "found": True,
             "job_id": row["id"],

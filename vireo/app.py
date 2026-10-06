@@ -1710,6 +1710,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         _label_identity_timer.daemon = True
         _label_identity_timer.start()
 
+    # Searchable EXIF values for photos written before the search-text
+    # triggers existed (see StartupTasks.kickoff_exif_search_backfill).
+    # Ephemeral JobRunner job, skipped when every photo is indexed.
+    app._kickoff_exif_search_backfill = startup.kickoff_exif_search_backfill
+
+    if not os.environ.get("VIREO_DISABLE_STARTUP_BACKFILL_TIMERS"):
+        _exif_search_timer = threading.Timer(4.0, startup.kickoff_exif_search_backfill)
+        _exif_search_timer.daemon = True
+        _exif_search_timer.start()
+
     # -- Per-app services shared by several blueprints --
 
     # Resolves visual-search clauses; owns the per-app query-text
@@ -1800,9 +1810,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             clear_preview_cache_invalid=render_cache.clear_preview_cache_invalid,
         )
     )
-    # The prepare-full-resolution job calls the /original view directly so
-    # its RAW/companion/edit fallbacks cannot drift from the lightbox's.
+    # The prepare-full-resolution job calls the /original and /preview views
+    # directly so its RAW/companion/edit fallbacks cannot drift from the
+    # lightbox's.
     serve_original_photo = app.view_functions["media.serve_original_photo"]
+    serve_photo_preview = app.view_functions["media.serve_photo_preview"]
 
     app.register_blueprint(create_photo_labels_blueprint(_get_db, json_error))
     app.register_blueprint(create_photo_review_blueprint(_get_db, json_error))
@@ -2052,9 +2064,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             ),
             guard_move_folder=folder_moves.guard_error,
             start_move_folder_job=folder_moves.start_job,
-            # Late-bound so it resolves whichever ``serve_original_photo``
-            # create_app holds when a job runs, not when the app is built.
+            # Late-bound so they resolve whichever views create_app holds
+            # when a job runs, not when the app is built.
             serve_original_photo=lambda *args, **kwargs: serve_original_photo(
+                *args, **kwargs
+            ),
+            serve_photo_preview=lambda *args, **kwargs: serve_photo_preview(
                 *args, **kwargs
             ),
             sync_job_lock=app._sync_job_lock,

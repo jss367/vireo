@@ -36,6 +36,105 @@ def _photo_ids_by_filename(db):
     }
 
 
+@pytest.mark.parametrize("already_cataloged", [False, True])
+def test_pair_survivor_does_not_add_a_second_snapshot_outcome(tmp_path, already_cataloged):
+    from types import SimpleNamespace
+
+    import scanner
+    from db import Database
+    from services.import_in_place import _InPlaceImportRun
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(tmp_path))
+    raw_id = db.add_photo(folder_id, "PAIR.cr3", ".cr3", 256, None)
+    jpeg_id = db.add_photo(folder_id, "PAIR.jpg", ".jpg", 256, None)
+    jpeg_path = str(tmp_path / "PAIR.jpg")
+    imported = _InPlaceImportRun.__new__(_InPlaceImportRun)
+    imported.photo_ids, imported.seen_photo_ids, imported.indexed_paths = [], set(), set()
+    imported.runner = SimpleNamespace(update_step=lambda *a, **k: None)
+    imported.job, imported.plan = {"id": "snapshot-import"}, SimpleNamespace(source_snapshot_id="frozen")
+    imported.snapshot_known_before = {jpeg_path: jpeg_id} if already_cataloged else {}
+    imported.snapshot_requested = 1
+    imported.snapshot_missing, imported.snapshot_unreadable = [], []
+    try:
+        imported._photo_cb(jpeg_id, jpeg_path)
+        merged = scanner._pair_raw_jpeg_companions(db)
+        assert merged == {jpeg_id: raw_id}
+        scanner._ScanRun._report_merged_photos(SimpleNamespace(
+            db=db, photo_merged_callback=imported._photo_merged_cb,
+            _reported_identities={jpeg_id: (folder_id, "PAIR.jpg")},
+        ), merged)
+        result = imported._snapshot_result_fields([])
+        assert result["imported"] == (0 if already_cataloged else 1)
+        assert result["already_cataloged"] == (1 if already_cataloged else 0)
+        assert result["imported"] + result["already_cataloged"] == result["requested"]
+        assert imported.photo_ids == [raw_id]
+        assert imported.seen_photo_ids == {raw_id}
+        assert imported.indexed_paths == {jpeg_path}
+    finally:
+        db.close()
+
+
+def test_later_scan_root_cannot_substitute_an_unrelated_reused_id(tmp_path):
+    """A receiver spans roots even though each root creates its own ScanRun."""
+    from types import SimpleNamespace
+
+    import scanner
+    from db import Database
+    from pipeline_stages.scanning import _ScanPass
+
+    first, unrelated, second = (tmp_path / name for name in ("first", "unrelated", "second"))
+    for folder in (first, unrelated, second):
+        folder.mkdir()
+    original, other = first / "ORIGINAL.jpg", second / "SECOND.jpg"
+    for path in (original, other, unrelated / "OTHER.jpg"):
+        Image.new("RGB", (40, 30), (30, 90, 180)).save(path)
+    (unrelated / "OTHER.cr3").write_bytes(b"cataloged RAW placeholder")
+    db = Database(str(tmp_path / "test.db"))
+    writer = Database(str(tmp_path / "test.db"))
+    first_id, unrelated_id = db.add_folder(str(first)), db.add_folder(str(unrelated))
+    old_id = db.add_photo(first_id, original.name, ".jpg", original.stat().st_size, original.stat().st_mtime)
+    collected = []
+    run = SimpleNamespace(
+        stages={"scan": {"count": 0}}, job={"id": "multi-root"},
+        runner=SimpleNamespace(update_step=lambda *a, **k: None),
+        control=SimpleNamespace(should_abort=lambda _a: False, cancellation_requested=lambda: False),
+        abort=SimpleNamespace(set=lambda: None, is_set=lambda: False),
+    )
+    stage = _ScanPass(
+        run, sentinel=object(), filter_excluded=None,
+        find_broken_metadata_folders=None, missing_archive_mount_root=None,
+        put_scan_item=lambda item: None, collected_photo_ids=collected,
+        effective_thumb_cache_dir=None, effective_vireo_dir=None,
+        final_destination=None, missing_originals_invalidator=None,
+        remote_archive=None, skip_scan=False, snapshot_paths=None,
+    )
+    stage.thread_db, stage.do_scan = db, scanner.scan
+    stage.pipeline_cfg = {"extract_full_metadata": False}
+    stage._on_scan_progress = lambda *a: None
+    stage._on_scan_status = lambda *a, **k: None
+    try:
+        stage._scan(
+            str(first), discovered_files=[original], skip_working_copies=True,
+            photo_callback=stage._on_scanned_photo, photo_merged_callback=stage._on_merged_photo,
+        )
+        assert collected == [old_id]
+        writer.delete_photos([old_id])
+        assert writer.add_photo(unrelated_id, "OTHER.jpg", ".jpg", 256, None) == old_id
+        raw_id = writer.add_photo(unrelated_id, "OTHER.cr3", ".cr3", 256, None)
+        stage._scan(
+            str(second), discovered_files=[other], skip_working_copies=True,
+            photo_callback=stage._on_scanned_photo, photo_merged_callback=stage._on_merged_photo,
+        )
+        second_id = db.conn.execute("SELECT id FROM photos WHERE filename = 'SECOND.jpg'").fetchone()[0]
+        assert raw_id not in collected
+        assert collected == [second_id]
+        assert run.stages["scan"]["count"] == 1
+    finally:
+        writer.close()
+        db.close()
+
+
 @pytest.mark.parametrize("reuse_id", [False, True])
 def test_merged_owner_deleted_before_publication_drops_import_membership(
     tmp_path, reuse_id,
@@ -79,6 +178,91 @@ def test_merged_owner_deleted_before_publication_drops_import_membership(
     try:
         scanner._ScanRun._report_merged_photos(run, merged)
         assert published == [(jpeg_id, None, None)]
+        assert pipeline.collected_photo_ids == []
+        assert pipeline.run.stages["scan"]["count"] == 0
+        assert imported.photo_ids == []
+        assert imported.seen_photo_ids == set()
+    finally:
+        writer.close()
+        db.close()
+
+
+def test_reused_old_id_drops_import_membership_instead_of_substituting(
+    tmp_path,
+):
+    """Scanner reported ``old_id`` for one JPEG, then another connection
+    freed and reused that id for an unrelated JPEG that pairing merged
+    into a DIFFERENT RAW. Substituting the pairing's RAW for ``old_id``
+    would add an unrelated RAW to the receiver's collection, so publish
+    must detect the identity mismatch and drop ``old_id`` instead.
+    """
+    from types import SimpleNamespace
+
+    import scanner
+    from db import Database
+    from pipeline_stages.scanning import _ScanPass
+    from services.import_in_place import _InPlaceImportRun
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    writer = Database(db_path)
+    folder_id = db.add_folder(str(tmp_path))
+    # Seed the unrelated RAW first so the original JPEG claims the
+    # table's current max id; deleting it then frees the max rowid,
+    # which SQLite (no AUTOINCREMENT) hands to the very next insert.
+    unrelated_raw_id = writer.add_photo(
+        folder_id, "OTHER.cr3", ".cr3", 256, None,
+    )
+    original_jpeg_folder = folder_id
+    original_jpeg_filename = "ORIG.jpg"
+    original_jpeg_id = db.add_photo(
+        original_jpeg_folder, original_jpeg_filename, ".jpg", 256, None,
+    )
+    writer.delete_photos([original_jpeg_id])
+    reused_jpeg_id = writer.add_photo(
+        folder_id, "OTHER.jpg", ".jpg", 256, None,
+    )
+    assert reused_jpeg_id == original_jpeg_id
+    merged = scanner._pair_raw_jpeg_companions(db)
+    assert merged == {reused_jpeg_id: unrelated_raw_id}
+
+    substitutions = []
+    pipeline = SimpleNamespace(
+        _collected_ids={original_jpeg_id},
+        _reported_photo_ids={original_jpeg_id},
+        collected_photo_ids=[original_jpeg_id],
+        run=SimpleNamespace(stages={"scan": {"count": 1}}),
+        _on_scanned_photo=lambda pid, p: substitutions.append((pid, p)),
+    )
+    imported = SimpleNamespace(
+        seen_photo_ids={original_jpeg_id},
+        photo_ids=[original_jpeg_id],
+        _photo_cb=lambda pid, p: substitutions.append((pid, p)),
+    )
+    published = []
+
+    def report(old_id, new_id, path):
+        published.append((old_id, new_id, path))
+        _ScanPass._on_merged_photo(pipeline, old_id, new_id, path)
+        _InPlaceImportRun._photo_merged_cb(imported, old_id, new_id, path)
+
+    run = SimpleNamespace(
+        db=db,
+        photo_merged_callback=report,
+        _reported_identities={
+            original_jpeg_id: (
+                original_jpeg_folder, original_jpeg_filename,
+            ),
+        },
+    )
+    try:
+        scanner._ScanRun._report_merged_photos(run, merged)
+        # Mismatch between what the scanner reported for this id and
+        # what pairing merged → drop old_id, do not substitute. If the
+        # fix regresses, the publish re-adds ``unrelated_raw_id`` to
+        # the receivers via their substitution callbacks.
+        assert published == [(original_jpeg_id, None, None)]
+        assert substitutions == []
         assert pipeline.collected_photo_ids == []
         assert pipeline.run.stages["scan"]["count"] == 0
         assert imported.photo_ids == []
@@ -638,6 +822,198 @@ def test_add_photo_losing_a_race_keeps_concurrent_collection_entry(
         "SELECT id FROM collections WHERE name = ?", ("Concurrent",),
     ).fetchone()["id"]
     assert _collection_photo_ids(db, coll_id) == raced_photo_ids
+
+
+def test_attach_companion_refuses_when_owner_metadata_changed_before_commit(
+    tmp_path, monkeypatch,
+):
+    """``_resolve_companion_group`` reads the RAW's capture metadata
+    (timestamp, camera_make, camera_model) and ``_pick_compatible_raw_jpeg_pairs``
+    decides compatibility from those values. Between that read and the
+    guarded UPDATE inside ``_attach_companion``, another writer can
+    rewrite the RAW's metadata — the identity predicates on the UPDATE
+    (id, folder_id, filename, companion_path) do not catch that change,
+    so without a compatibility recheck under the writer lock, the pair
+    would commit on stale evidence and permanently attach an unrelated
+    JPEG to a different-exposure RAW. Attach must refuse in that race.
+    """
+    import scanner as scanner_mod
+    from db import Database
+
+    card = tmp_path / "card"
+    _shoot_pairs(card, ["IMG_001"])
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+
+    jpeg_path = str(card / "IMG_001.jpg")
+    raw_path = str(card / "IMG_001.cr3")
+
+    # Pretend ExifTool read a Nikon camera off the JPEG and nothing off
+    # the RAW. ``_pick_compatible_raw_jpeg_pairs`` then runs with the
+    # RAW's capture columns all None (one-side-unknown → compatible), so
+    # the pair is returned. The race below rewrites the RAW's camera on
+    # a separate connection just before the attach's guarded UPDATE,
+    # making the pair incompatible by the time it commits.
+    def fake_extract(paths, progress_callback=None, checkpoint=None, **_kw):
+        meta = {}
+        for p in paths:
+            if p.endswith(".jpg"):
+                meta[p] = {
+                    "EXIF": {"Make": "Nikon", "Model": "Z9"},
+                    "File": {},
+                    "Composite": {},
+                }
+            else:
+                meta[p] = {}
+        return meta
+
+    monkeypatch.setattr(scanner_mod, "extract_metadata", fake_extract)
+
+    real_pick = scanner_mod._pick_compatible_raw_jpeg_pairs
+
+    def racing_pick(members, log_conflicts=True):
+        pairs = real_pick(members, log_conflicts=log_conflicts)
+        # Simulate a concurrent writer rewriting the RAW's capture
+        # metadata between pair decision and attach so the compat
+        # decision we return no longer holds under the writer lock.
+        for raw, jpeg in pairs:
+            if raw["id"] is None or jpeg["id"] is not None:
+                continue
+            with sqlite3.connect(db_path) as other:
+                other.execute(
+                    "UPDATE photos SET camera_make = ?, camera_model = ?"
+                    " WHERE id = ?",
+                    ("Canon", "EOS R5", raw["id"]),
+                )
+                other.commit()
+        return pairs
+
+    monkeypatch.setattr(
+        scanner_mod, "_pick_compatible_raw_jpeg_pairs", racing_pick,
+    )
+    # Keep the end-of-scan pairing pass from re-pairing after the attach
+    # refused — the test's assertion is about the attach itself. (It
+    # would also see Canon-vs-Nikon as incompatible and still refuse.)
+    monkeypatch.setattr(
+        scanner_mod, "_pair_raw_jpeg_companions", lambda *a, **k: {},
+    )
+
+    callbacks = []
+
+    def on_photo(photo_id, path):
+        callbacks.append((photo_id, path))
+
+    scanner_mod.scan(str(card), db, photo_callback=on_photo)
+
+    # The attach must refuse because the RAW's metadata diverged from
+    # the JPEG's under the writer lock. The JPEG then falls through to
+    # being cataloged as its own photo.
+    photos = _photo_ids_by_filename(db)
+    assert set(photos) == {"IMG_001.cr3", "IMG_001.jpg"}, photos
+    # No companion attachment landed.
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM companion_identities"
+    ).fetchone()[0] == 0
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM photos WHERE companion_path IS NOT NULL"
+    ).fetchone()[0] == 0
+    # The JPEG was published as its own photo (both files reported
+    # under their own ids), not merged into the RAW's id.
+    paths_in_callbacks = {c[1] for c in callbacks}
+    assert paths_in_callbacks == {raw_path, jpeg_path}, callbacks
+    for pid, path in callbacks:
+        assert pid == photos[os.path.basename(path)], (pid, path, photos)
+
+
+def test_attach_companion_skips_publishing_when_owner_vanished_before_callback(
+    tmp_path, monkeypatch,
+):
+    """``_attach_companion`` publishes the RAW's id to ``photo_callback``
+    AFTER ``_commits_held`` releases, so the thumbnail worker on another
+    connection sees ``companion_path``. In that window another connection
+    can delete the RAW and SQLite can reuse its rowid for an unrelated
+    photo; without ownership revalidation, the callback would publish
+    that stale id into the pipeline or import collection — a dangling id
+    (or one that now names a different file) that no end-of-scan merge
+    callback can correct, because the JPEG never had a row of its own.
+    """
+    import scanner as scanner_mod
+    from db import Database
+
+    card = tmp_path / "card"
+    _shoot_pairs(card, ["IMG_001"])
+    vireo_dir = tmp_path / "vireo"
+    (vireo_dir / "originals").mkdir(parents=True)
+    thumbs = tmp_path / "thumbs"
+    thumbs.mkdir()
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+
+    real_fs_actions = scanner_mod._run_post_commit_fs_actions
+
+    def racing_fs_actions(actions):
+        real_fs_actions(actions)
+        # The attach commit (and its ``_commits_held``) have landed; the
+        # callback has not fired yet. Replay the exact deletion-then-reuse
+        # race on a separate real connection.
+        with sqlite3.connect(db_path) as other:
+            other.execute("PRAGMA foreign_keys = ON")
+            other.row_factory = sqlite3.Row
+            row = other.execute(
+                "SELECT p.id FROM photos p JOIN folders f ON f.id = p.folder_id"
+                " WHERE p.filename = ? AND f.path = ?",
+                ("IMG_001.cr3", str(card)),
+            ).fetchone()
+            if row is None:
+                return
+            raw_id = row["id"]
+            other.execute("DELETE FROM photos WHERE id = ?", (raw_id,))
+            # Insert an unrelated photo into a different folder that reuses
+            # the freed rowid. ``photos`` has no AUTOINCREMENT, so an
+            # explicit id in the INSERT re-claims it.
+            unrelated = tmp_path / "unrelated"
+            unrelated.mkdir(exist_ok=True)
+            folder_id = other.execute(
+                "INSERT INTO folders (path) VALUES (?)",
+                (str(unrelated),),
+            ).lastrowid
+            other.execute(
+                "INSERT INTO photos (id, folder_id, filename, extension,"
+                " file_size, file_mtime) VALUES (?, ?, ?, ?, ?, ?)",
+                (raw_id, folder_id, "OTHER.jpg", ".jpg", 0, 0.0),
+            )
+            other.commit()
+
+    monkeypatch.setattr(
+        scanner_mod, "_run_post_commit_fs_actions", racing_fs_actions,
+    )
+    # Keep the end-of-scan pairing pass out: the attach already fired for
+    # the JPEG; the assertion is about the publication for THAT attach.
+    monkeypatch.setattr(
+        scanner_mod, "_pair_raw_jpeg_companions", lambda *a, **k: {},
+    )
+
+    jpeg_path = str(card / "IMG_001.jpg")
+    callbacks = []
+
+    def on_photo(photo_id, path):
+        callbacks.append((photo_id, path))
+
+    scanner_mod.scan(
+        str(card), db,
+        photo_callback=on_photo,
+        vireo_dir=str(vireo_dir),
+        thumb_cache_dir=str(thumbs),
+    )
+
+    # The JPEG's attach fired after the RAW was deleted and its id reused
+    # for OTHER.jpg. The publication must NOT have called photo_callback
+    # with (reused_id, companion_path) — that would adopt an unrelated row
+    # into the collection built from these callbacks.
+    jpeg_callbacks = [c for c in callbacks if c[1] == jpeg_path]
+    assert jpeg_callbacks == [], (
+        f"attach callback leaked a stale/reused id for the JPEG: {jpeg_callbacks}"
+    )
 
 
 def test_photos_repository_add_reports_whether_it_inserted(tmp_path):

@@ -10,6 +10,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from page_scripts import page_with_scripts
 
 
 def test_api_photos_default(app_and_db):
@@ -4351,7 +4352,29 @@ def test_auto_tone_returns_fitted_controls(client_with_photo):
     }
     assert data["metering"] == "frame"
     assert data["subject_source"] is None
+    assert data["style"] == "balanced"
     assert isinstance(data["notes"], list)
+
+
+def test_auto_tone_fits_the_requested_style(client_with_photo, monkeypatch):
+    import auto_tone
+
+    app, _db, photo_id = client_with_photo
+    seen = []
+    real = auto_tone.fit_loaded_image
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs["style"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(auto_tone, "fit_loaded_image", spy)
+    for style in auto_tone.STYLES:
+        resp = app.test_client().get(
+            f"/api/photos/{photo_id}/auto-tone", query_string={"style": style},
+        )
+        assert resp.status_code == 200
+        assert resp.get_json()["style"] == style
+    assert seen == list(auto_tone.STYLES)
 
 
 def test_auto_tone_meters_on_active_mask_then_detection(
@@ -4429,6 +4452,9 @@ def test_auto_tone_rejects_bad_requests(client_with_photo):
         )
         assert resp.status_code == 400, recipe
         assert resp.get_json()["error"]
+    resp = client.get(f"/api/photos/{photo_id}/auto-tone", query_string={"style": "dramatic"})
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "Unknown Auto Tone style"
 
 
 def test_non_crop_preview_loads_with_requested_size(client_with_photo, monkeypatch):
@@ -5390,10 +5416,8 @@ def test_photo_editor_page_renders(client_with_photo):
     app, _db, photo_id = client_with_photo
     client = app.test_client()
 
-    resp = client.get(f"/edit/{photo_id}")
-
-    assert resp.status_code == 200
-    html = resp.get_data(as_text=True)
+    assert client.get(f"/edit/{photo_id}").status_code == 200
+    html = page_with_scripts(client, f"/edit/{photo_id}")
     assert "Photo Editor" in html
     assert "Edit History" in html
     assert "Save Changes" in html

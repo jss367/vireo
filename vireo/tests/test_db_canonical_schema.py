@@ -33,7 +33,9 @@ SNAPSHOT_PATH = os.path.join(
 # The species-identity repair marker embeds a digest of the local taxonomy
 # resolution, so its key differs between machines. It is written by
 # ``species_identity_repair`` after the schema is created, not by the schema.
-_ENVIRONMENT_META_PREFIXES = ("species_identity_repair:",)
+# The EXIF search text stamp digests the SQLite version along with the
+# trigger definitions, so its value differs between builds.
+_ENVIRONMENT_META_PREFIXES = ("species_identity_repair:", "exif_search_text_definition")
 
 
 def _sqlite_master(path):
