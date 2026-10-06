@@ -88,6 +88,91 @@ def test_merged_owner_deleted_before_publication_drops_import_membership(
         db.close()
 
 
+def test_reused_old_id_drops_import_membership_instead_of_substituting(
+    tmp_path,
+):
+    """Scanner reported ``old_id`` for one JPEG, then another connection
+    freed and reused that id for an unrelated JPEG that pairing merged
+    into a DIFFERENT RAW. Substituting the pairing's RAW for ``old_id``
+    would add an unrelated RAW to the receiver's collection, so publish
+    must detect the identity mismatch and drop ``old_id`` instead.
+    """
+    from types import SimpleNamespace
+
+    import scanner
+    from db import Database
+    from pipeline_stages.scanning import _ScanPass
+    from services.import_in_place import _InPlaceImportRun
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    writer = Database(db_path)
+    folder_id = db.add_folder(str(tmp_path))
+    # Seed the unrelated RAW first so the original JPEG claims the
+    # table's current max id; deleting it then frees the max rowid,
+    # which SQLite (no AUTOINCREMENT) hands to the very next insert.
+    unrelated_raw_id = writer.add_photo(
+        folder_id, "OTHER.cr3", ".cr3", 256, None,
+    )
+    original_jpeg_folder = folder_id
+    original_jpeg_filename = "ORIG.jpg"
+    original_jpeg_id = db.add_photo(
+        original_jpeg_folder, original_jpeg_filename, ".jpg", 256, None,
+    )
+    writer.delete_photos([original_jpeg_id])
+    reused_jpeg_id = writer.add_photo(
+        folder_id, "OTHER.jpg", ".jpg", 256, None,
+    )
+    assert reused_jpeg_id == original_jpeg_id
+    merged = scanner._pair_raw_jpeg_companions(db)
+    assert merged == {reused_jpeg_id: unrelated_raw_id}
+
+    substitutions = []
+    pipeline = SimpleNamespace(
+        _collected_ids={original_jpeg_id},
+        _reported_photo_ids={original_jpeg_id},
+        collected_photo_ids=[original_jpeg_id],
+        run=SimpleNamespace(stages={"scan": {"count": 1}}),
+        _on_scanned_photo=lambda pid, p: substitutions.append((pid, p)),
+    )
+    imported = SimpleNamespace(
+        seen_photo_ids={original_jpeg_id},
+        photo_ids=[original_jpeg_id],
+        _photo_cb=lambda pid, p: substitutions.append((pid, p)),
+    )
+    published = []
+
+    def report(old_id, new_id, path):
+        published.append((old_id, new_id, path))
+        _ScanPass._on_merged_photo(pipeline, old_id, new_id, path)
+        _InPlaceImportRun._photo_merged_cb(imported, old_id, new_id, path)
+
+    run = SimpleNamespace(
+        db=db,
+        photo_merged_callback=report,
+        _reported_identities={
+            original_jpeg_id: (
+                original_jpeg_folder, original_jpeg_filename,
+            ),
+        },
+    )
+    try:
+        scanner._ScanRun._report_merged_photos(run, merged)
+        # Mismatch between what the scanner reported for this id and
+        # what pairing merged → drop old_id, do not substitute. If the
+        # fix regresses, the publish re-adds ``unrelated_raw_id`` to
+        # the receivers via their substitution callbacks.
+        assert published == [(original_jpeg_id, None, None)]
+        assert substitutions == []
+        assert pipeline.collected_photo_ids == []
+        assert pipeline.run.stages["scan"]["count"] == 0
+        assert imported.photo_ids == []
+        assert imported.seen_photo_ids == set()
+    finally:
+        writer.close()
+        db.close()
+
+
 def test_merged_owner_is_committed_and_cannot_be_deleted_during_publication(
     tmp_path,
 ):

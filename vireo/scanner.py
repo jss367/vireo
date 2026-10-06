@@ -1369,11 +1369,21 @@ def _run_post_commit_fs_actions(post_commit_fs_actions):
 
 
 class _MergedPhotoIds(dict):
-    """Merged ids plus the RAW identities that actually absorbed them."""
+    """Merged ids plus the identities (companion AND surviving RAW)
+    that pairing captured at merge time, so publication can refuse to
+    substitute when either id's current row is not the one pairing saw.
+    """
 
     def __init__(self):
         super().__init__()
         self.owners = {}
+        # ``companion_id -> (folder_id, filename)`` as pairing saw the
+        # JPEG row before deleting it. The scanner compares this against
+        # the identity it originally reported for that id: if the two
+        # disagree, the id was reused after being reported and must not
+        # be substituted with the pairing's RAW id (the two name
+        # unrelated files).
+        self.companions = {}
 
 
 def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
@@ -1445,6 +1455,9 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
             merged_ids[companion["id"]] = primary["id"]
             merged_ids.owners[primary["id"]] = (
                 primary["folder_id"], primary["filename"],
+            )
+            merged_ids.companions[companion["id"]] = (
+                companion["folder_id"], companion["filename"],
             )
             if vireo_dir:
                 _defer_companion_derivative_cleanup(
@@ -3590,9 +3603,9 @@ def _incremental_photo_index(db, image_files):
         params = [part for path in batch for part in (str(path.parent), path.name)]
         rows = db.conn.execute(
             f"WITH requested(folder_path, filename) AS (VALUES {placeholders}) "
-            "SELECT f.path AS folder_path, p.id, p.filename, p.extension, "
-            "p.file_size, p.file_mtime, p.xmp_mtime, p.timestamp, p.width, "
-            "p.file_hash, p.exif_data IS NOT NULL AS exif_extracted, "
+            "SELECT f.path AS folder_path, p.id, p.folder_id, p.filename, "
+            "p.extension, p.file_size, p.file_mtime, p.xmp_mtime, p.timestamp, "
+            "p.width, p.file_hash, p.exif_data IS NOT NULL AS exif_extracted, "
             "(p.exif_data IS NULL AND p.camera_make IS NULL "
             "AND p.camera_model IS NULL AND p.lens IS NULL "
             "AND p.aperture IS NULL AND p.shutter_speed IS NULL "
@@ -4538,6 +4551,13 @@ class _ScanRun:
         # merges must be intersected with what *this* invocation counted (see
         # ``_pair_raw_jpeg_companions``).
         self.indexed_photo_ids = set()
+        # Identity (``folder_id, filename``) the scanner handed to
+        # ``photo_callback`` under each photo id. ``_report_merged_photos``
+        # compares this against the companion identity pairing captured:
+        # if another connection deleted the row and SQLite reused the id
+        # for an unrelated file between callback and pairing, the two
+        # disagree and the pairing merge must not substitute the id.
+        self._reported_identities = {}
         try:
             self._register_scan_targets()
             for image_path in self.image_files:
@@ -4669,7 +4689,10 @@ class _ScanRun:
             if not self._lock_companion_owner(known["owner_id"], ownership):
                 return False
             self._import_companion_sidecar(image_path, known)
-            self._credit_known_companion(known["owner_id"], str(image_path))
+            self._credit_known_companion(
+                known["owner_id"], str(image_path),
+                known["folder_id"], known["owner_filename"],
+            )
         return True
 
     def _import_companion_sidecar(self, image_path, known):
@@ -4741,7 +4764,10 @@ class _ScanRun:
             and not metadata_missing
             and not hash_needs_repair
         ):
-            self._credit_reused_row(existing["id"], full_path_str)
+            self._credit_reused_row(
+                existing["id"], full_path_str,
+                existing["folder_id"], existing["filename"],
+            )
             return True
 
         # XMP changed: re-import keywords
@@ -4768,20 +4794,26 @@ class _ScanRun:
             and not metadata_missing
             and not hash_needs_repair
         ):
-            self._credit_reused_row(existing["id"], full_path_str)
+            self._credit_reused_row(
+                existing["id"], full_path_str,
+                existing["folder_id"], existing["filename"],
+            )
             return True
         return False
 
-    def _credit_reused_row(self, photo_id, full_path_str):
+    def _credit_reused_row(self, photo_id, full_path_str, folder_id, filename):
         self.processed_count += 1
         self.counts["indexed"] += 1
         self.indexed_photo_ids.add(photo_id)
+        self._reported_identities[photo_id] = (folder_id, filename)
         if self.photo_callback:
             self.photo_callback(photo_id, full_path_str)
         if self.progress_callback:
             self.progress_callback(self.processed_count, self.total)
 
-    def _credit_known_companion(self, owner_id, full_path_str):
+    def _credit_known_companion(
+        self, owner_id, full_path_str, owner_folder_id, owner_filename,
+    ):
         """Dispose of a companion JPEG its RAW's row already holds.
 
         ``photo_callback`` gets the RAW's id: that row is where the file is
@@ -4790,6 +4822,7 @@ class _ScanRun:
         """
         self.processed_count += 1
         self.counts["known_companions"] += 1
+        self._reported_identities[owner_id] = (owner_folder_id, owner_filename)
         if self.photo_callback:
             self.photo_callback(owner_id, full_path_str)
         if self.progress_callback:
@@ -5205,6 +5238,9 @@ class _ScanRun:
         if file_hash is not None:
             db.check_and_resolve_duplicates_for_hash(file_hash)
 
+        self._reported_identities[photo_id] = (
+            item.folder_id, item.image_path.name,
+        )
         if self.photo_callback:
             self.photo_callback(photo_id, str(image_path))
 
@@ -5382,6 +5418,9 @@ class _ScanRun:
                 actions, {"id": owner_id}, self.vireo_dir, self.thumb_cache_dir,
             )
             _run_post_commit_fs_actions(actions)
+        self._reported_identities[owner_id] = (
+            owner["folder_id"], owner["filename"],
+        )
         if self.photo_callback:
             self.photo_callback(owner_id, str(image_path))
         if self.progress_callback:
@@ -5956,6 +5995,8 @@ class _ScanRun:
         # the merge. Reacquire the writer lock before validating the RAW
         # and publishing its id; deletion and rowid reuse must not interleave
         # with a callback that updates an import's in-memory membership.
+        companion_identities = getattr(merged, "companions", {})
+        reported_identities = getattr(self, "_reported_identities", {})
         with self.db._commits_held():
             self.db.conn.execute("BEGIN IMMEDIATE")
             for old_id, new_id in merged.items():
@@ -5965,7 +6006,26 @@ class _ScanRun:
                     (new_id,),
                 ).fetchone()
                 expected = getattr(merged, "owners", {}).get(new_id)
-                if row is None or (row[0], row[1]) != expected:
+                # The merged-away JPEG must still be the same file the
+                # scanner reported under ``old_id``. If a concurrent delete
+                # freed the id and SQLite reused it for an unrelated row
+                # that pairing then merged, substituting ``new_id`` for
+                # ``old_id`` in the receiver's collection would adopt an
+                # unrelated RAW. ``None`` on either side means we did not
+                # report this id (pairing covers the whole catalog) and
+                # the receiver's own id-set check will no-op anyway.
+                reported_identity = reported_identities.get(old_id)
+                pairing_identity = companion_identities.get(old_id)
+                identity_matches = (
+                    reported_identity is None
+                    or pairing_identity is None
+                    or reported_identity == pairing_identity
+                )
+                if (
+                    row is None
+                    or (row[0], row[1]) != expected
+                    or not identity_matches
+                ):
                     self.photo_merged_callback(old_id, None, None)
                 else:
                     self.photo_merged_callback(
