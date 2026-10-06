@@ -116,3 +116,44 @@ def test_stale_auto_tone_response_does_not_edit_loaded_photo(live_server, page, 
     expect(page.locator('#exposureValue')).to_have_text('0.0')
     assert not page.evaluate('recipeForSave(editorState.recipe).adjustments')
     expect(page.locator('#saveBtn')).to_be_disabled()
+
+
+@pytest.mark.parametrize('style, button, label', [
+    ('subject', '#autoToneSubjectBtn', 'Auto Tone (Subject style)'),
+    ('gentle', '#autoToneGentleBtn', 'Auto Tone (Gentle style)'),
+])
+def test_style_buttons_request_their_style_and_name_it(live_server, page, dark_photo, style, button, label):
+    page.goto(f"{live_server['url']}/edit/{dark_photo}")
+    expect(page.locator('#editorFilename')).to_have_text('dim-meadow.png')
+    page.wait_for_function('!editorState.loading')
+    held = []
+    page.route('**/api/photos/*/auto-tone?*', lambda route: held.append(route))
+    with page.expect_request('**/api/photos/*/auto-tone?*') as request:
+        page.locator(button).click()
+    assert f'style={style}' in request.value.url
+    # One fit at a time: every Auto button waits for this one.
+    for other in ('#autoToneBtn', '#autoToneSubjectBtn', '#autoToneGentleBtn'):
+        expect(page.locator(other)).to_be_disabled()
+    held[0].continue_()
+    toast = page.locator('#toastContainer')
+    expect(toast).to_contain_text(label + ' (metered on the detected subject):')
+    expect(page.locator('#autoToneBtn')).to_be_enabled()
+    expect(page.locator(button)).not_to_have_text('Analyzing...')
+
+
+def test_subject_fallback_is_named_when_nothing_changes(live_server, page, dark_photo):
+    page.goto(f"{live_server['url']}/edit/{dark_photo}")
+    expect(page.locator('#editorFilename')).to_have_text('dim-meadow.png')
+    page.wait_for_function('!editorState.loading')
+    page.route('**/api/photos/*/auto-tone?*', lambda route: route.fulfill(json={
+        'adjustments': {key: 0 for key in (
+            'exposure', 'highlights', 'shadows', 'contrast', 'whites', 'blacks', 'vibrance', 'saturation',
+        )},
+        'notes': ['no subject found, so metered the whole frame as Balanced does'],
+        'metering': 'frame', 'style': 'subject', 'subject_source': None,
+    }))
+    page.locator('#autoToneSubjectBtn').click()
+    expect(page.locator('#toastContainer')).to_contain_text(
+        'Auto Tone (Subject style): no subject found, so metered the whole frame as Balanced does; '
+        'already balanced, nothing changed'
+    )

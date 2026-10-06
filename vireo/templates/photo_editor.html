@@ -759,7 +759,9 @@ body {
     <div class="panel-band">
       <div class="panel-title">Adjustments</div>
       <div class="button-row">
-        <button class="editor-btn" type="button" id="autoToneBtn" onclick="autoTone()">Auto Tone</button>
+        <button class="editor-btn" type="button" id="autoToneBtn" onclick="autoTone('balanced')" title="Balance the whole photo, weighting the subject">Auto Tone</button>
+        <button class="editor-btn" type="button" id="autoToneSubjectBtn" onclick="autoTone('subject')" title="Expose for the subject; the background may go bright or white">Auto: Subject</button>
+        <button class="editor-btn" type="button" id="autoToneGentleBtn" onclick="autoTone('gentle')" title="Auto Tone at half strength, keeping the photo's mood">Auto: Gentle</button>
       </div>
       <div class="control-row">
         <label for="exposureRange">Exposure</label>

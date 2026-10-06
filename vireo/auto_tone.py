@@ -24,6 +24,16 @@ box), metering weights the subject: exposure blends subject and frame
 brightness, highlights also protect bright plumage on the subject, and
 shadows lift a dark subject rather than a deliberately dark background.
 
+Three styles share that fit:
+
+  balanced  the fit above.
+  subject   exposes for the subject the way a photographer does for a bird
+            against a bright sky: meters the subject alone, guards only the
+            subject's own highlights, and lets the background go bright or
+            clip. Without a subject it is the same as balanced.
+  gentle    balanced at half strength, for a photo whose mood is already
+            right: every fitted control moves half as far.
+
 White balance, texture, clarity, and dehaze are never set: an automatic
 neutral would remove a wanted cast such as golden-hour warmth, and the
 presence controls are taste. The current white balance and presence values
@@ -143,6 +153,16 @@ COLOUR_TARGET = 0.12
 # scene (snow, fog) never has a faint cast amplified.
 NEUTRAL_CHROMA = 0.05
 MIN_COLOURED_SHARE = 0.15
+
+# Subject style: the subject is metered all the way to mid-grey, up to this
+# many stops, and brightening stops before the subject's 80th percentile
+# passes HIGHLIGHT_GUARD. Not a higher percentile: a refined detection box
+# still holds a fringe of bright backdrop, which would stop a dark bird
+# against the sky after a stop or so.
+SUBJECT_STYLE_EXPOSURE_LIMIT = 4.0
+SUBJECT_STYLE_GUARD_QUANTILE = 0.8
+
+STYLES = ("balanced", "subject", "gentle")
 
 _BISECT_STEPS = 7
 
@@ -303,12 +323,12 @@ def _headroom_stops(rgb, *, input_linear, white_balance, weights):
     return math.log2(bright / HIGHLIGHT_KNEE)
 
 
-def _stops_to_grey(level):
+def _stops_to_grey(level, brighten_share=EXPOSURE_BRIGHTEN_SHARE, limit=EXPOSURE_LIMIT):
     """Damped exposure (stops) that moves a display level toward mid-grey."""
     level = max(float(level), 1e-3)
     full = math.log2(float(srgb_to_linear(MID_GREY)) / float(srgb_to_linear(level)))
-    share = EXPOSURE_BRIGHTEN_SHARE if full > 0 else EXPOSURE_DARKEN_SHARE
-    return EXPOSURE_LIMIT * math.tanh(share * full / EXPOSURE_LIMIT)
+    share = brighten_share if full > 0 else EXPOSURE_DARKEN_SHARE
+    return limit * math.tanh(share * full / limit)
 
 
 def _subject_weights(subject, shape):
@@ -324,9 +344,37 @@ def _subject_weights(subject, shape):
     return weights.ravel()
 
 
+def _halved(adj):
+    """Every fitted control at half its reach, on whole slider steps."""
+    halved = {key: _round_toward(value / 2.0, 1.0) + 0.0 for key, value in adj.items()}
+    halved["exposure"] = round(_round_toward(adj["exposure"] / 2.0, 0.1), 1) + 0.0
+    return halved
+
+
+def _describe(adj):
+    """Plain-language notes on what the fitted values change."""
+    notes = []
+    if adj["exposure"] >= 0.1:
+        notes.append(f"brightened {adj['exposure']:.1f} EV")
+    elif adj["exposure"] <= -0.1:
+        notes.append(f"darkened {abs(adj['exposure']):.1f} EV")
+    if adj["highlights"]:
+        notes.append("recovered highlights")
+    if adj["shadows"]:
+        notes.append("lifted shadows")
+    if adj["contrast"]:
+        notes.append("added contrast")
+    endpoints = [name for name, key in (("white", "whites"), ("black", "blacks")) if adj[key]]
+    if endpoints:
+        notes.append("set the " + " and ".join(endpoints) + " point" + ("s" if len(endpoints) > 1 else ""))
+    if adj["vibrance"] or adj["saturation"]:
+        notes.append("enriched muted colour")
+    return notes
+
+
 def fit(
     rgb, *, input_linear=False, range_radius=0, subject=None,
-    white_balance=None, presence=None, presence_scale=1.0,
+    white_balance=None, presence=None, presence_scale=1.0, style="balanced",
 ):
     """Fit Auto Tone to a pre-tone RGB buffer.
 
@@ -339,12 +387,16 @@ def fit(
         white_balance, presence: the photo's current white balance and
             texture/clarity/dehaze, rendered during the fit but not changed.
         presence_scale: output pixels per native pixel, for presence radii.
+        style: one of ``STYLES`` (see the module docstring).
 
     Returns:
-        ``{"adjustments": {...}, "metering": "subject"|"frame", "notes": [...]}``
-        where ``adjustments`` holds the eight fitted controls (zeros included)
-        and ``notes`` lists, in plain words, what the fit changed and why.
+        ``{"adjustments": {...}, "metering": "subject"|"frame",
+        "style": style, "notes": [...]}`` where ``adjustments`` holds the
+        eight fitted controls (zeros included) and ``notes`` lists, in plain
+        words, what the fit changed and why.
     """
+    if style not in STYLES:
+        raise ValueError(f"unknown Auto Tone style: {style!r}")
     rgb = np.asarray(rgb, dtype=np.float32)
     weights = _subject_weights(subject, rgb.shape[:2])
     fitter = _Fitter(
@@ -357,9 +409,9 @@ def fit(
         presence_scale=presence_scale,
     )
     has_subject = weights is not None
+    expose_for_subject = style == "subject" and has_subject
     subject_mask = weights > 0.5 if has_subject else None
     adj = {}
-    notes = []
 
     # --- exposure: bring the (subject-weighted) median toward mid-grey ---
     base = fitter.render({})
@@ -374,25 +426,30 @@ def fit(
         # Meter the subject on its brightest channel: a saturated blue or red
         # bird has low luma but is not underexposed.
         value = base.rgb.reshape(-1, 3).max(axis=1)
-        subject_ev = _stops_to_grey(_weighted_median(value, weights))
-        ev = SUBJECT_METERING_SHARE * subject_ev + (1.0 - SUBJECT_METERING_SHARE) * frame_ev
-        ev = min(frame_ev + SUBJECT_PULL_LIMIT, max(frame_ev - SUBJECT_PULL_LIMIT, ev))
+        subject_level = _weighted_median(value, weights)
+        if expose_for_subject:
+            ev = _stops_to_grey(
+                subject_level, brighten_share=1.0, limit=SUBJECT_STYLE_EXPOSURE_LIMIT,
+            )
+        else:
+            subject_ev = _stops_to_grey(subject_level)
+            ev = SUBJECT_METERING_SHARE * subject_ev + (1.0 - SUBJECT_METERING_SHARE) * frame_ev
+            ev = min(frame_ev + SUBJECT_PULL_LIMIT, max(frame_ev - SUBJECT_PULL_LIMIT, ev))
     if ev < 0:
         ev = max(ev, -_headroom_stops(
             rgb, input_linear=input_linear, white_balance=white_balance, weights=weights,
         ))
     ev = _round_toward(ev, 0.1)
     if ev > 0:
-        ev = _largest(
-            ev,
-            lambda amount: fitter.render({"exposure": amount}).frame(0.99) <= HIGHLIGHT_GUARD,
-            step=0.1,
-        )
+        if expose_for_subject:
+            def guarded(amount):
+                r = fitter.render({"exposure": amount})
+                return r.subject(SUBJECT_STYLE_GUARD_QUANTILE) <= HIGHLIGHT_GUARD
+        else:
+            def guarded(amount):
+                return fitter.render({"exposure": amount}).frame(0.99) <= HIGHLIGHT_GUARD
+        ev = _largest(ev, guarded, step=0.1)
     adj["exposure"] = round(ev, 1) + 0.0
-    if adj["exposure"] >= 0.1:
-        notes.append(f"brightened {adj['exposure']:.1f} EV")
-    elif adj["exposure"] <= -0.1:
-        notes.append(f"darkened {abs(adj['exposure']):.1f} EV")
 
     exposed = fitter.render(adj)
     # Pixels already at white cannot be pulled back by Highlights (the curve
@@ -403,7 +460,10 @@ def fit(
     # --- highlights: give bright areas their gradation back ---
     def highlights_ok(amount):
         r = fitter.render({**adj, "highlights": amount})
-        if r.share_above(HIGHLIGHT_CEILING, among=recoverable) > 0.03:
+        # The subject style lets the background go bright on purpose.
+        if not expose_for_subject and r.share_above(
+            HIGHLIGHT_CEILING, among=recoverable,
+        ) > 0.03:
             return False
         if has_subject:
             subject_recoverable = recoverable & subject_mask
@@ -414,12 +474,10 @@ def fit(
         return True
 
     adj["highlights"] = _bisect(HIGHLIGHTS_LIMIT, highlights_ok)
-    if adj["highlights"]:
-        notes.append("recovered highlights")
 
     # --- shadows: open up a dark subject or a crushed frame ---
     frame_floor = FRAME_SHADOW_FLOOR_WITH_SUBJECT if has_subject else FRAME_SHADOW_FLOOR
-    if low_key:
+    if low_key or expose_for_subject:
         frame_floor = 0.0
 
     def shadows_ok(amount):
@@ -431,8 +489,6 @@ def fit(
     adj["shadows"] = _bisect(
         SHADOWS_LIMIT_SUBJECT if has_subject else SHADOWS_LIMIT, shadows_ok,
     )
-    if adj["shadows"]:
-        notes.append("lifted shadows")
 
     # Contrast and blacks deepen dark tones. They may not push the shadows
     # back under the floors the Shadows fit worked to reach.
@@ -471,11 +527,8 @@ def fit(
         )
     else:
         adj["contrast"] = 0.0
-    if adj["contrast"]:
-        notes.append("added contrast")
 
     # --- whites / blacks: anchor the endpoints without clipping ---
-    endpoints = []
     adj["whites"] = 0.0
     adj["blacks"] = 0.0
     if has_range:
@@ -493,8 +546,6 @@ def fit(
             _bisect(WHITES_LIMIT, whites_reach),
             _largest(WHITES_LIMIT, whites_safe),
         )
-        if adj["whites"]:
-            endpoints.append("white")
 
         toned = fitter.render(adj)
         crushed0 = toned.share_below(CRUSHED)
@@ -513,10 +564,6 @@ def fit(
             _bisect(BLACKS_LIMIT, blacks_reach),
             _largest(BLACKS_LIMIT, blacks_safe),
         )
-        if adj["blacks"]:
-            endpoints.append("black")
-    if endpoints:
-        notes.append("set the " + " and ".join(endpoints) + " point" + ("s" if len(endpoints) > 1 else ""))
 
     # --- vibrance, then saturation: enliven muted colour only ---
     adj["vibrance"] = 0.0
@@ -543,13 +590,17 @@ def fit(
             adj["saturation"] = _bisect(
                 SATURATION_LIMIT, vivid(lambda a: {"saturation": a}),
             )
-        if adj["vibrance"] or adj["saturation"]:
-            notes.append("enriched muted colour")
 
     adjustments = {k: (float(v) + 0.0) for k, v in adj.items()}
+    if style == "gentle":
+        adjustments = _halved(adjustments)
+    notes = _describe(adjustments)
+    if style == "subject" and not has_subject:
+        notes.insert(0, "no subject found, so metered the whole frame as Balanced does")
     return {
         "adjustments": adjustments,
         "metering": "subject" if has_subject else "frame",
+        "style": style,
         "notes": notes,
     }
 
@@ -610,7 +661,9 @@ def _refine_box_subject(display, ellipse):
     return refined
 
 
-def fit_loaded_image(img, recipe, *, native_size=None, mask=None, box=None):
+def fit_loaded_image(
+    img, recipe, *, native_size=None, mask=None, box=None, style="balanced",
+):
     """Fit Auto Tone to a decoded source and the recipe being edited.
 
     ``img`` is the decoded edit source (PIL image, or a FloatImage — RAW is
@@ -619,7 +672,8 @@ def fit_loaded_image(img, recipe, *, native_size=None, mask=None, box=None):
     every other adjustment (including local edits) is ignored, so the result
     does not depend on the slider values Auto Tone replaces. ``mask`` (the
     active SAM mask, 'L') or ``box`` (primary detection, normalized) marks
-    the subject in source space. The result of :func:`fit` gains
+    the subject in source space; ``style`` is passed to :func:`fit`. The
+    result of :func:`fit` gains
     ``subject_source``: "mask", "detection", or None.
     """
     from PIL import Image
@@ -676,6 +730,7 @@ def fit_loaded_image(img, recipe, *, native_size=None, mask=None, box=None):
         white_balance=adjustments.get("white_balance"),
         presence={k: adjustments.get(k) for k in _PRESENCE_KEYS},
         presence_scale=scale,
+        style=style,
     )
     result["subject_source"] = subject_source if result["metering"] == "subject" else None
     return result

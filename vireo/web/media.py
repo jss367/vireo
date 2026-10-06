@@ -3854,7 +3854,7 @@ def create_media_blueprint(
 
     @blueprint.route("/api/photos/<int:photo_id>/auto-tone")
     def api_auto_tone(photo_id):
-        """Fit Auto Tone to the photo as framed by ``recipe``.
+        """Fit Auto Tone to the photo as framed by ``recipe``, in ``style``.
 
         Returns the fitted exposure, highlights, shadows, contrast, whites,
         blacks, vibrance and saturation, whether metering weighted the
@@ -3874,6 +3874,9 @@ def create_media_blueprint(
             return json_error("Invalid recipe")
         if not isinstance(recipe, dict):
             return json_error("Invalid recipe")
+        style = request.args.get("style") or "balanced"
+        if style not in auto_tone.STYLES:
+            return json_error("Unknown Auto Tone style")
 
         from image_edits import RecipeError, normalize_recipe
         try:
@@ -3921,6 +3924,7 @@ def create_media_blueprint(
         try:
             result = auto_tone.fit_loaded_image(
                 img, recipe, native_size=edit.native_dims, mask=mask, box=box,
+                style=style,
             )
         finally:
             img.close()

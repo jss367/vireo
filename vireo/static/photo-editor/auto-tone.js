@@ -9,23 +9,38 @@
 // controls stay as the user set them so a wanted cast such as golden-hour
 // warmth is never neutralised; the fit renders them, so it balances the photo
 // as it will look with them.
+//
+// Each style has its own button: Balanced (Auto Tone), Subject (expose for
+// the subject, letting the background go bright) and Gentle (half strength).
+// The buttons share one request at a time.
 
 var AUTO_TONE_KEYS = ['exposure', 'highlights', 'shadows', 'contrast', 'whites', 'blacks', 'vibrance', 'saturation'];
+var AUTO_TONE_STYLES = {
+  balanced: {button: 'autoToneBtn', label: 'Auto Tone'},
+  subject: {button: 'autoToneSubjectBtn', label: 'Auto Tone (Subject style)'},
+  gentle: {button: 'autoToneGentleBtn', label: 'Auto Tone (Gentle style)'},
+};
 
 function autoToneMessage(result, changedControls) {
   var notes = (result && result.notes) || [];
+  var style = AUTO_TONE_STYLES[result && result.style] || AUTO_TONE_STYLES.balanced;
+  var name = style.label;
   var metering = '';
   if (result && result.metering === 'subject') {
     metering = result.subject_source === 'detection'
       ? ' (metered on the detected subject)'
       : ' (metered on the subject mask)';
   }
-  if (!changedControls) return 'Auto Tone' + metering + ': already balanced, nothing changed';
+  // Subject style without a subject meters like Balanced; say so even when
+  // that fit changes nothing, or the click looks like a subject fit.
+  var fallback = result && result.style === 'subject' && result.metering !== 'subject'
+    ? 'no subject found, so metered the whole frame as Balanced does; ' : '';
+  if (!changedControls) return name + metering + ': ' + fallback + 'already balanced, nothing changed';
   if (!notes.length) {
-    return 'Auto Tone' + metering + ': Reset previous tone adjustments; source already balanced. White balance left unchanged.';
+    return name + metering + ': Reset previous tone adjustments; source already balanced. White balance left unchanged.';
   }
   var text = notes.join(', ');
-  return 'Auto Tone' + metering + ': ' + text.charAt(0).toUpperCase() + text.slice(1) +
+  return name + metering + ': ' + text.charAt(0).toUpperCase() + text.slice(1) +
     '. White balance left unchanged.';
 }
 
@@ -38,17 +53,23 @@ function _loadImage(src) {
   });
 }
 
-async function autoTone() {
+function autoToneButtons() {
+  return Object.keys(AUTO_TONE_STYLES).map(function(key) {
+    return document.getElementById(AUTO_TONE_STYLES[key].button);
+  }).filter(Boolean);
+}
+
+async function autoTone(style) {
   if (!editorState.photoId) return;
+  if (!AUTO_TONE_STYLES[style]) style = 'balanced';
   var photoId = editorState.photoId;
   var loadSeq = editorState.loadSeq;
-  var btn = document.getElementById('autoToneBtn');
-  if (btn && btn.disabled) return;
+  var buttons = autoToneButtons();
+  if (buttons.some(function(b) { return b.disabled; })) return;
+  var btn = document.getElementById(AUTO_TONE_STYLES[style].button);
   var prevLabel = btn ? btn.textContent : '';
-  if (btn) {
-    btn.disabled = true;
-    btn.textContent = 'Analyzing...';
-  }
+  buttons.forEach(function(b) { b.disabled = true; });
+  if (btn) btn.textContent = 'Analyzing...';
   try {
     // The fit reads the frame (geometry and crop), white balance and
     // presence from this recipe; its tonal values do not affect the result,
@@ -58,8 +79,8 @@ async function autoTone() {
     var startKey = recipeKey(editorState.recipe);
     var analysed = previewRecipeFor(editorState.recipe, true);
     delete analysed.local;
-    var result = await safeFetch('/api/photos/' + photoId + '/auto-tone?recipe=' +
-      encodeURIComponent(JSON.stringify(analysed)), {}, {toast: false});
+    var result = await safeFetch('/api/photos/' + photoId + '/auto-tone?style=' + style +
+      '&recipe=' + encodeURIComponent(JSON.stringify(analysed)), {}, {toast: false});
     if (editorState.photoId !== photoId || editorState.loadSeq !== loadSeq ||
         recipeKey(editorState.recipe) !== startKey) return;
     var auto = result.adjustments || {};
@@ -87,9 +108,7 @@ async function autoTone() {
         (e && e.message ? ': ' + e.message : ''), 'error');
     }
   } finally {
-    if (btn) {
-      btn.disabled = false;
-      btn.textContent = prevLabel || 'Auto Tone';
-    }
+    buttons.forEach(function(b) { b.disabled = false; });
+    if (btn) btn.textContent = prevLabel;
   }
 }
