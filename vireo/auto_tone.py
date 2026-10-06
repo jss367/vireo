@@ -13,6 +13,12 @@ Controls are fitted in a fixed order, each with the earlier ones applied:
   exposure -> highlights -> shadows -> contrast -> whites -> blacks
   -> vibrance -> saturation
 
+Exposure only darkens to recover detail a RAW source holds above display
+white. A bright frame with no such headroom (a JPEG or a camera-embedded
+preview, or a RAW whose brightest tones are already in range) is bright on
+purpose — an overcast sky, snow, a white bird — and pulling it toward
+mid-grey only turns it grey.
+
 When the photo has a subject (its active SAM mask, else its primary detection
 box), metering weights the subject: exposure blends subject and frame
 brightness, highlights also protect bright plumage on the subject, and
@@ -34,22 +40,26 @@ import numpy as np
 try:
     from .float_image import FloatImage
     from .tone import (
+        HIGHLIGHT_KNEE,
         LUMA_B,
         LUMA_G,
         LUMA_R,
         apply_adjustments,
         linear_to_srgb,
         srgb_to_linear,
+        white_balance_gains,
     )
 except ImportError:
     from float_image import FloatImage
     from tone import (
+        HIGHLIGHT_KNEE,
         LUMA_B,
         LUMA_G,
         LUMA_R,
         apply_adjustments,
         linear_to_srgb,
         srgb_to_linear,
+        white_balance_gains,
     )
 
 # Long edge the edit source is decoded at (before crop) for analysis.
@@ -70,6 +80,11 @@ EXPOSURE_LIMIT = 2.5
 # The limit keeps a dark bird from blowing out the sand or sky around it.
 SUBJECT_METERING_SHARE = 0.5
 SUBJECT_PULL_LIMIT = 0.75
+# Darkening recovers at most the stops that bring the frame's 99th
+# percentile (or the subject's 95th) of scene-linear luminance down to the
+# renderer's highlight knee; above it the shoulder is compressing detail.
+HEADROOM_FRAME_QUANTILE = 0.99
+HEADROOM_SUBJECT_QUANTILE = 0.95
 # Brightening stops before the frame's 99th percentile passes this level:
 # auto exposure never pushes more than 1% of the frame into the shoulder.
 HIGHLIGHT_GUARD = 0.97
@@ -258,11 +273,34 @@ class _Fitter:
         return result
 
 
-def _weighted_median(values, weights):
+def _weighted_quantile(values, weights, q):
     order = np.argsort(values)
     cumulative = np.cumsum(weights[order])
-    index = min(len(values) - 1, int(np.searchsorted(cumulative, cumulative[-1] / 2.0)))
+    index = min(len(values) - 1, int(np.searchsorted(cumulative, cumulative[-1] * q)))
     return float(values[order][index])
+
+
+def _weighted_median(values, weights):
+    return _weighted_quantile(values, weights, 0.5)
+
+
+def _headroom_stops(rgb, *, input_linear, white_balance, weights):
+    """Stops of darkening that still recover highlight detail.
+
+    Only a scene-linear (RAW) source holds tones above the renderer's
+    highlight knee; darkening brings them back out of the shoulder. A
+    display-referred source has nothing above white, so it has no headroom.
+    """
+    if not input_linear:
+        return 0.0
+    gains = np.asarray(white_balance_gains(white_balance), dtype=np.float32)
+    luma = np.maximum(_luma(rgb * gains), 0.0).ravel()
+    bright = float(np.quantile(luma, HEADROOM_FRAME_QUANTILE))
+    if weights is not None:
+        bright = max(bright, _weighted_quantile(luma, weights, HEADROOM_SUBJECT_QUANTILE))
+    if bright <= HIGHLIGHT_KNEE:
+        return 0.0
+    return math.log2(bright / HIGHLIGHT_KNEE)
 
 
 def _stops_to_grey(level):
@@ -339,6 +377,10 @@ def fit(
         subject_ev = _stops_to_grey(_weighted_median(value, weights))
         ev = SUBJECT_METERING_SHARE * subject_ev + (1.0 - SUBJECT_METERING_SHARE) * frame_ev
         ev = min(frame_ev + SUBJECT_PULL_LIMIT, max(frame_ev - SUBJECT_PULL_LIMIT, ev))
+    if ev < 0:
+        ev = max(ev, -_headroom_stops(
+            rgb, input_linear=input_linear, white_balance=white_balance, weights=weights,
+        ))
     ev = _round_toward(ev, 0.1)
     if ev > 0:
         ev = _largest(
