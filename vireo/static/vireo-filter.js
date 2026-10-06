@@ -78,6 +78,12 @@
   let toastTimer = null;
   let wouldMatchEpoch = 0;
   let localEdits = false;
+  // What quick-search terms match: 'all' (every metadata value) or
+  // 'keyword' (keyword names only). The toggle is remembered across pages;
+  // an applied search records its own scope in ``_qs_scope``, and the
+  // toggle follows it when the search is restored.
+  const SEARCH_SCOPE_KEY = 'vireo.filter.searchScope';
+  let searchScope = readSearchScope();
 
   const $ = (sel) => rootEl.querySelector(sel);
   const $$ = (sel) => Array.from(rootEl.querySelectorAll(sel));
@@ -423,6 +429,22 @@
     return state.root.rules.find((n) => isGroup(n) && n._qs);
   }
 
+  function readSearchScope() {
+    try {
+      return window.localStorage.getItem(SEARCH_SCOPE_KEY) === 'keyword' ? 'keyword' : 'all';
+    } catch (e) {
+      return 'all';
+    }
+  }
+
+  function groupScope(group) {
+    return group && group._qs_scope === 'keyword' ? 'keyword' : 'all';
+  }
+
+  function quickSearchLabel(group) {
+    return groupScope(group) === 'keyword' ? 'Keywords' : 'Search';
+  }
+
   function chipEntries() {
     const entries = [];
     if (state.visual) {
@@ -440,7 +462,7 @@
     state.root.rules.forEach((node) => {
       const fromShortcut = isGroup(node) && !node._qs ? shortcutLabelFor(node) : null;
       if (isGroup(node) && node._qs) {
-        entries.push({ node, label: `Search: “${node._qs_text}”`, qs: true });
+        entries.push({ node, label: `${quickSearchLabel(node)}: “${node._qs_text}”`, qs: true });
       } else if (fromShortcut) {
         // A grouped expression set by one button removes as one chip.
         entries.push({ node, label: fromShortcut });
@@ -691,10 +713,13 @@
   // ---- quick search -----------------------------------------------------
 
   function buildQuickSearchGroup(text) {
-    return {
+    const keywordOnly = searchScope === 'keyword';
+    const group = {
       mode: 'all', _qs: true, _qs_text: text, _qs_version: 2,
-      rules: [window.VireoSearch.parse(text)],
+      rules: [window.VireoSearch.parse(text, { field: keywordOnly ? 'keyword' : 'metadata' })],
     };
+    if (keywordOnly) group._qs_scope = 'keyword';
+    return group;
   }
 
   function setSearchError(message) {
@@ -738,7 +763,8 @@
     setSearchError('');
     const current = quickSearchGroup();
     if ((!value && !current) ||
-        (value && current && current._qs_text === value && current._qs_version === 2 && !state.visual)) return;
+        (value && current && current._qs_text === value && current._qs_version === 2 &&
+         groupScope(current) === searchScope && !state.visual)) return;
     // A cleared quick search widens the result set, so the previously
     // selected/open photo is expected to reappear. Flag it so the page can
     // preserve the anchor for this case without reintroducing preservation
@@ -792,9 +818,10 @@
     const q = input.value.trim();
     if (!drop) return;
     if (!q) { drop.hidden = true; return; }
+    const keywordOnly = searchScope === 'keyword';
     drop.innerHTML = `
-      <p class="vf-search-help">Search all metadata. Use AND, OR, NOT, parentheses, or &quot;quoted phrases&quot;.</p>
-      <button type="button" data-search-kind="text"><span>⌕</span><span>Text matches for “${esc(q)}”</span><em>Live</em></button>
+      <p class="vf-search-help">${keywordOnly ? 'Search keyword names only' : 'Search all metadata'}. Use AND, OR, NOT, parentheses, or &quot;quoted phrases&quot;.</p>
+      <button type="button" data-search-kind="text"><span>⌕</span><span>${keywordOnly ? 'Keyword' : 'Text'} matches for “${esc(q)}”</span><em>Live</em></button>
       <button type="button" data-search-kind="visual" class="vf-suggest-visual"><span>✦</span><span>Visually similar to “${esc(q)}”</span><em></em></button>`;
     drop.hidden = false;
   }
@@ -827,6 +854,32 @@
     if (!input || quickSearchTimer !== null || document.activeElement === input || input.getAttribute('aria-invalid') === 'true') return;
     const group = quickSearchGroup();
     input.value = group ? group._qs_text : (state.visual ? state.visual.prompt : '');
+    if (group) searchScope = groupScope(group);
+  }
+
+  function renderSearchScope() {
+    const btn = $('.vf-search-scope');
+    const input = $('.vf-search input');
+    if (!btn || !input) return;
+    const keywordOnly = searchScope === 'keyword';
+    btn.classList.toggle('active', keywordOnly);
+    btn.setAttribute('aria-pressed', keywordOnly ? 'true' : 'false');
+    btn.title = keywordOnly
+      ? 'Matching keyword names only. Click to search all metadata.'
+      : 'Searching all metadata. Click to match keyword names only.';
+    input.placeholder = keywordOnly ? 'Search keywords…' : 'Search photos…';
+    input.title = `${keywordOnly ? 'Search keyword names only' : 'Search all metadata'}. Use AND, OR, NOT, parentheses, or "quoted phrases".`;
+  }
+
+  function toggleSearchScope() {
+    searchScope = searchScope === 'keyword' ? 'all' : 'keyword';
+    try { window.localStorage.setItem(SEARCH_SCOPE_KEY, searchScope); } catch (e) { /* private mode */ }
+    renderSearchScope();
+    const input = $('.vf-search input');
+    // Re-run the typed search in the new scope. A visual clause keeps its
+    // prompt; the toggle only decides what the next text search matches.
+    if (input.value.trim() && !state.visual) applyQuickSearch(input.value);
+    if (document.activeElement === input) showSearchSuggest();
   }
 
   // ---- rendering --------------------------------------------------------
@@ -834,6 +887,7 @@
   function render() {
     if (!state.ready) return;
     syncQuickSearchInput();
+    renderSearchScope();
     renderRules();
     renderLight();
   }
@@ -1255,7 +1309,7 @@
     if (isGroup(node)) {
       if (node._qs) {
         return `<div class="vf-rule-row vf-qs-row">
-          <span class="vf-qs-label">Search: ${esc(node._qs_text)}</span>
+          <span class="vf-qs-label">${quickSearchLabel(node)}: ${esc(node._qs_text)}</span>
           <button class="vf-remove" data-action="remove" data-path="${path}" type="button" aria-label="Remove search">×</button>
         </div>`;
       }
@@ -1530,6 +1584,12 @@
       else if (!searchInput.value.trim() && state.visual) applyVisualSearch('');
       else syncQuickSearchInput();
     });
+    const scopeBtn = $('.vf-search-scope');
+    if (scopeBtn) {
+      // mousedown keeps focus (and the suggestion list) in the search box.
+      scopeBtn.addEventListener('mousedown', (e) => e.preventDefault());
+      scopeBtn.addEventListener('click', toggleSearchScope);
+    }
     const searchSuggest = $('.vf-search-suggest');
     if (searchSuggest) {
       // mousedown beats the input's blur, so the pick is never lost.
