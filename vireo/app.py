@@ -1800,9 +1800,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             clear_preview_cache_invalid=render_cache.clear_preview_cache_invalid,
         )
     )
-    # The prepare-full-resolution job calls the /original view directly so
-    # its RAW/companion/edit fallbacks cannot drift from the lightbox's.
+    # The prepare-full-resolution job calls the /original and /preview views
+    # directly so its RAW/companion/edit fallbacks cannot drift from the
+    # lightbox's.
     serve_original_photo = app.view_functions["media.serve_original_photo"]
+    serve_photo_preview = app.view_functions["media.serve_photo_preview"]
 
     app.register_blueprint(create_photo_labels_blueprint(_get_db, json_error))
     app.register_blueprint(create_photo_review_blueprint(_get_db, json_error))
@@ -2052,9 +2054,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             ),
             guard_move_folder=folder_moves.guard_error,
             start_move_folder_job=folder_moves.start_job,
-            # Late-bound so it resolves whichever ``serve_original_photo``
-            # create_app holds when a job runs, not when the app is built.
+            # Late-bound so they resolve whichever views create_app holds
+            # when a job runs, not when the app is built.
             serve_original_photo=lambda *args, **kwargs: serve_original_photo(
+                *args, **kwargs
+            ),
+            serve_photo_preview=lambda *args, **kwargs: serve_photo_preview(
                 *args, **kwargs
             ),
             sync_job_lock=app._sync_job_lock,
