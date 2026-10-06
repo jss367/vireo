@@ -21830,6 +21830,64 @@ def test_same_subject_disagreement_stays_ambiguous(app_and_db):
     assert entry["ambiguous_prediction_ids"] == [common]
 
 
+def test_burst_consensus_attributes_species_to_its_detection(app_and_db):
+    """A mixed-label burst minority frame must index under its consensus.
+
+    Codex flagged this on the multi-subject fix: ``accept_prediction`` tags
+    a burst's consensus species, not the row's raw label, so the index of
+    "which detection holds which species on this photo" has to key on the
+    consensus too. Otherwise a Sparrow-labelled frame whose burst votes
+    make Robin the winner would be indexed as holding Sparrow; after accept
+    tags Robin on the photo, a neighbouring detection's Little Egret sees
+    an unattributed Robin keyword and goes to Review as a conflict.
+    """
+    import json as _json
+    app, db = app_and_db
+    client = app.test_client()
+    # Seed the Little Egret detection first; then promote the sparrow
+    # row to a burst-minority frame whose consensus is Robin.
+    folder_id = db.get_folder_tree()[0]["id"]
+    photo_id = db.add_photo(
+        folder_id=folder_id, filename="mixed-burst.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    det_ids = db.save_detections(
+        photo_id,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3},
+          "confidence": 0.9, "category": "animal"},
+         {"box": {"x": 0.6, "y": 0.6, "w": 0.3, "h": 0.3},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )
+    db.add_prediction(
+        det_ids[0], "Sparrow", 0.9, "bioclip",
+        labels_fingerprint="fp1",
+        group_id="mixed-burst-1",
+        individual=_json.dumps({"Robin": 2, "Sparrow": 1}),
+    )
+    db.add_prediction(
+        det_ids[1], "Little Egret", 0.9, "bioclip",
+        labels_fingerprint="fp1",
+    )
+
+    sparrow_pred = _prediction_id(db, photo_id, "Sparrow")
+    egret = _prediction_id(db, photo_id, "Little Egret")
+
+    # Accepting the minority frame tags Robin (the consensus), not Sparrow.
+    resp = client.post(
+        "/api/predictions/batch-accept", json={"prediction_ids": [sparrow_pred]},
+    )
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    names = {k["name"] for k in db.get_photo_keywords(photo_id)}
+    assert "Robin" in names and "Sparrow" not in names
+
+    # The egret ID on the other detection must still be acceptable: Robin
+    # belongs to the other subject, so it must not surface as a conflict.
+    entry = _suggestion_for(client, [photo_id], "Little Egret")
+    assert entry["acceptable_prediction_ids"] == [egret]
+    assert entry["ambiguous_prediction_ids"] == []
+
+
 def test_batch_accept_leaves_earlier_accept_untouched_when_resubmitted(app_and_db):
     """Filtering already-accepted ids must not leak their photos into a
     sibling's grouped scope.

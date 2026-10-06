@@ -665,8 +665,10 @@ class PredictionRepository:
         ``labels_fingerprint`` per ``(detection, model)``, not rejected or an
         alternative in the active workspace, on a detection at or above the
         workspace's ``detector_confidence``. Rows carry the columns
-        ``SpeciesResolver.prediction`` reads, so callers compare identities
-        rather than spellings.
+        ``SpeciesResolver.consensus`` reads — including ``group_id`` and
+        ``individual`` from ``prediction_review`` — so a mixed-label burst
+        minority frame is indexed under the species acceptance would actually
+        apply (the burst consensus), not its own raw label.
         """
         if not photo_ids:
             return {}
@@ -682,7 +684,9 @@ class PredictionRepository:
             for row in self.conn.execute(
                 f"""SELECT d.photo_id, pr.detection_id, pr.species,
                            pr.scientific_name, pr.source_taxon_id,
-                           pr.classifier_model, pr.labels_fingerprint
+                           pr.classifier_model, pr.labels_fingerprint,
+                           pr_rev.group_id AS group_id,
+                           pr_rev.individual AS individual
                     FROM predictions pr
                     JOIN detections d ON d.id = pr.detection_id
                     LEFT JOIN prediction_review pr_rev
