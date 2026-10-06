@@ -1205,3 +1205,134 @@ def test_preparation_guard_accepts_matching_recipe(client_with_photo):
     for size in (1920, 2560, 3840):
         assert db.preview_cache_get(photo_id, size), size
         assert (preview_dir / f"{photo_id}_{size}.jpg").is_file(), size
+
+
+def test_prepare_raw_jpeg_pair_warms_paired_jpeg_tiers(
+    client_with_photo, monkeypatch,
+):
+    """A RAW+JPEG pair's paired-JPEG preview tiers are a cache hit after prep.
+
+    The lightbox defaults a RAW+JPEG pair to the JPEG and appends
+    ``?source=jpeg`` to every render URL; ``_serve_preview`` bypasses the
+    ordinary ``(photo_id, size)`` cache for source-specific requests and
+    writes a paired shadow cache instead. Without warming the paired tiers
+    the first fit-size request still decoded the companion JPEG, so the
+    job must report the pair ready only when the paired tiers are on disk.
+    """
+    import image_loader
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    folder_path = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id "
+        "WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()["path"]
+    # Convert the fixture's photo into a RAW+JPEG pair by renaming the
+    # primary to a RAW extension and adding a companion JPEG next to it.
+    # A real NEF decoder isn't available in tests; the stub only has to
+    # make ``is_raw_jpeg_pair`` see a RAW primary. The ``load_image``
+    # patch below mirrors what production does when a RAW can't decode
+    # for the ordinary ``/preview`` and ``/original`` paths: fall back
+    # to the companion JPEG. The ``?source=jpeg`` paired path never
+    # touches the RAW at all.
+    raw_path = os.path.join(folder_path, "paired.NEF")
+    with open(raw_path, "wb") as raw_file:
+        raw_file.write(b"stub raw bytes")
+    companion_path = os.path.join(folder_path, "paired.jpg")
+    Image.new("RGB", (800, 600), (90, 170, 60)).save(
+        companion_path, "JPEG", quality=85,
+    )
+    raw_stat = os.stat(raw_path)
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='paired.NEF', extension='.nef',
+               companion_path='paired.jpg', width=800, height=600,
+               file_size=?, file_mtime=?, working_copy_path=NULL
+           WHERE id=?""",
+        (raw_stat.st_size, raw_stat.st_mtime, photo_id),
+    )
+    db.conn.commit()
+    # Setting a recipe routes /original through ``serve_edited`` whose
+    # ``_rescue_failed_edit_decode`` falls back to the companion when
+    # the RAW can't decode — the same fallback the ``/preview`` path
+    # uses. This keeps the stub NEF harmless so the test can focus on
+    # the paired-cache warming the finding is about.
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+
+    original_load_image = image_loader.load_image
+    paired_jpeg_decodes = []
+
+    def paired_aware_load_image(path, *args, **kwargs):
+        if str(path).lower().endswith(".nef"):
+            return None  # force the companion-JPEG fallback
+        if str(path) == companion_path:
+            paired_jpeg_decodes.append(str(path))
+        return original_load_image(path, *args, **kwargs)
+
+    monkeypatch.setattr(
+        image_loader, "load_image", paired_aware_load_image,
+    )
+
+    started = client.post(
+        "/api/jobs/prepare-full-resolution", json={"photo_ids": [photo_id]},
+    )
+    job = wait_for_job_via_client(client, started.get_json()["job_id"])
+    assert job["status"] == "completed", job
+    result = job["result"]
+    assert result["ok"] is True, result
+    assert result["ready"] == 1, result
+    assert result["failed"] == 0, result
+
+    preview_dir = Path(os.path.dirname(app.config["THUMB_CACHE_DIR"]), "previews")
+    paired_dir = preview_dir / "paired"
+    assert paired_dir.is_dir()
+    for size in (1920, 2560, 3840):
+        matches = list(paired_dir.glob(f"{photo_id}_{size}_jpeg_*.jpg"))
+        assert matches, f"no paired JPEG preview for size {size}"
+        assert any(m.stat().st_size > 0 for m in matches), size
+
+    decodes_after_prep = len(paired_jpeg_decodes)
+
+    # The lightbox default: /preview?size=N&source=jpeg must now be a
+    # cache hit — no further companion decodes after preparation.
+    for size in (1920, 2560, 3840):
+        url = f"/photos/{photo_id}/preview?size={size}&source=jpeg"
+        response = client.get(url)
+        assert response.status_code == 200, (url, response.status_code)
+        with Image.open(io.BytesIO(response.data)) as image:
+            # The paired path renders the companion as-authored, so the
+            # response is the companion's own geometry rather than the
+            # catalog row's (which, for a RAW+JPEG pair, may differ).
+            assert image.size[0] > 0 and image.size[1] > 0, url
+        response.close()
+    assert len(paired_jpeg_decodes) == decodes_after_prep, (
+        "lightbox JPEG fit view decoded again after preparation: "
+        f"{paired_jpeg_decodes[decodes_after_prep:]}"
+    )
+
+
+def test_prepare_non_pair_does_not_warm_paired_cache(client_with_photo):
+    """A plain JPEG photo must not produce paired shadow cache entries.
+
+    Non-pair photos never request ``?source=jpeg`` from the lightbox,
+    so warming a paired tier for them would waste both a decode and a
+    cache slot. The pair gate must only fire for RAW primaries with
+    JPEG companions.
+    """
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+
+    started = client.post(
+        "/api/jobs/prepare-full-resolution", json={"photo_ids": [photo_id]},
+    )
+    job = wait_for_job_via_client(client, started.get_json()["job_id"])
+    assert job["status"] == "completed", job
+    assert job["result"]["ready"] == 1
+
+    preview_dir = Path(os.path.dirname(app.config["THUMB_CACHE_DIR"]), "previews")
+    paired_dir = preview_dir / "paired"
+    # No paired entries exist (and the directory does not need to).
+    assert not paired_dir.exists() or not list(
+        paired_dir.glob(f"{photo_id}_*.jpg")
+    )
