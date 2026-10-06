@@ -154,6 +154,10 @@ function buildPhotoContextMenu(photoIds, contextPhotoId) {
   var developmentSourceId = contextPhotoId != null
     ? Number(contextPhotoId)
     : (one ? Number(photoIds[0]) : null);
+  // Only a loaded photo's known status disables "View on Map"; anything else
+  // goes to the map, which explains a photo it cannot place.
+  var oneLoaded = one ? photos.find(function(p) { return p.id === Number(photoIds[0]); }) : null;
+  var noMapLocation = !!oneLoaded && oneLoaded.location_status === 'none';
   var copiedDevelopment = window.vireoEditNav
     ? window.vireoEditNav.getCopiedRecipe()
     : null;
@@ -207,7 +211,8 @@ function buildPhotoContextMenu(photoIds, contextPhotoId) {
     { separator: true },
     { label: 'Find Similar', disabled: !one, disabledHint: hint,
       onClick: function() { if (typeof findSimilar === 'function') findSimilar(photoIds[0]); } },
-    { label: 'View on Map', disabled: !one, disabledHint: hint,
+    { label: 'View on Map', disabled: !one || noMapLocation,
+      disabledHint: one ? 'No map coordinates: no EXIF GPS and no location linked to a place' : hint,
       onClick: function() { viewPhotoOnMap(photoIds[0]); } },
     { label: 'Review on Map',
       onClick: function() { reviewLocationsForSelection(); } },

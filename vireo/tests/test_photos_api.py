@@ -1521,6 +1521,70 @@ def test_api_photos_geo_caps_payload_and_preserves_focused_photo(
     assert focus_id in {photo["id"] for photo in data["photos"]}
 
 
+def test_api_photos_geo_unplottable_focus_names_coordless_location(app_and_db):
+    """A deep-linked photo that cannot be placed returns no markers and says
+    why, naming the name-only location the user could link to a place."""
+    app, db = app_and_db
+    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    db.conn.execute(
+        "UPDATE photos SET latitude=37.77, longitude=-122.42 WHERE filename='bird1.jpg'"
+    )
+    db.conn.commit()
+    lake = db.add_keyword("Laguna Lake", kw_type="location")
+    db.tag_photo(photos["bird2.jpg"], lake)
+
+    resp = app.test_client().get(f"/api/photos/geo?photo_id={photos['bird2.jpg']}")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["photos"] == []
+    assert data["truncated"] is False
+    assert data["unplottable_focus"] == {
+        "id": photos["bird2.jpg"],
+        "filename": "bird2.jpg",
+        "reason": "no_coordinates",
+        "location_keywords": [{"id": lake, "name": "Laguna Lake"}],
+    }
+
+
+def test_api_photos_geo_unplottable_focus_unavailable_and_not_found(app_and_db):
+    """A photo with coordinates whose folder is offline, and an unknown id,
+    get their own reasons rather than a misleading "no coordinates"."""
+    app, db = app_and_db
+    photo = next(p for p in db.get_photos() if p["filename"] == "bird1.jpg")
+    db.conn.execute(
+        "UPDATE photos SET latitude=37.77, longitude=-122.42 WHERE id=?",
+        (photo["id"],),
+    )
+    db.conn.execute(
+        "UPDATE folders SET status = 'missing' WHERE id = ?", (photo["folder_id"],),
+    )
+    db.conn.commit()
+    client = app.test_client()
+
+    offline = client.get(f"/api/photos/geo?photo_id={photo['id']}").get_json()
+    assert offline["photos"] == []
+    assert offline["unplottable_focus"]["reason"] == "unavailable"
+
+    missing = client.get("/api/photos/geo?photo_id=999999").get_json()
+    assert missing["unplottable_focus"] == {"id": 999999, "reason": "not_found"}
+
+
+def test_api_photos_geo_plottable_focus_has_no_unplottable_notice(app_and_db):
+    app, db = app_and_db
+    photo = db.get_photos()[0]
+    db.conn.execute(
+        "UPDATE photos SET latitude=37.77, longitude=-122.42 WHERE id=?",
+        (photo["id"],),
+    )
+    db.conn.commit()
+
+    data = app.test_client().get(f"/api/photos/geo?photo_id={photo['id']}").get_json()
+
+    assert [p["id"] for p in data["photos"]] == [photo["id"]]
+    assert "unplottable_focus" not in data
+
+
 def test_api_photos_geo_includes_gps_stats(app_and_db):
     """GET /api/photos/geo response includes consistent global GPS stats."""
     app, db = app_and_db

@@ -1949,7 +1949,7 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   background: var(--bg-tertiary);
 }
 .vireo-ctx-disabled {
-  color: var(--text-tertiary); cursor: default;
+  color: var(--text-dim); cursor: default;
 }
 .vireo-ctx-sep {
   height: 1px; background: var(--border-secondary);

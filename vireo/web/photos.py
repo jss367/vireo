@@ -83,6 +83,32 @@ log = logging.getLogger(__name__)
 MAP_RENDER_PHOTO_LIMIT = 10_000
 
 
+def _unplottable_map_focus(db, photo_id):
+    """Explain why a deep-linked photo is absent from the Map's photo set.
+
+    ``reason`` is ``not_found`` (no such photo in the active workspace),
+    ``no_coordinates`` (no EXIF GPS pair and no assigned location with
+    coordinates; ``location_keywords`` lists the name-only locations that
+    could be linked to a place), or ``unavailable`` (it has coordinates but
+    the map's scope excludes it, e.g. its folder is offline or missing).
+    """
+    photo = db.get_photo(photo_id, verify_workspace=True)
+    if photo is None:
+        return {"id": photo_id, "reason": "not_found"}
+    focus = {"id": photo_id, "filename": photo["filename"]}
+    status = db.get_photo_location_statuses([photo_id]).get(photo_id, "none")
+    if status != "none":
+        focus["reason"] = "unavailable"
+        return focus
+    focus["reason"] = "no_coordinates"
+    focus["location_keywords"] = [
+        {"id": k["id"], "name": k["name"]}
+        for k in db.get_photo_keywords(photo_id)
+        if k["type"] == "location"
+    ]
+    return focus
+
+
 def create_photos_blueprint(
     get_db,
     json_error,
@@ -948,7 +974,17 @@ def create_photos_blueprint(
         total_geolocated = total_photos - total_without_coordinates
 
         total_filtered = len(photos)
-        visible_photos = list(photos[:MAP_RENDER_PHOTO_LIMIT])
+        unplottable_focus = None
+        if (
+            focus_photo_id is not None
+            and all(p["id"] != focus_photo_id for p in photos)
+        ):
+            # Plotting the whole library around a photo that is not on it
+            # reads as "here is your photo". Send no markers and say why.
+            unplottable_focus = _unplottable_map_focus(db, focus_photo_id)
+            visible_photos = []
+        else:
+            visible_photos = list(photos[:MAP_RENDER_PHOTO_LIMIT])
         # A deep-linked photo must remain reachable even when it falls beyond
         # the safety ceiling in the default date ordering. Replace the last
         # visible row rather than exceeding the bound.
@@ -969,7 +1005,9 @@ def create_photos_blueprint(
             "total_filtered": total_filtered,
             "total_rendered": len(photo_dicts),
             "render_limit": MAP_RENDER_PHOTO_LIMIT,
-            "truncated": total_filtered > len(photo_dicts),
+            "truncated": (
+                unplottable_focus is None and total_filtered > len(photo_dicts)
+            ),
             "total_photos": total_photos,
             "total_geolocated": total_geolocated,
             "total_without_coordinates": total_without_coordinates,
@@ -983,6 +1021,8 @@ def create_photos_blueprint(
         # visual search that silently returned metadata-only matches.
         if visual_info is not None:
             response["visual"] = visual_info
+        if unplottable_focus is not None:
+            response["unplottable_focus"] = unplottable_focus
         return jsonify(response)
 
     @blueprint.route("/api/photos/<int:photo_id>/wildlife_excluded", methods=["POST"])
