@@ -63,7 +63,6 @@ from resource_ledger import (
     get_resource_ledger,
     suspend_resource_wait_timing,
 )
-from sql_chunks import chunked
 from xmp import read_hierarchical_keywords, read_keywords
 
 log = logging.getLogger(__name__)
@@ -1376,6 +1375,14 @@ def _run_post_commit_fs_actions(post_commit_fs_actions):
             )
 
 
+class _MergedPhotoIds(dict):
+    """Merged ids plus the RAW identities that actually absorbed them."""
+
+    def __init__(self):
+        super().__init__()
+        self.owners = {}
+
+
 def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
     """Find raw+JPEG pairs in the same folder and merge them.
 
@@ -1423,13 +1430,10 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
     # handed out. Collected at the DELETE but only returned after the
     # commit below succeeds — the whole loop shares one transaction, so a
     # commit failure rolls every deletion back and none of them happened.
-    merged_ids = {}
+    merged_ids = _MergedPhotoIds()
 
-    # Every companion row is deleted through one ``PhotoRowDeletion``, so
-    # the collections naming any of them are rewritten once, when the block
-    # exits, instead of once per pair (each rewrite parses every
-    # collection). The rewrite runs in the same transaction as the pair
-    # deletes and is rolled back with them if the commit fails.
+    # The deletion chokepoint batches collection rewrites for all pairs;
+    # retain each RAW identity for ownership-checked callback publication.
     with photo_row_deletion(db.conn) as photo_rows:
         for (_folder_id, _base), members in groups.items():
             for primary, companion in _pick_compatible_raw_jpeg_pairs(members):
@@ -1438,6 +1442,9 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
                     post_commit_fs_actions, photo_rows,
                 )
                 merged_ids[companion["id"]] = primary["id"]
+                merged_ids.owners[primary["id"]] = (
+                    primary["folder_id"], primary["filename"],
+                )
                 if vireo_dir:
                     _defer_companion_derivative_cleanup(
                         post_commit_fs_actions, companion, vireo_dir,
@@ -3713,6 +3720,9 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             A JPEG the scan pairs with its RAW is reported under the RAW's
             id; it is never inserted as a photo first.
         photo_merged_callback: optional callable(old_id, new_id, path_str)
+            If the surviving RAW was deleted or replaced before publication,
+            new_id and path_str are None: discard old_id without adopting
+            a missing or unrelated replacement row.
             called after the end-of-scan pairing pass merges an existing
             JPEG photo into the RAW row ``new_id`` at ``path_str``. Called
             for every merge that pass commits, which can include pairs
@@ -5047,6 +5057,10 @@ class _ScanRun:
             for key in list(self._waiting_companions):
                 self._resolve_companion_group(key)
         except BaseException:
+            # Waiting JPEGs have not been indexed or reported yet. Leave
+            # them untouched if their group is interrupted: the partial
+            # folder status makes the next scan retry the whole group.
+            # Do not attempt new pairing writes after a database failure.
             # Per-file loop died mid-way (DB error, signal, etc). Roll back any
             # half-applied write so the partial-status UPDATE below runs on a
             # clean transaction, then flag every folder in scope as 'partial' so
@@ -5335,23 +5349,38 @@ class _ScanRun:
                 self._import_companion_sidecar(
                     image_path, {"owner_id": owner_id},
                 )
-                # Reported while ownership is still locked, like
-                # ``_finish_known_companion``: the id is the RAW's.
                 self.processed_count += 1
                 self.counts["merged_companions"] += 1
-                if self.photo_callback:
-                    self.photo_callback(owner_id, str(image_path))
         except _CompanionAttachRefused:
             # ``_commits_held`` rolled back already, unless the connection
             # cannot hold commits; the refusals precede every other write.
             db.conn.rollback()
             return False
+        # Report AFTER ``_commits_held`` releases: the thumbnail worker runs
+        # on a separate connection and only sees committed data. If the
+        # callback fired inside the guard, a queue entry whose canonical
+        # path falls back to the companion (missing RAW) would be checked
+        # against a row where ``companion_path`` is still NULL and
+        # ``_still_owns`` would drop it. Unlike ``_finish_known_companion``,
+        # which handles an unchanged companion whose ``companion_path`` was
+        # committed by an earlier scan, this attach is the write that first
+        # makes the pairing visible.
+        #
+        # Invalidate the RAW's display cache before the callback: a
+        # callback that raises leaves the pairing committed, and the next
+        # incremental scan takes ``_finish_known_companion`` instead,
+        # which does not re-invalidate. Running the post-commit filesystem
+        # actions first means a stale pre-pairing render cannot survive a
+        # callback failure, and ``_run_post_commit_fs_actions`` already
+        # catches per-action errors so it will not skip the callback.
         if self.vireo_dir:
             actions = []
             _defer_primary_display_cache_invalidation(
                 actions, {"id": owner_id}, self.vireo_dir, self.thumb_cache_dir,
             )
             _run_post_commit_fs_actions(actions)
+        if self.photo_callback:
+            self.photo_callback(owner_id, str(image_path))
         if self.progress_callback:
             self.progress_callback(self.processed_count, self.total)
         return True
@@ -5584,29 +5613,31 @@ class _ScanRun:
     def _add_photo(self, item):
         """Insert (or find) the row and credit it; returns the photo id."""
         vireo_dir = self.vireo_dir
-        photo_id = self.db.add_photo(
-            folder_id=item.folder_id,
-            filename=item.image_path.name,
-            extension=item.image_path.suffix.lower(),
-            file_size=item.file_size,
-            file_mtime=item.file_mtime,
-            xmp_mtime=item.xmp_mtime,
-            timestamp=item.meta.timestamp,
-            width=item.meta.width,
-            height=item.meta.height,
-        )
-        # Credit the photo the moment its row is durable — add_photo
-        # commits before returning. Several fallible steps run below
-        # (cache invalidation, XMP keyword import, duplicate
-        # auto-resolve, photo_callback), and one of them raising must
-        # not leave the sink reporting fewer photos than the catalog
-        # actually holds. ``processed_count`` stays at the end of the
-        # iteration: it drives the progress bar, which should only
-        # advance once the file is genuinely done with.
+        # Keep insertion and inherited-membership cleanup under the same
+        # writer lock. A second connection may legitimately add the new
+        # photo to a collection as soon as the row becomes visible; cleanup
+        # after add_photo commits would mistake that membership for stale.
+        with self.db._commits_held():
+            photo_id, inserted = self.db.add_photo(
+                folder_id=item.folder_id,
+                filename=item.image_path.name,
+                extension=item.image_path.suffix.lower(),
+                file_size=item.file_size,
+                file_mtime=item.file_mtime,
+                xmp_mtime=item.xmp_mtime,
+                timestamp=item.meta.timestamp,
+                width=item.meta.width,
+                height=item.meta.height,
+                return_inserted=True,
+            )
+            # The pre-check can miss a concurrent winning INSERT. Only
+            # the actual inserter may remove inherited memberships.
+            if inserted:
+                self._drop_inherited_collection_membership(photo_id)
+        # Credit the row after the insert and cleanup are durable. Later
+        # cache invalidation or callbacks may fail without losing this count.
         self.counts["indexed"] += 1
         self.indexed_photo_ids.add(photo_id)
-        if not item.row_already_existed:
-            self._drop_inherited_collection_membership(photo_id)
 
         # A brand-new row may have claimed a *recycled* rowid (see
         # ``purge_cached_files_for_recycled_id``). Cached derivatives
@@ -5615,7 +5646,7 @@ class _ScanRun:
         # this an O(1) set lookup per insert; only ids that actually
         # collide do real work.
         if (
-            not item.row_already_existed
+            inserted
             and vireo_dir
             and purge_cached_files_for_recycled_id(
                 self.thumb_cache_dir or os.path.join(vireo_dir, "thumbnails"),
@@ -5918,19 +5949,25 @@ class _ScanRun:
         """Tell ``photo_merged_callback`` which RAW absorbed each merged id."""
         if not merged or self.photo_merged_callback is None:
             return
-        paths = {}
-        for chunk in chunked(sorted(set(merged.values()))):
-            placeholders = ",".join("?" for _ in chunk)
-            for row in self.db.conn.execute(
-                "SELECT p.id, f.path, p.filename FROM photos p"
-                " JOIN folders f ON f.id = p.folder_id"
-                f" WHERE p.id IN ({placeholders})",
-                chunk,
-            ):
-                paths[row[0]] = os.path.join(row[1], row[2])
-        for old_id, new_id in merged.items():
-            if new_id in paths:
-                self.photo_merged_callback(old_id, new_id, paths[new_id])
+        # Pairing has committed, so readers on other connections can see
+        # the merge. Reacquire the writer lock before validating the RAW
+        # and publishing its id; deletion and rowid reuse must not interleave
+        # with a callback that updates an import's in-memory membership.
+        with self.db._commits_held():
+            self.db.conn.execute("BEGIN IMMEDIATE")
+            for old_id, new_id in merged.items():
+                row = self.db.conn.execute(
+                    "SELECT p.folder_id, p.filename, f.path FROM photos p"
+                    " JOIN folders f ON f.id = p.folder_id WHERE p.id = ?",
+                    (new_id,),
+                ).fetchone()
+                expected = getattr(merged, "owners", {}).get(new_id)
+                if row is None or (row[0], row[1]) != expected:
+                    self.photo_merged_callback(old_id, None, None)
+                else:
+                    self.photo_merged_callback(
+                        old_id, new_id, os.path.join(row[2], row[1]),
+                    )
 
     def _working_copy_scope(self):
         if self.restrict_dirs is not None:

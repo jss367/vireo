@@ -11,6 +11,7 @@ collection.
 
 import json
 import os
+import sqlite3
 
 import pytest
 from PIL import Image
@@ -33,6 +34,94 @@ def _photo_ids_by_filename(db):
         r["filename"]: r["id"]
         for r in db.conn.execute("SELECT id, filename FROM photos")
     }
+
+
+@pytest.mark.parametrize("reuse_id", [False, True])
+def test_merged_owner_deleted_before_publication_drops_import_membership(
+    tmp_path, reuse_id,
+):
+    from types import SimpleNamespace
+
+    import scanner
+    from db import Database
+    from pipeline_stages.scanning import _ScanPass
+    from services.import_in_place import _InPlaceImportRun
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    writer = Database(db_path)
+    folder_id = db.add_folder(str(tmp_path))
+    raw_id = db.add_photo(folder_id, "IMG_001.cr3", ".cr3", 256, None)
+    jpeg_id = db.add_photo(folder_id, "IMG_001.jpg", ".jpg", 256, None)
+    merged = scanner._pair_raw_jpeg_companions(db)
+    assert merged == {jpeg_id: raw_id}
+    writer.delete_photos([raw_id])
+    if reuse_id:
+        assert writer.add_photo(
+            folder_id, "unrelated.jpg", ".jpg", 256, None,
+        ) == raw_id
+    pipeline = SimpleNamespace(
+        _collected_ids={jpeg_id}, _reported_photo_ids={jpeg_id},
+        collected_photo_ids=[jpeg_id],
+        run=SimpleNamespace(stages={"scan": {"count": 1}}),
+    )
+    imported = SimpleNamespace(
+        seen_photo_ids={jpeg_id}, photo_ids=[jpeg_id],
+    )
+    published = []
+
+    def report(old_id, new_id, path):
+        published.append((old_id, new_id, path))
+        _ScanPass._on_merged_photo(pipeline, old_id, new_id, path)
+        _InPlaceImportRun._photo_merged_cb(imported, old_id, new_id, path)
+
+    run = SimpleNamespace(db=db, photo_merged_callback=report)
+    try:
+        scanner._ScanRun._report_merged_photos(run, merged)
+        assert published == [(jpeg_id, None, None)]
+        assert pipeline.collected_photo_ids == []
+        assert pipeline.run.stages["scan"]["count"] == 0
+        assert imported.photo_ids == []
+        assert imported.seen_photo_ids == set()
+    finally:
+        writer.close()
+        db.close()
+
+
+def test_merged_owner_is_committed_and_cannot_be_deleted_during_publication(
+    tmp_path,
+):
+    from types import SimpleNamespace
+
+    import scanner
+    from db import Database
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    writer = Database(db_path)
+    writer.conn.execute("PRAGMA busy_timeout=0")
+    folder_id = db.add_folder(str(tmp_path))
+    raw_id = db.add_photo(folder_id, "IMG_001.cr3", ".cr3", 256, None)
+    jpeg_id = db.add_photo(folder_id, "IMG_001.jpg", ".jpg", 256, None)
+    merged = scanner._pair_raw_jpeg_companions(db)
+    published = []
+
+    def report(old_id, new_id, path):
+        assert writer.get_photo(new_id)["companion_path"] == "IMG_001.jpg"
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            writer.conn.execute("DELETE FROM photos WHERE id=?", (new_id,))
+        writer.conn.rollback()
+        published.append((old_id, new_id, path))
+
+    run = SimpleNamespace(db=db, photo_merged_callback=report)
+    try:
+        scanner._ScanRun._report_merged_photos(run, merged)
+        assert published == [(jpeg_id, raw_id, str(tmp_path / "IMG_001.cr3"))]
+        writer.delete_photos([raw_id])
+        assert db.get_photo(raw_id) is None
+    finally:
+        writer.close()
+        db.close()
 
 
 def _shoot_pairs(folder, stems, raw_ext=".cr3"):
@@ -274,6 +363,55 @@ def test_new_photo_drops_a_stale_collection_entry_for_its_reused_id(tmp_path):
     assert _collection_photo_ids(db, stale) == [kept_id]
 
 
+def test_new_photo_preserves_collection_created_after_insert(
+    tmp_path, monkeypatch,
+):
+    """A separate writer may name a new photo once its insert is visible."""
+    from db import Database
+    from scanner import scan
+
+    card = tmp_path / "card"
+    card.mkdir()
+    Image.new("RGB", (32, 32), "green").save(card / "bird.jpg")
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    writer = Database(db_path)
+    writer.conn.execute("PRAGMA busy_timeout=0")
+    real_add = db.add_photo
+    state = {}
+
+    def add_membership(photo_id):
+        return writer.add_collection(
+            "User selected bird",
+            json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
+        )
+
+    def insert_then_user_selection(*args, **kwargs):
+        result = real_add(*args, **kwargs)
+        photo_id, inserted = result
+        assert inserted
+        state["photo_id"] = photo_id
+        try:
+            state["collection_id"] = add_membership(photo_id)
+        except sqlite3.OperationalError as error:
+            assert "locked" in str(error).lower()
+            writer.conn.rollback()
+        return result
+
+    monkeypatch.setattr(db, "add_photo", insert_then_user_selection)
+    try:
+        scan(str(card), db)
+        if "collection_id" not in state:
+            state["collection_id"] = add_membership(state["photo_id"])
+        assert _photo_ids_by_filename(db)["bird.jpg"] == state["photo_id"]
+        assert _collection_photo_ids(writer, state["collection_id"]) == [
+            state["photo_id"],
+        ]
+    finally:
+        writer.close()
+        db.close()
+
+
 def test_jpeg_becomes_its_own_photo_when_its_raw_changes_under_it(
     tmp_path, monkeypatch,
 ):
@@ -306,3 +444,209 @@ def test_jpeg_becomes_its_own_photo_when_its_raw_changes_under_it(
     assert db.conn.execute(
         "SELECT COUNT(*) FROM photos WHERE companion_path IS NOT NULL"
     ).fetchone()[0] == 0
+
+
+def test_attach_companion_commits_before_firing_callback(tmp_path):
+    """A thumbnail worker on another connection must see ``companion_path``
+    by the time the attach callback fires: the thumbnail stage keys queue
+    entries on the owner's canonical path or its companion path, and the
+    pre-generation ``_still_owns`` check runs against committed state.
+    When the callback fired inside ``_commits_held``, the fresh-connection
+    read saw ``companion_path`` IS NULL and the queue entry was dropped.
+    """
+    from db import Database
+    from scanner import scan
+
+    card = tmp_path / "card"
+    _shoot_pairs(card, ["IMG_001"])
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    jpeg_path = str(card / "IMG_001.jpg")
+    seen_companion_path = []
+
+    def on_photo(photo_id, path):
+        if path != jpeg_path:
+            return
+        # Open a separate SQLite connection — a thumbnail worker runs on
+        # its own connection and only sees committed state. If the attach
+        # fired its callback inside the ``_commits_held`` guard, the
+        # ``companion_path`` UPDATE would not yet be visible here.
+        with sqlite3.connect(db_path) as other:
+            other.row_factory = sqlite3.Row
+            row = other.execute(
+                "SELECT companion_path FROM photos WHERE id = ?", (photo_id,),
+            ).fetchone()
+            seen_companion_path.append(row["companion_path"] if row else None)
+
+    scan(str(card), db, photo_callback=on_photo)
+
+    assert seen_companion_path == ["IMG_001.jpg"], seen_companion_path
+
+
+def test_attach_companion_invalidates_display_cache_before_firing_callback(
+    tmp_path,
+):
+    """A ``photo_callback`` that raises after the attach commit must still
+    leave the RAW's display cache invalidated.
+
+    The attach commits ``companion_path``, so the next incremental scan
+    takes ``_finish_known_companion`` for an unchanged JPEG — and that
+    path does not re-run ``_defer_primary_display_cache_invalidation``.
+    If the first-pairing invalidation ran after the external callback, a
+    callback raise would strand a pre-pairing render as the RAW's cache
+    forever. Running the cache invalidation first closes that window.
+    """
+    from db import Database
+    from scanner import scan
+
+    card = tmp_path / "card"
+    _shoot_pairs(card, ["IMG_001"])
+    vireo_dir = tmp_path / "vireo"
+    thumbs = tmp_path / "thumbs"
+    (vireo_dir / "originals").mkdir(parents=True)
+    thumbs.mkdir()
+    db = Database(str(tmp_path / "test.db"))
+    jpeg_path = str(card / "IMG_001.jpg")
+    stale_display_paths = []
+
+    def on_photo(photo_id, path):
+        if path != jpeg_path:
+            # First call: RAW is reported. Plant the stale display cache
+            # that the attach must invalidate.
+            display = vireo_dir / "originals" / f"{photo_id}.display.jpg"
+            display.write_bytes(b"stale pre-pairing render")
+            stale_display_paths.append(display)
+            return
+        # Second call: companion attach after commit. Raise to prove the
+        # cache invalidation already happened.
+        raise RuntimeError("callback failure after companion commit")
+
+    with pytest.raises(RuntimeError, match="callback failure"):
+        scan(
+            str(card), db,
+            photo_callback=on_photo,
+            vireo_dir=str(vireo_dir),
+            thumb_cache_dir=str(thumbs),
+        )
+
+    assert stale_display_paths, "RAW photo_callback never fired"
+    display_path = stale_display_paths[0]
+    assert not display_path.exists(), (
+        f"stale display cache survived callback failure: {display_path}"
+    )
+    # The attach commit itself still landed: ``companion_path`` is set.
+    raw_id = int(display_path.stem.split(".")[0])
+    row = db.conn.execute(
+        "SELECT companion_path FROM photos WHERE id = ?", (raw_id,),
+    ).fetchone()
+    assert row["companion_path"] == "IMG_001.jpg"
+
+
+def test_add_photo_losing_a_race_keeps_concurrent_collection_entry(
+    tmp_path, monkeypatch,
+):
+    """When ``add_photo``'s INSERT OR IGNORE loses to a concurrent writer,
+    the id it returns is the winner's — not ours. The pre-check SELECT
+    cannot see the concurrent insert, so the row looks new to the scanner.
+    The stale-id cleanup must branch on the actual INSERT result instead,
+    or it would strip the winner's collection entry for that id.
+    """
+    import scanner as scanner_mod
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    folder = tmp_path / "folder"
+    folder.mkdir()
+    Image.new("RGB", (32, 32), "red").save(str(folder / "heron.jpg"))
+
+    real_add_photo = Database.add_photo
+    raced_photo_ids = []
+
+    def racing_add_photo(self, *args, **kwargs):
+        if not raced_photo_ids and kwargs.get("filename") == "heron.jpg":
+            # Simulate a concurrent writer: insert the row AND populate a
+            # collection with its id before our INSERT OR IGNORE fires.
+            cur = self.conn.execute(
+                "INSERT INTO photos (folder_id, filename, extension,"
+                " file_size, file_mtime)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (kwargs["folder_id"], kwargs["filename"],
+                 kwargs.get("extension", ".jpg"),
+                 kwargs.get("file_size", 0),
+                 kwargs.get("file_mtime", 0.0)),
+            )
+            self.conn.commit()
+            raced_photo_ids.append(cur.lastrowid)
+            self.add_collection(
+                "Concurrent",
+                json.dumps(
+                    [{"field": "photo_ids", "value": [cur.lastrowid]}],
+                ),
+            )
+        return real_add_photo(self, *args, **kwargs)
+
+    monkeypatch.setattr(Database, "add_photo", racing_add_photo)
+    scanner_mod.scan(str(folder), db)
+
+    assert raced_photo_ids, "racing_add_photo never fired"
+    coll_id = db.conn.execute(
+        "SELECT id FROM collections WHERE name = ?", ("Concurrent",),
+    ).fetchone()["id"]
+    assert _collection_photo_ids(db, coll_id) == raced_photo_ids
+
+
+def test_photos_repository_add_reports_whether_it_inserted(tmp_path):
+    """``PhotoRepository.add`` returns ``(photo_id, inserted)``; the second
+    call for the same (folder, filename) is a no-op INSERT OR IGNORE and
+    reports ``inserted=False`` with the original id.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(tmp_path / "shoot"))
+
+    repo = db._photos_repository(scoped=False)
+    first_id, first_inserted = repo.add(
+        folder_id=folder_id, filename="owl.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    assert first_inserted is True
+
+    second_id, second_inserted = repo.add(
+        folder_id=folder_id, filename="owl.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    assert second_id == first_id
+    assert second_inserted is False
+
+
+def test_database_add_photo_returning_inserted(tmp_path):
+    """``Database.add_photo(return_inserted=True)`` surfaces the signal and
+    the plain ``add_photo`` still returns just the id.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(tmp_path / "shoot"))
+
+    first = db.add_photo(
+        folder_id=folder_id, filename="owl.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    assert isinstance(first, int)
+
+    second_id, second_inserted = db.add_photo(
+        folder_id=folder_id, filename="owl.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+        return_inserted=True,
+    )
+    assert second_id == first
+    assert second_inserted is False
+
+    third_id, third_inserted = db.add_photo(
+        folder_id=folder_id, filename="falcon.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+        return_inserted=True,
+    )
+    assert third_id != first
+    assert third_inserted is True

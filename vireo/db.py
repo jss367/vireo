@@ -3002,6 +3002,7 @@ class Database:
         height=None,
         xmp_mtime=None,
         file_hash=None,
+        return_inserted=False,
     ):
         """Insert a photo. Returns the photo id.
 
@@ -3010,8 +3011,15 @@ class Database:
         the duplicate auto-resolver runs and flags the loser(s) as rejected.
         The hook is wrapped in try/except so resolver bugs never break
         inserts.
+
+        With ``return_inserted=True`` returns ``(photo_id, inserted)`` instead;
+        ``inserted`` is False when another writer inserted the row first and
+        the INSERT OR IGNORE here was a no-op. Callers that would purge
+        state inherited from a recycled id must branch on this signal rather
+        than on their own pre-check SELECT, which cannot see a concurrent
+        insert.
         """
-        photo_id = self._photos_repository(scoped=False).add(
+        photo_id, inserted = self._photos_repository(scoped=False).add(
             folder_id,
             filename,
             extension,
@@ -3031,6 +3039,8 @@ class Database:
         if file_hash:
             self.check_and_resolve_duplicates_for_hash(file_hash)
 
+        if return_inserted:
+            return photo_id, inserted
         return photo_id
 
     def _duplicates_repository(self):

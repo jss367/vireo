@@ -88,7 +88,16 @@ class PhotoRepository:
         xmp_mtime=None,
         file_hash=None,
     ):
-        """Insert a photo (or find the existing row), commit, return its id."""
+        """Insert a photo (or find the existing row), commit.
+
+        Returns ``(photo_id, inserted)``: ``inserted`` is True only when this
+        call actually created the row. On a race where a concurrent writer
+        inserts the same (folder, filename) first, the ``INSERT OR IGNORE``
+        is a no-op and the SELECT fallback returns the winner's id with
+        ``inserted=False``; callers that gate recycled-id or inherited-
+        membership cleanup must consult ``inserted`` rather than their own
+        pre-check, since the pre-check cannot see a concurrent insert.
+        """
         cur = self.execute_with_retry(
             self.conn,
             """INSERT OR IGNORE INTO photos
@@ -110,14 +119,12 @@ class PhotoRepository:
         )
         self.commit_with_retry(self.conn)
         if cur.rowcount > 0:
-            photo_id = cur.lastrowid
-        else:
-            row = self.conn.execute(
-                "SELECT id FROM photos WHERE folder_id = ? AND filename = ?",
-                (folder_id, filename),
-            ).fetchone()
-            photo_id = row["id"]
-        return photo_id
+            return cur.lastrowid, True
+        row = self.conn.execute(
+            "SELECT id FROM photos WHERE folder_id = ? AND filename = ?",
+            (folder_id, filename),
+        ).fetchone()
+        return row["id"], False
 
     def get(self, photo_id, verify_workspace=False):
         """Return one photo row (detail columns), or None.

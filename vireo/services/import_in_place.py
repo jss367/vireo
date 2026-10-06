@@ -732,7 +732,8 @@ class _InPlaceImportRun:
             return
         self.seen_photo_ids.discard(old_id)
         self.photo_ids = [pid for pid in self.photo_ids if pid != old_id]
-        self._photo_cb(new_id, path)
+        if new_id is not None:
+            self._photo_cb(new_id, path)
 
     def _progress_cb(self, current, total):
         job = self.job
