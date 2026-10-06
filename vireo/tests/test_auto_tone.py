@@ -159,11 +159,49 @@ def test_bright_areas_get_highlight_recovery():
 
 
 def test_overexposed_raw_is_darkened_in_linear_light():
-    rgb = np.full((H, W, 3), 0.6, dtype=np.float32)
-    rgb *= np.linspace(0.5, 1.5, W, dtype=np.float32)[None, :, None]
+    # Scene-linear values up to two stops over display white.
+    rgb = np.full((H, W, 3), 1.0, dtype=np.float32)
+    rgb *= np.linspace(0.5, 4.0, W, dtype=np.float32)[None, :, None]
     result = auto_tone.fit(rgb, input_linear=True)
     assert result['adjustments']['exposure'] < 0
     assert result['notes'][0].startswith('darkened')
+
+
+def test_raw_darkening_stops_once_its_headroom_is_recovered():
+    # A bright RAW frame whose top tones sit just one stop past the knee.
+    rgb = np.full((H, W, 3), 1.0, dtype=np.float32)
+    rgb *= np.linspace(0.8, 2 * 0.85, W, dtype=np.float32)[None, :, None]
+    exposure = auto_tone.fit(rgb, input_linear=True)['adjustments']['exposure']
+    assert -1.0 <= exposure < 0
+
+
+def test_bright_raw_within_white_is_not_darkened():
+    # Bright, but nothing above the highlight knee: no detail to recover.
+    rgb = np.full((H, W, 3), 0.6, dtype=np.float32)
+    rgb *= np.linspace(0.9, 1.4, W, dtype=np.float32)[None, :, None]
+    assert auto_tone.fit(rgb, input_linear=True)['adjustments']['exposure'] >= 0
+
+
+def test_bright_display_referred_sky_is_not_darkened_to_grey():
+    # A JPEG (or camera-embedded preview) of a bright cyan sky: nothing is
+    # clipped, but a display-referred source has no headroom to recover.
+    sky = np.zeros((H, W, 3), dtype=np.float32)
+    sky[...] = (0.62, 0.9, 0.98)
+    sky *= np.random.default_rng(4).uniform(0.95, 1.0, (H, W, 1)).astype(np.float32)
+    assert auto_tone.fit(sky)['adjustments']['exposure'] >= 0
+
+
+def test_dark_bird_on_white_overcast_sky_keeps_the_sky_white():
+    # Metering the frame alone would pull the white sky toward mid-grey.
+    levels = np.full((H, W), 0.97, dtype=np.float32)
+    levels[:40] = 1.0
+    levels[55:65, 85:100] = 0.12
+    rgb = _grey(levels)
+    result = auto_tone.fit(rgb, subject=_box(55, 85, 10, 15))
+    assert result['metering'] == 'subject'
+    assert result['adjustments']['exposure'] >= 0
+    rendered = _luma(_render(rgb, result['adjustments']))
+    assert np.median(rendered[70:]) >= 0.9
 
 
 def test_neutral_frame_gets_no_colour_boost():
