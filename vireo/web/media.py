@@ -2090,9 +2090,10 @@ class _ThumbnailRequest:
         # ``os.path.join('', photo['filename'])`` — a CWD-relative path
         # that could read or persist a thumbnail derived from an
         # unrelated same-named file in the server's working directory.
-        # Workspace membership is already enforced above via
-        # ``get_photo(verify_workspace=True)``, so a direct ``get_folder``
-        # lookup here is safe and status-agnostic.
+        # The routes already decided the photo may be shown (workspace
+        # membership, or duplicate-group membership on the Duplicates
+        # page), so a direct ``get_folder`` lookup here is safe and
+        # status-agnostic.
         self.folders = (
             {self.folder_row["id"]: self.folder_row["path"]}
             if self.folder_row else {}
@@ -2869,8 +2870,6 @@ def create_media_blueprint(
           * the source image is unreadable (e.g. RAW decode failure).
             ``generate_thumbnail`` already logs the underlying cause.
         """
-        thumb_dir = config["THUMB_CACHE_DIR"]
-
         try:
             photo_id = int(filename.replace(".jpg", ""))
         except ValueError:
@@ -2900,7 +2899,38 @@ def create_media_blueprint(
             # do NOT touch the cached file here — another workspace may
             # legitimately own it.
             return "", 404
+        return _serve_photo_thumbnail(db, photo_id, photo, filename)
 
+    @blueprint.route("/thumbnails/duplicate/<filename>")
+    def serve_duplicate_thumbnail(filename):
+        """``serve_thumbnail`` for a member of a duplicate group, in any workspace.
+
+        The duplicate scan is library-wide, so the Duplicates page shows
+        copies the active workspace does not, and ``/thumbnails/<filename>``
+        404s on those. This route replaces the workspace check with
+        duplicate-group membership (a photo sharing its ``file_hash`` with
+        another row), which is exactly the set that page can show; any
+        other photo still 404s. The folder comes from ``get_folder`` by id,
+        which is not workspace-scoped, so the source path never falls back
+        to a CWD-relative join.
+        """
+        try:
+            photo_id = int(filename.replace(".jpg", ""))
+        except ValueError:
+            log.warning("Thumbnail request with non-numeric filename: %s", filename)
+            return "", 404
+
+        db = get_db()
+        if not db.is_duplicate_group_member(photo_id):
+            return "", 404
+        photo = db.get_photo(photo_id)
+        if not photo:
+            return "", 404
+        return _serve_photo_thumbnail(db, photo_id, photo, filename)
+
+    def _serve_photo_thumbnail(db, photo_id, photo, filename):
+        """Serve or self-heal the thumbnail of a photo the caller may show."""
+        thumb_dir = config["THUMB_CACHE_DIR"]
         folder_row = db.get_folder(photo["folder_id"])
         if not folder_row:
             return "", 404

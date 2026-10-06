@@ -207,6 +207,7 @@ GET          /shortcuts
 GET          /stats
 GET          /storage
 GET          /thumbnails/<filename>
+GET          /thumbnails/duplicate/<filename>
 GET          /welcome
 GET          /workspace
 GET,POST     /api/edit-presets
