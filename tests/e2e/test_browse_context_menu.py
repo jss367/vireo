@@ -1,5 +1,6 @@
 import re
 
+import pytest
 from playwright.sync_api import expect
 
 _PNG_1X1 = (
@@ -389,6 +390,117 @@ def test_browse_selection_review_marks_the_active_photos_eye(live_server, page):
         }"""
     )
     expect(marker).to_be_hidden()
+
+
+def test_browse_selection_review_centers_every_card_on_its_eye(live_server, page):
+    """"Center on eyes" zooms each card on its own eye, not one shared spot."""
+    page.goto(f"{live_server['url']}/browse")
+
+    cards = page.locator(".grid-card")
+    cards.first.wait_for(state="visible")
+    photo_ids = [int(cards.nth(i).get_attribute("data-id")) for i in range(3)]
+    db = live_server["db"]
+    for pid, (ex, ey) in zip(photo_ids, [(0.2, 0.4), (0.8, 0.7), (None, None)], strict=True):
+        db.conn.execute(
+            "UPDATE photos SET eye_x = ?, eye_y = ?, eye_conf = 0.98 WHERE id = ?",
+            (ex, ey, pid),
+        )
+    db.conn.commit()
+
+    for i in range(3):
+        cards.nth(i).click(modifiers=["Meta"])
+    page.locator("#burstReviewBtn").click()
+    page.wait_for_function(
+        "() => document.querySelector('#grmOverlay.open')",
+        timeout=5000,
+    )
+    page.wait_for_function("() => grmState.seeded")
+    page.evaluate(
+        """png => {
+          window.grmPhotoUrl = () => 'data:image/png;base64,' + png;
+          grmState.selected = null;
+          grmState.selectedIds.clear();
+          grmState.selectionAnchor = null;
+          renderGroupModal();
+          grmRefreshSelectedLoupe();
+        }""",
+        _PNG_1X1,
+    )
+
+    button = page.locator("#grmEyeAlignBtn")
+    expect(button).to_have_text("Center on eyes \u00b7 2 of 3")
+    expect(button).to_be_enabled()
+
+    page.locator(
+        f'#grmOverlay .grm-card[data-photo-id="{photo_ids[0]}"]'
+    ).click()
+    page.wait_for_function(
+        """() => {
+          const img = document.getElementById('grmLoupePhoto');
+          return img.complete && img.naturalWidth > 0;
+        }"""
+    )
+    button.click()
+    expect(button).to_have_text("Centered on eyes \u00b7 2 of 3")
+    expect(button).to_have_attribute("aria-pressed", "true")
+
+    def card_geometry(pid):
+        return page.evaluate(
+            r"""pid => {
+              const card = document.querySelector(
+                `#grmOverlay .grm-card[data-photo-id="${pid}"]`);
+              const img = card.querySelector('img');
+              const m = img.style.transform.match(
+                /translate\(([-\d.e]+)px, ([-\d.e]+)px\) scale\(([-\d.e]+)\)/);
+              const photo = grmState.items.find(item => item.id === pid);
+              return {
+                tx: parseFloat(m[1]), ty: parseFloat(m[2]), s: parseFloat(m[3]),
+                w: parseFloat(card.dataset.natW), h: parseFloat(card.dataset.natH),
+                eyeX: photo.eye_x, eyeY: photo.eye_y,
+                cardW: GRM_CARD_W, cardH: GRM_CARD_H,
+              };
+            }""",
+            pid,
+        )
+
+    for pid in photo_ids[:2]:
+        g = card_geometry(pid)
+        assert g["tx"] + g["eyeX"] * g["w"] * g["s"] == pytest.approx(
+            g["cardW"] / 2, abs=0.5
+        )
+        assert g["ty"] + g["eyeY"] * g["h"] * g["s"] == pytest.approx(
+            g["cardH"] / 2, abs=0.5
+        )
+
+    # No detected eye: the card keeps the ordinary centred view.
+    g = card_geometry(photo_ids[2])
+    assert g["tx"] == pytest.approx((g["cardW"] - g["w"] * g["s"]) / 2, abs=0.5)
+    assert g["ty"] == pytest.approx((g["cardH"] - g["h"] * g["s"]) / 2, abs=0.5)
+
+    # The active photo's eye marker lands on the pinned centre crosshair.
+    marker = page.locator("#grmSelectedEyeCrosshair")
+    expect(marker).to_be_visible()
+    loupe = page.evaluate(
+        """() => {
+          const box = document.getElementById('grmLoupeImg');
+          const marker = document.getElementById('grmSelectedEyeCrosshair');
+          return {
+            w: box.clientWidth, h: box.clientHeight,
+            left: parseFloat(marker.style.left), top: parseFloat(marker.style.top),
+          };
+        }"""
+    )
+    assert loupe["left"] == pytest.approx(loupe["w"] / 2, abs=1)
+    assert loupe["top"] == pytest.approx(loupe["h"] / 2, abs=1)
+
+    # Clicking the preview releases the pin and the eye centring with it.
+    page.locator("#grmLoupeImg").click()
+    expect(button).to_have_text("Center on eyes \u00b7 2 of 3")
+    expect(button).to_have_attribute("aria-pressed", "false")
+    page.mouse.move(0, 0)
+    page.wait_for_function("() => _grmLastHoverX === null")
+    g = card_geometry(photo_ids[0])
+    assert g["tx"] == pytest.approx((g["cardW"] - g["w"] * g["s"]) / 2, abs=0.5)
 
 
 def test_right_click_rating_applies(live_server, page):

@@ -266,6 +266,8 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
     applying: false
   };
   _grmLoupeLocked = false;
+  _grmEyeAlign = false;
+  _grmSetCrosshairLocked(false);
   grmCancelHoverFrame();
   _grmZoomMultiplier = 1;
   _grmLoupeZoomLevel = 1;
@@ -527,6 +529,7 @@ function closeGroupReview(force) {
   if (grmState) grmState.applying = false;
   refreshPipelineReviewLightboxReadOnlyState();
   _grmOffsets = {};
+  _grmEyeAlign = false;
   _grmDragging = null;
   _grmLoupeAlignDragging = null;
   document.removeEventListener('mousemove', grmLoupeMouseMove);

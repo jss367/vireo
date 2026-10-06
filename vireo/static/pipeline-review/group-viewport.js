@@ -29,6 +29,13 @@ var _grmDragging = null;
 var _grmLoupeAlignDragging = null;
 var _grmSuppressNextClick = false;
 var _grmSuppressLoupeClick = false;
+// "Center on eyes": every card with a detected eye pans so its eye sits at
+// the card's centre, and the hover is pinned at the centre so each card shows
+// its own eye zoomed. The pan is derived from the eye's 0-1 position at
+// transform time (not stored in `_grmOffsets`), so it survives resolution
+// changes; manual drags still add on top to correct a misplaced detection.
+var _grmEyeAlign = false;
+var _grmEyePhotoIndex = { items: null, size: 0, byId: {} };
 
 function _grmInitialThumbSize() {
   try {
@@ -145,7 +152,7 @@ function _grmComputeCardTransform(card) {
   var hy = hovering ? (_grmLastHoverY / 100) : 0.5;
   var baseTx = hx * (GRM_CARD_W - W * s);
   var baseTy = hy * (GRM_CARD_H - H * s);
-  var off = _grmOffsets[card.dataset.photoId] || { tx: 0, ty: 0 };
+  var off = _grmCardOffset(card, W, H);
   // User pan offsets are stored in pre-scale (image-coordinate) CSS pixels,
   // so they translate by `off * s` in card-coordinate pixels after the scale.
   var tx = baseTx + off.tx * s;
@@ -161,6 +168,46 @@ function _grmComputeCardTransform(card) {
   };
 }
 
+// The photo's detected eye as 0-1 fractions of the displayed image, or null
+// when there is none to align on. Eye keypoints are measured on the unedited
+// (oriented) image, so a rotate/flip/crop recipe makes them meaningless here,
+// the same rule that hides the loupe's eye marker.
+function _grmPhotoEye(photo) {
+  if (!photo || photo.eye_x == null || photo.eye_y == null) return null;
+  if (_lbRecipeHasGeometricEdit(photo.edit_recipe)) return null;
+  var x = Number(photo.eye_x);
+  var y = Number(photo.eye_y);
+  if (!isFinite(x) || !isFinite(y) || x < 0 || x > 1 || y < 0 || y > 1) return null;
+  return { x: x, y: y };
+}
+
+function _grmPhotoById(photoId) {
+  var items = grmState && grmState.items;
+  if (!items) return null;
+  if (_grmEyePhotoIndex.items !== items || _grmEyePhotoIndex.size !== items.length) {
+    var byId = {};
+    items.forEach(function(item) { byId[String(item.id)] = item; });
+    _grmEyePhotoIndex = { items: items, size: items.length, byId: byId };
+  }
+  return _grmEyePhotoIndex.byId[String(photoId)] || null;
+}
+
+// Pan (pre-scale image pixels) that puts the card's eye at the hover anchor
+// when the anchor is the card centre. Zero outside "Center on eyes" mode or
+// for a photo with no usable eye.
+function _grmEyeAlignOffset(photoId, W, H) {
+  if (!_grmEyeAlign) return { tx: 0, ty: 0 };
+  var eye = _grmPhotoEye(_grmPhotoById(photoId));
+  if (!eye) return { tx: 0, ty: 0 };
+  return { tx: (0.5 - eye.x) * W, ty: (0.5 - eye.y) * H };
+}
+
+function _grmCardOffset(card, W, H) {
+  var manual = _grmOffsets[card.dataset.photoId] || { tx: 0, ty: 0 };
+  var eye = _grmEyeAlignOffset(card.dataset.photoId, W, H);
+  return { tx: manual.tx + eye.tx, ty: manual.ty + eye.ty };
+}
+
 function grmApplyCardTransforms() {
   document.querySelectorAll('#grmOverlay .grm-card').forEach(function(card) {
     var img = card.querySelector('img');
@@ -171,6 +218,7 @@ function grmApplyCardTransforms() {
     if (box) box.classList.toggle('zoomed', t.zoomed);
   });
   grmUpdateSelectedEyeCrosshair();
+  grmRefreshEyeAlignButton();
 }
 
 function _grmApplyCardTransform(card) {
@@ -277,11 +325,20 @@ function grmUpdateSelectedEyeCrosshair() {
   var offset = _grmOffsets[String(grmState.selected)] ||
     _grmOffsets[grmState.selected] || { tx: 0, ty: 0 };
   var cardScale = card ? _grmCardDisplayedScale(card) : 0;
+  // "Center on eyes" pans by a fraction of the image, so carry it into the
+  // loupe as that same fraction of the rendered photo: the marker then lands
+  // on the pinned centre crosshair, where every card's eye now sits.
+  var eyeAlign = { tx: 0, ty: 0 };
+  if (_grmEyeAlign && _grmPhotoEye(photo)) {
+    eyeAlign = { tx: (0.5 - eyeX) * renderedW, ty: (0.5 - eyeY) * renderedH };
+  }
   marker.style.left = (
-    originX + (unzoomedX - originX) * _grmLoupeZoomLevel + offset.tx * cardScale
+    originX + (unzoomedX + eyeAlign.tx - originX) * _grmLoupeZoomLevel +
+    offset.tx * cardScale
   ) + 'px';
   marker.style.top = (
-    originY + (unzoomedY - originY) * _grmLoupeZoomLevel + offset.ty * cardScale
+    originY + (unzoomedY + eyeAlign.ty - originY) * _grmLoupeZoomLevel +
+    offset.ty * cardScale
   ) + 'px';
   marker.style.display = 'block';
 }
@@ -291,6 +348,9 @@ function grmLoupeToggleLock(e) {
     _grmSuppressLoupeClick = false;
     return;
   }
+  // Clicking the pinned loupe releases "Center on eyes" along with the pin,
+  // then falls through to the ordinary unlock so the zoom follows the cursor.
+  _grmEyeAlign = false;
   _grmLoupeLocked = !_grmLoupeLocked;
   var ch = document.getElementById('grmCrosshairH');
   var cv = document.getElementById('grmCrosshairV');
@@ -548,6 +608,77 @@ function grmResetAllOffsets() {
     _grmApplyCardTransform(card);
   });
   grmRefreshResetAllVisibility();
+}
+
+function grmEyeAlignCounts() {
+  var items = grmState && grmState.items ? _grmVisibleItems() : [];
+  var withEye = items.filter(function(photo) { return !!_grmPhotoEye(photo); }).length;
+  return { withEye: withEye, total: items.length };
+}
+
+function grmToggleEyeAlign() {
+  if (!grmState) return;
+  if (_grmEyeAlign) {
+    grmStopEyeAlign();
+    return;
+  }
+  if (!grmEyeAlignCounts().withEye) return;
+  grmCancelHoverFrame();
+  _grmEyeAlign = true;
+  _grmLoupeLocked = true;
+  _grmLastHoverX = 50;
+  _grmLastHoverY = 50;
+  grmPositionCrosshair(50, 50);
+  _grmSetCrosshairLocked(true);
+  grmApplyLoupeZoom();
+  grmApplyCardTransforms();
+}
+
+function grmStopEyeAlign() {
+  if (!_grmEyeAlign) return;
+  _grmEyeAlign = false;
+  _grmLoupeLocked = false;
+  _grmLastHoverX = null;
+  _grmLastHoverY = null;
+  _grmSetCrosshairLocked(false);
+  grmApplyLoupeZoom();
+  grmApplyCardTransforms();
+}
+
+function _grmSetCrosshairLocked(locked) {
+  var color = locked ? 'rgba(255, 180, 50, 0.7)' : '';
+  var ch = document.getElementById('grmCrosshairH');
+  var cv = document.getElementById('grmCrosshairV');
+  if (ch) ch.style.background = color;
+  if (cv) cv.style.background = color;
+}
+
+function grmRefreshEyeAlignButton() {
+  var btn = document.getElementById('grmEyeAlignBtn');
+  if (!btn) return;
+  var counts = grmEyeAlignCounts();
+  var missing = counts.total - counts.withEye;
+  var text;
+  var title;
+  if (_grmEyeAlign) {
+    text = 'Centered on eyes \u00b7 ' + counts.withEye + ' of ' + counts.total;
+    title = 'Each photo with a detected eye is zoomed on it. ' +
+      (missing ? missing + ' without a usable eye position stay where they were. ' : '') +
+      'Click here or on the preview to release.';
+  } else if (counts.withEye) {
+    text = 'Center on eyes \u00b7 ' + counts.withEye + ' of ' + counts.total;
+    title = 'Zoom every photo on its detected eye.' +
+      (missing ? ' ' + missing + ' have no usable eye position (none detected, or a rotate/crop edit) and will stay where they are.' : '');
+  } else {
+    text = 'Center on eyes \u00b7 no eyes detected';
+    title = 'None of these photos has a detected eye position. Eye positions come from ' +
+      'eye-focus detection in the pipeline (Settings), and are ignored on photos with a rotate/crop edit.';
+  }
+  if (btn.textContent !== text) btn.textContent = text;
+  if (btn.title !== title) btn.title = title;
+  btn.disabled = !_grmEyeAlign && !counts.withEye;
+  btn.classList.toggle('active', _grmEyeAlign);
+  btn.setAttribute('aria-pressed', _grmEyeAlign ? 'true' : 'false');
 }
 
 function grmVisibleRegionForCard(card) {
