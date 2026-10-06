@@ -336,22 +336,15 @@ def test_scan_resets_dedup_set_between_invocations():
     assert scan_step["count"] == 2
 
 
-def test_thumbnail_skips_stale_queue_entry_after_id_reuse(tmp_path):
-    """A transient JPEG row inserted in one scanner invocation is deleted
-    by RAW/JPEG pairing at the end of that pass, but its ``(id,
-    companion_path)`` queue entry can still be waiting for the thumbnail
-    worker. If the next ``_scan_in_place`` iteration inserts an unrelated
-    photo under that reused SQLite id before the drain reaches the stale
-    entry, caching ``{id}.jpg`` from the companion's bytes would pin the
-    deleted companion's pixels under the new photo's id — the new row's
-    own queue entry would then see the cache file already present and
-    skip. ``_thumbnail_scanned_photo`` must re-resolve the catalog's
-    canonical filename for the id at drain time and skip a queue entry
-    whose basename no longer names the current row.
+def _make_thumb_pass(tmp_path):
+    """Build a minimally-wired _ThumbPass for direct method unit tests.
+
+    Returns the pass with its thread_db / cache_dir / generate_thumbnail
+    unassigned — each test sets what it needs.
     """
     from types import SimpleNamespace
 
-    from pipeline_stages.media import _ThumbPass, _ThumbPhoto
+    from pipeline_stages.media import _ThumbPass
 
     run = SimpleNamespace(
         stages={"thumbnails": {}},
@@ -365,7 +358,6 @@ def test_thumbnail_skips_stale_queue_entry_after_id_reuse(tmp_path):
         abort=SimpleNamespace(set=lambda: None, is_set=lambda: False),
         emit_progress=lambda *a, **k: None,
     )
-
     thumbs = _ThumbPass(
         run,
         raw_extensions={".cr3", ".nef", ".arw"},
@@ -381,6 +373,28 @@ def test_thumbnail_skips_stale_queue_entry_after_id_reuse(tmp_path):
         scan_to_thumb=None,
     )
     thumbs.thumb_size = 300
+    thumbs.cache_dir = str(tmp_path)
+    return thumbs
+
+
+def test_thumbnail_skips_stale_queue_entry_after_id_reuse(tmp_path):
+    """A transient JPEG row inserted in one scanner invocation is deleted
+    by RAW/JPEG pairing at the end of that pass, but its ``(id,
+    companion_path)`` queue entry can still be waiting for the thumbnail
+    worker. If the next ``_scan_in_place`` iteration inserts an unrelated
+    photo under that reused SQLite id before the drain reaches the stale
+    entry, caching ``{id}.jpg`` from the companion's bytes would pin the
+    deleted companion's pixels under the new photo's id — the new row's
+    own queue entry would then see the cache file already present and
+    skip. ``_thumbnail_scanned_photo`` must re-resolve the catalog's
+    canonical ownership for the id at drain time and skip a queue entry
+    whose path no longer names the current row.
+    """
+    from types import SimpleNamespace
+
+    from pipeline_stages.media import _ThumbPhoto
+
+    thumbs = _make_thumb_pass(tmp_path)
 
     def _generate_must_not_run(*_a, **_k):
         raise AssertionError(
@@ -394,9 +408,9 @@ def test_thumbnail_skips_stale_queue_entry_after_id_reuse(tmp_path):
         get_photo_filenames=lambda ids: (
             {42: (99, "IMG_002.jpg")} if 42 in ids else {}
         ),
+        get_folder=lambda fid: {"id": fid, "path": "/B"} if fid == 99 else None,
         get_photo_edit_recipe=lambda _id: None,
     )
-    thumbs.cache_dir = str(tmp_path)
     thumbs.generate_thumbnail = _generate_must_not_run
 
     stale = _ThumbPhoto(photo_id=42, photo_path="/A/IMG_001.jpg")
@@ -409,14 +423,132 @@ def test_thumbnail_skips_stale_queue_entry_after_id_reuse(tmp_path):
     assert thumbs.skipped == 0
     assert thumbs.failed == 0
 
-    # The entry whose basename DOES match the current catalog row is
-    # not short-circuited by the stale-entry guard: with no cache file
-    # on disk, no edit recipe, and generate_thumbnail returning a real
-    # path, the function proceeds and increments the generated tally.
+    # Row entirely absent from the catalog (deleted but not yet reused)
+    # is also skipped.
+    thumbs.thread_db = SimpleNamespace(
+        get_photo_filenames=lambda ids: {},
+        get_folder=lambda _fid: None,
+        get_photo_edit_recipe=lambda _id: None,
+    )
+    orphan = _ThumbPhoto(photo_id=99, photo_path="/anywhere/anything.jpg")
+    assert thumbs._thumbnail_scanned_photo(orphan) is False
+    assert thumbs.generated == 0 and thumbs.skipped == 0 and thumbs.failed == 0
+
+    # The entry whose ownership DOES match the current catalog row is
+    # not short-circuited by the guard: with no cache file on disk,
+    # no edit recipe, and generate_thumbnail returning a real path,
+    # the function proceeds and increments the generated tally.
     generated_path = os.path.join(str(tmp_path), "42.jpg")
+    thumbs.thread_db = SimpleNamespace(
+        get_photo_filenames=lambda ids: (
+            {42: (99, "IMG_002.jpg")} if 42 in ids else {}
+        ),
+        get_folder=lambda fid: {"id": fid, "path": "/B"} if fid == 99 else None,
+        get_photo_edit_recipe=lambda _id: None,
+    )
     thumbs.generate_thumbnail = lambda *_a, **_k: generated_path
     live = _ThumbPhoto(photo_id=42, photo_path="/B/IMG_002.jpg")
     assert thumbs._thumbnail_scanned_photo(live) is True
     assert thumbs.generated == 1
     assert thumbs.skipped == 0
     assert thumbs.failed == 0
+
+
+def test_thumbnail_skips_queue_entry_when_folder_differs(tmp_path):
+    """Basename equality alone does not identify the owner: the catalog
+    row at a reused id can happen to share the queued entry's basename
+    while living in a different folder (two photos coincidentally named
+    IMG_001.jpg in different directories). ``_thumbnail_scanned_photo``
+    must compare folder + filename, not basename alone — otherwise the
+    stale ``/A/IMG_001.jpg`` entry would be treated as valid for a row
+    the catalog now locates at ``/B/IMG_001.jpg``.
+    """
+    from types import SimpleNamespace
+
+    from pipeline_stages.media import _ThumbPhoto
+
+    thumbs = _make_thumb_pass(tmp_path)
+
+    def _generate_must_not_run(*_a, **_k):
+        raise AssertionError(
+            "generate_thumbnail must not run when the folder differs"
+        )
+
+    thumbs.generate_thumbnail = _generate_must_not_run
+    # Catalog says id 42 is /B/IMG_001.jpg (folder B, same filename).
+    thumbs.thread_db = SimpleNamespace(
+        get_photo_filenames=lambda ids: (
+            {42: (7, "IMG_001.jpg")} if 42 in ids else {}
+        ),
+        get_folder=lambda fid: {"id": fid, "path": "/B"} if fid == 7 else None,
+        get_photo_edit_recipe=lambda _id: None,
+    )
+    # Queue entry is /A/IMG_001.jpg (same basename, folder A).
+    stale = _ThumbPhoto(photo_id=42, photo_path="/A/IMG_001.jpg")
+    assert thumbs._thumbnail_scanned_photo(stale) is False
+    assert not os.path.exists(os.path.join(str(tmp_path), "42.jpg"))
+    assert thumbs.generated == 0 and thumbs.skipped == 0 and thumbs.failed == 0
+
+
+def test_thumbnail_discards_cache_when_ownership_changes_during_generate(tmp_path):
+    """Ownership can change DURING ``generate_thumbnail``: the pre-check
+    passes while the row is still the transient JPEG's, then pairing
+    deletes that row and the next scanner invocation inserts an
+    unrelated photo under the same reused id — all before generate
+    publishes ``{id}.jpg``. The published cache file now holds the stale
+    companion's pixels under the new photo's id. The post-generation
+    re-check must detect this and delete the written cache file so the
+    new row's own queue entry regenerates from the correct source.
+    """
+    from types import SimpleNamespace
+
+    from pipeline_stages.media import _ThumbPhoto
+
+    thumbs = _make_thumb_pass(tmp_path)
+
+    # The ownership query flips between calls: pre-check sees the
+    # original transient row (owns the stale path), generate_thumbnail
+    # runs and writes the cache file, then the post-check sees the row
+    # replaced under the reused id by an unrelated photo in another
+    # folder with a different filename.
+    ownership_states = iter([
+        # Pre-check: the row still names the queued path.
+        {42: (7, "IMG_001.jpg")},
+        # Post-check: the row now names a different photo in a
+        # different folder.
+        {42: (99, "DIFFERENT.jpg")},
+    ])
+
+    def get_filenames(ids):
+        return next(ownership_states) if 42 in ids else {}
+
+    def get_folder(fid):
+        if fid == 7:
+            return {"id": 7, "path": "/A"}
+        if fid == 99:
+            return {"id": 99, "path": "/B"}
+        return None
+
+    thumbs.thread_db = SimpleNamespace(
+        get_photo_filenames=get_filenames,
+        get_folder=get_folder,
+        get_photo_edit_recipe=lambda _id: None,
+    )
+
+    # generate_thumbnail writes the (now-wrong) cache file and returns
+    # its path, mimicking the real published location.
+    published_path = os.path.join(str(tmp_path), "42.jpg")
+
+    def fake_generate(*_a, **_k):
+        Path(published_path).write_bytes(b"stale-companion-bytes")
+        return published_path
+
+    thumbs.generate_thumbnail = fake_generate
+
+    entry = _ThumbPhoto(photo_id=42, photo_path="/A/IMG_001.jpg")
+    assert thumbs._thumbnail_scanned_photo(entry) is False
+    # The published cache file was removed — the reused id does not
+    # carry the stale companion's pixels forward.
+    assert not os.path.exists(published_path)
+    # No tally advanced; the new row's own queue entry will regenerate.
+    assert thumbs.generated == 0 and thumbs.skipped == 0 and thumbs.failed == 0
