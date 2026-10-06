@@ -1,6 +1,8 @@
 """Tests for prediction API routes (/api/predictions/*)."""
 import json
 
+from page_scripts import page_with_scripts
+
 _DET = {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
 
 
@@ -1382,7 +1384,7 @@ def test_group_apply_client_sends_the_observed_baseline(app_and_db):
     stay green while the modal quietly stopped participating.
     """
     app, _ = app_and_db
-    html = app.test_client().get('/review').get_data(as_text=True)
+    html = page_with_scripts(app.test_client(), '/review')
     assert "observed[it.id] = it.status || 'pending';" in html, (
         "the burst modal must build its baseline from the statuses it "
         "displayed"

@@ -35,7 +35,6 @@ INLINE_SCRIPT_LINE_LIMITS = {
     "misses.html": 1438,
     "move.html": 1660,
     "pipeline_rapid_review.html": 1614,
-    "review.html": 2556,
     "shortcuts.html": 251,
     "stats.html": 999,
     "storage.html": 885,
@@ -92,6 +91,7 @@ SPLIT_PAGES = {
     "/edit": "photo-editor",
     "/locations/review": "location-review",
     "/jobs": "jobs",
+    "/review": "review",
 }
 
 
