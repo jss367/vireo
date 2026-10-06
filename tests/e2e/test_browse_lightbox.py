@@ -2031,6 +2031,74 @@ def test_browse_lightbox_arrows_preserve_one_to_one_zoom(live_server, page):
 
 
 
+def test_browse_lightbox_arrows_keep_one_to_one_on_photos_with_saved_edits(live_server, page):
+    """A saved recipe carries ``version``; the lightbox's clipped copy does not.
+
+    The clipped copy used to be written back onto the photo-list entry, so the
+    next open fingerprinted it against the server's full recipe, saw an edit
+    that never happened, and reloaded the render -- resetting 1:1 to fit.
+    """
+    url = live_server["url"]
+    recipe = {"adjustments": {"exposure": 1.2, "shadows": 100.0}, "version": 1}
+    buf = io.BytesIO()
+    Image.new("RGB", (4000, 2000), (40, 120, 60)).save(buf, "JPEG", quality=50)
+    jpeg = buf.getvalue()
+
+    def _with_recipe(route):
+        response = route.fetch()
+        data = response.json()
+
+        def _stamp(value):
+            if isinstance(value, dict):
+                if "id" in value and "filename" in value:
+                    value["width"], value["height"] = 4000, 2000
+                    value["edit_recipe"] = json.loads(json.dumps(recipe))
+                    value.pop("render_key", None)
+                for child in value.values():
+                    _stamp(child)
+            elif isinstance(value, list):
+                for child in value:
+                    _stamp(child)
+
+        _stamp(data)
+        route.fulfill(response=response, body=json.dumps(data), content_type="application/json")
+
+    page.route(re.compile(r"/api/(browse/init|photos/\d+$)"), _with_recipe)
+    page.route(
+        re.compile(r"/photos/\d+/(full|original|preview)"),
+        lambda route: route.fulfill(body=jpeg, content_type="image/jpeg"),
+    )
+
+    page.goto(f"{url}/browse")
+    first_card = page.locator(".grid-card").first
+    first_card.wait_for(state="visible")
+    first_card.dblclick()
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+    page.wait_for_function("vireoLightboxViewport.nativeZoom() > 1")
+
+    page.keyboard.press("z")
+    page.wait_for_function(
+        "vireoLightboxViewport.isOneToOne() && !vireoLightboxViewport.pendingOneToOne()"
+    )
+
+    for _ in range(3):
+        before = page.evaluate("vireoLightboxSession.requestedPhotoId()")
+        with page.expect_response(re.compile(r"/api/photos/\d+$")):
+            page.keyboard.press("ArrowRight")
+        page.wait_for_function(
+            "id => vireoLightboxSession.requestedPhotoId() !== id"
+            " && vireoLightboxViewport.nativeZoom()"
+            " && !vireoLightboxViewport.pendingOneToOne()",
+            arg=before,
+        )
+        # Let the metadata response's recipe comparison run before asserting.
+        page.wait_for_timeout(300)
+        assert page.evaluate("vireoLightboxViewport.isOneToOne()") is True
+        assert page.evaluate(
+            "Math.abs(vireoLightboxViewport.zoom() - vireoLightboxViewport.nativeZoom()) < 0.01"
+        )
+
+
 def test_browse_lightbox_predecodes_adjacent_photo_for_current_source_tier(
     live_server, page
 ):

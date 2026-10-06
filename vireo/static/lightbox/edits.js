@@ -592,8 +592,12 @@ function _lbRememberEditRecipe(photoId, recipe, preserveAdjustmentInput) {
   var currentRecipe = _lbRecipeHasEdits(storedRecipe) ? storedRecipe : null;
   _lbEditRecipeByPhoto[String(photoId)] = storedRecipe;
   _lbEditRecipeKnownByPhoto[String(photoId)] = true;
+  // The list entry is re-read as the photo's recipe on the next open, so give
+  // it the unclipped recipe. The clipped clone drops ``version`` and ``local``;
+  // fingerprinting it against the server's copy reports an edit that never
+  // happened, and that reload resets a 1:1 view to fit on arrow navigation.
   var p = _lightboxPhotoList.find(function(x) { return x.id === numericId; });
-  if (p) p.edit_recipe = currentRecipe;
+  if (p) p.edit_recipe = _lbRecipeHasEdits(recipe) ? recipe : null;
   if (vireoLightboxSession.requestedPhotoId() === numericId) {
     _lbCurrentEditRecipe = currentRecipe;
     if (!preserveAdjustmentInput) {
