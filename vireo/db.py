@@ -6252,6 +6252,20 @@ class Database:
         """Upsert a db_meta row."""
         self._meta_repository().set(key, value, _commit=_commit)
 
+    def _exif_search_repository(self):
+        """Build the (catalog-wide) EXIF search text backfill on this connection."""
+        from repositories.exif_search import ExifSearchRepository
+
+        return ExifSearchRepository(self.conn, commit_with_retry)
+
+    def count_exif_search_unindexed(self):
+        """Photos metadata search cannot prefilter by stored EXIF values yet."""
+        return self._exif_search_repository().count_unindexed()
+
+    def index_exif_search_batch(self, after_id, limit):
+        """Store search text for the next unindexed photos; see ``ExifSearchRepository``."""
+        return self._exif_search_repository().index_batch(after_id, limit)
+
     def untag_photo(self, photo_id, keyword_id, _commit=True):
         """Remove a keyword association from a photo.
 

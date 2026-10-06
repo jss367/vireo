@@ -98,20 +98,11 @@ def search_catalog(app_and_db, monkeypatch):
     return set_exif, keystroke
 
 
-# A term made only of number characters can't use the raw-text shortcut
-# (metadata_search.raw_text_rules_out): SQLite re-renders stored numbers, so
-# raw text lacking the term doesn't prove no value renders as it. Those
-# terms still walk every photo's EXIF. Strict, so fixing it fails here until
-# the marker goes.
-NUMBER_TERM_WALKS_EXIF = pytest.mark.xfail(
-    strict=True, reason="number-only terms still parse every photo's EXIF")
-
-
-@pytest.mark.parametrize("term", [
-    "zzqxv", "hawk", "Canon EOS",
-    pytest.param("2024", marks=NUMBER_TERM_WALKS_EXIF),
-    pytest.param("1.4", marks=NUMBER_TERM_WALKS_EXIF),
-])
+# "Tag" is in every tag name and no value: a raw-text check on the EXIF JSON
+# lets it through for every photo, as "long" was for every GPSLongitude.
+# Number-only terms can't use a raw-text check at all, since SQLite
+# re-renders stored numbers. The stored tag values serve both.
+@pytest.mark.parametrize("term", ["zzqxv", "hawk", "Canon EOS", "Tag", "2024", "1.4"])
 def test_keystroke_cost_does_not_grow_with_catalog_exif(search_catalog, term):
     set_exif, keystroke = search_catalog
     set_exif(lambda i: json.dumps({"EXIF": {"Make": "Nikon"}}))

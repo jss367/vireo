@@ -1053,9 +1053,50 @@ class CanonicalSchema:
                 "INSERT INTO db_meta(key, value) "
                 "VALUES ('saved_processes_seeded', '1')"
             )
+        self._create_exif_search_text()
         from photo_visibility_schema import create_photo_visibility_schema
 
         create_photo_visibility_schema(self.conn)
         if fresh:
             self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self.conn.commit()
+
+    def _create_exif_search_text(self):
+        """Each photo's searchable EXIF tag values, for metadata search.
+
+        Triggers keep a row current for every ``exif_data`` write; photos
+        written before the table existed are filled in by the startup
+        backfill (``StartupTasks.kickoff_exif_search_backfill``). The rows
+        are SQLite's renderings of the values under the trigger definition,
+        so a changed definition or SQLite version invalidates all of them:
+        the stamp in ``db_meta`` notices, rebuilds the triggers and empties
+        the table for the backfill to refill.
+        """
+        import hashlib
+
+        from metadata_search import EXIF_SEARCH_TEXT_TABLE, exif_search_text_triggers
+
+        self.conn.execute(f"""CREATE TABLE IF NOT EXISTS {EXIF_SEARCH_TEXT_TABLE} (
+            photo_id   INTEGER PRIMARY KEY
+                REFERENCES photos(id) ON DELETE CASCADE ON UPDATE CASCADE,
+            value_text TEXT NOT NULL
+        )""")
+        triggers = exif_search_text_triggers()
+        (sqlite_version,) = self.conn.execute("SELECT sqlite_version()").fetchone()
+        stamp = hashlib.sha256(
+            "\n".join([sqlite_version, *(sql for _name, sql in triggers)]).encode()
+        ).hexdigest()
+        current = self.conn.execute(
+            "SELECT value FROM db_meta WHERE key = 'exif_search_text_definition'"
+        ).fetchone()
+        if current is not None and current[0] == stamp:
+            return
+        for name, sql in triggers:
+            self.conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+            self.conn.execute(sql)
+        self.conn.execute(f"DELETE FROM {EXIF_SEARCH_TEXT_TABLE}")
+        self.conn.execute(
+            "INSERT INTO db_meta (key, value) VALUES ('exif_search_text_definition', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (stamp,),
+        )
