@@ -4274,7 +4274,6 @@ class _ScanRun:
 
     def _load_catalog_state(self):
         db = self.db
-        self._discovered_image_paths = set(self.image_files)
         self.existing_by_path = (
             _incremental_photo_index(db, self.image_files)
             if self.incremental else {}
@@ -4567,69 +4566,41 @@ class _ScanRun:
                 files_to_process.append(image_path)
                 added = True
             else:
-                ownership = (
-                    known["folder_id"], known["owner_filename"],
-                    image_path.name,
-                )
-                if not self._lock_companion_owner(owner_id, ownership):
-                    # Owner deleted/replaced after ``_needs_processing``
-                    # cached this ``known``; discard the stale credit.
-                    # Commit releases the dummy UPDATE lock without
-                    # changing any row and clears the implicit
-                    # transaction before the next iteration.
-                    commit_with_retry(self.db.conn)
-                    continue
-                self._import_companion_sidecar(image_path, known)
-                # ``_import_companion_sidecar`` only commits on the
-                # keyword-import success path; its early returns leave
-                # the lock's dummy UPDATE pending. Commit here so the
-                # lock is released whichever branch it took and the
-                # transaction is closed before the next iteration.
-                commit_with_retry(self.db.conn)
-                self._credit_known_companion(owner_id, str(image_path))
+                if not self._finish_known_companion(image_path, known):
+                    # The cached owner vanished or changed. Hash and
+                    # catalog the JPEG against fresh state rather than
+                    # losing its disposition or crediting a recycled ID.
+                    files_to_process.append(image_path)
+                    added = True
         self.stat_unchanged_companions = []
         return added
 
-    def _import_companion_sidecar(self, image_path, known):
-        """Import companion XMP when the owner cannot handle it this scan.
+    def _finish_known_companion(self, image_path, known):
+        """Import sidecar and report the path while its owner stays locked.
 
-        When the companion JPEG's stem matches the owning RAW's stem
-        (``IMG.cr3`` + ``IMG.jpg``), both share a single ``IMG.xmp`` and
-        the RAW's own main-loop sidecar handling covers it when that RAW
-        is actually processed in this scan: an unchanged
-        RAW with an unchanged sidecar is skipped, and a changed sidecar
-        is caught by ``_reuse_existing_row``'s ``xmp_unchanged`` guard,
-        which also pulls the companion into reprocessing. A missing RAW,
-        a frozen JPEG-only scan, or a RAW that was discovered but
-        vanished before the pre-pass or indexing step (deleted or an
-        unmount between discovery and ``stat()``), needs the companion
-        to import the shared-stem sidecar because the RAW receives no
-        scan callback. ``_discovered_image_paths`` alone does not tell
-        the two apart — discovery populated it before any ``stat()``
-        failed — so re-check that the RAW still exists on disk. When it
-        does not, the RAW's own handling never ran this scan and the
-        companion is the only path left for the shared XMP.
-
-        When the companion's stem differs from the RAW's (an
-        intentionally renamed JPEG beside its RAW, or a separate shared
-        file whose basename is not shared), the sidecar beside the
-        companion (e.g. ``OTHER.xmp``) is not any photo row's sidecar.
-        Before this hook the stat-unchanged credit path and
-        ``_keep_known_companion`` both returned without touching it, so
-        new keywords in that sidecar never reached the owning RAW. Run
-        the keyword import for the owner id so a later sidecar edit
-        propagates, as the pre-#1970 transient-row + merge path did.
+        Keyword creation/tagging and the sidecar helper ordinarily commit
+        internally. Hold those commits so they cannot release ownership
+        between validation, tagging and the callback. The full/hash path
+        uses the same guard as stat settling.
         """
-        owner_filename = known["owner_filename"]
-        if not owner_filename:
-            return
-        raw_path = image_path.with_name(owner_filename)
-        if (
-            Path(owner_filename).stem == image_path.stem
-            and raw_path in self._discovered_image_paths
-            and raw_path.exists()
-        ):
-            return
+        ownership = (
+            known["folder_id"], known["owner_filename"], image_path.name,
+        )
+        with self.db._commits_held():
+            if not self._lock_companion_owner(known["owner_id"], ownership):
+                return False
+            self._import_companion_sidecar(image_path, known)
+            self._credit_known_companion(known["owner_id"], str(image_path))
+        return True
+
+    def _import_companion_sidecar(self, image_path, known):
+        """Import the validated companion's additive sidecar keywords.
+
+        Import shared-stem XMP too: the RAW can vanish after the JPEG is
+        handled, even if it existed at discovery or at this call. Repeating
+        the keyword import on the same owner is idempotent and preserves
+        pending removals, just as the old insert-and-merge path did.
+        """
         xmp_path = image_path.with_suffix(".xmp")
         if not xmp_path.exists():
             return
@@ -5148,6 +5119,18 @@ class _ScanRun:
         known = self.known_companions.lookup(folder_id, image_path.name)
         if known is None:
             return False
+        ownership = (folder_id, known["owner_filename"], image_path.name)
+        with self.db._commits_held():
+            if not self._lock_companion_owner(known["owner_id"], ownership):
+                return False
+            return self._keep_locked_companion(
+                image_path, known, file_size, file_mtime, file_hash, meta,
+            )
+
+    def _keep_locked_companion(
+        self, image_path, known, file_size, file_mtime, file_hash, meta,
+    ):
+        """Keep metadata, identity, sidecar and credit under the owner's lock."""
         if file_hash is None and file_size > 0:
             # Unreadable right now. Re-merging would replace a verified
             # identity with an unhashed one; keep the catalog's and let the
@@ -5171,10 +5154,10 @@ class _ScanRun:
                 # via ``_pending_companion_fills`` below.
                 self._apply_companion_gap_fill(
                     known["owner_id"], companion_columns,
-                    (folder_id, known["owner_filename"], image_path.name),
+                    (known["folder_id"], known["owner_filename"], image_path.name),
                 )
                 self._pending_companion_fills[known["owner_id"]] = (
-                    (folder_id, known["owner_filename"], image_path.name),
+                    (known["folder_id"], known["owner_filename"], image_path.name),
                     companion_columns,
                 )
             # Only record the fresh stat when the fill actually ran, or
@@ -5204,9 +5187,7 @@ class _ScanRun:
             commit_with_retry(self.db.conn)
         else:
             return False
-        self._import_companion_sidecar(image_path, known)
-        self._credit_known_companion(known["owner_id"], str(image_path))
-        return True
+        return self._finish_known_companion(image_path, known)
 
     def _companion_columns(self, meta):
         """The columns pairing reads from a companion row, from fresh metadata.

@@ -3092,6 +3092,154 @@ def test_stat_unchanged_companion_settle_discards_stale_credit_after_owner_mutat
     assert (cat.raw_id, "CAMERA_OTHER.jpg") not in cat.callbacks
 
 
+@pytest.mark.parametrize(
+    "boundary", ["stat-settle", "before-sidecar", "after-sidecar", "keyword-created"],
+)
+def test_companion_keywords_and_credit_keep_the_same_owner_through_commits(
+    tmp_path, monkeypatch, boundary,
+):
+    """Normal deletion on another connection must not redirect an import."""
+    import sqlite3
+
+    import scanner
+    from db import Database
+    from xmp import write_sidecar
+
+    cat = _PairedCatalog(tmp_path, monkeypatch)
+    other = cat.img_dir / "OTHER.jpg"
+    cat.jpeg.rename(other)
+    cat.db.conn.execute(
+        "UPDATE photos SET companion_path=? WHERE id=?", (other.name, cat.raw_id),
+    )
+    cat.db.conn.execute(
+        "UPDATE companion_identities SET filename=? WHERE photo_id=?",
+        (other.name, cat.raw_id),
+    )
+    cat.db.conn.commit()
+    write_sidecar(
+        str(other.with_suffix(".xmp")), flat_keywords={"Ownership keyword"},
+        hierarchical_keywords=set(),
+    )
+    evidence = {"attempted": False, "replaced": False, "blocked": False}
+
+    with Database(str(cat.vireo_dir / "test.db")) as writer:
+        writer.conn.execute("PRAGMA busy_timeout=0")
+
+        def replace_owner():
+            assert not evidence["attempted"]
+            evidence["attempted"] = True
+            try:
+                writer.delete_photos([cat.raw_id])
+                replacement = writer.add_photo(None, "unrelated.jpg", ".jpg", 200, None)
+                assert replacement == cat.raw_id
+                evidence["replaced"] = True
+            except sqlite3.OperationalError as error:
+                assert "locked" in str(error).lower()
+                writer.conn.rollback()
+                evidence["blocked"] = True
+
+        if boundary == "stat-settle":
+            original = scanner._ScanRun._settle_stat_unchanged_companions
+
+            def settle(run, files):
+                assert run.stat_unchanged_companions
+                replace_owner()
+                return original(run, files)
+
+            monkeypatch.setattr(scanner._ScanRun, "_settle_stat_unchanged_companions", settle)
+        elif boundary in {"before-sidecar", "after-sidecar"}:
+            original = scanner._ScanRun._import_companion_sidecar
+
+            def sidecar(run, path, known):
+                if boundary == "before-sidecar":
+                    replace_owner()
+                result = original(run, path, known)
+                if boundary == "after-sidecar":
+                    replace_owner()
+                return result
+
+            monkeypatch.setattr(scanner._ScanRun, "_import_companion_sidecar", sidecar)
+        else:
+            original = cat.db.add_keyword
+
+            def add_keyword(name, *args, **kwargs):
+                keyword = original(name, *args, **kwargs)
+                replace_owner()
+                return keyword
+
+            monkeypatch.setattr(cat.db, "add_keyword", add_keyword)
+
+        counts = cat.scan(incremental=boundary == "stat-settle")
+        assert evidence["attempted"]
+        keywords = {keyword["name"] for keyword in cat.db.get_photo_keywords(cat.raw_id)}
+        companion_callback = (cat.raw_id, other.name)
+        if evidence["replaced"]:
+            assert "Ownership keyword" not in keywords
+            assert companion_callback not in cat.callbacks
+            # The JPEG still exists: retry against fresh state catalogs
+            # it as itself, without losing the scan's disposition.
+            assert cat.photo_id(other.name) != cat.raw_id
+            assert cat.photo_id(other.name) is not None
+            assert "Ownership keyword" in {
+                keyword["name"]
+                for keyword in cat.db.get_photo_keywords(cat.photo_id(other.name))
+            }
+            assert counts["indexed"] == counts["discovered"]
+        else:
+            assert evidence["blocked"]
+            assert "Ownership keyword" in keywords
+            assert companion_callback in cat.callbacks
+            assert cat.rows() == {"IMG_001.cr3": "OTHER.jpg"}
+
+
+@pytest.mark.parametrize("incremental", [True, False])
+def test_jpeg_first_shared_sidecar_survives_later_raw_disappearance(
+    tmp_path, monkeypatch, incremental,
+):
+    import scanner
+    from xmp import write_sidecar
+
+    cat = _PairedCatalog(tmp_path, monkeypatch)
+    raw = cat.img_dir / "IMG_001.nef"
+    cat.raw.rename(raw)
+    cat.raw = raw
+    cat.db.conn.execute(
+        "UPDATE photos SET filename='IMG_001.nef', extension='.nef' WHERE id=?",
+        (cat.raw_id,),
+    )
+    cat.db.conn.commit()
+    future = time.time() + 60
+    os.utime(raw, (future, future))
+    original_triage = scanner._ScanRun._triage_files
+    original_index = scanner._ScanRun._index_file
+
+    def sidecar_after_triage(run):
+        files = original_triage(run)
+        assert raw in files
+        write_sidecar(
+            str(cat.jpeg.with_suffix(".xmp")), flat_keywords={"Late vanished RAW"},
+            hierarchical_keywords=set(),
+        )
+        return files
+
+    def vanish_when_raw_indexes(run, path, *args):
+        if path == raw:
+            assert run.counts["known_companions"] == 1
+            raw.unlink()
+        return original_index(run, path, *args)
+
+    monkeypatch.setattr(scanner._ScanRun, "_triage_files", sidecar_after_triage)
+    monkeypatch.setattr(scanner._ScanRun, "_index_file", vanish_when_raw_indexes)
+    counts = cat.scan(incremental=incremental)
+
+    assert counts["vanished"] == 1
+    assert cat.merges == []
+    assert cat.rows() == {"IMG_001.nef": "IMG_001.jpg"}
+    assert "Late vanished RAW" in {
+        keyword["name"] for keyword in cat.db.get_photo_keywords(cat.raw_id)
+    }
+
+
 def test_scan_late_arriving_raw_pairs_with_existing_jpeg(tmp_path):
     """Importing raws after JPEGs matches them to existing photo records."""
     import os
