@@ -850,8 +850,8 @@ def _keep_companion_import_identity(db, primary, companion):
     # reading it (see ``_KnownCompanions``).
     db.conn.execute(
         "INSERT OR REPLACE INTO companion_identities "
-        "(photo_id, filename, file_size, timestamp, file_hash, file_mtime) "
-        "SELECT ?, filename, file_size, timestamp, file_hash, file_mtime"
+        "(photo_id, filename, file_size, timestamp, file_hash, file_mtime, needs_sync) "
+        "SELECT ?, filename, file_size, timestamp, file_hash, file_mtime, 0"
         " FROM photos WHERE id=?",
         (primary["id"], companion["id"]),
     )
@@ -3577,7 +3577,7 @@ class _KnownCompanions:
 
     _OWNER_SQL = (
         "SELECT p.id AS owner_id, p.filename AS owner_filename,"
-        " c.file_size, c.file_mtime, c.file_hash"
+        " c.file_size, c.file_mtime, c.file_hash, c.needs_sync"
         " FROM photos p LEFT JOIN companion_identities c"
         " ON c.photo_id = p.id AND c.filename = p.companion_path"
         " WHERE p.folder_id = ? AND p.companion_path = ?"
@@ -3631,7 +3631,8 @@ class _KnownCompanions:
 def _companion_stat_unchanged(known, stat):
     """True when size and mtime match the identity a hash vouched for."""
     return (
-        known["file_mtime"] is not None
+        not known["needs_sync"]
+        and known["file_mtime"] is not None
         and known["file_mtime"] == stat.st_mtime
         and known["file_size"] == stat.st_size
         and (known["file_hash"] is not None or stat.st_size == 0)
@@ -3640,6 +3641,11 @@ def _companion_stat_unchanged(known, stat):
 
 def _companion_bytes_unchanged(known, file_size, file_hash):
     """True when freshly hashed bytes are the ones the identity stores."""
+    if known["needs_sync"]:
+        # Recovery verifies bytes for duplicate preview, but has not
+        # imported metadata/keywords or invalidated companion caches.
+        # Run the ordinary insert-and-pair path once to synchronize them.
+        return False
     if known["file_size"] is None or known["file_size"] != file_size:
         return False
     if file_size == 0:
@@ -4279,7 +4285,7 @@ class _ScanRun:
         self.stat_unchanged_companions = []
         # Cataloged rows the pre-pass sends for re-reading.
         self.reprocessed_row_ids = set()
-        # ``owner_id -> companion columns`` for companions found unchanged
+        # ``owner_id -> (ownership, companion columns)`` for companions found unchanged
         # after their metadata was read. Populated as each companion is
         # processed; drained by ``_write_photo_columns`` when the owner is
         # re-read (so the gap fill lands in the same UPDATE as the
@@ -5128,9 +5134,11 @@ class _ScanRun:
                 # via ``_pending_companion_fills`` below.
                 self._apply_companion_gap_fill(
                     known["owner_id"], companion_columns,
+                    (folder_id, known["owner_filename"], image_path.name),
                 )
                 self._pending_companion_fills[known["owner_id"]] = (
-                    companion_columns
+                    (folder_id, known["owner_filename"], image_path.name),
+                    companion_columns,
                 )
             # Only record the fresh stat when the fill actually ran, or
             # when the owner is unchanged this scan and no retry marker
@@ -5188,7 +5196,21 @@ class _ScanRun:
             columns[column] = summary.get(column)
         return columns
 
-    def _apply_companion_gap_fill(self, owner_id, companion_columns):
+    def _lock_companion_owner(self, owner_id, ownership):
+        """Revalidate ownership while acquiring the transaction's writer lock.
+
+        Photo IDs can be recycled between commits. The guarded no-op write
+        prevents a concurrent deletion/replacement between this check and
+        the metadata write; the caller's commit releases the lock.
+        """
+        folder_id, filename, companion = ownership
+        return self.db.conn.execute(
+            "UPDATE photos SET id=id WHERE id=? AND folder_id IS ?"
+            " AND filename=? AND companion_path=?",
+            (owner_id, folder_id, filename, companion),
+        ).rowcount == 1
+
+    def _apply_companion_gap_fill(self, owner_id, companion_columns, ownership):
         """Fill the owner's gaps from the companion in the current transaction.
 
         Reads the owner's columns as they stand right now (so a prior
@@ -5198,6 +5220,8 @@ class _ScanRun:
         other work the caller is already staging — see
         ``_keep_known_companion`` and ``_write_photo_columns``.
         """
+        if not self._lock_companion_owner(owner_id, ownership):
+            return
         owner_columns, _ = _read_metadata_transfer_rows(
             self.db, {"id": owner_id}, {"id": owner_id},
         )
@@ -5221,8 +5245,8 @@ class _ScanRun:
         """
         if not self._pending_companion_fills:
             return
-        for owner_id, companion_columns in self._pending_companion_fills.items():
-            self._apply_companion_gap_fill(owner_id, companion_columns)
+        for owner_id, (ownership, columns) in self._pending_companion_fills.items():
+            self._apply_companion_gap_fill(owner_id, columns, ownership)
         commit_with_retry(self.db.conn)
         self._pending_companion_fills = {}
 
@@ -5383,10 +5407,15 @@ class _ScanRun:
             # placeholder would be worse than leaving it as-is; the
             # duplicates page already flags empty-byte groups for
             # manual review.
-        pending_companion_fill = (
+        pending_companion = (
             self._pending_companion_fills.pop(photo_id, None)
             if row_already_existed else None
         )
+        pending_companion_fill = None
+        if pending_companion is not None:
+            ownership, columns = pending_companion
+            if self._lock_companion_owner(photo_id, ownership):
+                pending_companion_fill = columns
         if file_meta:
             # Promoted EXIF summary columns (universal filter fields).
             # Written whenever ExifTool ran, independent of whether the

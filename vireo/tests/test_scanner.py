@@ -2255,6 +2255,181 @@ def test_companion_without_a_stored_identity_remerges_once(tmp_path, monkeypatch
     assert cat.merges == []
 
 
+@pytest.mark.parametrize("incremental", [True, False])
+def test_recovered_changed_companion_synchronizes_before_no_churn(
+    tmp_path, monkeypatch, incremental,
+):
+    import import_dedup
+    import scanner
+
+    changed = False
+
+    def metadata(paths, *args, **kwargs):
+        result = {}
+        for path in paths:
+            result[path] = {
+                "EXIF": {"Make": "Canon", "Model": "EOS R5"},
+                "File": {"ImageWidth": 200, "ImageHeight": 100},
+            }
+            if changed and path.endswith(".jpg"):
+                result[path]["XMP"] = {"Subject": ["Recovered keyword"]}
+        return result
+
+    monkeypatch.setattr(scanner, "extract_metadata", metadata)
+    cat = _PairedCatalog(tmp_path, monkeypatch)
+    cat.seed_raw_caches()
+    Image.new("RGB", (240, 120), color="blue").save(cat.jpeg)
+    changed = True
+    cat.db.conn.execute("DELETE FROM companion_identities")
+    cat.db.conn.commit()
+
+    list(import_dedup.recover_companion_identities(cat.db))
+    # Recovery still provides the byte identity duplicate preview needs.
+    assert cat.identity()[0]["file_hash"] is not None
+    cat.scan(incremental=incremental)
+
+    assert "Recovered keyword" in {
+        keyword["name"] for keyword in cat.db.get_photo_keywords(cat.raw_id)
+    }
+    assert not cat.jpeg_variant.exists() and not cat.display.exists()
+    assert cat.rows() == {"IMG_001.cr3": "IMG_001.jpg"}
+
+    cat.seed_raw_caches()
+    cat.scan()
+    assert cat.merges == []
+    assert cat.extracted == []
+    assert cat.jpeg_variant.exists() and cat.display.exists()
+
+
+@pytest.mark.parametrize("changed_identity", ["folder", "filename", "companion"])
+def test_deferred_companion_fill_does_not_follow_a_reused_photo_id(
+    tmp_path, monkeypatch, changed_identity,
+):
+    """A different writer replaces the owner after its JPEG was processed."""
+    import sqlite3
+
+    import scanner
+
+    cat = _PairedCatalog(tmp_path, monkeypatch)
+    real_refill = scanner._ScanRun._refill_owners_from_companions
+
+    def replace_owner_then_refill(run):
+        assert cat.raw_id in run._pending_companion_fills
+        # A separate connection makes the deletion/insertion a committed
+        # concurrent edit, rather than an uncommitted change in the scan.
+        with sqlite3.connect(cat.vireo_dir / "test.db") as writer:
+            writer.execute("PRAGMA foreign_keys = ON")
+            owner = writer.execute(
+                "SELECT folder_id, filename, companion_path FROM photos WHERE id=?",
+                (cat.raw_id,),
+            ).fetchone()
+            folder, filename, companion = owner
+            if changed_identity == "folder":
+                folder = None
+            elif changed_identity == "filename":
+                filename = "different.cr3"
+            else:
+                companion = "different.jpg"
+            writer.execute("DELETE FROM photos WHERE id=?", (cat.raw_id,))
+            writer.execute(
+                "INSERT INTO photos(id, folder_id, filename, companion_path)"
+                " VALUES (?, ?, ?, ?)",
+                (cat.raw_id, folder, filename, companion),
+            )
+        real_refill(run)
+
+    monkeypatch.setattr(
+        scanner._ScanRun, "_refill_owners_from_companions",
+        replace_owner_then_refill,
+    )
+    cat.scan(incremental=False)
+    row = cat.db.conn.execute(
+        "SELECT camera_make, width, exif_data FROM photos WHERE id=?", (cat.raw_id,),
+    ).fetchone()
+    assert tuple(row) == (None, None, None)
+
+
+def test_pending_companion_fill_is_revalidated_before_owner_metadata_write(
+    tmp_path, monkeypatch,
+):
+    import sqlite3
+
+    import scanner
+
+    def metadata(paths, *args, **kwargs):
+        result = {}
+        for path in paths:
+            exif = {"Make": "Canon", "Model": "EOS R5"}
+            if path.endswith(".jpg"):
+                exif["LensModel"] = "Old owner's JPEG lens"
+            result[path] = {"EXIF": exif}
+        return result
+
+    monkeypatch.setattr(scanner, "extract_metadata", metadata)
+    cat = _PairedCatalog(tmp_path, monkeypatch)
+    # JPEG precedes NEF, so the pending fill is consumed by the RAW write.
+    cat.raw.rename(cat.img_dir / "IMG_001.nef")
+    cat.db.conn.execute(
+        "UPDATE photos SET filename='IMG_001.nef', extension='.nef' WHERE id=?",
+        (cat.raw_id,),
+    )
+    cat.db.conn.commit()
+    real_write = scanner._ScanRun._write_photo_columns
+    replaced = []
+
+    def replace_owner_then_write(run, photo_id, item):
+        if photo_id == cat.raw_id:
+            assert photo_id in run._pending_companion_fills
+            with sqlite3.connect(cat.vireo_dir / "test.db") as writer:
+                writer.execute("PRAGMA foreign_keys = ON")
+                writer.execute("DELETE FROM photos WHERE id=?", (photo_id,))
+                writer.execute(
+                    "INSERT INTO photos(id, filename) VALUES (?, 'replacement.nef')",
+                    (photo_id,),
+                )
+            replaced.append(photo_id)
+        real_write(run, photo_id, item)
+
+    monkeypatch.setattr(scanner._ScanRun, "_write_photo_columns", replace_owner_then_write)
+    cat.scan(incremental=False)
+    assert replaced == [cat.raw_id]
+    assert cat.db.conn.execute(
+        "SELECT lens FROM photos WHERE id=?", (cat.raw_id,),
+    ).fetchone()[0] is None
+
+
+def test_recovered_companion_waits_for_a_readable_scan_before_synchronizing(
+    tmp_path, monkeypatch,
+):
+    import import_dedup
+    import scanner
+
+    cat = _PairedCatalog(tmp_path, monkeypatch)
+    cat.seed_raw_caches()
+    cat.db.conn.execute("DELETE FROM companion_identities")
+    cat.db.conn.commit()
+    list(import_dedup.recover_companion_identities(cat.db))
+    recovered = [tuple(row) for row in cat.identity()]
+    real_features = scanner._compute_file_features
+
+    def unreadable_jpeg(path):
+        phash, file_hash = real_features(path)
+        return (phash, None) if path.endswith(".jpg") else (phash, file_hash)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(scanner, "_compute_file_features", unreadable_jpeg)
+        cat.scan()
+    assert cat.merges == []
+    assert [tuple(row) for row in cat.identity()] == recovered
+    assert cat.jpeg_variant.exists() and cat.display.exists()
+
+    cat.scan()
+    assert cat.merges == ["IMG_001.jpg"]
+    assert not cat.jpeg_variant.exists() and not cat.display.exists()
+    cat.scan()
+    assert cat.merges == []
+
+
 def test_unreadable_companion_keeps_its_stored_identity(tmp_path, monkeypatch):
     """A companion that cannot be read right now is left in its RAW with the
     identity a hash vouched for, not re-merged with an unhashed one."""

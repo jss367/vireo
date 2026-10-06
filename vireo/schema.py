@@ -69,10 +69,30 @@ def _validate_companion_file_mtime(conn):
         raise RuntimeError("companion_identities.file_mtime is missing")
 
 
+def _add_companion_sync_state(conn):
+    """Distinguish recovered hashes from identities synchronized by pairing."""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(companion_identities)")}
+    if "needs_sync" not in columns:
+        conn.execute(
+            "ALTER TABLE companion_identities"
+            " ADD COLUMN needs_sync INTEGER NOT NULL DEFAULT 0"
+        )
+
+
+def _validate_companion_sync_state(conn):
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(companion_identities)")}
+    if "needs_sync" not in columns:
+        raise RuntimeError("companion_identities.needs_sync is missing")
+
+
 MIGRATIONS = (
     Migration(
         13, "companion_identities_file_mtime",
         _add_companion_file_mtime, _validate_companion_file_mtime,
+    ),
+    Migration(
+        14, "companion_identities_sync_state",
+        _add_companion_sync_state, _validate_companion_sync_state,
     ),
 )
 

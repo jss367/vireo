@@ -20,7 +20,7 @@ This module must not import ``db``: ``schema.py`` imports ``db``, and
 # database it creates from nothing. It is the newest registry migration in
 # ``schema.MIGRATIONS``: ``create_tables`` builds every migration's end state,
 # so a fresh database has nothing to migrate.
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 
 class CanonicalSchema:
@@ -128,7 +128,8 @@ class CanonicalSchema:
                 file_size INTEGER,
                 timestamp TEXT,
                 file_hash TEXT,
-                file_mtime REAL
+                file_mtime REAL,
+                needs_sync INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS keywords (

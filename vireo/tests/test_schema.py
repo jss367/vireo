@@ -371,3 +371,36 @@ def test_catalog_before_companion_mtime_gains_the_column(tmp_path, stamped):
             "SELECT photo_id, filename, file_size, file_hash, file_mtime"
             " FROM companion_identities"
         ).fetchall() == [(7, "IMG.jpg", 10, "h", None)]
+
+
+def test_v13_companion_identities_remain_trusted_after_sync_state_migration(tmp_path):
+    """Existing NULL mtimes are metadata retries, not recovered byte identities."""
+    db_path = str(tmp_path / "vireo.db")
+    schema.ensure_schema(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute("DROP TABLE companion_identities")
+        conn.execute(
+            "CREATE TABLE companion_identities (photo_id INTEGER PRIMARY KEY,"
+            " filename TEXT NOT NULL, file_size INTEGER, timestamp TEXT,"
+            " file_hash TEXT, file_mtime REAL)"
+        )
+        conn.executemany(
+            "INSERT INTO companion_identities VALUES (?, ?, ?, ?, ?, ?)",
+            [(7, "IMG.jpg", 10, None, "h", None),
+             (8, "OTHER.jpg", 20, "2024-01-15", "other", 123.0)],
+        )
+        conn.execute("PRAGMA user_version = 13")
+
+    schema.ensure_schema(db_path)
+    schema.ensure_schema(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert conn.execute(
+            "SELECT photo_id, filename, file_size, timestamp, file_hash,"
+            " file_mtime, needs_sync FROM companion_identities ORDER BY photo_id"
+        ).fetchall() == [
+            (7, "IMG.jpg", 10, None, "h", None, 0),
+            (8, "OTHER.jpg", 20, "2024-01-15", "other", 123.0, 0),
+        ]

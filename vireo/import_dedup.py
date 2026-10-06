@@ -288,13 +288,15 @@ def _recover_companion_batch(db, rows):
         # the recovered hash as unchanged — the owner would never be
         # re-synced. A NULL ``file_mtime`` fails the incremental stat check
         # (``scanner._companion_stat_unchanged`` requires non-NULL mtime),
-        # forcing the scanner to re-read the companion and run its own
-        # synchronization. The hash is kept so the duplicate-identity
-        # preview still recognizes paired JPEGs on a second card.
+        # forcing the scanner to re-read the companion. ``needs_sync``
+        # also prevents its freshly recovered hash from being accepted as
+        # already synchronized: NULL mtime alone is also used for trusted
+        # identities whose JPEG-only metadata refill needs a retry.
+        # The hash is kept so duplicate preview recognizes a second card.
         db.conn.executemany(
             "INSERT OR REPLACE INTO companion_identities "
-            "(photo_id, filename, file_size, timestamp, file_hash, file_mtime)"
-            " VALUES (?, ?, ?, ?, ?, NULL)",
+            "(photo_id, filename, file_size, timestamp, file_hash, file_mtime, needs_sync)"
+            " VALUES (?, ?, ?, ?, ?, NULL, 1)",
             recovered,
         )
     except BaseException:
