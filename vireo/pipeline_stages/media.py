@@ -266,9 +266,31 @@ class _ThumbPass:
     def _thumbnail_scanned_photo(self, thumb):
         """Thumbnail one photo taken from the scan queue.
 
-        Returns False when the photo was already counted as failed and
-        the per-photo progress update must be skipped.
+        Returns False when the queue entry is stale (its photo_id was
+        reused by a different file after the entry was queued) or when
+        the photo was already counted as failed, so the per-photo
+        progress update must be skipped.
         """
+        # SQLite reuses the row ids of deleted photos. A paired JPEG's
+        # transient row is inserted during one scanner invocation and
+        # then deleted by pairing at the end of that pass; _scan_in_place
+        # iterates sources with one do_scan per source, so a later
+        # invocation can insert an unrelated photo under the same reused
+        # id while a stale (id, companion_path) entry is still waiting
+        # in the queue. If this stale entry wins the race, generating
+        # {id}.jpg from the companion's bytes caches the deleted
+        # companion's pixels under the new photo's id — the real new-row
+        # entry then sees the cache file already present and skips.
+        # Re-resolve the catalog's canonical filename for this id at
+        # drain time and skip the entry when its path no longer names
+        # the current row.
+        filenames = self.thread_db.get_photo_filenames([thumb.photo_id])
+        catalog_entry = filenames.get(thumb.photo_id)
+        if (
+            catalog_entry is None
+            or os.path.basename(thumb.photo_path) != catalog_entry[1]
+        ):
+            return False
         thumb_path = os.path.join(self.cache_dir, f"{thumb.photo_id}.jpg")
         thumb.already_exists = os.path.exists(thumb_path)
         thumb.recipe = self.thread_db.get_photo_edit_recipe(thumb.photo_id)
