@@ -10,6 +10,7 @@ from pathlib import Path
 import config as cfg
 import pipeline_job
 import pipeline_stages
+import pytest
 from db import Database
 from PIL import Image
 from pipeline_stages import media
@@ -716,6 +717,7 @@ def test_thumbnail_post_check_uses_canonical_queued_path_not_mutated_render_sour
             _RowLike(id=99, path="/B") if fid == 99 else None
         ),
         get_photo_edit_recipe=lambda _id: None,
+        get_photo=lambda _id: None,
     )
     generated_path = os.path.join(str(tmp_path), "42.jpg")
 
@@ -803,3 +805,89 @@ def test_thumbnail_accepts_queued_companion_path_when_canonical_raw_is_missing(t
     bogus = _ThumbPhoto(photo_id=42, photo_path="/B/UNRELATED.jpg")
     assert thumbs._thumbnail_scanned_photo(bogus) is False
     assert thumbs.generated == 0 and thumbs.failed == 0
+
+
+@pytest.mark.parametrize("mode", ["missing", "unreadable", "decode-failure"])
+@pytest.mark.parametrize("edited", [False, True])
+def test_scanned_raw_thumbnail_renders_available_companion(
+    tmp_path, mode, edited,
+):
+    """The real queue/consumer must publish JPEG pixels for an unusable RAW."""
+    from pipeline_stages.media import _ThumbPhoto
+    from pipeline_stages.scanning import _ScanPass
+    from thumbnails import (
+        _is_working_copy_source,
+        _retry_thumbnail_after_working_copy_eviction,
+        generate_thumbnail,
+    )
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    raw = photo_dir / "source.NEF"
+    raw.write_bytes(b"\0" * 300)
+    companion = photo_dir / "different-stem.jpg"
+    Image.new("RGB", (800, 600), "green").save(companion)
+    with Database(str(tmp_path / "catalog.db")) as db:
+        folder_id = db.add_folder(str(photo_dir), name="photos")
+        photo_id = db.add_photo(
+            folder_id, raw.name, ".nef", raw.stat().st_size,
+            raw.stat().st_mtime, width=800, height=600,
+        )
+        db.conn.execute(
+            "UPDATE photos SET companion_path=? WHERE id=?",
+            (companion.name, photo_id),
+        )
+        db.conn.commit()
+        if edited:
+            db.set_photo_edit_recipe(
+                photo_id, {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
+            )
+        if mode == "missing":
+            raw.unlink()
+        elif mode == "unreadable":
+            raw.chmod(0)
+        queued = []
+        thumbs = _make_thumb_pass(tmp_path / "thumbnails")
+        thumbs.run.stages["scan"] = {"count": 0}
+        scan = _ScanPass(
+            thumbs.run, sentinel=object(), filter_excluded=None,
+            find_broken_metadata_folders=None, missing_archive_mount_root=None,
+            put_scan_item=queued.append, collected_photo_ids=[],
+            effective_thumb_cache_dir=thumbs.cache_dir,
+            effective_vireo_dir=str(tmp_path), final_destination=None,
+            missing_originals_invalidator=None, remote_archive=None,
+            skip_scan=False, snapshot_paths=None,
+        )
+        scan.thread_db = db
+        scan._on_scanned_photo(photo_id, str(companion))
+        assert len(queued) == 1
+        thumbs.thread_db = db
+        thumbs.generate_thumbnail = generate_thumbnail
+        thumbs.is_working_copy_source = _is_working_copy_source
+        thumbs.retry_thumbnail_after_working_copy_eviction = (
+            _retry_thumbnail_after_working_copy_eviction
+        )
+        thumbs.recipe_render_source = pipeline_job._recipe_render_source
+        thumbs.retry_thumbnail_with_companion = (
+            pipeline_job._retry_thumbnail_with_companion
+        )
+        thumbs.retry_thumbnail_with_working_copy = (
+            pipeline_job._retry_thumbnail_with_working_copy
+        )
+        thumbs.thumb_min_source_size_kwargs = pipeline_job._thumb_min_source_size_kwargs
+        thumbs.thumb_raw_decode_kwargs = pipeline_job._thumb_raw_decode_kwargs
+        thumbs.effective_vireo_dir = str(tmp_path)
+        try:
+            assert thumbs._thumbnail_scanned_photo(_ThumbPhoto(*queued[0])) is True
+            thumbs._flush_thumb_paths()
+            assert thumbs.generated == 1 and thumbs.failed == 0
+            cache = Path(thumbs.cache_dir) / f"{photo_id}.jpg"
+            with Image.open(cache) as image:
+                pixel = image.convert("RGB").getpixel(
+                    (image.width // 2, image.height // 2),
+                )
+            assert pixel[1] >= 80 and pixel[0] < 50 and pixel[2] < 50
+            assert db.get_photo(photo_id)["thumb_path"] == f"{photo_id}.jpg"
+        finally:
+            if raw.exists():
+                raw.chmod(0o600)

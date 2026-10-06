@@ -357,7 +357,9 @@ class _ThumbPass:
         thumb_path = os.path.join(self.cache_dir, f"{thumb.photo_id}.jpg")
         thumb.already_exists = os.path.exists(thumb_path)
         thumb.recipe = self.thread_db.get_photo_edit_recipe(thumb.photo_id)
-        if thumb.recipe:
+        # Unedited RAWs need catalog detail too: a missing, unreadable or
+        # undecodable source must still be able to retry its paired JPEG.
+        if thumb.recipe or self._is_raw(canonical_path):
             thumb.detail_photo = self.thread_db.get_photo(thumb.photo_id)
             if thumb.detail_photo:
                 folder_row = self.thread_db.get_folder(thumb.detail_photo["folder_id"])
@@ -365,7 +367,7 @@ class _ThumbPass:
                     {folder_row["id"]: folder_row["path"]}
                     if folder_row else {}
                 )
-                if not self._resolve_recipe_source(thumb, thumb.folders):
+                if thumb.recipe and not self._resolve_recipe_source(thumb, thumb.folders):
                     return False
         result_path = self._generate(thumb)
         detail_photo = thumb.detail_photo
