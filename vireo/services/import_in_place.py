@@ -537,6 +537,7 @@ class _InPlaceImportRun:
 
         self.photo_ids = []
         self.seen_photo_ids = set()
+        self.reported_photo_identities = {}
         self.indexed_paths = set()
         self.root_errors = []
         self.scan_acc = {
@@ -1115,6 +1116,7 @@ class _InPlaceImportRun:
             ),
             photo_callback=self._photo_cb,
             photo_merged_callback=self._photo_merged_cb,
+            reported_photo_identities=self.reported_photo_identities,
             status_callback=self._status_cb,
             recursive=plan.recursive,
             restrict_dirs=scope.dirs,

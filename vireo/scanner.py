@@ -3718,7 +3718,7 @@ def _companion_bytes_unchanged(known, file_size, file_hash):
     return file_hash is not None and file_hash == known["file_hash"]
 
 
-def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True, photo_callback=None, skip_paths=None, status_callback=None, recursive=True, restrict_dirs=None, restrict_files=None, vireo_dir=None, thumb_cache_dir=None, permission_error_callback=None, cancel_check=None, pause_check=None, cancel_only_check=None, skip_working_copies=False, repair_missing_metadata=False, register_restrict_dirs_as_roots=True, allow_photo_inserts=True, counts=None, discovered_files=None, photo_merged_callback=None):
+def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True, photo_callback=None, skip_paths=None, status_callback=None, recursive=True, restrict_dirs=None, restrict_files=None, vireo_dir=None, thumb_cache_dir=None, permission_error_callback=None, cancel_check=None, pause_check=None, cancel_only_check=None, skip_working_copies=False, repair_missing_metadata=False, register_restrict_dirs_as_roots=True, allow_photo_inserts=True, counts=None, discovered_files=None, photo_merged_callback=None, reported_photo_identities=None):
     """Walk a folder tree, discover photos, read metadata, populate database.
 
     Args:
@@ -3746,6 +3746,10 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             ``photo_callback``, this scan or an earlier one) must replace
             it, because the id no longer names a photo and SQLite can give
             it to the next insert.
+        reported_photo_identities: optional dict shared across all scanner
+            calls feeding one receiver. Stores the catalog identity reported
+            for each id, so a later root cannot substitute an unrelated pair
+            for a deleted photo reported by an earlier root.
         skip_paths: optional set of absolute path strings to exclude from scanning
         status_callback: optional callable(message) for phase status updates.
             Callers may also accept keyword-only ``phase_current``,
@@ -3937,6 +3941,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         register_restrict_dirs_as_roots=register_restrict_dirs_as_roots,
         allow_photo_inserts=allow_photo_inserts,
         photo_merged_callback=photo_merged_callback,
+        reported_photo_identities=reported_photo_identities,
     ).run()
     return counts
 
@@ -4018,6 +4023,7 @@ class _ScanRun:
         cancel_only_check, skip_working_copies, repair_missing_metadata,
         register_restrict_dirs_as_roots, allow_photo_inserts,
         photo_merged_callback=None,
+        reported_photo_identities=None,
     ):
         self.root = root
         self.root_path = root_path
@@ -4031,6 +4037,9 @@ class _ScanRun:
         self.extract_full_metadata = extract_full_metadata
         self.photo_callback = photo_callback
         self.photo_merged_callback = photo_merged_callback
+        self._reported_identities = (
+            reported_photo_identities if reported_photo_identities is not None else {}
+        )
         self.skip_paths = skip_paths
         self.status_callback = status_callback
         self.status_supports_phase = status_supports_phase
@@ -4551,13 +4560,9 @@ class _ScanRun:
         # merges must be intersected with what *this* invocation counted (see
         # ``_pair_raw_jpeg_companions``).
         self.indexed_photo_ids = set()
-        # Identity (``folder_id, filename``) the scanner handed to
-        # ``photo_callback`` under each photo id. ``_report_merged_photos``
-        # compares this against the companion identity pairing captured:
-        # if another connection deleted the row and SQLite reused the id
-        # for an unrelated file between callback and pairing, the two
-        # disagree and the pairing merge must not substitute the id.
-        self._reported_identities = {}
+        # The identity history initialized by __init__ spans the receiver's
+        # scanner calls. Do not reset it at this per-root phase boundary:
+        # end-of-scan pairing may merge ids reported by an earlier root.
         try:
             self._register_scan_targets()
             for image_path in self.image_files:
@@ -6011,9 +6016,9 @@ class _ScanRun:
                 # freed the id and SQLite reused it for an unrelated row
                 # that pairing then merged, substituting ``new_id`` for
                 # ``old_id`` in the receiver's collection would adopt an
-                # unrelated RAW. ``None`` on either side means we did not
-                # report this id (pairing covers the whole catalog) and
-                # the receiver's own id-set check will no-op anyway.
+                # unrelated RAW. A missing reported identity means none of
+                # this receiver's scanner calls reported the id; pairing
+                # also covers catalog rows outside those calls.
                 reported_identity = reported_identities.get(old_id)
                 pairing_identity = companion_identities.get(old_id)
                 identity_matches = (
@@ -6031,6 +6036,9 @@ class _ScanRun:
                     self.photo_merged_callback(
                         old_id, new_id, os.path.join(row[2], row[1]),
                     )
+                    if reported_identity is not None:
+                        reported_identities[new_id] = expected
+                reported_identities.pop(old_id, None)
 
     def _working_copy_scope(self):
         if self.restrict_dirs is not None:

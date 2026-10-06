@@ -197,6 +197,10 @@ class _ScanPass:
         # Mirror of ``collected_photo_ids`` for O(1) membership in
         # ``_on_merged_photo``; the list keeps the collection's order.
         self._collected_ids: set = set()
+        # Pairing covers the whole catalog, including ids reported by an
+        # earlier source. Keep identity history for the whole stage while
+        # the callback dedup set remains scoped to each scanner invocation.
+        self._reported_photo_identities = {}
 
         # Collect the scan roots actually fed to do_scan so the finally
         # clause can invalidate the new-images cache for each one,
@@ -500,6 +504,7 @@ class _ScanPass:
             cancel_check=self.cancel_requested,
             pause_check=self._scan_pause_requested,
             cancel_only_check=self.run.control.cancellation_requested,
+            reported_photo_identities=self._reported_photo_identities,
             **kwargs,
         )
 

@@ -36,6 +36,66 @@ def _photo_ids_by_filename(db):
     }
 
 
+def test_later_scan_root_cannot_substitute_an_unrelated_reused_id(tmp_path):
+    """A receiver spans roots even though each root creates its own ScanRun."""
+    from types import SimpleNamespace
+
+    import scanner
+    from db import Database
+    from pipeline_stages.scanning import _ScanPass
+
+    first, unrelated, second = (tmp_path / name for name in ("first", "unrelated", "second"))
+    for folder in (first, unrelated, second):
+        folder.mkdir()
+    original, other = first / "ORIGINAL.jpg", second / "SECOND.jpg"
+    for path in (original, other, unrelated / "OTHER.jpg"):
+        Image.new("RGB", (40, 30), (30, 90, 180)).save(path)
+    (unrelated / "OTHER.cr3").write_bytes(b"cataloged RAW placeholder")
+    db = Database(str(tmp_path / "test.db"))
+    writer = Database(str(tmp_path / "test.db"))
+    first_id, unrelated_id = db.add_folder(str(first)), db.add_folder(str(unrelated))
+    old_id = db.add_photo(first_id, original.name, ".jpg", original.stat().st_size, original.stat().st_mtime)
+    collected = []
+    run = SimpleNamespace(
+        stages={"scan": {"count": 0}}, job={"id": "multi-root"},
+        runner=SimpleNamespace(update_step=lambda *a, **k: None),
+        control=SimpleNamespace(should_abort=lambda _a: False, cancellation_requested=lambda: False),
+        abort=SimpleNamespace(set=lambda: None, is_set=lambda: False),
+    )
+    stage = _ScanPass(
+        run, sentinel=object(), filter_excluded=None,
+        find_broken_metadata_folders=None, missing_archive_mount_root=None,
+        put_scan_item=lambda item: None, collected_photo_ids=collected,
+        effective_thumb_cache_dir=None, effective_vireo_dir=None,
+        final_destination=None, missing_originals_invalidator=None,
+        remote_archive=None, skip_scan=False, snapshot_paths=None,
+    )
+    stage.thread_db, stage.do_scan = db, scanner.scan
+    stage.pipeline_cfg = {"extract_full_metadata": False}
+    stage._on_scan_progress = lambda *a: None
+    stage._on_scan_status = lambda *a, **k: None
+    try:
+        stage._scan(
+            str(first), discovered_files=[original], skip_working_copies=True,
+            photo_callback=stage._on_scanned_photo, photo_merged_callback=stage._on_merged_photo,
+        )
+        assert collected == [old_id]
+        writer.delete_photos([old_id])
+        assert writer.add_photo(unrelated_id, "OTHER.jpg", ".jpg", 256, None) == old_id
+        raw_id = writer.add_photo(unrelated_id, "OTHER.cr3", ".cr3", 256, None)
+        stage._scan(
+            str(second), discovered_files=[other], skip_working_copies=True,
+            photo_callback=stage._on_scanned_photo, photo_merged_callback=stage._on_merged_photo,
+        )
+        second_id = db.conn.execute("SELECT id FROM photos WHERE filename = 'SECOND.jpg'").fetchone()[0]
+        assert raw_id not in collected
+        assert collected == [second_id]
+        assert run.stages["scan"]["count"] == 1
+    finally:
+        writer.close()
+        db.close()
+
+
 @pytest.mark.parametrize("reuse_id", [False, True])
 def test_merged_owner_deleted_before_publication_drops_import_membership(
     tmp_path, reuse_id,
