@@ -350,7 +350,7 @@ class _ScanPass:
         self.collected_photo_ids[:] = [
             pid for pid in self.collected_photo_ids if pid != old_id
         ]
-        if new_id in self._collected_ids:
+        if new_id is None or new_id in self._collected_ids:
             self.run.stages["scan"]["count"] = len(self.collected_photo_ids)
         else:
             self._on_scanned_photo(new_id, path)

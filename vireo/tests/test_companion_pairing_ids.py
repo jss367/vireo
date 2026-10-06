@@ -36,6 +36,94 @@ def _photo_ids_by_filename(db):
     }
 
 
+@pytest.mark.parametrize("reuse_id", [False, True])
+def test_merged_owner_deleted_before_publication_drops_import_membership(
+    tmp_path, reuse_id,
+):
+    from types import SimpleNamespace
+
+    import scanner
+    from db import Database
+    from pipeline_stages.scanning import _ScanPass
+    from services.import_in_place import _InPlaceImportRun
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    writer = Database(db_path)
+    folder_id = db.add_folder(str(tmp_path))
+    raw_id = db.add_photo(folder_id, "IMG_001.cr3", ".cr3", 256, None)
+    jpeg_id = db.add_photo(folder_id, "IMG_001.jpg", ".jpg", 256, None)
+    merged = scanner._pair_raw_jpeg_companions(db)
+    assert merged == {jpeg_id: raw_id}
+    writer.delete_photos([raw_id])
+    if reuse_id:
+        assert writer.add_photo(
+            folder_id, "unrelated.jpg", ".jpg", 256, None,
+        ) == raw_id
+    pipeline = SimpleNamespace(
+        _collected_ids={jpeg_id}, _reported_photo_ids={jpeg_id},
+        collected_photo_ids=[jpeg_id],
+        run=SimpleNamespace(stages={"scan": {"count": 1}}),
+    )
+    imported = SimpleNamespace(
+        seen_photo_ids={jpeg_id}, photo_ids=[jpeg_id],
+    )
+    published = []
+
+    def report(old_id, new_id, path):
+        published.append((old_id, new_id, path))
+        _ScanPass._on_merged_photo(pipeline, old_id, new_id, path)
+        _InPlaceImportRun._photo_merged_cb(imported, old_id, new_id, path)
+
+    run = SimpleNamespace(db=db, photo_merged_callback=report)
+    try:
+        scanner._ScanRun._report_merged_photos(run, merged)
+        assert published == [(jpeg_id, None, None)]
+        assert pipeline.collected_photo_ids == []
+        assert pipeline.run.stages["scan"]["count"] == 0
+        assert imported.photo_ids == []
+        assert imported.seen_photo_ids == set()
+    finally:
+        writer.close()
+        db.close()
+
+
+def test_merged_owner_is_committed_and_cannot_be_deleted_during_publication(
+    tmp_path,
+):
+    from types import SimpleNamespace
+
+    import scanner
+    from db import Database
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    writer = Database(db_path)
+    writer.conn.execute("PRAGMA busy_timeout=0")
+    folder_id = db.add_folder(str(tmp_path))
+    raw_id = db.add_photo(folder_id, "IMG_001.cr3", ".cr3", 256, None)
+    jpeg_id = db.add_photo(folder_id, "IMG_001.jpg", ".jpg", 256, None)
+    merged = scanner._pair_raw_jpeg_companions(db)
+    published = []
+
+    def report(old_id, new_id, path):
+        assert writer.get_photo(new_id)["companion_path"] == "IMG_001.jpg"
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            writer.conn.execute("DELETE FROM photos WHERE id=?", (new_id,))
+        writer.conn.rollback()
+        published.append((old_id, new_id, path))
+
+    run = SimpleNamespace(db=db, photo_merged_callback=report)
+    try:
+        scanner._ScanRun._report_merged_photos(run, merged)
+        assert published == [(jpeg_id, raw_id, str(tmp_path / "IMG_001.cr3"))]
+        writer.delete_photos([raw_id])
+        assert db.get_photo(raw_id) is None
+    finally:
+        writer.close()
+        db.close()
+
+
 def _shoot_pairs(folder, stems, raw_ext=".cr3"):
     """A RAW and its camera JPEG per stem, the way a card holds them."""
     folder.mkdir(parents=True, exist_ok=True)

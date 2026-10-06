@@ -62,7 +62,6 @@ from resource_ledger import (
     get_resource_ledger,
     suspend_resource_wait_timing,
 )
-from sql_chunks import chunked
 from xmp import read_hierarchical_keywords, read_keywords
 
 log = logging.getLogger(__name__)
@@ -1369,6 +1368,14 @@ def _run_post_commit_fs_actions(post_commit_fs_actions):
             )
 
 
+class _MergedPhotoIds(dict):
+    """Merged ids plus the RAW identities that actually absorbed them."""
+
+    def __init__(self):
+        super().__init__()
+        self.owners = {}
+
+
 def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
     """Find raw+JPEG pairs in the same folder and merge them.
 
@@ -1416,7 +1423,7 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
     # handed out. Collected at the DELETE but only returned after the
     # commit below succeeds — the whole loop shares one transaction, so a
     # commit failure rolls every deletion back and none of them happened.
-    merged_ids = {}
+    merged_ids = _MergedPhotoIds()
     # ``companion_id -> primary_id`` accumulated across every pair so we can
     # remap collection ``photo_ids`` rules once at the end of the loop.
     # ``remap_collection_photo_ids`` scans and JSON-parses every collection
@@ -1436,6 +1443,9 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
             )
             collection_remap[companion["id"]] = primary["id"]
             merged_ids[companion["id"]] = primary["id"]
+            merged_ids.owners[primary["id"]] = (
+                primary["folder_id"], primary["filename"],
+            )
             if vireo_dir:
                 _defer_companion_derivative_cleanup(
                     post_commit_fs_actions, companion, vireo_dir,
@@ -3713,6 +3723,9 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             A JPEG the scan pairs with its RAW is reported under the RAW's
             id; it is never inserted as a photo first.
         photo_merged_callback: optional callable(old_id, new_id, path_str)
+            If the surviving RAW was deleted or replaced before publication,
+            new_id and path_str are None: discard old_id without adopting
+            a missing or unrelated replacement row.
             called after the end-of-scan pairing pass merges an existing
             JPEG photo into the RAW row ``new_id`` at ``path_str``. Called
             for every merge that pass commits, which can include pairs
@@ -5931,19 +5944,25 @@ class _ScanRun:
         """Tell ``photo_merged_callback`` which RAW absorbed each merged id."""
         if not merged or self.photo_merged_callback is None:
             return
-        paths = {}
-        for chunk in chunked(sorted(set(merged.values()))):
-            placeholders = ",".join("?" for _ in chunk)
-            for row in self.db.conn.execute(
-                "SELECT p.id, f.path, p.filename FROM photos p"
-                " JOIN folders f ON f.id = p.folder_id"
-                f" WHERE p.id IN ({placeholders})",
-                chunk,
-            ):
-                paths[row[0]] = os.path.join(row[1], row[2])
-        for old_id, new_id in merged.items():
-            if new_id in paths:
-                self.photo_merged_callback(old_id, new_id, paths[new_id])
+        # Pairing has committed, so readers on other connections can see
+        # the merge. Reacquire the writer lock before validating the RAW
+        # and publishing its id; deletion and rowid reuse must not interleave
+        # with a callback that updates an import's in-memory membership.
+        with self.db._commits_held():
+            self.db.conn.execute("BEGIN IMMEDIATE")
+            for old_id, new_id in merged.items():
+                row = self.db.conn.execute(
+                    "SELECT p.folder_id, p.filename, f.path FROM photos p"
+                    " JOIN folders f ON f.id = p.folder_id WHERE p.id = ?",
+                    (new_id,),
+                ).fetchone()
+                expected = getattr(merged, "owners", {}).get(new_id)
+                if row is None or (row[0], row[1]) != expected:
+                    self.photo_merged_callback(old_id, None, None)
+                else:
+                    self.photo_merged_callback(
+                        old_id, new_id, os.path.join(row[2], row[1]),
+                    )
 
     def _working_copy_scope(self):
         if self.restrict_dirs is not None:
