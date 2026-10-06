@@ -1043,3 +1043,165 @@ def test_preview_publication_refused_after_photo_id_recycled(client_with_photo, 
     # The old photo's pixels never reached the recycled ID's preview cache.
     assert not list(preview_dir.glob(f"{photo_id}_*.jpg"))
     assert db.preview_cache_get(photo_id, 1920) is None
+
+
+def test_cross_photo_eviction_demotes_earlier_ready_photo(
+    client_with_photo, monkeypatch,
+):
+    """A later photo's warming can evict an earlier photo's already-warmed
+    tiers once the combined selection exceeds ``preview_cache_max_mb``.
+
+    The in-loop per-photo check runs before subsequent photos touch the
+    cache, so it cannot see this: without the final cross-selection pass,
+    the job counts every photo as ready even though the earlier ones will
+    decode again at the next lightbox request. Verify readiness is corrected
+    to match what the lightbox actually sees.
+    """
+    from web import media as media_mod
+
+    app, db, pid1 = client_with_photo
+    client = app.test_client()
+
+    row = db.conn.execute(
+        "SELECT f.id AS folder_id, f.path FROM photos p "
+        "JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+        (pid1,),
+    ).fetchone()
+    folder_id, folder_path = row["folder_id"], row["path"]
+    src2 = os.path.join(folder_path, "test2.jpg")
+    Image.new("RGB", (800, 600), (40, 180, 90)).save(src2, "JPEG", quality=85)
+    pid2 = db.add_photo(
+        folder_id=folder_id, filename="test2.jpg", extension=".jpg",
+        file_size=os.path.getsize(src2), file_mtime=os.path.getmtime(src2),
+        width=800, height=600,
+    )
+
+    preview_dir = Path(os.path.dirname(app.config["THUMB_CACHE_DIR"]), "previews")
+
+    # Simulate quota that fits one photo's tiers but not both: after
+    # pid2 starts publishing its tiers, eviction wipes pid1's entries.
+    real_evict = media_mod.evict_preview_cache_if_over_quota
+    purged = []
+
+    def cross_evict(db_arg, dir_arg):
+        # Fire once, as soon as pid2 has published something — all of
+        # pid1's tiers get evicted in bulk, mimicking an LRU pass over a
+        # quota that only holds the current photo's tier set.
+        if not purged and db_arg.preview_cache_get(pid2, 2560):
+            import contextlib
+            for size in (1920, 2560, 3840):
+                f = preview_dir / f"{pid1}_{size}.jpg"
+                with contextlib.suppress(FileNotFoundError):
+                    f.unlink()
+                db_arg.conn.execute(
+                    "DELETE FROM preview_cache WHERE photo_id=? AND size=?",
+                    (pid1, size),
+                )
+            db_arg.conn.commit()
+            purged.append(True)
+        return real_evict(db_arg, dir_arg)
+
+    monkeypatch.setattr(
+        media_mod, "evict_preview_cache_if_over_quota", cross_evict,
+    )
+
+    started = client.post(
+        "/api/jobs/prepare-full-resolution",
+        json={"photo_ids": [pid1, pid2]},
+    )
+    job = wait_for_job_via_client(client, started.get_json()["job_id"])
+    result = job["result"]
+    assert purged, "cross-photo eviction hook never fired"
+    # Final cross-selection pass must demote pid1 from ready → failed.
+    assert result["failed"] == 1, result
+    assert result["ready"] == 1, result
+    assert result["ok"] is False, result
+    assert any("evicted during warming" in e for e in result["errors"]), result
+    assert any("test.jpg" in e for e in result["errors"]), result
+    # pid2's tiers survived.
+    for size in (1920, 2560, 3840):
+        assert db.preview_cache_get(pid2, size), size
+        assert (preview_dir / f"{pid2}_{size}.jpg").is_file(), size
+    # pid1's tiers were evicted and the final pass caught it.
+    for size in (1920, 2560, 3840):
+        assert db.preview_cache_get(pid1, size) is None, size
+        assert not (preview_dir / f"{pid1}_{size}.jpg").exists(), size
+
+
+def test_preview_publication_refused_when_recipe_changes_mid_render(
+    client_with_photo, monkeypatch,
+):
+    """A recipe save racing a preparation render must not publish stale pixels.
+
+    ``photo_source_matches`` only compares source-asset fields, so with
+    the old guard the worker could publish bytes rendered without the new
+    recipe after the edit endpoint had already invalidated the cache. Since
+    ordinary preview filenames are not recipe-keyed, the next lightbox
+    request would then serve those stale pixels. The guard now also refuses
+    publication if the stored recipe changed under it.
+    """
+    import preview_materializer
+    from db import Database
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    preview_dir = Path(os.path.dirname(app.config["THUMB_CACHE_DIR"]), "previews")
+    original_render = preview_materializer.render_preview_bytes
+    recipe_saves = []
+
+    def render_then_save_recipe(*args, **kwargs):
+        data = original_render(*args, **kwargs)
+        if not recipe_saves:
+            # Simulate a concurrent /api/photos/<id>/edit-recipe save on a
+            # different connection, as the live edit endpoint would do.
+            other = Database(app.config["DB_PATH"])
+            try:
+                other.set_photo_edit_recipe(photo_id, {"rotation": 90})
+            finally:
+                other.close()
+            recipe_saves.append(True)
+        return data
+
+    monkeypatch.setattr(
+        preview_materializer, "render_preview_bytes", render_then_save_recipe,
+    )
+
+    started = client.post(
+        "/api/jobs/prepare-full-resolution", json={"photo_ids": [photo_id]},
+    )
+    job = wait_for_job_via_client(client, started.get_json()["job_id"])
+    assert recipe_saves, "recipe save hook never fired"
+    result = job["result"]
+    # Publication was refused on the preview whose render raced the save:
+    # the photo cannot be ready, and no preview file was published under
+    # the recipe-unaware filename.
+    assert result["ready"] == 0, result
+    assert result["failed"] == 1, result
+    assert not list(preview_dir.glob(f"{photo_id}_*.jpg"))
+    assert db.preview_cache_get(photo_id, 1920) is None
+
+
+def test_preparation_guard_accepts_matching_recipe(client_with_photo):
+    """Preparation of an edited photo publishes normally when nothing races it.
+
+    The recipe-check guard added for the mid-render race must not false-trip
+    on the ordinary edited-photo case: when the recipe stays the same from
+    capture through publication, both ``/original`` and ``/preview`` renders
+    publish and the photo is reported ready.
+    """
+    app, db, photo_id = client_with_photo
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    client = app.test_client()
+
+    started = client.post(
+        "/api/jobs/prepare-full-resolution", json={"photo_ids": [photo_id]},
+    )
+    job = wait_for_job_via_client(client, started.get_json()["job_id"])
+    result = job["result"]
+    assert result["ok"] is True, result
+    assert result["ready"] == 1, result
+    assert result["failed"] == 0, result
+    preview_dir = Path(os.path.dirname(app.config["THUMB_CACHE_DIR"]), "previews")
+    for size in (1920, 2560, 3840):
+        assert db.preview_cache_get(photo_id, size), size
+        assert (preview_dir / f"{photo_id}_{size}.jpg").is_file(), size

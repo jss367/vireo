@@ -1286,6 +1286,10 @@ def create_job_launchers_blueprint(
                 failed = 0
                 skipped_deleted = 0
                 copied_bytes = 0
+                # Photos counted ready by the in-loop pass: a final
+                # cross-selection check verifies no later photo's warming
+                # evicted their tiers before the job reports them ready.
+                pending_ready_meta = {}
                 total = len(photo_ids)
                 job["_start_time"] = time.time()
                 job["progress"]["total"] = total
@@ -1409,11 +1413,17 @@ def create_job_launchers_blueprint(
                                         )
                             elif error is None:
                                 ready += 1
+                                cache_bytes = int(cached.get("bytes") or 0)
                                 if cached["status"] == "cached":
                                     copied += 1
-                                    copied_bytes += int(cached.get("bytes") or 0)
+                                    copied_bytes += cache_bytes
                                 elif cached["status"] == "skipped":
                                     reused += 1
+                                pending_ready_meta[photo_id] = {
+                                    "filename": filename,
+                                    "cached_status": cached["status"],
+                                    "cached_bytes": cache_bytes,
+                                }
                             else:
                                 failed += 1
                                 job["errors"].append(f"{filename}: {error}")
@@ -1431,6 +1441,42 @@ def create_job_launchers_blueprint(
                     }
                     job["progress"].update(progress)
                     ctx.runner.push_event(job["id"], "progress", progress)
+
+                # Final cross-selection verification: later photos' warming
+                # may have evicted earlier photos' tiers once the combined
+                # selection exceeds preview_cache_max_mb. The in-loop check
+                # cannot see this — it runs before subsequent photos touch
+                # the cache. Reclassify any photo whose tiers no longer
+                # exist on disk / in the preview_cache table as failed.
+                if preview_sizes and pending_ready_meta:
+                    preview_dir = os.path.join(vireo_dir, "previews")
+                    for photo_id, info in pending_ready_meta.items():
+                        missing_size = None
+                        for size in preview_sizes:
+                            cache_file = os.path.join(
+                                preview_dir, f"{photo_id}_{size}.jpg",
+                            )
+                            if not (
+                                thread_db.preview_cache_get(photo_id, size)
+                                and os.path.exists(cache_file)
+                            ):
+                                missing_size = size
+                                break
+                        if missing_size is None:
+                            continue
+                        ready -= 1
+                        failed += 1
+                        if info["cached_status"] == "cached":
+                            copied -= 1
+                            copied_bytes -= info["cached_bytes"]
+                        elif info["cached_status"] == "skipped":
+                            reused -= 1
+                        job["errors"].append(
+                            f"{info['filename']}: {missing_size}px preview "
+                            "was evicted during warming "
+                            "(preview_cache_max_mb too small for the "
+                            "lightbox tiers)"
+                        )
 
                 return {
                     "ok": failed == 0,

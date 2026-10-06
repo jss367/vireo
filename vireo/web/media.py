@@ -90,6 +90,12 @@ from working_copy_cache import (
 log = logging.getLogger(__name__)
 
 
+# Sentinel for "argument not provided" where None is a meaningful recipe value
+# (an unedited photo has recipe=None). Lets _preparation_publication tell "no
+# recipe guard requested" apart from "the captured recipe was None".
+_UNSET = object()
+
+
 class _ArtifactResponseError(RuntimeError):
     """Carry a producer's non-success Flask response to equal-key waiters."""
 
@@ -426,21 +432,31 @@ def _source_changed_response():
 
 
 @contextlib.contextmanager
-def _preparation_publication(db, photo_id, prepare_source):
+def _preparation_publication(db, photo_id, prepare_source, captured_recipe=_UNSET):
     """Hold a catalog-writer transaction while a preparation render publishes.
 
     Refuses late preparation writes after deletion/reimport, so a recycled
     photo ID never receives the previous owner's pixels. Decode and encode
     stay outside this short transaction. ``prepare_source=None`` (an
     interactive request) publishes unguarded.
+
+    ``captured_recipe`` is the edit recipe the render decoded against. When
+    passed, publication is also refused if the stored recipe has changed
+    since — a user save mid-render invalidated the cache we would overwrite,
+    and the ordinary preview filename is not recipe-keyed, so publishing the
+    old pixels would serve a different recipe at the next lightbox hit.
     """
     if prepare_source is None:
         yield
         return
     from offline_cache import photo_source_matches
 
+    check_recipe = captured_recipe is not _UNSET
+
     def check_source():
         if not photo_source_matches(prepare_source, db.get_photo(photo_id)):
+            raise _source_changed_response()
+        if check_recipe and db.get_photo_edit_recipe(photo_id) != captured_recipe:
             raise _source_changed_response()
 
     if db.conn.in_transaction:
@@ -511,7 +527,10 @@ class _OriginalPhotoRequest:
         self.extraction_decode = None
 
     def _preparation_publication(self):
-        return _preparation_publication(self.db, self.photo_id, self.prepare_source)
+        return _preparation_publication(
+            self.db, self.photo_id, self.prepare_source,
+            captured_recipe=self.recipe,
+        )
 
     def _reenter(self, *, guarded):
         response = make_response(
@@ -3514,6 +3533,7 @@ def create_media_blueprint(
                 publish_best_effort=True,
                 publication_guard=lambda: _preparation_publication(
                     db, photo_id, _prepare_source,
+                    captured_recipe=render_recipe,
                 ),
             )
         except PreviewMaterializationError:
