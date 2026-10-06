@@ -176,8 +176,7 @@ const note = '[extract_masks] No detections to mask';
 assert.equal(noteFilter._pipelineFailureErrors({errors: [note], notes: [note]}).length, 0);
 assert.deepEqual(Array.from(noteFilter._pipelineFailureErrors({errors: [note, '[scan] failed'], notes: [note]})), ['[scan] failed']);
 
-const dateSource = fs.readFileSync('vireo/templates/jobs.html', 'utf8');
-const dateViewCode = dateSource.match(/  function moveDateView\([^]*?\n  \}/)[0];
+const dateViewCode = fn('vireo/static/jobs/move-route.js', 'moveDateView');
 const dateView = vm.createContext({
   isLiveStatus: status => ['running', 'queued'].includes(status),
   DATE_FOLDER_ROWS: 10,

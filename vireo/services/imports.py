@@ -179,8 +179,8 @@ def import_resume_takeover(parent_id, parent_result, rows, parent_config=None):
 
     A descendant that crashed or was cancelled before its tag pass did
     none of the work and leaves the parent as the place to continue from.
-    Mirrored by ``importResumeTakeover`` in ``templates/jobs.html``; keep
-    the two equivalent.
+    Mirrored by ``importResumeTakeover`` in
+    ``vireo/static/jobs/import-retry.js``; keep the two equivalent.
     """
     parent_result = _json_dict(parent_result)
     parent_interrupted = bool(parent_result.get("interrupted"))
