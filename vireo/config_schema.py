@@ -226,9 +226,15 @@ SCHEMA = {
         "category": "Display", "scope": "both",
         "label": "Stacks: burst time gap (s)",
         "desc": (
-            "Browse's Stacks toggle groups consecutive frames from one folder "
-            "into a burst while each gap between shots is no longer than this. "
-            "Frames must also share the same species and location keywords."
+            "Browse's Stacks toggle first collapses exact duplicates, then "
+            "groups camera bursts: consecutive frames from one folder where "
+            "each gap between shots is no longer than this and every frame "
+            "has the same species and location keywords. Untagged frames "
+            "inside a tagged run stay out of the tagged stack until they are "
+            "tagged, and frames with no capture time never join a burst. "
+            "Stacks are built from the photos your filters match, so a filter "
+            "that removes the middle of a run splits it. Selecting a stacked "
+            "card selects every frame in it."
         ),
     },
     "browse_stack_split_mode": {
@@ -242,8 +248,9 @@ SCHEMA = {
         "label": "Stacks: keyword changes",
         "desc": (
             "What happens when species or location keywords change part-way "
-            "through a burst. Breaking keeps shooting order, so a run tagged "
-            "A, B, A becomes three stacks; partitioning regroups it into two."
+            "through a burst (untagged counts as its own keyword set). "
+            "Breaking keeps shooting order, so a run tagged A, B, A becomes "
+            "three stacks; partitioning regroups it into two."
         ),
     },
     "open_in_browser": {
