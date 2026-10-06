@@ -31,7 +31,6 @@ INLINE_SCRIPT_LINE_LIMITS = {
     "keywords.html": 1204,
     "life_list.html": 1604,
     "lightroom.html": 135,
-    "location_review.html": 1624,
     "logs.html": 64,
     "map.html": 416,
     "misses.html": 1438,
@@ -92,6 +91,7 @@ SPLIT_PAGES = {
     "/pipeline": "pipeline",
     "/pipeline/review": "pipeline-review",
     "/edit": "photo-editor",
+    "/locations/review": "location-review",
 }
 
 
