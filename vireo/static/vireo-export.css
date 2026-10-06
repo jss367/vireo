@@ -26,6 +26,15 @@
   align-self: start;
 }
 #exportPreview { overflow-wrap: anywhere; line-height: 1.6; }
+.export-location {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+  font-family: monospace;
+  overflow-wrap: anywhere;
+  line-height: 1.6;
+}
+.export-location[hidden] { display: none; }
 .export-collision-notice {
   font-size: 11px;
   color: var(--text-secondary);
