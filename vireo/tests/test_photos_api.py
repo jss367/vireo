@@ -13785,6 +13785,69 @@ def test_api_photos_geo_accepts_rules(app_and_db):
     assert client.get('/api/photos/geo?rules=notjson').status_code == 400
 
 
+def test_api_photos_geo_selection_accounts_for_every_selected_photo(app_and_db):
+    """A POSTed selection limits the map and says why each missing photo is missing."""
+    app, db = app_and_db
+    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    offline_folder = db.add_folder('/photos/offline', name='offline')
+    offline_pid = db.add_photo(
+        folder_id=offline_folder, filename='bird4.jpg', extension='.jpg',
+        file_size=4000, file_mtime=4.0, timestamp='2024-07-01T09:00:00',
+    )
+    db.conn.execute(
+        "UPDATE photos SET latitude=37.7, longitude=-122.4 WHERE id IN (?, ?, ?)",
+        (photos["bird1.jpg"], photos["bird3.jpg"], offline_pid))
+    db.conn.execute(
+        "UPDATE folders SET status='missing' WHERE id=?", (offline_folder,))
+    db.conn.commit()
+    not_in_workspace = max(photos.values()) + offline_pid + 1000
+    selection = [
+        photos["bird1.jpg"], photos["bird2.jpg"], photos["bird3.jpg"],
+        offline_pid, not_in_workspace, photos["bird1.jpg"],
+    ]
+
+    client = app.test_client()
+    resp = client.post('/api/photos/geo', json={"photo_ids": selection})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert {p["id"] for p in data["photos"]} == {
+        photos["bird1.jpg"], photos["bird3.jpg"],
+    }
+    assert data["selection"] == {
+        "selected": 5,
+        "shown": 2,
+        "hidden_by_filters": 0,
+        "without_location": 1,
+        "folder_unavailable": 1,
+        "not_in_workspace": 1,
+    }
+
+    resp = client.post('/api/photos/geo', json={
+        "photo_ids": selection,
+        "rules": [{"field": "rating", "op": ">=", "value": 4}],
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert [p["id"] for p in data["photos"]] == [photos["bird3.jpg"]]
+    assert data["selection"]["shown"] == 1
+    assert data["selection"]["hidden_by_filters"] == 1
+    assert data["selection"]["without_location"] == 1
+
+    # The plain map request is unchanged and carries no selection block.
+    assert "selection" not in client.get('/api/photos/geo').get_json()
+
+
+def test_api_photos_geo_selection_rejects_malformed_ids(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    for body in ({}, {"photo_ids": []}, {"photo_ids": ["1"]},
+                 {"photo_ids": [True]}, {"photo_ids": 5}):
+        assert client.post('/api/photos/geo', json=body).status_code == 400
+    assert client.post(
+        '/api/photos/geo', data="[]", content_type="application/json",
+    ).status_code == 400
+
+
 def test_api_predictions_accepts_rules(app_and_db):
     import json as _json
     app, db = app_and_db

@@ -11,12 +11,12 @@
 <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
 <title>Vireo - Map</title>
 <style>
-body { padding-bottom: 36px; }
-
 .map-wrapper {
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 44px);
+  /* Navbar above, bottom-panel toggle (and the open panel) below: the status
+   * line must stay above both, or its counts are hidden under the toggle. */
+  height: calc(100vh - 48px - var(--bottom-offset, 28px));
 }
 
 .map-body {
@@ -293,6 +293,8 @@ body { padding-bottom: 36px; }
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+<script src="/static/map-selection.js"></script>
+<script src="/static/map-status.js"></script>
 <script>
 /* ── Tile layers ── */
 var streetLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -658,6 +660,7 @@ async function loadPhotos() {
   var focusPhotoId = requestedPhotoId;
   requestedPhotoId = null;
   var params = new URLSearchParams();
+  var rules = null, visual = null;
   // When the user follows a Browse "View on Map" deep link (``?photo_id=``),
   // skip any restored/persisted filter rules for this one load — otherwise a
   // saved rule that excludes the requested photo silently hides its marker
@@ -665,10 +668,11 @@ async function loadPhotos() {
   // plottable. The filter chips stay on-screen and reapply on the next
   // filter-driven reload; only this focus-triggered request is unfiltered.
   if (focusPhotoId === null && window.VireoFilter && VireoFilter.getRules) {
-    var rules = VireoFilter.getRules();
+    rules = VireoFilter.getRules();
     var count = Array.isArray(rules) ? rules.length : (rules.rules || []).length;
-    if (count) params.set('rules', JSON.stringify(rules));
-    var visual = VireoFilter.getVisual ? VireoFilter.getVisual() : null;
+    if (!count) rules = null;
+    if (rules) params.set('rules', JSON.stringify(rules));
+    visual = VireoFilter.getVisual ? VireoFilter.getVisual() : null;
     if (visual) params.set('visual', JSON.stringify(visual));
   }
   if (focusPhotoId !== null) params.set('photo_id', focusPhotoId);
@@ -677,7 +681,7 @@ async function loadPhotos() {
   var url = '/api/photos/geo' + (qs ? '?' + qs : '');
 
   try {
-    var data = await safeFetch(url);
+    var data = mapSelectionIds ? await fetchMapSelection(rules, visual) : await safeFetch(url);
     if (myEpoch !== _loadPhotosEpoch) return;  // superseded — drop
     if (window.VireoFilter && VireoFilter.setResultTotal) {
       VireoFilter.setResultTotal(data.total_filtered);
@@ -696,15 +700,10 @@ async function loadPhotos() {
     if (data.photos.length === 0) {
       renderSidebar([]);
       var emptyStatus = document.getElementById('mapStatus');
-      if (focusPhotoId !== null) {
+      if (focusPhotoId !== null && !data.selection) {
         emptyStatus.textContent = 'No map location found for this photo.';
       } else {
-        var emptyMessage = 'No geolocated photos found. Photos with EXIF GPS or an assigned map location will appear here.';
-        if (data.total_without_coordinates > 0) {
-          emptyMessage += ' <a href="/browse?location_status=none">Browse ' +
-            data.total_without_coordinates + ' without coordinates</a>.';
-        }
-        emptyStatus.innerHTML = emptyMessage;
+        emptyStatus.innerHTML = mapStatusHtml(data);
       }
       legendControl.update({});
       return;
@@ -722,29 +721,8 @@ async function loadPhotos() {
       }
     }
 
-    /* Map-coordinate coverage stats — global (unfiltered) for consistency */
-    var totalFiltered = data.total_filtered;
-    var totalGeolocated = data.total_geolocated;
-    var totalPhotos = data.total_photos;
-    var missingCoordinates = data.total_without_coordinates;
-    var pct = totalPhotos > 0 ? Math.round((totalGeolocated / totalPhotos) * 100) : 0;
-
-    var statusEl = document.getElementById('mapStatus');
-    var parts;
-    if (data.truncated) {
-      parts = [
-        'Showing ' + data.photos.length + ' of ' + totalFiltered + ' matching photos',
-        'Map display is limited to ' + data.render_limit + ' photos; refine the filters to see omitted results',
-      ];
-    } else {
-      parts = ['Showing ' + totalFiltered + ' of ' + totalGeolocated + ' geolocated photos'];
-    }
-    parts.push(pct + '% map coverage');
-    if (missingCoordinates > 0) {
-      parts.push('<a href="/browse?location_status=none">' + missingCoordinates + ' without coordinates</a>');
-    }
-    if (focusPhotoId === null || photoMarkers[focusPhotoId]) {
-      statusEl.innerHTML = parts.join(' &mdash; ');
+    if (data.selection || focusPhotoId === null || photoMarkers[focusPhotoId]) {
+      document.getElementById('mapStatus').innerHTML = mapStatusHtml(data);
     }
   } catch (e) {
     if (myEpoch !== _loadPhotosEpoch) return;  // superseded — drop
@@ -756,7 +734,7 @@ async function loadPhotos() {
 VireoFilter.init({
   page: 'map',
   root: document.getElementById('vireoFilterBar'),
-  scopeLabel: 'Map \u00b7 Plottable locations',
+  scopeLabel: mapSelectionScopeLabel() || 'Map \u00b7 Plottable locations',
   onChange: loadPhotos,
 }).then(loadPhotos).catch(function() { loadPhotos(); });
 </script>

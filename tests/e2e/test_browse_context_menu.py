@@ -3,6 +3,8 @@ import re
 import pytest
 from playwright.sync_api import expect
 
+from e2e.leaflet_stub import stub_leaflet
+
 _PNG_1X1 = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
     "/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
@@ -275,6 +277,37 @@ def test_view_on_map_context_action_targets_right_clicked_photo(live_server, pag
 
     menu.get_by_text("View on Map", exact=True).click()
     assert page.evaluate("window.__mapTarget") == pid
+
+
+def test_view_on_map_with_several_selected_photos_maps_just_those(live_server, page):
+    """View on Map on a multi-selection opens a map of only the selected photos."""
+    url = live_server["url"]
+    for pid in live_server["data"]["photos"]:
+        live_server["db"].conn.execute(
+            "UPDATE photos SET latitude = 37.7749, longitude = -122.4194 WHERE id = ?",
+            (pid,),
+        )
+    live_server["db"].conn.commit()
+    page.route("https://unpkg.com/**", stub_leaflet)
+    page.goto(f"{url}/browse")
+
+    cards = page.locator(".grid-card")
+    cards.first.wait_for(state="visible")
+    selected = [int(cards.nth(i).get_attribute("data-id")) for i in (0, 1)]
+    cards.nth(0).click(modifiers=["ControlOrMeta"])
+    cards.nth(1).click(modifiers=["ControlOrMeta"])
+    cards.nth(1).click(button="right")
+    menu = page.locator(".vireo-ctx-menu")
+    expect(menu).to_be_visible()
+
+    menu.get_by_text("View on Map", exact=True).click()
+    page.wait_for_url("**/map?source=selection")
+    expect(page.locator("#mapStatus")).to_contain_text("Showing 2 of 2 selected photos")
+    shown = sorted(
+        int(card.get_attribute("data-id"))
+        for card in page.locator(".sidebar-card").all()
+    )
+    assert shown == sorted(selected)
 
 
 def test_browse_selection_opens_burst_review(live_server, page):
