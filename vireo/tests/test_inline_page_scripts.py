@@ -27,7 +27,6 @@ INLINE_SCRIPT_LINE_LIMITS = {
     "duplicates.html": 1457,
     "highlights.html": 1155,
     "id_conflicts.html": 968,
-    "jobs.html": 1698,
     "keywords.html": 1204,
     "life_list.html": 1604,
     "lightroom.html": 135,
@@ -92,6 +91,7 @@ SPLIT_PAGES = {
     "/pipeline/review": "pipeline-review",
     "/edit": "photo-editor",
     "/locations/review": "location-review",
+    "/jobs": "jobs",
 }
 
 

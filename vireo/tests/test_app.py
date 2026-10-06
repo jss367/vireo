@@ -806,12 +806,11 @@ def test_logs_page(app_and_db):
 def test_jobs_page_uses_cache_aware_classification_eta(app_and_db):
     """Classification must not estimate throughput from cache-hit progress."""
     app, _ = app_and_db
-    resp = app.test_client().get('/jobs')
+    html = _page_with_scripts(app.test_client(), '/jobs')
 
-    assert resp.status_code == 200
-    assert b"step.progress.eta_kind === 'classification'" in resp.data
-    assert b"newly classified" in resp.data
-    assert b"first uncached batch" in resp.data
+    assert "step.progress.eta_kind === 'classification'" in html
+    assert "newly classified" in html
+    assert "first uncached batch" in html
 
 
 def test_storage_page_has_preview_cache_field(app_and_db):
