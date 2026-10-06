@@ -1335,6 +1335,39 @@ def create_job_launchers_blueprint(
                                             serve_photo_preview, photo_id, photo,
                                             f"{size}px preview",
                                         )
+                                    # Eviction can delete a just-warmed
+                                    # preview the moment it is published
+                                    # (preview_cache_max_mb too small for the
+                                    # combined tiers, or 0). _serve_preview
+                                    # still returns 200 from the in-memory
+                                    # bytes, so a successful render alone is
+                                    # not proof that the next lightbox
+                                    # request will be a cache hit — check
+                                    # after warming instead of calling the
+                                    # photo ready prematurely.
+                                    if error is None and preview_sizes:
+                                        preview_dir = os.path.join(
+                                            vireo_dir, "previews",
+                                        )
+                                        for size in preview_sizes:
+                                            cache_file = os.path.join(
+                                                preview_dir,
+                                                f"{photo_id}_{size}.jpg",
+                                            )
+                                            if not (
+                                                thread_db.preview_cache_get(
+                                                    photo_id, size,
+                                                )
+                                                and os.path.exists(cache_file)
+                                            ):
+                                                error = (
+                                                    f"{size}px preview was "
+                                                    "evicted during warming "
+                                                    "(preview_cache_max_mb "
+                                                    "too small for the "
+                                                    "lightbox tiers)"
+                                                )
+                                                break
                             except Exception as exc:
                                 thread_db.conn.rollback()
                                 error = str(exc) or exc.__class__.__name__

@@ -14,12 +14,18 @@ import shutil
 
 log = logging.getLogger(__name__)
 
-# The fixed ``/photos/<id>/preview?size=N`` tiers. The lightbox shows
-# ``/full`` (``preview_max_size``) when that covers the displayed long edge,
-# then steps up through these (``_lbPickSourceKey`` in
-# ``static/lightbox/source-loading.js``), and only past the last one does it
-# load ``/original``.
+# The fixed ``/photos/<id>/preview?size=N`` tiers the server allows at all.
+# ``allowed_preview_sizes`` serves this plus ``preview_max_size`` so UI
+# surfaces besides the lightbox (pipeline review's resolution slider,
+# browse's preview-size picker) can request these explicitly.
 PREVIEW_TIER_SIZES = (1920, 2560, 3840)
+
+# The tiers the lightbox actually steps through at fit. ``_lbPickSourceKey``
+# in ``static/lightbox/source-loading.js`` only has explicit 2560 and 3840
+# choices — below the first it serves ``/full`` (``preview_max_size``),
+# past 3840 it falls back to ``/original``. 1920 never appears, so a
+# ``preview_max_size`` under 1920 jumps straight from ``/full`` to 2560.
+LIGHTBOX_FIT_TIER_SIZES = (2560, 3840)
 
 
 def lightbox_fit_preview_sizes(preview_max_size):
@@ -28,12 +34,13 @@ def lightbox_fit_preview_sizes(preview_max_size):
     ``preview_max_size == 0`` makes ``/full`` redirect to ``/original``, so
     no preview size is in play. Otherwise ``/full`` serves
     ``preview_max_size`` and the lightbox only picks a fixed tier larger
-    than that.
+    than that. The 1920 tier is omitted because ``_lbPickSourceKey`` never
+    requests it: warming it just wastes an extra decode and cache slot.
     """
     if preview_max_size == 0:
         return []
     full = int(preview_max_size or 1920)
-    return [full] + [size for size in PREVIEW_TIER_SIZES if size > full]
+    return [full] + [size for size in LIGHTBOX_FIT_TIER_SIZES if size > full]
 
 
 def cleanup_cached_files_for_deleted_photos(

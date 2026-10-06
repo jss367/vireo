@@ -875,6 +875,11 @@ def test_lightbox_fit_preview_sizes_follow_preview_max_size():
     assert lightbox_fit_preview_sizes(4096) == [4096]
     # /full redirects to /original, which preparation already renders.
     assert lightbox_fit_preview_sizes(0) == []
+    # _lbPickSourceKey has only 2560 and 3840 explicit tiers — a
+    # preview_max_size below 1920 jumps straight from /full to 2560.
+    # Including 1920 here would warm a tier the lightbox never asks for.
+    assert lightbox_fit_preview_sizes(1280) == [1280, 2560, 3840]
+    assert lightbox_fit_preview_sizes(1600) == [1600, 2560, 3840]
 
 
 def test_preparation_warms_every_lightbox_fit_preview(client_with_photo, monkeypatch):
@@ -927,6 +932,42 @@ def test_preparation_skips_previews_when_full_is_original(client_with_photo):
     job = wait_for_job_via_client(client, started.get_json()["job_id"])
     assert job["status"] == "completed", job
     assert job["result"]["ready"] == 1
+    preview_dir = Path(os.path.dirname(app.config["THUMB_CACHE_DIR"]), "previews")
+    assert not list(preview_dir.glob(f"{photo_id}_*.jpg"))
+
+
+def test_preview_evicted_during_warming_marks_photo_failed(
+    client_with_photo,
+):
+    """A tiny preview_cache_max_mb lets eviction delete a just-warmed tier.
+
+    _serve_preview still returns 200 off the in-memory bytes, so without
+    this check the job would record the photo as ready even though the
+    next lightbox request has to decode again — defeating the point of
+    Prepare Full Resolution. The job must report the photo as not ready.
+    """
+    import config as cfg
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    saved = cfg.load()
+    # Any eviction target below the sum of warmed tiers forces at least
+    # one previously-warmed preview to be removed when the next tier is
+    # published. 0 is the clearest signal (every row is evicted
+    # immediately), and matches a user who turned the preview cache off.
+    saved["preview_cache_max_mb"] = 0
+    cfg.save(saved)
+
+    started = client.post(
+        "/api/jobs/prepare-full-resolution", json={"photo_ids": [photo_id]},
+    )
+    job = wait_for_job_via_client(client, started.get_json()["job_id"])
+    result = job["result"]
+    assert result["ok"] is False, result
+    assert result["ready"] == 0, result
+    assert result["failed"] == 1, result
+    assert any("evicted" in e for e in result["errors"]), result["errors"]
+    # No tier survived — the lightbox will decode on its next pass.
     preview_dir = Path(os.path.dirname(app.config["THUMB_CACHE_DIR"]), "previews")
     assert not list(preview_dir.glob(f"{photo_id}_*.jpg"))
 
