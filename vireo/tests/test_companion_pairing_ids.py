@@ -172,6 +172,51 @@ def test_pipeline_collection_names_only_surviving_raw_ids(
     assert sorted(members) == sorted(ids.values())
 
 
+def test_pipeline_scan_summary_counts_photos_not_files(tmp_path, monkeypatch):
+    """"N photos" in the scan step summary must match the collection.
+
+    ``_on_scan_progress`` writes the file-progress count into
+    ``stages["scan"]["count"]``, and rowless-companion attachment produces no
+    later merge callback to correct it. The final summary must therefore come
+    from ``collected_photo_ids`` (what the pipeline runs on), not from the
+    file-walked tally — otherwise a RAW+JPEG card reports twice its photo
+    count."""
+    from db import Database
+    from pipeline_job import PipelineParams, run_pipeline_job
+    from test_pipeline_job import FakeRunner, _make_job
+
+    _isolate_config(tmp_path, monkeypatch)
+    card = tmp_path / "card"
+    _shoot_pairs(card, ["IMG_001", "IMG_002", "IMG_003"])
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    runner = FakeRunner()
+    params = PipelineParams(
+        source=str(card),
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+    result = run_pipeline_job(_make_job(), runner, db_path, ws_id, params)
+
+    members = _collection_photo_ids(db, result["collection_id"])
+    assert len(members) == 3  # three RAWs, each JPEG attached rowlessly
+
+    scan_completed = [
+        kw for (_jid, sid, kw) in runner.step_updates
+        if sid == "scan" and kw.get("status") == "completed"
+    ]
+    assert scan_completed, runner.step_updates
+    summary = scan_completed[-1].get("summary", "")
+    leading = summary.split()[0] if summary else ""
+    assert leading == str(len(members)), (
+        f"scan summary {summary!r} must count the photos the pipeline runs "
+        f"on ({len(members)}), not the files walked (6)"
+    )
+
+
 def test_later_import_does_not_join_an_earlier_pipeline_collection(
     tmp_path, monkeypatch,
 ):
