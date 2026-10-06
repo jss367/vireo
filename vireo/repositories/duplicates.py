@@ -61,6 +61,42 @@ class DuplicatesRepository:
 
     # -- groups -------------------------------------------------------------
 
+    def is_group_member(self, photo_id):
+        """Whether ``photo_id`` shares its ``file_hash`` with another photo.
+
+        Counts rejected rows too, so the members of an already-resolved
+        group (kept row plus rejected hash-twins) qualify.
+        """
+        row = self.conn.execute(
+            "SELECT 1 FROM photos p "
+            "JOIN photos o ON o.file_hash = p.file_hash AND o.id != p.id "
+            "WHERE p.id = ? AND p.file_hash IS NOT NULL LIMIT 1",
+            (photo_id,),
+        ).fetchone()
+        return row is not None
+
+    def workspace_names(self, photo_ids):
+        """Return ``{photo_id: [workspace name, ...]}`` for the ids given.
+
+        Names come back sorted; a photo no workspace shows maps to ``[]``.
+        """
+        names = {pid: [] for pid in photo_ids}
+        ids = list(names)
+        for i in range(0, len(ids), self.chunk_size):
+            chunk = ids[i:i + self.chunk_size]
+            placeholders = ",".join("?" * len(chunk))
+            rows = self.conn.execute(
+                f"SELECT DISTINCT v.photo_id, w.name "
+                f"FROM photo_workspace_visibility v "
+                f"JOIN workspaces w ON w.id = v.workspace_id "
+                f"WHERE v.photo_id IN ({placeholders}) "
+                f"ORDER BY w.name COLLATE NOCASE",
+                chunk,
+            ).fetchall()
+            for r in rows:
+                names[r["photo_id"]].append(r["name"])
+        return names
+
     def live_ids_for_hash(self, file_hash):
         """Return the ids of non-rejected photos with ``file_hash``."""
         dup_rows = self.conn.execute(

@@ -3088,6 +3088,15 @@ class Database:
             include_resolved=include_resolved,
         )
 
+    def is_duplicate_group_member(self, photo_id):
+        """Whether ``photo_id`` shares its ``file_hash`` with another photo
+        (rejected rows included). Catalog-wide, like the duplicate scan."""
+        return self._duplicates_repository().is_group_member(photo_id)
+
+    def photo_workspace_names(self, photo_ids):
+        """Return ``{photo_id: [names of the workspaces that show it]}``."""
+        return self._duplicates_repository().workspace_names(photo_ids)
+
     def apply_duplicate_resolution(self, photo_ids):
         """Resolve a group of photos sharing a file_hash.
 
