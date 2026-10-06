@@ -326,10 +326,18 @@ def test_color_search_is_workspace_scoped_for_shared_photos(catalog):
     ('{"EXIF": {"Model": "Plain text"}}', "plain TEXT"),
     ('{"EXIF": {"Flash": false}}', "fals"),
 ])
-def test_raw_text_shortcut_never_drops_a_rendered_match(catalog, raw_exif, term):
-    """Values whose rendering differs from the stored JSON still match."""
+@pytest.mark.parametrize("indexed", [True, False], ids=["indexed", "unindexed"])
+def test_exif_prefilter_never_drops_a_rendered_match(catalog, raw_exif, term, indexed):
+    """Values whose rendering differs from the stored JSON still match.
+
+    Indexed photos prefilter on their stored tag values; photos the startup
+    backfill has not reached take the raw-text check instead.
+    """
     db, ids = catalog
     db.conn.execute("UPDATE photos SET exif_data=? WHERE id=?", (raw_exif, ids["robin"]))
+    if not indexed:
+        db.conn.execute("DELETE FROM photo_exif_search_text WHERE photo_id=?", (ids["robin"],))
+    db.conn.commit()
     rule = {"field": "metadata", "op": "contains", "value": term}
     assert ids["robin"] in db.query_photo_ids([rule])
     rule["op"] = "not_contains"
@@ -343,6 +351,22 @@ def test_raw_text_shortcut_never_drops_a_rendered_match(catalog, raw_exif, term)
 def test_raw_text_shortcut_only_for_terms_no_number_renders_as(term, shortcut):
     from metadata_search import raw_text_rules_out
     assert raw_text_rules_out(term) is shortcut
+
+
+@pytest.mark.parametrize("indexed", [True, False], ids=["indexed", "unindexed"])
+def test_tag_names_never_match(catalog, indexed):
+    db, ids = catalog
+    db.conn.execute("UPDATE photos SET exif_data=? WHERE id=?", (
+        json.dumps({"EXIF": {"GPSLongitude": "122 deg 30' W", "LongExposureNR": "Off"}}),
+        ids["robin"],
+    ))
+    if not indexed:
+        db.conn.execute("DELETE FROM photo_exif_search_text WHERE photo_id=?", (ids["robin"],))
+    db.conn.commit()
+    rule = {"field": "metadata", "op": "contains", "value": "long"}
+    assert ids["robin"] not in db.query_photo_ids([rule])
+    rule["value"] = "122 deg"
+    assert ids["robin"] in db.query_photo_ids([rule])
 
 
 def test_browse_summary_runs_the_metadata_filter_once(catalog):

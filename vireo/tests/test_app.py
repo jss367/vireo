@@ -17187,15 +17187,14 @@ def test_browse_export_started_uses_info_toast():
     assert "showToast('Export started (' + count + ' photo' + (count === 1 ? '' : 's') + ')', 'info')" in body
 
 
-def test_review_switch_collection_does_not_silently_widen_scope():
+def test_review_switch_collection_does_not_silently_widen_scope(app_and_db):
     """When /api/collections/<id>/photos fails, the review page must not fall
     back to `allPredictions.slice()` — that silently widened the scope back
     to every prediction, the opposite of what the user asked for. Regression
-    guard on the template source itself.
+    guard on the page's script source itself.
     """
-    from pathlib import Path
-    src = Path(__file__).parent.parent / "templates" / "review.html"
-    text = src.read_text(encoding="utf-8")
+    app, _ = app_and_db
+    text = _page_with_scripts(app.test_client(), "/review")
     # Locate the switchCollection function and the catch branch inside it.
     fn_start = text.find("async function switchCollection")
     assert fn_start != -1, "switchCollection function not found"
@@ -17205,7 +17204,7 @@ def test_review_switch_collection_does_not_silently_widen_scope():
     # The old silent fallback assigned allPredictions.slice() from the catch;
     # the new behavior keeps the scope empty and surfaces a toast.
     assert "predictions = allPredictions.slice()" not in body.split("catch")[1], (
-        "review.html still silently widens scope on collection load failure"
+        "Review still silently widens scope on collection load failure"
     )
     assert "predictions = []" in body
     assert "showToast" in body
@@ -19606,7 +19605,7 @@ def test_review_supports_photo_id_deep_link(app_and_db):
     """Browse routes ambiguous predictions to Review filtered to one photo."""
     app, _ = app_and_db
     client = app.test_client()
-    html = client.get("/review").get_data(as_text=True)
+    html = _page_with_scripts(client, "/review")
     assert "currentPhotoIdFilter" in html
     # The narrowing must be visible, or a one-photo queue reads as "empty".
     assert "photoFilterPill" in html
@@ -24320,15 +24319,17 @@ function __report() {
 
 def _run_review_accept(html, payload, call):
     """Run Review's real accept handlers against the stub server."""
+    # ``html`` comes from ``_page_with_scripts``: the actions run to the end
+    # of static/review/decisions.js.
     start = html.find("/* ---------- Actions ---------- */")
-    end = html.find("/* ---------- Keyboard Shortcuts ---------- */")
+    end = html.find("</script>", start)
     assert start != -1 and end > start, (
-        "review.html's accept actions could not be located"
+        "Review's accept actions could not be located"
     )
     grid_start = html.find("function getVisibleItems(")
     grid_end = html.find("function renderGrid(")
     assert grid_start != -1 and grid_end > grid_start, (
-        "review.html's getVisibleItems could not be located"
+        "Review's getVisibleItems could not be located"
     )
     import json as _json
 
@@ -24360,10 +24361,10 @@ def test_review_accept_all_consumes_grouped_accept_expansion(app_and_db):
     """
     app, _ = app_and_db
     client = app.test_client()
-    html = client.get("/review").get_data(as_text=True)
-    assert "/static/vireo-predictions.js" in html, (
-        "Review must load the shared grouped-decision module"
-    )
+    assert "/static/vireo-predictions.js" in client.get("/review").get_data(
+        as_text=True
+    ), "Review must load the shared grouped-decision module"
+    html = _page_with_scripts(client, "/review")
     # 11 and 12 are one burst; 13 is unrelated and queued behind them.
     predictions = [
         {"id": 11, "status": "pending"},
@@ -24417,7 +24418,7 @@ def test_review_single_accept_marks_expanded_group_members(app_and_db):
     """
     app, _ = app_and_db
     client = app.test_client()
-    html = client.get("/review").get_data(as_text=True)
+    html = _page_with_scripts(client, "/review")
 
     result = _run_review_accept(html, {
         "predictions": [
@@ -24446,7 +24447,7 @@ def test_review_accept_all_accepts_only_the_cards_the_filters_show(app_and_db):
     model's species on photos the user never saw.
     """
     app, _ = app_and_db
-    html = app.test_client().get("/review").get_data(as_text=True)
+    html = _page_with_scripts(app.test_client(), "/review")
     predictions = [
         {"id": 11, "status": "pending", "confidence": 0.95, "model": "m1"},
         {"id": 12, "status": "pending", "confidence": 0.30, "model": "m1"},
@@ -24475,7 +24476,7 @@ def test_review_reject_marks_burst_members_outside_the_filter(app_and_db):
     unfiltered copy claiming it is still pending.
     """
     app, _ = app_and_db
-    html = app.test_client().get("/review").get_data(as_text=True)
+    html = _page_with_scripts(app.test_client(), "/review")
 
     result = _run_review_accept(html, {
         "predictions": [
