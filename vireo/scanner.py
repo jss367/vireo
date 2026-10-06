@@ -878,8 +878,11 @@ def _fill_primary_metadata_gaps(db, primary, primary_full, companion_full):
         updates.append("flag = ?")
         params.append(companion_full["flag"])
     if primary_full["latitude"] is None and companion_full["latitude"] is not None:
-        updates.extend(["latitude = ?", "longitude = ?"])
-        params.extend([companion_full["latitude"], companion_full["longitude"]])
+        updates.append("latitude = ?")
+        params.append(companion_full["latitude"])
+    if primary_full["longitude"] is None and companion_full["longitude"] is not None:
+        updates.append("longitude = ?")
+        params.append(companion_full["longitude"])
     if not primary_full["exif_data"] and companion_full["exif_data"]:
         updates.append("exif_data = ?")
         params.append(companion_full["exif_data"])
@@ -897,8 +900,11 @@ def _fill_primary_metadata_gaps(db, primary, primary_full, companion_full):
             updates.append(f"{column} = ?")
             params.append(companion_full[column])
     if not primary_full["width"] and companion_full["width"]:
-        updates.extend(["width = ?", "height = ?"])
-        params.extend([companion_full["width"], companion_full["height"]])
+        updates.append("width = ?")
+        params.append(companion_full["width"])
+    if not primary_full["height"] and companion_full["height"]:
+        updates.append("height = ?")
+        params.append(companion_full["height"])
     if updates:
         params.append(primary["id"])
         db.conn.execute(

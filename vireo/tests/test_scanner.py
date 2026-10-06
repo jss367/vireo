@@ -2008,6 +2008,45 @@ def test_rescan_changed_companion_invalidates_jpeg_thumbnail_variant(tmp_path):
     assert not variant.exists()
 
 
+@pytest.mark.parametrize(
+    ("primary_values", "expected"),
+    [
+        ((None, 11, None, 222), (33, 11, 555, 222)),
+        ((11, None, 222, None), (11, 44, 222, 666)),
+    ],
+)
+def test_companion_metadata_fills_each_missing_coordinate_and_dimension(
+    tmp_path, primary_values, expected,
+):
+    from db import Database
+    from scanner import _fill_primary_metadata_gaps, _read_metadata_transfer_rows
+
+    with Database(str(tmp_path / "catalog.db")) as db:
+        folder_id = db.add_folder(str(tmp_path), name="photos")
+        raw_id = db.add_photo(folder_id, "IMG.cr3", ".cr3", 2000, 1.0)
+        jpeg_id = db.add_photo(folder_id, "IMG.jpg", ".jpg", 1000, 1.0)
+        db.conn.execute(
+            "UPDATE photos SET latitude=?, longitude=?, width=?, height=? WHERE id=?",
+            (*primary_values, raw_id),
+        )
+        db.conn.execute(
+            "UPDATE photos SET latitude=?, longitude=?, width=?, height=? WHERE id=?",
+            (33, 44, 555, 666, jpeg_id),
+        )
+        primary = {"id": raw_id}
+        companion = {"id": jpeg_id}
+        primary_full, companion_full = _read_metadata_transfer_rows(
+            db, primary, companion,
+        )
+        _fill_primary_metadata_gaps(db, primary, primary_full, companion_full)
+
+        row = db.conn.execute(
+            "SELECT latitude, longitude, width, height FROM photos WHERE id=?",
+            (raw_id,),
+        ).fetchone()
+        assert tuple(row) == expected
+
+
 class _PairedCatalog:
     """A scanned IMG_001.cr3 + IMG_001.jpg pair with a vireo dir, plus the
     probes the no-churn rescan tests read."""
