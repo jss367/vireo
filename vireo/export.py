@@ -2073,7 +2073,18 @@ class _DestinationPathReservations:
 
 
 def preview_export_renames(db, photo_ids, destination=None, options=None):
-    """Return filename changes that export collision handling would make.
+    """Return filename changes that export collision handling would make."""
+    return preview_export(db, photo_ids, destination, options)["renames"]
+
+
+def preview_export(db, photo_ids, destination=None, options=None):
+    """Preview where an export would write and which names it would change.
+
+    Returns ``{"renames": [...], "destination_folders": [...]}``. Each rename
+    is a filename collision handling would number; ``destination_folders``
+    lists, in export order and without repeats, the folder each exportable
+    photo's naming template is resolved under (the custom destination, or the
+    original's folder, before any export subfolder).
 
     This preflight mirrors export's source, destination, template, sequence,
     and deduplication rules without rendering output files. A later filesystem
@@ -2108,6 +2119,8 @@ def preview_export_renames(db, photo_ids, destination=None, options=None):
     seq_counters = {}
     destination_reservations = {}
     renames = []
+    destination_folders = []
+    seen_destination_folders = set()
 
     for pid in photo_ids:
         photo = photos_map.get(pid)
@@ -2211,6 +2224,10 @@ def preview_export_renames(db, photo_ids, destination=None, options=None):
             is_reserved=is_reserved,
         )
         reservations.add(export_path, reservation_destination)
+        destination_folder = os.path.normpath(destination_base)
+        if destination_folder not in seen_destination_folders:
+            seen_destination_folders.add(destination_folder)
+            destination_folders.append(destination_folder)
         if export_path != requested_path:
             renames.append({
                 "photo_id": pid,
@@ -2222,4 +2239,4 @@ def preview_export_renames(db, photo_ids, destination=None, options=None):
     for reservation_group in destination_reservations.values():
         for reservations in reservation_group:
             reservations.close()
-    return renames
+    return {"renames": renames, "destination_folders": destination_folders}

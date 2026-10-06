@@ -1,4 +1,5 @@
-"""The export modal mentions numbered filenames only when a name is taken."""
+"""The export modal's preflight: where files land, and numbered filenames
+only when a name is taken."""
 
 from pathlib import Path
 
@@ -29,7 +30,7 @@ def export_photos(live_server, tmp_path):
     busy = tmp_path / "busy-dest"
     busy.mkdir()
     (busy / "kestrel-a.jpg").write_bytes(b"existing export")
-    return {"ids": ids, "empty": empty, "busy": busy}
+    return {"ids": ids, "folder": folder, "empty": empty, "busy": busy}
 
 
 def _open_browse_export(page, live_server, ids):
@@ -112,6 +113,31 @@ def test_browse_export_stops_for_a_name_taken_after_the_check(
     assert (dest / "kestrel-b.jpg").read_bytes() == b"arrived later"
 
 
+def test_browse_preview_shows_where_files_land(live_server, page, export_photos):
+    _open_browse_export(page, live_server, export_photos["ids"])
+    location = page.locator("#exportLocation")
+
+    # No custom destination: next to the originals.
+    expect(location).to_have_text(f"Location: {export_photos['folder']}")
+
+    _set_destination(page, export_photos["empty"])
+    expect(location).to_have_text(f"Location: {export_photos['empty']}")
+
+    # The subfolder shows in the filename preview, under the same location.
+    page.locator("#exportSubfolder").check()
+    expect(page.locator("#exportPreview")).to_have_text("Preview: exported/kestrel-a.jpg")
+    expect(location).to_have_text(f"Location: {export_photos['empty']}")
+    Path(".context").mkdir(exist_ok=True)
+    page.locator("#exportOverlay .export-summary").screenshot(
+        path=".context/export-location.png",
+    )
+
+    _set_destination(page, "relative/folder")
+    expect(location).to_have_text(
+        "Location unavailable: destination must be an absolute path",
+    )
+
+
 def test_photo_editor_notice_follows_destination(live_server, page, export_photos):
     pid = export_photos["ids"][0]
     page.goto(f"{live_server['url']}/edit/{pid}")
@@ -122,6 +148,9 @@ def test_photo_editor_notice_follows_destination(live_server, page, export_photo
 
     expect(notice).to_contain_text("1 filename is already taken")
     expect(notice).to_contain_text("kestrel-a.jpg → kestrel-a_2.jpg")
+    location = page.locator("#exportLocation")
+    expect(location).to_have_text(f"Location: {export_photos['folder']}")
 
     _set_destination(page, export_photos["empty"])
     expect(notice).to_be_hidden()
+    expect(location).to_have_text(f"Location: {export_photos['empty']}")

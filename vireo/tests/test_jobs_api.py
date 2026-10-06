@@ -1340,8 +1340,55 @@ def test_job_export_preflight_reports_numbered_collision_name(
             "destination": str(destination),
         }],
         "truncated": False,
+        "destination_folder_count": 1,
+        "destination_folders": [str(destination)],
     }
 
+
+def test_job_export_preflight_reports_destination_folders(
+    app_and_db, tmp_path,
+):
+    """Without a custom destination each photo lands next to its original,
+    so the preflight names every folder the export writes into, in order."""
+    app, db = app_and_db
+    client = app.test_client()
+    rows = db.conn.execute(
+        "SELECT id, folder_id, filename FROM photos "
+        "WHERE filename IN ('bird1.jpg', 'bird2.jpg') ORDER BY filename"
+    ).fetchall()
+    assert rows[0]["folder_id"] != rows[1]["folder_id"]
+    folders = []
+    for index, row in enumerate(rows):
+        folder = tmp_path / f"source{index}"
+        folder.mkdir()
+        Image.new("RGB", (20, 20)).save(folder / row["filename"], "JPEG")
+        db.conn.execute(
+            "UPDATE folders SET path = ? WHERE id = ?",
+            (str(folder), row["folder_id"]),
+        )
+        folders.append(folder)
+    db.conn.commit()
+    ids = [row["id"] for row in rows]
+
+    resp = client.post("/api/jobs/export/preflight", json={
+        "photo_ids": ids,
+        "destination": "",
+        "export_to_subfolder": True,
+        "subfolder_name": "exported",
+    })
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["destination_folder_count"] == 2
+    assert data["destination_folders"] == [str(folders[0]), str(folders[1])]
+
+    resp = client.post("/api/jobs/export/preflight", json={
+        "photo_ids": ids,
+        "destination": str(tmp_path / "out"),
+    })
+    data = resp.get_json()
+    assert data["destination_folder_count"] == 1
+    assert data["destination_folders"] == [str(tmp_path / "out")]
 
 def test_job_export_preflight_reports_unverifiable_destination(
     app_and_db, monkeypatch,
@@ -1355,7 +1402,7 @@ def test_job_export_preflight_reports_unverifiable_destination(
     def fail_preflight(**_kwargs):
         raise export_mod.ExportPreflightError("destination cannot be verified")
 
-    monkeypatch.setattr(export_mod, "preview_export_renames", fail_preflight)
+    monkeypatch.setattr(export_mod, "preview_export", fail_preflight)
 
     resp = client.post("/api/jobs/export/preflight", json={
         "photo_ids": [photo["id"]],
