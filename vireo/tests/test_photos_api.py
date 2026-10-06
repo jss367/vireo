@@ -10,6 +10,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from page_scripts import page_with_scripts
 
 
 def test_api_photos_default(app_and_db):
@@ -5390,10 +5391,8 @@ def test_photo_editor_page_renders(client_with_photo):
     app, _db, photo_id = client_with_photo
     client = app.test_client()
 
-    resp = client.get(f"/edit/{photo_id}")
-
-    assert resp.status_code == 200
-    html = resp.get_data(as_text=True)
+    assert client.get(f"/edit/{photo_id}").status_code == 200
+    html = page_with_scripts(client, f"/edit/{photo_id}")
     assert "Photo Editor" in html
     assert "Edit History" in html
     assert "Save Changes" in html
