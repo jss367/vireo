@@ -232,9 +232,10 @@ SCHEMA = {
             "has the same species and location keywords. Untagged frames "
             "inside a tagged run stay out of the tagged stack until they are "
             "tagged, and frames with no capture time never join a burst. "
-            "Stacks are built from the photos your filters match, so a filter "
-            "that removes the middle of a run splits it. Selecting a stacked "
-            "card selects every frame in it."
+            "Stacks are built from the photos your filters match, with gaps "
+            "measured between those photos, so filtering out frames can split "
+            "a run or join two. Selecting a stacked card selects every frame "
+            "in it."
         ),
     },
     "browse_stack_split_mode": {
