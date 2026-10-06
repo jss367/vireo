@@ -492,8 +492,9 @@ def test_thumbnail_skips_stale_queue_entry_after_id_reuse(tmp_path):
     # different folder: the transient JPEG that was queued under id 42
     # has been deleted and the id has been reused for a new photo.
     thumbs.thread_db = SimpleNamespace(
-        get_photo_filenames=lambda ids: (
-            {42: (99, "IMG_002.jpg")} if 42 in ids else {}
+        get_photos_by_ids=lambda ids: (
+            {42: _RowLike(folder_id=99, filename="IMG_002.jpg", companion_path=None)}
+            if 42 in ids else {}
         ),
         get_folder=lambda fid: _RowLike(id=fid, path="/B") if fid == 99 else None,
         get_photo_edit_recipe=lambda _id: None,
@@ -513,7 +514,7 @@ def test_thumbnail_skips_stale_queue_entry_after_id_reuse(tmp_path):
     # Row entirely absent from the catalog (deleted but not yet reused)
     # is also skipped.
     thumbs.thread_db = SimpleNamespace(
-        get_photo_filenames=lambda ids: {},
+        get_photos_by_ids=lambda ids: {},
         get_folder=lambda _fid: None,
         get_photo_edit_recipe=lambda _id: None,
     )
@@ -527,8 +528,9 @@ def test_thumbnail_skips_stale_queue_entry_after_id_reuse(tmp_path):
     # the function proceeds and increments the generated tally.
     generated_path = os.path.join(str(tmp_path), "42.jpg")
     thumbs.thread_db = SimpleNamespace(
-        get_photo_filenames=lambda ids: (
-            {42: (99, "IMG_002.jpg")} if 42 in ids else {}
+        get_photos_by_ids=lambda ids: (
+            {42: _RowLike(folder_id=99, filename="IMG_002.jpg", companion_path=None)}
+            if 42 in ids else {}
         ),
         get_folder=lambda fid: _RowLike(id=fid, path="/B") if fid == 99 else None,
         get_photo_edit_recipe=lambda _id: None,
@@ -564,8 +566,9 @@ def test_thumbnail_skips_queue_entry_when_folder_differs(tmp_path):
     thumbs.generate_thumbnail = _generate_must_not_run
     # Catalog says id 42 is /B/IMG_001.jpg (folder B, same filename).
     thumbs.thread_db = SimpleNamespace(
-        get_photo_filenames=lambda ids: (
-            {42: (7, "IMG_001.jpg")} if 42 in ids else {}
+        get_photos_by_ids=lambda ids: (
+            {42: _RowLike(folder_id=7, filename="IMG_001.jpg", companion_path=None)}
+            if 42 in ids else {}
         ),
         get_folder=lambda fid: _RowLike(id=fid, path="/B") if fid == 7 else None,
         get_photo_edit_recipe=lambda _id: None,
@@ -600,13 +603,13 @@ def test_thumbnail_discards_cache_when_ownership_changes_during_generate(tmp_pat
     # folder with a different filename.
     ownership_states = iter([
         # Pre-check: the row still names the queued path.
-        {42: (7, "IMG_001.jpg")},
+        {42: _RowLike(folder_id=7, filename="IMG_001.jpg", companion_path=None)},
         # Post-check: the row now names a different photo in a
         # different folder.
-        {42: (99, "DIFFERENT.jpg")},
+        {42: _RowLike(folder_id=99, filename="DIFFERENT.jpg", companion_path=None)},
     ])
 
-    def get_filenames(ids):
+    def get_photos_by_ids(ids):
         return next(ownership_states) if 42 in ids else {}
 
     def get_folder(fid):
@@ -617,7 +620,7 @@ def test_thumbnail_discards_cache_when_ownership_changes_during_generate(tmp_pat
         return None
 
     thumbs.thread_db = SimpleNamespace(
-        get_photo_filenames=get_filenames,
+        get_photos_by_ids=get_photos_by_ids,
         get_folder=get_folder,
         get_photo_edit_recipe=lambda _id: None,
     )
@@ -667,8 +670,9 @@ def test_thumbnail_still_owns_works_with_real_sqlite_row_folders(tmp_path):
 
     thumbs = _make_thumb_pass(tmp_path)
     thumbs.thread_db = SimpleNamespace(
-        get_photo_filenames=lambda ids: (
-            {42: (99, "IMG_002.jpg")} if 42 in ids else {}
+        get_photos_by_ids=lambda ids: (
+            {42: _RowLike(folder_id=99, filename="IMG_002.jpg", companion_path=None)}
+            if 42 in ids else {}
         ),
         get_folder=get_folder,
         get_photo_edit_recipe=lambda _id: None,
@@ -699,13 +703,14 @@ def test_thumbnail_post_check_uses_canonical_queued_path_not_mutated_render_sour
 
     thumbs = _make_thumb_pass(tmp_path)
 
-    # Catalog says id 42 is /B/IMG_001.cr3 (a RAW). The queued path
-    # is the RAW's canonical path; a retry path will rewrite
-    # ``thumb.photo_path`` to its companion JPEG, which has a
-    # different basename.
+    # Catalog says id 42 is /B/IMG_001.cr3 (a RAW) with no companion.
+    # The queued path is the RAW's canonical path; a retry path will
+    # rewrite ``thumb.photo_path`` to a working-copy JPEG that lives
+    # under a completely different name (``/working-copy/42.jpg``).
     thumbs.thread_db = SimpleNamespace(
-        get_photo_filenames=lambda ids: (
-            {42: (99, "IMG_001.cr3")} if 42 in ids else {}
+        get_photos_by_ids=lambda ids: (
+            {42: _RowLike(folder_id=99, filename="IMG_001.cr3", companion_path=None)}
+            if 42 in ids else {}
         ),
         get_folder=lambda fid: (
             _RowLike(id=99, path="/B") if fid == 99 else None
@@ -715,12 +720,13 @@ def test_thumbnail_post_check_uses_canonical_queued_path_not_mutated_render_sour
     generated_path = os.path.join(str(tmp_path), "42.jpg")
 
     def generate_and_mutate(*_a, **_k):
-        # Simulate a retry-path mutation: the companion is used as
+        # Simulate a retry-path mutation: the working-copy is used as
         # the actual render source. If the post-check compared
-        # against thumb.photo_path, "COMPANION.jpg" would not match
-        # the catalog's "IMG_001.cr3" and this valid thumbnail
-        # would be deleted.
-        entry.photo_path = "/B/COMPANION.jpg"
+        # against thumb.photo_path, ``/working-copy/42.jpg`` would
+        # not match the catalog's ``/B/IMG_001.cr3`` (different
+        # folder, different basename, not the companion either) and
+        # the valid thumbnail would be deleted.
+        entry.photo_path = "/working-copy/42.jpg"
         return generated_path
 
     thumbs.generate_thumbnail = generate_and_mutate
@@ -729,6 +735,71 @@ def test_thumbnail_post_check_uses_canonical_queued_path_not_mutated_render_sour
     assert thumbs._thumbnail_scanned_photo(entry) is True
     # The published cache file survived — the post-check validated
     # against the ORIGINAL /B/IMG_001.cr3, not the mutated
-    # /B/COMPANION.jpg.
+    # /working-copy/42.jpg.
     assert thumbs.generated == 1
     assert thumbs.failed == 0
+
+
+def test_thumbnail_accepts_queued_companion_path_when_canonical_raw_is_missing(tmp_path):
+    """``_canonical_photo_path`` keeps the companion JPEG path (rather
+    than rewriting to the owner's canonical RAW path) when the RAW is
+    not on disk, so ``_ThumbPass`` can still generate a thumbnail from
+    the available file. ``_still_owns`` must therefore accept EITHER
+    the owner's canonical path OR the owner's ``companion_path`` as a
+    valid queued path — a strict owner-filename check would silently
+    discard every missing-RAW/companion-present pair, exactly the
+    regression ``dc37f0ac`` was meant to prevent.
+    """
+    from types import SimpleNamespace
+
+    from pipeline_stages.media import _ThumbPhoto
+
+    thumbs = _make_thumb_pass(tmp_path)
+    # Owner at id 42 is a RAW with a paired JPEG companion. The queue
+    # entry carries the companion's full path (RAW is missing on disk).
+    thumbs.thread_db = SimpleNamespace(
+        get_photos_by_ids=lambda ids: (
+            {42: _RowLike(
+                folder_id=99,
+                filename="IMG_001.cr3",
+                companion_path="IMG_001.jpg",
+            )}
+            if 42 in ids else {}
+        ),
+        get_folder=lambda fid: _RowLike(id=fid, path="/B") if fid == 99 else None,
+        get_photo_edit_recipe=lambda _id: None,
+    )
+    generated_path = os.path.join(str(tmp_path), "42.jpg")
+    thumbs.generate_thumbnail = lambda *_a, **_k: generated_path
+
+    missing_raw = _ThumbPhoto(photo_id=42, photo_path="/B/IMG_001.jpg")
+    assert thumbs._thumbnail_scanned_photo(missing_raw) is True
+    assert thumbs.generated == 1
+    assert thumbs.failed == 0
+
+    # A path that is neither the owner's filename nor its
+    # companion_path is still rejected — the acceptance stays scoped
+    # to what the catalog actually ties to this id.
+    thumbs = _make_thumb_pass(tmp_path)
+    thumbs.thread_db = SimpleNamespace(
+        get_photos_by_ids=lambda ids: (
+            {42: _RowLike(
+                folder_id=99,
+                filename="IMG_001.cr3",
+                companion_path="IMG_001.jpg",
+            )}
+            if 42 in ids else {}
+        ),
+        get_folder=lambda fid: _RowLike(id=fid, path="/B") if fid == 99 else None,
+        get_photo_edit_recipe=lambda _id: None,
+    )
+
+    def _must_not_run(*_a, **_k):
+        raise AssertionError(
+            "generate_thumbnail must not run for a third-party path"
+        )
+
+    thumbs.generate_thumbnail = _must_not_run
+    bogus = _ThumbPhoto(photo_id=42, photo_path="/B/UNRELATED.jpg")
+    assert thumbs._thumbnail_scanned_photo(bogus) is False
+    assert thumbs.generated == 0 and thumbs.failed == 0

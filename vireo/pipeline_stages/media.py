@@ -264,8 +264,8 @@ class _ThumbPass:
             self._report_progress(thumb.photo_path, scan_total)
 
     def _still_owns(self, photo_id, canonical_path):
-        """True if the catalog's current row at ``photo_id`` still names
-        the folder + filename behind ``canonical_path``.
+        """True if the catalog's current row at ``photo_id`` names
+        ``canonical_path`` as either its own file or its companion.
 
         SQLite reuses the row ids of deleted photos. A paired JPEG's
         transient row is inserted during one scanner invocation and
@@ -275,19 +275,27 @@ class _ThumbPass:
         only the basename would miss the case where the replacement
         photo happens to share the companion's filename but lives in
         a different folder, so this validates folder + filename
-        together — the two columns that identify a row for pairing
-        and for ``_canonical_photo_path`` at queue time. ``canonical``
-        here means the owner's path (the RAW path for pairs), captured
-        before any render-source mutation; the retry paths rewrite
-        ``thumb.photo_path`` to a companion or working-copy path and
+        together.
+
+        The queue entry can carry EITHER the owner's canonical path
+        (RAW path for pairs — the normal ``_canonical_photo_path``
+        output) OR the owner's companion path when the canonical RAW
+        is missing on disk (``_canonical_photo_path`` keeps the JPEG
+        path in that case). Both are legitimate for the owner, so
+        accept either; otherwise a missing-RAW thumbnail that falls
+        back to its companion is silently dropped. ``canonical`` here
+        names the queued path, captured before any render-source
+        mutation — the retry paths rewrite ``thumb.photo_path`` and
         validating against that would false-reject a live row.
         """
-        filenames = self.thread_db.get_photo_filenames([photo_id])
-        entry = filenames.get(photo_id)
-        if entry is None:
+        photos = self.thread_db.get_photos_by_ids([photo_id])
+        photo = photos.get(photo_id)
+        if photo is None:
             return False
-        folder_id, filename = entry
-        if os.path.basename(canonical_path) != filename:
+        try:
+            folder_id = photo["folder_id"]
+            filename = photo["filename"]
+        except (KeyError, IndexError):
             return False
         folder = self.thread_db.get_folder(folder_id)
         if folder is None:
@@ -304,8 +312,20 @@ class _ThumbPass:
             return False
         if not folder_path:
             return False
-        catalog_path = os.path.normpath(os.path.join(folder_path, filename))
-        return os.path.normpath(canonical_path) == catalog_path
+        expected = {os.path.normpath(os.path.join(folder_path, filename))}
+        # ``companion_path`` is stored as the companion's bare filename
+        # (``_pair_raw_jpeg_companions`` writes ``companion["filename"]``
+        # into the column); join it onto the owner's folder to get the
+        # full companion path the scanner would queue under the owner id.
+        try:
+            companion_path = photo["companion_path"]
+        except (KeyError, IndexError):
+            companion_path = None
+        if companion_path:
+            expected.add(
+                os.path.normpath(os.path.join(folder_path, companion_path))
+            )
+        return os.path.normpath(canonical_path) in expected
 
     def _thumbnail_scanned_photo(self, thumb):
         """Thumbnail one photo taken from the scan queue.
