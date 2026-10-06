@@ -5335,17 +5335,24 @@ class _ScanRun:
                 self._import_companion_sidecar(
                     image_path, {"owner_id": owner_id},
                 )
-                # Reported while ownership is still locked, like
-                # ``_finish_known_companion``: the id is the RAW's.
                 self.processed_count += 1
                 self.counts["merged_companions"] += 1
-                if self.photo_callback:
-                    self.photo_callback(owner_id, str(image_path))
         except _CompanionAttachRefused:
             # ``_commits_held`` rolled back already, unless the connection
             # cannot hold commits; the refusals precede every other write.
             db.conn.rollback()
             return False
+        # Report AFTER ``_commits_held`` releases: the thumbnail worker runs
+        # on a separate connection and only sees committed data. If the
+        # callback fired inside the guard, a queue entry whose canonical
+        # path falls back to the companion (missing RAW) would be checked
+        # against a row where ``companion_path`` is still NULL and
+        # ``_still_owns`` would drop it. Unlike ``_finish_known_companion``,
+        # which handles an unchanged companion whose ``companion_path`` was
+        # committed by an earlier scan, this attach is the write that first
+        # makes the pairing visible.
+        if self.photo_callback:
+            self.photo_callback(owner_id, str(image_path))
         if self.vireo_dir:
             actions = []
             _defer_primary_display_cache_invalidation(
@@ -5584,7 +5591,7 @@ class _ScanRun:
     def _add_photo(self, item):
         """Insert (or find) the row and credit it; returns the photo id."""
         vireo_dir = self.vireo_dir
-        photo_id = self.db.add_photo(
+        photo_id, inserted = self.db.add_photo(
             folder_id=item.folder_id,
             filename=item.image_path.name,
             extension=item.image_path.suffix.lower(),
@@ -5594,6 +5601,7 @@ class _ScanRun:
             timestamp=item.meta.timestamp,
             width=item.meta.width,
             height=item.meta.height,
+            return_inserted=True,
         )
         # Credit the photo the moment its row is durable — add_photo
         # commits before returning. Several fallible steps run below
@@ -5605,7 +5613,13 @@ class _ScanRun:
         # advance once the file is genuinely done with.
         self.counts["indexed"] += 1
         self.indexed_photo_ids.add(photo_id)
-        if not item.row_already_existed:
+        # Branch on the actual INSERT OR IGNORE result, not ``item``'s
+        # pre-check SELECT: a concurrent writer may have inserted the
+        # row between the pre-check and ``add_photo``, in which case the
+        # id we hold is theirs, and the cleanups below would remove
+        # legitimate collection entries that writer just populated and
+        # discard cache files its scan already revalidated.
+        if inserted:
             self._drop_inherited_collection_membership(photo_id)
 
         # A brand-new row may have claimed a *recycled* rowid (see
@@ -5615,7 +5629,7 @@ class _ScanRun:
         # this an O(1) set lookup per insert; only ids that actually
         # collide do real work.
         if (
-            not item.row_already_existed
+            inserted
             and vireo_dir
             and purge_cached_files_for_recycled_id(
                 self.thumb_cache_dir or os.path.join(vireo_dir, "thumbnails"),

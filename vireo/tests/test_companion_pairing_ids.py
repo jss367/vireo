@@ -11,6 +11,7 @@ collection.
 
 import json
 import os
+import sqlite3
 
 import pytest
 from PIL import Image
@@ -306,3 +307,150 @@ def test_jpeg_becomes_its_own_photo_when_its_raw_changes_under_it(
     assert db.conn.execute(
         "SELECT COUNT(*) FROM photos WHERE companion_path IS NOT NULL"
     ).fetchone()[0] == 0
+
+
+def test_attach_companion_commits_before_firing_callback(tmp_path):
+    """A thumbnail worker on another connection must see ``companion_path``
+    by the time the attach callback fires: the thumbnail stage keys queue
+    entries on the owner's canonical path or its companion path, and the
+    pre-generation ``_still_owns`` check runs against committed state.
+    When the callback fired inside ``_commits_held``, the fresh-connection
+    read saw ``companion_path`` IS NULL and the queue entry was dropped.
+    """
+    from db import Database
+    from scanner import scan
+
+    card = tmp_path / "card"
+    _shoot_pairs(card, ["IMG_001"])
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    jpeg_path = str(card / "IMG_001.jpg")
+    seen_companion_path = []
+
+    def on_photo(photo_id, path):
+        if path != jpeg_path:
+            return
+        # Open a separate SQLite connection — a thumbnail worker runs on
+        # its own connection and only sees committed state. If the attach
+        # fired its callback inside the ``_commits_held`` guard, the
+        # ``companion_path`` UPDATE would not yet be visible here.
+        with sqlite3.connect(db_path) as other:
+            other.row_factory = sqlite3.Row
+            row = other.execute(
+                "SELECT companion_path FROM photos WHERE id = ?", (photo_id,),
+            ).fetchone()
+            seen_companion_path.append(row["companion_path"] if row else None)
+
+    scan(str(card), db, photo_callback=on_photo)
+
+    assert seen_companion_path == ["IMG_001.jpg"], seen_companion_path
+
+
+def test_add_photo_losing_a_race_keeps_concurrent_collection_entry(
+    tmp_path, monkeypatch,
+):
+    """When ``add_photo``'s INSERT OR IGNORE loses to a concurrent writer,
+    the id it returns is the winner's — not ours. The pre-check SELECT
+    cannot see the concurrent insert, so the row looks new to the scanner.
+    The stale-id cleanup must branch on the actual INSERT result instead,
+    or it would strip the winner's collection entry for that id.
+    """
+    import scanner as scanner_mod
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    folder = tmp_path / "folder"
+    folder.mkdir()
+    Image.new("RGB", (32, 32), "red").save(str(folder / "heron.jpg"))
+
+    real_add_photo = Database.add_photo
+    raced_photo_ids = []
+
+    def racing_add_photo(self, *args, **kwargs):
+        if not raced_photo_ids and kwargs.get("filename") == "heron.jpg":
+            # Simulate a concurrent writer: insert the row AND populate a
+            # collection with its id before our INSERT OR IGNORE fires.
+            cur = self.conn.execute(
+                "INSERT INTO photos (folder_id, filename, extension,"
+                " file_size, file_mtime)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (kwargs["folder_id"], kwargs["filename"],
+                 kwargs.get("extension", ".jpg"),
+                 kwargs.get("file_size", 0),
+                 kwargs.get("file_mtime", 0.0)),
+            )
+            self.conn.commit()
+            raced_photo_ids.append(cur.lastrowid)
+            self.add_collection(
+                "Concurrent",
+                json.dumps(
+                    [{"field": "photo_ids", "value": [cur.lastrowid]}],
+                ),
+            )
+        return real_add_photo(self, *args, **kwargs)
+
+    monkeypatch.setattr(Database, "add_photo", racing_add_photo)
+    scanner_mod.scan(str(folder), db)
+
+    assert raced_photo_ids, "racing_add_photo never fired"
+    coll_id = db.conn.execute(
+        "SELECT id FROM collections WHERE name = ?", ("Concurrent",),
+    ).fetchone()["id"]
+    assert _collection_photo_ids(db, coll_id) == raced_photo_ids
+
+
+def test_photos_repository_add_reports_whether_it_inserted(tmp_path):
+    """``PhotoRepository.add`` returns ``(photo_id, inserted)``; the second
+    call for the same (folder, filename) is a no-op INSERT OR IGNORE and
+    reports ``inserted=False`` with the original id.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(tmp_path / "shoot"))
+
+    repo = db._photos_repository(scoped=False)
+    first_id, first_inserted = repo.add(
+        folder_id=folder_id, filename="owl.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    assert first_inserted is True
+
+    second_id, second_inserted = repo.add(
+        folder_id=folder_id, filename="owl.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    assert second_id == first_id
+    assert second_inserted is False
+
+
+def test_database_add_photo_returning_inserted(tmp_path):
+    """``Database.add_photo(return_inserted=True)`` surfaces the signal and
+    the plain ``add_photo`` still returns just the id.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(tmp_path / "shoot"))
+
+    first = db.add_photo(
+        folder_id=folder_id, filename="owl.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    assert isinstance(first, int)
+
+    second_id, second_inserted = db.add_photo(
+        folder_id=folder_id, filename="owl.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+        return_inserted=True,
+    )
+    assert second_id == first
+    assert second_inserted is False
+
+    third_id, third_inserted = db.add_photo(
+        folder_id=folder_id, filename="falcon.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+        return_inserted=True,
+    )
+    assert third_id != first
+    assert third_inserted is True
