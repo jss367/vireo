@@ -4693,19 +4693,18 @@ def test_pipeline_has_model_checkboxes(app_and_db):
     """Pipeline page uses checkboxes for model selection, not a single select."""
     app, _ = app_and_db
     client = app.test_client()
-    resp = client.get('/pipeline')
-    assert resp.status_code == 200
-    assert b'model-checkbox' in resp.data
-    assert b'id="cfgModel"' not in resp.data  # old single select removed
+    assert client.get('/pipeline').status_code == 200
+    html = _page_with_scripts(client, '/pipeline')
+    assert 'model-checkbox' in html
+    assert 'id="cfgModel"' not in html  # old single select removed
 
 
 def test_pipeline_exposes_inline_label_download_modal(app_and_db):
     """Pipeline page lets users download species labels without leaving."""
     app, _ = app_and_db
     client = app.test_client()
-    resp = client.get('/pipeline')
-    assert resp.status_code == 200
-    html = resp.data.decode()
+    assert client.get('/pipeline').status_code == 200
+    html = _page_with_scripts(client, '/pipeline')
     assert 'openPipelineLabelsModal()' in html
     assert 'id="pipelineLabelsModal"' in html
     assert 'id="pipelineFetchLabelsBtn"' in html
@@ -16970,7 +16969,7 @@ def test_pipeline_picker_disables_degraded_collections(app_and_db):
     """
     app, _db = app_and_db
     client = app.test_client()
-    html = client.get("/pipeline").get_data(as_text=True)
+    html = _page_with_scripts(client, "/pipeline")
     # The renderer keys off c.count_error and adds ' disabled' to the option
     # (plus a tooltip explaining why it's unavailable). Assert the branch is
     # actually in the template rather than probing it from the DOM.
@@ -18204,7 +18203,7 @@ def test_process_page_has_no_import_source(app_and_db):
     admission control, including newly detected images, lives at Import."""
     app, _ = app_and_db
     client = app.test_client()
-    html = client.get("/pipeline").data.decode()
+    html = _page_with_scripts(client, "/pipeline")
     assert 'id="radioImport"' not in html
     assert "/api/jobs/import-full" not in html
     assert 'id="radioFolders"' in html
