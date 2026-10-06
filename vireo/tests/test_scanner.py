@@ -2924,6 +2924,174 @@ def test_companion_imports_shared_sidecar_when_raw_is_not_scanned(
     assert {"Companion sidecar", "Later keyword"} <= rescan()
 
 
+@pytest.mark.parametrize("incremental", [True, False])
+def test_companion_imports_shared_sidecar_when_raw_vanishes_mid_scan(
+    tmp_path, monkeypatch, incremental,
+):
+    """A same-stem RAW discovered then deleted before the pre-pass or
+    indexing step is classified as vanished, so no RAW handler runs its
+    shared XMP; the companion must import that sidecar instead. The
+    discovered set alone cannot tell "RAW is handling it" from "RAW
+    was discovered but never processed", so the gate re-checks the RAW
+    on disk."""
+    from xmp import write_sidecar
+
+    cat = _PairedCatalog(tmp_path, monkeypatch)
+    identity_hash = cat.identity()[0]["file_hash"]
+    sidecar = str(cat.jpeg.with_suffix(".xmp"))
+    write_sidecar(
+        sidecar, flat_keywords={"Vanished RAW keyword"},
+        hierarchical_keywords=set(),
+    )
+
+    # Delete the RAW at the discovery/pre-pass seam so it stays in
+    # ``_discovered_image_paths`` but vanishes before any handler touches
+    # it. ``progress_callback(current, total)`` fires at exactly that
+    # seam (see ``test_scan_counts_report_indexed_not_discovered``).
+    def vanish_raw_after_discovery(current, total):
+        if current == 0 and cat.raw.exists():
+            cat.raw.unlink()
+
+    cat.merges.clear()
+    cat.extracted.clear()
+    cat.callbacks.clear()
+    result = cat.scanner.scan(
+        str(cat.img_dir), cat.db, incremental=incremental,
+        vireo_dir=str(cat.vireo_dir), thumb_cache_dir=str(cat.thumb_dir),
+        photo_callback=cat._callback,
+        progress_callback=vanish_raw_after_discovery,
+    )
+
+    assert result["vanished"] == 1
+    # The RAW row and its paired companion identity still vouch for the
+    # JPEG; Missing Originals owns the orphaned RAW.
+    assert cat.merges == []
+    assert cat.rows() == {"IMG_001.cr3": "IMG_001.jpg"}
+    assert cat.identity()[0]["file_hash"] == identity_hash
+    # New keywords in the shared sidecar must land on the RAW's row.
+    assert "Vanished RAW keyword" in {
+        k["name"] for k in cat.db.get_photo_keywords(cat.raw_id)
+    }
+
+    # A later edit of the same sidecar must also propagate.
+    write_sidecar(
+        sidecar,
+        flat_keywords={"Vanished RAW keyword", "Later keyword"},
+        hierarchical_keywords=set(),
+    )
+    cat.merges.clear()
+    cat.extracted.clear()
+    cat.callbacks.clear()
+    cat.scanner.scan(
+        str(cat.img_dir), cat.db, incremental=incremental,
+        vireo_dir=str(cat.vireo_dir), thumb_cache_dir=str(cat.thumb_dir),
+        photo_callback=cat._callback,
+    )
+    assert cat.merges == []
+    assert {"Vanished RAW keyword", "Later keyword"} <= {
+        k["name"] for k in cat.db.get_photo_keywords(cat.raw_id)
+    }
+
+
+def test_stat_unchanged_companion_settle_discards_stale_credit_after_owner_mutation(
+    tmp_path, monkeypatch,
+):
+    """``_needs_processing`` caches the owner lookup; by the time
+    ``_settle_stat_unchanged_companions`` runs, another connection may
+    have deleted the owner row and SQLite may have reused that id for
+    a different photo in another folder. Without ownership
+    revalidation, the settle imports the companion's XMP keywords
+    into the replacement row and reports its path to the pipeline
+    under the reused id. The lock around
+    (folder_id, filename, companion_path) makes the stale credit
+    discard: no XMP keyword lands on a mutated row and no callback
+    fires with the companion's path under the stale id.
+
+    The companion is given a differing stem so its sidecar is
+    not shared with the RAW's own-sidecar handling — that handling
+    would import the same keyword via ``_reuse_existing_row`` and
+    mask the settle path's behavior. The sidecar path for differing
+    stems is the one the P1 finding and the lock cover.
+    """
+    import scanner
+    from xmp import write_sidecar
+
+    cat = _PairedCatalog(tmp_path, monkeypatch)
+    # Rename the paired JPEG so its stem differs from the RAW's. The
+    # RAW's own ``IMG_001.xmp`` handling now has no bearing on
+    # ``CAMERA_OTHER.xmp``, which only the settle path imports.
+    other = cat.img_dir / "CAMERA_OTHER.jpg"
+    cat.jpeg.rename(other)
+    cat.jpeg = other
+    cat.db.conn.execute(
+        "UPDATE photos SET companion_path = ? WHERE id = ?",
+        ("CAMERA_OTHER.jpg", cat.raw_id),
+    )
+    cat.db.conn.execute(
+        "UPDATE companion_identities SET filename = ? WHERE photo_id = ?",
+        ("CAMERA_OTHER.jpg", cat.raw_id),
+    )
+    cat.db.conn.commit()
+    sidecar = str(cat.img_dir / "CAMERA_OTHER.xmp")
+    write_sidecar(
+        sidecar, flat_keywords={"Companion keyword"},
+        hierarchical_keywords=set(),
+    )
+
+    real_settle = scanner._ScanRun._settle_stat_unchanged_companions
+    races = {"ran": False}
+
+    def race_overlay(self, files_to_process):
+        # Only mutate once, and only when the pre-pass has actually
+        # cached a stat-unchanged companion (not during warm-up or
+        # probe scans).
+        if not self.stat_unchanged_companions or races["ran"]:
+            return real_settle(self, files_to_process)
+        races["ran"] = True
+        # Simulate the race: a concurrent connection replaced the
+        # owner row (deletion + id reuse). The row's filename no
+        # longer matches what the pre-pass cached, so the ownership
+        # lock must now fail.
+        self.db.conn.execute(
+            "UPDATE photos SET filename = 'RECYCLED.cr3',"
+            " companion_path = NULL WHERE id = ?",
+            (cat.raw_id,),
+        )
+        self.db.conn.execute(
+            "DELETE FROM companion_identities WHERE photo_id = ?",
+            (cat.raw_id,),
+        )
+        self.db.conn.commit()
+        return real_settle(self, files_to_process)
+
+    monkeypatch.setattr(
+        scanner._ScanRun, "_settle_stat_unchanged_companions",
+        race_overlay,
+    )
+    cat.merges.clear()
+    cat.extracted.clear()
+    cat.callbacks.clear()
+    cat.scanner.scan(
+        str(cat.img_dir), cat.db, incremental=True,
+        vireo_dir=str(cat.vireo_dir), thumb_cache_dir=str(cat.thumb_dir),
+        photo_callback=cat._callback,
+    )
+    assert races["ran"]
+
+    # The replacement row (same id, different identity) must NOT
+    # receive the companion's XMP keywords.
+    row_keywords = {
+        k["name"] for k in cat.db.get_photo_keywords(cat.raw_id)
+    }
+    assert "Companion keyword" not in row_keywords
+
+    # The pipeline must not see the companion's path reported under
+    # the stale id — that would feed the replacement row into the
+    # thumbnail queue and the pipeline's collection as if it were the
+    # paired JPEG.
+    assert (cat.raw_id, "CAMERA_OTHER.jpg") not in cat.callbacks
+
+
 def test_scan_late_arriving_raw_pairs_with_existing_jpeg(tmp_path):
     """Importing raws after JPEGs matches them to existing photo records."""
     import os

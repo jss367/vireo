@@ -3577,6 +3577,7 @@ class _KnownCompanions:
 
     _OWNER_SQL = (
         "SELECT p.id AS owner_id, p.filename AS owner_filename,"
+        " p.folder_id AS folder_id,"
         " c.file_size, c.file_mtime, c.file_hash, c.needs_sync"
         " FROM photos p LEFT JOIN companion_identities c"
         " ON c.photo_id = p.id AND c.filename = p.companion_path"
@@ -4549,6 +4550,15 @@ class _ScanRun:
         re-read is read too, and its columns refill the gaps (see
         ``_refill_owners_from_companions``). Returns whether any were
         added to ``files_to_process``.
+
+        ``known`` was cached during ``_needs_processing``; between then
+        and here another connection could have deleted the owner row and
+        SQLite could have reused that ID for an unrelated photo. Lock
+        the expected ownership (``folder_id`` + ``filename`` +
+        ``companion_path``) before importing the sidecar or crediting
+        the callback, so a stale cache can neither write this
+        companion's XMP keywords into a replacement row nor report that
+        replacement to the pipeline collection and thumbnail queue.
         """
         added = False
         for image_path, known in self.stat_unchanged_companions:
@@ -4557,7 +4567,25 @@ class _ScanRun:
                 files_to_process.append(image_path)
                 added = True
             else:
+                ownership = (
+                    known["folder_id"], known["owner_filename"],
+                    image_path.name,
+                )
+                if not self._lock_companion_owner(owner_id, ownership):
+                    # Owner deleted/replaced after ``_needs_processing``
+                    # cached this ``known``; discard the stale credit.
+                    # Commit releases the dummy UPDATE lock without
+                    # changing any row and clears the implicit
+                    # transaction before the next iteration.
+                    commit_with_retry(self.db.conn)
+                    continue
                 self._import_companion_sidecar(image_path, known)
+                # ``_import_companion_sidecar`` only commits on the
+                # keyword-import success path; its early returns leave
+                # the lock's dummy UPDATE pending. Commit here so the
+                # lock is released whichever branch it took and the
+                # transaction is closed before the next iteration.
+                commit_with_retry(self.db.conn)
                 self._credit_known_companion(owner_id, str(image_path))
         self.stat_unchanged_companions = []
         return added
@@ -4567,13 +4595,20 @@ class _ScanRun:
 
         When the companion JPEG's stem matches the owning RAW's stem
         (``IMG.cr3`` + ``IMG.jpg``), both share a single ``IMG.xmp`` and
-        the RAW's own main-loop sidecar handling covers it if that RAW
-        was discovered in this scan: an unchanged
+        the RAW's own main-loop sidecar handling covers it when that RAW
+        is actually processed in this scan: an unchanged
         RAW with an unchanged sidecar is skipped, and a changed sidecar
         is caught by ``_reuse_existing_row``'s ``xmp_unchanged`` guard,
         which also pulls the companion into reprocessing. A missing RAW,
-        or a frozen JPEG-only scan, needs the companion to import even a
-        shared-stem sidecar because the RAW receives no scan callback.
+        a frozen JPEG-only scan, or a RAW that was discovered but
+        vanished before the pre-pass or indexing step (deleted or an
+        unmount between discovery and ``stat()``), needs the companion
+        to import the shared-stem sidecar because the RAW receives no
+        scan callback. ``_discovered_image_paths`` alone does not tell
+        the two apart — discovery populated it before any ``stat()``
+        failed — so re-check that the RAW still exists on disk. When it
+        does not, the RAW's own handling never ran this scan and the
+        companion is the only path left for the shared XMP.
 
         When the companion's stem differs from the RAW's (an
         intentionally renamed JPEG beside its RAW, or a separate shared
@@ -4588,9 +4623,11 @@ class _ScanRun:
         owner_filename = known["owner_filename"]
         if not owner_filename:
             return
+        raw_path = image_path.with_name(owner_filename)
         if (
             Path(owner_filename).stem == image_path.stem
-            and image_path.with_name(owner_filename) in self._discovered_image_paths
+            and raw_path in self._discovered_image_paths
+            and raw_path.exists()
         ):
             return
         xmp_path = image_path.with_suffix(".xmp")
