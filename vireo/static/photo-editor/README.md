@@ -18,7 +18,7 @@ for the page's inline event handlers, and the editor's shared state lives on
 | `adjustments.js` | Basic, tone curve, color mixer, color grading, and detail (denoise) controls |
 | `presets.js` | Edit presets: loading, applying, saving, and deleting |
 | `local-adjustments.js` | Subject/background adjustments, the mask snapshot, and the mask overlay |
-| `auto-tone.js` | Auto Tone requests and their result messages |
+| `auto-tone.js` | Auto Tone requests (Balanced, Subject and Gentle styles) and their result messages |
 | `save.js` | Resetting all edits and saving the recipe |
 | `checkpoints.js` | Edit History checkpoints and the saved-edit undo/redo hooks |
 | `export.js` | The Export dialog: presets, filename preview, preflight, and starting the job |

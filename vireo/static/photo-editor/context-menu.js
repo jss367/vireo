@@ -106,7 +106,23 @@ function buildPhotoEditorContextMenu() {
       disabledHint: unavailable
         ? 'No photo is ready to edit'
         : (savePending ? 'Saving changes' : undefined),
-      onClick: autoTone,
+      onClick: function() { autoTone('balanced'); },
+    },
+    {
+      label: 'Auto Tone: Subject',
+      disabled: unavailable || savePending,
+      disabledHint: unavailable
+        ? 'No photo is ready to edit'
+        : (savePending ? 'Saving changes' : undefined),
+      onClick: function() { autoTone('subject'); },
+    },
+    {
+      label: 'Auto Tone: Gentle',
+      disabled: unavailable || savePending,
+      disabledHint: unavailable
+        ? 'No photo is ready to edit'
+        : (savePending ? 'Saving changes' : undefined),
+      onClick: function() { autoTone('gentle'); },
     },
     {
       label: 'Edit Crop',
