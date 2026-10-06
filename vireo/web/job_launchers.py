@@ -65,6 +65,58 @@ def _count_lines(path):
         return None
 
 
+def _photo_is_raw_jpeg_pair(photo):
+    """Mirror of ``static/lightbox/edits.js``'s ``vireoPhotoIsRawJpegPair``.
+
+    The lightbox defaults a photo matching this predicate to its JPEG and
+    appends ``?source=jpeg`` to every render URL. ``_serve_preview``
+    bypasses the ordinary ``(photo_id, size)`` cache for source-specific
+    requests and writes the paired shadow cache instead — so a
+    prepare-full-resolution run that warmed only the ordinary tiers would
+    still trigger a decode on the lightbox's first fit-size request for
+    the pair.
+    """
+    if not photo or not photo["companion_path"]:
+        return False
+    from image_loader import RAW_EXTENSIONS
+
+    primary_ext = os.path.splitext(photo["filename"])[1].lower()
+    if primary_ext not in RAW_EXTENSIONS:
+        return False
+    companion_ext = os.path.splitext(photo["companion_path"])[1].lower()
+    return companion_ext in {".jpg", ".jpeg"}
+
+
+# Shadow directory name used by ``web.media._paired_preview_path`` for
+# source-specific preview renders. Kept in sync with that module.
+_PAIRED_PREVIEW_DIRNAME = "paired"
+
+
+def _paired_jpeg_preview_exists(preview_dir, photo_id, size):
+    """Any non-empty paired-JPEG shadow-cache file for this (photo_id, size).
+
+    ``web.media._paired_preview_path`` keys the filename by the paired
+    render's state hash, so the prepare-full-resolution job scans the
+    directory rather than recomputing the hash from the catalog row —
+    this stays correct across future changes to the hash inputs.
+    """
+    paired_dir = os.path.join(preview_dir, _PAIRED_PREVIEW_DIRNAME)
+    try:
+        entries = os.listdir(paired_dir)
+    except OSError:
+        return False
+    prefix = f"{photo_id}_{size}_jpeg_"
+    for name in entries:
+        if not name.startswith(prefix) or not name.endswith(".jpg"):
+            continue
+        try:
+            if os.path.getsize(os.path.join(paired_dir, name)) > 0:
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def create_job_launchers_blueprint(
     get_db,
     json_error,
@@ -1305,6 +1357,7 @@ def create_job_launchers_blueprint(
                         photo = selected_photos.get(photo_id)
                         current_photo = thread_db.get_photo(photo_id)
                         filename = photo["filename"] if photo else f"Photo {photo_id}"
+                        is_pair = _photo_is_raw_jpeg_pair(photo)
                         error = None
                         cached = None
                         attempted = photo_source_matches(photo, current_photo)
@@ -1339,6 +1392,22 @@ def create_job_launchers_blueprint(
                                             serve_photo_preview, photo_id, photo,
                                             f"{size}px preview",
                                         )
+                                        # RAW+JPEG pairs: the lightbox
+                                        # defaults to the JPEG and appends
+                                        # ?source=jpeg to every render URL,
+                                        # which bypasses the ordinary
+                                        # (photo_id, size) cache. Warm the
+                                        # paired shadow cache too, otherwise
+                                        # the first fit-size request still
+                                        # decodes the companion JPEG.
+                                        if error is None and is_pair:
+                                            error = render_through_view(
+                                                f"/photos/{photo_id}/preview"
+                                                f"?size={size}&source=jpeg",
+                                                serve_photo_preview, photo_id,
+                                                photo,
+                                                f"{size}px paired preview",
+                                            )
                                     # Eviction can delete a just-warmed
                                     # preview the moment it is published
                                     # (preview_cache_max_mb too small for the
@@ -1370,6 +1439,27 @@ def create_job_launchers_blueprint(
                                                     "(preview_cache_max_mb "
                                                     "too small for the "
                                                     "lightbox tiers)"
+                                                )
+                                                break
+                                            # The paired shadow cache is not
+                                            # subject to preview_cache_max_mb
+                                            # eviction, so a missing file
+                                            # here means the paired render
+                                            # itself failed to publish.
+                                            if (
+                                                is_pair
+                                                and not
+                                                _paired_jpeg_preview_exists(
+                                                    preview_dir, photo_id,
+                                                    size,
+                                                )
+                                            ):
+                                                error = (
+                                                    f"{size}px paired "
+                                                    "preview was not "
+                                                    "written (RAW+JPEG "
+                                                    "companion source "
+                                                    "unavailable)"
                                                 )
                                                 break
                             except Exception as exc:
@@ -1423,6 +1513,7 @@ def create_job_launchers_blueprint(
                                     "filename": filename,
                                     "cached_status": cached["status"],
                                     "cached_bytes": cache_bytes,
+                                    "is_pair": is_pair,
                                 }
                             else:
                                 failed += 1
@@ -1452,6 +1543,7 @@ def create_job_launchers_blueprint(
                     preview_dir = os.path.join(vireo_dir, "previews")
                     for photo_id, info in pending_ready_meta.items():
                         missing_size = None
+                        missing_kind = None
                         for size in preview_sizes:
                             cache_file = os.path.join(
                                 preview_dir, f"{photo_id}_{size}.jpg",
@@ -1461,6 +1553,16 @@ def create_job_launchers_blueprint(
                                 and os.path.exists(cache_file)
                             ):
                                 missing_size = size
+                                missing_kind = "preview"
+                                break
+                            if (
+                                info["is_pair"]
+                                and not _paired_jpeg_preview_exists(
+                                    preview_dir, photo_id, size,
+                                )
+                            ):
+                                missing_size = size
+                                missing_kind = "paired preview"
                                 break
                         if missing_size is None:
                             continue
@@ -1471,12 +1573,19 @@ def create_job_launchers_blueprint(
                             copied_bytes -= info["cached_bytes"]
                         elif info["cached_status"] == "skipped":
                             reused -= 1
-                        job["errors"].append(
-                            f"{info['filename']}: {missing_size}px preview "
-                            "was evicted during warming "
-                            "(preview_cache_max_mb too small for the "
-                            "lightbox tiers)"
-                        )
+                        if missing_kind == "paired preview":
+                            job["errors"].append(
+                                f"{info['filename']}: {missing_size}px "
+                                "paired preview went missing after warming "
+                                "(RAW+JPEG companion source unavailable)"
+                            )
+                        else:
+                            job["errors"].append(
+                                f"{info['filename']}: {missing_size}px "
+                                "preview was evicted during warming "
+                                "(preview_cache_max_mb too small for the "
+                                "lightbox tiers)"
+                            )
 
                 return {
                     "ok": failed == 0,
