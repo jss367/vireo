@@ -29,8 +29,9 @@ to keep no matter what order things happen in:
 7. **No collection names a photo that does not exist.** A collection built
    from the ids a scan reported (as the pipeline and import-in-place build
    theirs) holds only live photos, and no step leaves an id behind in any
-   collection: SQLite gives a freed id to the next photo, which would then
-   join that collection.
+   collection, including one of hand-picked photos that a delete, an
+   archive merge or a pairing merge later removes: SQLite gives a freed id
+   to the next photo, which would then join that collection.
 
 Imports are interrupted two ways: a cancel, which the job handles, and a
 crash, where an exception escapes mid-batch the way a killed process stops
@@ -681,6 +682,20 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
             f"the scan reported photo ids {sorted(set(reported) - live)} "
             "that no longer exist once it finished"
         )
+
+    @precondition(lambda self: self._catalog_rows())
+    @rule(data=st.data())
+    def hand_pick_photos_into_a_collection(self, data):
+        """Add a few cataloged photos to a static collection, as Browse's
+        "Add to collection" does, so every later delete, archive merge and
+        pairing merge can land on a collection member."""
+        ids = [row["id"] for row in self._catalog_rows()]
+        chosen = data.draw(st.lists(st.sampled_from(ids), min_size=1, max_size=4, unique=True))
+        self.db.add_collection(
+            f"Picked {self.next_job}",
+            json.dumps([{"field": "photo_ids", "value": chosen}]),
+        )
+        self.next_job += 1
 
     def _check_scan_catalogs_folder(self, root):
         cataloged = set()

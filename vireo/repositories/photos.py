@@ -17,7 +17,7 @@ hook. Ratings, flags, wildlife exclusion (``photo_review``) and color labels
 
 import os
 
-from repositories.collections import remap_collection_photo_ids
+from repositories.photo_row_deletion import photo_row_deletion
 
 
 class PhotoRepository:
@@ -947,19 +947,14 @@ class PhotoRepository:
                 # Deleting detections cascades to predictions via ON DELETE CASCADE
                 self.conn.execute(f"DELETE FROM detections WHERE photo_id IN ({ph})", chunk)
 
-            # Clean collection rules. Photos are global and SQLite reuses a
-            # freed ``photos.id``, so every workspace's static collections are
-            # rewritten, not only the active one's. The active workspace is
-            # still resolved here so a delete without one rolls back.
+            # The active workspace is still resolved here so a delete
+            # without one rolls back.
             workspace_id_fn()
-            remap_collection_photo_ids(
-                self.conn, dict.fromkeys(all_ids),
-            )
 
             # Delete photos (cascades to edit_history_items, inat_submissions)
-            for chunk in id_chunks:
-                ph = ",".join("?" for _ in chunk)
-                self.conn.execute(f"DELETE FROM photos WHERE id IN ({ph})", chunk)
+            # and take them out of every workspace's static collections.
+            with photo_row_deletion(self.conn) as photo_rows:
+                photo_rows.delete(dict.fromkeys(all_ids))
 
             # A moved RAW/JPEG sibling stores the source folder path as
             # provenance so another same-stem sibling can follow it to the

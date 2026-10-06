@@ -899,8 +899,13 @@ def test_delete_photos_resolves_workspace_mid_transaction(db, lib, cache):
 
 def test_delete_photos_chunks_every_in_clause(db, lib, monkeypatch):
     monkeypatch.setattr(db, "prune_pipeline_cache_for_ids", lambda ids: None)
+    # The dependents chunk at ``db._chunks``' size; the photo rows go
+    # through ``photo_row_deletion``, which chunks at ``sql_chunks``'. Just
+    # past the larger of the two splits every statement in two.
+    from sql_chunks import SQL_PARAM_CHUNK
+
     ids = [_photo(db, lib["root"], f"z{i}.jpg")
-           for i in range(_SQLITE_PARAM_CHUNK_SIZE + 3)]
+           for i in range(max(_SQLITE_PARAM_CHUNK_SIZE, SQL_PARAM_CHUNK) + 3)]
     statements = _trace(db)
     result = db.delete_photos(ids)
     db.conn.set_trace_callback(None)
@@ -928,8 +933,9 @@ def test_delete_photos_sql_order(db, lib, monkeypatch, tmp_path):
         f"DELETE FROM photo_embedded_keyword_offered WHERE photo_id IN ({a})",
         f"DELETE FROM pending_changes WHERE photo_id IN ({a})",
         f"DELETE FROM detections WHERE photo_id IN ({a})",
-        "SELECT id, rules FROM collections",
+        # ``photo_row_deletion``: the rows, then their collection entries.
         f"DELETE FROM photos WHERE id IN ({a})",
+        "SELECT id, rules FROM collections",
         f"SELECT filename FROM photos WHERE folder_id = {root}",
         "SELECT id, filename, last_move_source_folder_path FROM photos "
         f"WHERE last_move_source_folder_path IN ('{tmp_path / 'lib'}')",

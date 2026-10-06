@@ -9522,6 +9522,11 @@ class Database:
         from repositories.collections import photo_ids_named_by_collections
         return photo_ids_named_by_collections(self.conn)
 
+    def prune_collection_ids_of_missing_photos(self):
+        """Drop ``photo_ids`` entries naming deleted photos, in every workspace; commits."""
+        from repositories.collections import prune_collection_ids_of_missing_photos
+        return prune_collection_ids_of_missing_photos(self.conn, commit=commit_with_retry)
+
     def rename_collection(self, collection_id, new_name):
         """Rename a collection within the active workspace.
 

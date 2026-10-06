@@ -55,6 +55,7 @@ from preview_cache import (
 )
 from render_source import exif_orientation as _exif_orientation_from_data
 from render_source import is_undersized
+from repositories.photo_row_deletion import photo_row_deletion
 from resource_ledger import (
     ResourceRequest,
     cpu_inference_request,
@@ -1264,8 +1265,12 @@ def _defer_recipe_snapshot_transfer(
     post_commit_fs_actions.append(_apply_recipe_transfer_fs)
 
 
-def _delete_companion_row(db, primary, companion):
-    """Move the companion's remaining per-photo state to the primary, then delete its row."""
+def _delete_companion_row(db, primary, companion, photo_rows):
+    """Move the companion's remaining per-photo state to the primary, then delete its row.
+
+    ``photo_rows`` is the caller's ``PhotoRowDeletion``; the companion's
+    collection entries move to the primary when the caller's block exits.
+    """
     # Remove keyword associations then the duplicate JPEG record
     db._transfer_gps_review_for_merge(companion["id"], primary["id"])
     db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (companion["id"],))
@@ -1281,7 +1286,7 @@ def _delete_companion_row(db, primary, companion):
     from repositories.photo_visibility import remap_photo_visibility
 
     remap_photo_visibility(db.conn, {companion["id"]: primary["id"]})
-    db.conn.execute("DELETE FROM photos WHERE id = ?", (companion["id"],))
+    photo_rows.delete({companion["id"]: primary["id"]})
 
 
 def _defer_companion_derivative_cleanup(
@@ -1318,12 +1323,14 @@ def _defer_companion_derivative_cleanup(
 
 def _merge_companion_into_primary(
     db, primary, companion, vireo_dir, thumb_cache_dir, post_commit_fs_actions,
+    photo_rows,
 ):
     """Fold one JPEG companion row into its RAW primary inside the open transaction.
 
     Every DB write joins the caller's transaction; every filesystem change
     is appended to ``post_commit_fs_actions`` (only when ``vireo_dir`` is
-    set) for the caller to run once the commit succeeds.
+    set) for the caller to run once the commit succeeds. The companion row
+    is deleted through the caller's ``PhotoRowDeletion`` (``photo_rows``).
     """
     primary_full, companion_full = _read_metadata_transfer_rows(
         db, primary, companion,
@@ -1348,7 +1355,7 @@ def _merge_companion_into_primary(
         db, primary, companion, vireo_dir, thumb_cache_dir,
         post_commit_fs_actions,
     )
-    _delete_companion_row(db, primary, companion)
+    _delete_companion_row(db, primary, companion, photo_rows)
 
 
 def _run_post_commit_fs_actions(post_commit_fs_actions):
@@ -1417,33 +1424,26 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
     # commit below succeeds — the whole loop shares one transaction, so a
     # commit failure rolls every deletion back and none of them happened.
     merged_ids = {}
-    # ``companion_id -> primary_id`` accumulated across every pair so we can
-    # remap collection ``photo_ids`` rules once at the end of the loop.
-    # ``remap_collection_photo_ids`` scans and JSON-parses every collection
-    # that carries ``photo_ids``, then writes each rewritten row; a per-pair
-    # call would repeat that O(collections) work N times and, for a static
-    # collection containing many companions, rewrite the same row once per
-    # deletion. One post-loop call is O(pairs + collections) instead of
-    # O(pairs * collections). The remap runs in the same transaction as the
-    # pair deletes below and is rolled back with them if the commit fails.
-    collection_remap = {}
 
-    for (_folder_id, _base), members in groups.items():
-        for primary, companion in _pick_compatible_raw_jpeg_pairs(members):
-            _merge_companion_into_primary(
-                db, primary, companion, vireo_dir, thumb_cache_dir,
-                post_commit_fs_actions,
-            )
-            collection_remap[companion["id"]] = primary["id"]
-            merged_ids[companion["id"]] = primary["id"]
-            if vireo_dir:
-                _defer_companion_derivative_cleanup(
-                    post_commit_fs_actions, companion, vireo_dir,
-                    thumb_cache_dir,
+    # Every companion row is deleted through one ``PhotoRowDeletion``, so
+    # the collections naming any of them are rewritten once, when the block
+    # exits, instead of once per pair (each rewrite parses every
+    # collection). The rewrite runs in the same transaction as the pair
+    # deletes and is rolled back with them if the commit fails.
+    with photo_row_deletion(db.conn) as photo_rows:
+        for (_folder_id, _base), members in groups.items():
+            for primary, companion in _pick_compatible_raw_jpeg_pairs(members):
+                _merge_companion_into_primary(
+                    db, primary, companion, vireo_dir, thumb_cache_dir,
+                    post_commit_fs_actions, photo_rows,
                 )
+                merged_ids[companion["id"]] = primary["id"]
+                if vireo_dir:
+                    _defer_companion_derivative_cleanup(
+                        post_commit_fs_actions, companion, vireo_dir,
+                        thumb_cache_dir,
+                    )
 
-    if collection_remap:
-        db.remap_collection_photo_ids(collection_remap)
     commit_with_retry(db.conn)
     # DB state is durable now. Run the collected filesystem operations.
     _run_post_commit_fs_actions(post_commit_fs_actions)

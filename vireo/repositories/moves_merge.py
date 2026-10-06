@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 
 from keyword_normalization import keyword_match_key
 from repositories import UNSET
-from repositories.collections import remap_collection_photo_ids
+from repositories.photo_row_deletion import photo_row_deletion
 from repositories.photo_visibility import remap_photo_visibility
 
 log = logging.getLogger(__name__)
@@ -670,12 +670,13 @@ class MovesMergeRepository:
         # progress on preparing the archive tree is a valid state a retry
         # can build on, but partial photo/folder reparenting is not.
         try:
-            for sf in staged_folders:
-                merge.fold_staged_folder(sf)
-            merge.delete_folded_staged_folders()
-            merge.link_survivors_for_sibling_edits()
-
-            remap_collection_photo_ids(self.conn, merge.collection_remap)
+            # Every photo row the fold drops leaves its collections (or
+            # follows its survivor into them) when this block exits.
+            with photo_row_deletion(self.conn) as merge.photo_rows:
+                for sf in staged_folders:
+                    merge.fold_staged_folder(sf)
+                merge.delete_folded_staged_folders()
+                merge.link_survivors_for_sibling_edits()
 
             self.conn.commit()
             invalidate_new_images([ws])
@@ -821,9 +822,10 @@ class _StagedTreeMerge:
         # archive folder later in the loop. A set, so two edits sharing a
         # survivor write one link.
         self.sibling_links = set()
-        # Collection memberships of every photo row this merge drops, keyed
-        # to the survivor that absorbs it; applied once, before the commit.
-        self.collection_remap = {}
+        # The ``PhotoRowDeletion`` that drops photo rows during the fold
+        # loop. ``merge_staged_tree_into_archive`` sets it for that loop and
+        # rewrites the dropped rows' collection memberships when it ends.
+        self.photo_rows = None
         # Map of target-path -> folder id for folders already processed in this
         # run, so a child can fall back to its parent's id (Fix I2) even if the
         # parent's row isn't yet findable by path lookup.
@@ -1420,9 +1422,7 @@ class _StagedTreeMerge:
                 (pid,))
         self.conn.execute(
             "DELETE FROM photo_keywords WHERE photo_id = ?", (pid,))
-        self.conn.execute(
-            "DELETE FROM photos WHERE id = ?", (pid,))
-        self.collection_remap[pid] = survivor_id
+        self.photo_rows.delete({pid: survivor_id})
         self.counts["already_present"] += 1
         # The staged photo id is now free. Thumbnails,
         # previews, working copies, and offline cache files
@@ -1610,10 +1610,7 @@ class _StagedTreeMerge:
         self._transfer_embedded_keyword_offered(collision["id"], pid)
         self.conn.execute(
             "DELETE FROM photo_keywords WHERE photo_id = ?", (collision["id"],))
-        self.conn.execute(
-            "DELETE FROM photos WHERE id = ?",
-            (collision["id"],))
-        self.collection_remap[collision["id"]] = pid
+        self.photo_rows.delete({collision["id"]: pid})
         # The phantom target-row id is likewise freed —
         # its cache files can be reused for a new
         # photo. Report it up for cleanup too.
