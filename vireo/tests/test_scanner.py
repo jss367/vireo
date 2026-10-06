@@ -2453,6 +2453,85 @@ def test_raw_reread_companion_refill_survives_interrupted_scan(
     assert cat.db.conn.execute(lens, (cat.raw_id,)).fetchone()[0] == "RF 100-500mm"
 
 
+def test_rescan_keeps_retry_marker_when_companion_metadata_is_missing(
+    tmp_path, monkeypatch,
+):
+    """A rescan that re-reads the RAW but gets no metadata for its
+    companion (an ExifTool transient omission) must leave the companion's
+    ``file_mtime`` NULL so the next incremental scan re-reads it, instead
+    of recording the fresh stat and stat-skipping it forever with the
+    RAW's JPEG-only columns (e.g. ``lens``) left cleared."""
+    import scanner
+
+    def jpeg_populated(paths, *args, **kwargs):
+        meta = {}
+        for p in paths:
+            exif = {"Make": "Canon", "Model": "EOS R5"}
+            if p.endswith(".jpg"):
+                exif["LensModel"] = "RF 100-500mm"
+            meta[p] = {"EXIF": exif, "Composite": {},
+                       "File": {"ImageWidth": 200, "ImageHeight": 100}}
+        return meta
+
+    monkeypatch.setattr(scanner, "extract_metadata", jpeg_populated)
+    cat = _PairedCatalog(tmp_path, monkeypatch)
+    lens = "SELECT lens FROM photos WHERE id = ?"
+    assert cat.db.conn.execute(lens, (cat.raw_id,)).fetchone()[0] == "RF 100-500mm"
+
+    # Change the RAW so it is re-read (which clears the owner's JPEG-only
+    # columns and nulls the companion's stored mtime), and simulate the
+    # metadata read dropping the companion from the result.
+    cat.raw.write_bytes(b"\x02" * 300)
+
+    def jpeg_omitted(paths, *args, **kwargs):
+        return {
+            p: {"EXIF": {"Make": "Canon", "Model": "EOS R5"},
+                "Composite": {},
+                "File": {"ImageWidth": 200, "ImageHeight": 100}}
+            for p in paths if not p.endswith(".jpg")
+        }
+
+    monkeypatch.setattr(scanner, "extract_metadata", jpeg_omitted)
+    cat.scan(incremental=True)
+    assert cat.merges == []
+    # The companion's file_mtime must stay NULL so the next incremental
+    # scan re-reads it; otherwise ``lens`` would be stat-skipped forever.
+    assert cat.identity()[0]["file_mtime"] is None
+
+    # Restore the companion's metadata and rescan. The retry marker drove
+    # a re-read, so the gap fill now runs and ``lens`` is back.
+    monkeypatch.setattr(scanner, "extract_metadata", jpeg_populated)
+    cat.scan(incremental=True)
+    assert cat.db.conn.execute(lens, (cat.raw_id,)).fetchone()[0] == "RF 100-500mm"
+
+
+def test_rescan_records_companion_mtime_when_owner_is_unchanged(
+    tmp_path, monkeypatch,
+):
+    """An unchanged owner means ``_write_photo_columns`` never cleared
+    JPEG-only columns, so recording the fresh companion ``file_mtime``
+    is safe even when metadata was transiently empty for the companion:
+    the next incremental scan can stat-skip it with no refill owed."""
+    import scanner
+
+    cat = _PairedCatalog(tmp_path, monkeypatch)
+
+    future = time.time() + 60
+    os.utime(cat.jpeg, (future, future))
+
+    def jpeg_omitted(paths, *args, **kwargs):
+        return {
+            p: {"EXIF": {}, "Composite": {},
+                "File": {"ImageWidth": 200, "ImageHeight": 100}}
+            for p in paths if not p.endswith(".jpg")
+        }
+
+    monkeypatch.setattr(scanner, "extract_metadata", jpeg_omitted)
+    cat.scan(incremental=True)
+    assert cat.merges == []
+    assert cat.identity()[0]["file_mtime"] == cat.jpeg.stat().st_mtime
+
+
 def test_scan_late_arriving_raw_pairs_with_existing_jpeg(tmp_path):
     """Importing raws after JPEGs matches them to existing photo records."""
     import os

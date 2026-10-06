@@ -5064,13 +5064,6 @@ class _ScanRun:
                 "stored identity", image_path,
             )
         elif _companion_bytes_unchanged(known, file_size, file_hash):
-            # Same bytes: record the stat so the next incremental scan can
-            # see that without reading the file again.
-            self.db.conn.execute(
-                "UPDATE companion_identities SET file_mtime = ?"
-                " WHERE photo_id = ? AND filename = ?",
-                (file_mtime, known["owner_id"], image_path.name),
-            )
             if meta.file_meta:
                 companion_columns = self._companion_columns(meta)
                 # Apply the gap fill inline in this same transaction as
@@ -5088,6 +5081,25 @@ class _ScanRun:
                 )
                 self._pending_companion_fills[known["owner_id"]] = (
                     companion_columns
+                )
+            # Only record the fresh stat when the fill actually ran, or
+            # when the owner is unchanged this scan (so nothing was
+            # cleared that would need a refill). If ExifTool transiently
+            # omits this companion from the metadata result and the
+            # owner was re-read earlier this scan, ``_write_photo_columns``
+            # has nulled this identity's file_mtime so a retry fires on
+            # the next incremental scan; writing the current mtime here
+            # would stat-skip the companion forever and the JPEG-only
+            # columns (e.g. ``lens``) would stay cleared until a full
+            # rescan.
+            if (
+                meta.file_meta
+                or known["owner_id"] not in self.reprocessed_row_ids
+            ):
+                self.db.conn.execute(
+                    "UPDATE companion_identities SET file_mtime = ?"
+                    " WHERE photo_id = ? AND filename = ?",
+                    (file_mtime, known["owner_id"], image_path.name),
                 )
             commit_with_retry(self.db.conn)
         else:

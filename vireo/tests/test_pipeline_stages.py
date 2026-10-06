@@ -92,3 +92,60 @@ def test_concurrent_runs_keep_their_created_collections(tmp_path, monkeypatch):
             ]
     finally:
         db.close()
+
+
+def test_on_scanned_photo_dedupes_companion_from_raw():
+    """A RAW/JPEG pair that lives as one photo (the RAW's row plus the
+    companion JPEG under the same owner id, reported by
+    ``scanner._credit_known_companion``) must land in
+    ``collected_photo_ids`` and the scan→thumb queue only once. Otherwise
+    the thumbnail stage processes it twice (whichever path sorts first
+    creates ``{owner_id}.jpg``, so the JPEG can bypass the normal
+    RAW-first/fallback selection) and the generated pipeline collection
+    carries duplicate ids."""
+    from types import SimpleNamespace
+
+    from pipeline_stages.scanning import _ScanPass
+
+    enqueued = []
+    collected = []
+    scan_step = {"count": 0}
+    updates = []
+
+    run = SimpleNamespace(
+        stages={"scan": scan_step},
+        job={"id": "pipeline-1"},
+        runner=SimpleNamespace(
+            update_step=lambda job_id, step, **kw: updates.append(
+                (job_id, step, kw),
+            ),
+        ),
+    )
+
+    scan = _ScanPass(
+        run,
+        sentinel=object(),
+        filter_excluded=lambda *_a, **_k: None,
+        find_broken_metadata_folders=lambda *_a, **_k: [],
+        missing_archive_mount_root=lambda *_a, **_k: None,
+        put_scan_item=enqueued.append,
+        collected_photo_ids=collected,
+        effective_thumb_cache_dir=None,
+        effective_vireo_dir=None,
+        final_destination=None,
+        missing_originals_invalidator=None,
+        remote_archive=None,
+        skip_scan=False,
+        snapshot_paths=None,
+    )
+
+    scan._on_scanned_photo(42, "/photos/IMG_001.cr3")
+    scan._on_scanned_photo(42, "/photos/IMG_001.jpg")  # companion of RAW 42
+    scan._on_scanned_photo(43, "/photos/IMG_002.jpg")
+
+    assert collected == [42, 43]
+    assert enqueued == [
+        (42, "/photos/IMG_001.cr3"),
+        (43, "/photos/IMG_002.jpg"),
+    ]
+    assert scan_step["count"] == 2

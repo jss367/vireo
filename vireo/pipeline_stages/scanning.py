@@ -180,6 +180,16 @@ class _ScanPass:
         self.remote_archive = remote_archive
         self.skip_scan = skip_scan
         self.snapshot_paths = snapshot_paths
+        # Dedupes `_on_scanned_photo` by photo_id so a rescan that sees
+        # both members of a RAW/JPEG pair (the RAW through its own row,
+        # the companion JPEG under the same owner id via
+        # ``scanner._credit_known_companion``) only appends the id to
+        # ``collected_photo_ids`` once and only queues one thumbnail
+        # item for it. Without this, the thumbnail stage would process
+        # the same photo twice — whichever path sorts first would win
+        # the shared ``{owner_id}.jpg`` output — and the generated
+        # pipeline collection would carry duplicate ids.
+        self._reported_photo_ids: set = set()
 
         # Collect the scan roots actually fed to do_scan so the finally
         # clause can invalidate the new-images cache for each one,
@@ -289,6 +299,14 @@ class _ScanPass:
 
     def _on_scanned_photo(self, photo_id, path):
         run = self.run
+        if photo_id in self._reported_photo_ids:
+            # The scanner reports an unchanged companion JPEG under
+            # its RAW's owner id so import-in-place can tick the
+            # companion path off, but the pipeline needs only one
+            # entry per photo for the thumbnail queue, the scan count
+            # and the collection it builds from these ids.
+            return
+        self._reported_photo_ids.add(photo_id)
         self.collected_photo_ids.append(photo_id)
         # Abort/pause-aware: a blocking put would wedge the scanner
         # if the thumbnail consumer parked or failed on a full queue.
