@@ -7,17 +7,26 @@ var explorerLeafData = null;   // last species-leaf payload
 var explorerLeafGenus = null;  // {id,name,rank} of the genus being shown
 
 async function loadExplorerSpecies(node) {
+  var myReq = ++explorerViewReqId;   // claim the body token; any later navigation bumps it
   explorerLeafGenus = { id: node.id, name: node.common_name || node.name, rank: node.rank };
+  // Drop the previous genus's payload now, so a view that returns to this genus
+  // before the response lands (Back to cards) reloads it instead of showing the
+  // old genus's species under this genus's name.
+  explorerLeafData = null;
   explorerPath.push(explorerLeafGenus);
   renderSunburst();
   var body = document.getElementById('explorerBody');
   if (body) body.innerHTML = renderBreadcrumb() + '<div class="ll-exp-empty">Loading species…</div>';
+  var data;
   try {
-    explorerLeafData = await safeFetch('/api/life-list/explorer/species?genus=' + encodeURIComponent(node.id));
+    data = await safeFetch('/api/life-list/explorer/species?genus=' + encodeURIComponent(node.id));
   } catch (e) {
+    if (myReq !== explorerViewReqId) return;   // superseded — leave the newer view alone
     if (body) body.innerHTML = renderBreadcrumb() + '<div class="ll-exp-empty">Failed to load species.</div>';
     return;
   }
+  if (myReq !== explorerViewReqId) return;   // the user navigated away; discard this stale response
+  explorerLeafData = data;
   renderExplorerLeaf(false);
 }
 

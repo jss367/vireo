@@ -6,11 +6,16 @@
 var explorerData = null;      // last payload from /api/life-list/explorer
 var explorerPath = [];        // [{id,name,rank}] drill path from class root down
 var explorerRankView = null;  // {rank,data,search,missingOnly,showAll} when the flat rank view is open, else null
+// Token for the requests that fill #explorerBody (the genus species leaf and the
+// flat rank view). Each one claims it; every navigation that replaces the body
+// bumps it, so a late response for a view the user already left is dropped.
+var explorerViewReqId = 0;
 
 // Load the explorer tree for a class (rootId = class taxon id, or omit for
 // the default Aves root). Stores the payload and re-renders.
 async function loadExplorer(rootId) {
   var panel = document.getElementById('tab-explorer');
+  explorerViewReqId++;   // invalidate any in-flight /rank or /species fetch from the old class
   panel.innerHTML = '<div class="ll-exp"><div class="ll-exp-empty">Loading…</div></div>';
   try {
     explorerData = await safeFetch('/api/life-list/explorer' + (rootId ? ('?root=' + encodeURIComponent(rootId)) : ''));
@@ -20,7 +25,6 @@ async function loadExplorer(rootId) {
   }
   explorerPath = [];        // reset drill path whenever a new class is loaded
   explorerRankView = null;  // and exit the flat rank view on class change
-  explorerRankReqId++;      // invalidate any in-flight /rank fetch from the old class
   renderExplorer();
 }
 
@@ -135,6 +139,7 @@ function wireBreadcrumb(container) {
     var depth = parseInt(crumb.getAttribute('data-depth'), 10);
     if (isNaN(depth) || depth === explorerPath.length) return;   // current crumb: no-op
     explorerPath = explorerPath.slice(0, depth);
+    explorerViewReqId++;   // supersede any in-flight /species or /rank fetch
     renderExplorerBody();
   });
 }
