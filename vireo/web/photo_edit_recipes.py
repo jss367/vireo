@@ -128,6 +128,25 @@ def create_photo_edit_recipes_blueprint(
             return json_error(str(e))
         return jsonify({"mask": mask, "stale": False})
 
+    @blueprint.route("/api/photos/<int:photo_id>/local-mask/correct", methods=["POST"])
+    def api_correct_local_mask(photo_id):
+        db = get_db()
+        if not db.get_photo(photo_id, verify_workspace=True):
+            return photo_not_found_error(legacy_error="not found")
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return json_error("request body must be a JSON object")
+        import local_masks
+        try:
+            mask = local_masks.correct_snapshot(
+                vireo_dir=os.path.dirname(config["THUMB_CACHE_DIR"]),
+                photo_id=photo_id, mask=body.get("mask"), mode=body.get("mode"),
+                radius=body.get("radius"), points=body.get("points"),
+            )
+        except ValueError as exc:
+            return json_error(str(exc))
+        return jsonify({"mask": mask})
+
     @blueprint.route("/api/photos/<int:photo_id>/edit-recipe", methods=["PUT", "POST"])
     def api_set_photo_edit_recipe(photo_id):
         db = get_db()
@@ -252,7 +271,9 @@ def create_photo_edit_recipes_blueprint(
                     vireo_dir=os.path.dirname(config["THUMB_CACHE_DIR"]),
                     native_size=_recipe_source_dimensions(photo),
                 )
+                recipe["local"]["mask"].pop("corrected", None)
                 recipe["local"]["mask"].update(mask)
+                recipe = normalize_recipe(recipe) or {}
         except (ValueError, OSError) as e:
             return json_error(str(e))
         return jsonify({"recipe": recipe})
@@ -352,6 +373,7 @@ def create_photo_edit_recipes_blueprint(
                 target_local_mask = dict(
                     target_recipe["local"].get("mask") or {}
                 )
+                target_local_mask.pop("corrected", None)
                 target_local_mask.update(target_mask)
                 target_recipe["local"]["mask"] = target_local_mask
             old_value = recipe_to_json(old_recipe) or ""

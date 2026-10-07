@@ -476,8 +476,8 @@ def normalize_recipe(recipe):
 def _normalize_local(local):
     """Validate and canonicalize the local (mask-weighted) section.
 
-    Returns None when every region normalizes away — the shared mask never
-    persists without at least one active region referencing it.
+    Retain manually corrected masks even before a region is adjusted; other
+    masks normalize away when no region references them.
     """
     if not isinstance(local, dict):
         raise RecipeError("local must be an object")
@@ -532,10 +532,11 @@ def _normalize_local(local):
                 {"region": region, "adjustments": normalized_adj}
             )
 
-    if not normalized_regions:
+    mask_in = local.get("mask")
+    corrected = isinstance(mask_in, dict) and mask_in.get("corrected") is True
+    if not normalized_regions and not corrected:
         return None
 
-    mask_in = local.get("mask")
     if not isinstance(mask_in, dict):
         raise RecipeError("local.mask is required when regions are present")
     ref = mask_in.get("ref")
@@ -547,6 +548,8 @@ def _normalize_local(local):
     if not isinstance(digest, str) or not digest.strip() or len(digest) > 128:
         raise RecipeError("local.mask.source_digest is required")
     normalized_mask = {"ref": ref, "source_digest": digest}
+    if corrected:
+        normalized_mask["corrected"] = True
 
     feather = mask_in.get("feather", 0)
     if feather in (None, ""):

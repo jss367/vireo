@@ -14821,3 +14821,39 @@ def test_active_mask_retries_replaced_generation(client_with_photo, monkeypatch,
     mask = _load_active_mask(db, photo_id)
     assert mask.size == (7, 5)
     assert mask.getpixel((0, 0)) == 123
+
+
+def test_mask_brush_endpoint_preserves_history_and_workspace(client_with_photo):
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    folder = db.conn.execute("SELECT path FROM folders").fetchone()
+    _register_active_mask(db, photo_id, folder['path'])
+    mask = client.post(f'/api/photos/{photo_id}/local-mask/snapshot').json['mask']
+    endpoint = f'/api/photos/{photo_id}/local-mask/correct'
+    body = {'mask': mask, 'mode': 'add', 'radius': 0.06, 'points': [[0.8, 0.5]]}
+    response = client.post(endpoint, json=body)
+    assert response.status_code == 200
+    corrected = response.json['mask']
+    assert corrected['corrected'] is True
+    assert corrected['ref'] != mask['ref']
+    assert corrected['source_digest'] == mask['source_digest']
+    assert db.get_photo_edit_recipe(photo_id) is None  # publishing does not save
+    recipe = {'local': {'mask': corrected, 'regions': []}}
+    saved = client.put(f'/api/photos/{photo_id}/edit-recipe', json={'recipe': recipe})
+    assert saved.status_code == 200
+    assert saved.json['recipe']['local'] == recipe['local']
+    assert client.post('/api/undo').status_code == 200
+    assert db.get_photo_edit_recipe(photo_id) is None
+    assert client.post('/api/redo').status_code == 200
+    assert db.get_photo_edit_recipe(photo_id)['local'] == recipe['local']
+    hidden_id = _add_other_workspace_photo(db)
+    assert client.post(f'/api/photos/{hidden_id}/local-mask/correct', json=body).status_code == 404
+
+
+@pytest.mark.parametrize('body', [None, [], {}, {'mask': {'ref': '../bad'}},
+                                      {'mode': 'add', 'radius': True, 'points': []}])
+def test_mask_brush_bad_requests_leave_recipe_unchanged(client_with_photo, body):
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    assert client.post(f'/api/photos/{photo_id}/local-mask/correct', json=body).status_code == 400
+    assert db.get_photo_edit_recipe(photo_id) is None

@@ -417,3 +417,54 @@ def test_gc_rechecks_mtime_before_deleting(tmp_path, monkeypatch):
     assert result["deleted"] == 0
     assert result["kept"] == 1
     db.close()
+
+
+def test_brush_correction_is_immutable_and_keeps_source_staleness(tmp_path):
+    from image_edits import normalize_recipe
+
+    path = _write_mask(str(tmp_path / 'source.png'))
+    row = _mask_row(path)
+    original = local_masks.create_snapshot(photo_id=1, mask_row=row, vireo_dir=str(tmp_path))
+    options = dict(vireo_dir=str(tmp_path), photo_id=1, radius=0.06)
+    added = local_masks.correct_snapshot(**options, mask=original, mode='add', points=[[0.05, 0.5], [0.15, 0.5]])
+    removed = local_masks.correct_snapshot(**options, mask=added, mode='subtract', points=[[0.5, 0.5]])
+    assert len({original['ref'], added['ref'], removed['ref']}) == 3
+    assert original['source_digest'] == added['source_digest'] == removed['source_digest']
+    before = np.asarray(local_masks.load_snapshot(str(tmp_path), 1, _local_recipe(original)))
+    after = np.asarray(local_masks.load_snapshot(str(tmp_path), 1, _local_recipe(removed)))
+    assert before[30, 8] == 0 and after[30, 8] == 255
+    assert before[30, 40] == 255 and after[30, 40] == 0
+    # Corrections can be saved before the first exposure adjustment.
+    recipe = normalize_recipe({'local': {'mask': removed, 'regions': []}})
+    assert recipe['local']['mask']['corrected'] is True
+    assert not local_masks.is_stale(recipe, row)
+    _write_mask(path, box=(0, 0, 10, 10))
+    assert local_masks.is_stale(recipe, row)
+    assert np.array_equal(before, np.asarray(local_masks.load_snapshot(str(tmp_path), 1, _local_recipe(original))))
+    # Identical strokes reuse content rather than mutate prior history.
+    assert local_masks.correct_snapshot(**options, mask=original, mode='add', points=[[0.05, 0.5], [0.15, 0.5]]) == added
+
+
+@pytest.mark.parametrize('override', [
+    {'mode': 'replace'}, {'radius': True}, {'radius': float('nan')},
+    {'radius': 0}, {'radius': 0.5}, {'radius': 10 ** 400},
+    {'points': []}, {'points': [[0.5, 0.5]] * 2049},
+    {'points': [[float('inf'), 0.5]]}, {'points': [[True, 0.5]]},
+    {'points': [[-0.1, 0.5]]}, {'points': [[0.5]]},
+    {'mask': {'ref': '../outside', 'source_digest': 'test'}},
+])
+def test_invalid_brush_does_not_publish(tmp_path, override):
+    options = dict(vireo_dir=str(tmp_path), photo_id=1,
+                   mask={'ref': 'a' * 12, 'source_digest': 'test'},
+                   mode='add', radius=0.05, points=[[0.5, 0.5]])
+    options.update(override)
+    with pytest.raises(ValueError):
+        local_masks.correct_snapshot(**options)
+    assert not (tmp_path / 'edit-masks').exists()
+
+
+def test_brush_snapshot_cannot_cross_photo_ids(tmp_path):
+    original = local_masks.create_snapshot(photo_id=1, mask_row=_mask_row(_write_mask(str(tmp_path / 'source.png'))), vireo_dir=str(tmp_path))
+    with pytest.raises(ValueError, match='missing'):
+        local_masks.correct_snapshot(vireo_dir=str(tmp_path), photo_id=2,
+                                     mask=original, mode='add', radius=0.05, points=[[0.5, 0.5]])

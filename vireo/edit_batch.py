@@ -190,12 +190,14 @@ def _restore_preset_radius(normalized, source, fields):
 def encode_preset(recipe, fields):
     fields = validate_fields(fields)
     selected = compose_recipe({}, recipe, fields, "merge") or {}
-    _restore_preset_radius(selected, recipe, fields)
     if selected.get("local"):
         # Presets carry region values, never a reference to a source image's
         # snapshot. A valid sentinel keeps the normal recipe schema reusable;
         # application always replaces it with the target's own snapshot.
+        selected["local"]["mask"].pop("corrected", None)
         selected["local"]["mask"].update(ref="000000000000", source_digest="preset")
+        selected = normalize_recipe(selected) or {}
+    _restore_preset_radius(selected, recipe, fields)
     return json.dumps({"recipe": selected, "fields": fields}, separators=(",", ":"))
 
 

@@ -3,6 +3,7 @@
 
 function resetAllEdits() {
   cancelPointColorPicker();
+  cancelMaskBrush();
   editorState.recipe = {};
   ensureCrop(editorState.recipe);
   editorState.cropAspect = null;
@@ -12,7 +13,7 @@ function resetAllEdits() {
 }
 
 async function saveRecipe(description) {
-  if (!editorState.photoId || editorState.loading) return false;
+  if (!editorState.photoId || editorState.loading || maskBrush.busy || maskBrush.stroke) return false;
   if (editorState.savingPhotoIds[String(editorState.photoId)]) return false;
   // Capture the photo being saved so a Prev/Next during the PUT can't make us
   // write the previous photo's returned recipe back into the editor state for
