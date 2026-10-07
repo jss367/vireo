@@ -56,7 +56,7 @@ RESERVATION_EXEMPT_ENDPOINTS = frozenset({
     # folder or filter change, so reserving for them blocked browsing for
     # the length of a NAS send. Only add a route here if it writes nothing.
     "photos.api_photos_query", "photos.api_photos_companion_count",
-    "photos.api_photos_by_ids",
+    "photos.api_photos_by_ids", "photos.api_photos_geo",
     "browse.api_browse_photo_counts",
     "browse.api_selection_keyword_suggestions",
     "browse.api_selection_prediction_suggestions",
