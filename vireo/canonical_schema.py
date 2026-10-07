@@ -20,7 +20,7 @@ This module must not import ``db``: ``schema.py`` imports ``db``, and
 # database it creates from nothing. It is the newest registry migration in
 # ``schema.MIGRATIONS``: ``create_tables`` builds every migration's end state,
 # so a fresh database has nothing to migrate.
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 
 class CanonicalSchema:
@@ -671,6 +671,15 @@ class CanonicalSchema:
                 PRIMARY KEY (photo_id, size),
                 FOREIGN KEY (photo_id) REFERENCES photos(id) ON DELETE CASCADE
             );
+
+            CREATE TABLE IF NOT EXISTS paired_preview_cache (
+                filename TEXT PRIMARY KEY,
+                photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+                bytes INTEGER NOT NULL,
+                last_access_at REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_paired_preview_photo
+                ON paired_preview_cache(photo_id);
 
             CREATE TABLE IF NOT EXISTS offline_originals (
                 photo_id INTEGER NOT NULL PRIMARY KEY,

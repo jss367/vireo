@@ -4901,6 +4901,19 @@ class Database:
         """Return the row for (photo_id, size), or None."""
         return self._caches_repository().preview_get(photo_id, size)
 
+    def paired_preview_cache_insert(self, photo_id, filename, bytes_):
+        """Register a source-keyed preview in the publisher's transaction."""
+        self._caches_repository().paired_preview_insert(photo_id, filename, bytes_)
+
+    def paired_preview_cache_get(self, filename):
+        return self._caches_repository().paired_preview_get(filename)
+
+    def paired_preview_cache_touch(self, filename):
+        self._caches_repository().paired_preview_touch(filename)
+
+    def paired_preview_cache_oldest_first(self):
+        return self._caches_repository().paired_preview_oldest_first()
+
     # ------------------------------------------------------------------
     # offline original cache
     # ------------------------------------------------------------------

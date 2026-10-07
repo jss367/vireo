@@ -1207,7 +1207,7 @@ def test_preparation_guard_accepts_matching_recipe(client_with_photo):
         assert (preview_dir / f"{photo_id}_{size}.jpg").is_file(), size
 
 
-@pytest.mark.parametrize("cache_fault", [None, "expired", "wrong_state", "publication_failure", "relocated"])
+@pytest.mark.parametrize("cache_fault", [None, "expired", "long_review", "wrong_state", "publication_failure", "relocated"])
 def test_prepare_raw_jpeg_pair_warms_paired_jpeg_tiers(
     client_with_photo, monkeypatch, cache_fault,
 ):
@@ -1336,9 +1336,10 @@ def test_prepare_raw_jpeg_pair_warms_paired_jpeg_tiers(
         "/api/jobs/prepare-full-resolution", json={"photo_ids": [photo_id]},
     )
     job = wait_for_job_via_client(client, started.get_json()["job_id"])
-    assert job["status"] == ("failed" if cache_fault else "completed"), job
+    fails = cache_fault in {"wrong_state", "publication_failure", "relocated"}
+    assert job["status"] == ("failed" if fails else "completed"), job
     result = job["result"]
-    if cache_fault is not None:
+    if fails:
         assert result["ready"] == 0, result
         assert result["failed"] == 1, result
         assert result["ok"] is False, result
@@ -1354,6 +1355,18 @@ def test_prepare_raw_jpeg_pair_warms_paired_jpeg_tiers(
         matches = list(paired_dir.glob(f"{photo_id}_{size}_jpeg_*.jpg"))
         assert matches, f"no paired JPEG preview for size {size}"
         assert any(m.stat().st_size > 0 for m in matches), size
+
+    if cache_fault == "long_review":
+        # The review starts an hour after preparation, and startup reconciliation runs.
+        # Registration is persistent, and old mtimes must not expire it.
+        from preview_cache import reconcile_preview_cache
+        for artifact in paired_dir.glob("*.jpg"):
+            old = time.time() - 3600
+            os.utime(artifact, (old, old))
+        monkeypatch.setattr(media, "time", SimpleNamespace(
+            time=lambda: time.time() + 3600,
+        ))
+        reconcile_preview_cache(db, str(preview_dir.parent))
 
     decodes_after_prep = len(paired_jpeg_decodes)
 

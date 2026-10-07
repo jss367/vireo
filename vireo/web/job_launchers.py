@@ -26,7 +26,7 @@ from flask import Blueprint, current_app, jsonify, request
 from preview_cache import (
     evict_if_over_quota as evict_preview_cache_if_over_quota,
 )
-from preview_cache import lightbox_fit_preview_sizes
+from preview_cache import lightbox_fit_preview_sizes, paired_preview_ready
 from preview_materializer import (
     PreviewMaterializationError,
     materialize_preview,
@@ -90,7 +90,6 @@ def _photo_is_raw_jpeg_pair(photo):
 def _paired_jpeg_preview_exists(preview_dir, photo, size, db):
     """Check the exact current JPEG artifact using the renderer's predicate."""
     from web.media import (
-        _fresh_paired_artifact,
         _paired_preview_path,
         _paired_render_state_hash,
     )
@@ -118,7 +117,7 @@ def _paired_jpeg_preview_exists(preview_dir, photo, size, db):
     state_hash = _paired_render_state_hash(
         photo, size, "jpeg", source_path, None,
     )
-    return _fresh_paired_artifact(_paired_preview_path(
+    return paired_preview_ready(db, _paired_preview_path(
         preview_dir, photo["id"], size, "jpeg", state_hash,
     ))
 
@@ -1447,11 +1446,8 @@ def create_job_launchers_blueprint(
                                                     "lightbox tiers)"
                                                 )
                                                 break
-                                            # The paired shadow cache is not
-                                            # subject to preview_cache_max_mb
-                                            # eviction, so a missing file
-                                            # here means the paired render
-                                            # itself failed to publish.
+                                            # Paired tiers share the preview
+                                            # quota and can be evicted too.
                                             if (
                                                 is_pair
                                                 and not
@@ -1464,8 +1460,8 @@ def create_job_launchers_blueprint(
                                                     f"{size}px paired "
                                                     "preview was not "
                                                     "written (RAW+JPEG "
-                                                    "companion source "
-                                                    "unavailable)"
+                                                    "companion unavailable "
+                                                    "or preview cache quota too small)"
                                                 )
                                                 break
                             except Exception as exc:
@@ -1585,7 +1581,7 @@ def create_job_launchers_blueprint(
                             job["errors"].append(
                                 f"{info['filename']}: {missing_size}px "
                                 "paired preview went missing after warming "
-                                "(RAW+JPEG companion source unavailable)"
+                                "(source changed or preview cache quota too small)"
                             )
                         else:
                             job["errors"].append(

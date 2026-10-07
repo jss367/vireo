@@ -8,7 +8,7 @@ per-photo variant listing that points at them (``/api/photos/<pid>/masks``).
 Every route answers only for photos in the active workspace.
 
 The helpers only these routes use live here too: the paired RAW/JPEG source
-selection (``?source=jpeg|raw``) and its short-lived shadow renders, the
+selection (``?source=jpeg|raw``) and its source-keyed renders, the
 equal-key artifact-flight response carrier, the full-resolution render cache
 paths and mtime pegging, and the working-copy cache-hit sender.
 """
@@ -45,7 +45,7 @@ from flask import (
     request,
     send_from_directory,
 )
-from preview_cache import PREVIEW_TIER_SIZES, ensure_preview_cache_invalidations_table
+from preview_cache import PREVIEW_TIER_SIZES, ensure_preview_cache_invalidations_table, paired_preview_ready
 from preview_cache import (
     evict_if_over_quota as evict_preview_cache_if_over_quota,
 )
@@ -118,12 +118,9 @@ def _shed_prefetch_response():
     return response
 
 
-# Paired-source preview renders (`?source=jpeg|raw`) intentionally sit outside
-# the durable (photo_id, size) preview cache so RAW and JPEG pixels can never
-# contaminate one another.  For coordination alone we do publish them to a
-# dedicated subdirectory so an equal-key follower can serve the producer's
-# already-decoded bytes instead of racing another concurrent decode against
-# the same source.  These files are kept short-lived and swept on write.
+# Paired previews use source-state filenames and their own cache index, while
+# sharing the ordinary preview disk quota. Full-resolution paired RAW renders
+# still use transient artifacts for request coordination.
 _PAIRED_PREVIEW_DIRNAME = "paired"
 _PAIRED_PREVIEW_TTL_SEC = 15 * 60
 
@@ -3363,8 +3360,7 @@ def create_media_blueprint(
         render_recipe = None if pair_source == "jpeg" else recipe
         # The established preview cache is keyed only by (photo_id, size).
         # Explicit paired-source views bypass it so RAW and JPEG pixels can
-        # never contaminate one another. Browser caching still makes repeated
-        # viewing cheap; the ordinary unpaired path keeps the disk LRU.
+        # never contaminate one another. Both indexes share the preview disk LRU.
         bypass_cache = pair_source is not None
         # Paired renders coordinate through a distinct source-aware artifact
         # so a browser warmup (prefetch=1) and the visible request that
@@ -3375,8 +3371,8 @@ def create_media_blueprint(
         # edit recipe or a swapped paired source produces a distinct
         # filename. Otherwise repeatedly accessed entries would keep
         # returning bytes rendered from the previous state indefinitely —
-        # regular preview-cache invalidation does not remove these shadow
-        # files, and the TTL sweep only fires when a new render publishes.
+        # regular preview-cache invalidation does not remove these source-keyed
+        # files. Old states remain accounted for until LRU eviction.
         paired_cache_path = (
             _paired_preview_path(
                 preview_dir,
@@ -3490,8 +3486,10 @@ def create_media_blueprint(
         # cache, so waiters skip repeating that work.
         if (
             paired_cache_path
-            and _fresh_paired_artifact(paired_cache_path)
+            and paired_preview_ready(db, paired_cache_path)
         ):
+            with contextlib.suppress(sqlite3.Error):
+                db.paired_preview_cache_touch(os.path.basename(paired_cache_path))
             return send_file(paired_cache_path, mimetype="image/jpeg")
 
         # Cache miss: coordinate every durable preview producer in this
@@ -3501,7 +3499,7 @@ def create_media_blueprint(
         # their own Flask request context.  Paired renders are coordinated
         # too, keyed by the source-aware paired path so RAW and JPEG variants
         # of the same photo never share a flight — the shared artifact for
-        # waiters lives at that paired path rather than the durable cache.
+        # waiters live at that paired path, isolated from ordinary previews.
         if not _artifact_flight_guarded:
             artifact_key = os.path.abspath(
                 paired_cache_path if bypass_cache else cache_path,
@@ -3583,8 +3581,15 @@ def create_media_blueprint(
         # producer render into a 500.
         if bypass_cache and paired_cache_path and rendered.data is not None:
             try:
-                _sweep_stale_paired_previews(_paired_preview_dir(preview_dir))
-                atomic_write_bytes(rendered.data, paired_cache_path)
+                # Publication and registration share the source-identity
+                # guard: a deletion/reimport during decoding must not attach
+                # the old pixels to the new photo's durable cache entry.
+                with _preparation_publication(db, photo_id, photo):
+                    atomic_write_bytes(rendered.data, paired_cache_path)
+                    db.paired_preview_cache_insert(
+                        photo_id, os.path.basename(paired_cache_path), len(rendered.data),
+                    )
+                evict_preview_cache_if_over_quota(db, vireo_dir)
             except Exception:
                 log.warning(
                     "Failed to publish paired preview cache %s",

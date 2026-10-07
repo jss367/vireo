@@ -89,6 +89,9 @@ def create_storage_blueprint(get_db, json_error, db_path, config):
             os.path.dirname(config["THUMB_CACHE_DIR"]), "previews"
         )
         preview = _dir_stats(preview_dir)
+        paired = _dir_stats(os.path.join(preview_dir, "paired"))
+        preview["count"] += paired["count"]
+        preview["size"] += paired["size"]
         working = working_copy_stats(
             os.path.dirname(config["THUMB_CACHE_DIR"])
         )
@@ -429,31 +432,26 @@ def create_storage_blueprint(get_db, json_error, db_path, config):
 
         files = []
         truncated = False
-        if os.path.isdir(cache_dir):
-            if limit is None:
-                names = sorted(os.listdir(cache_dir))
-                for f in names:
-                    fp = os.path.join(cache_dir, f)
-                    if os.path.isfile(fp) and f != "manifest.json":
-                        entry = {"name": f, "size": os.path.getsize(fp)}
-                        if f in manifest:
-                            entry["meta"] = manifest[f]
-                        files.append(entry)
-            else:
-                with os.scandir(cache_dir) as entries:
-                    for entry_info in entries:
-                        if entry_info.name == "manifest.json":
-                            continue
-                        if not entry_info.is_file():
-                            continue
-                        if len(files) >= limit:
-                            truncated = True
-                            break
-                        stat = entry_info.stat()
-                        entry = {"name": entry_info.name, "size": stat.st_size}
-                        if entry_info.name in manifest:
-                            entry["meta"] = manifest[entry_info.name]
-                        files.append(entry)
+        directories = [(cache_dir, "")]
+        if cache_type == "previews":
+            directories.append((os.path.join(cache_dir, "paired"), "paired/"))
+        for directory, prefix in directories:
+            if not os.path.isdir(directory):
+                continue
+            with os.scandir(directory) as entries:
+                ordered = sorted(entries, key=lambda e: e.name) if limit is None else entries
+                for info in ordered:
+                    if not info.is_file() or info.name == "manifest.json":
+                        continue
+                    if limit is not None and len(files) >= limit:
+                        truncated = True
+                        break
+                    entry = {"name": prefix + info.name, "size": info.stat().st_size}
+                    if info.name in manifest:
+                        entry["meta"] = manifest[info.name]
+                    files.append(entry)
+            if truncated:
+                break
         return jsonify({
             "type": cache_type,
             "path": cache_dir,
@@ -474,6 +472,7 @@ def create_storage_blueprint(get_db, json_error, db_path, config):
             # Settings "Current usage" and eviction don't see phantoms.
             db = get_db()
             db.conn.execute("DELETE FROM preview_cache")
+            db.conn.execute("DELETE FROM paired_preview_cache")
             db.conn.commit()
             return jsonify({"ok": True})
         elif cache_type == "thumbnails":
@@ -608,11 +607,15 @@ def create_storage_blueprint(get_db, json_error, db_path, config):
         for fname in filenames:
             # Prevent path traversal
             safe = os.path.basename(fname)
-            fp = os.path.join(cache_dir, safe)
+            is_paired = cache_type == "previews" and fname == f"paired/{safe}"
+            fp = os.path.join(cache_dir, "paired" if is_paired else "", safe)
             if os.path.isfile(fp):
                 os.remove(fp)
                 deleted += 1
-                if cache_type == "previews":
+                if is_paired:
+                    db.conn.execute("DELETE FROM paired_preview_cache WHERE filename=?", (safe,))
+                    db.conn.commit()
+                elif cache_type == "previews":
                     m = sized_pat.match(safe)
                     if m:
                         db.preview_cache_delete(int(m.group(1)), int(m.group(2)))

@@ -46,7 +46,8 @@ class CachesRepository:
     def preview_total_bytes(self):
         """Return total bytes tracked in preview_cache."""
         row = self.conn.execute(
-            "SELECT COALESCE(SUM(bytes), 0) AS total FROM preview_cache"
+            "SELECT (SELECT COALESCE(SUM(bytes), 0) FROM preview_cache) + "
+            "(SELECT COALESCE(SUM(bytes), 0) FROM paired_preview_cache) AS total"
         ).fetchone()
         return row["total"]
 
@@ -64,6 +65,33 @@ class CachesRepository:
             "WHERE photo_id=? AND size=?",
             (photo_id, size),
         ).fetchone()
+
+    def paired_preview_insert(self, photo_id, filename, bytes_):
+        """Join the publisher's transaction; the filename includes source state."""
+        import time
+        self.conn.execute(
+            "INSERT OR REPLACE INTO paired_preview_cache "
+            "(filename, photo_id, bytes, last_access_at) VALUES (?, ?, ?, ?)",
+            (filename, photo_id, bytes_, time.time()),
+        )
+
+    def paired_preview_get(self, filename):
+        return self.conn.execute(
+            "SELECT * FROM paired_preview_cache WHERE filename=?", (filename,),
+        ).fetchone()
+
+    def paired_preview_touch(self, filename):
+        import time
+        self.conn.execute(
+            "UPDATE paired_preview_cache SET last_access_at=? WHERE filename=?",
+            (time.time(), filename),
+        )
+        self.conn.commit()
+
+    def paired_preview_oldest_first(self):
+        return self.conn.execute(
+            "SELECT * FROM paired_preview_cache ORDER BY last_access_at",
+        ).fetchall()
 
     # -- offline original cache ----------------------------------------------
 
