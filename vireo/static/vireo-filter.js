@@ -133,6 +133,7 @@
 
   function defaultOp(spec) {
     if (!spec) return 'is';
+    if (spec.default_op) return spec.default_op;
     if (spec.type === 'text') return 'contains';
     if (spec.type === 'date') return 'recent';
     if (spec.type === 'enum') return 'in';
@@ -357,15 +358,47 @@
     return null;
   }
 
-  // Clone the tree with one leaf dropped from its group — never substitute
-  // "true", which inverts any/none groups (prototype review finding).
-  function rulesWithout(target) {
+  // Clone ``root`` with every leaf matching ``drop`` removed, plus any
+  // group that becomes empty along the way. Dropping empty groups is not
+  // optional: ``_RuleQueryBuilder.build_node`` compiles an empty ``any``
+  // group to ``0``, so leaving one behind would AND into the compiled
+  // query (and into any scope request built from the result) and collapse
+  // the grid to nothing — never substitute "true" for the removed leaf,
+  // which inverts any/none groups (prototype review finding).
+  function prunedTree(root, drop) {
     function walk(node) {
-      if (!isGroup(node)) return node === target ? null : clone(node);
+      if (!isGroup(node)) return drop(node) ? null : clone(node);
       const kept = node.rules.map(walk).filter((c) => c !== null);
+      if (!kept.length) return null;
       return { ...clone({ ...node, rules: [] }), rules: kept };
     }
-    return walk(state.root);
+    return walk(root) || { mode: 'all', rules: [] };
+  }
+
+  function rulesWithout(target) {
+    return prunedTree(state.root, (n) => n === target);
+  }
+
+  function rulesWithoutFields(root, fields) {
+    return prunedTree(root, (n) => fields.includes(n.field));
+  }
+
+  // Compose ``context`` and the remaining rule tree ``others`` into one
+  // ``all`` tree for a /api/filters/values request. Concatenating
+  // ``others.rules`` would discard the root mode: a tree whose root is
+  // ``any`` or ``none`` (NOT(…) / OR(…)) would silently become ``all``,
+  // scoping values to the wrong photo set and letting the 50-result cap
+  // fill with values from outside the active grid (Codex review
+  // r4208938067). Wrap non-``all`` subtrees so their mode survives, and
+  // drop empty subtrees so an empty ``any`` doesn't short-circuit the
+  // scope to false (``prunedTree`` already prunes nested empties).
+  function composeScopeRules(context, others) {
+    const combined = clone(context);
+    if (others && others.rules && others.rules.length) {
+      if (others.mode === 'all') combined.push(...others.rules);
+      else combined.push(others);
+    }
+    return { mode: 'all', rules: combined };
   }
 
   // ---- labels -----------------------------------------------------------
@@ -403,9 +436,13 @@
       return MISSING_TAG_LABELS[rule.field];
     }
     if (rule.field === 'keyword_identity') return 'Keyword · ' + (rule.label || 'Selected species or place');
+    if (['burst_id', 'duplicate_group'].includes(rule.field)) {
+      const label = rule.value_label || (rule.field === 'burst_id' ? 'Saved burst' : 'Saved duplicate group');
+      return `${rule.op === 'is not' ? 'Outside' : 'In'} ${label}`;
+    }
     if (rule.field === 'photo_ids') {
       const n = Array.isArray(rule.value) ? rule.value.length : 0;
-      return `${n} hand-picked photo${n === 1 ? '' : 's'}`;
+      return rule.value_label ? `${rule.value_label} · ${n} selected photos` : `${n} hand-picked photo${n === 1 ? '' : 's'}`;
     }
     if (rule.field === 'life_list_uncounted') {
       try {
@@ -1296,6 +1333,7 @@
           action: active.dataset.action,
           path: active.dataset.path,
           value: active.dataset.value,
+          folder: active.dataset.folder,
           start: active.selectionStart,
           end: active.selectionEnd,
           suggest: Boolean(active.dataset.suggest),
@@ -1313,17 +1351,22 @@
       ? state.root.rules.map((node, i) => renderNode(node, String(i), 0)).join('')
       : (visualRow ? '' : '<div class="vf-empty-rules">No rules yet. Use a quick filter or add any metadata field.</div>'));
     loadExtensionPickers();
+    loadValuePickers();
     if (restore) {
       const controls = Array.from(tree.querySelectorAll('[data-action][data-path]'));
       let el = controls.find((candidate) =>
         candidate.dataset.action === restore.action && candidate.dataset.path === restore.path &&
-        candidate.dataset.value === restore.value) || (['extension-remove', 'extension-pick'].includes(restore.action) &&
+        candidate.dataset.value === restore.value && candidate.dataset.folder === restore.folder) || (['extension-remove', 'extension-pick'].includes(restore.action) &&
           controls.find((candidate) => candidate.dataset.action === 'extension-pick' &&
             candidate.dataset.path === restore.path &&
             candidate.dataset.value.toLowerCase() === restore.value.toLowerCase()));
       if (!el && ['extension-remove', 'extension-pick'].includes(restore.action)) {
         const picker = $$('.vf-extension-picker').find((candidate) => candidate.dataset.path === restore.path);
         if (picker) el = extensionFocusTarget(picker);
+      }
+      if (!el && ['choice-pick', 'choice-remove', 'choice-folder-toggle'].includes(restore.action)) {
+        el = controls.find((candidate) => candidate.dataset.path === restore.path &&
+          candidate.dataset.action === 'choice-search');
       }
       if (el) {
         el.focus({ preventScroll: true });
@@ -1359,7 +1402,7 @@
         </div>
       </div>`;
     }
-    if (node.field === 'keyword_identity') {
+    if (node.field === 'keyword_identity' || node.field === 'photo_ids') {
       // Chart links select a confirmed identity, which cannot be edited as
       // free text. Keep its readable label and allow removing the constraint.
       return `<div class="vf-rule-row vf-identity-row">
@@ -1369,7 +1412,7 @@
     }
     const spec = fieldSpec(node.field) || { label: node.field, type: 'text', ops: ['is'] };
     const fieldOptions = state.fieldOrder.filter((key) =>
-      fieldAvailable(key) || key === node.field).map((key) =>
+      (fieldAvailable(key) && !state.fields[key].picker_hidden) || key === node.field).map((key) =>
       `<option value="${key}" ${key === node.field ? 'selected' : ''}>${esc(state.fields[key].label)}</option>`).join('');
     const opOptions = spec.ops.map((op) =>
       `<option value="${esc(op)}" ${op === node.op ? 'selected' : ''}>${esc(OP_LABELS[op] || op)}</option>`).join('');
@@ -1452,7 +1495,271 @@
     });
   }
 
+  // Picker searches select stored values; typing here never changes a rule.
+  // Per-node state keeps searches and expanded folders across value edits.
+  let valuePickerStates = new WeakMap();
+
+  function valuePickerState(node) {
+    let picker = valuePickerStates.get(node);
+    if (!picker || picker.field !== node.field) {
+      picker = { field: node.field, query: '', open: false, values: null, scopedPaths: null, scopeKey: null, error: false, request: 0, pending: false, collapsed: new Set() };
+      valuePickerStates.set(node, picker);
+    }
+    return picker;
+  }
+
+  // Stringified representation of everything the picker's value request
+  // depends on, used by ``loadValuePickers`` to detect that an already-
+  // fetched list is stale after a sibling rule change (Codex review
+  // r4209098966). The query is only part of the key for non-folder
+  // pickers: the folder picker fetches a single tree and filters it
+  // client-side, so typing in its search box must not invalidate the
+  // cache.
+  function pickerScopeKey(node, picker) {
+    const context = state.getContextRules ? state.getContextRules() : [];
+    const scopedRules = composeScopeRules(context, rulesWithout(node));
+    const scope = state.getScope ? state.getScope() : null;
+    const visual = (state.visual && !state.muted) ? state.visual : null;
+    const parts = { f: node.field, rules: scopedRules, scope, visual };
+    if (node.field !== 'folder') parts.q = picker.query.trim();
+    return JSON.stringify(parts);
+  }
+
+  function usesValuePicker(node) {
+    const spec = fieldSpec(node.field);
+    return spec && spec.picker && ['is', 'is not', 'in', 'not_in', 'under', 'not_under'].includes(node.op);
+  }
+
+  function pickerValueKey(node, value) {
+    return ['camera_make', 'camera_model', 'lens'].includes(node.field)
+      ? String(value).toLowerCase() : String(value);
+  }
+
+  function pickerChoice(node, path, value, label) {
+    const multiple = node.op === 'in' || node.op === 'not_in';
+    const selected = extensionValues(node).some((v) => pickerValueKey(node, v) === pickerValueKey(node, value));
+    return `<label class="vf-choice" title="${esc(value)}"><input type="${multiple ? 'checkbox' : 'radio'}" name="choice-${path}" data-action="choice-pick" data-path="${path}" data-value="${esc(value)}" ${selected ? 'checked' : ''}><span>${esc(label || value)}</span></label>`;
+  }
+
+  function renderFolderChoices(node, path, picker) {
+    const folders = picker.values || [];
+    // ``scopedPaths`` is the subset of workspace folder paths that have at
+    // least one photo matching the current sibling rules, visual clause
+    // and page scope (folder/collection) — subtree-aggregated server-side.
+    // Null means scope is inactive and every folder is reachable. Hiding
+    // out-of-scope folders stops a folder-scoped Browse view from offering
+    // picks that would silently empty the grid (Codex review r4209098975).
+    const scopedPaths = picker.scopedPaths;
+    // A folder the user has already picked must stay visible in the tree
+    // even when the current scope would otherwise hide it, so they can
+    // uncheck it in place instead of hunting for a pill at the top.
+    const selectedPaths = new Set(extensionValues(node));
+    const byId = new Map(folders.map((f) => [f.id, f]));
+    const children = new Map();
+    const visible = new Set();
+    const q = picker.query.toLowerCase().trim();
+    folders.forEach((f) => {
+      const parent = byId.has(f.parent_id) ? f.parent_id : null;
+      if (!children.has(parent)) children.set(parent, []);
+      children.get(parent).push(f);
+    });
+    folders.forEach((f) => {
+      const inScope = !scopedPaths || scopedPaths.has(f.path);
+      if (!inScope && !selectedPaths.has(f.path)) return;
+      if (!q || f.path.toLowerCase().includes(q)) {
+        let current = f;
+        while (current && !visible.has(current.id)) {
+          visible.add(current.id);
+          current = byId.get(current.parent_id);
+        }
+      }
+    });
+    const renderBranch = (parent) => (children.get(parent) || [])
+      .filter((f) => visible.has(f.id)).sort((a, b) => a.path.localeCompare(b.path)).map((f) => {
+        const hasChildren = (children.get(f.id) || []).some((child) => visible.has(child.id));
+        const expanded = Boolean(q) || !picker.collapsed.has(f.id);
+        return `<li><div class="vf-folder-choice">${hasChildren
+          ? `<button type="button" class="vf-folder-toggle" data-action="choice-folder-toggle" data-path="${path}" data-folder="${f.id}" aria-label="${expanded ? 'Collapse' : 'Expand'} ${esc(f.name || f.path)}" aria-expanded="${expanded}">${expanded ? '▾' : '▸'}</button>`
+          : '<span class="vf-folder-spacer"></span>'}
+          ${pickerChoice(node, path, f.path, parent === null ? f.path : f.name || f.path)}</div>
+          ${hasChildren && expanded ? `<ul>${renderBranch(f.id)}</ul>` : ''}</li>`;
+      }).join('');
+    // Keep a saved folder available even after it leaves the workspace.
+    const saved = extensionValues(node).filter((v) => !folders.some((f) => f.path === v));
+    return saved.map((v) => pickerChoice(node, path, v)).join('') + `<ul class="vf-folder-choices">${renderBranch(null)}</ul>`;
+  }
+
+  function renderPickerChoices(node, path, picker) {
+    if (node.field === 'folder') return renderFolderChoices(node, path, picker);
+    const values = new Map(extensionValues(node).map((v) => [pickerValueKey(node, v), v]));
+    (picker.values || []).forEach((entry) => {
+      const key = pickerValueKey(node, entry.value);
+      if (entry.value != null && entry.value !== '' && !values.has(key)) values.set(key, entry.value);
+    });
+    return Array.from(values.values()).map((v) => pickerChoice(node, path, v)).join('');
+  }
+
+  function pickerStatus(node, picker) {
+    if (picker.pending || picker.values === null && !picker.error) return 'Loading choices…';
+    if (picker.error) return 'Could not load choices.';
+    if (!picker.values.length) return picker.query ? 'No matching choices.' : 'No choices in this workspace.';
+    if (node.field === 'folder') {
+      const q = picker.query.trim().toLowerCase();
+      const scoped = picker.scopedPaths;
+      const inScope = scoped
+        ? picker.values.filter((f) => scoped.has(f.path))
+        : picker.values;
+      if (!inScope.length) return 'No folders in the current scope.';
+      if (q && !inScope.some((f) => f.path.toLowerCase().includes(q))) return 'No matching folders.';
+      return 'Includes the selected folder and its subfolders.';
+    }
+    return picker.values.length >= 50 ? 'Showing up to 50 choices. Search to narrow the list.' : '';
+  }
+
+  function renderValuePicker(node, spec, path) {
+    const picker = valuePickerState(node);
+    const selected = extensionValues(node);
+    return `<div class="vf-value-picker" data-path="${path}">
+      <div class="vf-enum-multi">${selected.map((v) => `<button type="button" class="vf-enum-pill active" data-action="choice-remove" data-path="${path}" data-value="${esc(v)}" aria-label="Remove ${esc(v)}">${esc(v)} ×</button>`).join('')}</div>
+      <details ${picker.open ? 'open' : ''}><summary data-action="choice-open" data-path="${path}">Choose ${esc(spec.label.toLowerCase())}…</summary>
+        <input type="search" data-action="choice-search" data-path="${path}" value="${esc(picker.query)}" placeholder="Search choices…" aria-label="Search ${esc(spec.label.toLowerCase())} choices" autocomplete="off">
+        <div class="vf-choice-options" role="group" aria-label="${esc(spec.label)} choices">${renderPickerChoices(node, path, picker)}</div>
+        <div class="vf-choice-status" role="status">${esc(pickerStatus(node, picker))}</div>
+        <button type="button" data-action="choice-retry" data-path="${path}" ${picker.error ? '' : 'hidden'}>Retry</button>
+      </details>
+    </div>`;
+  }
+
+  function refreshPickerOptions(node, picker) {
+    $$('.vf-value-picker').forEach((wrap) => {
+      if (getNodeAtPath(wrap.dataset.path) !== node || !usesValuePicker(node)) return;
+      const options = wrap.querySelector('.vf-choice-options');
+      const active = options.contains(document.activeElement) ? document.activeElement : null;
+      options.innerHTML = renderPickerChoices(node, wrap.dataset.path, picker);
+      if (active) {
+        const replacement = Array.from(options.querySelectorAll('[data-action]')).find((el) =>
+          el.dataset.action === active.dataset.action && el.dataset.value === active.dataset.value &&
+          el.dataset.folder === active.dataset.folder);
+        (replacement || wrap.querySelector('[data-action="choice-search"]')).focus({ preventScroll: true });
+      }
+      wrap.querySelector('.vf-choice-status').textContent = pickerStatus(node, picker);
+      wrap.querySelector('[data-action="choice-retry"]').hidden = !picker.error;
+    });
+  }
+
+  function requestPickerValues(node, picker) {
+    const seq = ++picker.request;
+    picker.pending = true;
+    picker.error = false;
+    refreshPickerOptions(node, picker);
+    // Snapshot the scope key at request time so a sibling change
+    // mid-request still forces a refetch on the next render.
+    const scopeKey = pickerScopeKey(node, picker);
+    const context = state.getContextRules ? state.getContextRules() : [];
+    const scopedRules = composeScopeRules(context, rulesWithout(node));
+    const scope = state.getScope ? state.getScope() : null;
+    const hasVisual = state.visual && !state.muted;
+    const scopeActive = (scopedRules.rules || []).length > 0
+      || (scope && (scope.folder_id != null || scope.collection_id != null))
+      || hasVisual;
+    const scopeParams = () => {
+      const params = new URLSearchParams({ field: node.field, limit: '50', q: picker.query.trim() });
+      params.set('rules', JSON.stringify(scopedRules));
+      if (hasVisual) params.set('visual', JSON.stringify(state.visual));
+      if (scope) {
+        if (scope.folder_id != null) params.set('folder_id', scope.folder_id);
+        if (scope.collection_id != null) params.set('collection_id', scope.collection_id);
+      }
+      return params;
+    };
+    const finish = (values, scopedPaths) => {
+      if (picker.request !== seq || valuePickerStates.get(node) !== picker) return;
+      picker.values = values;
+      picker.scopedPaths = scopedPaths;
+      picker.scopeKey = scopeKey;
+      picker.pending = false;
+      refreshPickerOptions(node, picker);
+      // A sibling rule, visual clause or page-scope change while this
+      // request was in flight triggered a render whose ``loadValuePickers``
+      // skipped it (``picker.pending`` was true). No later render fires
+      // ``loadValuePickers`` on its own, so the pending request's
+      // completion is where that re-check has to happen or the picker
+      // stays scoped to the previous result set indefinitely (Codex
+      // review r4209417944). Re-run only while the picker is still open
+      // — a reopen will fire ``loadValuePickers`` on its own and refetch
+      // against the fresh scope.
+      if (picker.open && pickerScopeKey(node, picker) !== picker.scopeKey) {
+        requestPickerValues(node, picker);
+      }
+    };
+    const fail = () => {
+      if (picker.request !== seq || valuePickerStates.get(node) !== picker) return;
+      picker.pending = false;
+      picker.error = true;
+      refreshPickerOptions(node, picker);
+    };
+    if (node.field === 'folder') {
+      // Folders need two reads: ``/api/folders`` for the id/parent_id
+      // hierarchy used to render the tree, and the scoped folder facet
+      // from ``/api/filters/values`` so the picker only lists folders
+      // whose subtree has photos matching the current sibling rules,
+      // visual clause and page scope (Codex review r4209098975). The
+      // facet aggregates counts over each folder's subtree, so a scoped
+      // path's ancestors are already in the response — no manual
+      // ancestor hoisting needed. If the facet fails but the tree
+      // succeeds, fall back to the unscoped tree (same behavior as
+      // before the scope was wired in).
+      const foldersPromise = fetchJson('/api/folders');
+      // The folder facet uses a bump limit server-side so the tree is
+      // not silently truncated past the typeahead's 50-cap when the
+      // workspace has many scoped folders.
+      let scopedPromise = Promise.resolve(null);
+      if (scopeActive) {
+        const params = scopeParams();
+        params.set('limit', '10000');
+        params.delete('q');  // folder search is client-side
+        scopedPromise = fetchJson(`/api/filters/values?${params}`).catch(() => null);
+      }
+      Promise.all([foldersPromise, scopedPromise]).then(([folders, scoped]) => {
+        const paths = scoped && scoped.values
+          ? new Set(scoped.values.map((v) => v.value))
+          : null;
+        finish(folders, paths);
+      }).catch(fail);
+      return;
+    }
+    // Mirror the typeahead's scope (other rules, visual, page scope) so a
+    // folder- or collection-scoped Browse view lists values present in
+    // the current grid. Without these the global 50-value cap can omit
+    // values that are actually in scope (Codex review r4208710522).
+    fetchJson(`/api/filters/values?${scopeParams()}`).then((data) => {
+      finish(data.values, null);
+    }).catch(fail);
+  }
+
+  function loadValuePickers() {
+    $$('.vf-value-picker').forEach((wrap) => {
+      const node = getNodeAtPath(wrap.dataset.path);
+      const picker = valuePickerState(node);
+      if (!picker.open || picker.pending || picker.error) return;
+      // Refetch when either the picker has never loaded or when a
+      // sibling rule, visual clause or page-scope change has made the
+      // cached values stale (Codex review r4209098966). Without this
+      // the picker continues to show the previous scope's choices —
+      // and with more than 50 values can omit newly valid ones — until
+      // the user retypes the query or reopens the whole popover.
+      const scopeKey = pickerScopeKey(node, picker);
+      if (picker.values === null || picker.scopeKey !== scopeKey) {
+        requestPickerValues(node, picker);
+      }
+    });
+  }
+
   function renderValueInput(node, spec, path) {
+    if (usesValuePicker(node)) return renderValuePicker(node, spec, path);
+    if (['burst_id', 'duplicate_group'].includes(node.field)) {
+      return `<span class="vf-group-reference" title="${esc(node.value)}">${esc(node.value_label || 'Saved group')}<small>Choose groups from a stack’s context menu.</small></span>`;
+    }
     if (node.field === 'extension') return renderExtensionPicker(node, path);
     if ((node.op === 'in' || node.op === 'not_in') && spec.values) {
       const selected = Array.isArray(node.value) ? node.value : [node.value];
@@ -1523,8 +1830,7 @@
     // Counts respect everything except the rule being edited, plus the
     // page's context rules — "how many results would I get".
     const context = state.getContextRules ? state.getContextRules() : [];
-    const others = rulesWithout(node);
-    const rules = { mode: 'all', rules: clone(context).concat(others.rules) };
+    const rules = composeScopeRules(context, rulesWithout(node));
     const params = new URLSearchParams({ field: node.field, limit: '8' });
     if (q) params.set('q', q);
     params.set('rules', JSON.stringify(rules));
@@ -1570,6 +1876,7 @@
     if (shouldOpen) {
       extensionOptions = null;
       extensionRequest = null;
+      valuePickerStates = new WeakMap();
       renderRules();
     }
     if (restoreFocus) $('.vf-filters-btn').focus();
@@ -1587,7 +1894,7 @@
     const byCategory = new Map();
     state.fieldOrder.forEach((key) => {
       const spec = fieldSpec(key);
-      if (!fieldAvailable(key)) return;
+      if (!fieldAvailable(key) || spec.picker_hidden) return;
       if (needle && !`${spec.label} ${spec.category}`.toLowerCase().includes(needle)) return;
       if (!byCategory.has(spec.category)) byCategory.set(spec.category, []);
       byCategory.get(spec.category).push([key, spec]);
@@ -1629,6 +1936,7 @@
         node.op = defaultOp(next);
         node.value = defaultValue(next, node.op);
         delete node.case;
+        delete node.value_label;
       } else if (action === 'op') {
         node.op = target.value;
         node.value = coerceValue(spec, node.op, node.value);
@@ -1853,12 +2161,32 @@
     });
 
     const tree = $('.vf-rule-tree');
+    tree.addEventListener('toggle', (e) => {
+      if (!e.target.matches('.vf-value-picker details') || !document.contains(e.target)) return;
+      const wrap = e.target.closest('.vf-value-picker');
+      const node = getNodeAtPath(wrap.dataset.path);
+      valuePickerState(node).open = e.target.open;
+      if (e.target.open) loadValuePickers();
+    }, true);
     tree.addEventListener('change', (e) => {
       // Typed inputs commit through the debounced input path; their blur
       // 'change' would re-render mid-click and destroy a suggest option
       // before its pick lands (blur fires before click).
       const action = e.target.dataset.action;
       if (['value-input', 'between-lo', 'between-hi', 'recent-n', 'multi-text'].includes(action)) return;
+      if (action === 'choice-search') return;
+      if (action === 'choice-pick') {
+        const node = getNodeAtPath(e.target.dataset.path);
+        const value = e.target.dataset.value;
+        const checked = e.target.checked;
+        mutate(() => {
+          if (node.op === 'in' || node.op === 'not_in') {
+            const values = extensionValues(node).filter((v) => pickerValueKey(node, v) !== pickerValueKey(node, value));
+            node.value = checked ? values.concat(value) : values;
+          } else node.value = value;
+        }, { reason: checked ? undefined : 'filterRemoved' });
+        return;
+      }
       if (action === 'extension-pick') {
         const node = getNodeAtPath(e.target.dataset.path);
         if (!node || node.field !== 'extension') return;
@@ -1876,6 +2204,19 @@
     });
     tree.addEventListener('input', (e) => {
       const action = e.target.dataset.action;
+      if (action === 'choice-search') {
+        const node = getNodeAtPath(e.target.dataset.path);
+        const picker = valuePickerState(node);
+        picker.query = e.target.value;
+        clearTimeout(picker.timer);
+        picker.request++;
+        if (node.field === 'folder' && picker.values !== null) refreshPickerOptions(node, picker);
+        else {
+          picker.pending = true;
+          picker.timer = setTimeout(() => requestPickerValues(node, picker), 150);
+        }
+        return;
+      }
       if (['value-input', 'between-lo', 'between-hi', 'recent-n', 'multi-text'].includes(action)) {
         clearTimeout(editDebounce);
         const target = e.target;
@@ -1915,6 +2256,28 @@
       if (action === 'visual-remove') {
         clearVisual();
         toast('Visual search removed', true);
+        return;
+      }
+      if (action === 'choice-retry') {
+        const node = getNodeAtPath(path);
+        requestPickerValues(node, valuePickerState(node));
+        return;
+      }
+      if (action === 'choice-folder-toggle') {
+        const node = getNodeAtPath(path);
+        const picker = valuePickerState(node);
+        const folderId = Number(target.dataset.folder);
+        if (picker.collapsed.has(folderId)) picker.collapsed.delete(folderId);
+        else picker.collapsed.add(folderId);
+        renderRules();
+        return;
+      }
+      if (action === 'choice-remove') {
+        const node = getNodeAtPath(path);
+        mutate(() => {
+          if (node.op === 'in' || node.op === 'not_in') node.value = extensionValues(node).filter((v) => v !== target.dataset.value);
+          else removeByReference(state.root, node);
+        }, { reason: 'filterRemoved' });
         return;
       }
       if (action === 'extension-retry') {
@@ -2316,6 +2679,29 @@
         state.root.rules = state.root.rules.filter((n) => isGroup(n) || n.field !== field);
         state.root.rules.unshift(rule);
       }, { reason: removing ? 'filterRemoved' : undefined });
+    },
+    selectPhotoGroup(photoIds, label) {
+      if (!Array.isArray(photoIds) || !photoIds.length) return;
+      mutate(() => {
+        const rule = { field: 'photo_ids', op: 'in', value: photoIds.slice(), value_label: label };
+        // Strip every ``photo_ids``/``burst_id``/``duplicate_group`` leaf
+        // from the whole tree. A nested identity leaf (saved advanced
+        // group, say) would otherwise intersect its disjoint old
+        // membership with the new rule and empty the grid instead of
+        // switching to the selected group (Codex review r4208710529).
+        // ``rulesWithoutFields`` also prunes groups left empty by the
+        // strip, so a nested empty ``any`` cannot compile to false and
+        // AND-collapse the grid when the new rule is appended (Codex
+        // review r4208938061).
+        const stripped = rulesWithoutFields(state.root, ['photo_ids', 'burst_id', 'duplicate_group']);
+        if (stripped.mode === 'all') {
+          stripped.rules.push(rule);
+          state.root = stripped;
+        } else {
+          state.root = { mode: 'all', rules: [stripped, rule] };
+        }
+        state.muted = false;
+      });
     },
     quickSearch(text) { applyQuickSearch(text); },
     removeField(field, opts) {

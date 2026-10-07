@@ -209,6 +209,7 @@ function renderBrowseStackTray(cover) {
     + '<span class="browse-stack-tray-title">' + escapeHtml(label) + '</span>'
     + '<span class="browse-stack-tray-subtitle">' + stack.count + ' photos</span>'
     + '</div><div class="browse-stack-tray-actions">'
+    + '<button type="button" onclick="filterToBrowseGroup(' + cover.id + ')">Filter to group</button>'
     + '<button type="button" onclick="selectBrowseStackAll(event,' + cover.id + ')">Select all</button>'
     + '<button type="button" onclick="reviewBrowseStack(event,' + cover.id + ')">' + reviewLabel + '</button>'
     + '<button type="button" aria-label="Collapse stack" title="Collapse" onclick="toggleBrowseStack(event,' + cover.id + ')">&#10005;</button>'

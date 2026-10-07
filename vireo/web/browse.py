@@ -410,10 +410,16 @@ def create_browse_blueprint(
         # negative ``LIMIT`` as "no limit" and returns everything), and
         # ``?limit=999999`` on a large library would load an unbounded
         # suggestions list. Fallback to the 20-default when parsing fails.
+        # The folder field uses the repository's 10,000 subtree-facet
+        # allowance instead of the 500 default: the folder picker renders
+        # a hierarchy of every workspace folder, not a 50-value preview,
+        # and clamping to 500 silently truncates scoped folder lists past
+        # that point (Codex review r4209417965).
         limit_raw = request.args.get("limit", 20, type=int)
         if limit_raw is None:
             limit_raw = 20
-        limit = max(1, min(limit_raw, 500))
+        limit_cap = 10000 if field == "folder" else 500
+        limit = max(1, min(limit_raw, limit_cap))
         rules = inject_active_visual_model(rules)
         try:
             visual = request_visual_arg()
