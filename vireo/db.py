@@ -933,6 +933,18 @@ class Database:
         """
         self.conn.execute("BEGIN IMMEDIATE")
 
+    @contextlib.contextmanager
+    def transaction(self):
+        """``with db.conn:``: commit when the block exits, roll back if it raises.
+
+        This is sqlite3's own connection context manager, so its commit is
+        the C-level one: unlike ``commit()`` it is not held off by
+        ``_commits_held``. It opens no transaction itself; pair it with
+        ``begin_immediate()`` to take the writer lock for the block.
+        """
+        with self.conn:
+            yield
+
     def _canonical_schema(self):
         """Build the canonical-schema setup on this connection."""
         from canonical_schema import CanonicalSchema
@@ -4998,6 +5010,14 @@ class Database:
         """Return the row for (photo_id, size), or None."""
         return self._caches_repository().preview_get(photo_id, size)
 
+    def is_preview_cache_invalid(self, photo_id, size):
+        """True when ``(photo_id, size)``'s on-disk preview must not be adopted.
+
+        The caller creates ``preview_cache_invalidations`` first
+        (``preview_cache.ensure_preview_cache_invalidations_table``).
+        """
+        return self._caches_repository().preview_invalidated(photo_id, size)
+
     def paired_preview_cache_insert(self, photo_id, filename, bytes_):
         """Register a source-keyed preview in the publisher's transaction."""
         self._caches_repository().paired_preview_insert(photo_id, filename, bytes_)
@@ -5082,6 +5102,28 @@ class Database:
             sharpness=sharpness,
         )
 
+    def get_photo_working_copy_path(self, photo_id):
+        """The photo's ``working_copy_path``, or None (unset or unknown id)."""
+        return self._photos_repository(scoped=False).working_copy_path(photo_id)
+
+    def record_generated_original(self, photo_id, working_copy_path, *,
+                                  tracked, dimensions=None):
+        """Record an on-demand full-resolution render on the photo row and commit.
+
+        ``tracked`` stores ``working_copy_path`` and clears
+        ``working_copy_evicted_mtime``; untracked clears the path and marks it
+        evicted at ``COALESCE(file_mtime, -1)``. ``dimensions`` (``(width,
+        height)``) also sets the photo's size. A plain ``commit()``: it ends
+        any transaction the caller holds.
+        """
+        self._photos_repository(scoped=False).record_generated_original(
+            photo_id, working_copy_path, tracked=tracked, dimensions=dimensions,
+        )
+
+    def set_photo_thumb_path(self, photo_id, thumb_path):
+        """Store the photo's thumbnail filename (``photos.thumb_path``) and commit."""
+        self._photos_repository(scoped=False).set_thumb_path(photo_id, thumb_path)
+
     def _masks_features_repository(self, *, scoped=True):
         """Build the masks/features repository on this connection.
 
@@ -5120,6 +5162,14 @@ class Database:
         return self._masks_features_repository(
             scoped=False,
         ).list_masks_for_photo(photo_id)
+
+    def get_active_mask_variant(self, photo_id):
+        """The photo's ``active_mask_variant``, or None (unset or unknown id)."""
+        return self._masks_features_repository(scoped=False).active_variant(photo_id)
+
+    def get_photo_mask_path(self, photo_id):
+        """The photo's denormalized ``mask_path``, or None (unset or unknown id)."""
+        return self._masks_features_repository(scoped=False).photo_mask_path(photo_id)
 
     def set_active_mask_variant(self, photo_id, variant, _commit=True, *, weak_rescue_min_conf=None):
         """Mark `variant` as active for `photo_id` and denormalize its
@@ -8767,6 +8817,10 @@ class Database:
         ws_id = self._ws_id()
         scope_clause, scope_params = self._scope_clause(photo_ids)
         return repo.reject_misses(col, ws_id, since, scope_clause, scope_params)
+
+    def get_detection_subject_exposure_ev(self, detection_id):
+        """The subject analysis's ``exposure_ev`` for one detection, or None if unanalysed."""
+        return self._detections_repository().subject_exposure_ev(detection_id)
 
     def get_detection_ids_for_photos(self, photo_ids):
         """Return {photo_id: set(detection_id, ...)} for the given photo IDs.

@@ -47,6 +47,20 @@ class MasksFeaturesRepository:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def active_variant(self, photo_id):
+        """The photo's ``active_mask_variant``, or None (unset or unknown id)."""
+        row = self.conn.execute(
+            "SELECT active_mask_variant FROM photos WHERE id=?", (photo_id,)
+        ).fetchone()
+        return row["active_mask_variant"] if row else None
+
+    def photo_mask_path(self, photo_id):
+        """The photo's denormalized ``mask_path``, or None (unset or unknown id)."""
+        row = self.conn.execute(
+            "SELECT mask_path FROM photos WHERE id = ?", (photo_id,)
+        ).fetchone()
+        return row["mask_path"] if row else None
+
     def set_active_variant(self, photo_id, variant, min_conf, _commit=True, *,
                            weak_rescue_min_conf=None):
         """Activate ``variant`` for ``photo_id`` against the ``min_conf`` floor.

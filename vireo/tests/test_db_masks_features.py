@@ -224,6 +224,19 @@ def test_set_active_mask_variant_denormalizes_and_commits(db, monkeypatch):
     assert p["noise_estimate"] == 0.05
 
 
+def test_active_mask_variant_and_mask_path_reads(db):
+    pid = _photo(db, "a.jpg")
+    assert db.get_active_mask_variant(pid) is None
+    assert db.get_photo_mask_path(pid) is None
+    assert db.get_active_mask_variant(99999) is None
+    assert db.get_photo_mask_path(99999) is None
+    _det(db, pid)
+    _mask(db, pid, path="/m/a.png")
+    db.set_active_mask_variant(pid, "sam2-small")
+    assert db.get_active_mask_variant(pid) == "sam2-small"
+    assert db.get_photo_mask_path(pid) == "/m/a.png"
+
+
 def test_set_active_mask_variant_without_commit(db):
     pid = _photo(db, "a.jpg")
     _det(db, pid)
@@ -984,6 +997,8 @@ _DELEGATING_MASKS_FEATURES_METHODS = (
     "get_workspace_photo_ids_with_mask_variant",
     "get_photo_pipeline_features",
     "set_active_mask_variant",
+    "get_active_mask_variant",
+    "get_photo_mask_path",
     "delete_masks_for_variant",
     "delete_inactive_masks",
     "find_stale_masks",

@@ -6,7 +6,9 @@ pure function of (photo, model), and confidence floors apply at read time.
 active workspace id and the effective detector/classifier floors, builds the
 filter-bar scope clause, asks the model-runs domain whether a detector run is
 pinned, and re-syncs the primary subject after id-based deletes. This
-repository owns the SQL those steps read and write.
+repository owns the SQL those steps read and write, plus the one read of a
+detection's subject analysis (``detection_subjects.exposure_ev``) that the
+subject-crop preview applies; ``subjects`` still owns that table's writes.
 """
 
 
@@ -345,6 +347,14 @@ class DetectionsRepository:
             for row in rows:
                 result.setdefault(row["photo_id"], set()).add(row["id"])
         return result
+
+    def subject_exposure_ev(self, detection_id):
+        """The subject analysis's ``exposure_ev`` for one detection, or None if unanalysed."""
+        row = self.conn.execute(
+            "SELECT exposure_ev FROM detection_subjects WHERE detection_id=?",
+            (detection_id,),
+        ).fetchone()
+        return row["exposure_ev"] if row else None
 
     # -- misses -------------------------------------------------------------
 

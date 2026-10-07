@@ -115,7 +115,6 @@ CONN_USE_LIMITS = {
     "web/local_folder.py": 3,
     "web/location_edits.py": 4,
     "web/locations.py": 14,
-    "web/media.py": 21,
     "web/misses.py": 1,
     "web/move_cleanup.py": 5,
     "web/moves.py": 2,

@@ -15,9 +15,9 @@ passed as a call argument is allowed. Anything else (``self.conn.execute``,
 transaction control on the façade and belongs in a repository, except in the
 connection-lifecycle methods listed below. The tests at the end pin the
 public transaction-control methods among them (``commit``, ``rollback``,
-``in_transaction``, ``begin_immediate``) to the connection calls they replace,
-and ``commit_with_retry`` (which only hands the connection to
-``db.commit_with_retry``, so the guard needs no exception for it) to that
+``in_transaction``, ``begin_immediate``, ``transaction``) to the connection
+calls they replace, and ``commit_with_retry`` (which only hands the connection
+to ``db.commit_with_retry``, so the guard needs no exception for it) to that
 helper.
 """
 
@@ -48,6 +48,9 @@ CONNECTION_LIFECYCLE = {
     "rollback",
     # Takes SQLite's writer lock up front (the prediction-decision lock).
     "begin_immediate",
+    # sqlite3's own context manager (``with conn:``): commits on exit and
+    # rolls back on error, exactly as the ``with db.conn:`` blocks it replaces.
+    "transaction",
 }
 
 
@@ -185,6 +188,14 @@ def test_commit_with_retry_commits_through_the_module_helper(db, monkeypatch):
     assert _committed_markers(db) == 1
 
 
+def test_transaction_commits_on_exit(db):
+    with db.transaction():
+        db.begin_immediate()
+        _write(db, "a")
+    assert not db.in_transaction
+    assert _committed_markers(db) == 1
+
+
 def test_commit_with_retry_retries_a_transient_lock(db, monkeypatch):
     import db as db_module
 
@@ -203,3 +214,22 @@ def test_commit_with_retry_retries_a_transient_lock(db, monkeypatch):
     db.commit_with_retry()
     assert len(attempts) == 2
     assert _committed_markers(db) == 1
+
+
+def test_transaction_rolls_back_when_the_block_raises(db):
+    with pytest.raises(RuntimeError, match="boom"), db.transaction():
+        db.begin_immediate()
+        _write(db, "a")
+        raise RuntimeError("boom")
+    assert not db.in_transaction
+    assert _committed_markers(db) == 0
+
+
+def test_transaction_commits_even_while_commits_are_held(db):
+    # ``with conn:`` commits through sqlite3's C-level commit, which
+    # ``_Connection.commit``'s hold never sees; ``transaction()`` keeps that.
+    with db._commits_held():
+        with db.transaction():
+            _write(db, "a")
+        assert not db.in_transaction
+        assert _committed_markers(db) == 1

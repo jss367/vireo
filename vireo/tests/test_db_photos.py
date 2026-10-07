@@ -1095,6 +1095,67 @@ def test_quality_writers_use_commit_with_retry(db, lib, monkeypatch):
     assert commits == [1, 1]
 
 
+# -- working copy and thumbnail columns ------------------------------------------
+
+
+def _working_copy_state(db, pid):
+    with _reader(db) as r:
+        return tuple(r.execute(
+            "SELECT working_copy_path, working_copy_evicted_mtime, width, "
+            "height FROM photos WHERE id = ?", (pid,),
+        ).fetchone())
+
+
+def test_get_photo_working_copy_path(db, lib):
+    assert db.get_photo_working_copy_path(lib["a"]) is None
+    db.record_generated_original(lib["a"], "working/1.jpg", tracked=True)
+    assert db.get_photo_working_copy_path(lib["a"]) == "working/1.jpg"
+    assert db.get_photo_working_copy_path(99999) is None
+
+
+def test_record_generated_original_tracked_stores_path_and_clears_eviction(db, lib):
+    db.conn.execute(
+        "UPDATE photos SET working_copy_evicted_mtime = 7, width = 5, "
+        "height = 6 WHERE id = ?", (lib["a"],),
+    )
+    db.conn.commit()
+    db.record_generated_original(lib["a"], "working/a.jpg", tracked=True)
+    assert not db.conn.in_transaction
+    assert _working_copy_state(db, lib["a"]) == ("working/a.jpg", None, 5, 6)
+
+
+def test_record_generated_original_untracked_marks_evicted_at_source_mtime(db, lib):
+    db.record_generated_original(lib["a"], "working/a.jpg", tracked=True)
+    db.record_generated_original(lib["a"], "ignored", tracked=False,
+                                 dimensions=(40, 30))
+    assert _working_copy_state(db, lib["a"]) == (None, 1.0, 40, 30)
+    db.conn.execute("UPDATE photos SET file_mtime = NULL WHERE id = ?", (lib["b"],))
+    db.conn.commit()
+    db.record_generated_original(lib["b"], None, tracked=False)
+    assert _working_copy_state(db, lib["b"])[:2] == (None, -1)
+
+
+def test_record_generated_original_commits_the_callers_transaction(db, lib):
+    # A plain commit, like the ``db.conn.commit()`` it replaced: it ends a
+    # transaction the caller opened, and honors ``_commits_held``.
+    db.begin_immediate()
+    db.record_generated_original(lib["a"], "working/a.jpg", tracked=True)
+    assert not db.in_transaction
+    with db._commits_held():
+        db.record_generated_original(lib["b"], "working/b.jpg", tracked=True)
+        assert db.in_transaction
+    assert _working_copy_state(db, lib["b"])[0] == "working/b.jpg"
+
+
+def test_set_photo_thumb_path_commits(db, lib):
+    db.set_photo_thumb_path(lib["a"], f"{lib['a']}.jpg")
+    assert not db.conn.in_transaction
+    with _reader(db) as r:
+        assert r.execute(
+            "SELECT thumb_path FROM photos WHERE id = ?", (lib["a"],),
+        ).fetchone()[0] == f"{lib['a']}.jpg"
+
+
 # -- structure -----------------------------------------------------------------
 
 MOVED = [
@@ -1107,6 +1168,8 @@ MOVED = [
     "delete_photos", "update_photo_sharpness", "update_photo_quality",
     "get_photo_with_folder_path", "get_photo_flags_ratings_and_eyes",
     "get_workspace_photos_in_folders",
+    "get_photo_working_copy_path", "record_generated_original",
+    "set_photo_thumb_path",
 ]
 
 

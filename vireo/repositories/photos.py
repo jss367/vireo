@@ -12,7 +12,8 @@ calls happen at the same point as before. ``delete_photos`` keeps the
 companion resolution, the new-images cache invalidation and the pipeline
 cache prune on the façade; ``add_photo`` keeps the duplicate auto-resolve
 hook. Ratings, flags, wildlife exclusion (``photo_review``) and color labels
-(``photo_labels``) have their own repositories.
+(``photo_labels``) have their own repositories. The working-copy and
+thumbnail column writes here are the ones the on-demand image routes make.
 """
 
 import os
@@ -1083,3 +1084,52 @@ class PhotoRepository:
             ),
         )
         self.commit_with_retry(self.conn)
+
+    # -- working copy and thumbnail columns ----------------------------------
+
+    def working_copy_path(self, photo_id):
+        """The photo's ``working_copy_path``, or None (unset or unknown id)."""
+        row = self.conn.execute(
+            "SELECT working_copy_path FROM photos WHERE id=?",
+            (photo_id,),
+        ).fetchone()
+        return row["working_copy_path"] if row else None
+
+    def record_generated_original(self, photo_id, working_copy_path, *,
+                                  tracked, dimensions=None):
+        """Record an on-demand full-resolution render on the photo row and commit.
+
+        ``tracked`` stores ``working_copy_path`` and clears the eviction
+        marker; untracked clears the path and marks it evicted at the source
+        mtime (``-1`` without one), ignoring ``working_copy_path``.
+        ``dimensions`` (``(width, height)``) also sets the photo's size.
+        """
+        if tracked:
+            updates = [
+                "working_copy_path=?",
+                "working_copy_evicted_mtime=NULL",
+            ]
+            params = [working_copy_path]
+        else:
+            updates = [
+                "working_copy_path=NULL",
+                "working_copy_evicted_mtime=COALESCE(file_mtime, -1)",
+            ]
+            params = []
+        if dimensions is not None:
+            updates.extend(["width=?", "height=?"])
+            params.extend(dimensions)
+        params.append(photo_id)
+        self.conn.execute(
+            f"UPDATE photos SET {', '.join(updates)} WHERE id=?",
+            params,
+        )
+        self.conn.commit()
+
+    def set_thumb_path(self, photo_id, thumb_path):
+        """Store the photo's thumbnail filename and commit."""
+        self.conn.execute(
+            "UPDATE photos SET thumb_path=? WHERE id=?",
+            (thumb_path, photo_id),
+        )
+        self.conn.commit()
