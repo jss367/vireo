@@ -209,7 +209,7 @@ def _publish_snapshot(vireo_dir, photo_id, data):
     return ref
 
 
-def correct_snapshot(*, vireo_dir, photo_id, mask, mode, radius, points):
+def correct_snapshot(*, vireo_dir, photo_id, mask, mode, radius, points, softness=0, strength=1):
     """Paint one bounded stroke in normalized, untransformed photo coordinates.
 
     Preserve the AI source digest: a manual correction is not a new extraction.
@@ -226,6 +226,9 @@ def correct_snapshot(*, vireo_dir, photo_id, mask, mode, radius, points):
         raise ValueError("invalid mask source digest")
     if mode not in ("add", "subtract"):
         raise ValueError("brush mode must be add or subtract")
+    for name, value, minimum in (("softness", softness, 0), ("strength", strength, 0.01)):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not minimum <= value <= 1:
+            raise ValueError(f"brush {name} must be between {minimum} and 1")
     if (
         isinstance(radius, bool)
         or not isinstance(radius, (int, float))
@@ -251,12 +254,11 @@ def correct_snapshot(*, vireo_dir, photo_id, mask, mode, radius, points):
     width, height = image.size
     pixels = [(x * (width - 1), y * (height - 1)) for x, y in points]
     r = max(0.5, radius * min(width, height))
-    draw = ImageDraw.Draw(image)
     value = 255 if mode == "add" else 0
-    if len(pixels) > 1:
-        draw.line(pixels, fill=value, width=max(1, round(2 * r)))
-    for x, y in pixels:
-        draw.ellipse((x - r, y - r, x + r, y + r), fill=value)
+    if softness == 0 and strength == 1:
+        _draw_brush_stroke(image, pixels, r, value)
+    else:
+        _blend_brush_stroke(image, pixels, r, value, softness, strength)
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
     image.close()
@@ -265,6 +267,48 @@ def correct_snapshot(*, vireo_dir, photo_id, mask, mode, radius, points):
         "source_digest": digest,
         "corrected": True,
     }
+
+
+def _draw_brush_stroke(image, pixels, radius, value):
+    draw = ImageDraw.Draw(image)
+    if len(pixels) > 1:
+        draw.line(pixels, fill=value, width=max(1, round(2 * radius)))
+    for x, y in pixels:
+        draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=value)
+
+
+def _blend_brush_stroke(image, pixels, radius, value, softness, strength):
+    """Blend stroke coverage once; pointer sampling density cannot build opacity.
+
+    Feather inward from the stroke boundary. Build beyond the photo edges before
+    clipping, so a brush crossing an image edge does not gain an artificial fade.
+    """
+    import math
+
+    import cv2
+    import numpy as np
+
+    left = math.floor(min(x for x, _ in pixels) - radius - 2)
+    top = math.floor(min(y for _, y in pixels) - radius - 2)
+    right = math.ceil(max(x for x, _ in pixels) + radius + 2)
+    bottom = math.ceil(max(y for _, y in pixels) + radius + 2)
+    with Image.new("L", (right - left, bottom - top)) as coverage:
+        _draw_brush_stroke(coverage, [(x - left, y - top) for x, y in pixels], radius, 255)
+        weights = np.asarray(coverage)
+        if softness:
+            weights = cv2.distanceTransform(weights, cv2.DIST_L2, cv2.DIST_MASK_5)
+            weights /= max(0.5, radius * softness)
+            np.clip(weights, 0, 1, out=weights)
+            weights = weights * weights * (3 - 2 * weights)
+        else:
+            weights = weights.astype(np.float32) / 255
+    box = (max(0, left), max(0, top), min(image.width, right), min(image.height, bottom))
+    weights = weights[box[1] - top:box[3] - top, box[0] - left:box[2] - left] * strength
+    with image.crop(box) as region:
+        before = np.asarray(region, dtype=np.float32)
+        blended = np.clip(np.rint(before + (value - before) * weights), 0, 255).astype(np.uint8)
+    with Image.fromarray(blended) as result:
+        image.paste(result, box)
 
 
 def load_snapshot(vireo_dir, photo_id, recipe):

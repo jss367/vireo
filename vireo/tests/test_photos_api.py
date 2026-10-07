@@ -14894,3 +14894,16 @@ def test_mask_brush_bad_requests_leave_recipe_unchanged(client_with_photo, body)
     client = app.test_client()
     assert client.post(f'/api/photos/{photo_id}/local-mask/correct', json=body).status_code == 400
     assert db.get_photo_edit_recipe(photo_id) is None
+
+
+@pytest.mark.parametrize('options', [{'softness': -1}, {'softness': True}, {'strength': 0}, {'strength': '0.5'}])
+def test_mask_brush_invalid_controls_leave_recipe_unchanged(client_with_photo, tmp_path, options):
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    _register_active_mask(db, photo_id, str(tmp_path))
+    mask = client.post(f'/api/photos/{photo_id}/local-mask/snapshot').json['mask']
+    response = client.post(f'/api/photos/{photo_id}/local-mask/correct', json={
+        'mask': mask, 'mode': 'add', 'radius': 0.06, 'points': [[0.8, 0.5]], **options,
+    })
+    assert response.status_code == 400
+    assert db.get_photo_edit_recipe(photo_id) is None

@@ -72,6 +72,15 @@ retains a corrected snapshot even with no active region adjustments. It is
 removed when rebinding masks for presets or other photos. The original
 `source_digest` continues to detect newer AI extractions.
 
+The brush outline shows the current footprint, with an inner dashed ring for
+the solid core. Softness fades inward from the stroke edge. Strength blends
+once over the whole stroke, so retracing within one drag does not build opacity;
+separate strokes do. Defaults retain the original hard, full-strength brush.
+`[` and `]` resize the brush outside text fields and dialogs. Hold Option/Alt
+before starting a stroke to subtract temporarily. Mode, size, softness and
+strength are captured at pointer-down for the entire stroke. The colored path
+is a guide; the corrected mask appears on release and remains undoable.
+
 The browser preview regression suite also reports five quick/refined latency
 samples and their p50/p95 in JUnit properties, using a synthetic 3,072 × 2,048
 JPEG. These are input-to-display times on the current machine, not a camera RAW

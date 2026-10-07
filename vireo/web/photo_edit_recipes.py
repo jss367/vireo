@@ -142,6 +142,7 @@ def create_photo_edit_recipes_blueprint(
                 vireo_dir=os.path.dirname(config["THUMB_CACHE_DIR"]),
                 photo_id=photo_id, mask=body.get("mask"), mode=body.get("mode"),
                 radius=body.get("radius"), points=body.get("points"),
+                softness=body.get("softness", 0), strength=body.get("strength", 1),
             )
         except ValueError as exc:
             return json_error(str(exc))

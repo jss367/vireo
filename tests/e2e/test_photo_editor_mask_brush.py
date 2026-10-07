@@ -206,3 +206,138 @@ def test_cancel_during_brush_mask_reacquisition_never_paints(page, live_server, 
     assert corrections == []
     assert page.evaluate('editorState.recipe.local || null') is None
     assert page.evaluate('maskBrush.mode') is None
+
+
+def set_brush_control(page, name, value):
+    page.locator('#maskBrush' + name).evaluate(
+        "(el, value) => {el.value=value; el.dispatchEvent(new Event('input', {bubbles:true}));}", str(value))
+
+
+def test_soft_brush_controls_persist_and_alt_temporarily_subtracts(page, live_server, masked_photo):
+    open_mask(page, live_server, masked_photo)
+    set_brush_control(page, 'Size', 120)
+    set_brush_control(page, 'Softness', 100)
+    set_brush_control(page, 'Strength', 50)
+    expect(page.locator('#maskBrushSoftnessValue')).to_have_text('100%')
+    expect(page.locator('#maskBrushStrengthValue')).to_have_text('50%')
+    requests = []
+    page.on('request', lambda request: requests.append(request.post_data_json)
+            if '/local-mask/correct' in request.url else None)
+    added = stroke(page, 'add', 0.8, 0.5)
+    assert requests[-1]['softness'] == 1
+    assert requests[-1]['strength'] == 0.5
+    page.wait_for_function('editorImageMatchesZoomRecipe(document.getElementById("editorImg"))')
+    box = page.locator('#editorImg').bounding_box()
+    page.mouse.move(box['x'] + box['width'] * 0.2, box['y'] + box['height'] * 0.5)
+    page.keyboard.down('Alt')
+    expect(page.locator('#maskBrushCursor')).to_have_class('mask-brush-cursor subtract')
+    with page.expect_response('**/local-mask/correct') as response:
+        page.mouse.down()
+        # Parameters and mode belong to the entire stroke, including its end.
+        page.keyboard.up('Alt')
+        set_brush_control(page, 'Strength', 100)
+        page.mouse.up()
+    assert response.value.ok
+    page.wait_for_function('!maskBrush.busy')
+    assert requests[-1]['mode'] == 'subtract'
+    assert requests[-1]['strength'] == 0.5
+    expect(page.locator('#maskBrushAdd')).to_have_attribute('aria-pressed', 'true')
+    expect(page.locator('#maskBrushCursor')).not_to_have_class('mask-brush-cursor subtract')
+    corrected = page.evaluate('editorState.recipe.local.mask.ref')
+    assert page.evaluate('doUndo()') is True
+    assert page.evaluate('editorState.recipe.local.mask.ref') == added
+    assert page.evaluate('doRedo()') is True
+    assert page.evaluate('saveRecipe()') is True
+    page.reload()
+    page.wait_for_function('!editorState.loading && !!editorState.recipe.local')
+    assert page.evaluate('editorState.recipe.local.mask.ref') == corrected
+    with page.expect_response('**/edit-mask-preview?*') as response:
+        page.locator('#maskOverlayBtn').click()
+    alpha = np.asarray(Image.open(io.BytesIO(response.value.body())))[..., 3]
+    assert alpha[64, 205] == pytest.approx(alpha[64, 0] / 2, abs=2)
+    assert alpha[64, 51] == pytest.approx(alpha[64, 0] / 2, abs=2)
+    assert 0 < alpha[64, 216] < alpha[64, 205]  # soft edge persisted
+
+
+def test_brush_cursor_shortcuts_and_focus_boundaries(page, live_server, masked_photo):
+    open_mask(page, live_server, masked_photo)
+    page.locator('#maskBrushAdd').click()
+    page.wait_for_function('maskBrush.mode && !maskBrush.busy')
+    box = page.locator('#editorImg').bounding_box()
+    page.mouse.move(box['x'] + box['width'] * 0.8, box['y'] + box['height'] * 0.5)
+    cursor = page.locator('#maskBrushCursor')
+    expect(cursor).to_be_visible()
+    assert cursor.bounding_box()['width'] == pytest.approx(40)
+    page.keyboard.press(']')
+    expect(page.locator('#maskBrushSizeValue')).to_have_text('44')
+    assert cursor.bounding_box()['width'] == pytest.approx(44)
+    page.keyboard.press('[')
+    expect(page.locator('#maskBrushSize')).to_have_value('40')
+    set_brush_control(page, 'Size', 120)
+    page.keyboard.press(']')
+    expect(page.locator('#maskBrushSize')).to_have_value('120')
+    set_brush_control(page, 'Size', 8)
+    page.keyboard.press('[')
+    expect(page.locator('#maskBrushSize')).to_have_value('8')
+    page.locator('#editorSearchInput').focus()
+    page.keyboard.press(']')
+    expect(page.locator('#editorSearchInput')).to_have_value(']')
+    expect(page.locator('#maskBrushSize')).to_have_value('8')
+    page.locator('#editorSearchInput').fill('')
+    page.locator('#editorSearchInput').blur()
+    page.evaluate('setEditorSpacePan(true)')
+    expect(cursor).to_be_hidden()
+    page.evaluate('setEditorSpacePan(false)')
+    expect(cursor).to_be_visible()
+    page.keyboard.down('Alt')
+    page.evaluate("window.dispatchEvent(new Event('blur'))")
+    expect(cursor).to_be_hidden()
+    assert page.evaluate('maskBrush.erase') is False
+    page.keyboard.up('Alt')
+    page.mouse.move(box['x'] + box['width'] * 0.7, box['y'] + box['height'] * 0.5)
+    expect(cursor).to_be_visible()
+    page.keyboard.press('Escape')
+    expect(cursor).to_be_hidden()
+    assert page.evaluate('maskBrush.mode') is None
+
+
+def test_brush_outline_tracks_radius_limit_and_zoom(page, live_server, masked_photo):
+    open_mask(page, live_server, masked_photo)
+    page.locator('#maskBrushAdd').click()
+    page.wait_for_function('maskBrush.mode && !maskBrush.busy')
+    set_brush_control(page, 'Size', 120)
+    page.evaluate('setEditorZoomToActual()')
+    page.wait_for_function('editorImageMatchesZoomRecipe(document.getElementById("editorImg"))')
+    box = page.locator('#editorImg').bounding_box()
+    page.mouse.move(box['x'] + box['width'] * 0.7, box['y'] + box['height'] * 0.5)
+    cursor = page.locator('#maskBrushCursor')
+    expect(cursor).to_be_visible()
+    # The server caps radius at a quarter of the native short side (128px).
+    assert cursor.bounding_box()['width'] == pytest.approx(64)
+    page.evaluate('setEditorZoom(200)')
+    page.wait_for_function('editorImageMatchesZoomRecipe(document.getElementById("editorImg"))')
+    box = page.locator('#editorImg').bounding_box()
+    page.mouse.move(box['x'] + box['width'] * 0.7, box['y'] + box['height'] * 0.5)
+    assert cursor.bounding_box()['width'] == pytest.approx(120)
+    with page.expect_request('**/local-mask/correct') as request:
+        page.mouse.click(box['x'] + box['width'] * 0.7, box['y'] + box['height'] * 0.5)
+    assert request.value.post_data_json['radius'] * 128 * 2 * 2 == pytest.approx(120)
+    page.wait_for_function('!maskBrush.busy')
+
+
+def test_escape_finishes_brush_from_text_field_but_leaves_dialogs_in_control(page, live_server, masked_photo):
+    open_mask(page, live_server, masked_photo)
+    page.locator('#maskBrushAdd').click()
+    page.wait_for_function('maskBrush.mode && !maskBrush.busy')
+    page.locator('#editorSearchInput').fill('heron')
+    page.keyboard.press('Escape')
+    assert page.evaluate('maskBrush.mode') is None
+    expect(page.locator('#editorSearchInput')).to_have_value('heron')
+    expect(page.locator('#maskBrushCursor')).to_be_hidden()
+    page.locator('#maskBrushAdd').click()
+    page.wait_for_function('maskBrush.mode && !maskBrush.busy')
+    page.evaluate('openExportModal()')
+    expect(page.locator('#exportOverlay')).to_be_visible()
+    page.keyboard.press('Escape')
+    expect(page.locator('#exportOverlay')).to_be_hidden()
+    assert page.evaluate('maskBrush.mode') == 'add'

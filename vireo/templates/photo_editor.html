@@ -432,6 +432,23 @@ body {
   pointer-events: none;
 }
 #maskBrushCanvas { z-index: 5; }
+.mask-brush-cursor {
+  position: fixed;
+  pointer-events: none;
+  z-index: 20;
+  border: 1px solid #fff;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px #111;
+  transform: translate(-50%, -50%);
+}
+.mask-brush-cursor::after {
+  content: '';
+  position: absolute;
+  inset: var(--brush-soft-inset, 0%);
+  border: 1px dashed #50d2a0;
+  border-radius: 50%;
+}
+.mask-brush-cursor.subtract::after { border-color: #ff6e64; }
 .mask-brushing, .mask-brushing .crop-box { cursor: crosshair; }
 .local-stale-banner {
   display: flex;
@@ -671,6 +688,7 @@ body {
     </div>
 
     <div class="editor-canvas-wrap" id="editorCanvasWrap">
+      <div id="maskBrushCursor" class="mask-brush-cursor" aria-hidden="true" hidden></div>
       <div class="editor-canvas" id="editorCanvas">
         <img id="editorImg" alt="">
         <img id="maskOverlayImg" alt="" aria-hidden="true" style="display:none">
@@ -1042,9 +1060,20 @@ body {
       </div>
       <div class="control-row">
         <label for="maskBrushSize">Brush size</label>
-        <input id="maskBrushSize" type="range" min="8" max="120" value="40" oninput="document.getElementById('maskBrushSizeValue').textContent=this.value">
+        <input id="maskBrushSize" type="range" min="8" max="120" value="40" oninput="updateMaskBrushControls()">
         <span class="control-value" id="maskBrushSizeValue">40</span>
       </div>
+      <div class="control-row">
+        <label for="maskBrushSoftness">Softness</label>
+        <input id="maskBrushSoftness" type="range" min="0" max="100" value="0" oninput="updateMaskBrushControls()">
+        <span class="control-value" id="maskBrushSoftnessValue">0%</span>
+      </div>
+      <div class="control-row">
+        <label for="maskBrushStrength">Strength</label>
+        <input id="maskBrushStrength" type="range" min="1" max="100" value="100" oninput="updateMaskBrushControls()">
+        <span class="control-value" id="maskBrushStrengthValue">100%</span>
+      </div>
+      <p class="local-unavailable-note">[ / ] resize the brush. Hold Option/Alt before painting to subtract. Softness fades the stroke edge; strength limits each stroke. Colored strokes are guides; the mask updates on release.</p>
       <p id="maskBrushStatus" class="local-unavailable-note" aria-live="polite">Paint corrections to the subject mask. Undo restores each stroke.</p>
       <div class="local-region-title">Subject</div>
       <div id="subjectLocalControls"></div>

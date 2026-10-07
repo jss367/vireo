@@ -8,6 +8,7 @@ function initCropDrag() {
   function updatePanCursor() {
     wrap.classList.toggle('space-pan', editorState.spacePan);
     wrap.classList.toggle('panning', !!editorState.pan);
+    if (typeof updateMaskBrushCursor === 'function') updateMaskBrushCursor();
   }
 
   function startPan(e) {
