@@ -358,27 +358,47 @@
     return null;
   }
 
-  // Clone the tree with one leaf dropped from its group — never substitute
-  // "true", which inverts any/none groups (prototype review finding).
-  function rulesWithout(target) {
+  // Clone ``root`` with every leaf matching ``drop`` removed, plus any
+  // group that becomes empty along the way. Dropping empty groups is not
+  // optional: ``_RuleQueryBuilder.build_node`` compiles an empty ``any``
+  // group to ``0``, so leaving one behind would AND into the compiled
+  // query (and into any scope request built from the result) and collapse
+  // the grid to nothing — never substitute "true" for the removed leaf,
+  // which inverts any/none groups (prototype review finding).
+  function prunedTree(root, drop) {
     function walk(node) {
-      if (!isGroup(node)) return node === target ? null : clone(node);
+      if (!isGroup(node)) return drop(node) ? null : clone(node);
       const kept = node.rules.map(walk).filter((c) => c !== null);
+      if (!kept.length) return null;
       return { ...clone({ ...node, rules: [] }), rules: kept };
     }
-    return walk(state.root);
+    return walk(root) || { mode: 'all', rules: [] };
   }
 
-  // Clone the tree with every leaf whose field is in ``fields`` dropped,
-  // wherever it sits in the rule tree. The caller still has to handle
-  // what to do with empty groups left behind.
+  function rulesWithout(target) {
+    return prunedTree(state.root, (n) => n === target);
+  }
+
   function rulesWithoutFields(root, fields) {
-    function walk(node) {
-      if (!isGroup(node)) return fields.includes(node.field) ? null : clone(node);
-      const kept = node.rules.map(walk).filter((c) => c !== null);
-      return { ...clone({ ...node, rules: [] }), rules: kept };
+    return prunedTree(root, (n) => fields.includes(n.field));
+  }
+
+  // Compose ``context`` and the remaining rule tree ``others`` into one
+  // ``all`` tree for a /api/filters/values request. Concatenating
+  // ``others.rules`` would discard the root mode: a tree whose root is
+  // ``any`` or ``none`` (NOT(…) / OR(…)) would silently become ``all``,
+  // scoping values to the wrong photo set and letting the 50-result cap
+  // fill with values from outside the active grid (Codex review
+  // r4208938067). Wrap non-``all`` subtrees so their mode survives, and
+  // drop empty subtrees so an empty ``any`` doesn't short-circuit the
+  // scope to false (``prunedTree`` already prunes nested empties).
+  function composeScopeRules(context, others) {
+    const combined = clone(context);
+    if (others && others.rules && others.rules.length) {
+      if (others.mode === 'all') combined.push(...others.rules);
+      else combined.push(others);
     }
-    return walk(root);
+    return { mode: 'all', rules: combined };
   }
 
   // ---- labels -----------------------------------------------------------
@@ -1604,8 +1624,7 @@
       // the current grid. Without these the global 50-value cap can omit
       // values that are actually in scope (Codex review r4208710522).
       const context = state.getContextRules ? state.getContextRules() : [];
-      const others = rulesWithout(node);
-      const scopedRules = { mode: 'all', rules: clone(context).concat(others.rules) };
+      const scopedRules = composeScopeRules(context, rulesWithout(node));
       params.set('rules', JSON.stringify(scopedRules));
       if (state.visual && !state.muted) params.set('visual', JSON.stringify(state.visual));
       const scope = state.getScope ? state.getScope() : null;
@@ -1711,8 +1730,7 @@
     // Counts respect everything except the rule being edited, plus the
     // page's context rules — "how many results would I get".
     const context = state.getContextRules ? state.getContextRules() : [];
-    const others = rulesWithout(node);
-    const rules = { mode: 'all', rules: clone(context).concat(others.rules) };
+    const rules = composeScopeRules(context, rulesWithout(node));
     const params = new URLSearchParams({ field: node.field, limit: '8' });
     if (q) params.set('q', q);
     params.set('rules', JSON.stringify(rules));
@@ -2571,6 +2589,10 @@
         // group, say) would otherwise intersect its disjoint old
         // membership with the new rule and empty the grid instead of
         // switching to the selected group (Codex review r4208710529).
+        // ``rulesWithoutFields`` also prunes groups left empty by the
+        // strip, so a nested empty ``any`` cannot compile to false and
+        // AND-collapse the grid when the new rule is appended (Codex
+        // review r4208938061).
         const stripped = rulesWithoutFields(state.root, ['photo_ids', 'burst_id', 'duplicate_group']);
         if (stripped.mode === 'all') {
           stripped.rules.push(rule);
