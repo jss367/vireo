@@ -162,6 +162,19 @@ class PhotoRepository:
                 result[row["id"]] = (row["folder_id"], row["filename"])
         return result
 
+    def existing_ids(self, photo_ids):
+        """Which of ``photo_ids`` have a ``photos`` row, in any workspace."""
+        found = set()
+        for chunk in self._chunks(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            found.update(
+                r["id"] for r in self.conn.execute(
+                    f"SELECT id FROM photos WHERE id IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+            )
+        return found
+
     def get_by_ids(self, photo_ids, *, include_exif=False):
         """Return {photo_id: Row} (list columns, optionally exif_data)."""
         if not photo_ids:

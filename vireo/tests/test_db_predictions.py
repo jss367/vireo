@@ -465,6 +465,57 @@ def test_top_prediction_confidences(db, cat, monkeypatch):
     assert len([s for s in dict.fromkeys(statements) if "p.id IN (" in s]) == 2
 
 
+def test_top_unrejected_predictions_by_photo(db, cat):
+    p0, p1, p2, p3 = cat["p"]
+    det = _det(db, p0)
+    db.add_prediction(det, "Robin", 0.99, "m1", labels_fingerprint="old")
+    db.add_prediction(det, "Jay", 0.7, "m1", labels_fingerprint="new")
+    db.add_prediction(det, "Wren", 0.8, "m1", labels_fingerprint="new")
+    jay = _pred_id(db, det, "Jay", fp="new")
+    wren = _pred_id(db, det, "Wren", fp="new")
+    db.update_prediction_status(wren, "rejected")
+    db.set_review_status(jay, cat["ws"], "reviewed", group_id="g")
+    # Another workspace's rejection does not hide a row here.
+    other = db.create_workspace("Other")
+    db.set_review_status(jay, other, "rejected")
+
+    tie = _det(db, p1)
+    db.add_prediction(tie, "Hawk", 0.5, "m1")
+    db.add_prediction(tie, "Kite", 0.5, "m1")
+    kite = _pred_id(db, tie, "Kite", fp="legacy")
+
+    only_rejected = _det(db, p2)
+    db.add_prediction(only_rejected, "Owl", 0.9, "m1")
+    db.update_prediction_status(_pred_id(db, only_rejected, "Owl", fp="legacy"), "rejected")
+
+    # Not filtered by workspace visibility.
+    db.add_prediction(_det(db, cat["outside"]), "Crow", 0.4, "m1")
+
+    got = db.get_top_unrejected_predictions_by_photo([p0, p1, p2, p3, cat["outside"]])
+    assert set(got) == {p0, p1, cat["outside"]}
+    assert dict(got[p0]) == {
+        "photo_id": p0, "id": jay, "species": "Jay", "confidence": 0.7,
+        "classifier_model": "m1", "group_id": "g", "status": "reviewed",
+    }
+    # Equal confidence: the higher id wins.
+    assert got[p1]["id"] == kite
+    assert (got[p1]["status"], got[p1]["group_id"]) == ("pending", None)
+    assert got[cat["outside"]]["species"] == "Crow"
+
+    statements = _trace(db)
+    padded = list(range(10_000, 10_800)) + [p1]
+    assert set(db.get_top_unrejected_predictions_by_photo(padded)) == {p1}
+    db.conn.set_trace_callback(None)
+    assert len([s for s in dict.fromkeys(statements) if "d.photo_id IN" in s]) == 2
+
+
+def test_top_unrejected_predictions_by_photo_workspace_resolution(db, cat):
+    db.set_active_workspace(None)
+    assert db.get_top_unrejected_predictions_by_photo([]) == {}
+    with pytest.raises(RuntimeError):
+        db.get_top_unrejected_predictions_by_photo([cat["p"][0]])
+
+
 def test_prediction_for_photo(db, cat):
     p0 = cat["p"][0]
     det = _det(db, p0)
@@ -905,6 +956,7 @@ _DELEGATING_PREDICTION_METHODS = (
     "get_existing_prediction_photo_ids",
     "get_top_prediction_for_photo",
     "get_top_prediction_confidences",
+    "get_top_unrejected_predictions_by_photo",
     "get_prediction_for_photo",
     "clear_prediction_group_info",
     "update_prediction_group_info",

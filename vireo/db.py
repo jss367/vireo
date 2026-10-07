@@ -3381,6 +3381,10 @@ class Database:
         """
         return self._photos_repository(scoped=False).get_filenames(photo_ids)
 
+    def get_existing_photo_ids(self, photo_ids):
+        """Which of ``photo_ids`` have a photo row, in any workspace."""
+        return self._photos_repository(scoped=False).existing_ids(photo_ids)
+
     def get_photos_by_ids(self, photo_ids, *, include_exif=False):
         """Return photos for a list of IDs.
 
@@ -6492,6 +6496,16 @@ class Database:
         """The set of ``photo_ids`` that carry ``keyword_id``."""
         return self._keyword_repository().photo_ids_tagged_with(keyword_id, photo_ids)
 
+    def get_species_rank_keywords_for_photo(self, photo_id):
+        """Rows (``id``, ``name``, ``is_species``, ``type``) of a photo's
+        species-rank identification keywords, ``is_species`` first, then
+        most recently tagged first."""
+        return self._keyword_repository().species_rank_keywords_for_photo(photo_id)
+
+    def get_photo_ids_with_species_rank_keyword(self, photo_ids):
+        """Which of ``photo_ids`` carry a species-rank identification keyword."""
+        return self._keyword_repository().photo_ids_with_species_rank_keyword(photo_ids)
+
     def get_photo_keywords(self, photo_id):
         """Return all keywords for a photo."""
         return self._keyword_repository().get_for_photo(photo_id)
@@ -6949,6 +6963,42 @@ class Database:
         """
         return self._species_curation_repository().rename_highlights(
             old_species, new_species, photo_workspace_pairs=photo_workspace_pairs, _commit=_commit,
+        )
+
+    # Reads the Highlights relabel snapshots before it moves any curation.
+    # None of them commits.
+
+    def get_species_highlight_rows_for_photos(self, photo_ids):
+        """Rows (``species``, ``photo_id``, ``rank``) of the active workspace's
+        ordered highlights on ``photo_ids``."""
+        return self._species_curation_repository().highlight_rows_for_photos(photo_ids)
+
+    def get_photo_preference_purposes_for_species(self, species):
+        """Representative-style purposes the active workspace has a
+        preference row for under ``species``."""
+        return self._species_curation_repository().preference_purposes_for_species(species)
+
+    def get_photo_preference_rows_for_photos(self, photo_ids):
+        """Rows (``species``, ``photo_id``, ``purpose``) of the active
+        workspace's representative-style preferences on ``photo_ids``."""
+        return self._species_curation_repository().preference_rows_for_photos(photo_ids)
+
+    def get_representative_photo_ids_for_species(self, species, photo_ids):
+        """Which of ``photo_ids`` are a representative of ``species``."""
+        return self._species_curation_repository().representative_photo_ids_for_species(
+            species, photo_ids,
+        )
+
+    def get_species_representative_rows_for_photos(self, photo_ids):
+        """Rows (``species``, ``photo_id``, ``selected_order``) of every
+        representative on ``photo_ids``."""
+        return self._species_curation_repository().representative_rows_for_photos(photo_ids)
+
+    def is_photo_life_list_preference_eligible(self, species, photo_id):
+        """Whether ``photo_id`` may hold the life-list representative for
+        ``species`` in the active workspace."""
+        return self._species_curation_repository().photo_is_life_list_preference_eligible(
+            species, photo_id,
         )
 
     def get_folders_with_quality_data(self):
@@ -7812,6 +7862,15 @@ class Database:
         classifier is certain this is nothing".
         """
         return self._prediction_repository().get_top_confidences(photo_ids)
+
+    def get_top_unrejected_predictions_by_photo(self, photo_ids):
+        """``{photo_id: row}``: each photo's highest-confidence prediction
+        from its latest label set that the active workspace has not rejected.
+
+        Rows carry ``photo_id``, ``id``, ``species``, ``confidence``,
+        ``classifier_model``, ``group_id`` and ``status``.
+        """
+        return self._prediction_repository().top_unrejected_by_photo(photo_ids)
 
     def get_prediction_for_photo(self, photo_id, model, labels_fingerprint=None):
         """Return species, confidence, and detection_id for a photo's prediction.

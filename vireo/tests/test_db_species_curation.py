@@ -976,6 +976,10 @@ def test_move_species_highlight_without_commit(db, cur):
     ("get_life_list_uncounted_identifications", ()),
     ("get_photo_life_list_species", (1,)),
     ("get_life_list_locations", ()),
+    ("get_species_highlight_rows_for_photos", ([1],)),
+    ("get_photo_preference_purposes_for_species", ("American Robin",)),
+    ("get_photo_preference_rows_for_photos", ([1],)),
+    ("is_photo_life_list_preference_eligible", ("American Robin", 1)),
 ])
 def test_workspace_scoped_methods_require_active_workspace(db, method, args):
     db.set_active_workspace(None)
@@ -1248,6 +1252,88 @@ def test_rename_species_highlights_no_source_rows(db, cur):
     assert db.rename_species_highlights_species("Missing", "New Name") == 0
 
 
+# -- relabel and eligibility reads --------------------------------------------------------
+
+
+def test_relabel_snapshot_reads(db, cur):
+    p, ws = cur["p"], cur["ws"]
+    other = _seed_renames(db, cur)
+    db.conn.executemany(
+        "INSERT INTO species_highlights (workspace_id, species, photo_id, rank) "
+        "VALUES (?, ?, ?, ?)",
+        [(ws, "Old Name", p["robin1"], 1), (ws, "Old Name", p["robin2"], 2),
+         (ws, "Other Bird", p["card1"], 1), (other, "Old Name", p["card2"], 1)],
+    )
+    db.conn.commit()
+    ids = [p["robin1"], p["robin2"], p["card2"], 987_654]
+
+    assert sorted(tuple(r) for r in db.get_species_highlight_rows_for_photos(ids)) == sorted(
+        [("Old Name", p["robin1"], 1), ("Old Name", p["robin2"], 2)]
+    )
+    # Only the representative-style purposes, only this workspace.
+    assert sorted(tuple(r) for r in db.get_photo_preference_rows_for_photos(ids)) == [
+        ("Old Name", p["robin1"], "life_list"),
+    ]
+    assert db.get_photo_preference_purposes_for_species("Old Name") == {"life_list"}
+    assert db.get_photo_preference_purposes_for_species("New Name") == set()
+    db.set_active_workspace(other)
+    assert db.get_photo_preference_purposes_for_species("Old Name") == {"life_list"}
+    assert db.get_photo_preference_purposes_for_species("New Name") == set()  # custom
+    db.set_active_workspace(ws)
+
+    # Representatives are global.
+    assert db.get_representative_photo_ids_for_species("Old Name", ids) == {
+        p["robin1"], p["robin2"],
+    }
+    assert db.get_representative_photo_ids_for_species("New Name", ids) == {p["robin2"]}
+    assert sorted(
+        tuple(r) for r in db.get_species_representative_rows_for_photos(ids)
+    ) == sorted([
+        ("Old Name", p["robin1"], 1), ("Old Name", p["robin2"], 2),
+        ("New Name", p["robin2"], 3),
+    ])
+    assert not db.conn.in_transaction
+
+
+def test_relabel_snapshot_reads_chunk_photo_ids(db, cur):
+    p = cur["p"]
+    _seed_renames(db, cur)
+    padded = list(range(1_000_000, 1_000_900)) + [p["robin1"]]
+    statements = _trace(db)
+    db.get_species_highlight_rows_for_photos(padded)
+    db.get_photo_preference_rows_for_photos(padded)
+    assert db.get_representative_photo_ids_for_species("Old Name", padded) == {p["robin1"]}
+    assert len(db.get_species_representative_rows_for_photos(padded)) == 1
+    db.conn.set_trace_callback(None)
+    distinct = list(dict.fromkeys(statements))
+    for needle in ("FROM species_highlights", "FROM photo_preferences",
+                   "SELECT photo_id FROM species_representatives",
+                   "SELECT species, photo_id, selected_order"):
+        assert len([s for s in distinct if needle in s]) == 2, needle
+
+
+def test_life_list_preference_eligibility(db, cur):
+    p, k = cur["p"], cur["k"]
+    eligible = db.is_photo_life_list_preference_eligible
+    assert eligible("American Robin", p["robin1"])
+    # Turdus is suppressed on robin1, which also carries its descendant.
+    assert not eligible("Turdus", p["robin1"])
+    # A linked higher-rank identification on its own is eligible.
+    assert eligible("Turdus", p["card2"])
+    assert eligible("Mystery Bird", p["plain"])
+    assert not eligible("Northern Cardinal", p["robin1"])
+    assert not eligible("Backyard", p["robin1"])  # location keyword
+    assert not eligible("Northern Cardinal", p["rejected"])
+    assert not eligible("Northern Cardinal", p["outside"])
+    # A hierarchy leaf matches through its taxon's root identification.
+    leaf = _leaf(db, "robin (leaf)", k["sunset"])
+    _link(db, leaf, 4)
+    db.tag_photo(p["card1"], leaf)
+    assert eligible("American Robin", p["card1"])
+    assert eligible("robin (leaf)", p["card1"])
+    assert not db.conn.in_transaction
+
+
 # -- structure ----------------------------------------------------------------------------
 
 
@@ -1280,6 +1366,12 @@ _DELEGATING_SPECIES_CURATION_METHODS = (
     "rename_photo_preferences_species",
     "rename_species_representatives_species",
     "rename_species_highlights_species",
+    "get_species_highlight_rows_for_photos",
+    "get_photo_preference_purposes_for_species",
+    "get_photo_preference_rows_for_photos",
+    "get_representative_photo_ids_for_species",
+    "get_species_representative_rows_for_photos",
+    "is_photo_life_list_preference_eligible",
 )
 
 
