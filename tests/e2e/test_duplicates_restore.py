@@ -133,6 +133,11 @@ def test_duplicates_page_all_stale_does_not_declare_library_clean(
     # it is suppressed when nothing remains to show alongside it.
     expect(page.locator("#restoredBanner")).to_be_visible()
     expect(page.locator("#restoredStale")).to_have_text("")
+    # And the banner must not claim "Still up to date" alongside the
+    # empty-state's "out of date" message — the two directly contradict.
+    expect(page.locator("#restoredBanner")).not_to_contain_text(
+        "Still up to date"
+    )
 
 
 def test_duplicates_page_empty_restore_names_duplicates_added_since(

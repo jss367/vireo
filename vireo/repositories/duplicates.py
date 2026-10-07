@@ -152,6 +152,12 @@ class DuplicatesRepository:
                     "file_hash": file_hash,
                     "photo_ids": [pid for pid, _ in rows_for_hash],
                     "status": "resolved",
+                    # The single non-rejected row. A later flag edit that
+                    # swaps which member is kept and which is rejected
+                    # keeps ``photo_ids`` the same but changes the winner,
+                    # so callers that fingerprint a resolved group need
+                    # this to notice.
+                    "winner_id": kept[0],
                 })
         return unresolved + resolved
 

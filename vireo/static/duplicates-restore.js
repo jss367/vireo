@@ -21,7 +21,14 @@ function formatTimeAgo(isoStr) {
 function restoredFreshnessText(result) {
   var added = result.new_group_count || 0;
   var changed = result.changed_group_count || 0;
+  var stale = result.stale_group_count || 0;
+  var remaining = (result.proposals || []).length;
   if (!added && !changed) {
+    // All-stale with nothing left to show: ``renderResults`` already
+    // writes "The last scan is out of date" into #results, so saying
+    // "Still up to date" here would directly contradict it. Stay silent
+    // and let the empty-state message speak alone.
+    if (!remaining && stale) return '';
     return ' Still up to date: no duplicates have been added or changed ' +
       'in your catalog since then.';
   }

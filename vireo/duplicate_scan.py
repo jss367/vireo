@@ -117,8 +117,14 @@ def revalidate_scan_result(db, result):
     )
 
 
-def _group_state(status, photo_ids):
-    return status, frozenset(photo_ids)
+def _group_state(status, photo_ids, winner_id=None):
+    # For a resolved group the kept/rejected partition is part of the
+    # identity: an id set like {A, B} with A kept reads the same as the
+    # same set with B kept, but a rescan would show the opposite winner
+    # and its cleanup controls would act on the other copy. Carry
+    # ``winner_id`` for resolved groups so that swap counts as changed.
+    # Unresolved groups have no single winner yet, so this stays None.
+    return status, frozenset(photo_ids), winner_id
 
 
 def _changes_since_scan(db, stored_proposals, shown_proposals):
@@ -127,17 +133,22 @@ def _changes_since_scan(db, stored_proposals, shown_proposals):
     Returns ``(new_group_count, changed_group_count)``. A group is the same
     when its status and member ids match what a new scan would find: an
     unresolved group lists its non-rejected copies, a resolved one every
-    copy, exactly as ``find_duplicate_groups`` reports them. A group dropped
-    by revalidation counts as changed only if its hash still forms a group.
+    copy and its current winner, exactly as ``find_duplicate_groups``
+    reports them. A group dropped by revalidation counts as changed only
+    if its hash still forms a group.
     """
     current = {
-        g["file_hash"]: _group_state(g["status"], g["photo_ids"])
+        g["file_hash"]: _group_state(
+            g["status"], g["photo_ids"], g.get("winner_id"),
+        )
         for g in db.find_duplicate_groups(include_resolved=True)
     }
     shown = {
         p.get("file_hash"): _group_state(
             p.get("status"),
             [e.get("id") for e in [p.get("winner") or {}] + list(p.get("losers") or [])],
+            (p.get("winner") or {}).get("id")
+            if p.get("status") == "resolved" else None,
         )
         for p in shown_proposals
     }

@@ -856,6 +856,39 @@ def test_last_scan_counts_groups_resolved_or_grown_since_the_scan(app_and_db):
     assert result["changed_group_count"] == 2
 
 
+def test_last_scan_counts_resolved_group_whose_winner_was_swapped(app_and_db):
+    """A later flag edit that swaps which copy is kept and which is rejected
+    changes what a rescan would show, even though the id set is the same.
+
+    The stored proposal still names the old winner, so its cleanup controls
+    would act on the wrong copy. ``changed_group_count`` must reflect that
+    so the banner tells the user to rescan.
+    """
+    app, db = app_and_db
+    fid = db.add_folder("/tmp/duplastscanswap")
+    kept, rejected = _seed_pair(
+        db, "HSWAP", fid, name_a="s.jpg", name_b="s (2).jpg",
+    )
+    # Apply the first scan so the group becomes resolved (``kept`` wins).
+    client = app.test_client()
+    _scan_and_restore(client)
+    client.post("/api/duplicates/apply", json={"hashes": ["HSWAP"]})
+    _scan_and_restore(client)
+
+    # Swap flags: un-reject the former loser, reject the former winner.
+    db.conn.execute(
+        "UPDATE photos SET flag='rejected' WHERE id=?", (kept,),
+    )
+    db.conn.execute(
+        "UPDATE photos SET flag='none' WHERE id=?", (rejected,),
+    )
+    db.conn.commit()
+
+    result = client.get("/api/duplicates/last-scan").get_json()["result"]
+    assert result["new_group_count"] == 0
+    assert result["changed_group_count"] == 1
+
+
 def test_last_scan_group_whose_copy_was_removed_is_not_a_change(app_and_db):
     """Removing the only extra copy hides the group as stale; a rescan would
     not show it either, so it is no reason to rescan."""
