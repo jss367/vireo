@@ -114,3 +114,37 @@ def test_storage_reports_lists_and_clears_paired_previews(client_with_photo):
     assert response.status_code == 200
     assert db.preview_cache_total_bytes() == 0
     assert not paired.exists()
+
+
+@pytest.mark.parametrize('locked', [False, True])
+def test_dedicated_clear_control_includes_paired_cache(client_with_photo, monkeypatch, locked):
+    app, db, _ = client_with_photo
+    root = Path(app.config['THUMB_CACHE_DIR']).parent
+    _, ordinary, paired = seed(db, root, size=10)
+    legacy = paired.with_name('999_1920_jpeg_old.jpg')
+    legacy.write_bytes(b'old shadow')
+    if locked:
+        real_remove = os.remove
+
+        def fail_paired(path):
+            if Path(path) == paired:
+                raise PermissionError('locked paired preview')
+            real_remove(path)
+
+        monkeypatch.setattr(os, 'remove', fail_paired)
+    client = app.test_client()
+    before = client.get('/api/preview-cache').get_json()
+    assert before['count'] == 2
+    assert before['total_size'] == 20
+    result = client.post('/api/preview-cache/clear').get_json()
+    assert result == {
+        'cleared': 1 if locked else 2,
+        'files_removed': 2 if locked else 3,
+        'failed': 1 if locked else 0,
+    }
+    after = client.get('/api/preview-cache').get_json()
+    assert after['count'] == (1 if locked else 0)
+    assert after['total_size'] == (10 if locked else 0)
+    assert paired.exists() == locked
+    assert not ordinary.exists()
+    assert not legacy.exists()

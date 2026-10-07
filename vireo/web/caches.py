@@ -192,7 +192,9 @@ def create_caches_blueprint(get_db, json_error, db_path, config):
         if not photo_count:
             return 0
         avg_row = db.conn.execute(
-            "SELECT AVG(bytes) AS a FROM preview_cache WHERE bytes > 0"
+            "SELECT AVG(bytes) AS a FROM ("
+            "SELECT bytes FROM preview_cache UNION ALL "
+            "SELECT bytes FROM paired_preview_cache) WHERE bytes > 0"
         ).fetchone()
         avg_bytes = (avg_row["a"] if avg_row and avg_row["a"] else 500 * 1024)
         recommended_bytes = photo_count * avg_bytes
@@ -200,11 +202,12 @@ def create_caches_blueprint(get_db, json_error, db_path, config):
 
     @blueprint.route("/api/preview-cache")
     def api_preview_cache():
-        """Return counts and totals from the preview_cache table, plus quota."""
+        """Return counts and totals for both preview cache families, plus quota."""
         import config as cfg
         db = get_db()
         count_row = db.conn.execute(
-            "SELECT COUNT(*) AS c FROM preview_cache"
+            "SELECT (SELECT COUNT(*) FROM preview_cache) + "
+            "(SELECT COUNT(*) FROM paired_preview_cache) AS c"
         ).fetchone()
         total = db.preview_cache_total_bytes()
         quota_mb = cfg.load().get("preview_cache_max_mb", 20480)
@@ -233,9 +236,11 @@ def create_caches_blueprint(get_db, json_error, db_path, config):
         preview_dir = os.path.join(vireo_dir, "previews")
 
         count_row = db.conn.execute(
-            "SELECT COUNT(*) AS c FROM preview_cache"
+            "SELECT (SELECT COUNT(*) FROM preview_cache) + "
+            "(SELECT COUNT(*) FROM paired_preview_cache) AS c"
         ).fetchone()
         tracked = count_row["c"]
+        paired_rows = db.paired_preview_cache_oldest_first()
 
         # Matches {id}.jpg (legacy /full cache) and {id}_{size}.jpg (current).
         pattern = re.compile(r"^(\d+)(?:_(\d+))?\.jpg$")
@@ -280,17 +285,41 @@ def create_caches_blueprint(get_db, json_error, db_path, config):
                 db.conn.execute("DROP TABLE _pc_failed")
         else:
             db.conn.execute("DELETE FROM preview_cache")
+
+        # Paired previews live under their own source-state filenames, but
+        # the Clear Preview Cache control covers the shared disk budget.
+        # Keep failed unlinks tracked just as for ordinary previews, and
+        # remove legacy/untracked shadow files as well.
+        paired_dir = os.path.join(preview_dir, "paired")
+        failed_paired = set()
+        if os.path.isdir(paired_dir):
+            for name in os.listdir(paired_dir):
+                if not name.endswith(".jpg"):
+                    continue
+                try:
+                    os.remove(os.path.join(paired_dir, name))
+                    files_removed += 1
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    failed_paired.add(name)
+        db.conn.executemany(
+            "DELETE FROM paired_preview_cache WHERE filename=?",
+            [(row["filename"],) for row in paired_rows
+             if row["filename"] not in failed_paired],
+        )
         db.conn.commit()
 
         remaining = db.conn.execute(
-            "SELECT COUNT(*) AS c FROM preview_cache"
+            "SELECT (SELECT COUNT(*) FROM preview_cache) + "
+            "(SELECT COUNT(*) FROM paired_preview_cache) AS c"
         ).fetchone()["c"]
         cleared = tracked - remaining
 
         return jsonify({
             "cleared": cleared,
             "files_removed": files_removed,
-            "failed": len(failed_tracked),
+            "failed": len(failed_tracked) + len(failed_paired),
         })
 
     @blueprint.route("/api/detection-cache/stats")
