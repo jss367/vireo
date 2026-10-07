@@ -14,7 +14,7 @@ Workspace-folder membership lives in ``repositories/workspace_folders.py``.
 
 import os
 
-from repositories.collections import remap_collection_photo_ids
+from repositories.photo_row_deletion import photo_row_deletion
 from repositories.photo_visibility import remap_photo_visibility
 
 
@@ -600,8 +600,8 @@ class FolderRepository:
             )
             self.conn.execute(f"DELETE FROM pending_changes WHERE photo_id IN ({ph})", drop_ids)
             self.conn.execute(f"DELETE FROM detections WHERE photo_id IN ({ph})", drop_ids)
-            self.conn.execute(f"DELETE FROM photos WHERE id IN ({ph})", drop_ids)
-            remap_collection_photo_ids(self.conn, collection_remap)
+            with photo_row_deletion(self.conn) as photo_rows:
+                photo_rows.delete(collection_remap)
 
         # Reparent child folders from source to target
         self.conn.execute(

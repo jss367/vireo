@@ -28,14 +28,12 @@ INLINE_SCRIPT_LINE_LIMITS = {
     "highlights.html": 1155,
     "id_conflicts.html": 968,
     "keywords.html": 1204,
-    "life_list.html": 1604,
     "lightroom.html": 135,
     "logs.html": 64,
-    "map.html": 416,
+    "map.html": 389,
     "misses.html": 1438,
     "move.html": 1660,
     "pipeline_rapid_review.html": 1614,
-    "review.html": 2556,
     "shortcuts.html": 251,
     "stats.html": 999,
     "storage.html": 885,
@@ -87,11 +85,13 @@ def test_inline_page_script_only_shrinks():
 SPLIT_PAGES = {
     "/settings": "settings",
     "/import": "import",
+    "/life-list": "life-list",
     "/pipeline": "pipeline",
     "/pipeline/review": "pipeline-review",
     "/edit": "photo-editor",
     "/locations/review": "location-review",
     "/jobs": "jobs",
+    "/review": "review",
 }
 
 

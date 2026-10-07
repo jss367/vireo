@@ -962,6 +962,24 @@
   ],
   [
    "table",
+   "photo_exif_search_text",
+   "photo_exif_search_text",
+   "CREATE TABLE photo_exif_search_text (\n            photo_id   INTEGER PRIMARY KEY\n                REFERENCES photos(id) ON DELETE CASCADE ON UPDATE CASCADE,\n            value_text TEXT NOT NULL\n        )"
+  ],
+  [
+   "trigger",
+   "trg_photo_exif_search_text_insert",
+   "photos",
+   "CREATE TRIGGER trg_photo_exif_search_text_insert AFTER INSERT ON photos BEGIN INSERT OR REPLACE INTO photo_exif_search_text (photo_id, value_text) VALUES (NEW.id, (SELECT COALESCE(group_concat((CASE WHEN search_tag.type IN ('true', 'false') THEN search_tag.type ELSE CAST(search_tag.atom AS TEXT) END), char(31)), '') FROM json_tree(json_remove(CASE WHEN json_valid(NEW.exif_data) THEN NEW.exif_data ELSE '{}' END, '$.XMP.Subject', '$.XMP.HierarchicalSubject', '$.IPTC.Keywords', '$.XMP.Rating', '$.XMP.Label', '$.XMP.ColorLabel', '$.File.FileName', '$.File.Directory', '$.System.FileName', '$.System.Directory')) search_tag WHERE search_tag.key NOT IN ('FileSize', 'StripOffsets', 'StripByteCounts', 'TileOffsets', 'TileByteCounts', 'ThumbnailOffset', 'ThumbnailLength', 'JpgFromRawStart', 'JpgFromRawLength', 'OtherImageStart', 'OtherImageLength', 'PreviewImageStart', 'PreviewImageLength', 'MPImageStart', 'MPImageLength') AND (CASE WHEN search_tag.type IN ('true', 'false') THEN search_tag.type ELSE CAST(search_tag.atom AS TEXT) END) NOT LIKE '(Binary data %')); END"
+  ],
+  [
+   "trigger",
+   "trg_photo_exif_search_text_update",
+   "photos",
+   "CREATE TRIGGER trg_photo_exif_search_text_update AFTER UPDATE OF exif_data ON photos BEGIN INSERT OR REPLACE INTO photo_exif_search_text (photo_id, value_text) VALUES (NEW.id, (SELECT COALESCE(group_concat((CASE WHEN search_tag.type IN ('true', 'false') THEN search_tag.type ELSE CAST(search_tag.atom AS TEXT) END), char(31)), '') FROM json_tree(json_remove(CASE WHEN json_valid(NEW.exif_data) THEN NEW.exif_data ELSE '{}' END, '$.XMP.Subject', '$.XMP.HierarchicalSubject', '$.IPTC.Keywords', '$.XMP.Rating', '$.XMP.Label', '$.XMP.ColorLabel', '$.File.FileName', '$.File.Directory', '$.System.FileName', '$.System.Directory')) search_tag WHERE search_tag.key NOT IN ('FileSize', 'StripOffsets', 'StripByteCounts', 'TileOffsets', 'TileByteCounts', 'ThumbnailOffset', 'ThumbnailLength', 'JpgFromRawStart', 'JpgFromRawLength', 'OtherImageStart', 'OtherImageLength', 'PreviewImageStart', 'PreviewImageLength', 'MPImageStart', 'MPImageLength') AND (CASE WHEN search_tag.type IN ('true', 'false') THEN search_tag.type ELSE CAST(search_tag.atom AS TEXT) END) NOT LIKE '(Binary data %')); END"
+  ],
+  [
+   "table",
    "workspace_photos",
    "workspace_photos",
    "CREATE TABLE workspace_photos (\n        workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,\n        photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,\n        PRIMARY KEY (workspace_id, photo_id)\n    )"

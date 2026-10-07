@@ -17,7 +17,7 @@ hook. Ratings, flags, wildlife exclusion (``photo_review``) and color labels
 
 import os
 
-from repositories.collections import remap_collection_photo_ids
+from repositories.photo_row_deletion import photo_row_deletion
 
 
 class PhotoRepository:
@@ -88,7 +88,16 @@ class PhotoRepository:
         xmp_mtime=None,
         file_hash=None,
     ):
-        """Insert a photo (or find the existing row), commit, return its id."""
+        """Insert a photo (or find the existing row), commit.
+
+        Returns ``(photo_id, inserted)``: ``inserted`` is True only when this
+        call actually created the row. On a race where a concurrent writer
+        inserts the same (folder, filename) first, the ``INSERT OR IGNORE``
+        is a no-op and the SELECT fallback returns the winner's id with
+        ``inserted=False``; callers that gate recycled-id or inherited-
+        membership cleanup must consult ``inserted`` rather than their own
+        pre-check, since the pre-check cannot see a concurrent insert.
+        """
         cur = self.execute_with_retry(
             self.conn,
             """INSERT OR IGNORE INTO photos
@@ -110,14 +119,12 @@ class PhotoRepository:
         )
         self.commit_with_retry(self.conn)
         if cur.rowcount > 0:
-            photo_id = cur.lastrowid
-        else:
-            row = self.conn.execute(
-                "SELECT id FROM photos WHERE folder_id = ? AND filename = ?",
-                (folder_id, filename),
-            ).fetchone()
-            photo_id = row["id"]
-        return photo_id
+            return cur.lastrowid, True
+        row = self.conn.execute(
+            "SELECT id FROM photos WHERE folder_id = ? AND filename = ?",
+            (folder_id, filename),
+        ).fetchone()
+        return row["id"], False
 
     def get(self, photo_id, verify_workspace=False):
         """Return one photo row (detail columns), or None.
@@ -947,19 +954,14 @@ class PhotoRepository:
                 # Deleting detections cascades to predictions via ON DELETE CASCADE
                 self.conn.execute(f"DELETE FROM detections WHERE photo_id IN ({ph})", chunk)
 
-            # Clean collection rules. Photos are global and SQLite reuses a
-            # freed ``photos.id``, so every workspace's static collections are
-            # rewritten, not only the active one's. The active workspace is
-            # still resolved here so a delete without one rolls back.
+            # The active workspace is still resolved here so a delete
+            # without one rolls back.
             workspace_id_fn()
-            remap_collection_photo_ids(
-                self.conn, dict.fromkeys(all_ids),
-            )
 
             # Delete photos (cascades to edit_history_items, inat_submissions)
-            for chunk in id_chunks:
-                ph = ",".join("?" for _ in chunk)
-                self.conn.execute(f"DELETE FROM photos WHERE id IN ({ph})", chunk)
+            # and take them out of every workspace's static collections.
+            with photo_row_deletion(self.conn) as photo_rows:
+                photo_rows.delete(dict.fromkeys(all_ids))
 
             # A moved RAW/JPEG sibling stores the source folder path as
             # provenance so another same-stem sibling can follow it to the

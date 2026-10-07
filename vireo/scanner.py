@@ -55,6 +55,7 @@ from preview_cache import (
 )
 from render_source import exif_orientation as _exif_orientation_from_data
 from render_source import is_undersized
+from repositories.photo_row_deletion import photo_row_deletion
 from resource_ledger import (
     ResourceRequest,
     cpu_inference_request,
@@ -664,12 +665,39 @@ def _companions_compatible(raw, jpeg):
     return True
 
 
+_COMPANION_RAW_EXTENSIONS = frozenset(
+    {".nef", ".cr2", ".cr3", ".arw", ".raf", ".dng", ".rw2", ".orf"}
+)
+_COMPANION_JPEG_EXTENSIONS = frozenset({".jpg", ".jpeg"})
+
+
+def _pairing_rows_for_stem(db, folder_id, stem):
+    """The cataloged pairing candidates sharing ``stem`` in one folder.
+
+    Same rows ``_group_photos_by_folder_and_stem`` would put in this
+    group, read through the ``(folder_id, filename)`` index: every name
+    whose stem is ``stem`` sorts in ``[stem + ".", stem + "/")``.
+    """
+    rows = db.conn.execute(
+        "SELECT id, folder_id, filename, extension, timestamp,"
+        " camera_make, camera_model, companion_path FROM photos"
+        " WHERE folder_id = ? AND filename >= ? AND filename < ?"
+        " AND (companion_path IS NULL OR extension IN"
+        " ('.nef','.cr2','.cr3','.arw','.raf','.dng','.rw2','.orf'))",
+        (folder_id, stem + ".", stem + "/"),
+    ).fetchall()
+    return [
+        dict(row) for row in rows
+        if os.path.splitext(row["filename"])[0] == stem
+    ]
+
+
 def _group_photos_by_folder_and_stem(db):
     """Group pairing candidates by folder_id + base name (without extension).
 
     Candidates are every photo not yet paired, plus RAW rows that already
-    carry a companion_path (so a companion whose file changed, which a
-    rescan re-inserts as its own row, folds back into its RAW).
+    carry a companion_path (so a JPEG photo named like a RAW's companion
+    re-pairs with that RAW, never another same-stem one).
     """
     rows = db.conn.execute(
         "SELECT id, folder_id, filename, extension, timestamp,"
@@ -722,7 +750,7 @@ def _max_raw_jpeg_matching(raws, jpegs):
     return [(raws[ri], jpegs[ji]) for ri, ji in match_r2j.items()]
 
 
-def _pick_compatible_raw_jpeg_pairs(members):
+def _pick_compatible_raw_jpeg_pairs(members, log_conflicts=True):
     """Return every ``(raw, jpeg)`` to merge from one same-stem group.
 
     A group needs at least one RAW and one JPEG, and each returned pair
@@ -740,9 +768,15 @@ def _pick_compatible_raw_jpeg_pairs(members):
     (``IMG.cr3``/``IMG.jpg`` and ``IMG.arw``/``IMG.jpeg`` both merge in one
     pass instead of the newer set being starved by the reinserted older
     companion).
+
+    A member may be a JPEG file the scan has not cataloged yet (``id`` is
+    None; see ``_ScanRun._resolve_companion_group``), so the scan decides
+    before inserting it whether it becomes a photo or a companion.
+    ``log_conflicts=False`` leaves the conflicting-metadata message to the
+    end-of-scan pass, which sees the same group.
     """
-    raw_exts = {".nef", ".cr2", ".cr3", ".arw", ".raf", ".dng", ".rw2", ".orf"}
-    jpeg_exts = {".jpg", ".jpeg"}
+    raw_exts = _COMPANION_RAW_EXTENSIONS
+    jpeg_exts = _COMPANION_JPEG_EXTENSIONS
 
     if len(members) < 2:
         return []
@@ -766,9 +800,8 @@ def _pick_compatible_raw_jpeg_pairs(members):
     taken = set()
 
     # Each RAW with an existing companion re-pairs with that same filename
-    # first; a rescan that found the companion changed re-inserts its file,
-    # which folds back in, and the companion never drifts to another
-    # same-stem JPEG.
+    # first (a rescan that found the companion changed offers its file
+    # again), and the companion never drifts to another same-stem JPEG.
     for raw in raws:
         name = raw["companion_path"]
         if (
@@ -797,7 +830,7 @@ def _pick_compatible_raw_jpeg_pairs(members):
         pairs.append((raw, jpeg))
         taken.add(jpeg["filename"])
 
-    if not pairs:
+    if not pairs and log_conflicts:
         unmatched_raws = [r for r in raws if r["companion_path"] is None]
         unmatched_jpegs = [j for j in jpegs if j["filename"] not in claimed]
         if unmatched_raws and unmatched_jpegs:
@@ -1231,8 +1264,12 @@ def _defer_recipe_snapshot_transfer(
     post_commit_fs_actions.append(_apply_recipe_transfer_fs)
 
 
-def _delete_companion_row(db, primary, companion):
-    """Move the companion's remaining per-photo state to the primary, then delete its row."""
+def _delete_companion_row(db, primary, companion, photo_rows):
+    """Move the companion's remaining per-photo state to the primary, then delete its row.
+
+    ``photo_rows`` is the caller's ``PhotoRowDeletion``; the companion's
+    collection entries move to the primary when the caller's block exits.
+    """
     # Remove keyword associations then the duplicate JPEG record
     db._transfer_gps_review_for_merge(companion["id"], primary["id"])
     db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (companion["id"],))
@@ -1248,7 +1285,7 @@ def _delete_companion_row(db, primary, companion):
     from repositories.photo_visibility import remap_photo_visibility
 
     remap_photo_visibility(db.conn, {companion["id"]: primary["id"]})
-    db.conn.execute("DELETE FROM photos WHERE id = ?", (companion["id"],))
+    photo_rows.delete({companion["id"]: primary["id"]})
 
 
 def _defer_companion_derivative_cleanup(
@@ -1285,12 +1322,14 @@ def _defer_companion_derivative_cleanup(
 
 def _merge_companion_into_primary(
     db, primary, companion, vireo_dir, thumb_cache_dir, post_commit_fs_actions,
+    photo_rows,
 ):
     """Fold one JPEG companion row into its RAW primary inside the open transaction.
 
     Every DB write joins the caller's transaction; every filesystem change
     is appended to ``post_commit_fs_actions`` (only when ``vireo_dir`` is
-    set) for the caller to run once the commit succeeds.
+    set) for the caller to run once the commit succeeds. The companion row
+    is deleted through the caller's ``PhotoRowDeletion`` (``photo_rows``).
     """
     primary_full, companion_full = _read_metadata_transfer_rows(
         db, primary, companion,
@@ -1315,7 +1354,7 @@ def _merge_companion_into_primary(
         db, primary, companion, vireo_dir, thumb_cache_dir,
         post_commit_fs_actions,
     )
-    _delete_companion_row(db, primary, companion)
+    _delete_companion_row(db, primary, companion, photo_rows)
 
 
 def _run_post_commit_fs_actions(post_commit_fs_actions):
@@ -1336,6 +1375,24 @@ def _run_post_commit_fs_actions(post_commit_fs_actions):
             )
 
 
+class _MergedPhotoIds(dict):
+    """Merged ids plus the identities (companion AND surviving RAW)
+    that pairing captured at merge time, so publication can refuse to
+    substitute when either id's current row is not the one pairing saw.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.owners = {}
+        # ``companion_id -> (folder_id, filename)`` as pairing saw the
+        # JPEG row before deleting it. The scanner compares this against
+        # the identity it originally reported for that id: if the two
+        # disagree, the id was reused after being reported and must not
+        # be substituted with the pairing's RAW id (the two name
+        # unrelated files).
+        self.companions = {}
+
+
 def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
     """Find raw+JPEG pairs in the same folder and merge them.
 
@@ -1346,11 +1403,13 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
     All pairs share one transaction; filesystem changes run only after it
     commits (see ``post_commit_fs_actions`` below).
 
-    Returns the set of companion photo ids merged away. Callers that count
-    indexed photos must discount these: both files were counted on the way
-    in, but only the RAW row survives, so the scan would otherwise claim
-    two photos where the catalog holds one — and RAW+JPEG is the common
-    shooting mode, so that overstates nearly every import.
+    Returns ``{companion_id: primary_id}`` for the JPEG rows merged away.
+    Callers that count indexed photos must discount these: both files were
+    counted on the way in, but only the RAW row survives, so the scan would
+    otherwise claim two photos where the catalog holds one. Callers that
+    handed a merged id to someone (``scan``'s ``photo_callback``) must tell
+    them which row absorbed it: the id no longer names a photo, and SQLite
+    can give it to the next insert.
 
     Ids, not a bare count, because this query covers the *whole* photos
     table: it also merges pairs left pending anywhere else in the catalog
@@ -1358,6 +1417,11 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
     with the ids it actually counted, or a scoped scan would be debited
     for merges it had nothing to do with and could report a negative
     total.
+
+    A scan pairs a JPEG file it has not cataloged yet before inserting it
+    (``_ScanRun._resolve_companion_group``), so what reaches this pass is
+    a JPEG that is already a photo of its own: one cataloged before its
+    RAW arrived, or a pair left pending.
     """
     groups = _group_photos_by_folder_and_stem(db)
 
@@ -1371,39 +1435,35 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
     # us "all DB changes durable, then all FS changes" — commit failure
     # aborts both halves.
     post_commit_fs_actions = []
-    # Companion rows merged away, reported to the caller so it can correct
-    # its indexed count. Collected at the DELETE but only returned after
-    # the commit below succeeds — the whole loop shares one transaction,
-    # so a commit failure rolls every deletion back and none of them
-    # happened.
-    merged_ids = set()
-    # ``companion_id -> primary_id`` accumulated across every pair so we can
-    # remap collection ``photo_ids`` rules once at the end of the loop.
-    # ``remap_collection_photo_ids`` scans and JSON-parses every collection
-    # that carries ``photo_ids``, then writes each rewritten row; a per-pair
-    # call would repeat that O(collections) work N times and, for a static
-    # collection containing many companions, rewrite the same row once per
-    # deletion. One post-loop call is O(pairs + collections) instead of
-    # O(pairs * collections). The remap runs in the same transaction as the
-    # pair deletes below and is rolled back with them if the commit fails.
-    collection_remap = {}
+    # Companion rows merged away (``companion_id -> primary_id``), reported
+    # to the caller so it can correct its indexed count and the ids it
+    # handed out. Collected at the DELETE but only returned after the
+    # commit below succeeds — the whole loop shares one transaction, so a
+    # commit failure rolls every deletion back and none of them happened.
+    merged_ids = _MergedPhotoIds()
 
-    for (_folder_id, _base), members in groups.items():
-        for primary, companion in _pick_compatible_raw_jpeg_pairs(members):
-            _merge_companion_into_primary(
-                db, primary, companion, vireo_dir, thumb_cache_dir,
-                post_commit_fs_actions,
-            )
-            collection_remap[companion["id"]] = primary["id"]
-            merged_ids.add(companion["id"])
-            if vireo_dir:
-                _defer_companion_derivative_cleanup(
-                    post_commit_fs_actions, companion, vireo_dir,
-                    thumb_cache_dir,
+    # The deletion chokepoint batches collection rewrites for all pairs;
+    # retain each RAW identity for ownership-checked callback publication.
+    with photo_row_deletion(db.conn) as photo_rows:
+        for (_folder_id, _base), members in groups.items():
+            for primary, companion in _pick_compatible_raw_jpeg_pairs(members):
+                _merge_companion_into_primary(
+                    db, primary, companion, vireo_dir, thumb_cache_dir,
+                    post_commit_fs_actions, photo_rows,
                 )
+                merged_ids[companion["id"]] = primary["id"]
+                merged_ids.owners[primary["id"]] = (
+                    primary["folder_id"], primary["filename"],
+                )
+                merged_ids.companions[companion["id"]] = (
+                    companion["folder_id"], companion["filename"],
+                )
+                if vireo_dir:
+                    _defer_companion_derivative_cleanup(
+                        post_commit_fs_actions, companion, vireo_dir,
+                        thumb_cache_dir,
+                    )
 
-    if collection_remap:
-        db.remap_collection_photo_ids(collection_remap)
     commit_with_retry(db.conn)
     # DB state is durable now. Run the collected filesystem operations.
     _run_post_commit_fs_actions(post_commit_fs_actions)
@@ -3540,9 +3600,9 @@ def _incremental_photo_index(db, image_files):
         params = [part for path in batch for part in (str(path.parent), path.name)]
         rows = db.conn.execute(
             f"WITH requested(folder_path, filename) AS (VALUES {placeholders}) "
-            "SELECT f.path AS folder_path, p.id, p.filename, p.extension, "
-            "p.file_size, p.file_mtime, p.xmp_mtime, p.timestamp, p.width, "
-            "p.file_hash, p.exif_data IS NOT NULL AS exif_extracted, "
+            "SELECT f.path AS folder_path, p.id, p.folder_id, p.filename, "
+            "p.extension, p.file_size, p.file_mtime, p.xmp_mtime, p.timestamp, "
+            "p.width, p.file_hash, p.exif_data IS NOT NULL AS exif_extracted, "
             "(p.exif_data IS NULL AND p.camera_make IS NULL "
             "AND p.camera_model IS NULL AND p.lens IS NULL "
             "AND p.aperture IS NULL AND p.shutter_speed IS NULL "
@@ -3645,7 +3705,8 @@ def _companion_bytes_unchanged(known, file_size, file_hash):
     if known["needs_sync"]:
         # Recovery verifies bytes for duplicate preview, but has not
         # imported metadata/keywords or invalidated companion caches.
-        # Run the ordinary insert-and-pair path once to synchronize them.
+        # Re-pair it once (``_ScanRun._attach_companion``) to synchronize
+        # them.
         return False
     if known["file_size"] is None or known["file_size"] != file_size:
         return False
@@ -3654,7 +3715,7 @@ def _companion_bytes_unchanged(known, file_size, file_hash):
     return file_hash is not None and file_hash == known["file_hash"]
 
 
-def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True, photo_callback=None, skip_paths=None, status_callback=None, recursive=True, restrict_dirs=None, restrict_files=None, vireo_dir=None, thumb_cache_dir=None, permission_error_callback=None, cancel_check=None, pause_check=None, cancel_only_check=None, skip_working_copies=False, repair_missing_metadata=False, register_restrict_dirs_as_roots=True, allow_photo_inserts=True, counts=None, discovered_files=None):
+def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True, photo_callback=None, skip_paths=None, status_callback=None, recursive=True, restrict_dirs=None, restrict_files=None, vireo_dir=None, thumb_cache_dir=None, permission_error_callback=None, cancel_check=None, pause_check=None, cancel_only_check=None, skip_working_copies=False, repair_missing_metadata=False, register_restrict_dirs_as_roots=True, allow_photo_inserts=True, counts=None, discovered_files=None, photo_merged_callback=None, reported_photo_identities=None):
     """Walk a folder tree, discover photos, read metadata, populate database.
 
     Args:
@@ -3668,7 +3729,24 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             ExifTool payload is NULL through metadata extraction even when a
             fallback timestamp was available during the original scan
         extract_full_metadata: if True, store full ExifTool JSON in exif_data column
-        photo_callback: optional callable(photo_id, path_str) called after each photo is committed
+        photo_callback: optional callable(photo_id, path_str) called after each photo is committed.
+            A JPEG the scan pairs with its RAW is reported under the RAW's
+            id; it is never inserted as a photo first.
+        photo_merged_callback: optional callable(old_id, new_id, path_str)
+            If the surviving RAW was deleted or replaced before publication,
+            new_id and path_str are None: discard old_id without adopting
+            a missing or unrelated replacement row.
+            called after the end-of-scan pairing pass merges an existing
+            JPEG photo into the RAW row ``new_id`` at ``path_str``. Called
+            for every merge that pass commits, which can include pairs
+            elsewhere in the catalog; a caller holding ``old_id`` (from
+            ``photo_callback``, this scan or an earlier one) must replace
+            it, because the id no longer names a photo and SQLite can give
+            it to the next insert.
+        reported_photo_identities: optional dict shared across all scanner
+            calls feeding one receiver. Stores the catalog identity reported
+            for each id, so a later root cannot substitute an unrelated pair
+            for a deleted photo reported by an earlier root.
         skip_paths: optional set of absolute path strings to exclude from scanning
         status_callback: optional callable(message) for phase status updates.
             Callers may also accept keyword-only ``phase_current``,
@@ -3859,6 +3937,8 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         repair_missing_metadata=repair_missing_metadata,
         register_restrict_dirs_as_roots=register_restrict_dirs_as_roots,
         allow_photo_inserts=allow_photo_inserts,
+        photo_merged_callback=photo_merged_callback,
+        reported_photo_identities=reported_photo_identities,
     ).run()
     return counts
 
@@ -3912,6 +3992,15 @@ class _IndexedFile:
     prev_file_hash: str | None
 
 
+class _CompanionAttachRefused(Exception):
+    """Rolls back a row-less companion attach whose owner changed."""
+
+
+def _companion_group_key(image_path):
+    """``(directory, stem)``: the files pairing considers together."""
+    return (str(image_path.parent), image_path.stem)
+
+
 class _ScanRun:
     """One ``scan()`` past its early exits.
 
@@ -3930,6 +4019,8 @@ class _ScanRun:
         permission_error_callback, cancel_check, pause_check,
         cancel_only_check, skip_working_copies, repair_missing_metadata,
         register_restrict_dirs_as_roots, allow_photo_inserts,
+        photo_merged_callback=None,
+        reported_photo_identities=None,
     ):
         self.root = root
         self.root_path = root_path
@@ -3942,6 +4033,10 @@ class _ScanRun:
         self.incremental = incremental
         self.extract_full_metadata = extract_full_metadata
         self.photo_callback = photo_callback
+        self.photo_merged_callback = photo_merged_callback
+        self._reported_identities = (
+            reported_photo_identities if reported_photo_identities is not None else {}
+        )
         self.skip_paths = skip_paths
         self.status_callback = status_callback
         self.status_supports_phase = status_supports_phase
@@ -4292,6 +4387,7 @@ class _ScanRun:
         # clear-to-NULL — see ``_write_photo_columns``), and by the
         # end-of-scan safety net ``_refill_owners_from_companions``.
         self._pending_companion_fills = {}
+        self._init_collection_membership_cache()
 
         # Build folder cache: path -> folder_id
         self.folder_cache = {}
@@ -4459,6 +4555,9 @@ class _ScanRun:
         # merges must be intersected with what *this* invocation counted (see
         # ``_pair_raw_jpeg_companions``).
         self.indexed_photo_ids = set()
+        # The identity history initialized by __init__ spans the receiver's
+        # scanner calls. Do not reset it at this per-root phase boundary:
+        # end-of-scan pairing may merge ids reported by an earlier root.
         try:
             self._register_scan_targets()
             for image_path in self.image_files:
@@ -4590,7 +4689,10 @@ class _ScanRun:
             if not self._lock_companion_owner(known["owner_id"], ownership):
                 return False
             self._import_companion_sidecar(image_path, known)
-            self._credit_known_companion(known["owner_id"], str(image_path))
+            self._credit_known_companion(
+                known["owner_id"], str(image_path),
+                known["folder_id"], known["owner_filename"],
+            )
         return True
 
     def _import_companion_sidecar(self, image_path, known):
@@ -4662,7 +4764,10 @@ class _ScanRun:
             and not metadata_missing
             and not hash_needs_repair
         ):
-            self._credit_reused_row(existing["id"], full_path_str)
+            self._credit_reused_row(
+                existing["id"], full_path_str,
+                existing["folder_id"], existing["filename"],
+            )
             return True
 
         # XMP changed: re-import keywords
@@ -4689,20 +4794,26 @@ class _ScanRun:
             and not metadata_missing
             and not hash_needs_repair
         ):
-            self._credit_reused_row(existing["id"], full_path_str)
+            self._credit_reused_row(
+                existing["id"], full_path_str,
+                existing["folder_id"], existing["filename"],
+            )
             return True
         return False
 
-    def _credit_reused_row(self, photo_id, full_path_str):
+    def _credit_reused_row(self, photo_id, full_path_str, folder_id, filename):
         self.processed_count += 1
         self.counts["indexed"] += 1
         self.indexed_photo_ids.add(photo_id)
+        self._reported_identities[photo_id] = (folder_id, filename)
         if self.photo_callback:
             self.photo_callback(photo_id, full_path_str)
         if self.progress_callback:
             self.progress_callback(self.processed_count, self.total)
 
-    def _credit_known_companion(self, owner_id, full_path_str):
+    def _credit_known_companion(
+        self, owner_id, full_path_str, owner_folder_id, owner_filename,
+    ):
         """Dispose of a companion JPEG its RAW's row already holds.
 
         ``photo_callback`` gets the RAW's id: that row is where the file is
@@ -4711,6 +4822,7 @@ class _ScanRun:
         """
         self.processed_count += 1
         self.counts["known_companions"] += 1
+        self._reported_identities[owner_id] = (owner_folder_id, owner_filename)
         if self.photo_callback:
             self.photo_callback(owner_id, full_path_str)
         if self.progress_callback:
@@ -4971,10 +5083,20 @@ class _ScanRun:
     # -- main loop ---------------------------------------------------
 
     def _index_files(self):
+        self._track_companion_groups()
         try:
             for image_path, (phash, file_hash) in self._iter_features():
                 self._index_file(image_path, phash, file_hash)
+                self._mark_group_member_seen(image_path)
+            # Every group's last member has been seen by now; this only
+            # matters if a path appeared in ``files_to_process`` twice.
+            for key in list(self._waiting_companions):
+                self._resolve_companion_group(key)
         except BaseException:
+            # Waiting JPEGs have not been indexed or reported yet. Leave
+            # them untouched if their group is interrupted: the partial
+            # folder status makes the next scan retry the whole group.
+            # Do not attempt new pairing writes after a database failure.
             # Per-file loop died mid-way (DB error, signal, etc). Roll back any
             # half-applied write so the partial-status UPDATE below runs on a
             # clean transaction, then flag every folder in scope as 'partial' so
@@ -5076,6 +5198,24 @@ class _ScanRun:
             row_already_existed=row_already_existed,
             prev_file_hash=prev_file_hash,
         )
+        if (
+            not row_already_existed
+            and image_path.suffix.lower() in _COMPANION_JPEG_EXTENSIONS
+        ):
+            # Decide whether this JPEG is a photo or a RAW's companion
+            # before it gets a row (see ``_resolve_companion_group``).
+            self._waiting_companions[_companion_group_key(image_path)].append(
+                item,
+            )
+            return
+        self._catalog_file(item)
+
+    def _catalog_file(self, item):
+        """Insert or refresh ``item``'s row, then its keywords and callback."""
+        db = self.db
+        image_path = item.image_path
+        xmp_path = item.xmp_path
+        file_hash = item.file_hash
         photo_id = self._add_photo(item)
         self._write_photo_columns(photo_id, item)
         self._heal_changed_content(photo_id, item)
@@ -5098,6 +5238,9 @@ class _ScanRun:
         if file_hash is not None:
             db.check_and_resolve_duplicates_for_hash(file_hash)
 
+        self._reported_identities[photo_id] = (
+            item.folder_id, item.image_path.name,
+        )
         if self.photo_callback:
             self.photo_callback(photo_id, str(image_path))
 
@@ -5105,16 +5248,265 @@ class _ScanRun:
         if self.progress_callback:
             self.progress_callback(self.processed_count, self.total)
 
+    # -- pairing a JPEG before it gets a row --------------------------
+    #
+    # A camera JPEG beside its RAW used to be inserted as its own photo and
+    # merged into the RAW by the end-of-scan pairing pass. Between the two
+    # its id was live: ``photo_callback`` reported it, so the pipeline's
+    # and import-in-place's collections, thumbnail queue and counts kept a
+    # deleted id, and because ``photos`` has no AUTOINCREMENT the next
+    # insert could take that id and join those collections. The scan now
+    # makes the pairing decision first and records a paired JPEG straight
+    # onto its RAW's row, so the transient row never exists.
+
+    def _track_companion_groups(self):
+        """Count each same-stem group's RAW/JPEG files in this scan.
+
+        A JPEG waits until the loop has seen every file of its group, so
+        its RAW (which may sort after it: ``IMG.jpg`` < ``IMG.nef``) has a
+        row with fresh metadata, and a group's JPEGs are decided together
+        the way the end-of-scan pass would decide them.
+        """
+        self._unseen_group_members = defaultdict(int)
+        self._waiting_companions = defaultdict(list)
+        for image_path in self.files_to_process:
+            ext = image_path.suffix.lower()
+            if (
+                ext in _COMPANION_RAW_EXTENSIONS
+                or ext in _COMPANION_JPEG_EXTENSIONS
+            ):
+                self._unseen_group_members[
+                    _companion_group_key(image_path)
+                ] += 1
+
+    def _mark_group_member_seen(self, image_path):
+        key = _companion_group_key(image_path)
+        remaining = self._unseen_group_members.get(key)
+        if remaining is None:
+            return
+        remaining -= 1
+        if remaining > 0:
+            self._unseen_group_members[key] = remaining
+            return
+        del self._unseen_group_members[key]
+        if key in self._waiting_companions:
+            self._resolve_companion_group(key)
+
+    def _resolve_companion_group(self, key):
+        """Pair the group's uncataloged JPEGs, or catalog them as photos.
+
+        The candidates are the cataloged rows of the group plus each waiting
+        JPEG as a row-less member, decided by the same
+        ``_pick_compatible_raw_jpeg_pairs`` the end-of-scan pass uses, so
+        #1970's one-companion rule and the metadata checks hold unchanged.
+        """
+        items = self._waiting_companions.pop(key)
+        folder_id = items[0].folder_id
+        members = _pairing_rows_for_stem(self.db, folder_id, key[1])
+        cataloged = {m["filename"] for m in members}
+        members.extend(
+            self._uncataloged_member(item) for item in items
+            if item.image_path.name not in cataloged
+        )
+        members.sort(key=lambda m: m["filename"])
+        owners = {
+            jpeg["filename"]: raw
+            for raw, jpeg in _pick_compatible_raw_jpeg_pairs(
+                members, log_conflicts=False,
+            )
+            if jpeg["id"] is None and raw["id"] is not None
+        }
+        for item in items:
+            owner = owners.get(item.image_path.name)
+            if owner is not None and self._attach_companion(item, owner):
+                continue
+            # A photo of its own, or a RAW that changed under us: the
+            # ordinary path (whose end-of-scan pass still pairs it, with
+            # ``photo_merged_callback`` reporting the merge).
+            self._catalog_file(item)
+
+    def _uncataloged_member(self, item):
+        """``item`` shaped like a ``_pairing_rows_for_stem`` row, ``id`` None."""
+        file_meta = item.meta.file_meta
+        summary = exif_summary_columns(file_meta) if file_meta else {}
+        return {
+            "id": None,
+            "folder_id": item.folder_id,
+            "filename": item.image_path.name,
+            "extension": item.image_path.suffix.lower(),
+            "timestamp": item.meta.timestamp,
+            "camera_make": summary.get("camera_make"),
+            "camera_model": summary.get("camera_model"),
+            "companion_path": None,
+        }
+
+    def _attach_companion(self, item, owner):
+        """Record ``item`` as ``owner``'s companion without a row; True if done.
+
+        Does what inserting the JPEG and merging it used to leave on the
+        RAW: ``companion_path``, the import identity re-import checks, the
+        JPEG-only metadata filling the RAW's gaps, the JPEG's embedded and
+        sidecar keywords, and dropping the RAW's companion-derived display
+        caches. A changed companion takes the same path with fresh values.
+        Returns False, writing nothing, when the owner row changed since it
+        was read or the JPEG gained a row meanwhile.
+        """
+        db = self.db
+        image_path = item.image_path
+        name = image_path.name
+        owner_id = owner["id"]
+        ownership = (owner["folder_id"], owner["filename"], name)
+        try:
+            with db._commits_held():
+                # The guarded write takes the writer lock before anything
+                # else, so neither check below can go stale before commit.
+                if db.conn.execute(
+                    "UPDATE photos SET companion_path = ? WHERE id = ?"
+                    " AND folder_id IS ? AND filename = ?"
+                    " AND (companion_path IS NULL OR companion_path = ?)",
+                    (name, owner_id, owner["folder_id"], owner["filename"], name),
+                ).rowcount != 1:
+                    raise _CompanionAttachRefused
+                if db.conn.execute(
+                    "SELECT 1 FROM photos WHERE folder_id = ? AND filename = ?",
+                    (item.folder_id, name),
+                ).fetchone() is not None:
+                    raise _CompanionAttachRefused
+                # Re-check compatibility under the writer lock. The identity
+                # predicates above (id, folder, filename, companion_path)
+                # miss a concurrent metadata UPDATE on the same row — a
+                # same-stem replacement RAW from a different exposure or
+                # camera that another scanner rewrote between
+                # ``_resolve_companion_group`` reading its timestamp/camera
+                # columns and this guarded UPDATE. Without this re-check the
+                # pairing would commit on a stale compatibility decision and
+                # permanently attach unrelated files.
+                current = db.conn.execute(
+                    "SELECT timestamp, camera_make, camera_model FROM photos"
+                    " WHERE id = ?",
+                    (owner_id,),
+                ).fetchone()
+                if current is not None:
+                    jpeg_summary = (
+                        exif_summary_columns(item.meta.file_meta)
+                        if item.meta.file_meta else {}
+                    )
+                    if not _companions_compatible(
+                        {
+                            "timestamp": current["timestamp"],
+                            "camera_make": current["camera_make"],
+                            "camera_model": current["camera_model"],
+                        },
+                        {
+                            "timestamp": item.meta.timestamp,
+                            "camera_make": jpeg_summary.get("camera_make"),
+                            "camera_model": jpeg_summary.get("camera_model"),
+                        },
+                    ):
+                        raise _CompanionAttachRefused
+                db.conn.execute(
+                    "INSERT OR REPLACE INTO companion_identities"
+                    " (photo_id, filename, file_size, timestamp, file_hash,"
+                    " file_mtime, needs_sync) VALUES (?, ?, ?, ?, ?, ?, 0)",
+                    (owner_id, name, item.file_size, item.meta.timestamp,
+                     item.file_hash, item.file_mtime),
+                )
+                self._apply_companion_gap_fill(
+                    owner_id, self._companion_columns(item.meta), ownership,
+                )
+                _import_embedded_keywords_for_photo(
+                    db, owner_id, item.meta.file_meta,
+                )
+                self._import_companion_sidecar(
+                    image_path, {"owner_id": owner_id},
+                )
+                self.processed_count += 1
+                self.counts["merged_companions"] += 1
+        except _CompanionAttachRefused:
+            # ``_commits_held`` rolled back already, unless the connection
+            # cannot hold commits; the refusals precede every other write.
+            db.conn.rollback()
+            return False
+        # Report AFTER ``_commits_held`` releases: the thumbnail worker runs
+        # on a separate connection and only sees committed data. If the
+        # callback fired inside the guard, a queue entry whose canonical
+        # path falls back to the companion (missing RAW) would be checked
+        # against a row where ``companion_path`` is still NULL and
+        # ``_still_owns`` would drop it. Unlike ``_finish_known_companion``,
+        # which handles an unchanged companion whose ``companion_path`` was
+        # committed by an earlier scan, this attach is the write that first
+        # makes the pairing visible.
+        #
+        # Invalidate the RAW's display cache before the callback: a
+        # callback that raises leaves the pairing committed, and the next
+        # incremental scan takes ``_finish_known_companion`` instead,
+        # which does not re-invalidate. Running the post-commit filesystem
+        # actions first means a stale pre-pairing render cannot survive a
+        # callback failure, and ``_run_post_commit_fs_actions`` already
+        # catches per-action errors so it will not skip the callback.
+        if self.vireo_dir:
+            actions = []
+            _defer_primary_display_cache_invalidation(
+                actions, {"id": owner_id}, self.vireo_dir, self.thumb_cache_dir,
+            )
+            _run_post_commit_fs_actions(actions)
+        if self.photo_callback:
+            # Revalidate ownership before publishing ``owner_id``. The
+            # attach commit was released above so the post-commit FS
+            # actions could see it; in that window another connection can
+            # delete the RAW and SQLite can reuse its rowid for an
+            # unrelated photo. Without this check, an incremental scan
+            # that processes only a new JPEG beside an unchanged
+            # cataloged RAW would publish the stale id to the pipeline
+            # or import collection — and no end-of-scan merge callback
+            # would correct it because the JPEG never had a row of its
+            # own. Taking the writer lock under ``_commits_held`` makes
+            # the check-then-publish atomic against concurrent deletes.
+            prepare = getattr(self.photo_callback, "prepare_publication", None)
+            publication = (
+                prepare(owner_id, str(image_path)) if prepare is not None
+                else contextlib.nullcontext(
+                    lambda: self.photo_callback(owner_id, str(image_path)),
+                )
+            )
+            # A streaming receiver waits for Pause and queue capacity before
+            # the writer lock, then publishes through a nonblocking callback.
+            # Ownership is revalidated AFTER that wait, keeping rowid reuse
+            # protection without preventing the consumer's thumbnail commits.
+            with publication as publish, db._commits_held():
+                owner_still_valid = self._lock_companion_owner(
+                    owner_id, ownership,
+                )
+                if owner_still_valid:
+                    self._reported_identities[owner_id] = (
+                        owner["folder_id"], owner["filename"],
+                    )
+                    publish()
+                else:
+                    log.warning(
+                        "Companion attach for %s lost RAW owner %s before "
+                        "publishing; the next scan will catalog the JPEG",
+                        image_path, owner_id,
+                    )
+        else:
+            self._reported_identities[owner_id] = (
+                owner["folder_id"], owner["filename"],
+            )
+        if self.progress_callback:
+            self.progress_callback(self.processed_count, self.total)
+        return True
+
     def _keep_known_companion(
         self, image_path, folder_id, file_size, file_mtime, file_hash, meta,
     ):
         """Leave an unchanged companion JPEG in its RAW's row; True if it was.
 
         A companion whose bytes changed (or that has no stored identity to
-        compare) returns False and is cataloged as before: inserted, then
-        merged back into its RAW by the pairing pass, which refreshes the
-        stored identity, fills the RAW's gaps from it, carries its new
-        keywords over, and drops the RAW's companion-derived caches.
+        compare) returns False and is re-paired with its RAW without a row
+        of its own (``_resolve_companion_group`` -> ``_attach_companion``),
+        which refreshes the stored identity, fills the RAW's gaps from it,
+        carries its new keywords over, and drops the RAW's
+        companion-derived caches.
         """
         known = self.known_companions.lookup(folder_id, image_path.name)
         if known is None:
@@ -5332,25 +5724,29 @@ class _ScanRun:
     def _add_photo(self, item):
         """Insert (or find) the row and credit it; returns the photo id."""
         vireo_dir = self.vireo_dir
-        photo_id = self.db.add_photo(
-            folder_id=item.folder_id,
-            filename=item.image_path.name,
-            extension=item.image_path.suffix.lower(),
-            file_size=item.file_size,
-            file_mtime=item.file_mtime,
-            xmp_mtime=item.xmp_mtime,
-            timestamp=item.meta.timestamp,
-            width=item.meta.width,
-            height=item.meta.height,
-        )
-        # Credit the photo the moment its row is durable — add_photo
-        # commits before returning. Several fallible steps run below
-        # (cache invalidation, XMP keyword import, duplicate
-        # auto-resolve, photo_callback), and one of them raising must
-        # not leave the sink reporting fewer photos than the catalog
-        # actually holds. ``processed_count`` stays at the end of the
-        # iteration: it drives the progress bar, which should only
-        # advance once the file is genuinely done with.
+        # Keep insertion and inherited-membership cleanup under the same
+        # writer lock. A second connection may legitimately add the new
+        # photo to a collection as soon as the row becomes visible; cleanup
+        # after add_photo commits would mistake that membership for stale.
+        with self.db._commits_held():
+            photo_id, inserted = self.db.add_photo(
+                folder_id=item.folder_id,
+                filename=item.image_path.name,
+                extension=item.image_path.suffix.lower(),
+                file_size=item.file_size,
+                file_mtime=item.file_mtime,
+                xmp_mtime=item.xmp_mtime,
+                timestamp=item.meta.timestamp,
+                width=item.meta.width,
+                height=item.meta.height,
+                return_inserted=True,
+            )
+            # The pre-check can miss a concurrent winning INSERT. Only
+            # the actual inserter may remove inherited memberships.
+            if inserted:
+                self._drop_inherited_collection_membership(photo_id)
+        # Credit the row after the insert and cleanup are durable. Later
+        # cache invalidation or callbacks may fail without losing this count.
         self.counts["indexed"] += 1
         self.indexed_photo_ids.add(photo_id)
 
@@ -5361,7 +5757,7 @@ class _ScanRun:
         # this an O(1) set lookup per insert; only ids that actually
         # collide do real work.
         if (
-            not item.row_already_existed
+            inserted
             and vireo_dir
             and purge_cached_files_for_recycled_id(
                 self.thumb_cache_dir or os.path.join(vireo_dir, "thumbnails"),
@@ -5374,6 +5770,82 @@ class _ScanRun:
         ):
             self.invalidated_photo_ids.add(photo_id)
         return photo_id
+
+    def _init_collection_membership_cache(self):
+        """Track collection edits on this connection, including rolled-back ones.
+
+        data_version detects other connections' commits only. TEMP triggers
+        notify a monotonic Python counter for this connection's collection
+        writes; unlike a SQL counter, rollback cannot reuse a cache version.
+        The triggers/function last only as long as the connection and never
+        change the persistent catalog schema.
+        """
+        conn = self.db.conn
+        if not hasattr(conn, "_scan_collection_revision"):
+            conn._scan_collection_revision = 0
+
+            def collection_changed():
+                conn._scan_collection_revision += 1
+                return 0
+
+            conn.create_function("_scan_collection_changed", 0, collection_changed)
+            for operation in ("INSERT", "UPDATE", "DELETE"):
+                # IF NOT EXISTS keeps this idempotent when a prior scan on
+                # the same sqlite connection has already created the TEMP
+                # triggers — e.g. a test that re-wraps the connection loses
+                # the Python-side counter attribute but the triggers persist
+                # for the lifetime of the connection.
+                conn.execute(
+                    f"CREATE TEMP TRIGGER IF NOT EXISTS "
+                    f"_scan_collection_{operation.lower()} "
+                    f"AFTER {operation} ON main.collections BEGIN "
+                    "SELECT _scan_collection_changed(); END"
+                )
+        self._collection_named_ids = None
+        self._collection_named_ids_version = None
+
+    def _drop_inherited_collection_membership(self, photo_id):
+        """Take a just-inserted photo out of collections it never joined.
+
+        A static collection can still list the id of a photo that no longer
+        exists (a companion JPEG row an older build inserted and merged
+        away after the pipeline or import collection captured it, or a
+        deletion from before deletes cleaned collections). SQLite hands the
+        highest freed id to the next insert, which would then appear in
+        that collection. A photo that did not exist until now cannot be a
+        member of anything, so any listing of its id is stale. Reuse the
+        named-id set until either another connection commits (data_version)
+        or this connection edits collections (the non-transactional counter).
+        Check both after the INSERT has acquired its writer lock, so a stale
+        UI save between insert commits cannot become a new photo's membership.
+        """
+        conn = self.db.conn
+        version = (
+            conn.execute("PRAGMA data_version").fetchone()[0],
+            conn._scan_collection_revision,
+        )
+        if (
+            self._collection_named_ids is None
+            or version != self._collection_named_ids_version
+        ):
+            self._collection_named_ids = (
+                self.db.photo_ids_named_by_collections()
+            )
+            self._collection_named_ids_version = version
+        if photo_id not in self._collection_named_ids:
+            return
+        self._collection_named_ids.discard(photo_id)
+        rewritten = self.db.remap_collection_photo_ids({photo_id: None})
+        # This remap only removed photo_id, already discarded above. Keep
+        # the cache current without traversing all other memberships again.
+        self._collection_named_ids_version = (version[0], conn._scan_collection_revision)
+        commit_with_retry(self.db.conn)
+        log.warning(
+            "New photo %d reused the id of a deleted photo that %d "
+            "collection(s) still listed; removed the stale entry so the "
+            "new photo does not join them",
+            photo_id, rewritten,
+        )
 
     def _write_photo_columns(self, photo_id, item):
         # Update metadata columns (also fixes existing photos that were
@@ -5591,9 +6063,10 @@ class _ScanRun:
             # an older build). Debiting a scoped scan for those would make it
             # undercount, and scanning a root with no new files while one
             # stale pair was pending would report -1 photos indexed.
-            _mine = _merged_ids & self.indexed_photo_ids
+            _mine = _merged_ids.keys() & self.indexed_photo_ids
             counts["merged_companions"] += len(_mine)
             counts["indexed"] -= len(_mine)
+            self._report_merged_photos(_merged_ids)
 
             # Extract working copies for RAW photos (after pairing so companion is known).
             # Scope to the folders the caller just scanned so a fresh import doesn't
@@ -5630,6 +6103,54 @@ class _ScanRun:
             raise
         finally:
             db.update_folder_counts()
+
+    def _report_merged_photos(self, merged):
+        """Tell ``photo_merged_callback`` which RAW absorbed each merged id."""
+        if not merged or self.photo_merged_callback is None:
+            return
+        # Pairing has committed, so readers on other connections can see
+        # the merge. Reacquire the writer lock before validating the RAW
+        # and publishing its id; deletion and rowid reuse must not interleave
+        # with a callback that updates an import's in-memory membership.
+        companion_identities = getattr(merged, "companions", {})
+        reported_identities = getattr(self, "_reported_identities", {})
+        with self.db._commits_held():
+            self.db.conn.execute("BEGIN IMMEDIATE")
+            for old_id, new_id in merged.items():
+                row = self.db.conn.execute(
+                    "SELECT p.folder_id, p.filename, f.path FROM photos p"
+                    " JOIN folders f ON f.id = p.folder_id WHERE p.id = ?",
+                    (new_id,),
+                ).fetchone()
+                expected = getattr(merged, "owners", {}).get(new_id)
+                # The merged-away JPEG must still be the same file the
+                # scanner reported under ``old_id``. If a concurrent delete
+                # freed the id and SQLite reused it for an unrelated row
+                # that pairing then merged, substituting ``new_id`` for
+                # ``old_id`` in the receiver's collection would adopt an
+                # unrelated RAW. A missing reported identity means none of
+                # this receiver's scanner calls reported the id; pairing
+                # also covers catalog rows outside those calls.
+                reported_identity = reported_identities.get(old_id)
+                pairing_identity = companion_identities.get(old_id)
+                identity_matches = (
+                    reported_identity is None
+                    or pairing_identity is None
+                    or reported_identity == pairing_identity
+                )
+                if (
+                    row is None
+                    or (row[0], row[1]) != expected
+                    or not identity_matches
+                ):
+                    self.photo_merged_callback(old_id, None, None)
+                else:
+                    self.photo_merged_callback(
+                        old_id, new_id, os.path.join(row[2], row[1]),
+                    )
+                    if reported_identity is not None:
+                        reported_identities[new_id] = expected
+                reported_identities.pop(old_id, None)
 
     def _working_copy_scope(self):
         if self.restrict_dirs is not None:

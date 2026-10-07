@@ -26,6 +26,12 @@ to keep no matter what order things happen in:
    the companion JPEG of a RAW row beside it, whose stored identity matches
    the JPEG's bytes. Scanning again at once inserts, merges and deletes no
    rows: a RAW's companion is not re-imported and merged back every time.
+7. **No collection names a photo that does not exist.** A collection built
+   from the ids a scan reported (as the pipeline and import-in-place build
+   theirs) holds only live photos, and no step leaves an id behind in any
+   collection, including one of hand-picked photos that a delete, an
+   archive merge or a pairing merge later removes: SQLite gives a freed id
+   to the next photo, which would then join that collection.
 
 Imports are interrupted two ways: a cancel, which the job handles, and a
 crash, where an exception escapes mid-batch the way a killed process stops
@@ -54,6 +60,7 @@ What is stubbed, and why:
 """
 
 import hashlib
+import json
 import os
 import random
 import shutil
@@ -494,6 +501,30 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
         _write_raw(stem + RAW_EXTENSION, self.next_seed, captured_at)
         self.snapshot = self._disk_snapshot()
 
+    def _lone_own_folder_jpegs(self):
+        """Own-folder JPEG photos with no RAW file of the same stem beside them."""
+        lone = []
+        for row in self._catalog_rows():
+            if os.path.normcase(row["folder_path"]) != os.path.normcase(self.own_folder):
+                continue
+            stem, ext = os.path.splitext(row["filename"])
+            if ext.lower() not in IMAGE_EXTENSIONS:
+                continue
+            if not os.path.exists(os.path.join(self.own_folder, stem + RAW_EXTENSION)):
+                lone.append(os.path.join(self.own_folder, row["filename"]))
+        return sorted(lone)
+
+    @precondition(lambda self: self._lone_own_folder_jpegs())
+    @rule(data=st.data())
+    def copy_the_raw_of_a_cataloged_jpeg(self, data):
+        """The RAW of a JPEG Vireo already cataloged on its own arrives later
+        (copied separately, or still copying when the folder was scanned)."""
+        jpeg = data.draw(st.sampled_from(self._lone_own_folder_jpegs()))
+        self.next_seed += 1
+        captured_at = datetime.fromtimestamp(os.stat(jpeg).st_mtime)
+        _write_raw(os.path.splitext(jpeg)[0] + RAW_EXTENSION, self.next_seed, captured_at)
+        self.snapshot = self._disk_snapshot()
+
     def _paired_companion_paths(self):
         return sorted(
             path for path in (
@@ -592,13 +623,18 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
         result = self._run_import(card, _Runner(cancel_after=cancel_after))
         event(f"interrupted import: cancelled={bool(result.get('cancelled'))}")
 
+    def _merged_into_raw(self, old_id, new_id, path):
+        """A JPEG photo pairing folded into its RAW: its row is gone by design."""
+        self.allowed_catalog_deletions.add(old_id)
+
     @rule(incremental=st.booleans())
     def scan_own_folder(self, incremental):
         import scanner
 
         own_root = os.path.dirname(self.own_folder)
         scanner.scan(own_root, self.db, incremental=incremental,
-                     thumb_cache_dir=self.thumbs)
+                     thumb_cache_dir=self.thumbs,
+                     photo_merged_callback=self._merged_into_raw)
         self._check_scan_catalogs_folder(own_root)
         rows_before = self._catalog_rows()
         counts = scanner.scan(own_root, self.db, incremental=incremental,
@@ -610,6 +646,56 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
         assert sorted(map(sorted, map(dict.items, self._catalog_rows()))) == sorted(
             map(sorted, map(dict.items, rows_before))
         ), "rescanning an unchanged folder changed the catalog rows"
+
+    @rule(incremental=st.booleans())
+    def scan_own_folder_into_a_collection(self, incremental):
+        """Scan the folder and collect what it reported the way Process and
+        import-in-place do: ids from ``photo_callback``, each id a pairing
+        merge retires replaced by its RAW's, saved as a static collection."""
+        import scanner
+
+        reported = []
+
+        def on_photo(photo_id, _path):
+            if photo_id not in reported:
+                reported.append(photo_id)
+
+        def on_merged(old_id, new_id, path):
+            self._merged_into_raw(old_id, new_id, path)
+            if old_id in reported:
+                reported.remove(old_id)
+                on_photo(new_id, path)
+
+        own_root = os.path.dirname(self.own_folder)
+        scanner.scan(own_root, self.db, incremental=incremental,
+                     thumb_cache_dir=self.thumbs, photo_callback=on_photo,
+                     photo_merged_callback=on_merged)
+        self._check_scan_catalogs_folder(own_root)
+        if reported:
+            self.db.add_collection(
+                f"Scan {self.next_job}",
+                json.dumps([{"field": "photo_ids", "value": reported}]),
+            )
+            self.next_job += 1
+        live = {row["id"] for row in self._catalog_rows()}
+        assert set(reported) <= live, (
+            f"the scan reported photo ids {sorted(set(reported) - live)} "
+            "that no longer exist once it finished"
+        )
+
+    @precondition(lambda self: self._catalog_rows())
+    @rule(data=st.data())
+    def hand_pick_photos_into_a_collection(self, data):
+        """Add a few cataloged photos to a static collection, as Browse's
+        "Add to collection" does, so every later delete, archive merge and
+        pairing merge can land on a collection member."""
+        ids = [row["id"] for row in self._catalog_rows()]
+        chosen = data.draw(st.lists(st.sampled_from(ids), min_size=1, max_size=4, unique=True))
+        self.db.add_collection(
+            f"Picked {self.next_job}",
+            json.dumps([{"field": "photo_ids", "value": chosen}]),
+        )
+        self.next_job += 1
 
     def _check_scan_catalogs_folder(self, root):
         cataloged = set()
@@ -811,6 +897,23 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
         assert not dropped, f"photos lost workspace visibility: {dropped}"
         self.visibility = now
         self.allowed_catalog_deletions = set()
+
+    @invariant()
+    def no_collection_names_a_missing_photo(self):
+        live = {row[0] for row in self.db.conn.execute("SELECT id FROM photos")}
+        dangling = {}
+        for collection_id, rules in self.db.conn.execute(
+            "SELECT id, rules FROM collections"
+        ):
+            for clause in json.loads(rules):
+                if clause.get("field") != "photo_ids":
+                    continue
+                missing = sorted(set(clause["value"]) - live)
+                if missing:
+                    dangling[collection_id] = missing
+        assert not dangling, (
+            f"collections name photos that do not exist: {dangling}"
+        )
 
     @invariant()
     def catalog_matches_disk(self):

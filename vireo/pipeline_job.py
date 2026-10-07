@@ -1965,6 +1965,29 @@ class _StageState:
                 continue
         return False
 
+    @contextlib.contextmanager
+    def prepare_scan_item(self, item):
+        """Wait for Pause/backpressure, then yield an unlocked publisher.
+
+        The ``break`` below leaves ``with self.scan_to_thumb.not_full:``,
+        which invokes the context manager's ``__exit__`` and releases the
+        queue mutex before control reaches the ``yield``. The returned
+        lambda therefore calls ``put_nowait`` with the mutex free and
+        acquires it itself — there is no re-acquisition across the yield.
+
+        The scanner is the queue's only producer, so once we observe free
+        space nothing else can refill the queue before ``put_nowait``.
+        """
+        while not self.control.should_abort(self.control.abort):
+            with self.scan_to_thumb.not_full:
+                if self.scan_to_thumb._qsize() < self.scan_to_thumb.maxsize:
+                    break  # releases scan_to_thumb.not_full before the yield
+                self.scan_to_thumb.not_full.wait(timeout=0.5)
+        else:
+            yield None
+            return
+        yield lambda: self.scan_to_thumb.put_nowait(item)
+
     def filter_excluded(self, photos):
         """Remove photos excluded by user selection in preview."""
         if not self.params.exclude_photo_ids:
@@ -1984,6 +2007,7 @@ def _wire_scan_stages(run, shared, *, skip_scan, snapshot_paths,
         _find_broken_metadata_folders=_find_broken_metadata_folders,
         _missing_archive_mount_root=_missing_archive_mount_root,
         _put_scan_item=shared.put_scan_item,
+        _prepare_scan_item=shared.prepare_scan_item,
         collected_photo_ids=shared.collected_photo_ids,
         effective_thumb_cache_dir=effective_thumb_cache_dir,
         effective_vireo_dir=effective_vireo_dir,

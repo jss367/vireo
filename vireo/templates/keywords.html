@@ -332,6 +332,7 @@
   </div>
 </div>
 
+<script src="/static/keywords-link-place-url.js"></script>
 <script>
 (function() {
   const TYPE_ICONS = {general:'\u25CF', taxonomy:'\uD83C\uDF3F', individual:'\uD83D\uDC64', location:'\uD83D\uDCCD', genre:'\uD83C\uDFAD'};
@@ -1624,7 +1625,7 @@
   window.__linkPlaceForTest = submitLinkPlace;
 
   // -- Init --
-  loadKeywords();
+  loadKeywords().then(() => openLinkPlaceFromUrl(allKeywords, openLinkPlaceModal));
 })();
 </script>
 </body>

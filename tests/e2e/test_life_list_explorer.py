@@ -147,3 +147,97 @@ def test_uncounted_identifications_are_reasoned_and_actionable(live_server, page
             ],
         }
     }
+
+
+def _hold_genus_species(page):
+    """Hold the next species-leaf request until the test releases it."""
+    held = []
+    page.route(
+        lambda url: "/api/life-list/explorer/species" in url,
+        lambda route: held.append(route),
+        times=1,
+    )
+    return held
+
+
+def _open_hummingbird_family(live_server, page):
+    _seed_hummingbird_tree(live_server["db"])
+    page.goto(f"{live_server['url']}/life-list?view=explorer")
+    page.locator(".ll-card", has_text="Swifts and Hummingbirds").click()
+    page.locator(".ll-card", has_text="Hummingbirds").click()
+    expect(page.locator("#explorerSunburstCenter")).to_have_attribute(
+        "data-name", "Hummingbirds"
+    )
+
+
+def _release(page, held):
+    with page.expect_response(lambda r: "/api/life-list/explorer/species" in r.url):
+        for route in held:
+            route.continue_()
+    # Let the resolved fetch run its continuation before asserting.
+    page.wait_for_timeout(200)
+
+
+def test_late_genus_species_response_does_not_replace_breadcrumb_navigation(
+    live_server, page
+):
+    _open_hummingbird_family(live_server, page)
+    held = _hold_genus_species(page)
+    with page.expect_request(lambda r: "/api/life-list/explorer/species" in r.url):
+        page.locator(".ll-card", has_text="Archilochus").click()
+    expect(page.locator("#explorerBody")).to_contain_text("Loading species")
+    assert held
+
+    # Leave the genus before its species arrive.
+    page.locator(".ll-crumb[data-depth='2']").click()
+    expect(page.locator(".ll-card", has_text="Selasphorus")).to_be_visible()
+
+    _release(page, held)
+    expect(page.locator(".ll-leaf-head")).to_have_count(0)
+    expect(page.locator(".ll-card", has_text="Archilochus")).to_be_visible()
+    expect(page.locator(".ll-card", has_text="Selasphorus")).to_be_visible()
+    expect(page.locator(".ll-crumb.current")).to_have_text("Hummingbirds")
+
+
+def test_late_genus_species_response_does_not_replace_another_genus(live_server, page):
+    _open_hummingbird_family(live_server, page)
+    held = _hold_genus_species(page)
+    with page.expect_request(lambda r: "/api/life-list/explorer/species" in r.url):
+        page.locator(".ll-card", has_text="Archilochus").click()
+    assert held
+
+    page.locator(".ll-crumb[data-depth='2']").click()
+    page.locator(".ll-card", has_text="Selasphorus").click()
+    expect(page.locator(".ll-leaf-head")).to_contain_text("0/1 species in Selasphorus")
+    expect(page.locator(".ll-sp", has_text="Selasphorus rufus")).to_be_visible()
+
+    _release(page, held)
+    expect(page.locator(".ll-leaf-head")).to_contain_text("0/1 species in Selasphorus")
+    expect(page.locator(".ll-sp", has_text="Selasphorus rufus")).to_be_visible()
+    expect(page.locator(".ll-sp", has_text="Archilochus colubris")).to_have_count(0)
+
+
+def test_rank_view_over_pending_genus_returns_to_that_genus(live_server, page):
+    _open_hummingbird_family(live_server, page)
+    # Load one genus fully so a leaf payload is cached.
+    page.locator(".ll-card", has_text="Archilochus").click()
+    expect(page.locator(".ll-sp", has_text="Archilochus colubris")).to_be_visible()
+    page.locator(".ll-crumb[data-depth='2']").click()
+
+    held = _hold_genus_species(page)
+    with page.expect_request(lambda r: "/api/life-list/explorer/species" in r.url):
+        page.locator(".ll-card", has_text="Selasphorus").click()
+    assert held
+
+    # Open a flat rank view while Selasphorus is still loading.
+    page.locator(".ll-sumchip[data-rank='family']").click()
+    expect(page.locator("#rankBackBtn")).to_be_visible()
+    _release(page, held)
+    expect(page.locator("#rankBackBtn")).to_be_visible()
+
+    # Back to cards returns to the genus the user opened, with its own species
+    # rather than the previously cached genus's.
+    page.locator("#rankBackBtn").click()
+    expect(page.locator(".ll-leaf-head")).to_contain_text("0/1 species in Selasphorus")
+    expect(page.locator(".ll-sp", has_text="Selasphorus rufus")).to_be_visible()
+    expect(page.locator(".ll-sp", has_text="Archilochus colubris")).to_have_count(0)

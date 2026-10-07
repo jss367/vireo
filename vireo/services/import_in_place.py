@@ -537,6 +537,7 @@ class _InPlaceImportRun:
 
         self.photo_ids = []
         self.seen_photo_ids = set()
+        self.reported_photo_identities = {}
         self.indexed_paths = set()
         self.root_errors = []
         self.scan_acc = {
@@ -720,6 +721,24 @@ class _InPlaceImportRun:
         self.runner.update_step(
             self.job["id"], "scan", current_file=os.path.basename(path),
         )
+
+    def _photo_merged_cb(self, old_id, new_id, path):
+        """Follow a JPEG photo the scan's pairing pass merged into its RAW.
+
+        ``old_id`` no longer names a photo and could be given to the next
+        insert, so the import collection, tags and chained Process job take
+        the RAW instead.
+        """
+        if old_id not in self.seen_photo_ids:
+            return
+        self.seen_photo_ids.discard(old_id)
+        self.photo_ids = [pid for pid in self.photo_ids if pid != old_id]
+        # Pairing changes catalog membership, not which source files the
+        # import scanned. The survivor may be outside a frozen snapshot;
+        # recording its path would count a second outcome for one JPEG.
+        if new_id is not None and new_id not in self.seen_photo_ids:
+            self.seen_photo_ids.add(new_id)
+            self.photo_ids.append(new_id)
 
     def _progress_cb(self, current, total):
         job = self.job
@@ -1100,6 +1119,8 @@ class _InPlaceImportRun:
                 "extract_full_metadata", True,
             ),
             photo_callback=self._photo_cb,
+            photo_merged_callback=self._photo_merged_cb,
+            reported_photo_identities=self.reported_photo_identities,
             status_callback=self._status_cb,
             recursive=plan.recursive,
             restrict_dirs=scope.dirs,
@@ -1319,11 +1340,10 @@ class _InPlaceImportRun:
 
     def _finish(self):
         if self.snapshot_paths is not None:
-            # Pairing can fold a newly scanned JPEG into an existing RAW
-            # row and delete the temporary JPEG row after photo_cb saw it.
-            # Resolve the frozen paths again so collections, tags, and a
-            # chained Process job receive durable catalog IDs rather than
-            # a deleted transient ID.
+            # Pairing can merge a JPEG photo into its RAW and delete the
+            # JPEG's row after photo_cb saw it (``_photo_merged_cb`` follows
+            # that). Resolve the frozen paths again anyway so collections,
+            # tags, and a chained Process job receive durable catalog IDs.
             catalog_ids_after = self._active_photo_ids_by_path()
             self.photo_ids = list(dict.fromkeys(
                 catalog_ids_after[path]

@@ -3,10 +3,10 @@
 ``create_app`` runs a handful of self-healing passes around startup: the
 ordered catalog repairs (``run_catalog_repairs``), the background thread that
 imports keywords embedded in already-scanned files and then marks species,
-the catalog-wide Wildlife genre retirement, the thumb_path and label-identity
-backfill jobs, and the teardown that stops the job runner and closes the
-startup database. ``StartupTasks`` owns them because they share per-app
-state (the app, its database path and the startup connection).
+the catalog-wide Wildlife genre retirement, the thumb_path, label-identity
+and EXIF search backfill jobs, and the teardown that stops the job runner
+and closes the startup database. ``StartupTasks`` owns them because they
+share per-app state (the app, its database path and the startup connection).
 
 This module decides *what* each pass does. *When* it runs (the
 ``VIREO_DISABLE_STARTUP_BACKFILL_TIMERS`` guards, thread and timer start
@@ -61,6 +61,44 @@ class StartupTasks:
                 repaired_location_ancestors,
             )
         init_db.create_default_collections_for_all_workspaces()
+        self.prune_collection_ids_of_missing_photos()
+
+    def prune_collection_ids_of_missing_photos(self):
+        """Take photos that no longer exist out of every static collection.
+
+        Every boot, not once behind a marker: deletes are covered at the
+        source (``repositories.photo_row_deletion``), but a collection can
+        still be saved with an id list captured before a delete (the filter
+        bar or collection editor submitting rules it loaded earlier, a job
+        saving the ids it gathered while photos were being deleted), and no
+        delete-side hook sees that. The check reads every collection's rules
+        and the catalog's photo ids, about 40 ms on a 100k-photo catalog
+        with 90k collection entries, and writes nothing when there is
+        nothing to remove. A hit is logged per collection, so a path that
+        still leaks shows up in the log.
+        """
+        db = self._init_db
+        started_at = time.time()
+        try:
+            pruned = db.prune_collection_ids_of_missing_photos()
+        except Exception:
+            log.exception("Could not check collections for deleted photos")
+            db.conn.rollback()
+            return []
+        if not pruned:
+            return []
+        for entry in pruned:
+            log.info(
+                "Removed %d deleted photo(s) from collection %d %r (workspace %s)",
+                entry["removed"], entry["collection_id"], entry["name"],
+                entry["workspace_id"],
+            )
+        log.warning(
+            "Removed %d entries for deleted photos from %d collection(s) in %.2fs",
+            sum(entry["removed"] for entry in pruned), len(pruned),
+            time.time() - started_at,
+        )
+        return pruned
 
     def retire_wildlife_genre(self):
         """Run the catalog-wide XMP migration outside startup readiness.
@@ -316,6 +354,69 @@ class StartupTasks:
             )
         except Exception:
             log.exception("Failed to start label list species ID job")
+
+
+    def kickoff_exif_search_backfill(self):
+        """Store searchable EXIF values for photos written before the triggers.
+
+        Metadata search walks a photo's EXIF only when its stored tag values
+        (``photo_exif_search_text``) contain the term; a photo without a row
+        falls back to the slower raw-text check. Triggers cover every later
+        EXIF write, so this pass only runs after an upgrade, or after a
+        definition change empties the table. Ephemeral JobRunner job, so it
+        shows in the bottom panel; skipped when nothing is unindexed.
+        """
+        db_path = self._db_path
+        check_db = None
+        try:
+            check_db = Database(db_path)
+            total = check_db.count_exif_search_unindexed()
+        except Exception:
+            log.exception("EXIF search backfill: pending check failed")
+            return
+        finally:
+            if check_db is not None:
+                check_db.close()
+        if not total:
+            log.debug("EXIF search backfill: nothing to index, skipping")
+            return
+
+        runner = self._app._job_runner
+
+        def work(job):
+            thread_db = Database(db_path)
+            try:
+                indexed = 0
+                after_id = 0
+                job["progress"]["total"] = total
+                while not runner.is_cancelled(job["id"]):
+                    batch = thread_db.index_exif_search_batch(after_id, 500)
+                    if batch is None:
+                        break
+                    after_id, count = batch
+                    indexed += count
+                    # Photos added meanwhile are indexed by the triggers, so
+                    # the pass can index fewer than it counted, never more.
+                    job["progress"]["current"] = min(indexed, total)
+                    runner.push_event(job["id"], "progress", {
+                        "current": job["progress"]["current"],
+                        "total": total,
+                        "phase": f"Indexing photo metadata for search: "
+                                 f"{job['progress']['current']:,} / {total:,} photos",
+                    })
+                log.info("EXIF search backfill: indexed %d photos", indexed)
+                return {"indexed": indexed}
+            finally:
+                thread_db.close()
+
+        try:
+            runner.start(
+                "exif_search_backfill", work,
+                ephemeral=True,
+                config={"trigger": "startup"},
+            )
+        except Exception:
+            log.exception("Failed to start EXIF search backfill job")
 
 
 def utc_iso_now():
