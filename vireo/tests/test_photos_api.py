@@ -13409,6 +13409,43 @@ def test_api_filter_values_clamps_limit(app_and_db):
     assert len(resp.get_json()["values"]) <= 500
 
 
+def test_api_filter_values_folder_uses_subtree_cap(app_and_db):
+    """The folder picker renders a hierarchy of every workspace folder, not a
+    50-value preview; the repository's ``_folder_filter_values`` already caps
+    the subtree facet at 10,000. The route must not clamp folder requests
+    back to the 500 default — otherwise scoped workspaces with 501..10,000
+    matching folders see valid paths silently disappear from the picker
+    (Codex review r4209417965)."""
+    app, _db = app_and_db
+    import db as db_module
+    original = db_module.Database.get_filter_field_values
+    captured = []
+
+    def wrapper(self, field, **kwargs):
+        captured.append((field, kwargs.get("limit")))
+        return original(self, field, **kwargs)
+
+    db_module.Database.get_filter_field_values = wrapper
+    try:
+        client = app.test_client()
+        # The folder facet client requests ``limit=10000``; the route must
+        # pass that through instead of clamping to the 500 default used for
+        # the typeahead's 50-value preview.
+        resp = client.get('/api/filters/values?field=folder&limit=10000')
+        assert resp.status_code == 200
+        # Non-folder fields keep the 500 ceiling so a huge library can't
+        # stream every distinct value out through one request.
+        resp = client.get('/api/filters/values?field=camera_model&limit=10000')
+        assert resp.status_code == 200
+    finally:
+        db_module.Database.get_filter_field_values = original
+
+    folder_limits = [lim for f, lim in captured if f == "folder"]
+    camera_limits = [lim for f, lim in captured if f == "camera_model"]
+    assert folder_limits == [10000], captured
+    assert camera_limits == [500], captured
+
+
 def test_api_filter_values_respects_scope(app_and_db):
     """Typeahead counts must respect the folder / dashboard-collection scope
     Browse passes to /api/photos/query; without this the badge beside each

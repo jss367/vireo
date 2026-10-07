@@ -1679,6 +1679,18 @@
       picker.scopeKey = scopeKey;
       picker.pending = false;
       refreshPickerOptions(node, picker);
+      // A sibling rule, visual clause or page-scope change while this
+      // request was in flight triggered a render whose ``loadValuePickers``
+      // skipped it (``picker.pending`` was true). No later render fires
+      // ``loadValuePickers`` on its own, so the pending request's
+      // completion is where that re-check has to happen or the picker
+      // stays scoped to the previous result set indefinitely (Codex
+      // review r4209417944). Re-run only while the picker is still open
+      // — a reopen will fire ``loadValuePickers`` on its own and refetch
+      // against the fresh scope.
+      if (picker.open && pickerScopeKey(node, picker) !== picker.scopeKey) {
+        requestPickerValues(node, picker);
+      }
     };
     const fail = () => {
       if (picker.request !== seq || valuePickerStates.get(node) !== picker) return;
