@@ -65,7 +65,7 @@ def create_encounters_blueprint(get_db, json_error, db_path):
         from pipeline_locks import acquire_workspace_regroup
 
         db = get_db()
-        with acquire_workspace_regroup(db._ws_id()):
+        with acquire_workspace_regroup(db.require_workspace_id()):
             return prediction_decisions.under_prediction_decision_lock(
                 db, lambda: _confirm_encounter_species(db),
                 json_error=json_error,
@@ -117,7 +117,7 @@ def create_encounters_blueprint(get_db, json_error, db_path):
         if error is not None:
             return error
 
-        ws_id = db._ws_id()
+        ws_id = db.require_workspace_id()
         confirmation.resolve_old_species_rows()
 
         # Run all mutations in a single transaction so that a mid-loop failure
@@ -144,7 +144,7 @@ def create_encounters_blueprint(get_db, json_error, db_path):
                     save_results_raw(
                         confirmation.before_cached,
                         confirmation.cache_dir,
-                        db._active_workspace_id,
+                        db.active_workspace_id,
                     )
                 except Exception:
                     log.exception("Failed to restore pipeline cache after species confirmation failed")
@@ -355,7 +355,7 @@ class _SpeciesConfirmation:
     def load_cache(self, load_results_raw):
         """Load the pipeline results and find the encounter holding the photos."""
         self.cached = load_results_raw(
-            self.cache_dir, self.db._active_workspace_id,
+            self.cache_dir, self.db.active_workspace_id,
         )
         self.before_cached = copy.deepcopy(self.cached)
         if self.cached:
@@ -1079,7 +1079,7 @@ class _SpeciesConfirmation:
             }
             from services.grouping_history import convert_to_grouping_edit
             convert_to_grouping_edit(self.db, self.photo_edit_id, change)
-        self.save_results_raw(cached, self.cache_dir, self.db._active_workspace_id)
+        self.save_results_raw(cached, self.cache_dir, self.db.active_workspace_id)
         self.cache_saved = True
 
     def _apply_burst_override(self):

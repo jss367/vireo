@@ -94,7 +94,7 @@ def resolve_folder_id(db, folder_id):
         raise ValueError("folder_id must be an integer") from None
     linked = db.conn.execute(
         "SELECT 1 FROM workspace_visible_folders WHERE workspace_id = ? AND folder_id = ?",
-        (db._active_workspace_id, folder_id),
+        (db.active_workspace_id, folder_id),
     ).fetchone()
     if not linked:
         raise LookupError("folder not found")
@@ -102,7 +102,7 @@ def resolve_folder_id(db, folder_id):
 
 
 def cache_key(db, folder_id):
-    return (db._db_path, db._active_workspace_id, folder_id)
+    return (db._db_path, db.active_workspace_id, folder_id)
 
 
 class MissingOriginals:
@@ -183,7 +183,7 @@ class MissingOriginals:
                 "job_id": inflight if isinstance(inflight, str) else None,
                 "photos": photos,
                 "backoff_seconds": backoff_seconds,
-                "workspace_id": db._active_workspace_id,
+                "workspace_id": db.active_workspace_id,
                 "folder_id": folder_id,
             }
 
@@ -381,7 +381,7 @@ class MissingOriginals:
             return self.payload(db, folder_id)
 
         runner = self._get_runner()
-        ws_id = db._active_workspace_id
+        ws_id = db.active_workspace_id
         db_file = db._db_path
         scope_label = "workspace" if folder_id is None else f"folder #{folder_id}"
 

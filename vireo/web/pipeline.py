@@ -74,7 +74,7 @@ def create_pipeline_blueprint(
             from pipeline_locks import acquire_workspace_regroup
 
             db = get_db()
-            with acquire_workspace_regroup(db._ws_id()):
+            with acquire_workspace_regroup(db.require_workspace_id()):
                 db.conn.execute("BEGIN IMMEDIATE")
                 try:
                     return fn()
@@ -218,7 +218,7 @@ def create_pipeline_blueprint(
                     "folder_ids must be a non-empty list of integers"
                 )
             db = get_db()
-            ws_for_folders = db._active_workspace_id
+            ws_for_folders = db.active_workspace_id
             subtree_ids = set()
             # Mirror the /api/jobs/pipeline folder resolution exactly so the
             # plan describes the same photos the run will process. Without
@@ -515,7 +515,7 @@ def create_pipeline_blueprint(
 
         db = launch.db
         runner = get_runner()
-        active_ws = db._active_workspace_id
+        active_ws = db.active_workspace_id
         runtime_warning = launch.runtime_warning(params)
 
         def work(job):
@@ -603,7 +603,7 @@ def create_pipeline_blueprint(
         # autosave can't read this same overrides snapshot and overwrite the
         # pipeline change with stale data.
         with settings_write_lock:
-            ws = db.get_workspace(db._active_workspace_id)
+            ws = db.get_workspace(db.active_workspace_id)
             current_overrides = {}
             if ws and ws["config_overrides"]:
                 with contextlib.suppress(json.JSONDecodeError, TypeError):
@@ -617,7 +617,7 @@ def create_pipeline_blueprint(
             pipeline_section.update(pipeline_updates)
             current_overrides["pipeline"] = pipeline_section
 
-            db.update_workspace(db._active_workspace_id, config_overrides=current_overrides)
+            db.update_workspace(db.active_workspace_id, config_overrides=current_overrides)
 
         return jsonify({"pipeline": pipeline_section, "status": "saved"})
 
@@ -710,8 +710,8 @@ def create_pipeline_blueprint(
             prune_missing_photos,
         )
         cache_dir = os.path.dirname(db_path)
-        prune_missing_photos(cache_dir, db._active_workspace_id, db)
-        results = load_results(cache_dir, db._active_workspace_id, db=db)
+        prune_missing_photos(cache_dir, db.active_workspace_id, db)
+        results = load_results(cache_dir, db.active_workspace_id, db=db)
         if results and results.get("photos"):
             # Cached pipeline rows predate edit recipes, which live in their
             # own table. Enrich them before Process Review positions overlays
@@ -763,7 +763,7 @@ def create_pipeline_blueprint(
             }
             row = db.conn.execute(
                 "SELECT last_group_fingerprint FROM workspaces WHERE id = ?",
-                (db._active_workspace_id,),
+                (db.active_workspace_id,),
             ).fetchone()
             last_group_fp = row["last_group_fingerprint"] if row else None
             current_group_fp = compute_group_fingerprint(effective_cfg)
@@ -807,7 +807,7 @@ def create_pipeline_blueprint(
                     review_readiness["enhancing_missing"].insert(0, "masks_partial")
             review_readiness["missing_required"] = []
 
-        ws = db.get_workspace(db._active_workspace_id)
+        ws = db.get_workspace(db.active_workspace_id)
         ws_overrides = {}
         if ws and ws["config_overrides"]:
             try:
@@ -924,8 +924,8 @@ def create_pipeline_blueprint(
         # that were deleted afterwards through other paths. Reconcile
         # against the DB at read time so the review page never renders
         # orphan cards that 404 on /thumbnails/<id>.jpg.
-        prune_missing_photos(cache_dir, db._active_workspace_id, db)
-        results = load_results(cache_dir, db._active_workspace_id, db=db)
+        prune_missing_photos(cache_dir, db.active_workspace_id, db)
+        results = load_results(cache_dir, db.active_workspace_id, db=db)
         if results is None:
             return json_error("No pipeline results found. Run regroup first.", 404)
         attach_live_pipeline_decisions(db, results)
@@ -1030,7 +1030,7 @@ def create_pipeline_blueprint(
         # cache and don't need the lock.
         writes_cache = save_cache and collection_id is None and photo_ids is None
         lock_ctx = (
-            acquire_workspace_regroup(db._active_workspace_id)
+            acquire_workspace_regroup(db.active_workspace_id)
             if writes_cache
             else contextlib.nullcontext()
         )
@@ -1059,12 +1059,12 @@ def create_pipeline_blueprint(
             # "Review misses" shortcut stays visible after a threshold
             # tweak. reflow/regroup-live do not recompute misses themselves.
             cache_dir = os.path.dirname(db_path)
-            existing = load_results_raw(cache_dir, db._active_workspace_id)
+            existing = load_results_raw(cache_dir, db.active_workspace_id)
             if existing and existing.get("miss_computed_at"):
                 results["miss_computed_at"] = existing["miss_computed_at"]
 
             if writes_cache:
-                save_results(results, cache_dir, db._active_workspace_id)
+                save_results(results, cache_dir, db.active_workspace_id)
 
         serialized = serialize_results(results, prior_results=existing)
         attach_nested_edit_recipes(db, serialized)
@@ -1124,7 +1124,7 @@ def create_pipeline_blueprint(
         # this endpoint's save would silently clobber.
         writes_cache = save_cache and collection_id is None and photo_ids is None
         lock_ctx = (
-            acquire_workspace_regroup(db._active_workspace_id)
+            acquire_workspace_regroup(db.active_workspace_id)
             if writes_cache
             else contextlib.nullcontext()
         )
@@ -1148,12 +1148,12 @@ def create_pipeline_blueprint(
             # "Review misses" shortcut stays visible after a threshold
             # tweak. regroup-live does not rerun the miss stage itself.
             cache_dir = os.path.dirname(db_path)
-            existing = load_results_raw(cache_dir, db._active_workspace_id)
+            existing = load_results_raw(cache_dir, db.active_workspace_id)
             if existing and existing.get("miss_computed_at"):
                 results["miss_computed_at"] = existing["miss_computed_at"]
 
             if writes_cache:
-                save_results(results, cache_dir, db._active_workspace_id)
+                save_results(results, cache_dir, db.active_workspace_id)
 
         serialized = serialize_results(results, prior_results=existing)
         attach_nested_edit_recipes(db, serialized)
@@ -1178,7 +1178,7 @@ def create_pipeline_blueprint(
 
         db = get_db()
         cache_dir = os.path.dirname(db_path)
-        results = load_results_raw(cache_dir, db._active_workspace_id)
+        results = load_results_raw(cache_dir, db.active_workspace_id)
         if results is None:
             return json_error("No pipeline results found", 404)
 
@@ -1291,7 +1291,7 @@ def create_pipeline_blueprint(
 
         db = get_db()
         cache_dir = os.path.dirname(db_path)
-        results = load_results_raw(cache_dir, db._active_workspace_id)
+        results = load_results_raw(cache_dir, db.active_workspace_id)
         if results is None:
             return json_error("No pipeline results found", 404)
 
@@ -1433,7 +1433,7 @@ def create_pipeline_blueprint(
         body = request.get_json(silent=True) or {}
         db = get_db()
         cache_dir = os.path.dirname(db_path)
-        current = load_results_raw(cache_dir, db._ws_id())
+        current = load_results_raw(cache_dir, db.require_workspace_id())
         if current is None:
             return json_error("No pipeline results found", 404)
         restored = copy.deepcopy(current)
@@ -1573,7 +1573,7 @@ def create_pipeline_blueprint(
             if not db._photo_in_workspace(pid):
                 return json_error(f"Photo {pid} is not in the active workspace", 403)
 
-        results = load_results_raw(os.path.dirname(db_path), db._ws_id())
+        results = load_results_raw(os.path.dirname(db_path), db.require_workspace_id())
         before = copy.deepcopy(results)
         removed = body.get("removed", [])
         if not isinstance(removed, list) or any(type(pid) is not int for pid in removed):
@@ -1652,13 +1652,13 @@ def create_pipeline_blueprint(
             saved = False
             try:
                 if results is not None:
-                    save_results_raw(results, os.path.dirname(db_path), db._ws_id())
+                    save_results_raw(results, os.path.dirname(db_path), db.require_workspace_id())
                     saved = True
                 db.conn.commit()
             except Exception:
                 db.conn.rollback()
                 if saved:
-                    save_results_raw(before, os.path.dirname(db_path), db._ws_id())
+                    save_results_raw(before, os.path.dirname(db_path), db.require_workspace_id())
                 raise
             db._prune_edit_history()
 
@@ -1705,7 +1705,7 @@ def create_pipeline_blueprint(
                 400,
             )
         db = get_db()
-        ws = db._ws_id()
+        ws = db.require_workspace_id()
         rows = db.conn.execute(
             """
             SELECT pm.photo_id
@@ -1774,7 +1774,7 @@ def create_pipeline_blueprint(
         # workspace-effective detector threshold, but the diagnostics keep raw
         # counts so the UI can distinguish "not run" from "hidden by threshold".
         import config as cfg
-        ws = db._active_workspace_id
+        ws = db.active_workspace_id
         effective_cfg = db.get_effective_config(cfg.load())
         min_conf = effective_cfg.get(
             "detector_confidence", 0.2
@@ -2276,7 +2276,7 @@ class _PipelineLaunch:
         active workspace, so unrelated descendants can never leak in.
         """
         db = self.db
-        ws_for_folders = db._active_workspace_id
+        ws_for_folders = db.active_workspace_id
         subtree_ids = set()
         # Import _chunks so the path-prefix workspace filter below can
         # split large legacy subtrees across multiple IN(...) statements.
@@ -2362,7 +2362,7 @@ class _PipelineLaunch:
                 f"SELECT p.id, p.folder_id, p.filename FROM photos p "
                 f"JOIN photo_workspace_visibility pv ON pv.photo_id = p.id "
                 f"WHERE p.folder_id IN ({marks}) AND pv.workspace_id = ?",
-                [*chunk, db._active_workspace_id],
+                [*chunk, db.active_workspace_id],
             ):
                 if r["id"] in excluded_photo_ids_set:
                     continue

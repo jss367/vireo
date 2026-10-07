@@ -318,7 +318,7 @@ def grouped_keywords(db):
         JOIN keywords k ON k.id = pk.keyword_id
         JOIN photos p ON p.id = pk.photo_id
         JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-        WHERE wf.workspace_id = ? GROUP BY d.identity""", (db._ws_id(),),
+        WHERE wf.workspace_id = ? GROUP BY d.identity""", (db.require_workspace_id(),),
     )}
     aliases = defaultdict(list)
     for row in db.conn.execute('SELECT keyword_id, path_json FROM keyword_import_aliases'):

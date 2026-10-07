@@ -111,7 +111,7 @@ def _capture_metadata(db, build_life_list, resolve_visual, include_locations,
     folders = {f["id"]: f["path"] for f in db.conn.execute(
         "SELECT f.id, f.path FROM folders f "
         "JOIN workspace_visible_folders wf ON wf.folder_id = f.id WHERE wf.workspace_id = ?",
-        (db._ws_id(),),
+        (db.require_workspace_id(),),
     )}
     for offset in range(0, total, 200):
         progress(offset, total, "", "Reading photo metadata")
@@ -171,7 +171,7 @@ def export_site(db, vireo_dir, destination, *, build_life_list, resolve_visual,
             progress_cb(current, total, name, phase)
 
     progress(0, 0, "", "Preparing site export")
-    workspace_id = db._ws_id()
+    workspace_id = db.require_workspace_id()
     with TemporaryFile(mode="w+t", encoding="utf-8") as snapshot:
         db.conn.execute("BEGIN")
         try:

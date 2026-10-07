@@ -172,7 +172,7 @@ def create_workspace_blueprint(
     @blueprint.route("/api/workspaces/active")
     def api_get_active_workspace():
         db = get_db()
-        ws = db.get_workspace(db._active_workspace_id)
+        ws = db.get_workspace(db.active_workspace_id)
         if not ws:
             return json_error("No active workspace", 404)
         result = dict(ws)
@@ -415,7 +415,7 @@ def create_workspace_blueprint(
         if len(workspaces) <= 1:
             return json_error("Cannot delete the only workspace")
         # Prevent deleting the active workspace
-        if ws_id == db._active_workspace_id:
+        if ws_id == db.active_workspace_id:
             return json_error("Cannot delete the active workspace. Switch first.")
         # Guard and delete run under stage_boundary_lock so a stage claim
         # cannot commit between the check and the workspace DELETE.
@@ -458,15 +458,15 @@ def create_workspace_blueprint(
         # Save current page path to the outgoing workspace's ui_state
         body = request.get_json(silent=True) or {}
         current_path = body.get("current_path")
-        if current_path and db._active_workspace_id:
-            old_ws = db.get_workspace(db._active_workspace_id)
+        if current_path and db.active_workspace_id:
+            old_ws = db.get_workspace(db.active_workspace_id)
             if old_ws:
                 try:
                     ui = json.loads(old_ws["ui_state"]) if old_ws["ui_state"] else {}
                 except (json.JSONDecodeError, TypeError):
                     ui = {}
                 ui["last_path"] = current_path
-                db.update_workspace(db._active_workspace_id, ui_state=ui)
+                db.update_workspace(db.active_workspace_id, ui_state=ui)
 
         # Activate the new workspace
         db.set_active_workspace(ws_id)
@@ -759,7 +759,7 @@ def create_workspace_blueprint(
     def api_workspace_config():
         """Get the active workspace's config overrides."""
         db = get_db()
-        ws = db.get_workspace(db._active_workspace_id)
+        ws = db.get_workspace(db.active_workspace_id)
         if not ws:
             return jsonify({})
         overrides = {}
@@ -805,7 +805,7 @@ def create_workspace_blueprint(
         # All-settings region can't race with a curated workspace-form save
         # and silently drop a recent override.
         with settings_write_lock:
-            ws = db.get_workspace(db._active_workspace_id)
+            ws = db.get_workspace(db.active_workspace_id)
             existing = {}
             if ws and ws["config_overrides"]:
                 try:
@@ -840,7 +840,7 @@ def create_workspace_blueprint(
                     existing.pop(k, None)
                 else:
                     existing[k] = v
-            db.update_workspace(db._active_workspace_id, config_overrides=existing if existing else None)
+            db.update_workspace(db.active_workspace_id, config_overrides=existing if existing else None)
         return jsonify({"ok": True, "overrides": existing})
 
     @blueprint.route("/api/workspaces/active/subject-types", methods=["GET"])
@@ -1088,7 +1088,7 @@ def create_workspace_blueprint(
     @blueprint.route("/api/workspaces/active/new-images")
     def api_workspace_new_images():
         db = get_db()
-        ws_id = db._active_workspace_id
+        ws_id = db.active_workspace_id
         if ws_id is None:
             return jsonify({"workspace_id": None, "new_count": 0, "per_root": [], "sample": []})
 
@@ -1193,7 +1193,7 @@ def create_workspace_blueprint(
         import volume_reachability
 
         db = get_db()
-        ws_id = db._active_workspace_id
+        ws_id = db.active_workspace_id
         if ws_id is None:
             return jsonify({"workspace_id": None, "rechecked": False})
         volume_reachability.invalidate_caches()
@@ -1211,7 +1211,7 @@ def create_workspace_blueprint(
     @blueprint.route("/api/workspaces/active/new-images/snapshot", methods=["POST"])
     def api_workspace_new_images_snapshot_create():
         db = get_db()
-        ws_id = db._active_workspace_id
+        ws_id = db.active_workspace_id
         if ws_id is None:
             return jsonify({"error": "no active workspace"}), 400
         cache = db._new_images_cache
@@ -1284,7 +1284,7 @@ def create_workspace_blueprint(
     )
     def api_workspace_new_images_snapshot_get(snapshot_id):
         db = get_db()
-        if db._active_workspace_id is None:
+        if db.active_workspace_id is None:
             abort(404)
         snap = db.get_new_images_snapshot(snapshot_id)
         if snap is None:
@@ -1317,7 +1317,7 @@ def create_workspace_blueprint(
         from models import get_models
 
         db = get_db()
-        ws_id = db._active_workspace_id
+        ws_id = db.active_workspace_id
         if not ws_id:
             return json_error("No active workspace", status=400)
         ws = db.get_workspace(ws_id)

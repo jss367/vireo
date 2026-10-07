@@ -306,7 +306,7 @@ def create_audit_blueprint(
             )
             conflict = local_copy_scan_conflict(
                 db, paths,
-                active_workspace_id=db._active_workspace_id,
+                active_workspace_id=db.active_workspace_id,
                 pending_stage_sources=pending_sources,
             )
             if conflict:

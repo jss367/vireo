@@ -307,7 +307,7 @@ def create_caches_blueprint(get_db, json_error, db_path, config):
     def api_culling_results():
         """Return the most recent culling analysis results for the active workspace."""
         db = get_db()
-        cache_path = os.path.join(os.path.dirname(db_path), f"culling_results_ws{db._active_workspace_id}.json")
+        cache_path = os.path.join(os.path.dirname(db_path), f"culling_results_ws{db.active_workspace_id}.json")
         if not os.path.exists(cache_path):
             return json_error("No culling analysis found. Run one first.", 404)
 

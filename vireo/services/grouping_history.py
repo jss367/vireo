@@ -220,13 +220,13 @@ def save_grouping_edit(db, before, after, description, *, photo_edit=None, items
     record_grouping_edit(db, description, change, items)
     saved = False
     try:
-        save_results_raw(after, cache_dir, db._ws_id())
+        save_results_raw(after, cache_dir, db.require_workspace_id())
         saved = True
         db.conn.commit()
     except Exception:
         db.conn.rollback()
         if saved:
-            save_results_raw(before, cache_dir, db._ws_id())
+            save_results_raw(before, cache_dir, db.require_workspace_id())
         raise
     db._prune_edit_history()
 
@@ -333,14 +333,14 @@ def restore_species_confirm_cache_edit(db, entry, *, undo):
     from pipeline import load_results_raw, save_results_raw
     from pipeline_locks import acquire_workspace_regroup
 
-    lock = acquire_workspace_regroup(db._ws_id())
+    lock = acquire_workspace_regroup(db.require_workspace_id())
     if not lock.acquire(blocking=False):
         raise GroupingHistoryConflict(
             'Photo groups are being updated. Try again when processing finishes.'
         )
     try:
         cache_dir = os.path.dirname(db._db_path)
-        current = load_results_raw(cache_dir, db._ws_id())
+        current = load_results_raw(cache_dir, db.require_workspace_id())
         change = json.loads(entry["new_value"])
         if current is None:
             raise GroupingHistoryStale(
@@ -419,13 +419,13 @@ def restore_species_confirm_cache_edit(db, entry, *, undo):
                 enc["confirmed_species_list"] = list(
                     replacement.get("confirmed_species_list") or []
                 )
-        save_results_raw(restored, cache_dir, db._ws_id())
+        save_results_raw(restored, cache_dir, db.require_workspace_id())
         try:
             yield
         except Exception:
             if db.conn.in_transaction:
                 db.conn.rollback()
-            save_results_raw(current, cache_dir, db._ws_id())
+            save_results_raw(current, cache_dir, db.require_workspace_id())
             raise
     finally:
         lock.release()
@@ -454,12 +454,12 @@ def restore_grouping_edit(db, entry, *, undo):
     # Undo already holds the database writer lock. Never wait here: processing
     # takes the regroup lock first and may need the database before releasing
     # it. Ordinary photo undo does not need this lock at all.
-    lock = acquire_workspace_regroup(db._ws_id())
+    lock = acquire_workspace_regroup(db.require_workspace_id())
     if not lock.acquire(blocking=False):
         raise GroupingHistoryConflict('Photo groups are being updated. Try again when processing finishes.')
     try:
         cache_dir = os.path.dirname(db._db_path)
-        current = load_results_raw(cache_dir, db._ws_id())
+        current = load_results_raw(cache_dir, db.require_workspace_id())
         expected = change["after" if undo else "before"]
         target = change["before" if undo else "after"]
         signature = (lambda value: value) if change.get("label_edit") else _grouping_signature
@@ -477,7 +477,7 @@ def restore_grouping_edit(db, entry, *, undo):
         restored["summary"] = _restored_summary(
             current.get("summary"), restored["encounters"],
         )
-        save_results_raw(restored, cache_dir, db._ws_id())
+        save_results_raw(restored, cache_dir, db.require_workspace_id())
         try:
             yield
         except Exception:
@@ -488,7 +488,7 @@ def restore_grouping_edit(db, entry, *, undo):
             # grouping state on disk and leave history desynchronized.
             if db.conn.in_transaction:
                 db.conn.rollback()
-            save_results_raw(current, cache_dir, db._ws_id())
+            save_results_raw(current, cache_dir, db.require_workspace_id())
             raise
     finally:
         lock.release()

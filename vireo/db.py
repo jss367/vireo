@@ -1041,6 +1041,19 @@ class Database:
             raise RuntimeError("No active workspace set")
         return self._active_workspace_id
 
+    @property
+    def active_workspace_id(self):
+        """The active workspace id, or ``None`` when no workspace is active.
+
+        The public read of the active-workspace state for code outside this
+        class; change it through ``set_active_workspace``.
+        """
+        return self._active_workspace_id
+
+    def require_workspace_id(self):
+        """Return the active workspace id, raising ``RuntimeError`` if none is set."""
+        return self._ws_id()
+
     def get_new_images_for_workspace(self, workspace_id):
         """Return new-images result for workspace, using cache when fresh.
 

@@ -254,7 +254,7 @@ class StartupTasks:
         def work(job):
             thread_db = Database(db_path)
             try:
-                active_ws = init_db._active_workspace_id
+                active_ws = init_db.active_workspace_id
                 if active_ws is not None:
                     thread_db.set_active_workspace(active_ws)
 

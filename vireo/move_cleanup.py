@@ -105,7 +105,7 @@ def _folder_owned_elsewhere(db, folder):
     except ImportError:
         from move import _path_equal_or_descends
     if folder["id"] is not None and any(
-        workspace["id"] != db._active_workspace_id
+        workspace["id"] != db.active_workspace_id
         for workspace in db.get_folder_workspaces(folder["id"])
     ):
         return True
@@ -114,7 +114,7 @@ def _folder_owned_elsewhere(db, folder):
     for root in db.conn.execute(
         "SELECT wf.workspace_id, f.path FROM workspace_folders wf "
         "JOIN folders f ON f.id = wf.folder_id "
-        "WHERE wf.is_root = 1 AND wf.workspace_id IS NOT ?", (db._active_workspace_id,),
+        "WHERE wf.is_root = 1 AND wf.workspace_id IS NOT ?", (db.active_workspace_id,),
     ):
         if folder["id"] in db._removed_workspace_folder_ids(root["workspace_id"]):
             continue
@@ -165,8 +165,8 @@ def _remove_empty_source(db, source, expected_device, expected_inode):
     except Exception:
         db.conn.rollback()
         raise
-    if db._active_workspace_id is not None:
-        db._new_images_cache.invalidate_workspaces(db._db_path, [db._active_workspace_id])
+    if db.active_workspace_id is not None:
+        db._new_images_cache.invalidate_workspaces(db._db_path, [db.active_workspace_id])
 
 
 def finish_source(db, source, expected_device=None, expected_inode=None):

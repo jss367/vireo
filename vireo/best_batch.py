@@ -57,7 +57,7 @@ def best_batch_scope(db, seed_photo_id, max_gap_seconds=8.0, max_sequence_gap=2,
     folder_id = seed["folder_id"]
     seed_key = _filename_sequence_key(seed["filename"])
     seed_ext = (seed["extension"] or os.path.splitext(seed["filename"])[1]).lower()
-    ws = db._ws_id()
+    ws = db.require_workspace_id()
 
     def _limited(rows):
         if len(rows) <= max_photos:

@@ -415,7 +415,7 @@ def create_photo_edit_recipes_blueprint(
                  AND ehi.photo_id = ?
                ORDER BY eh.created_at DESC, eh.id DESC
                LIMIT ?""",
-            (db._ws_id(), photo_id, limit),
+            (db.require_workspace_id(), photo_id, limit),
         ).fetchall()
 
         from image_edits import copy_recipe

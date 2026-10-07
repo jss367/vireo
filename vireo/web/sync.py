@@ -1091,7 +1091,7 @@ def create_sync_blueprint(get_db, json_error, get_runner):
     def _active_workspace_sync(db):
         for job in get_runner().list_jobs():
             if (job.get("type") == "sync"
-                    and job.get("workspace_id") == db._ws_id()
+                    and job.get("workspace_id") == db.require_workspace_id()
                     and job.get("status") in ("queued", "running", "pausing", "paused")):
                 return {key: job[key] for key in ("id", "status", "progress")}
         return None
@@ -1108,7 +1108,7 @@ def create_sync_blueprint(get_db, json_error, get_runner):
                UNION ALL
                SELECT change_type, COUNT(*), 0
                FROM pending_changes WHERE workspace_id = ? GROUP BY change_type""",
-            (db._ws_id(), db._ws_id()),
+            (db.require_workspace_id(), db.require_workspace_id()),
         ).fetchall()
         return jsonify({
             "pending_count": counts[0]["changes"],
@@ -1140,7 +1140,7 @@ def create_sync_blueprint(get_db, json_error, get_runner):
                JOIN keywords k ON k.id = pk.keyword_id
                WHERE pc.workspace_id = ? AND pc.change_type = 'location'
                  AND k.type = 'location'""",
-            (db._ws_id(),),
+            (db.require_workspace_id(),),
         ).fetchone()[0]
         return jsonify({
             "photos_with_location": photos,
@@ -1186,7 +1186,7 @@ def create_sync_blueprint(get_db, json_error, get_runner):
 
         requested_revision = request.args.get("revision")
         snapshot = _sync_preview_get_snapshot(
-            db, db._ws_id(), requested_revision,
+            db, db.require_workspace_id(), requested_revision,
         )
         revision = snapshot["revision"]
         if requested_revision and requested_revision != revision:
@@ -1240,7 +1240,7 @@ def create_sync_blueprint(get_db, json_error, get_runner):
         # progressive review on this existing conflict response.
         if (
             not has_more
-            and _sync_preview_pending_fingerprint(db, db._ws_id())
+            and _sync_preview_pending_fingerprint(db, db.require_workspace_id())
             != snapshot["fingerprint"]
         ):
             return json_error(
@@ -1261,7 +1261,7 @@ def create_sync_blueprint(get_db, json_error, get_runner):
             if not isinstance(revision, str) or not revision:
                 return json_error("revision required for discard_all")
 
-            ws_id = db._ws_id()
+            ws_id = db.require_workspace_id()
             try:
                 # Validate and delete under one write transaction. This keeps
                 # another request from replacing or adding a pending row
@@ -1322,7 +1322,7 @@ def create_sync_blueprint(get_db, json_error, get_runner):
             changes.extend(db.conn.execute(
                 f"SELECT * FROM pending_changes "
                 f"WHERE id IN ({placeholders}) AND workspace_id = ?",
-                list(chunk) + [db._ws_id()],
+                list(chunk) + [db.require_workspace_id()],
             ).fetchall())
 
         db.clear_pending(
