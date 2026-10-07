@@ -339,3 +339,15 @@ def test_presets_do_not_transfer_manual_mask_corrections(regions):
         assert result['local']['regions'] == regions
     else:
         assert not result or 'local' not in result
+
+
+@pytest.mark.parametrize('regions', [[], [{'region': 'subject', 'adjustments': {'exposure': 1}}]])
+def test_radius_and_local_preset_preserves_radius_for_sharpened_destination(regions):
+    source = {'adjustments': {'sharpen': 50, 'sharpen_radius': 2},
+              'local': {'mask': {'ref': 'a' * 12, 'source_digest': 'test', 'corrected': True},
+                        'regions': regions}}
+    recipe, fields = decode_preset(encode_preset(source, ['adjustments.sharpen_radius', 'local']))
+    assert recipe['adjustments']['sharpen_radius'] == 2
+    assert 'sharpen' not in recipe['adjustments']
+    result = compose_recipe({'adjustments': {'sharpen': 30, 'sharpen_radius': 1.5}}, recipe, fields, 'merge')
+    assert result['adjustments'] == {'sharpen': 30, 'sharpen_radius': 2}
