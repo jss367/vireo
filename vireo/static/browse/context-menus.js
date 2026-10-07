@@ -155,8 +155,10 @@ function buildPhotoContextMenu(photoIds, contextPhotoId) {
     ? Number(contextPhotoId)
     : (one ? Number(photoIds[0]) : null);
   // Only a loaded photo's known status disables "View on Map"; anything else
-  // goes to the map, which explains a photo it cannot place.
-  var oneLoaded = one ? photos.find(function(p) { return p.id === Number(photoIds[0]); }) : null;
+  // goes to the map, which explains a photo it cannot place. A right-click on
+  // an expanded stack member finds it through browseStackMembers, not the
+  // top-level photos array, so look it up through findBrowsePhoto.
+  var oneLoaded = one ? findBrowsePhoto(Number(photoIds[0])) : null;
   var noMapLocation = !!oneLoaded && oneLoaded.location_status === 'none';
   var copiedDevelopment = window.vireoEditNav
     ? window.vireoEditNav.getCopiedRecipe()
