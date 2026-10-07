@@ -3842,6 +3842,31 @@ def test_pipeline_folder_ids_rejects_out_of_range_integer(app_and_db, bad_fid):
         assert "folder_ids" in resp.get_json()["error"]
 
 
+@pytest.mark.parametrize(
+    "bad_fid",
+    [
+        1 << 63,          # one past SQLite's signed 64-bit max
+        -(1 << 63) - 1,   # one below SQLite's signed 64-bit min
+        1 << 70,          # obviously out of range
+    ],
+)
+def test_pipeline_plan_folder_ids_rejects_out_of_range_like_run(app_and_db, bad_fid):
+    """``/api/pipeline/plan`` must reject an out-of-range folder id with
+    the same 400 as ``/api/jobs/pipeline``. Without the shared range guard
+    the plan route binds ``bad_fid`` into the workspace-visible-folder
+    lookup, sqlite3 raises ``OverflowError``, and the request 500s."""
+    app, _ = app_and_db
+    with app.test_client() as client:
+        plan = client.post("/api/pipeline/plan", json={"folder_ids": [bad_fid]})
+        run = client.post("/api/jobs/pipeline", json={
+            "folder_ids": [bad_fid], "skip_classify": True, "skip_extract_masks": True, "skip_eye_keypoints": True, "skip_regroup": True,
+        })
+        assert plan.status_code == 400, plan.get_json()
+        assert run.status_code == 400, run.get_json()
+        assert plan.get_json()["error"] == run.get_json()["error"]
+        assert "signed 64-bit" in plan.get_json()["error"]
+
+
 def test_pipeline_folder_ids_includes_legacy_null_parent_descendants(app_and_db):
     """A workspace root's ad-hoc collection must include descendant folders
     whose ``parent_id`` is NULL even though their paths sit under the root.
