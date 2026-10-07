@@ -106,54 +106,60 @@ class DuplicatesRepository:
         return [r["id"] for r in dup_rows]
 
     def find_groups(self, include_resolved=False):
-        """Return duplicate groups; see ``Database.find_duplicate_groups``."""
-        unresolved_rows = self.conn.execute(
+        """Return duplicate groups; see ``Database.find_duplicate_groups``.
+
+        Finds the shared hashes on the covering ``file_hash`` index first and
+        reads ``flag`` only for their rows: a ``GROUP BY`` over every photo
+        that also reads ``flag`` costs ~0.4s on a 100k-photo catalog, which
+        ``/api/duplicates/last-scan`` pays on every page load.
+        """
+        rows = self.conn.execute(
             """
-            SELECT file_hash, GROUP_CONCAT(id) AS ids
+            SELECT file_hash, id, flag
             FROM photos
-            WHERE file_hash IS NOT NULL AND (flag IS NULL OR flag != 'rejected')
-            GROUP BY file_hash
-            HAVING COUNT(*) > 1
+            WHERE file_hash IN (
+                SELECT file_hash FROM photos
+                WHERE file_hash IS NOT NULL
+                GROUP BY file_hash
+                HAVING COUNT(*) > 1
+            )
+            ORDER BY file_hash, id
             """
         ).fetchall()
-        groups = [
-            {
-                "file_hash": r["file_hash"],
-                "photo_ids": [int(x) for x in r["ids"].split(",")],
-                "status": "unresolved",
-            }
-            for r in unresolved_rows
-        ]
+        members = {}
+        for r in rows:
+            members.setdefault(r["file_hash"], []).append(
+                (r["id"], r["flag"] == "rejected")
+            )
 
-        if not include_resolved:
-            return groups
-
-        # Resolved groups: hashes where exactly 1 non-rejected row exists
-        # AND at least 1 rejected row shares the hash. We exclude purely-
-        # rejected hashes (e.g. user manually rejected the only copy of a
-        # photo for non-duplicate reasons) — without the kept-row anchor
-        # there is no "loser of a duplicate group" to clean up.
-        resolved_rows = self.conn.execute(
-            """
-            SELECT file_hash,
-                   GROUP_CONCAT(id) AS ids,
-                   SUM(CASE WHEN flag IS NULL OR flag != 'rejected' THEN 1 ELSE 0 END) AS kept,
-                   SUM(CASE WHEN flag  = 'rejected' THEN 1 ELSE 0 END) AS rejected
-            FROM photos
-            WHERE file_hash IS NOT NULL
-            GROUP BY file_hash
-            HAVING kept = 1 AND rejected >= 1
-            """
-        ).fetchall()
-        groups.extend(
-            {
-                "file_hash": r["file_hash"],
-                "photo_ids": [int(x) for x in r["ids"].split(",")],
-                "status": "resolved",
-            }
-            for r in resolved_rows
-        )
-        return groups
+        unresolved = []
+        resolved = []
+        for file_hash, rows_for_hash in members.items():
+            kept = [pid for pid, rejected in rows_for_hash if not rejected]
+            if len(kept) > 1:
+                unresolved.append({
+                    "file_hash": file_hash,
+                    "photo_ids": kept,
+                    "status": "unresolved",
+                })
+            # Resolved: exactly 1 non-rejected row plus 1+ rejected rows
+            # sharing the hash. Purely-rejected hashes (e.g. the user
+            # manually rejected the only copy of a photo for non-duplicate
+            # reasons) are excluded — without the kept-row anchor there is
+            # no "loser of a duplicate group" to clean up.
+            elif include_resolved and len(kept) == 1:
+                resolved.append({
+                    "file_hash": file_hash,
+                    "photo_ids": [pid for pid, _ in rows_for_hash],
+                    "status": "resolved",
+                    # The single non-rejected row. A later flag edit that
+                    # swaps which member is kept and which is rejected
+                    # keeps ``photo_ids`` the same but changes the winner,
+                    # so callers that fingerprint a resolved group need
+                    # this to notice.
+                    "winner_id": kept[0],
+                })
+        return unresolved + resolved
 
     def reopen(self, file_hash):
         """Un-reject the rows with ``file_hash`` that the duplicate resolver
