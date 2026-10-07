@@ -404,3 +404,17 @@ def test_v13_companion_identities_remain_trusted_after_sync_state_migration(tmp_
             (7, "IMG.jpg", 10, None, "h", None, 0),
             (8, "OTHER.jpg", 20, "2024-01-15", "other", 123.0, 0),
         ]
+
+
+def test_version_14_catalog_gains_paired_preview_cache(tmp_path):
+    path = str(tmp_path / "pre-paired.db")
+    with Database(path) as db:
+        db.conn.execute("DROP TABLE paired_preview_cache")
+        db.conn.execute("PRAGMA user_version=14")
+        db.conn.commit()
+        schema._apply_pending(db.conn)
+        assert db.conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert [r[1] for r in db.conn.execute("PRAGMA table_info(paired_preview_cache)")] == [
+            "filename", "photo_id", "bytes", "last_access_at",
+        ]
+        assert db.conn.execute("PRAGMA foreign_key_list(paired_preview_cache)").fetchone()[2] == "photos"

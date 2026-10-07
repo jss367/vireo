@@ -1,6 +1,6 @@
 """Persistence for the on-disk caches: the preview LRU and offline originals.
 
-Both tables are catalog-wide (keyed by photo id, not by workspace), so the
+The caches are catalog-wide (keyed by photo id, not by workspace), so the
 repository takes no workspace id. The lock-retry helpers
 (``execute_with_retry`` / ``commit_with_retry``) live in ``db``; the façade
 passes them in so this module imports no ``db`` code and a monkeypatch of
@@ -44,9 +44,10 @@ class CachesRepository:
         self.conn.commit()
 
     def preview_total_bytes(self):
-        """Return total bytes tracked in preview_cache."""
+        """Return total bytes tracked across ordinary and paired previews."""
         row = self.conn.execute(
-            "SELECT COALESCE(SUM(bytes), 0) AS total FROM preview_cache"
+            "SELECT (SELECT COALESCE(SUM(bytes), 0) FROM preview_cache) + "
+            "(SELECT COALESCE(SUM(bytes), 0) FROM paired_preview_cache) AS total"
         ).fetchone()
         return row["total"]
 
@@ -64,6 +65,58 @@ class CachesRepository:
             "WHERE photo_id=? AND size=?",
             (photo_id, size),
         ).fetchone()
+
+    def paired_preview_insert(self, photo_id, filename, bytes_):
+        """Join the publisher's transaction; the filename includes source state."""
+        import time
+        self.conn.execute(
+            "INSERT OR REPLACE INTO paired_preview_cache "
+            "(filename, photo_id, bytes, last_access_at) VALUES (?, ?, ?, ?)",
+            (filename, photo_id, bytes_, time.time()),
+        )
+
+    def paired_preview_get(self, filename):
+        return self.conn.execute(
+            "SELECT * FROM paired_preview_cache WHERE filename=?", (filename,),
+        ).fetchone()
+
+    def paired_preview_touch(self, filename):
+        import time
+        self.conn.execute(
+            "UPDATE paired_preview_cache SET last_access_at=? WHERE filename=?",
+            (time.time(), filename),
+        )
+        self.conn.commit()
+
+    def paired_preview_oldest_first(self):
+        return self.conn.execute(
+            "SELECT * FROM paired_preview_cache ORDER BY last_access_at",
+        ).fetchall()
+
+    def paired_preview_delete(self, filename):
+        """Delete one paired_preview_cache entry (caller removes the file)."""
+        self.conn.execute(
+            "DELETE FROM paired_preview_cache WHERE filename=?", (filename,),
+        )
+        self.conn.commit()
+
+    def preview_delete_entries(self, preview_keys, paired_filenames):
+        """Delete ordinary entries by (photo_id, size) and paired ones by filename, then commit."""
+        self.conn.executemany(
+            "DELETE FROM preview_cache WHERE photo_id=? AND size=?",
+            list(preview_keys),
+        )
+        self.conn.executemany(
+            "DELETE FROM paired_preview_cache WHERE filename=?",
+            [(filename,) for filename in paired_filenames],
+        )
+        self.conn.commit()
+
+    def preview_clear_all(self):
+        """Delete every ordinary and paired preview entry (caller removes the files)."""
+        self.conn.execute("DELETE FROM preview_cache")
+        self.conn.execute("DELETE FROM paired_preview_cache")
+        self.conn.commit()
 
     # -- offline original cache ----------------------------------------------
 

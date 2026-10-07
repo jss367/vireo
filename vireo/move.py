@@ -2785,7 +2785,7 @@ class _PhotoMove:
     def update_catalog(self, item):
         """Repoint the verified photo's row at the destination folder."""
         db = self.db
-        link_destination = not self.workspace_linked and db._active_workspace_id is not None
+        link_destination = not self.workspace_linked and db.active_workspace_id is not None
         # Link destination and repoint the photo together, before deleting
         # originals. A failed visibility write must not leave a folder-wide
         # link exposing unrelated destination siblings after a failed move.
@@ -2793,7 +2793,7 @@ class _PhotoMove:
         try:
             if link_destination:
                 db._add_workspace_folder_no_commit(
-                    db._active_workspace_id, self.dest_folder_id, restore_removed=True,
+                    db.active_workspace_id, self.dest_folder_id, restore_removed=True,
                 )
             db.preserve_photo_visibility_for_move(item.pid, self.keep_visible)
             db.conn.execute(
@@ -2809,7 +2809,7 @@ class _PhotoMove:
             raise
         if link_destination:
             self.workspace_linked = True
-            db._new_images_cache.invalidate_workspaces(db._db_path, [db._active_workspace_id])
+            db._new_images_cache.invalidate_workspaces(db._db_path, [db.active_workspace_id])
         # Pin the stem to the proven source folder path so a same-source
         # sibling can follow in this call while a distinct source is
         # still rejected. Using the path (not folders.id) survives a

@@ -136,7 +136,7 @@ def create_keywords_blueprint(get_db, json_error):
         as duplicates the cleanup endpoint can never actually merge.
         """
         db = get_db()
-        ws = db._active_workspace_id
+        ws = db.active_workspace_id
         dupes = db.conn.execute(
             """SELECT LOWER(k.name) as lname, GROUP_CONCAT(k.id) as ids,
                       GROUP_CONCAT(k.name, ' | ') as names, COUNT(DISTINCT k.id) as cnt

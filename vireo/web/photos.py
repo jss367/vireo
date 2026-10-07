@@ -264,7 +264,7 @@ def create_photos_blueprint(
             return json_error("photo_ids must be a list")
 
         db = get_db()
-        ws_id = db._active_workspace_id
+        ws_id = db.active_workspace_id
         deleted = 0
         skipped = 0
         folder_online_cache = {}
@@ -366,7 +366,7 @@ def create_photos_blueprint(
             )
 
         db = get_db()
-        ws_id = db._active_workspace_id
+        ws_id = db.active_workspace_id
         confirmed_ids = []
         restored_ids = []
         folder_offline_ids = []
@@ -974,7 +974,7 @@ def create_photos_blueprint(
                JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
                WHERE wf.workspace_id = ? AND p.id IN ({placeholders})""",
-            (db._ws_id(), *photo_ids),
+            (db.require_workspace_id(), *photo_ids),
         ).fetchall()
         by_id = {row["id"]: row for row in rows}
         rows = [by_id[pid] for pid in photo_ids if pid in by_id]

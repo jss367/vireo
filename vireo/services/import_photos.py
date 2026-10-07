@@ -131,7 +131,7 @@ def _local_copy_conflict(runner, db, paths):
     )
     return local_copy_scan_conflict(
         db, paths,
-        active_workspace_id=db._active_workspace_id,
+        active_workspace_id=db.active_workspace_id,
         pending_stage_sources=pending_sources,
     )
 
@@ -519,7 +519,7 @@ class _ImportPhotosRequest:
                 self.parent_resume,
                 parent_err,
             ) = self.service._validate_parent_import_job(
-                parent_id_raw.strip(), self.db._active_workspace_id, self.db,
+                parent_id_raw.strip(), self.db.active_workspace_id, self.db,
                 snapshot_out=self.parent_takeover_snapshot,
             )
             if parent_err is not None:

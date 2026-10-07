@@ -72,7 +72,7 @@ class _HighlightsRelabel:
 
     def snapshot_curation(self):
         self._snapshot_predicted_species()
-        self.ws_id = self.db._ws_id()
+        self.ws_id = self.db.require_workspace_id()
         # Chunk both lookups: photo_ids has no upstream cap
         # (_parse_highlight_photo_ids just parses the list), so a bulk
         # relabel of >999 photos would blow SQLITE_MAX_VARIABLE_NUMBER
@@ -546,7 +546,7 @@ def create_highlights_blueprint(get_db, json_error):
     def _highlight_top_predictions(db, photo_ids):
         if not photo_ids:
             return {}
-        ws = db._ws_id()
+        ws = db.require_workspace_id()
         results = {}
         batch_size = 800
         for i in range(0, len(photo_ids), batch_size):
@@ -628,7 +628,7 @@ def create_highlights_blueprint(get_db, json_error):
         }, None
 
     def _photo_can_be_life_list_preference(db, species, photo_id):
-        ws = db._ws_id()
+        ws = db.require_workspace_id()
         # Accept a hierarchy leaf whose taxon links back to a root
         # identification with the same curation name. See the matching
         # comment on Database.get_species_representative_lists: after

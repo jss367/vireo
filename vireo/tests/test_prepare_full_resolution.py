@@ -1205,3 +1205,210 @@ def test_preparation_guard_accepts_matching_recipe(client_with_photo):
     for size in (1920, 2560, 3840):
         assert db.preview_cache_get(photo_id, size), size
         assert (preview_dir / f"{photo_id}_{size}.jpg").is_file(), size
+
+
+@pytest.mark.parametrize("cache_fault", [None, "expired", "long_review", "wrong_state", "publication_failure", "relocated"])
+def test_prepare_raw_jpeg_pair_warms_paired_jpeg_tiers(
+    client_with_photo, monkeypatch, cache_fault,
+):
+    """A RAW+JPEG pair's paired-JPEG preview tiers are a cache hit after prep.
+
+    The lightbox defaults a RAW+JPEG pair to the JPEG and appends
+    ``?source=jpeg`` to every render URL; ``_serve_preview`` bypasses the
+    ordinary ``(photo_id, size)`` cache for source-specific requests and
+    writes a paired shadow cache instead. Without warming the paired tiers
+    the first fit-size request still decoded the companion JPEG, so the
+    job must report the pair ready only when the paired tiers are on disk.
+    """
+    import image_loader
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    folder_path = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id "
+        "WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()["path"]
+    # Convert the fixture's photo into a RAW+JPEG pair by renaming the
+    # primary to a RAW extension and adding a companion JPEG next to it.
+    # A real NEF decoder isn't available in tests; the stub only has to
+    # make ``is_raw_jpeg_pair`` see a RAW primary. The ``load_image``
+    # patch below mirrors what production does when a RAW can't decode
+    # for the ordinary ``/preview`` and ``/original`` paths: fall back
+    # to the companion JPEG. The ``?source=jpeg`` paired path never
+    # touches the RAW at all.
+    raw_path = os.path.join(folder_path, "paired.NEF")
+    with open(raw_path, "wb") as raw_file:
+        raw_file.write(b"stub raw bytes")
+    companion_path = os.path.join(folder_path, "paired.jpg")
+    Image.new("RGB", (800, 600), (90, 170, 60)).save(
+        companion_path, "JPEG", quality=85,
+    )
+    raw_stat = os.stat(raw_path)
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='paired.NEF', extension='.nef',
+               companion_path='paired.jpg', width=800, height=600,
+               file_size=?, file_mtime=?, working_copy_path=NULL
+           WHERE id=?""",
+        (raw_stat.st_size, raw_stat.st_mtime, photo_id),
+    )
+    db.conn.commit()
+    # Setting a recipe routes /original through ``serve_edited`` whose
+    # ``_rescue_failed_edit_decode`` falls back to the companion when
+    # the RAW can't decode — the same fallback the ``/preview`` path
+    # uses. This keeps the stub NEF harmless so the test can focus on
+    # the paired-cache warming the finding is about.
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+
+    original_load_image = image_loader.load_image
+    paired_jpeg_decodes = []
+
+    def paired_aware_load_image(path, *args, **kwargs):
+        if str(path).lower().endswith(".nef"):
+            return None  # force the companion-JPEG fallback
+        if str(path) == companion_path:
+            paired_jpeg_decodes.append(str(path))
+        return original_load_image(path, *args, **kwargs)
+
+    monkeypatch.setattr(
+        image_loader, "load_image", paired_aware_load_image,
+    )
+
+    from types import SimpleNamespace
+
+    from web import job_launchers, media
+
+    if cache_fault in {"expired", "relocated"}:
+        # Advance the renderer's clock at the final cross-selection check,
+        # after all three tiers passed their immediate warming checks.
+        clock = {"offset": 0}
+        monkeypatch.setattr(media, "time", SimpleNamespace(
+            time=lambda: time.time() + clock["offset"],
+        ))
+        original_check = job_launchers._paired_jpeg_preview_exists
+        checks = []
+
+        def expire_before_final_check(*args):
+            checks.append(args)
+            if len(checks) > 3:
+                if cache_fault == "expired":
+                    clock["offset"] = media._PAIRED_PREVIEW_TTL_SEC + 1
+                elif len(checks) == 4:
+                    # Relocation retains folder_id, but the renderer now
+                    # selects a different live companion at its current path.
+                    from db import Database
+
+                    relocated = Path(folder_path).parent / "relocated"
+                    relocated.mkdir()
+                    (relocated / "paired.NEF").write_bytes(b"stub raw bytes")
+                    Image.new("RGB", (800, 600), (180, 40, 70)).save(
+                        relocated / "paired.jpg", "JPEG", quality=85,
+                    )
+                    writer = Database(db._db_path)
+                    try:
+                        folder_id = writer.get_photo(photo_id)["folder_id"]
+                        writer.relocate_folder(folder_id, str(relocated))
+                        assert writer.get_photo(photo_id)["folder_id"] == folder_id
+                    finally:
+                        writer.close()
+            return original_check(*args)
+
+        monkeypatch.setattr(job_launchers, "_paired_jpeg_preview_exists",
+                            expire_before_final_check)
+    elif cache_fault in {"wrong_state", "publication_failure"}:
+        original_write = media.atomic_write_bytes
+
+        def fail_current_paired_publication(data, path):
+            if "_jpeg_" in str(path) and Path(path).parent.name == "paired":
+                if cache_fault == "wrong_state":
+                    # A nonempty artifact for a different source/render
+                    # state cannot stand in for the failed current write.
+                    wrong = Path(str(path).rsplit("_", 1)[0] + "_wrongstate.jpg")
+                    wrong.parent.mkdir(parents=True, exist_ok=True)
+                    wrong.write_bytes(data)
+                raise OSError("simulated paired artifact publication failure")
+            return original_write(data, path)
+
+        monkeypatch.setattr(media, "atomic_write_bytes", fail_current_paired_publication)
+
+    started = client.post(
+        "/api/jobs/prepare-full-resolution", json={"photo_ids": [photo_id]},
+    )
+    job = wait_for_job_via_client(client, started.get_json()["job_id"])
+    fails = cache_fault in {"wrong_state", "publication_failure", "relocated"}
+    assert job["status"] == ("failed" if fails else "completed"), job
+    result = job["result"]
+    if fails:
+        assert result["ready"] == 0, result
+        assert result["failed"] == 1, result
+        assert result["ok"] is False, result
+        return
+    assert result["ok"] is True, result
+    assert result["ready"] == 1, result
+    assert result["failed"] == 0, result
+
+    preview_dir = Path(os.path.dirname(app.config["THUMB_CACHE_DIR"]), "previews")
+    paired_dir = preview_dir / "paired"
+    assert paired_dir.is_dir()
+    for size in (1920, 2560, 3840):
+        matches = list(paired_dir.glob(f"{photo_id}_{size}_jpeg_*.jpg"))
+        assert matches, f"no paired JPEG preview for size {size}"
+        assert any(m.stat().st_size > 0 for m in matches), size
+
+    if cache_fault == "long_review":
+        # The review starts an hour after preparation, and startup reconciliation runs.
+        # Registration is persistent, and old mtimes must not expire it.
+        from preview_cache import reconcile_preview_cache
+        for artifact in paired_dir.glob("*.jpg"):
+            old = time.time() - 3600
+            os.utime(artifact, (old, old))
+        monkeypatch.setattr(media, "time", SimpleNamespace(
+            time=lambda: time.time() + 3600,
+        ))
+        reconcile_preview_cache(db, str(preview_dir.parent))
+
+    decodes_after_prep = len(paired_jpeg_decodes)
+
+    # The lightbox default: /preview?size=N&source=jpeg must now be a
+    # cache hit — no further companion decodes after preparation.
+    for size in (1920, 2560, 3840):
+        url = f"/photos/{photo_id}/preview?size={size}&source=jpeg"
+        response = client.get(url)
+        assert response.status_code == 200, (url, response.status_code)
+        with Image.open(io.BytesIO(response.data)) as image:
+            # The paired path renders the companion as-authored, so the
+            # response is the companion's own geometry rather than the
+            # catalog row's (which, for a RAW+JPEG pair, may differ).
+            assert image.size[0] > 0 and image.size[1] > 0, url
+        response.close()
+    assert len(paired_jpeg_decodes) == decodes_after_prep, (
+        "lightbox JPEG fit view decoded again after preparation: "
+        f"{paired_jpeg_decodes[decodes_after_prep:]}"
+    )
+
+
+def test_prepare_non_pair_does_not_warm_paired_cache(client_with_photo):
+    """A plain JPEG photo must not produce paired shadow cache entries.
+
+    Non-pair photos never request ``?source=jpeg`` from the lightbox,
+    so warming a paired tier for them would waste both a decode and a
+    cache slot. The pair gate must only fire for RAW primaries with
+    JPEG companions.
+    """
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+
+    started = client.post(
+        "/api/jobs/prepare-full-resolution", json={"photo_ids": [photo_id]},
+    )
+    job = wait_for_job_via_client(client, started.get_json()["job_id"])
+    assert job["status"] == "completed", job
+    assert job["result"]["ready"] == 1
+
+    preview_dir = Path(os.path.dirname(app.config["THUMB_CACHE_DIR"]), "previews")
+    paired_dir = preview_dir / "paired"
+    # No paired entries exist (and the directory does not need to).
+    assert not paired_dir.exists() or not list(
+        paired_dir.glob(f"{photo_id}_*.jpg")
+    )

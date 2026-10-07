@@ -117,7 +117,7 @@ def create_history_blueprint(
             # their recorded snapshots), and a plain keyword edit never
             # changed them.
             refresh_cache_species_for_photos(
-                cache_dir, db._active_workspace_id, species_by_photo,
+                cache_dir, db.active_workspace_id, species_by_photo,
                 photos_only=True,
             )
         except Exception:
@@ -192,13 +192,13 @@ def create_history_blueprint(
         latest = db.conn.execute(
             f"SELECT id, description FROM edit_history WHERE workspace_id = ? AND undone = 0 AND action_type NOT IN ({placeholders}) "
             "ORDER BY created_at DESC, id DESC LIMIT 1",
-            (db._ws_id(), *non_undoable),
+            (db.require_workspace_id(), *non_undoable),
         ).fetchone()
         if not latest:
             return jsonify({"available": False, "description": "", "count": 0})
         total = db.conn.execute(
             f"SELECT COUNT(*) FROM edit_history WHERE workspace_id = ? AND undone = 0 AND action_type NOT IN ({placeholders})",
-            (db._ws_id(), *non_undoable),
+            (db.require_workspace_id(), *non_undoable),
         ).fetchone()[0]
         return jsonify({
             "available": True,
@@ -254,7 +254,7 @@ def create_history_blueprint(
         latest = db.conn.execute(
             f"SELECT id, description FROM edit_history WHERE workspace_id = ? AND undone = 1 AND action_type NOT IN ({placeholders}) "
             "ORDER BY created_at ASC, id ASC LIMIT 1",
-            (db._ws_id(), *non_undoable),
+            (db.require_workspace_id(), *non_undoable),
         ).fetchone()
         if not latest:
             return jsonify({"available": False, "description": ""})

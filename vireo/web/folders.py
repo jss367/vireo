@@ -67,7 +67,7 @@ def create_folders_blueprint(
             db.conn.execute("BEGIN")
             try:
                 folders = [dict(f) for f in db.get_folder_tree()]
-                active_workspace_id = db._ws_id()
+                active_workspace_id = db.require_workspace_id()
             finally:
                 db.conn.rollback()
             return jsonify(
@@ -138,7 +138,7 @@ def create_folders_blueprint(
             return json_error("folder not found", 404)
         linked = db.conn.execute(
             "SELECT 1 FROM workspace_visible_folders WHERE workspace_id = ? AND folder_id = ?",
-            (db._active_workspace_id, folder_id),
+            (db.active_workspace_id, folder_id),
         ).fetchone()
         if not linked:
             return json_error("folder not found", 404)
@@ -162,7 +162,7 @@ def create_folders_blueprint(
         # names without mutating the membership table during a GET.
         folder_workspaces = db.get_folder_workspaces(folder_id)
         if not any(
-            workspace["id"] == db._active_workspace_id
+            workspace["id"] == db.active_workspace_id
             for workspace in folder_workspaces
         ):
             return json_error("folder not found", 404)
@@ -172,7 +172,7 @@ def create_folders_blueprint(
             workspaces.append({
                 "id": workspace["id"],
                 "name": workspace["name"],
-                "is_active": workspace["id"] == db._active_workspace_id,
+                "is_active": workspace["id"] == db.active_workspace_id,
                 "is_root": bool(workspace["is_root"]),
             })
         return jsonify({

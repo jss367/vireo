@@ -5680,15 +5680,19 @@ def test_full_redirect_forwards_prefetch_flag_to_original(client_with_photo):
     assert "prefetch" not in resp.headers["Location"]
 
 
+@pytest.mark.parametrize("quota_mb", [20, 0])
 def test_paired_preview_shares_decode_across_warmup_and_visible(
-    client_with_photo, monkeypatch,
+    client_with_photo, monkeypatch, quota_mb,
 ):
     """A paired-source warmup and the follow-up visible request must share
     one decode: the paired URLs differ (prefetch=1 vs nothing) so the browser
     cannot coalesce them, so the server must — through the paired shadow
     cache — otherwise both requests decode the same source concurrently.
     """
+    import config as cfg
     import preview_materializer
+    config_load = cfg.load
+    monkeypatch.setattr(cfg, "load", lambda: {**config_load(), "preview_cache_max_mb": quota_mb})
     from PIL import Image
 
     app, db, photo_id = client_with_photo
@@ -5736,10 +5740,14 @@ def test_paired_preview_shares_decode_across_warmup_and_visible(
     visible = client.get(f"/photos/{photo_id}/preview?size=1920&source=jpeg")
     assert visible.status_code == 200
     assert visible.data == warmup.data
-    assert len(render_calls) == 1, (
+    expected_decodes = 1 if quota_mb else 2
+    assert len(render_calls) == expected_decodes, (
         "second paired request re-decoded the same source; the paired "
         "shadow cache should have satisfied it"
     )
+
+    assert bool(db.paired_preview_cache_oldest_first()) == bool(quota_mb)
+    assert (db.preview_cache_total_bytes() > 0) == bool(quota_mb)
 
     # The distinct RAW variant is a separate flight and must not be served
     # from the JPEG paired shadow — pixel contamination is the exact
@@ -5747,7 +5755,7 @@ def test_paired_preview_shares_decode_across_warmup_and_visible(
     raw_probe = client.get(f"/photos/{photo_id}/preview?size=1920&source=raw")
     assert raw_probe.status_code in (200, 500)
     if raw_probe.status_code == 200:
-        assert len(render_calls) == 2
+        assert len(render_calls) == expected_decodes + 1
         assert render_calls[-1] == "raw"
 
 

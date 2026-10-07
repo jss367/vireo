@@ -251,7 +251,7 @@ def create_collections_blueprint(get_db, json_error):
         body = request.get_json(silent=True) or {}
         row = db.conn.execute(
             "SELECT id, name, rules FROM collections WHERE id = ? AND workspace_id = ?",
-            (collection_id, db._ws_id()),
+            (collection_id, db.require_workspace_id()),
         ).fetchone()
         if not row:
             return json_error("collection not found", 404)
@@ -284,7 +284,7 @@ def create_collections_blueprint(get_db, json_error):
             updates.append("visual_json = ?")
             params.append(json.dumps(visual) if visual else None)
         if updates:
-            params.extend([collection_id, db._ws_id()])
+            params.extend([collection_id, db.require_workspace_id()])
             db.conn.execute(
                 f"UPDATE collections SET {', '.join(updates)} "
                 "WHERE id = ? AND workspace_id = ?",
@@ -321,7 +321,7 @@ def create_collections_blueprint(get_db, json_error):
 
         row = db.conn.execute(
             "SELECT rules, visual_json FROM collections WHERE id = ? AND workspace_id = ?",
-            (collection_id, db._ws_id()),
+            (collection_id, db.require_workspace_id()),
         ).fetchone()
         if not row:
             return json_error("Collection not found", 404)
@@ -378,7 +378,7 @@ def create_collections_blueprint(get_db, json_error):
 
         db.conn.execute(
             "UPDATE collections SET rules = ? WHERE id = ? AND workspace_id = ?",
-            (json.dumps(rules), collection_id, db._ws_id()),
+            (json.dumps(rules), collection_id, db.require_workspace_id()),
         )
         db.conn.commit()
         return jsonify({"ok": True, "total": len(ids_rule["value"])})

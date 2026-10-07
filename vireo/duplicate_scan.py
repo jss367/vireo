@@ -52,6 +52,13 @@ def revalidate_scan_result(db, result):
     are rebuilt from the groups that remain. Returns a new result dict with
     ``stale_group_count`` set to the number of groups dropped. Does no
     filesystem I/O, so a sleeping NAS cannot stall the page load.
+
+    Also says whether a new scan would find the same groups, so the page
+    only asks for one when it would show something different:
+    ``new_group_count`` counts duplicate groups in the catalog now whose
+    hash the scan never saw, and ``changed_group_count`` counts the scan's
+    groups that a new scan would show differently (another copy added or
+    gone, a decision applied since, or the group no longer a duplicate).
     """
     proposals = result.get("proposals") or []
     photo_ids = sorted({
@@ -87,6 +94,9 @@ def revalidate_scan_result(db, result):
             continue
         kept.append(dict(p, losers=losers))
 
+    new_group_count, changed_group_count = _changes_since_scan(
+        db, proposals, kept,
+    )
     return dict(
         result,
         proposals=kept,
@@ -102,7 +112,101 @@ def revalidate_scan_result(db, result):
             len(p["losers"]) for p in kept if p.get("status") == "resolved"
         ),
         stale_group_count=len(proposals) - len(kept),
+        new_group_count=new_group_count,
+        changed_group_count=changed_group_count,
     )
+
+
+def _group_state(status, photo_ids, winner_id):
+    # The members alone don't say which copy the page shows as KEEP: a flag
+    # edit can swap a resolved group's kept and rejected copies, and a
+    # changed mtime can make the resolver pick the other copy of an
+    # unresolved one, which ``/api/duplicates/apply`` would then keep.
+    return status, frozenset(photo_ids), winner_id
+
+
+def _entry_ids(proposal):
+    return [
+        e.get("id")
+        for e in [proposal.get("winner") or {}] + list(proposal.get("losers") or [])
+    ]
+
+
+def _unresolved_winners(db, groups, shown_entries):
+    """Return ``{file_hash: winner_id}`` the resolver would pick now for each
+    unresolved group whose copies the restored scan all shows.
+
+    Path and mtime come from the catalog; whether each file exists comes
+    from the stored scan, so this does no filesystem I/O. A group with a
+    copy the scan never saw differs in its members anyway.
+    """
+    groups = [
+        g for g in groups
+        if all(pid in shown_entries for pid in g["photo_ids"])
+    ]
+    rows = _fetch_photo_rows(
+        db, sorted({pid for g in groups for pid in g["photo_ids"]}),
+        columns="p.id, p.filename, p.file_mtime, f.path AS folder_path",
+    )
+    by_id = {r["id"]: r for r in rows}
+    winners = {}
+    for g in groups:
+        candidates = []
+        for pid in g["photo_ids"]:
+            row = by_id.get(pid)
+            if row is None:
+                break
+            entry = shown_entries[pid]
+            candidates.append(DupCandidate(
+                id=pid,
+                path=os.path.join(row["folder_path"] or "", row["filename"] or ""),
+                mtime=row["file_mtime"] or 0.0,
+                exists=bool(entry.get("exists", True) or entry.get("volume_offline")),
+            ))
+        else:
+            winners[g["file_hash"]] = resolve_duplicates(candidates)[0]
+    return winners
+
+
+def _changes_since_scan(db, stored_proposals, shown_proposals):
+    """Compare the groups a restored scan shows with the catalog's groups now.
+
+    Returns ``(new_group_count, changed_group_count)``. A group is the same
+    when a new scan would show the same copies with the same one kept: an
+    unresolved group lists its non-rejected copies and the copy the resolver
+    picks from current metadata, a resolved one every copy and the one kept,
+    as ``find_duplicate_groups`` reports them. A group dropped by
+    revalidation counts as changed only if its hash still forms a group.
+    """
+    groups = db.find_duplicate_groups(include_resolved=True)
+    shown_entries = {
+        e.get("id"): e
+        for p in shown_proposals
+        for e in [p.get("winner") or {}] + list(p.get("losers") or [])
+    }
+    unresolved_winners = _unresolved_winners(
+        db, [g for g in groups if g["status"] == "unresolved"], shown_entries,
+    )
+    current = {
+        g["file_hash"]: _group_state(
+            g["status"], g["photo_ids"],
+            g.get("winner_id") if g["status"] == "resolved"
+            else unresolved_winners.get(g["file_hash"]),
+        )
+        for g in groups
+    }
+    shown = {
+        p.get("file_hash"): _group_state(
+            p.get("status"), _entry_ids(p), (p.get("winner") or {}).get("id"),
+        )
+        for p in shown_proposals
+    }
+    scanned = {p.get("file_hash") for p in stored_proposals}
+    new_group_count = sum(1 for h in current if h not in scanned)
+    changed_group_count = sum(
+        1 for h in scanned if shown.get(h) != current.get(h)
+    )
+    return new_group_count, changed_group_count
 
 
 def _volume_offline(path):

@@ -85,6 +85,17 @@ def _validate_companion_sync_state(conn):
         raise RuntimeError("companion_identities.needs_sync is missing")
 
 
+def _add_paired_preview_cache(conn):
+    conn.execute("""CREATE TABLE IF NOT EXISTS paired_preview_cache (
+        filename TEXT PRIMARY KEY,
+        photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+        bytes INTEGER NOT NULL,
+        last_access_at REAL NOT NULL
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_paired_preview_photo "
+                 "ON paired_preview_cache(photo_id)")
+
+
 MIGRATIONS = (
     Migration(
         13, "companion_identities_file_mtime",
@@ -94,6 +105,7 @@ MIGRATIONS = (
         14, "companion_identities_sync_state",
         _add_companion_sync_state, _validate_companion_sync_state,
     ),
+    Migration(15, "durable_paired_preview_cache", _add_paired_preview_cache),
 )
 
 

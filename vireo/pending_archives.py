@@ -17,7 +17,7 @@ def register_pending_archive(db, archive_id, destination, staging_destination, t
     db.conn.execute(
         "INSERT OR IGNORE INTO pending_archives "
         "(id, workspace_id, destination, staging_destination, target_json) VALUES (?, ?, ?, ?, ?)",
-        (archive_id, db._ws_id(), destination, staging_destination, json.dumps(target)),
+        (archive_id, db.require_workspace_id(), destination, staging_destination, json.dumps(target)),
     )
     db.conn.commit()
 
@@ -25,7 +25,7 @@ def register_pending_archive(db, archive_id, destination, staging_destination, t
 def get_pending_archive(db, archive_id):
     row = db.conn.execute(
         "SELECT * FROM pending_archives WHERE id = ? AND workspace_id = ?",
-        (archive_id, db._ws_id()),
+        (archive_id, db.require_workspace_id()),
     ).fetchone()
     return dict(row) if row else None
 

@@ -180,7 +180,7 @@ def out_of_workspace_prediction_ids(db, pred_ids):
     if not pred_ids:
         return set()
     pred_ids = list(pred_ids)
-    ws = db._ws_id()
+    ws = db.require_workspace_id()
     # Rows whose ``workspace_folders`` join misses are out of scope. The
     # LEFT JOIN keeps a row for every prediction id regardless of folder
     # membership; the WHERE clause selects the misses.

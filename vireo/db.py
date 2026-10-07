@@ -1041,6 +1041,19 @@ class Database:
             raise RuntimeError("No active workspace set")
         return self._active_workspace_id
 
+    @property
+    def active_workspace_id(self):
+        """The active workspace id, or ``None`` when no workspace is active.
+
+        The public read of the active-workspace state for code outside this
+        class; change it through ``set_active_workspace``.
+        """
+        return self._active_workspace_id
+
+    def require_workspace_id(self):
+        """Return the active workspace id, raising ``RuntimeError`` if none is set."""
+        return self._ws_id()
+
     def get_new_images_for_workspace(self, workspace_id):
         """Return new-images result for workspace, using cache when fresh.
 
@@ -4900,7 +4913,7 @@ class Database:
         self._caches_repository().preview_delete(photo_id, size)
 
     def preview_cache_total_bytes(self):
-        """Return total bytes tracked in preview_cache."""
+        """Return total bytes tracked across ordinary and paired previews."""
         return self._caches_repository().preview_total_bytes()
 
     def preview_cache_oldest_first(self):
@@ -4910,6 +4923,31 @@ class Database:
     def preview_cache_get(self, photo_id, size):
         """Return the row for (photo_id, size), or None."""
         return self._caches_repository().preview_get(photo_id, size)
+
+    def paired_preview_cache_insert(self, photo_id, filename, bytes_):
+        """Register a source-keyed preview in the publisher's transaction."""
+        self._caches_repository().paired_preview_insert(photo_id, filename, bytes_)
+
+    def paired_preview_cache_get(self, filename):
+        return self._caches_repository().paired_preview_get(filename)
+
+    def paired_preview_cache_touch(self, filename):
+        self._caches_repository().paired_preview_touch(filename)
+
+    def paired_preview_cache_oldest_first(self):
+        return self._caches_repository().paired_preview_oldest_first()
+
+    def paired_preview_cache_delete(self, filename):
+        """Delete one paired preview entry (caller removes the file)."""
+        self._caches_repository().paired_preview_delete(filename)
+
+    def preview_cache_delete_entries(self, preview_keys, paired_filenames):
+        """Delete ordinary entries by (photo_id, size) and paired ones by filename."""
+        self._caches_repository().preview_delete_entries(preview_keys, paired_filenames)
+
+    def preview_cache_clear_all(self):
+        """Delete every ordinary and paired preview entry (caller removes the files)."""
+        self._caches_repository().preview_clear_all()
 
     # ------------------------------------------------------------------
     # offline original cache

@@ -26868,7 +26868,7 @@ def test_registry_declares_mutation_impact_for_every_field():
     # ``EXISTS`` predicate cannot change when a runner-up joins (Codex
     # review r4013497441, revising r4013378150).
     assert moved_by(MUTATION_PREDICTION) == {
-        "prediction_status", "prediction_confidence", "metadata"
+        "prediction_status", "prediction_confidence", "metadata", "top_predicted_species"
     }
     assert moved_by(MUTATION_WILDLIFE) == {"wildlife_excluded"}
 

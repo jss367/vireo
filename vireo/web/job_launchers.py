@@ -26,7 +26,7 @@ from flask import Blueprint, current_app, jsonify, request
 from preview_cache import (
     evict_if_over_quota as evict_preview_cache_if_over_quota,
 )
-from preview_cache import lightbox_fit_preview_sizes
+from preview_cache import lightbox_fit_preview_sizes, paired_preview_ready
 from preview_materializer import (
     PreviewMaterializationError,
     materialize_preview,
@@ -63,6 +63,61 @@ def _count_lines(path):
             return sum(1 for line in f if line.strip())
     except (OSError, UnicodeError):
         return None
+
+
+def _photo_is_raw_jpeg_pair(photo):
+    """Mirror of ``static/lightbox/edits.js``'s ``vireoPhotoIsRawJpegPair``.
+
+    The lightbox defaults a photo matching this predicate to its JPEG and
+    appends ``?source=jpeg`` to every render URL. ``_serve_preview``
+    bypasses the ordinary ``(photo_id, size)`` cache for source-specific
+    requests and writes the paired shadow cache instead — so a
+    prepare-full-resolution run that warmed only the ordinary tiers would
+    still trigger a decode on the lightbox's first fit-size request for
+    the pair.
+    """
+    if not photo or not photo["companion_path"]:
+        return False
+    from image_loader import RAW_EXTENSIONS
+
+    primary_ext = os.path.splitext(photo["filename"])[1].lower()
+    if primary_ext not in RAW_EXTENSIONS:
+        return False
+    companion_ext = os.path.splitext(photo["companion_path"])[1].lower()
+    return companion_ext in {".jpg", ".jpeg"}
+
+
+def _paired_jpeg_preview_exists(preview_dir, photo, size, db):
+    """Check the exact current JPEG artifact using the renderer's predicate."""
+    from web.media import (
+        _paired_preview_path,
+        _paired_render_state_hash,
+    )
+
+    if not photo or not photo["companion_path"]:
+        return False
+    # A relocation keeps folder_id, but changes which live source the
+    # renderer selects. Resolve its current path just as each request does.
+    folder = db.get_folder(photo["folder_id"])
+    if not folder:
+        return False
+    source_path = os.path.join(folder["path"], photo["companion_path"])
+    if not os.path.isfile(source_path):
+        # Match the renderer's live-source-first, offline-companion fallback.
+        cached = db.offline_original_get(photo["id"])
+        source_path = cached["companion_path"] if cached else None
+        if not source_path:
+            return False
+        if not os.path.isabs(source_path):
+            source_path = os.path.join(os.path.dirname(preview_dir), source_path)
+        if not os.path.isfile(source_path):
+            return False
+    state_hash = _paired_render_state_hash(
+        photo, size, "jpeg", source_path, None,
+    )
+    return paired_preview_ready(db, _paired_preview_path(
+        preview_dir, photo["id"], size, "jpeg", state_hash,
+    ))
 
 
 def create_job_launchers_blueprint(
@@ -1305,6 +1360,7 @@ def create_job_launchers_blueprint(
                         photo = selected_photos.get(photo_id)
                         current_photo = thread_db.get_photo(photo_id)
                         filename = photo["filename"] if photo else f"Photo {photo_id}"
+                        is_pair = _photo_is_raw_jpeg_pair(photo)
                         error = None
                         cached = None
                         attempted = photo_source_matches(photo, current_photo)
@@ -1339,6 +1395,22 @@ def create_job_launchers_blueprint(
                                             serve_photo_preview, photo_id, photo,
                                             f"{size}px preview",
                                         )
+                                        # RAW+JPEG pairs: the lightbox
+                                        # defaults to the JPEG and appends
+                                        # ?source=jpeg to every render URL,
+                                        # which bypasses the ordinary
+                                        # (photo_id, size) cache. Warm the
+                                        # paired shadow cache too, otherwise
+                                        # the first fit-size request still
+                                        # decodes the companion JPEG.
+                                        if error is None and is_pair:
+                                            error = render_through_view(
+                                                f"/photos/{photo_id}/preview"
+                                                f"?size={size}&source=jpeg",
+                                                serve_photo_preview, photo_id,
+                                                photo,
+                                                f"{size}px paired preview",
+                                            )
                                     # Eviction can delete a just-warmed
                                     # preview the moment it is published
                                     # (preview_cache_max_mb too small for the
@@ -1370,6 +1442,24 @@ def create_job_launchers_blueprint(
                                                     "(preview_cache_max_mb "
                                                     "too small for the "
                                                     "lightbox tiers)"
+                                                )
+                                                break
+                                            # Paired tiers share the preview
+                                            # quota and can be evicted too.
+                                            if (
+                                                is_pair
+                                                and not
+                                                _paired_jpeg_preview_exists(
+                                                    preview_dir, photo, size,
+                                                    thread_db,
+                                                )
+                                            ):
+                                                error = (
+                                                    f"{size}px paired "
+                                                    "preview was not "
+                                                    "written (RAW+JPEG "
+                                                    "companion unavailable "
+                                                    "or preview cache quota too small)"
                                                 )
                                                 break
                             except Exception as exc:
@@ -1423,6 +1513,7 @@ def create_job_launchers_blueprint(
                                     "filename": filename,
                                     "cached_status": cached["status"],
                                     "cached_bytes": cache_bytes,
+                                    "is_pair": is_pair,
                                 }
                             else:
                                 failed += 1
@@ -1451,7 +1542,9 @@ def create_job_launchers_blueprint(
                 if preview_sizes and pending_ready_meta:
                     preview_dir = os.path.join(vireo_dir, "previews")
                     for photo_id, info in pending_ready_meta.items():
+                        current_photo = thread_db.get_photo(photo_id)
                         missing_size = None
+                        missing_kind = None
                         for size in preview_sizes:
                             cache_file = os.path.join(
                                 preview_dir, f"{photo_id}_{size}.jpg",
@@ -1461,6 +1554,17 @@ def create_job_launchers_blueprint(
                                 and os.path.exists(cache_file)
                             ):
                                 missing_size = size
+                                missing_kind = "preview"
+                                break
+                            if (
+                                info["is_pair"]
+                                and not _paired_jpeg_preview_exists(
+                                    preview_dir, current_photo, size,
+                                    thread_db,
+                                )
+                            ):
+                                missing_size = size
+                                missing_kind = "paired preview"
                                 break
                         if missing_size is None:
                             continue
@@ -1471,12 +1575,19 @@ def create_job_launchers_blueprint(
                             copied_bytes -= info["cached_bytes"]
                         elif info["cached_status"] == "skipped":
                             reused -= 1
-                        job["errors"].append(
-                            f"{info['filename']}: {missing_size}px preview "
-                            "was evicted during warming "
-                            "(preview_cache_max_mb too small for the "
-                            "lightbox tiers)"
-                        )
+                        if missing_kind == "paired preview":
+                            job["errors"].append(
+                                f"{info['filename']}: {missing_size}px "
+                                "paired preview went missing after warming "
+                                "(source changed or preview cache quota too small)"
+                            )
+                        else:
+                            job["errors"].append(
+                                f"{info['filename']}: {missing_size}px "
+                                "preview was evicted during warming "
+                                "(preview_cache_max_mb too small for the "
+                                "lightbox tiers)"
+                            )
 
                 return {
                     "ok": failed == 0,
@@ -2244,7 +2355,7 @@ class _MaskExtractionRun:
         masked for this variant".
         """
         thread_db = self.thread_db
-        ws_id = thread_db._active_workspace_id
+        ws_id = thread_db.active_workspace_id
         rows = thread_db.conn.execute(
             f"""SELECT p.id, p.folder_id, p.filename,
                       d.detector_model,

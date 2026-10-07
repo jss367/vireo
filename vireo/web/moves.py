@@ -94,7 +94,7 @@ def create_moves_blueprint(get_db, json_error):
             # planner scope rather than filtering it through Browse membership.
             linked = db.conn.execute(
                 "SELECT 1 FROM workspace_folders WHERE folder_id = ? AND workspace_id = ?",
-                (folder_id, db._active_workspace_id),
+                (folder_id, db.active_workspace_id),
             ).fetchone()
             if not linked:
                 return json_error("folder not found", 404)

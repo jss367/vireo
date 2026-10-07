@@ -289,7 +289,12 @@ def test_find_duplicate_groups_include_resolved(db, folder):
         {"file_hash": "MIXED", "photo_ids": sorted([m1, m2]), "status": "unresolved"},
     ]
     assert _normalized(resolved) == [
-        {"file_hash": "A_RES", "photo_ids": sorted([k, l1, l2]), "status": "resolved"},
+        {
+            "file_hash": "A_RES",
+            "photo_ids": sorted([k, l1, l2]),
+            "status": "resolved",
+            "winner_id": k,
+        },
     ]
 
 

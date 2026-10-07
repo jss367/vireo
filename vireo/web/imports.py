@@ -1116,12 +1116,12 @@ def create_imports_blueprint(
     def api_pending_archives():
         from pending_archives import active_archive_jobs
         db = get_db()
-        jobs = active_archive_jobs(get_runner(), db._ws_id())
+        jobs = active_archive_jobs(get_runner(), db.require_workspace_id())
         rows = db.conn.execute(
             "SELECT a.*, c.id AS review_collection_id, c.name AS collection_name FROM pending_archives a "
             "LEFT JOIN collections c ON c.id = a.collection_id AND c.workspace_id = a.workspace_id "
             "WHERE a.workspace_id = ? AND a.state != 'complete' ORDER BY a.created_at",
-            (db._ws_id(),),
+            (db.require_workspace_id(),),
         ).fetchall()
         # Only pay for the folder read when something is actually pending —
         # three pages poll this endpoint every 5s with an empty list most of
@@ -1171,7 +1171,7 @@ def create_imports_blueprint(
             archive = get_pending_archive(db, archive_id)
             if archive is None:
                 return json_error("Pending NAS transfer not found in this workspace", 404)
-            blocking = active_archive_jobs(get_runner(), db._ws_id())
+            blocking = active_archive_jobs(get_runner(), db.require_workspace_id())
             if blocking:
                 return json_error(
                     f"Wait for {describe_jobs(blocking)} to finish before removing this transfer record", 409)
@@ -1181,7 +1181,7 @@ def create_imports_blueprint(
             # explicit recovery for lost storage, including interrupted sends.
             db.conn.execute(
                 "DELETE FROM pending_archives WHERE id = ? AND workspace_id = ?",
-                (archive_id, db._ws_id()),
+                (archive_id, db.require_workspace_id()),
             )
             db.conn.commit()
         return jsonify({"ok": True})
@@ -1191,7 +1191,7 @@ def create_imports_blueprint(
         from pending_archives import active_archive_jobs, get_pending_archive, send_pending_archive
         db = get_db()
         runner = get_runner()
-        workspace_id = db._ws_id()
+        workspace_id = db.require_workspace_id()
         raw = request.get_data(cache=True, as_text=True)
         # ``get_json(silent=True)`` returns None for both an absent body and a
         # parse failure, and ``or {}`` would additionally swallow the falsy
@@ -1483,7 +1483,7 @@ def create_imports_blueprint(
             return json_error("snapshot_id required", 400)
 
         db = get_db()
-        if db._active_workspace_id is None:
+        if db.active_workspace_id is None:
             abort(404)
         try:
             snap = db.get_new_images_snapshot(snapshot_id)
@@ -1501,7 +1501,7 @@ def create_imports_blueprint(
         root_paths = [
             r["path"]
             for r in _ni_mapped_roots(
-                db, db._active_workspace_id, include_missing=True,
+                db, db.active_workspace_id, include_missing=True,
             )
         ]
 
@@ -1928,7 +1928,7 @@ def create_imports_blueprint(
         from metadata import exiftool_status
 
         db = get_db()
-        active_ws = db._active_workspace_id
+        active_ws = db.active_workspace_id
         status = exiftool_status()
         roots = [r["path"] for r in db.get_workspace_folder_roots(active_ws)]
         # Filter macOS app-managed library bundles before ``os.path.isdir``:

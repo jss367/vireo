@@ -201,7 +201,7 @@ def create_export_blueprint(
             return json_error(str(exc))
 
         db = get_db()
-        active_ws = db._active_workspace_id
+        active_ws = db.active_workspace_id
         visible_set = set()
         for chunk in _chunks(photo_ids):
             placeholders = ",".join("?" for _ in chunk)

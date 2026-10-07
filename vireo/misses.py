@@ -154,7 +154,7 @@ def _fetch_workspace_miss_rows(db, detector_confidence=None):
     """Fetch all active-workspace photo rows needed to derive miss flags."""
     if detector_confidence is None:
         detector_confidence = _effective_detector_confidence(db)
-    ws_id = db._ws_id()
+    ws_id = db.require_workspace_id()
     rows = db.conn.execute(
         "SELECT p.id, p.folder_id, p.filename, p.companion_path, "
         "       p.timestamp, p.burst_id, "

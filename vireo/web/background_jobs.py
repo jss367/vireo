@@ -103,7 +103,7 @@ def make_background_job(get_runner, get_db, db_path, db_factory):
         def wrapper(*args, **kwargs):
             ctx = JobLaunch(
                 get_runner(),
-                get_db()._active_workspace_id,
+                get_db().active_workspace_id,
                 db_path,
                 db_factory,
             )

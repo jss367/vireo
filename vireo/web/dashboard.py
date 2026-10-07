@@ -38,7 +38,7 @@ def create_dashboard_blueprint(get_db, json_error):
         collection_rows = db.conn.execute(
             "SELECT id, name, rules, visual_json FROM collections "
             "WHERE workspace_id = ? ORDER BY name COLLATE NOCASE, id",
-            (db._ws_id(),),
+            (db.require_workspace_id(),),
         ).fetchall()
         collections = []
         for row in collection_rows:

@@ -308,7 +308,7 @@ def _local_copy_conflict(db, runner, paths):
     )
     return local_copy_scan_conflict(
         db, paths,
-        active_workspace_id=db._active_workspace_id,
+        active_workspace_id=db.active_workspace_id,
         pending_stage_sources=pending_sources,
     )
 
@@ -346,7 +346,7 @@ def _resolve_snapshot_paths(service, db, source_snapshot_id):
         (
             (os.path.normpath(r["path"]), r["path"])
             for r in _mapped_new_image_roots(
-                db, db._active_workspace_id, include_missing=True,
+                db, db.active_workspace_id, include_missing=True,
             )
         ),
         key=lambda item: len(item[0]),

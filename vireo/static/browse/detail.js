@@ -446,17 +446,51 @@ function renderSummary(data) {
 
   // Top species
   var speciesSection = document.getElementById('summarySpeciesSection');
-  var speciesHtml = '';
-  if (data.top_species && data.top_species.length > 0) {
-    data.top_species.forEach(function(s) {
-      speciesHtml += '<div class="summary-species-row">' +
-        '<span class="summary-species-name">' + escapeHtml(s.species) + '</span>' +
-        '<span class="summary-species-count">' + s.count + '</span></div>';
+  var speciesList = document.getElementById('summarySpeciesList');
+  speciesList.replaceChildren();
+  var species = data.top_species || [];
+  speciesSection.style.display = species.length ? '' : 'none';
+  species.forEach(function(s) {
+    var row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'summary-species-row';
+    row.title = 'Filter by top predicted species: ' + s.species;
+    var name = document.createElement('span');
+    name.className = 'summary-species-name';
+    name.textContent = s.species;
+    var count = document.createElement('span');
+    count.className = 'summary-species-count';
+    count.textContent = s.count;
+    row.append(name, count);
+    row.addEventListener('click', function() { filterByTopSpecies(s.species); });
+    row.addEventListener('keydown', function(event) {
+      // Let the native button activate without triggering grid shortcuts.
+      if (event.key === 'Enter' || event.key === ' ') event.stopPropagation();
     });
-    speciesSection.style.display = '';
-  } else {
-    speciesSection.style.display = 'none';
-  }
-  document.getElementById('summarySpeciesList').innerHTML = speciesHtml;
+    speciesList.appendChild(row);
+  });
+}
 
+async function filterByTopSpecies(species) {
+  var scopeGen = ++browseScopeGen;
+  if (!VireoFilter.isReady()) {
+    if (!browseFilterInitPromise) return;
+    try {
+      await browseFilterInitPromise;
+    } catch (e) {
+      return;
+    }
+    if (!VireoFilter.isReady() || scopeGen !== browseScopeGen) return;
+  }
+  // Compose with legacy collection deep links instead of dropping their scope.
+  if (activeCollectionId) dashboardCollectionScope = true;
+  var rules = VireoFilter.getUserRules();
+  if (rules.mode && rules.mode !== 'all' && rules.rules.length) {
+    // Narrow an OR collection as a whole, rather than adding another OR arm.
+    VireoFilter.loadExpression({mode: 'all', rules: [
+      rules, {field: 'top_predicted_species', op: 'is', value: species}
+    ]}, VireoFilter.getVisual(), {reason: 'filterAdded'});
+  } else {
+    VireoFilter.addRule('top_predicted_species', 'is', species);
+  }
 }

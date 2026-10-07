@@ -147,7 +147,7 @@ def collection_row(db, collection_id):
     return db.conn.execute(
         "SELECT id, name, rules, visual_json FROM collections "
         "WHERE id = ? AND workspace_id = ?",
-        (collection_id, db._ws_id()),
+        (collection_id, db.require_workspace_id()),
     ).fetchone()
 
 

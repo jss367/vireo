@@ -1455,7 +1455,7 @@ def _duplicate_gate(state, batch_st, *, source_file, rel, checker, db,
         if likely_rows:
             try:
                 new_grants, promoted = db.grant_verified_twin_photos_tracked(
-                    db._active_workspace_id, likely_rows,
+                    db.active_workspace_id, likely_rows,
                 )
                 db.conn.commit()
             except Exception as exc:
@@ -1587,7 +1587,7 @@ def _duplicate_gate(state, batch_st, *, source_file, rel, checker, db,
     if accept:
         try:
             new_grants, promoted = db.grant_verified_twin_photos_tracked(
-                db._active_workspace_id, verified_twin_rows,
+                db.active_workspace_id, verified_twin_rows,
             )
             db.conn.commit()
         except Exception as exc:

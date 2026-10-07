@@ -383,7 +383,7 @@ def register_app_hooks(app, *, get_db, reservation_exempt_endpoints):
         # hand it to a worker (scan, import-full, import-photos,
         # import-in-place) must reject the no-workspace case themselves so
         # they do not commit catalog rows invisible to every workspace.
-        active_ws = get_db()._active_workspace_id
+        active_ws = get_db().active_workspace_id
         workspaces = set()
         if active_ws is not None:
             workspaces.add(active_ws)

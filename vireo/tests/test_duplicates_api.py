@@ -800,6 +800,131 @@ def test_last_scan_drops_group_whose_extra_copy_id_was_reused(app_and_db, tmp_pa
     assert [h for b in result["buckets"] for h in b["file_hashes"]] == ["HKEEP"]
 
 
+def _scan_and_restore(client):
+    job_id = client.post("/api/duplicates/scan").get_json()["job_id"]
+    wait_for_job_via_client(client, job_id, wait_for_history=True)
+    return client.get("/api/duplicates/last-scan").get_json()["result"]
+
+
+def test_last_scan_reports_up_to_date_when_catalog_unchanged(app_and_db):
+    """A restored scan the catalog still matches needs no rescan."""
+    app, db = app_and_db
+    fid = db.add_folder("/tmp/duplastscanfresh")
+    _seed_pair(db, "HFRESH", fid)
+
+    result = _scan_and_restore(app.test_client())
+    assert result["new_group_count"] == 0
+    assert result["changed_group_count"] == 0
+
+
+def test_last_scan_counts_groups_added_since_the_scan(app_and_db):
+    """A duplicate imported after the scan is one a rescan would show."""
+    app, db = app_and_db
+    fid = db.add_folder("/tmp/duplastscanadded")
+    _seed_pair(db, "HBEFORE", fid)
+    client = app.test_client()
+    _scan_and_restore(client)
+
+    _seed_pair(db, "HAFTER", fid, name_a="n.jpg", name_b="n (2).jpg")
+
+    result = client.get("/api/duplicates/last-scan").get_json()["result"]
+    assert result["new_group_count"] == 1
+    assert result["changed_group_count"] == 0
+
+
+def test_last_scan_counts_groups_resolved_or_grown_since_the_scan(app_and_db):
+    """A decision applied since, or another copy of the same file, changes
+    what a rescan would show for that group."""
+    app, db = app_and_db
+    fid = db.add_folder("/tmp/duplastscanchanged")
+    _seed_pair(db, "HAPPLIED", fid)
+    _seed_pair(db, "HGROWN", fid, name_a="g.jpg", name_b="g (2).jpg")
+    _seed_pair(db, "HSAME", fid, name_a="s.jpg", name_b="s (2).jpg")
+    client = app.test_client()
+    _scan_and_restore(client)
+
+    client.post("/api/duplicates/apply", json={"hashes": ["HAPPLIED"]})
+    db.add_photo(
+        folder_id=fid, filename="g (3).jpg", extension=".jpg",
+        file_size=1000, file_mtime=300.0, file_hash="HGROWN",
+    )
+    db.conn.execute("UPDATE photos SET flag='none' WHERE file_hash='HGROWN'")
+    db.conn.commit()
+
+    result = client.get("/api/duplicates/last-scan").get_json()["result"]
+    assert result["new_group_count"] == 0
+    assert result["changed_group_count"] == 2
+
+
+def test_last_scan_counts_resolved_group_whose_winner_was_swapped(app_and_db):
+    """A later flag edit that swaps which copy is kept and which is rejected
+    changes what a rescan would show, even though the id set is the same.
+
+    The stored proposal still names the old winner, so its cleanup controls
+    would act on the wrong copy. ``changed_group_count`` must reflect that
+    so the banner tells the user to rescan.
+    """
+    app, db = app_and_db
+    fid = db.add_folder("/tmp/duplastscanswap")
+    kept, rejected = _seed_pair(
+        db, "HSWAP", fid, name_a="s.jpg", name_b="s (2).jpg",
+    )
+    # Apply the first scan so the group becomes resolved (``kept`` wins).
+    client = app.test_client()
+    _scan_and_restore(client)
+    client.post("/api/duplicates/apply", json={"hashes": ["HSWAP"]})
+    _scan_and_restore(client)
+
+    # Swap flags: un-reject the former loser, reject the former winner.
+    db.conn.execute(
+        "UPDATE photos SET flag='rejected' WHERE id=?", (kept,),
+    )
+    db.conn.execute(
+        "UPDATE photos SET flag='none' WHERE id=?", (rejected,),
+    )
+    db.conn.commit()
+
+    result = client.get("/api/duplicates/last-scan").get_json()["result"]
+    assert result["new_group_count"] == 0
+    assert result["changed_group_count"] == 1
+
+
+def test_last_scan_counts_unresolved_group_whose_winner_would_change(app_and_db):
+    """An mtime refreshed since the scan can make the resolver keep the other
+    copy; apply would follow the new pick, so the shown KEEP is out of date."""
+    app, db = app_and_db
+    fid = db.add_folder("/tmp/duplastscanmtime")
+    older, newer = _seed_pair(db, "HMTIME", fid, name_a="a.jpg", name_b="b.jpg")
+    client = app.test_client()
+    first = _scan_and_restore(client)
+    (proposal,) = first["proposals"]
+    assert proposal["winner"]["id"] == older  # same-length paths: older mtime wins
+    assert first["changed_group_count"] == 0
+
+    db.conn.execute("UPDATE photos SET file_mtime = 300.0 WHERE id = ?", (older,))
+    db.conn.commit()
+
+    result = client.get("/api/duplicates/last-scan").get_json()["result"]
+    assert result["changed_group_count"] == 1
+
+
+def test_last_scan_group_whose_copy_was_removed_is_not_a_change(app_and_db):
+    """Removing the only extra copy hides the group as stale; a rescan would
+    not show it either, so it is no reason to rescan."""
+    app, db = app_and_db
+    fid = db.add_folder("/tmp/duplastscangone")
+    _keep, extra = _seed_pair(db, "HGONE", fid)
+    client = app.test_client()
+    _scan_and_restore(client)
+
+    db.delete_photos([extra])
+
+    result = client.get("/api/duplicates/last-scan").get_json()["result"]
+    assert result["stale_group_count"] == 1
+    assert result["new_group_count"] == 0
+    assert result["changed_group_count"] == 0
+
+
 def test_last_scan_keeps_group_with_a_current_extra_copy_left(app_and_db):
     """Deleting one of two extra copies leaves a group that still applies."""
     app, db = app_and_db
