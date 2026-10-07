@@ -295,6 +295,7 @@
 <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
 <script src="/static/map-selection.js"></script>
 <script src="/static/map-status.js"></script>
+<script src="/static/map-container-size.js"></script>
 <script>
 /* ── Tile layers ── */
 var streetLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -310,7 +311,7 @@ var terrainLayer = L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png
   maxZoom: 17,
 });
 
-var map = L.map('map', { layers: [streetLayer] }).setView([20, 0], 2);
+var map = createMapWithContainerResize('map', { layers: [streetLayer] }).setView([20, 0], 2);
 L.control.layers({ 'Street': streetLayer, 'Satellite': satelliteLayer, 'Terrain': terrainLayer }).addTo(map);
 
 /* ── Marker cluster group ── */
