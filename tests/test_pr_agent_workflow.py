@@ -321,6 +321,19 @@ def test_routine_works_on_and_pushes_against_the_expected_head_only():
     assert reconcile.count(on_expected) >= 2  # Common Setup + reconciliation checkout
     assert "push to the same branch with\n    the `EXPECTED_HEAD` lease" in reconcile
 
+    # Absolute Rules must not contradict the lease by telling the routine to
+    # rebase onto a newer head after a rejected push: that would recreate the
+    # stale-fix-on-top-of-newer-head regression this change exists to prevent
+    # (#2011). The rule names the lease as the only push, and spells out that
+    # a lease rejection is a silent stop with no rebase onto the new head.
+    absolute = prompt.split("## Absolute Rules", 1)[1].split("\n## ", 1)[0]
+    assert "unconditionally force-push" in absolute
+    assert "--force-with-lease" in absolute
+    assert "no rebase onto the\n  new head" in absolute
+    assert "pull\n  with rebase" not in absolute  # the old contradictory rule
+    # Base-divergence (merge conflicts) still has a separate recovery path.
+    assert "`origin/$BASE`" in absolute
+
 
 def test_routine_contract_is_state_based_quiet_and_resolves_addressed_threads():
     prompt = _read(ROUTINE_PROMPT)

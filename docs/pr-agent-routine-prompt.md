@@ -466,8 +466,16 @@ the open `main-red` tracking issue, and `Workflow run` is the failing run.
 - Never create a new branch or new PR, except the one `claude/fix-main-*`
   branch and PR that the `fix-main` task opens. Every other push goes to the
   existing PR head branch.
-- Never force-push. If the branch has diverged unexpectedly, pull
-  with rebase, resolve any conflicts, then push.
+- Never unconditionally force-push (`git push --force` or `-f`). The
+  `--force-with-lease="refs/heads/$HEAD:$EXPECTED_HEAD"` push documented
+  in Common Setup is the only push used: when the branch head still
+  matches `EXPECTED_HEAD` it lands as an ordinary fast-forward, and git
+  itself rejects it when the head moved. A rejected lease push means the
+  head moved while you worked, and is a silent stop — no rebase onto the
+  new head, no retry, no comment. Divergence against the PR *base*
+  (merge conflicts flagged by `CONFLICTING`/`DIRTY`) is handled by
+  merging `origin/$BASE` into the PR head inside the reconciliation
+  flow, never by rebasing to recover from a lease rejection.
 - Never invent or skip validation. If a validation command cannot run, explain
   exactly what blocked it.
 - Never merge PRs yourself. Merging is handled by the GitHub Actions workflow's
