@@ -14,8 +14,10 @@ and calls in here for the SQL. ``_commit=False`` on ``set_flag`` is
 carried through unchanged for callers that already hold ``BEGIN IMMEDIATE``
 (the prediction-decision lock), so the writer lock is not released
 mid-decision. The wildlife-exclusion toggle (``update_photo_wildlife_excluded``)
-is a different column with its own workspace check and stays on
-``Database``.
+is a different column whose workspace check stays on ``Database``; its write
+(``_commit=False`` for a batch that records one edit and commits once) and
+the workspace-visible state read behind ``get_wildlife_excluded_states``
+live here.
 """
 
 
@@ -50,12 +52,35 @@ class PhotoReviewRepository:
         if _commit:
             self.conn.commit()
 
-    def set_wildlife_excluded(self, photo_id, excluded):
+    def set_wildlife_excluded(self, photo_id, excluded, *, _commit=True):
         self.conn.execute(
             "UPDATE photos SET wildlife_excluded = ? WHERE id = ?",
             (1 if excluded else 0, photo_id),
         )
-        self.conn.commit()
+        if _commit:
+            self.conn.commit()
+
+    def wildlife_excluded_states(self, photo_ids):
+        """``{photo_id: 0 or 1}`` for the named photos the workspace can see."""
+        if self.workspace_id is None:
+            raise RuntimeError("No active workspace set")
+        states = {}
+        for chunk in self._chunks(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self.conn.execute(
+                f"""SELECT p.id, COALESCE(p.wildlife_excluded, 0) AS excluded
+                    FROM photos p
+                    WHERE p.id IN ({placeholders})
+                      AND EXISTS (
+                          SELECT 1 FROM photo_workspace_visibility wf
+                          WHERE wf.photo_id = p.id
+                            AND wf.workspace_id = ?
+                      )""",
+                [*chunk, self.workspace_id],
+            ).fetchall()
+            for row in rows:
+                states[row["id"]] = int(row["excluded"])
+        return states
 
     def set_flags(self, photo_ids, flag, *, verify_workspace=True):
         self._set_many(

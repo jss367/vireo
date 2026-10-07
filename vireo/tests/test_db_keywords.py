@@ -514,6 +514,28 @@ def test_get_top_level_species_keyword_prefers_taxonomy_then_lowest_id(db):
     assert db.get_top_level_species_keyword("Wren") is None
 
 
+def test_get_keyword_row_reads_id_name_and_type(db):
+    kid = db.add_keyword("Back garden", kw_type="location")
+    assert tuple(db.get_keyword_row(kid)) == (kid, "Back garden", "location")
+    assert db.get_keyword_row(987_654) is None
+
+
+def test_get_photo_ids_with_keyword_and_chunks(db, lib):
+    p0, p1, p2, _ = lib["p"]
+    kid = db.add_keyword("Alpha")
+    other = db.add_keyword("Beta")
+    db.tag_photo(p0, kid)
+    db.tag_photo(p2, kid)
+    db.tag_photo(p1, other)
+    assert db.get_photo_ids_with_keyword(kid, []) == set()
+    assert db.get_photo_ids_with_keyword(kid, (p0, p1)) == {p0}
+    statements = _trace(db)
+    got = db.get_photo_ids_with_keyword(kid, list(range(10_000, 10_800)) + [p2, p0])
+    db.conn.set_trace_callback(None)
+    assert got == {p0, p2}
+    assert len([s for s in dict.fromkeys(statements) if "photo_id IN" in s]) == 2
+
+
 def test_species_keywords_and_equivalents(db, lib):
     p0, p1, p2, p3 = lib["p"]
     root = db.add_keyword("American Robin", is_species=True)
@@ -1057,6 +1079,8 @@ _DELEGATING_KEYWORD_METHODS = (
     "untag_photo",
     "get_keyword_name",
     "get_top_level_species_keyword",
+    "get_keyword_row",
+    "get_photo_ids_with_keyword",
     "get_photo_keywords",
     "get_keywords_for_photos",
     "get_species_keywords_for_photos",

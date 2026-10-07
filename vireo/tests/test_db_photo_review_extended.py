@@ -267,6 +267,40 @@ def test_update_photo_wildlife_excluded_verifies_through_the_scope_guard(
     assert seen == [photos[0]]
 
 
+def test_update_photo_wildlife_excluded_can_leave_the_write_uncommitted(db, photos):
+    db.update_photo_wildlife_excluded(
+        photos[0], True, verify_workspace=False, _commit=False,
+    )
+    assert db.conn.in_transaction
+    assert _column(db, photos[0], "wildlife_excluded") == 0
+    db.conn.commit()
+    assert _column(db, photos[0], "wildlife_excluded") == 1
+
+
+def test_get_wildlife_excluded_states_reads_visible_photos(db, photos, outsider):
+    db.update_photo_wildlife_excluded(photos[1], True)
+    assert db.get_wildlife_excluded_states(
+        [photos[0], photos[1], outsider, 987_654]
+    ) == {photos[0]: 0, photos[1]: 1}
+    assert db.get_wildlife_excluded_states([]) == {}
+
+
+def test_get_wildlife_excluded_states_chunks(db, photos, monkeypatch):
+    monkeypatch.setattr(db_module, "_SQLITE_PARAM_CHUNK_SIZE", 2)
+    statements = []
+    db.conn.set_trace_callback(statements.append)
+    states = db.get_wildlife_excluded_states(photos)
+    db.conn.set_trace_callback(None)
+    assert states == {pid: 0 for pid in photos}
+    assert len([s for s in statements if "wildlife_excluded, 0)" in s]) == 2
+
+
+def test_get_wildlife_excluded_states_without_workspace(db, photos):
+    db.set_active_workspace(None)
+    with pytest.raises(RuntimeError, match="No active workspace set"):
+        db.get_wildlife_excluded_states(photos)
+
+
 # -- color labels -------------------------------------------------------------
 
 
@@ -505,6 +539,7 @@ _DELEGATING_PHOTO_REVIEW_METHODS = {
     "batch_update_photo_rating": "_photo_review_repository",
     "update_photo_flag": "_photo_review_repository",
     "update_photo_wildlife_excluded": "_photo_review_repository",
+    "get_wildlife_excluded_states": "_photo_review_repository",
     "batch_update_photo_flag": "_photo_review_repository",
     "set_color_label": "_photo_label_repository",
     "remove_color_label": "_photo_label_repository",

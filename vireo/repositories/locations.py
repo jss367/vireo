@@ -612,6 +612,19 @@ class LocationRepository:
                 f"not 'location'"
             )
 
+    def fill_missing_coordinates(self, keyword_id, latitude, longitude):
+        """Give a keyword this map point where it has none, and commit.
+
+        Each of ``latitude`` and ``longitude`` is written only where the
+        stored value is NULL, so an established point is kept.
+        """
+        self.conn.execute(
+            "UPDATE keywords SET latitude = COALESCE(latitude, ?), "
+            "longitude = COALESCE(longitude, ?) WHERE id = ?",
+            (latitude, longitude, keyword_id),
+        )
+        self.conn.commit()
+
     def delete_photo_links(self, photo_id):
         """Delete ``photo_id``'s location-keyword links. Caller owns the transaction."""
         self.conn.execute(

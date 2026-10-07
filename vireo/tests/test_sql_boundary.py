@@ -95,7 +95,6 @@ CONN_USE_LIMITS = {
     "thumbnails.py": 11,
     "volume_reachability.py": 8,
     "web/app_hooks.py": 2,
-    "web/batch.py": 17,
     "web/browse.py": 10,
     "web/caches.py": 11,
     "web/card_cleanup.py": 2,
