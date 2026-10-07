@@ -162,22 +162,20 @@ var EDITOR_INTERACTIVE_SIZE = 1024;
 var EDITOR_PREVIEW_INTERVAL = 60;
 var EDITOR_REFINE_DELAY = 300;
 
-function cancelEditorPreview() {
+function cancelEditorPreview(options) {
   editorState.previewSeq++;
   clearTimeout(editorState.previewTimer);
   clearTimeout(editorState.previewRefineTimer);
   editorState.previewTimer = null;
   editorState.previewRefineTimer = null;
   editorPreviewQueue.pending = null;
-  // Release the in-flight render. Without this, pumpEditorPreview() would
-  // still see editorPreviewQueue.active populated and refuse to start the
-  // next photo's preview — a stalled or very slow previous request would
-  // then leave the previous photo on screen while the metadata already
-  // described the new photo, indefinitely on a hung request.
-  var stale = editorPreviewQueue.active;
-  if (stale) {
+  if (options && options.abortActive && editorPreviewQueue.active) {
+    // Navigation must not wait on a slow render of the previous photo. Keep
+    // coalescing ordinary edits, but release the slot when the photo changes.
+    var image = editorPreviewQueue.active.image;
     editorPreviewQueue.active = null;
-    if (stale.image) stale.image.onload = stale.image.onerror = null;
+    image.onload = image.onerror = null;
+    image.removeAttribute('src');
   }
 }
 
@@ -220,10 +218,9 @@ function pumpEditorPreview() {
   editorPreviewQueue.active = request;
   function finish(ok) {
     image.onload = image.onerror = null;
-    // cancelEditorPreview may have released this request already; only
-    // clear the slot when we're still its owner, so a late response from
-    // a cancelled fetch doesn't clobber a newer active request.
-    if (editorPreviewQueue.active === request) editorPreviewQueue.active = null;
+    // An obsolete event must not clear the next photo's active request.
+    if (editorPreviewQueue.active !== request) return;
+    editorPreviewQueue.active = null;
     if (request.seq === editorState.previewSeq && !editorState.loading) {
       if (ok) presentEditorPreview(request, image);
       else {

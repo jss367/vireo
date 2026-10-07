@@ -28,7 +28,7 @@ function applyLoadedLocalStaleness(photoId, loadSeq, savedRecipeSeq, data) {
 async function loadPhoto(photoId, opts) {
   cancelPointColorPicker();
   cancelMaskBrush();
-  cancelEditorPreview();
+  cancelEditorPreview({abortActive: true});
   editorState.previewInputAt = performance.now();
   opts = opts || {};
   photoId = Number(photoId);

@@ -128,8 +128,15 @@ def test_photo_switch_invalidates_pending_render(page, live_server, preview_phot
     page.wait_for_timeout(200)
     assert len(held) == 1
     other = live_server['data']['photos'][0]
+    page.route(f'**/photos/{other}/edit-preview?*', fill)
     page.evaluate('(id) => { loadPhoto(id); }', other)
     page.wait_for_function('(id) => editorState.photoId === id && !editorState.loading', arg=other)
+    # The new photo must display without waiting for the obsolete request.
+    page.wait_for_function('''id => {
+      const img = document.getElementById('editorImg');
+      return img.getAttribute('src').startsWith('/photos/' + id + '/edit-preview?') &&
+        img.complete && img.naturalWidth > 0;
+    }''', arg=other, timeout=5000)
     fill(held.pop(0))
     page.wait_for_timeout(100)
     displayed = page.locator('#editorImg').get_attribute('src')
@@ -149,6 +156,7 @@ def test_hung_render_does_not_block_the_next_photo_preview(page, live_server, pr
     page.wait_for_function('editorPreviewQueue.active !== null')
     assert len(held) == 1
     other = live_server['data']['photos'][0]
+    page.route(f'**/photos/{other}/edit-preview?*', fill)
     page.evaluate('(id) => { loadPhoto(id); }', other)
     page.wait_for_function('(id) => editorState.photoId === id && !editorState.loading', arg=other)
     # Without unblocking the previous photo's held request, the new photo's
@@ -164,6 +172,7 @@ def test_hung_render_does_not_block_the_next_photo_preview(page, live_server, pr
     )
     displayed = page.locator('#editorImg').get_attribute('src')
     assert json.loads(query(displayed)['recipe'][0]).get('adjustments') is None
+    held.pop().abort()
 
 
 def test_slow_quick_preview_still_displays_before_queued_refinement(page, live_server, preview_photo):
@@ -182,3 +191,29 @@ def test_slow_quick_preview_still_displays_before_queued_refinement(page, live_s
     fill(held.pop(0))
     page.wait_for_function('editorPreviewQueue.active === null')
     assert int(query(page.locator('#editorImg').get_attribute('src'))['size'][0]) > 1024
+
+
+@pytest.mark.parametrize('event', ['onload', 'onerror'])
+def test_obsolete_preview_callback_cannot_release_new_photo_request(page, live_server, preview_photo, event):
+    open_photo(page, live_server, preview_photo)
+    held = []
+    page.route('**/edit-preview?*', lambda route: held.append(route))
+    page.evaluate("setAdjustment('exposure', 0.5)")
+    page.wait_for_function('editorPreviewQueue.active !== null')
+    page.evaluate('event => { window.obsoletePreviewCallback = editorPreviewQueue.active.image[event]; }', event)
+    other = live_server['data']['photos'][0]
+    page.evaluate('(id) => { loadPhoto(id); }', other)
+    page.wait_for_function('''id => editorPreviewQueue.active &&
+      editorPreviewQueue.active.url.startsWith('/photos/' + id + '/edit-preview?')''', arg=other)
+    # Simulate an old event already queued when navigation cancelled its image.
+    assert page.evaluate('''() => {
+      const active = editorPreviewQueue.active;
+      window.obsoletePreviewCallback();
+      return editorPreviewQueue.active === active;
+    }''')
+    page.wait_for_timeout(100)
+    assert len(held) == 2
+    fill(held.pop())
+    page.wait_for_function('editorPreviewQueue.active === null')
+    assert page.locator('#editorImg').get_attribute('src').startswith(f'/photos/{other}/edit-preview?')
+    fill(held.pop())
