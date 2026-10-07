@@ -243,12 +243,12 @@ def test_removing_one_of_two_flags_can_exclude_selected_photo(live_server, page)
     assert page.evaluate("photos.length") < 120, "must not scan all results for an excluded photo"
 
 
-@pytest.mark.parametrize("control", ["pill", "text"])
+@pytest.mark.parametrize("control", ["pill", "extension_checkbox", "extension_chip"])
 @pytest.mark.parametrize("op", ["in", "not_in"])
 @pytest.mark.parametrize("selected", [True, False])
 def test_deselecting_advanced_enum_value_keeps_photo_in_view(live_server, page, control, op, selected):
     ids = _prepare(page, live_server, "quick_flag")
-    if control == "text":
+    if control.startswith("extension_"):
         with live_server["db"].conn:
             live_server["db"].conn.executemany(
                 "UPDATE photos SET extension='.png' WHERE id=?",
@@ -275,8 +275,14 @@ def test_deselecting_advanced_enum_value_keeps_photo_in_view(live_server, page, 
     )
     page.click('.vf-filters-btn')
     with _expect_reset_query(page) as query:
-        if control == "text":
-            page.fill('.vf-rule-tree [data-action="multi-text"]', remaining)
+        if control == "extension_checkbox":
+            page.locator('.vf-extension-picker').get_by_role(
+                "checkbox", name="PNG", exact=True,
+            ).uncheck()
+        elif control == "extension_chip":
+            page.locator('.vf-extension-picker').get_by_role(
+                "button", name="Remove PNG", exact=True,
+            ).click()
         else:
             page.click('.vf-rule-tree [data-action="multi"][data-value="none"]')
     assert query.value.post_data_json.get('focus_photo_id') == anchor['photoId']
@@ -346,15 +352,31 @@ def test_clearing_filters_keeps_offline_placeholder_in_view(live_server, page):
     assert page.evaluate("getActiveSelection()") == []
 
 
-@pytest.mark.parametrize('value', ['.gif', '.jpg, .png, .gif'])
-def test_replacing_or_adding_free_entry_values_starts_fresh(live_server, page, value):
+@pytest.mark.parametrize('op', ['is', 'in'], ids=['replace', 'add'])
+def test_replacing_or_adding_extension_values_starts_fresh(live_server, page, op):
     ids = _prepare(page, live_server, 'quick_flag')
-    page.evaluate("VireoFilter.loadExpression([{field: 'extension', op: 'in', value: ['.jpg', '.png']}])")
-    page.wait_for_function('!loading && browseDatasetReady')
+    # Formats can only be picked when present in the workspace (or already
+    # saved in the rule). Seed GIF so both radio replacement and checkbox
+    # addition exercise the real picker instead of the retired text input.
+    live_server['db'].add_photo(
+        folder_id=live_server['data']['folders'][0], filename='new.gif',
+        extension='.gif', file_size=1000, file_mtime=1.0,
+    )
+    page.evaluate("rule => VireoFilter.loadExpression([rule])", {
+        'field': 'extension', 'op': op,
+        'value': '.jpg' if op == 'is' else ['.jpg', '.png'],
+    })
+    page.wait_for_function('!loading && browseDatasetReady && totalPhotos === 185')
     page.locator(f'#grid .grid-card[data-id="{ids[25]}"]').click()
     page.click('.vf-filters-btn')
     with _expect_reset_query(page) as query:
-        page.fill('.vf-rule-tree [data-action="multi-text"]', value)
+        page.locator('.vf-extension-picker').get_by_role(
+            'radio' if op == 'is' else 'checkbox', name='GIF', exact=True,
+        ).check()
     assert 'focus_photo_id' not in query.value.post_data_json
-    page.wait_for_function('!loading && browseDatasetReady')
+    page.wait_for_function(
+        'total => !loading && browseDatasetReady && totalPhotos === total',
+        arg=1 if op == 'is' else 186,
+    )
     assert page.evaluate('selectedPhotoId') is None
+    assert page.evaluate('gridContainer.scrollTop') == 0
