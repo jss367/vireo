@@ -261,6 +261,11 @@ def test_development_settings_paste_blocks_overlapping_requests(
 
 def test_view_on_map_context_action_targets_right_clicked_photo(live_server, page):
     """Browse's right-click View on Map action targets the context photo."""
+    live_server["db"].conn.execute(
+        "UPDATE photos SET latitude=?, longitude=?",
+        (37.7749, -122.4194),
+    )
+    live_server["db"].conn.commit()
     url = live_server["url"]
     page.goto(f"{url}/browse")
 
@@ -275,6 +280,20 @@ def test_view_on_map_context_action_targets_right_clicked_photo(live_server, pag
 
     menu.get_by_text("View on Map", exact=True).click()
     assert page.evaluate("window.__mapTarget") == pid
+
+
+def test_view_on_map_context_action_disables_photo_without_coordinates(live_server, page):
+    """An unplottable loaded photo explains why the action is unavailable."""
+    page.goto(f"{live_server['url']}/browse")
+    card = page.locator(".grid-card").first
+    card.wait_for(state="visible")
+    page.evaluate("window.__mapTarget = null; window.viewPhotoOnMap = id => { window.__mapTarget = id; }")
+    card.click(button="right")
+    item = page.locator(".vireo-ctx-menu").get_by_text("View on Map", exact=True)
+    expect(item).to_have_class(re.compile(r".*disabled.*"))
+    expect(item).to_have_attribute("title", "No map coordinates: no EXIF GPS and no location linked to a place")
+    item.click(force=True)
+    assert page.evaluate("window.__mapTarget") is None
 
 
 def test_browse_selection_opens_burst_review(live_server, page):
