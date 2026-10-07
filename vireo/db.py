@@ -6313,6 +6313,33 @@ class Database:
             keyword_id, latitude, longitude,
         )
 
+    def get_keyword_place_row(self, keyword_id):
+        """Row (``id``, ``name``, ``place_id``, ``latitude``, ``longitude``,
+        ``parent_id``) of one keyword of any type, or None when the id is unknown."""
+        return self._location_repository().keyword_place_row(keyword_id)
+
+    def get_photo_location_leaf(self, photo_id):
+        """A ``type='location'`` keyword row linked to ``photo_id`` (columns as
+        ``get_keyword_place_row``), or None. Unordered ``LIMIT 1``."""
+        return self._location_repository().photo_location_leaf(photo_id)
+
+    def get_located_keywords_in_workspace(self):
+        """Location keywords with coordinates tagged on active-workspace photos,
+        each with its distinct visible ``photo_count``.
+
+        Raises ``RuntimeError`` when no workspace is active.
+        """
+        return self._location_repository().located_keywords_in_workspace()
+
+    def delete_location_gps_review(self, photo_id):
+        """Forget a photo's GPS discrepancy decision. Caller owns the transaction."""
+        self._location_repository().delete_gps_review(photo_id)
+
+    def save_location_gps_reviews(self, reviews):
+        """Store ``(photo_id, fingerprint)`` GPS keep decisions, replacing earlier
+        ones. Caller owns the transaction."""
+        self._location_repository().save_gps_reviews(reviews)
+
     def link_keyword_to_place(self, keyword_id, details):
         """Attach Google place data to an existing keyword.
 
@@ -6648,6 +6675,39 @@ class Database:
     def get_keyword_parent_rows(self):
         """Every keyword's ``id``, ``name`` and ``parent_id``."""
         return self._keyword_repository().parent_rows()
+
+    def get_keyword_rename_state(self, keyword_id):
+        """Row (``name``, ``is_species``, ``type``) of one keyword, or None when the id is unknown."""
+        return self._keyword_repository().rename_state(keyword_id)
+
+    def get_photo_workspaces_with_keyword(self, keyword_id):
+        """Rows (``photo_id``, ``workspace_id``) for each photo carrying the
+        keyword, once per workspace that can see it."""
+        return self._keyword_repository().photo_workspaces_tagged_with(keyword_id)
+
+    def get_keyword_subtree_photo_workspaces(self, keyword_id):
+        """Distinct rows (``photo_id``, ``workspace_id``) for photos tagged with
+        the keyword or any keyword below it, once per workspace that can see them."""
+        return self._keyword_repository().subtree_photo_workspaces(keyword_id)
+
+    def get_keyword_duplicate_groups(self, workspace_id):
+        """Rows (``lname``, ``ids``, ``names``, ``cnt``) of keywords tagged in
+        ``workspace_id`` that share a merge slot (``None`` matches nothing)."""
+        return self._keyword_repository().workspace_duplicate_groups(workspace_id)
+
+    def get_keyword_workspace_photo_count(self, keyword_id, workspace_id):
+        """Row (``name``, ``cnt``) of the keyword's photos visible in ``workspace_id``."""
+        return self._keyword_repository().workspace_photo_count(keyword_id, workspace_id)
+
+    def search_species_keyword_names(self, query, match_case, whole_word):
+        """Names of ``is_species`` keywords matching ``query`` (keyword text-match rules)."""
+        return self._keyword_repository().species_names_matching(
+            query, match_case, whole_word,
+        )
+
+    def delete_keyword(self, keyword_id):
+        """Delete a keyword (children become roots, photo links go) and commit."""
+        self._keyword_repository().delete(keyword_id)
 
     def get_species_rank_keywords_for_photo(self, photo_id):
         """Rows (``id``, ``name``, ``is_species``, ``type``) of a photo's

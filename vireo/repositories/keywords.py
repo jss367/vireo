@@ -10,7 +10,11 @@ This module owns the SQL behind the keyword domain:
   species) and ``untag``;
 - species-name resolution (``resolve_species_display``, taxon lookup,
   case-convention detection, lineage resolution, species marking);
-- the scope and liveness reads of ``Database._merge_duplicate_keywords_pass``.
+- the scope and liveness reads of ``Database._merge_duplicate_keywords_pass``;
+- the reads and the delete behind the ``/api/keywords`` and ``/api/species``
+  routes (duplicate groups and per-workspace counts, the rename state, the
+  photo/workspace pairs a rename or delete re-queues sidecar changes for,
+  the species-name search, ``delete``), moved verbatim from ``web/``.
 
 The method bodies were moved verbatim from ``Database``. The only edits are
 ``self._ws_id()`` -> ``self.workspace_id`` and ``NAME`` -> ``self.NAME`` for
@@ -1310,6 +1314,104 @@ class KeywordRepository:
         return self.conn.execute(
             'SELECT id, name, parent_id FROM keywords'
         ).fetchall()
+
+    def rename_state(self, keyword_id):
+        """Row (``name``, ``is_species``, ``type``) of one keyword, or None.
+
+        What a rename or retype compares before and after the update.
+        """
+        return self.conn.execute(
+            """SELECT name, is_species, type
+               FROM keywords WHERE id = ?""",
+            (keyword_id,),
+        ).fetchone()
+
+    def photo_workspaces_tagged_with(self, keyword_id):
+        """Rows (``photo_id``, ``workspace_id``): each photo carrying
+        ``keyword_id`` once per workspace that can see it."""
+        return self.conn.execute(
+            """SELECT pk.photo_id, wf.workspace_id
+               FROM photo_keywords pk
+               JOIN photos p ON p.id = pk.photo_id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
+               WHERE pk.keyword_id = ?""",
+            (keyword_id,),
+        ).fetchall()
+
+    def subtree_photo_workspaces(self, keyword_id):
+        """Distinct rows (``photo_id``, ``workspace_id``) for every photo
+        tagged with ``keyword_id`` or any keyword below it, once per
+        workspace that can see the photo."""
+        return self.conn.execute(
+            """WITH RECURSIVE tree(id) AS (
+                   SELECT ?
+                   UNION ALL
+                   SELECT k.id FROM keywords k
+                   JOIN tree t ON k.parent_id = t.id
+               )
+               SELECT DISTINCT p.id AS photo_id, wf.workspace_id
+               FROM photos p
+               JOIN photo_keywords pk ON pk.photo_id = p.id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
+               JOIN tree t ON t.id = pk.keyword_id""",
+            (keyword_id,),
+        ).fetchall()
+
+    def workspace_duplicate_groups(self, workspace_id):
+        """Rows (``lname``, ``ids``, ``names``, ``cnt``) of keywords tagged in
+        ``workspace_id`` that share a merge slot: ``LOWER(name)``,
+        ``parent_id``, ``type`` and species-bearing. ``workspace_id=None``
+        matches nothing."""
+        return self.conn.execute(
+            """SELECT LOWER(k.name) as lname, GROUP_CONCAT(k.id) as ids,
+                      GROUP_CONCAT(k.name, ' | ') as names, COUNT(DISTINCT k.id) as cnt
+               FROM keywords k
+               JOIN photo_keywords pk ON pk.keyword_id = k.id
+               JOIN photos p ON p.id = pk.photo_id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
+               WHERE wf.workspace_id = ?
+               GROUP BY LOWER(k.name), k.parent_id, k.type,
+                        CASE WHEN k.type = 'taxonomy' OR k.is_species = 1
+                             THEN 1 ELSE 0 END
+               HAVING COUNT(DISTINCT k.id) > 1""",
+            (workspace_id,),
+        ).fetchall()
+
+    def workspace_photo_count(self, keyword_id, workspace_id):
+        """Row (``name``, ``cnt``): the keyword's tagged photos visible in
+        ``workspace_id``. Always one row; ``name`` is NULL when ``cnt`` is 0."""
+        return self.conn.execute(
+            """SELECT k.name, COUNT(pk.photo_id) as cnt
+               FROM keywords k
+               JOIN photo_keywords pk ON pk.keyword_id = k.id
+               JOIN photos p ON p.id = pk.photo_id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
+               WHERE k.id = ? AND wf.workspace_id = ?""",
+            (keyword_id, workspace_id),
+        ).fetchone()
+
+    def species_names_matching(self, query, match_case, whole_word):
+        """Names of ``is_species`` keywords that match ``query`` under the
+        keyword text-match rules, in table order."""
+        return [
+            row["name"] for row in self.conn.execute(
+                """SELECT name FROM keywords
+                   WHERE is_species = 1
+                     AND vireo_keyword_text_match(name, ?, ?, ?)""",
+                (query, 1 if match_case else 0, 1 if whole_word else 0),
+            ).fetchall()
+        ]
+
+    def delete(self, keyword_id):
+        """Delete one keyword and commit.
+
+        Its children become root keywords and its photo associations are
+        removed. Statements the caller left uncommitted share the commit.
+        """
+        self.conn.execute("UPDATE keywords SET parent_id = NULL WHERE parent_id = ?", (keyword_id,))
+        self.conn.execute("DELETE FROM photo_keywords WHERE keyword_id = ?", (keyword_id,))
+        self.conn.execute("DELETE FROM keywords WHERE id = ?", (keyword_id,))
+        self.conn.commit()
 
     def species_rank_keywords_for_photo(self, photo_id):
         """A photo's species-rank identification keywords.

@@ -677,6 +677,77 @@ def test_get_or_create_text_location_rejects_none_and_commits(db):
     assert db.get_or_create_text_location("Back garden") == kid
 
 
+def test_get_keyword_place_row_reads_place_fields_of_any_type(db):
+    root = _kw(db, "France")
+    leaf = _kw(db, "Paris", parent_id=root, lat=48.8, lng=2.3, place_id="pid-paris")
+    general = _kw(db, "Bird", kw_type="general")
+    assert tuple(db.get_keyword_place_row(leaf)) == (
+        leaf, "Paris", "pid-paris", 48.8, 2.3, root,
+    )
+    assert tuple(db.get_keyword_place_row(root)) == (root, "France", None, None, None, None)
+    assert db.get_keyword_place_row(general)["name"] == "Bird"
+    assert db.get_keyword_place_row(987_654) is None
+
+
+def test_get_photo_location_leaf_reads_a_linked_location_keyword(db, fid):
+    located = _photo(db, fid, "located.jpg")
+    general_only = _photo(db, fid, "general.jpg")
+    bare = _photo(db, fid, "bare.jpg")
+    root = _kw(db, "France")
+    leaf = _kw(db, "Paris", parent_id=root, lat=48.8, lng=2.3, place_id="pid-paris")
+    _link(db, located, leaf)
+    _link(db, located, _kw(db, "Bird", kw_type="general"))
+    _link(db, general_only, _kw(db, "Heron", kw_type="general"))
+    assert tuple(db.get_photo_location_leaf(located)) == (
+        leaf, "Paris", "pid-paris", 48.8, 2.3, root,
+    )
+    assert db.get_photo_location_leaf(general_only) is None
+    assert db.get_photo_location_leaf(bare) is None
+
+
+def test_get_located_keywords_in_workspace_counts_visible_photos(db, fid):
+    p1 = _photo(db, fid, "a.jpg")
+    p2 = _photo(db, fid, "b.jpg")
+    hidden_folder = db.add_folder("/hidden", name="hidden")
+    db.remove_workspace_folder(db.active_workspace_id, hidden_folder)
+    hidden = _photo(db, hidden_folder, "c.jpg")
+    park = _kw(db, "Park", lat=1.0, lng=2.0, place_id="pid-park")
+    half = _kw(db, "Pond", lat=1.0)
+    text_only = _kw(db, "Somewhere")
+    unused = _kw(db, "Marsh", lat=3.0, lng=4.0)
+    general = _kw(db, "Bird", kw_type="general", lat=5.0, lng=6.0)
+    for pid in (p1, p2, hidden):
+        _link(db, pid, park)
+    _link(db, p1, half)
+    _link(db, p1, text_only)
+    _link(db, p1, general)
+    rows = db.get_located_keywords_in_workspace()
+    assert [tuple(r) for r in rows] == [(park, "Park", "pid-park", 1.0, 2.0, None, 2)]
+    assert unused not in {r["id"] for r in rows}
+    db.set_active_workspace(None)
+    with pytest.raises(RuntimeError, match="No active workspace set"):
+        db.get_located_keywords_in_workspace()
+
+
+def test_location_gps_reviews_save_replace_and_delete_leave_commit_to_caller(db, fid):
+    p1 = _photo(db, fid, "a.jpg")
+    p2 = _photo(db, fid, "b.jpg")
+    db.save_location_gps_reviews([(p1, "f1"), (p2, "f2")])
+    assert db.conn.in_transaction
+    with _reader(db) as other:
+        assert other.execute("SELECT COUNT(*) FROM location_gps_reviews").fetchone()[0] == 0
+    db.conn.commit()
+    db.save_location_gps_reviews([(p1, "f1-new")])
+    db.delete_location_gps_review(p2)
+    assert db.conn.in_transaction
+    db.conn.commit()
+    with _reader(db) as other:
+        rows = other.execute(
+            "SELECT photo_id, fingerprint FROM location_gps_reviews"
+        ).fetchall()
+    assert [tuple(r) for r in rows] == [(p1, "f1-new")]
+
+
 def test_fill_missing_location_coordinates_keeps_an_established_point(db):
     empty = _kw(db, "Back garden")
     half = _kw(db, "Pond", lat=1.5)
@@ -939,6 +1010,11 @@ _DELEGATING_LOCATION_METHODS = (
     "clear_photo_location",
     "get_or_create_text_location",
     "fill_missing_location_coordinates",
+    "get_keyword_place_row",
+    "get_photo_location_leaf",
+    "get_located_keywords_in_workspace",
+    "delete_location_gps_review",
+    "save_location_gps_reviews",
     "reverse_geocode_cache_get",
     "reverse_geocode_cache_put",
 )

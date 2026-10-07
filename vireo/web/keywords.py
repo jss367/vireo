@@ -137,35 +137,14 @@ def create_keywords_blueprint(get_db, json_error):
         """
         db = get_db()
         ws = db.active_workspace_id
-        dupes = db.conn.execute(
-            """SELECT LOWER(k.name) as lname, GROUP_CONCAT(k.id) as ids,
-                      GROUP_CONCAT(k.name, ' | ') as names, COUNT(DISTINCT k.id) as cnt
-               FROM keywords k
-               JOIN photo_keywords pk ON pk.keyword_id = k.id
-               JOIN photos p ON p.id = pk.photo_id
-               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-               WHERE wf.workspace_id = ?
-               GROUP BY LOWER(k.name), k.parent_id, k.type,
-                        CASE WHEN k.type = 'taxonomy' OR k.is_species = 1
-                             THEN 1 ELSE 0 END
-               HAVING COUNT(DISTINCT k.id) > 1""",
-            (ws,),
-        ).fetchall()
+        dupes = db.get_keyword_duplicate_groups(ws)
         results = []
         for d in dupes:
             ids = list(set(int(x) for x in d["ids"].split(",")))
             # Count photos per variant within this workspace
             variants = []
             for kid in ids:
-                row = db.conn.execute(
-                    """SELECT k.name, COUNT(pk.photo_id) as cnt
-                       FROM keywords k
-                       JOIN photo_keywords pk ON pk.keyword_id = k.id
-                       JOIN photos p ON p.id = pk.photo_id
-                       JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-                       WHERE k.id = ? AND wf.workspace_id = ?""",
-                    (kid, ws),
-                ).fetchone()
+                row = db.get_keyword_workspace_photo_count(kid, ws)
                 if row and row["cnt"] > 0:
                     variants.append({"id": kid, "name": row["name"], "photo_count": row["cnt"]})
             if len(variants) > 1:
@@ -191,11 +170,7 @@ def create_keywords_blueprint(get_db, json_error):
         # or retype can merge this row into a normalized same-slot peer, in
         # which case the original id and its photo_keywords rows are gone
         # afterwards (update_keyword returns the surviving id).
-        old_row = db.conn.execute(
-            """SELECT name, is_species, type
-               FROM keywords WHERE id = ?""",
-            (keyword_id,),
-        ).fetchone()
+        old_row = db.get_keyword_rename_state(keyword_id)
         if old_row is None:
             return json_error("keyword not found", 404)
         affected = []
@@ -208,14 +183,7 @@ def create_keywords_blueprint(get_db, json_error):
         # empty list and XMP keeps exporting the old spelling until another
         # edit occurs.
         if body.get("name") or body.get("type"):
-            affected = db.conn.execute(
-                """SELECT pk.photo_id, wf.workspace_id
-                   FROM photo_keywords pk
-                   JOIN photos p ON p.id = pk.photo_id
-                   JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-                   WHERE pk.keyword_id = ?""",
-                (keyword_id,),
-            ).fetchall()
+            affected = db.get_photo_workspaces_with_keyword(keyword_id)
         # Additionally snapshot photos whose SIDECAR LOCATION path would go
         # stale from this update. A location-keyword rename does not just
         # change ``dc:subject`` (the flat leaf, which the ``affected`` set
@@ -234,20 +202,7 @@ def create_keywords_blueprint(get_db, json_error):
             old_row["type"] == "location"
             or (isinstance(body.get("type"), str) and body["type"] == "location")
         ):
-            location_affected = db.conn.execute(
-                """WITH RECURSIVE tree(id) AS (
-                       SELECT ?
-                       UNION ALL
-                       SELECT k.id FROM keywords k
-                       JOIN tree t ON k.parent_id = t.id
-                   )
-                   SELECT DISTINCT p.id AS photo_id, wf.workspace_id
-                   FROM photos p
-                   JOIN photo_keywords pk ON pk.photo_id = p.id
-                   JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-                   JOIN tree t ON t.id = pk.keyword_id""",
-                (keyword_id,),
-            ).fetchall()
+            location_affected = db.get_keyword_subtree_photo_workspaces(keyword_id)
         # Reject '|' in a rename that lands on a location keyword before we
         # ever touch the row. ``get_or_create_text_location`` refuses pipes
         # at creation time because XMP keyword hierarchies reserve it as the
@@ -277,11 +232,7 @@ def create_keywords_blueprint(get_db, json_error):
         # Queue sidecar updates only after a successful DB update, using the
         # STORED spelling of the surviving row — update_keyword normalizes
         # the requested name, so it can differ from the raw request value.
-        new_row = db.conn.execute(
-            """SELECT name, is_species, type
-               FROM keywords WHERE id = ?""",
-            (effective_id,),
-        ).fetchone()
+        new_row = db.get_keyword_rename_state(effective_id)
         if (
             old_row is not None and new_row is not None
             and old_row["name"] != new_row["name"]
@@ -403,7 +354,7 @@ def create_keywords_blueprint(get_db, json_error):
                         workspace_id=row["workspace_id"],
                         _commit=False,
                     )
-                db.conn.commit()
+                db.commit()
         # keywords.html's updateType/renameKeyword/bulk-apply handlers refetch
         # only when `merged` is truthy; without it the UI keeps the deleted
         # source id and its next edit/delete would 404 or hit the wrong row.
@@ -414,18 +365,9 @@ def create_keywords_blueprint(get_db, json_error):
     def api_delete_keyword(keyword_id):
         db = get_db()
         # Queue sidecar removals for all affected workspaces
-        kw_row = db.conn.execute(
-            "SELECT name, type FROM keywords WHERE id = ?", (keyword_id,)
-        ).fetchone()
+        kw_row = db.get_keyword_row(keyword_id)
         if kw_row:
-            affected = db.conn.execute(
-                """SELECT pk.photo_id, wf.workspace_id
-                   FROM photo_keywords pk
-                   JOIN photos p ON p.id = pk.photo_id
-                   JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-                   WHERE pk.keyword_id = ?""",
-                (keyword_id,),
-            ).fetchall()
+            affected = db.get_photo_workspaces_with_keyword(keyword_id)
             for row in affected:
                 queue_keyword_remove(db, row["photo_id"], kw_row["name"], workspace_id=row["workspace_id"])
             # Deleting a location ancestor detaches its children (they
@@ -443,20 +385,7 @@ def create_keywords_blueprint(get_db, json_error):
             # so the same photo appearing under ``affected`` above is
             # harmless.
             if kw_row["type"] == "location":
-                location_descendants = db.conn.execute(
-                    """WITH RECURSIVE tree(id) AS (
-                           SELECT ?
-                           UNION ALL
-                           SELECT k.id FROM keywords k
-                           JOIN tree t ON k.parent_id = t.id
-                       )
-                       SELECT DISTINCT p.id AS photo_id, wf.workspace_id
-                       FROM photos p
-                       JOIN photo_keywords pk ON pk.photo_id = p.id
-                       JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-                       JOIN tree t ON t.id = pk.keyword_id""",
-                    (keyword_id,),
-                ).fetchall()
+                location_descendants = db.get_keyword_subtree_photo_workspaces(keyword_id)
                 for row in location_descendants:
                     db.queue_change(
                         row["photo_id"],
@@ -465,10 +394,7 @@ def create_keywords_blueprint(get_db, json_error):
                         workspace_id=row["workspace_id"],
                         _commit=False,
                     )
-        db.conn.execute("UPDATE keywords SET parent_id = NULL WHERE parent_id = ?", (keyword_id,))
-        db.conn.execute("DELETE FROM photo_keywords WHERE keyword_id = ?", (keyword_id,))
-        db.conn.execute("DELETE FROM keywords WHERE id = ?", (keyword_id,))
-        db.conn.commit()
+        db.delete_keyword(keyword_id)
         return jsonify({"ok": True})
 
     return blueprint

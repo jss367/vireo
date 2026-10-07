@@ -561,6 +561,113 @@ def test_species_keyword_identity_rows(db, lib):
     }
 
 
+def test_get_keyword_rename_state_reads_name_species_and_type(db, lib):
+    kid = db.add_keyword("Back garden", kw_type="location")
+    species = _raw_kw(db, "Robin", is_species=1)
+    assert tuple(db.get_keyword_rename_state(kid)) == ("Back garden", 0, "location")
+    assert tuple(db.get_keyword_rename_state(species)) == ("Robin", 1, "general")
+    assert db.get_keyword_rename_state(987_654) is None
+
+
+def test_get_photo_workspaces_with_keyword_lists_each_visible_workspace(db, lib):
+    p0, p1, p2, _ = lib["p"]
+    other_ws = db.create_workspace("Other")
+    db.add_workspace_folder(other_ws, lib["fid"])
+    kid = db.add_keyword("Alpha")
+    db.tag_photo(p0, kid)
+    db.tag_photo(p1, kid)
+    db.tag_photo(p2, db.add_keyword("Beta"))
+    got = sorted(tuple(r) for r in db.get_photo_workspaces_with_keyword(kid))
+    assert got == sorted(
+        [(p0, lib["ws"]), (p1, lib["ws"]), (p0, other_ws), (p1, other_ws)]
+    )
+    # A photo no workspace can see has no row.
+    db.remove_workspace_folder(other_ws, lib["fid"])
+    db.remove_workspace_folder(lib["ws"], lib["fid"])
+    assert db.get_photo_workspaces_with_keyword(kid) == []
+
+
+def test_get_keyword_subtree_photo_workspaces_walks_descendants(db, lib):
+    p0, p1, p2, p3 = lib["p"]
+    country = _raw_kw(db, "France", kw_type="location")
+    city = _raw_kw(db, "Paris", parent_id=country, kw_type="location")
+    park = _raw_kw(db, "Parc Monceau", parent_id=city, kw_type="location")
+    elsewhere = _raw_kw(db, "Spain", kw_type="location")
+    db.conn.commit()
+    db.tag_photo(p0, city)
+    db.tag_photo(p0, park)  # two subtree links, one row
+    db.tag_photo(p1, park)
+    db.tag_photo(p2, country)
+    db.tag_photo(p3, elsewhere)
+    ws = lib["ws"]
+    assert sorted(tuple(r) for r in db.get_keyword_subtree_photo_workspaces(country)) == [
+        (p0, ws), (p1, ws), (p2, ws),
+    ]
+    assert sorted(tuple(r) for r in db.get_keyword_subtree_photo_workspaces(park)) == [
+        (p0, ws), (p1, ws),
+    ]
+    assert db.get_keyword_subtree_photo_workspaces(987_654) == []
+
+
+def test_get_keyword_duplicate_groups_and_workspace_photo_counts(db, lib):
+    p0, p1, p2, p3 = lib["p"]
+    ws = lib["ws"]
+    upper = _raw_kw(db, "Heron")
+    lower = _raw_kw(db, "heron")
+    species = _raw_kw(db, "HERON", is_species=1)  # a different merge slot
+    lone = _raw_kw(db, "Egret")
+    db.conn.commit()
+    db.tag_photo(p0, upper)
+    db.tag_photo(p1, upper)
+    db.tag_photo(p2, lower)
+    db.tag_photo(p3, species)
+    db.tag_photo(p3, lone)
+    groups = db.get_keyword_duplicate_groups(ws)
+    assert len(groups) == 1
+    assert groups[0]["lname"] == "heron"
+    assert groups[0]["cnt"] == 2
+    assert {int(x) for x in groups[0]["ids"].split(",")} == {upper, lower}
+    assert db.get_keyword_duplicate_groups(None) == []
+    assert tuple(db.get_keyword_workspace_photo_count(upper, ws)) == ("Heron", 2)
+    assert tuple(db.get_keyword_workspace_photo_count(lower, ws)) == ("heron", 1)
+    # An aggregate with no GROUP BY: always one row, NULL name when nothing matches.
+    assert tuple(db.get_keyword_workspace_photo_count(upper, ws + 999)) == (None, 0)
+
+
+def test_search_species_keyword_names_matches_species_rows_only(db, lib):
+    _raw_kw(db, "American Robin", is_species=1)
+    _raw_kw(db, "European Robin", is_species=1)
+    _raw_kw(db, "Robin Hood")  # not a species
+    db.conn.commit()
+    assert db.search_species_keyword_names("robin", False, False) == [
+        "American Robin", "European Robin",
+    ]
+    assert db.search_species_keyword_names("robin", True, False) == []
+    assert db.search_species_keyword_names("Rob", False, True) == []
+    assert db.search_species_keyword_names("Robin", False, True) == [
+        "American Robin", "European Robin",
+    ]
+
+
+def test_delete_keyword_detaches_children_unlinks_photos_and_commits(db, lib):
+    p0, p1, _, _ = lib["p"]
+    parent = _raw_kw(db, "France", kw_type="location")
+    child = _raw_kw(db, "Paris", parent_id=parent, kw_type="location")
+    db.conn.commit()
+    db.tag_photo(p0, parent)
+    db.tag_photo(p1, child)
+    # A statement the caller left open shares the delete's commit.
+    db.queue_change(p1, "location", "effective", _commit=False)
+    db.delete_keyword(parent)
+    assert not db.conn.in_transaction
+    assert _visible(db, "SELECT id FROM keywords WHERE id = ?", (parent,)) == []
+    assert _visible(db, "SELECT parent_id FROM keywords WHERE id = ?", (child,)) == [(None,)]
+    assert _visible(db, "SELECT photo_id, keyword_id FROM photo_keywords") == [(p1, child)]
+    assert _visible(
+        db, "SELECT photo_id FROM pending_changes WHERE change_type = 'location'"
+    ) == [(p1,)]
+
+
 def test_species_rank_keywords_for_photo(db, lib):
     p0, p1 = lib["p"][0], lib["p"][1]
     unlinked = _raw_kw(db, "Mystery", kw_type="taxonomy")
@@ -1185,6 +1292,13 @@ _DELEGATING_KEYWORD_METHODS = (
     "get_photo_ids_with_keyword",
     "get_photo_keyword_associations_by_name",
     "get_keyword_parent_rows",
+    "get_keyword_rename_state",
+    "get_photo_workspaces_with_keyword",
+    "get_keyword_subtree_photo_workspaces",
+    "get_keyword_duplicate_groups",
+    "get_keyword_workspace_photo_count",
+    "search_species_keyword_names",
+    "delete_keyword",
     "get_species_rank_keywords_for_photo",
     "get_photo_ids_with_species_rank_keyword",
     "get_photo_keywords",

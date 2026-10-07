@@ -12,6 +12,10 @@ Photos and keywords are catalog-wide, so most methods take no workspace.
 The ones that are scoped resolve the active workspace through
 ``workspace_id_fn`` at the same point the original ``Database`` code called
 ``self._ws_id()``; building the repository never resolves it.
+
+The GPS discrepancy decisions (``location_gps_reviews``) the Location Review
+page records are written here too; their read is part of
+``location_review.gps_discrepancies``.
 """
 
 import time
@@ -653,6 +657,65 @@ class LocationRepository:
             (latitude, longitude, keyword_id),
         )
         self.conn.commit()
+
+    def keyword_place_row(self, keyword_id):
+        """Row (``id``, ``name``, ``place_id``, ``latitude``, ``longitude``,
+        ``parent_id``) of one keyword of any type, or None."""
+        return self.conn.execute(
+            "SELECT id, name, place_id, latitude, longitude, parent_id "
+            "FROM keywords WHERE id = ?",
+            (keyword_id,),
+        ).fetchone()
+
+    def photo_location_leaf(self, photo_id):
+        """One ``type='location'`` keyword row linked to ``photo_id``, or None.
+
+        Columns as :meth:`keyword_place_row`. ``LIMIT 1`` with no ORDER BY:
+        which row a photo with several location links gets is SQLite's
+        choice.
+        """
+        return self.conn.execute(
+            "SELECT k.id, k.name, k.place_id, k.latitude, k.longitude, k.parent_id "
+            "FROM photo_keywords pk "
+            "JOIN keywords k ON k.id = pk.keyword_id "
+            "WHERE pk.photo_id = ? AND k.type = 'location' "
+            "LIMIT 1",
+            (photo_id,),
+        ).fetchone()
+
+    def located_keywords_in_workspace(self):
+        """Location keywords with coordinates tagged on active-workspace photos.
+
+        Rows (``id``, ``name``, ``place_id``, ``latitude``, ``longitude``,
+        ``parent_id``, ``photo_count``), one per keyword; ``photo_count``
+        counts its distinct visible photos.
+        """
+        return self.conn.execute(
+            """SELECT k.id, k.name, k.place_id, k.latitude, k.longitude,
+                      k.parent_id, COUNT(DISTINCT pk.photo_id) AS photo_count
+               FROM keywords k
+               JOIN photo_keywords pk ON pk.keyword_id = k.id
+               JOIN photos p ON p.id = pk.photo_id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
+               WHERE wf.workspace_id = ? AND k.type = 'location'
+                 AND k.latitude IS NOT NULL AND k.longitude IS NOT NULL
+               GROUP BY k.id""",
+            (self.workspace_id_fn(),),
+        ).fetchall()
+
+    # -- GPS discrepancy reviews ----------------------------------------------
+
+    def delete_gps_review(self, photo_id):
+        """Forget ``photo_id``'s GPS discrepancy decision. Caller owns the transaction."""
+        self.conn.execute("DELETE FROM location_gps_reviews WHERE photo_id = ?", (photo_id,))
+
+    def save_gps_reviews(self, reviews):
+        """Store ``(photo_id, fingerprint)`` keep decisions, replacing any
+        earlier one for the photo. Caller owns the transaction."""
+        self.conn.executemany(
+            "INSERT OR REPLACE INTO location_gps_reviews(photo_id, fingerprint) VALUES (?, ?)",
+            reviews,
+        )
 
     def delete_photo_links(self, photo_id):
         """Delete ``photo_id``'s location-keyword links. Caller owns the transaction."""

@@ -53,9 +53,7 @@ def create_photo_location_keywords_blueprint(
         if keyword_id is not None:
             if isinstance(keyword_id, bool) or not isinstance(keyword_id, int):
                 return json_error("keyword_id must be an integer")
-            keyword_row = db.conn.execute(
-                "SELECT id, name FROM keywords WHERE id = ?", (keyword_id,)
-            ).fetchone()
+            keyword_row = db.get_keyword_row(keyword_id)
             if keyword_row is None:
                 return json_error("keyword not found", 404)
             kid = keyword_row["id"]
@@ -83,11 +81,9 @@ def create_photo_location_keywords_blueprint(
             # Queue/record the stored spelling: add_keyword normalizes
             # punctuation and applies the species casing convention, so it
             # can differ from the raw request name.
-            stored = db.conn.execute(
-                "SELECT name FROM keywords WHERE id = ?", (kid,)
-            ).fetchone()
-            if stored:
-                name = stored["name"]
+            stored = db.get_keyword_name(kid)
+            if stored is not None:
+                name = stored
         # tag_photo is INSERT OR IGNORE, so a repeated Add click on a
         # keyword the photo already carries would still queue a
         # keyword_add sidecar change and record a keyword_add edit whose
@@ -95,10 +91,7 @@ def create_photo_location_keywords_blueprint(
         # the pending/history bookkeeping when the row already exists, so
         # the second click is a true no-op (mirrors the batch route's
         # already_tagged precheck).
-        already_tagged = db.conn.execute(
-            "SELECT 1 FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
-            (photo_id, kid),
-        ).fetchone() is not None
+        already_tagged = photo_id in db.get_photo_ids_with_keyword(kid, [photo_id])
         if already_tagged:
             return jsonify({"ok": True, "keyword_id": kid})
         # source='manual': a person clicked Add. Stamping the association
@@ -264,12 +257,7 @@ def create_photo_location_keywords_blueprint(
             # and pipe characters.
             return json_error("missing name", 400)
         if latitude is not None:
-            db.conn.execute(
-                "UPDATE keywords SET latitude = COALESCE(latitude, ?), "
-                "longitude = COALESCE(longitude, ?) WHERE id = ?",
-                (latitude, longitude, leaf_id),
-            )
-            db.conn.commit()
+            db.fill_missing_location_coordinates(leaf_id, latitude, longitude)
         db.set_photo_location(photo_id, leaf_id)
         queue_location_sync_if_enabled(db, photo_id)
         db.record_edit(

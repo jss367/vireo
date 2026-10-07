@@ -202,11 +202,7 @@ def _serialize_keyword(db, keyword_id):
 
     Returns ``None`` if the keyword does not exist.
     """
-    leaf = db.conn.execute(
-        "SELECT id, name, place_id, latitude, longitude, parent_id "
-        "FROM keywords WHERE id = ?",
-        (keyword_id,),
-    ).fetchone()
+    leaf = db.get_keyword_place_row(keyword_id)
     if leaf is None:
         return None
     return {
@@ -348,38 +344,34 @@ def create_locations_blueprint(
             db, photo_ids, 0, include_reviewed=True, sidecar_reader=capture_sidecar,
         )
         # Serialize validation and queueing with concurrent assignment edits.
-        db.conn.execute("BEGIN IMMEDIATE")
+        db.begin_immediate()
         try:
             for photo_id in photo_ids:
                 error = location_errors.photo_location_edit_error(db, photo_id)
                 if error is not None:
-                    db.conn.rollback()
+                    db.rollback()
                     return error
             photos = location_review.gps_discrepancies(
                 db, photo_ids, 0, include_reviewed=True, sidecar_reader=sidecars.get,
             )
             current = {photo["id"]: photo for photo in photos}
             if any(pid not in current or fingerprints.get(str(pid)) != current[pid]["fingerprint"] for pid in photo_ids):
-                db.conn.rollback()
+                db.rollback()
                 return json_error("Location data changed. Reload this review before applying a decision.", 409)
             if body["action"] == "assigned":
                 import config as cfg
                 if not db.get_effective_config(cfg.load()).get("write_assigned_location_to_xmp", False):
-                    db.conn.rollback()
+                    db.rollback()
                     return json_error("Enable Write assigned locations to XMP in Settings before queueing corrections.", 409)
                 for photo_id in photo_ids:
                     queue_location_sync_if_enabled(db, photo_id, _commit=False)
-                    db.conn.execute("DELETE FROM location_gps_reviews WHERE photo_id = ?", (photo_id,))
+                    db.delete_location_gps_review(photo_id)
             else:
                 for photo_id in photo_ids:
-                    if db.conn.execute(
-                        "SELECT 1 FROM pending_changes WHERE photo_id = ? AND change_type = 'location' LIMIT 1",
-                        (photo_id,),
-                    ).fetchone():
-                        db.conn.rollback()
+                    if db.has_pending_location_change(photo_id):
+                        db.rollback()
                         return json_error("A selected photo has a pending location change. Review that change before keeping its GPS.", 409)
-                db.conn.executemany(
-                    "INSERT OR REPLACE INTO location_gps_reviews(photo_id, fingerprint) VALUES (?, ?)",
+                db.save_location_gps_reviews(
                     [(pid, current[pid]["fingerprint"]) for pid in photo_ids],
                 )
             db.record_edit(
@@ -390,9 +382,9 @@ def create_locations_blueprint(
                  for pid in photo_ids],
                 is_batch=len(photo_ids) > 1, _commit=False,
             )
-            db.conn.commit()
+            db.commit()
         except BaseException:
-            db.conn.rollback()
+            db.rollback()
             raise
         db._prune_edit_history()
         return jsonify({"reviewed": len(photo_ids), "queued": len(photo_ids) if body["action"] == "assigned" else 0})
@@ -418,18 +410,7 @@ def create_locations_blueprint(
         radius_m = min(radius_m, 100_000.0)
 
         db = get_db()
-        rows = db.conn.execute(
-            """SELECT k.id, k.name, k.place_id, k.latitude, k.longitude,
-                      k.parent_id, COUNT(DISTINCT pk.photo_id) AS photo_count
-               FROM keywords k
-               JOIN photo_keywords pk ON pk.keyword_id = k.id
-               JOIN photos p ON p.id = pk.photo_id
-               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-               WHERE wf.workspace_id = ? AND k.type = 'location'
-                 AND k.latitude IS NOT NULL AND k.longitude IS NOT NULL
-               GROUP BY k.id""",
-            (db.require_workspace_id(),),
-        ).fetchall()
+        rows = db.get_located_keywords_in_workspace()
 
         def distance_m(row):
             lat1 = math.radians(lat)
@@ -629,14 +610,7 @@ def create_locations_blueprint(
             [],
         )
 
-        photo_rows = db.conn.execute(
-            """SELECT DISTINCT pk.photo_id, wf.workspace_id
-               FROM photo_keywords pk
-               JOIN photos p ON p.id = pk.photo_id
-               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-               WHERE pk.keyword_id = ?""",
-            (result["keyword_id"],),
-        ).fetchall()
+        photo_rows = db.get_photo_workspaces_with_keyword(result["keyword_id"])
         for row in photo_rows:
             queue_location_sync_if_enabled(
                 db, row["photo_id"],
@@ -644,7 +618,7 @@ def create_locations_blueprint(
                 _commit=False,
             )
         if photo_rows:
-            db.conn.commit()
+            db.commit()
 
         return jsonify({
             "keyword": _serialize_keyword(db, result["keyword_id"]),
