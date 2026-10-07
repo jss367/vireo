@@ -1689,12 +1689,6 @@
       else if (!searchInput.value.trim() && state.visual) applyVisualSearch('');
       else syncQuickSearchInput();
     });
-    const scopeBtn = $('.vf-search-scope');
-    if (scopeBtn) {
-      // mousedown keeps focus (and the suggestion list) in the search box.
-      scopeBtn.addEventListener('mousedown', (e) => e.preventDefault());
-      scopeBtn.addEventListener('click', toggleSearchScope);
-    }
     const searchSuggest = $('.vf-search-suggest');
     if (searchSuggest) {
       // mousedown beats the input's blur, so the pick is never lost.
@@ -2162,6 +2156,15 @@
         earlySearchComposing = event.isComposing;
       };
       searchInput.addEventListener('input', rememberEarlySearch);
+      // Scope is already visible during registry/shortcut loading. Bind it
+      // once now so early choices survive the later workspace restore.
+      const scopeBtn = $('.vf-search-scope');
+      if (scopeBtn) {
+        // Keep focus (and the suggestion list) in the search box.
+        scopeBtn.addEventListener('mousedown', (e) => e.preventDefault());
+        scopeBtn.addEventListener('click', toggleSearchScope);
+      }
+      renderSearchScope();
       // Both loads run together: the shortcut row paints as soon as its
       // config lands, without waiting on the (larger) field registry.
       return Promise.all([loadRegistry(), loadShortcuts()]).then(() => {

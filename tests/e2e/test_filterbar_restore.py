@@ -104,8 +104,14 @@ def test_untouched_search_restores_saved_filters(page):
     assert page.evaluate('VireoFilter.getUserRules().rules[0]._qs_text') == 'kingf'
 
 
-def test_scope_toggle_survives_delayed_restore_with_empty_search(page):
-    search = start_filter_bar(page, '/api/workspaces/active')
+@pytest.mark.parametrize('delayed_endpoint', [
+    '/api/filters/fields', '/api/filters/shortcuts', '/api/workspaces/active',
+])
+@pytest.mark.parametrize('stored_scope', ['all', 'keyword'])
+def test_scope_toggle_survives_delayed_restore_with_empty_search(
+    page, delayed_endpoint, stored_scope,
+):
+    search = start_filter_bar(page, delayed_endpoint, stored_scope=stored_scope)
     # Also exercise mute preservation: picking a scope must not discard
     # unrelated saved state (saved rules, mute, visual clause).
     page.evaluate('''() => {
@@ -140,6 +146,12 @@ def test_scope_toggle_survives_delayed_restore_with_empty_search(page):
     search.press('Enter')
     field = 'keyword' if chosen == 'true' else 'metadata'
     assert page.evaluate('VireoFilter.getUserRules().rules[0].rules[0].field') == field
+    # Startup completion must not attach a second handler: a later click
+    # changes scope once and reapplies the existing text in that scope.
+    toggle.click()
+    expect(toggle).to_have_attribute('aria-pressed', 'false' if chosen == 'true' else 'true')
+    next_field = 'metadata' if field == 'keyword' else 'keyword'
+    assert page.evaluate('VireoFilter.getUserRules().rules[0].rules[0].field') == next_field
 
 
 @pytest.mark.parametrize('saved_scope', ['all', 'keyword'])
