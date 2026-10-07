@@ -369,6 +369,37 @@ class MasksFeaturesRepository:
             })
         return out
 
+    def workspace_photo_ids_with_variant(self, variant):
+        """Ids of the bound workspace's photos that have a ``variant`` mask row."""
+        rows = self.conn.execute(
+            """
+            SELECT pm.photo_id
+              FROM photo_masks pm
+              JOIN photos p ON p.id = pm.photo_id
+              JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
+             WHERE wf.workspace_id = ? AND pm.variant = ?
+            """,
+            (self.workspace_id, variant),
+        ).fetchall()
+        return [r["photo_id"] for r in rows]
+
+    def pipeline_feature_row(self, photo_id):
+        """One photo's pipeline-feature columns (any workspace), or None.
+
+        ``id``, ``filename``, ``timestamp``, ``width``, ``height``,
+        ``mask_path``, the subject/background sharpness and exposure
+        features, ``phash_crop`` and ``subject_size``.
+        """
+        return self.conn.execute(
+            """SELECT id, filename, timestamp, width, height,
+                      mask_path, subject_tenengrad, bg_tenengrad,
+                      crop_complete, bg_separation,
+                      subject_clip_high, subject_clip_low, subject_y_median,
+                      phash_crop, subject_size
+               FROM photos WHERE id = ?""",
+            (photo_id,),
+        ).fetchone()
+
     # -- writers -------------------------------------------------------------
 
     def upsert_mask(

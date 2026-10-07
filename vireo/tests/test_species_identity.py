@@ -1207,10 +1207,11 @@ RAW_SCIENTIFIC_NAME_READERS = {
     "repositories/masks_features.py": "presence ordering and class routing only; guesses keep the right class",
     "repositories/predictions.py": (
         "get_top_prediction_for_photo returns provenance; web/inat.py resolves it; "
-        "get_predictions_by_id's decision rows resolved via SpeciesResolver in web/predictions.py"
+        "get_predictions_by_id's decision rows resolved via SpeciesResolver in web/predictions.py; "
+        "get_inspector_predictions_for_photo's Pipeline Inspector payload via "
+        "resolved_prediction_taxonomy in web/pipeline.py"
     ),
     "repositories/stats.py": "presence ordering only",
-    "web/pipeline.py": "Pipeline Inspector payload via resolved_prediction_taxonomy",
 }
 
 

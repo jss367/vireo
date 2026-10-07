@@ -341,6 +341,23 @@ class WorkspaceFolderRepository:
         ).fetchone()
         return row is not None
 
+    def visible_ids(self, workspace_id, folder_ids):
+        """The subset of ``folder_ids`` the workspace sees, as a set.
+
+        Reads the ``workspace_visible_folders`` view (real links plus
+        photo-only grants), one ``IN`` statement per chunk.
+        """
+        visible = set()
+        for chunk in self._chunks(folder_ids):
+            marks = ",".join("?" for _ in chunk)
+            rows = self.conn.execute(
+                f"SELECT folder_id FROM workspace_visible_folders "
+                f"WHERE workspace_id = ? AND folder_id IN ({marks})",
+                [workspace_id] + list(chunk),
+            )
+            visible.update(r["folder_id"] for r in rows)
+        return visible
+
     def root_ids(self, workspace_id):
         """Return the ids of the workspace's user-facing roots, by path."""
         rows = self.conn.execute(

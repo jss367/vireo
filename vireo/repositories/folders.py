@@ -76,6 +76,18 @@ class FolderRepository:
             (folder_id,),
         ).fetchone()
 
+    def paths_by_id(self, folder_ids):
+        """``{folder_id: stored path}`` for the ids that exist (any workspace)."""
+        paths = {}
+        for chunk in self._chunks(folder_ids):
+            marks = ",".join("?" for _ in chunk)
+            for r in self.conn.execute(
+                f"SELECT id, path FROM folders WHERE id IN ({marks})",
+                tuple(chunk),
+            ):
+                paths[r["id"]] = r["path"]
+        return paths
+
     def tree(self):
         """Return the workspace's visible folders with parents rewritten to visible ancestors."""
         ws = self.workspace_id

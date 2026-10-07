@@ -6,7 +6,13 @@ workspaces: a model's output is a pure function of (photo or detection,
 model, label set). ``Database`` keeps the workspace-scoped config lookup:
 the classify preflight methods take the active workspace's detector floor
 as ``min_conf``, resolved by the façade through
-``Database.get_effective_config``.
+``Database.get_effective_config``. The Pipeline inspector's per-photo run
+diagnostics (``get_unscored_current_prediction_runs``,
+``get_match_scores_for_photo``, ``current_prediction_detector_confidences``,
+``classifier_runs_for_photo``) read ``predictions`` alongside the run tables
+here; ``current_prediction_detector_confidences`` and
+``classifier_runs_for_photo`` came from ``web/pipeline.py``, each serving the
+real-detection and full-image reads its two copies made.
 """
 
 
@@ -235,6 +241,47 @@ class ModelRunsRepository:
             (photo_id,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def current_prediction_detector_confidences(self, photo_id, *, full_image):
+        """Rows (``id``, ``detector_confidence``) of a photo's current-label-set predictions.
+
+        Current means the latest ``labels_fingerprint`` per (detection,
+        classifier model). ``full_image`` picks the full-image
+        pseudo-detection's predictions; otherwise every real detection's,
+        whatever its confidence. Not workspace-scoped.
+        """
+        detector_test = "=" if full_image else "!="
+        return self.conn.execute(
+            f"""SELECT pr.id, d.detector_confidence
+               FROM predictions pr
+               JOIN detections d ON d.id = pr.detection_id
+               WHERE d.photo_id = ?
+                 AND d.detector_model {detector_test} 'full-image'
+                 AND pr.labels_fingerprint = (
+                    SELECT pr2.labels_fingerprint FROM predictions pr2
+                    WHERE pr2.detection_id = pr.detection_id
+                      AND pr2.classifier_model = pr.classifier_model
+                    ORDER BY pr2.created_at DESC, pr2.id DESC
+                    LIMIT 1
+                 )""",
+            (photo_id,),
+        ).fetchall()
+
+    def classifier_runs_for_photo(self, photo_id, *, full_image):
+        """Rows (``prediction_count``, ``detector_confidence``) of a photo's classifier runs.
+
+        ``full_image`` picks the runs on the full-image pseudo-detection;
+        otherwise the runs on every real detection, whatever its confidence.
+        """
+        detector_test = "=" if full_image else "!="
+        return self.conn.execute(
+            f"""SELECT cr.prediction_count, d.detector_confidence
+               FROM classifier_runs cr
+               JOIN detections d ON d.id = cr.detection_id
+               WHERE d.photo_id = ?
+                 AND d.detector_model {detector_test} 'full-image'""",
+            (photo_id,),
+        ).fetchall()
 
     def get_classifier_run_keys(self, detection_id, runtime_fingerprint=None):
         """Return the (model, fingerprint) keys the runtime gate honors."""

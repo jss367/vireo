@@ -497,6 +497,23 @@ def test_get_keyword_name_reads_the_stored_spelling(db):
     assert db.get_keyword_name(987_654) is None
 
 
+def test_get_top_level_species_keyword_prefers_taxonomy_then_lowest_id(db):
+    assert db.get_top_level_species_keyword("Robin") is None
+    general = _raw_kw(db, "robin", None, "general")
+    _raw_kw(db, "Robin", None, "individual")
+    parent = _raw_kw(db, "Birds")
+    _raw_kw(db, "Robin", parent, "taxonomy", 1)
+    # Only the top-level general row qualifies: other types and nested rows
+    # never match.
+    row = db.get_top_level_species_keyword("ROBIN")
+    assert (row["id"], row["name"]) == (general, "robin")
+    _raw_kw(db, "Robin", None, "general")
+    taxonomy = _raw_kw(db, "ROBIN", None, "taxonomy", 1)
+    row = db.get_top_level_species_keyword("robin")
+    assert (row["id"], row["name"]) == (taxonomy, "ROBIN")
+    assert db.get_top_level_species_keyword("Wren") is None
+
+
 def test_species_keywords_and_equivalents(db, lib):
     p0, p1, p2, p3 = lib["p"]
     root = db.add_keyword("American Robin", is_species=True)
@@ -1039,6 +1056,7 @@ _DELEGATING_KEYWORD_METHODS = (
     "get_keyword_tree",
     "untag_photo",
     "get_keyword_name",
+    "get_top_level_species_keyword",
     "get_photo_keywords",
     "get_keywords_for_photos",
     "get_species_keywords_for_photos",

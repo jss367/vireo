@@ -8,7 +8,9 @@ This module owns the SQL behind the predictions domain:
   ``classifier_match_scores`` and ``classifier_runs`` deletes), and the
   reads Review, Browse, the pipeline and iNat use (``get_rows``,
   ``get_group``, ``get_states``, ``get_top_for_photo``,
-  ``get_top_confidences``, ``get_for_photo``, ``get_existing_photo_ids``);
+  ``get_top_confidences``, ``get_for_photo``, ``get_existing_photo_ids``,
+  and the Pipeline inspector's ``inspector_rows_for_photo``, whose SQL came
+  from ``web/pipeline.py`` unchanged);
 - per-workspace review state (``prediction_review``): status updates, burst
   grouping metadata (``update_group_info`` / ``clear_group_info`` /
   ``ungroup``), the auto-match reconciliation, the raw
@@ -1134,6 +1136,49 @@ class PredictionRepository:
                 if row["confidence"] is not None:
                     result[row["photo_id"]] = row["confidence"]
         return result
+
+    def inspector_rows_for_photo(self, photo_id, workspace_id, min_detector_confidence):
+        """A photo's current-label-set predictions with review state, best first.
+
+        The Pipeline inspector's rows: species, confidence, model, category,
+        match score, the stored taxonomy and provenance, the workspace's
+        review state (``status`` defaults to ``pending``; ``individual``,
+        ``group_id`` and the vote counts are NULL without a review row) and
+        the detection's box and confidence. Only real detections at or above
+        ``min_detector_confidence``, and only the latest ``labels_fingerprint``
+        per (detection, classifier model). ``workspace_id`` is taken as
+        given (not the bound workspace) and only scopes the review join.
+        """
+        return self.conn.execute(
+            """SELECT pr.species, pr.confidence, pr.classifier_model AS model,
+                      pr.category, pr.match_score,
+                      pr.labels_fingerprint, pr.source_taxon_id,
+                      pr.scientific_name, pr.taxonomy_kingdom, pr.taxonomy_phylum,
+                      pr.taxonomy_class, pr.taxonomy_order, pr.taxonomy_family,
+                      pr.taxonomy_genus,
+                      COALESCE(pr_rev.status, 'pending') AS status,
+                      pr_rev.individual AS individual,
+                      pr_rev.group_id AS group_id,
+                      pr_rev.vote_count AS vote_count,
+                      pr_rev.total_votes AS total_votes,
+                      d.box_x, d.box_y, d.box_w, d.box_h, d.detector_confidence
+               FROM predictions pr
+               JOIN detections d ON d.id = pr.detection_id
+               LEFT JOIN prediction_review pr_rev
+                 ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
+               WHERE d.photo_id = ?
+                 AND d.detector_confidence >= ?
+                 AND d.detector_model != 'full-image'
+                 AND pr.labels_fingerprint = (
+                    SELECT pr2.labels_fingerprint FROM predictions pr2
+                    WHERE pr2.detection_id = pr.detection_id
+                      AND pr2.classifier_model = pr.classifier_model
+                    ORDER BY pr2.created_at DESC, pr2.id DESC
+                    LIMIT 1
+                 )
+               ORDER BY pr.confidence DESC""",
+            (workspace_id, photo_id, min_detector_confidence),
+        ).fetchall()
 
     def get_for_photo(self, photo_id, model, labels_fingerprint=None):
         """Return species, confidence, and detection_id for a photo's prediction.

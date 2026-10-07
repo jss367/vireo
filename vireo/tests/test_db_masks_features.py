@@ -502,6 +502,42 @@ def test_mask_variant_coverage_is_workspace_scoped(db):
         db.mask_variant_coverage()
 
 
+def test_get_workspace_photo_ids_with_mask_variant_is_workspace_scoped(db):
+    fid = _folder(db)
+    a, b, c = (_photo(db, n, fid) for n in ("a.jpg", "b.jpg", "c.jpg"))
+    foreign = _other_workspace_photo(db)
+    _mask(db, a, "large")
+    _mask(db, b, "large")
+    _mask(db, b, "small")
+    _mask(db, c, "small")
+    _mask(db, foreign, "large")
+    assert sorted(db.get_workspace_photo_ids_with_mask_variant("large")) == [a, b]
+    assert db.get_workspace_photo_ids_with_mask_variant("tiny") == []
+    db.set_active_workspace(None)
+    with pytest.raises(RuntimeError, match="No active workspace"):
+        db.get_workspace_photo_ids_with_mask_variant("large")
+
+
+def test_get_photo_pipeline_features_reads_the_feature_columns(db):
+    foreign = _other_workspace_photo(db)
+    db.update_photo_pipeline_features(
+        foreign, subject_tenengrad=4.5, bg_tenengrad=1.5, subject_y_median=0.2,
+    )
+    row = db.get_photo_pipeline_features(foreign)
+    assert list(row.keys()) == [
+        "id", "filename", "timestamp", "width", "height",
+        "mask_path", "subject_tenengrad", "bg_tenengrad",
+        "crop_complete", "bg_separation",
+        "subject_clip_high", "subject_clip_low", "subject_y_median",
+        "phash_crop", "subject_size",
+    ]
+    assert (row["id"], row["filename"]) == (foreign, "foreign.jpg")
+    assert (row["subject_tenengrad"], row["bg_tenengrad"], row["subject_y_median"]) == (4.5, 1.5, 0.2)
+    db.set_active_workspace(None)  # catalog-wide
+    assert db.get_photo_pipeline_features(foreign)["id"] == foreign
+    assert db.get_photo_pipeline_features(999999) is None
+
+
 def test_mask_variant_coverage_empty(db):
     assert db.mask_variant_coverage() == []
 
@@ -945,6 +981,8 @@ def test_get_photos_with_embedding_chunks_photo_ids(db):
 _DELEGATING_MASKS_FEATURES_METHODS = (
     "get_photo_mask",
     "list_masks_for_photo",
+    "get_workspace_photo_ids_with_mask_variant",
+    "get_photo_pipeline_features",
     "set_active_mask_variant",
     "delete_masks_for_variant",
     "delete_inactive_masks",

@@ -207,6 +207,20 @@ def test_get_folder_returns_row_or_none(db):
     assert db.get_folder(fid)["id"] == fid  # catalog-wide
 
 
+def test_get_folder_paths_is_catalog_wide(db, monkeypatch):
+    assert db.get_folder_paths([]) == {}
+    a = db.add_folder("/p/a", name="a")
+    b = _raw_folder(db, "/p/b")  # linked to no workspace
+    db.set_active_workspace(None)
+    assert db.get_folder_paths([a, b, a + b + 999]) == {a: "/p/a", b: "/p/b"}
+    monkeypatch.setattr(db_module, "_SQLITE_PARAM_CHUNK_SIZE", 1)
+    statements = []
+    db.conn.set_trace_callback(statements.append)
+    assert db.get_folder_paths([a, b]) == {a: "/p/a", b: "/p/b"}
+    db.conn.set_trace_callback(None)
+    assert len([s for s in statements if "SELECT id, path FROM folders" in s]) == 2
+
+
 def test_get_folder_tree_filters_status_and_rewrites_parents(db):
     ws = db._ws_id()
     root = db.add_folder("/t", name="t")
@@ -1178,6 +1192,7 @@ _DELEGATING_FOLDER_METHODS = (
     "get_folder_tree",
     "get_folder_subtree_ids",
     "get_folder",
+    "get_folder_paths",
     "check_folder_health",
     "get_missing_folders",
     "get_missing_photos",

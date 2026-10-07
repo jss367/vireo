@@ -16,7 +16,6 @@ import os
 from functools import wraps
 
 from config import read_raw_config_file, settings_write_lock
-from db import _chunks, commit_with_retry
 from flask import Blueprint, jsonify, request
 from jobs import SLOT_CAP
 from photo_payload import (
@@ -75,12 +74,12 @@ def create_pipeline_blueprint(
 
             db = get_db()
             with acquire_workspace_regroup(db.require_workspace_id()):
-                db.conn.execute("BEGIN IMMEDIATE")
+                db.begin_immediate()
                 try:
                     return fn()
                 finally:
-                    if db.conn.in_transaction:
-                        db.conn.rollback()
+                    if db.in_transaction:
+                        db.rollback()
         return wrapped
 
     @blueprint.route("/api/pipeline/slots")
@@ -218,7 +217,6 @@ def create_pipeline_blueprint(
                     "folder_ids must be a non-empty list of integers"
                 )
             db = get_db()
-            ws_for_folders = db.active_workspace_id
             subtree_ids = set()
             # Mirror the /api/jobs/pipeline folder resolution exactly so the
             # plan describes the same photos the run will process. Without
@@ -226,37 +224,20 @@ def create_pipeline_blueprint(
             # (whose paths sit under the selected root) are silently omitted
             # from the plan even though the run walks them via
             # _folder_subtree_ids_by_path.
-            from db import _chunks  # noqa: PLC0415
             for fid in folder_ids:
-                linked = db.conn.execute(
-                    "SELECT 1 FROM workspace_visible_folders "
-                    "WHERE workspace_id = ? AND folder_id = ?",
-                    (ws_for_folders, fid),
-                ).fetchone()
-                if not linked:
+                if not db.get_workspace_visible_folder_ids([fid]):
                     return json_error("folder not found", 404)
                 subtree_ids.update(db.get_folder_subtree_ids(fid))
                 # Intersect the path-based descendants with the workspace's
                 # folder set so nothing leaks in from another workspace that
                 # happens to share a path prefix.
-                for chunk in _chunks(db._folder_subtree_ids_by_path(fid)):
-                    marks = ",".join("?" for _ in chunk)
-                    rows = db.conn.execute(
-                        f"SELECT folder_id FROM workspace_visible_folders "
-                        f"WHERE workspace_id = ? AND folder_id IN ({marks})",
-                        [ws_for_folders] + list(chunk),
-                    )
-                    subtree_ids.update(r["folder_id"] for r in rows)
-            scope_photo_ids = []
-            for chunk in _chunks(list(subtree_ids)):
-                marks = ",".join("?" for _ in chunk)
-                scope_photo_ids.extend(
-                    r["id"] for r in db.conn.execute(
-                        f"SELECT p.id FROM photos p JOIN photo_workspace_visibility pv ON pv.photo_id = p.id "
-                        f"WHERE p.folder_id IN ({marks}) AND pv.workspace_id = ?",
-                        [*chunk, ws_for_folders],
-                    )
-                )
+                subtree_ids.update(db.get_workspace_visible_folder_ids(
+                    db._folder_subtree_ids_by_path(fid),
+                ))
+            scope_photo_ids = [
+                r["id"]
+                for r in db.get_workspace_photos_in_folders(list(subtree_ids))
+            ]
         # Expand a saved-process id the same way /api/jobs/pipeline does so
         # the plan describes the run the same job body would produce. Without
         # this, the Identify-birds process (skip_regroup=True + species review)
@@ -719,18 +700,10 @@ def create_pipeline_blueprint(
             # source-coordinate markers.
             attach_nested_edit_recipes(db, results)
             photo_ids = [p["id"] for p in results["photos"]]
-            # Chunked: cached pipeline results can span the whole workspace,
-            # exceeding SQLite's bound-parameter cap in one IN clause.
-            live_photo_map = {}
-            for chunk in _chunks(photo_ids):
-                placeholders = ",".join("?" for _ in chunk)
-                rows = db.conn.execute(
-                    f"""SELECT id, flag, rating,
-                               eye_x, eye_y, eye_conf, eye_tenengrad
-                          FROM photos WHERE id IN ({placeholders})""",
-                    chunk,
-                ).fetchall()
-                live_photo_map.update({r["id"]: r for r in rows})
+            # Chunked in the repository: cached pipeline results can span the
+            # whole workspace, exceeding SQLite's bound-parameter cap in one
+            # IN clause.
+            live_photo_map = db.get_photo_flags_ratings_and_eyes(photo_ids)
             for p in results["photos"]:
                 live = live_photo_map.get(p["id"])
                 p["flag"] = live["flag"] if live else "none"
@@ -761,10 +734,7 @@ def create_pipeline_blueprint(
                 for p in results.get("photos", [])
                 if p.get("id") is not None
             }
-            row = db.conn.execute(
-                "SELECT last_group_fingerprint FROM workspaces WHERE id = ?",
-                (db.active_workspace_id,),
-            ).fetchone()
+            row = db.get_workspace(db.active_workspace_id)
             last_group_fp = row["last_group_fingerprint"] if row else None
             current_group_fp = compute_group_fingerprint(effective_cfg)
             if not last_group_fp:
@@ -889,12 +859,7 @@ def create_pipeline_blueprint(
         """Overlay saved photo decisions without trusting cached browser metadata."""
         photo_ids = [p["id"] for p in results.get("photos", [])]
         species = db.get_species_keywords_for_photos(photo_ids)
-        live = {}
-        for chunk in _chunks(photo_ids):
-            marks = ",".join("?" for _ in chunk)
-            live.update({row["id"]: row for row in db.conn.execute(
-                f"SELECT id, flag, rating FROM photos WHERE id IN ({marks})", chunk,
-            )})
+        live = db.get_photo_flags_ratings_and_eyes(photo_ids)
         for photo in results.get("photos", []):
             row = live.get(photo["id"])
             if row is None:
@@ -941,15 +906,7 @@ def create_pipeline_blueprint(
         # features and the edit recipe for any global photo id.
         if db.get_photo(photo_id, verify_workspace=True) is None:
             return json_error("Photo not found", 404)
-        row = db.conn.execute(
-            """SELECT id, filename, timestamp, width, height,
-                      mask_path, subject_tenengrad, bg_tenengrad,
-                      crop_complete, bg_separation,
-                      subject_clip_high, subject_clip_low, subject_y_median,
-                      phash_crop, subject_size
-               FROM photos WHERE id = ?""",
-            (photo_id,),
-        ).fetchone()
+        row = db.get_photo_pipeline_features(photo_id)
         if not row:
             return json_error("Photo not found", 404)
         result = dict(row)
@@ -1494,12 +1451,7 @@ def create_pipeline_blueprint(
             # other deliberate types (individual, location, genre) so a person
             # tag named like a species doesn't get reported as the species
             # keyword for has_species_keyword / Apply-label purposes.
-            row = db.conn.execute(
-                "SELECT id FROM keywords WHERE name = ? COLLATE NOCASE "
-                "AND parent_id IS NULL AND type IN ('taxonomy', 'general') "
-                "ORDER BY (type = 'taxonomy') DESC, id ASC LIMIT 1",
-                (name,),
-            ).fetchone()
+            row = db.get_top_level_species_keyword(name)
             return row["id"] if row else None
 
         species_kid = _species_kid(species) if species else None
@@ -1654,9 +1606,9 @@ def create_pipeline_blueprint(
                 if results is not None:
                     save_results_raw(results, os.path.dirname(db_path), db.require_workspace_id())
                     saved = True
-                db.conn.commit()
+                db.commit()
             except Exception:
-                db.conn.rollback()
+                db.rollback()
                 if saved:
                     save_results_raw(before, os.path.dirname(db_path), db.require_workspace_id())
                 raise
@@ -1705,26 +1657,17 @@ def create_pipeline_blueprint(
                 400,
             )
         db = get_db()
-        ws = db.require_workspace_id()
-        rows = db.conn.execute(
-            """
-            SELECT pm.photo_id
-              FROM photo_masks pm
-              JOIN photos p ON p.id = pm.photo_id
-              JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-             WHERE wf.workspace_id = ? AND pm.variant = ?
-            """,
-            (ws, variant),
-        ).fetchall()
+        # Raises with no active workspace, before any SQL runs.
+        photo_ids = db.get_workspace_photo_ids_with_mask_variant(variant)
         updated = 0
         # Batch: skip the per-row commit_with_retry inside
         # set_active_mask_variant and commit once after the loop. A
         # workspace with 10K photos would otherwise pay 10K WAL fsyncs
         # per request — multiple seconds with no progress indicator.
-        for r in rows:
+        for photo_id in photo_ids:
             try:
                 db.set_active_mask_variant(
-                    r["photo_id"], variant, _commit=False,
+                    photo_id, variant, _commit=False,
                 )
                 updated += 1
             except ValueError as e:
@@ -1734,10 +1677,10 @@ def create_pipeline_blueprint(
                 # the cause is visible if the count looks off.
                 log.warning(
                     "active-mask-variant skip photo %d: %s",
-                    r["photo_id"], e,
+                    photo_id, e,
                 )
                 continue
-        commit_with_retry(db.conn)
+        db.commit_with_retry()
         log.info(
             "Switched active mask variant to %s for %d workspace photo(s)",
             variant, updated,
@@ -1752,11 +1695,7 @@ def create_pipeline_blueprint(
         # folder_path and full photo metadata (mirrors serve_thumbnail).
         if db.get_photo(photo_id, verify_workspace=True) is None:
             return json_error("Photo not found", 404)
-        photo = db.conn.execute(
-            """SELECT p.*, f.path as folder_path FROM photos p
-               JOIN folders f ON f.id = p.folder_id WHERE p.id = ?""",
-            (photo_id,),
-        ).fetchone()
+        photo = db.get_photo_with_folder_path(photo_id)
         if not photo:
             return json_error("Photo not found", 404)
 
@@ -1774,7 +1713,6 @@ def create_pipeline_blueprint(
         # workspace-effective detector threshold, but the diagnostics keep raw
         # counts so the UI can distinguish "not run" from "hidden by threshold".
         import config as cfg
-        ws = db.active_workspace_id
         effective_cfg = db.get_effective_config(cfg.load())
         min_conf = effective_cfg.get(
             "detector_confidence", 0.2
@@ -1810,36 +1748,7 @@ def create_pipeline_blueprint(
         # Also pin to the most recent labels_fingerprint per
         # (detection, classifier_model) so a workspace that rotated label
         # sets doesn't see a debug payload mixing stale and current labels.
-        preds = db.conn.execute(
-            """SELECT pr.species, pr.confidence, pr.classifier_model AS model,
-                      pr.category, pr.match_score,
-                      pr.labels_fingerprint, pr.source_taxon_id,
-                      pr.scientific_name, pr.taxonomy_kingdom, pr.taxonomy_phylum,
-                      pr.taxonomy_class, pr.taxonomy_order, pr.taxonomy_family,
-                      pr.taxonomy_genus,
-                      COALESCE(pr_rev.status, 'pending') AS status,
-                      pr_rev.individual AS individual,
-                      pr_rev.group_id AS group_id,
-                      pr_rev.vote_count AS vote_count,
-                      pr_rev.total_votes AS total_votes,
-                      d.box_x, d.box_y, d.box_w, d.box_h, d.detector_confidence
-               FROM predictions pr
-               JOIN detections d ON d.id = pr.detection_id
-               LEFT JOIN prediction_review pr_rev
-                 ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
-               WHERE d.photo_id = ?
-                 AND d.detector_confidence >= ?
-                 AND d.detector_model != 'full-image'
-                 AND pr.labels_fingerprint = (
-                    SELECT pr2.labels_fingerprint FROM predictions pr2
-                    WHERE pr2.detection_id = pr.detection_id
-                      AND pr2.classifier_model = pr.classifier_model
-                    ORDER BY pr2.created_at DESC, pr2.id DESC
-                    LIMIT 1
-                 )
-               ORDER BY pr.confidence DESC""",
-            (ws, photo_id, min_conf),
-        ).fetchall()
+        preds = db.get_inspector_predictions_for_photo(photo_id, min_conf)
         # A custom-label row's stored taxonomy may be another species' guess;
         # show the label's resolved binomial instead.
         from species_identity import SpeciesResolver, resolved_prediction_taxonomy
@@ -1879,52 +1788,18 @@ def create_pipeline_blueprint(
             ),
         )
 
-        current_pred_rows = db.conn.execute(
-            """SELECT pr.id, d.detector_confidence
-               FROM predictions pr
-               JOIN detections d ON d.id = pr.detection_id
-               WHERE d.photo_id = ?
-                 AND d.detector_model != 'full-image'
-                 AND pr.labels_fingerprint = (
-                    SELECT pr2.labels_fingerprint FROM predictions pr2
-                    WHERE pr2.detection_id = pr.detection_id
-                      AND pr2.classifier_model = pr.classifier_model
-                    ORDER BY pr2.created_at DESC, pr2.id DESC
-                    LIMIT 1
-                 )""",
-            (photo_id,),
-        ).fetchall()
-        classifier_runs = db.conn.execute(
-            """SELECT cr.prediction_count, d.detector_confidence
-               FROM classifier_runs cr
-               JOIN detections d ON d.id = cr.detection_id
-               WHERE d.photo_id = ?
-                 AND d.detector_model != 'full-image'""",
-            (photo_id,),
-        ).fetchall()
-        full_image_pred_rows = db.conn.execute(
-            """SELECT pr.id
-               FROM predictions pr
-               JOIN detections d ON d.id = pr.detection_id
-               WHERE d.photo_id = ?
-                 AND d.detector_model = 'full-image'
-                 AND pr.labels_fingerprint = (
-                    SELECT pr2.labels_fingerprint FROM predictions pr2
-                    WHERE pr2.detection_id = pr.detection_id
-                      AND pr2.classifier_model = pr.classifier_model
-                    ORDER BY pr2.created_at DESC, pr2.id DESC
-                    LIMIT 1
-                 )""",
-            (photo_id,),
-        ).fetchall()
-        full_image_classifier_runs = db.conn.execute(
-            """SELECT cr.prediction_count
-               FROM classifier_runs cr
-               JOIN detections d ON d.id = cr.detection_id
-               WHERE d.photo_id = ?
-                 AND d.detector_model = 'full-image'""",
-            (photo_id,),
-        ).fetchall()
+        current_pred_rows = db.get_current_prediction_detector_confidences(
+            photo_id, full_image=False,
+        )
+        classifier_runs = db.get_classifier_runs_for_photo(
+            photo_id, full_image=False,
+        )
+        full_image_pred_rows = db.get_current_prediction_detector_confidences(
+            photo_id, full_image=True,
+        )
+        full_image_classifier_runs = db.get_classifier_runs_for_photo(
+            photo_id, full_image=True,
+        )
         max_raw_conf = (
             max(d["detector_confidence"] for d in raw_dets)
             if raw_dets else None
@@ -2276,18 +2151,9 @@ class _PipelineLaunch:
         active workspace, so unrelated descendants can never leak in.
         """
         db = self.db
-        ws_for_folders = db.active_workspace_id
         subtree_ids = set()
-        # Import _chunks so the path-prefix workspace filter below can
-        # split large legacy subtrees across multiple IN(...) statements.
-        from db import _chunks  # noqa: PLC0415
         for fid in self.folder_ids:
-            linked = db.conn.execute(
-                "SELECT 1 FROM workspace_visible_folders "
-                "WHERE workspace_id = ? AND folder_id = ?",
-                (ws_for_folders, fid),
-            ).fetchone()
-            if not linked:
+            if not db.get_workspace_visible_folder_ids([fid]):
                 return None, self.json_error("folder not found", 404)
             # Union — a workspace can link both a root and a nested
             # folder, so the same descendant can appear twice.
@@ -2303,30 +2169,24 @@ class _PipelineLaunch:
             # the app still treats as part of that folder. Intersect the
             # path-based descendants with the workspace's folder set so
             # nothing leaks in from another workspace that happens to
-            # share a path prefix.
-            for chunk in _chunks(db._folder_subtree_ids_by_path(fid)):
-                marks = ",".join("?" for _ in chunk)
-                rows = db.conn.execute(
-                    f"SELECT folder_id FROM workspace_visible_folders "
-                    f"WHERE workspace_id = ? AND folder_id IN ({marks})",
-                    [ws_for_folders] + list(chunk),
-                )
-                subtree_ids.update(r["folder_id"] for r in rows)
+            # share a path prefix. The repository splits large legacy
+            # subtrees across multiple IN(...) statements.
+            subtree_ids.update(db.get_workspace_visible_folder_ids(
+                db._folder_subtree_ids_by_path(fid),
+            ))
         return subtree_ids, None
 
     def _folder_scope_photo_ids(self, subtree_ids):
         """The subtree's photo ids, minus the requested exclusions."""
-        from db import _SQLITE_PARAM_CHUNK_SIZE  # noqa: PLC0415
-
         db = self.db
         excluded_paths_set = self.excluded_paths_set
         excluded_photo_ids_set = self.excluded_photo_ids_set
         # A large workspace root can expand into thousands of descendant
         # folder ids — more than SQLite's per-statement bound-parameter
-        # cap on legacy builds (SQLITE_MAX_VARIABLE_NUMBER = 999). Chunk
-        # the IN(...) lookup so a wide folder subtree doesn't blow up as
-        # an OperationalError before the job is even queued. Same pattern
-        # db.py uses for other large id scopes (see _chunks in db.py).
+        # cap on legacy builds (SQLITE_MAX_VARIABLE_NUMBER = 999). The
+        # repository reads chunk the IN(...) lookup so a wide folder
+        # subtree doesn't blow up as an OperationalError before the job is
+        # even queued.
         subtree_id_list = list(subtree_ids)
         # Fetch the folder paths for the whole subtree so we can compose
         # per-photo full paths and honor ``exclude_paths`` at the
@@ -2336,44 +2196,30 @@ class _PipelineLaunch:
         # would be filtered.
         folder_path_by_id: dict[int, str] = {}
         if excluded_paths_set:
-            for start in range(0, len(subtree_id_list), _SQLITE_PARAM_CHUNK_SIZE):
-                chunk = subtree_id_list[start:start + _SQLITE_PARAM_CHUNK_SIZE]
-                marks = ",".join("?" for _ in chunk)
-                for r in db.conn.execute(
-                    f"SELECT id, path FROM folders WHERE id IN ({marks})",
-                    tuple(chunk),
-                ):
-                    folder_path_by_id[r["id"]] = r["path"] or ""
+            folder_path_by_id = {
+                fid: path or ""
+                for fid, path in db.get_folder_paths(subtree_id_list).items()
+            }
         photo_ids = []
-        for start in range(0, len(subtree_id_list), _SQLITE_PARAM_CHUNK_SIZE):
-            chunk = subtree_id_list[start:start + _SQLITE_PARAM_CHUNK_SIZE]
-            marks = ",".join("?" for _ in chunk)
-            # Select (id, folder_id, filename) so we can compose each
-            # photo's full path in-Python to compare against
-            # ``exclude_paths``. Matching the same os.path.join shape
-            # scanner/ingest use for their ``skip_paths`` sets keeps
-            # deselections consistent across import and process runs.
-            # Filter ``exclude_photo_ids`` here too so the ad-hoc
-            # collection reflects exactly what the user asked to
-            # process; ``_filter_excluded`` would drop them again later
-            # but there is no reason to bake them into the collection
-            # membership.
-            for r in db.conn.execute(
-                f"SELECT p.id, p.folder_id, p.filename FROM photos p "
-                f"JOIN photo_workspace_visibility pv ON pv.photo_id = p.id "
-                f"WHERE p.folder_id IN ({marks}) AND pv.workspace_id = ?",
-                [*chunk, db.active_workspace_id],
-            ):
-                if r["id"] in excluded_photo_ids_set:
+        # Read (id, folder_id, filename) so we can compose each photo's
+        # full path in-Python to compare against ``exclude_paths``.
+        # Matching the same os.path.join shape scanner/ingest use for their
+        # ``skip_paths`` sets keeps deselections consistent across import
+        # and process runs. Filter ``exclude_photo_ids`` here too so the
+        # ad-hoc collection reflects exactly what the user asked to
+        # process; ``_filter_excluded`` would drop them again later but
+        # there is no reason to bake them into the collection membership.
+        for r in db.get_workspace_photos_in_folders(subtree_id_list):
+            if r["id"] in excluded_photo_ids_set:
+                continue
+            if excluded_paths_set:
+                full = os.path.join(
+                    folder_path_by_id.get(r["folder_id"], ""),
+                    r["filename"] or "",
+                )
+                if full in excluded_paths_set:
                     continue
-                if excluded_paths_set:
-                    full = os.path.join(
-                        folder_path_by_id.get(r["folder_id"], ""),
-                        r["filename"] or "",
-                    )
-                    if full in excluded_paths_set:
-                        continue
-                photo_ids.append(r["id"])
+            photo_ids.append(r["id"])
         return photo_ids
 
     def check_required_scope(self):
