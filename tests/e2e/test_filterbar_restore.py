@@ -96,3 +96,25 @@ def test_untouched_search_restores_saved_filters(page):
     }''')
     expect(search).to_have_value('kingf')
     assert page.evaluate('VireoFilter.getUserRules().rules[0]._qs_text') == 'kingf'
+
+
+def test_scope_toggle_survives_delayed_restore_with_empty_search(page):
+    search = start_filter_bar(page, '/api/workspaces/active')
+    toggle = page.locator('.vf-search-scope')
+    # Choose a different scope while the input is empty and restore is
+    # pending. Returning to the input's default scope is a newer choice too.
+    before = toggle.get_attribute('aria-pressed')
+    toggle.click()
+    chosen = toggle.get_attribute('aria-pressed')
+    assert chosen != before
+    page.evaluate('''async () => {
+      window.releaseStartup();
+      await window.filterInit;
+    }''')
+    expect(toggle).to_have_attribute('aria-pressed', chosen)
+    expect(search).to_have_value('')
+    assert page.evaluate('VireoFilter.getUserRules().rules') == []
+    search.fill('hawk')
+    search.press('Enter')
+    field = 'keyword' if chosen == 'true' else 'metadata'
+    assert page.evaluate('VireoFilter.getUserRules().rules[0].rules[0].field') == field

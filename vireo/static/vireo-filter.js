@@ -872,6 +872,9 @@
   }
 
   function toggleSearchScope() {
+    // A scope choice is a local edit even when there is no text to apply.
+    // A pending workspace restore must not replace that newer intent.
+    localEdits = true;
     searchScope = searchScope === 'keyword' ? 'all' : 'keyword';
     try { window.localStorage.setItem(SEARCH_SCOPE_KEY, searchScope); } catch (e) { /* private mode */ }
     renderSearchScope();
