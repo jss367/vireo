@@ -15,7 +15,6 @@ import os
 
 import filter_shortcuts
 from config import read_raw_config_file, settings_write_lock
-from db import commit_with_retry
 from flask import Blueprint, g, jsonify, make_response, request
 from preview_cache import (
     evict_if_over_quota as evict_preview_cache_if_over_quota,
@@ -293,23 +292,7 @@ def create_settings_blueprint(
             # UPDATE runs, leaving the row permanently ineligible for
             # backfill under the raised ceiling.
             with working_copy_publication_guard():
-                quota_db.conn.execute(
-                    "UPDATE photos SET working_copy_evicted_mtime=NULL, "
-                    "working_copy_failed_at=CASE WHEN "
-                    "working_copy_failed_source='source' "
-                    "AND companion_path IS NOT NULL THEN NULL "
-                    "ELSE working_copy_failed_at END, "
-                    "working_copy_failed_mtime=CASE WHEN "
-                    "working_copy_failed_source='source' "
-                    "AND companion_path IS NOT NULL THEN NULL "
-                    "ELSE working_copy_failed_mtime END, "
-                    "working_copy_failed_source=CASE WHEN "
-                    "working_copy_failed_source='source' "
-                    "AND companion_path IS NOT NULL THEN NULL "
-                    "ELSE working_copy_failed_source END "
-                    "WHERE working_copy_evicted_mtime IS NOT NULL"
-                )
-                commit_with_retry(quota_db.conn)
+                quota_db.clear_working_copy_evictions()
 
         vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
         evict_preview_cache_if_over_quota(quota_db, vireo_dir)

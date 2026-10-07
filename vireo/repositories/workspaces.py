@@ -43,6 +43,13 @@ class WorkspaceRepository:
         ).fetchone()
         return row[0] if row else None
 
+    def id_for_name(self, name):
+        """Return the id of the workspace named exactly ``name``, or None."""
+        row = self.conn.execute(
+            "SELECT id FROM workspaces WHERE name = ?", (name,),
+        ).fetchone()
+        return None if row is None else row["id"]
+
     def ids_for_folders(self, folder_ids):
         """Return the set of workspace ids linked to any of ``folder_ids``."""
         # Chunk to stay well under SQLite's SQLITE_MAX_VARIABLE_NUMBER (default 999).

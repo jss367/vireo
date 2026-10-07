@@ -191,9 +191,7 @@ def create_system_blueprint(
             photo = db.get_photo(pid_int, verify_workspace=True)
             if not photo:
                 return json_error("photo not found", 404)
-            folder_row = db.conn.execute(
-                "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
-            ).fetchone()
+            folder_row = db.get_folder(photo["folder_id"])
             folder_path = folder_row["path"] if folder_row else ""
             if not folder_path or not photo["filename"]:
                 return jsonify({"ok": False, "reason": "no path"})
@@ -208,11 +206,7 @@ def create_system_blueprint(
                 return json_error("folder not found", 404)
             # Reject reveal for folders not linked to the active workspace,
             # matching the photo branch's verify_workspace gate.
-            linked = db.conn.execute(
-                "SELECT 1 FROM workspace_visible_folders WHERE workspace_id = ? AND folder_id = ?",
-                (db.active_workspace_id, fid_int),
-            ).fetchone()
-            if not linked:
+            if fid_int not in db.get_workspace_visible_folder_ids([fid_int]):
                 return json_error("folder not found", 404)
             folder_path = folder["path"]
             if not folder_path:
@@ -655,18 +649,11 @@ def create_system_blueprint(
             db = get_db()
             ws = db.get_active_workspace()
             ws_name = ws["name"] if ws else "unknown"
-            folder_count = db.conn.execute("SELECT COUNT(*) FROM folders").fetchone()[0]
-            photo_count = db.conn.execute("SELECT COUNT(*) FROM photos").fetchone()[0]
+            folder_count = db.count_all_folders()
+            photo_count = db.count_catalog_photos()
             # Predictions are global now; workspace scoping happens through
             # the detection -> photo -> workspace_folders join.
-            pred_count = db.conn.execute(
-                """SELECT COUNT(*) FROM predictions pr
-                   JOIN detections d ON d.id = pr.detection_id
-                   JOIN photos p ON p.id = d.photo_id
-                   JOIN photo_workspace_visibility wf
-                     ON wf.photo_id = p.id AND wf.workspace_id = ?""",
-                (db.require_workspace_id(),)
-            ).fetchone()[0]
+            pred_count = db.count_workspace_predictions()
         except Exception:
             # Issue reports are how users report a degraded catalog; collect
             # what we can and keep going.
@@ -750,8 +737,7 @@ def create_system_blueprint(
         if db is not None:
             try:
                 private_paths = [
-                    row[0] for row in db.conn.execute("SELECT path FROM folders")
-                    if row[0]
+                    row["path"] for row in db.get_all_folders() if row["path"]
                 ]
             except sqlite3.Error:
                 log.warning(

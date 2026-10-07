@@ -1296,6 +1296,60 @@ def test_count_catalog_photos_spans_every_workspace(db, lib):
     assert db.count_catalog_photos() == 4
 
 
+def _failure_state(db, pid):
+    with _reader(db) as r:
+        return tuple(r.execute(
+            "SELECT working_copy_evicted_mtime, working_copy_failed_at, "
+            "working_copy_failed_mtime, working_copy_failed_source "
+            "FROM photos WHERE id = ?", (pid,),
+        ).fetchone())
+
+
+def test_clear_working_copy_evictions_resets_evicted_rows(db, lib, monkeypatch):
+    import db as db_module
+
+    def mark(pid, *, evicted, source, companion):
+        db.conn.execute(
+            "UPDATE photos SET working_copy_evicted_mtime = ?, "
+            "working_copy_failed_at = 'then', working_copy_failed_mtime = 3.0, "
+            "working_copy_failed_source = ?, companion_path = ? WHERE id = ?",
+            (evicted, source, companion, pid),
+        )
+
+    mark(lib["a"], evicted=5.0, source="source", companion="a.jpg")
+    mark(lib["b"], evicted=5.0, source="source", companion=None)
+    mark(lib["c"], evicted=5.0, source="working_copy", companion="c.jpg")
+    mark(lib["f"], evicted=None, source="source", companion="f.jpg")
+    db.conn.commit()
+    commits = []
+    real = db_module.commit_with_retry
+    monkeypatch.setattr(
+        db_module, "commit_with_retry",
+        lambda conn, *a, **kw: (commits.append(conn), real(conn, *a, **kw))[1],
+    )
+
+    db.clear_working_copy_evictions()
+
+    assert commits == [db.conn]
+    assert not db.in_transaction
+    # Evicted RAW-source failure on a photo with a companion: all cleared.
+    assert _failure_state(db, lib["a"]) == (None, None, None, None)
+    # Without a companion, or for another source, the failure stays.
+    assert _failure_state(db, lib["b"]) == (None, "then", 3.0, "source")
+    assert _failure_state(db, lib["c"]) == (None, "then", 3.0, "working_copy")
+    # A row that was never evicted is untouched, in any workspace.
+    assert _failure_state(db, lib["f"]) == (None, "then", 3.0, "source")
+
+
+def test_count_catalog_photos_counts_every_folder_status(db, lib):
+    db.conn.execute(
+        "UPDATE folders SET status = 'missing' WHERE id = ?", (lib["child"],),
+    )
+    db.conn.commit()
+    assert db.count_photos_in_workspace() == 3
+    assert db.count_catalog_photos() == 4
+
+
 # -- structure -----------------------------------------------------------------
 
 MOVED = [
@@ -1311,7 +1365,7 @@ MOVED = [
     "get_photo_file_in_workspace", "get_best_batch_rows_by_ids",
     "get_workspace_photos_in_folders",
     "get_photo_working_copy_path", "record_generated_original",
-    "set_photo_thumb_path",
+    "set_photo_thumb_path", "clear_working_copy_evictions",
     "get_photo_ids_at_paths",
     "clear_all_photo_thumb_paths", "clear_photo_thumb_paths",
     "count_catalog_photos",

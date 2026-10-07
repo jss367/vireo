@@ -1811,3 +1811,19 @@ class PredictionRepository:
                ORDER BY pr.id""",
             (ws, ws, group_id, classifier_model, exclude_id),
         ).fetchall()
+
+    def count_in_workspace(self):
+        """How many predictions sit on photos the active workspace can see.
+
+        Predictions are global; the workspace scope is the detection ->
+        photo -> ``photo_workspace_visibility`` join. Raises
+        ``RuntimeError`` when no workspace is active.
+        """
+        return self.conn.execute(
+            """SELECT COUNT(*) FROM predictions pr
+               JOIN detections d ON d.id = pr.detection_id
+               JOIN photos p ON p.id = d.photo_id
+               JOIN photo_workspace_visibility wf
+                 ON wf.photo_id = p.id AND wf.workspace_id = ?""",
+            (self.workspace_id,),
+        ).fetchone()[0]

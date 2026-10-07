@@ -1108,6 +1108,73 @@ def test_workspace_has_direct_folder_link_takes_the_workspace_explicitly(db, tre
     assert not db.workspace_has_direct_folder_link(None, p)
 
 
+# -- local-session sweeps (exact rows, caller commits) -----------------------------
+
+
+def _map_session(db, root_id, folder_ids):
+    db.conn.execute(
+        "INSERT OR IGNORE INTO local_folders (root_folder_id, state) VALUES (?, 'active')",
+        (root_id,),
+    )
+    for fid in folder_ids:
+        db.conn.execute(
+            "INSERT INTO local_folder_mappings "
+            "(root_folder_id, folder_id, source_path, local_path) VALUES (?, ?, ?, ?)",
+            (root_id, fid, f"/src/{fid}", f"/local/{fid}"),
+        )
+    db.conn.commit()
+
+
+def test_get_local_session_folder_ids_reads_one_session(db, tree):
+    ws, p, a, b, q = tree
+    _map_session(db, a, [a, b])
+    _map_session(db, q, [q])
+    assert sorted(db.get_local_session_folder_ids(a)) == [a, b]
+    assert db.get_local_session_folder_ids(q) == [q]
+    assert db.get_local_session_folder_ids(p) == []
+
+
+def test_unlink_exact_workspace_folders_no_commit_deletes_only_those_rows(db, tree, cache):
+    ws, p, a, b, q = tree
+    for fid, is_root in ((p, 1), (a, 0), (b, 0), (q, 1)):
+        _link_raw(db, ws, fid, is_root)
+    pid = _photo(db, b, "b.jpg")
+    db.conn.execute(
+        "INSERT INTO workspace_photos (workspace_id, photo_id) VALUES (?, ?)", (ws, pid),
+    )
+    db.conn.commit()
+    db.unlink_exact_workspace_folders_no_commit(ws, [a, b])
+    assert _links(db, ws) == {p: 1, q: 1}
+    assert db.in_transaction
+    with _reader(db) as conn:
+        assert _links(db, ws, conn) == {p: 1, a: 0, b: 0, q: 1}
+    db.commit()
+    with _reader(db) as conn:
+        assert _links(db, ws, conn) == {p: 1, q: 1}
+    # No removal record, no photo-grant cleanup, no cache invalidation.
+    assert _removals(db, ws) == {}
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM workspace_photos WHERE workspace_id = ?", (ws,),
+    ).fetchone()[0] == 1
+    assert cache.invalidated == []
+
+
+def test_transfer_exact_workspace_folders_no_commit_moves_links_as_non_roots(db, tree, cache):
+    ws, p, a, b, q = tree
+    target = db.create_workspace("Target")
+    _link_raw(db, ws, a, 1)
+    _link_raw(db, ws, b, 0)
+    _link_raw(db, target, b, 1)  # already linked there: kept as it is
+    cache.invalidated.clear()  # create_workspace's own invalidation
+    db.transfer_exact_workspace_folders_no_commit(ws, target, [a, b])
+    assert db.in_transaction
+    db.commit()
+    with _reader(db) as conn:
+        assert _links(db, ws, conn) == {}
+        assert _links(db, target, conn) == {a: 0, b: 1}
+    assert cache.invalidated == []
+
+
 # -- structure -------------------------------------------------------------------
 
 _MOVED_METHODS = [
@@ -1134,6 +1201,11 @@ _MOVED_METHODS = [
     "_photo_in_workspace",
     "get_workspace_visible_folder_ids",
     "workspace_has_direct_folder_link",
+
+
+    "get_local_session_folder_ids",
+    "unlink_exact_workspace_folders_no_commit",
+    "transfer_exact_workspace_folders_no_commit",
 ]
 
 

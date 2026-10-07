@@ -1133,6 +1133,17 @@ def test_count_folders(db):
         db.count_folders()
 
 
+def test_count_all_folders_is_catalog_wide(db):
+    before = db.count_all_folders()
+    db.add_folder("/every/a")
+    _raw_folder(db, "/every/unlinked")
+    _raw_folder(db, "/every/gone", status="missing")
+    assert db.count_all_folders() == before + 3
+    # Needs no active workspace.
+    db.set_active_workspace(None)
+    assert db.count_all_folders() == before + 3
+
+
 def test_get_all_folders_is_catalog_wide(db):
     a = db.add_folder("/all/a", name="a")
     gone = _raw_folder(db, "/all/gone", status="missing", name="gone")
@@ -1365,6 +1376,7 @@ _DELEGATING_FOLDER_METHODS = (
     "_folders_linked_in_other_workspace",
     "delete_folder",
     "count_folders",
+    "count_all_folders",
     "get_all_folders",
     "get_folder_id_by_path",
     "get_folder_source_path",

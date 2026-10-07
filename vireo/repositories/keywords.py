@@ -15,6 +15,8 @@ This module owns the SQL behind the keyword domain:
   routes (duplicate groups and per-workspace counts, the rename state, the
   photo/workspace pairs a rename or delete re-queues sidecar changes for,
   the species-name search, ``delete``), moved verbatim from ``web/``.
+- the species-confirmation reads ``/api/encounters/species`` runs to find
+  the rows standing for the species it replaces or removes.
 
 The method bodies were moved verbatim from ``Database``. The only edits are
 ``self._ws_id()`` -> ``self.workspace_id`` and ``NAME`` -> ``self.NAME`` for
@@ -2152,6 +2154,129 @@ class KeywordRepository:
         values = list(updates.values()) + [keyword_id]
         self.conn.execute(f"UPDATE keywords SET {set_clause} WHERE id = ?", values)
         self.conn.commit()
+
+    # -- species-confirmation reads ------------------------------------------
+    #
+    # The reads ``/api/encounters/species`` (``web/encounters.py``) runs inside
+    # its transaction to decide which attached rows stand for the species a
+    # confirmation replaces or removes. A "species row" is ``is_species = 1
+    # OR type = 'taxonomy'``.
+
+    def species_root_by_name(self, name, *, prefer_taxonomy=False):
+        """One root species row (``id``, ``name``, ``taxon_id``) named ``name``, or None.
+
+        ``name`` matches ``COLLATE NOCASE`` among ``parent_id IS NULL`` rows.
+        ``prefer_taxonomy`` orders taxonomy rows first, then by id; without it
+        the statement has no ``ORDER BY``.
+        """
+        if prefer_taxonomy:
+            return self.conn.execute(
+                """SELECT id, name, taxon_id FROM keywords
+                   WHERE name = ? COLLATE NOCASE
+                     AND parent_id IS NULL
+                     AND (is_species = 1 OR type = 'taxonomy')
+                   ORDER BY (type = 'taxonomy') DESC, id""",
+                (name,),
+            ).fetchone()
+        return self.conn.execute(
+            """SELECT id, name, taxon_id FROM keywords
+               WHERE name = ? COLLATE NOCASE
+                 AND parent_id IS NULL
+                 AND (is_species = 1 OR type = 'taxonomy')""",
+            (name,),
+        ).fetchone()
+
+    def other_linked_species_names(self, taxon_id, keyword_id):
+        """Names of the taxon-linked species rows that are a different species.
+
+        With ``taxon_id`` set, rows linked to any other taxon; otherwise
+        (an unlinked keyword) every linked row except ``keyword_id``.
+        """
+        if taxon_id is not None:
+            rows = self.conn.execute(
+                """SELECT name FROM keywords
+                   WHERE (is_species = 1 OR type = 'taxonomy')
+                     AND taxon_id IS NOT NULL
+                     AND taxon_id != ?""",
+                (taxon_id,),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """SELECT name FROM keywords
+                   WHERE (is_species = 1 OR type = 'taxonomy')
+                     AND taxon_id IS NOT NULL
+                     AND id != ?""",
+                (keyword_id,),
+            ).fetchall()
+        return [row["name"] for row in rows]
+
+    def previous_species_candidates(self, photo_ids, name, linked_root_taxon):
+        """Species-rank rows on ``photo_ids`` that may stand for species ``name``.
+
+        Rows (``id``, ``name``, ``taxon_id``, ``photo_id``) of attached species
+        rows whose taxon is species-rank or unknown, named ``name`` (NOCASE),
+        or also linked to ``linked_root_taxon`` when that is set. Each
+        chunk's rows come root rows first, then by keyword id.
+        """
+        rows = []
+        for chunk in self._chunks(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            if linked_root_taxon is not None:
+                rows.extend(self.conn.execute(
+                    f"""SELECT k.id, k.name, k.taxon_id, pk.photo_id
+                        FROM photo_keywords pk
+                        JOIN keywords k ON k.id = pk.keyword_id
+                        LEFT JOIN taxa t ON t.id = k.taxon_id
+                        WHERE pk.photo_id IN ({placeholders})
+                          AND (k.is_species = 1 OR k.type = 'taxonomy')
+                          AND (t.rank = 'species' OR t.rank IS NULL)
+                          AND (k.taxon_id = ?
+                               OR k.name = ? COLLATE NOCASE)
+                        ORDER BY CASE WHEN k.parent_id IS NULL
+                                      THEN 0 ELSE 1 END,
+                                 k.id""",
+                    [*chunk, linked_root_taxon, name],
+                ).fetchall())
+            else:
+                rows.extend(self.conn.execute(
+                    f"""SELECT k.id, k.name, k.taxon_id, pk.photo_id
+                        FROM photo_keywords pk
+                        JOIN keywords k ON k.id = pk.keyword_id
+                        LEFT JOIN taxa t ON t.id = k.taxon_id
+                        WHERE pk.photo_id IN ({placeholders})
+                          AND k.name = ? COLLATE NOCASE
+                          AND (k.is_species = 1 OR k.type = 'taxonomy')
+                          AND (t.rank = 'species' OR t.rank IS NULL)
+                        ORDER BY CASE WHEN k.parent_id IS NULL
+                                      THEN 0 ELSE 1 END,
+                                 k.id""",
+                    [*chunk, name],
+                ).fetchall())
+        return rows
+
+    def attached_species_rows(self, photo_ids):
+        """Every species-rank (or unranked) species row attached to ``photo_ids``.
+
+        Rows (``photo_id``, ``id``, ``name``, ``taxon_id``); each chunk's rows
+        come by photo, then root rows first, then by keyword id.
+        """
+        rows = []
+        for chunk in self._chunks(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows.extend(self.conn.execute(
+                f"""SELECT pk.photo_id, k.id, k.name, k.taxon_id
+                    FROM photo_keywords pk
+                    JOIN keywords k ON k.id = pk.keyword_id
+                    LEFT JOIN taxa t ON t.id = k.taxon_id
+                    WHERE pk.photo_id IN ({placeholders})
+                      AND (k.is_species = 1 OR k.type = 'taxonomy')
+                      AND (t.rank = 'species' OR t.rank IS NULL)
+                    ORDER BY pk.photo_id,
+                             CASE WHEN k.parent_id IS NULL THEN 0 ELSE 1 END,
+                             k.id""",
+                list(chunk),
+            ).fetchall())
+        return rows
 
     def commit(self):
         """Commit the connection's open transaction."""

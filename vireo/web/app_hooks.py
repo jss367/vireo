@@ -80,7 +80,7 @@ def close_request_db(exc):
     """Close the request's Database, if one was opened."""
     db = g.pop("db", None)
     if db is not None:
-        db.conn.close()
+        db.close()
 
 
 def claim_search_lane(db):
@@ -97,7 +97,7 @@ def claim_search_lane(db):
         return
     superseded = search_lanes.SEARCH_LANES.claim(*parsed)
     g.search_superseded = superseded
-    search_lanes.cancel_when_superseded(db.conn, superseded)
+    search_lanes.cancel_when_superseded(db, superseded)
 
 
 def register_app_hooks(app, *, get_db, reservation_exempt_endpoints):

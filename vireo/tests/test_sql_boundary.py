@@ -94,13 +94,6 @@ CONN_USE_LIMITS = {
     "taxonomy.py": 31,
     "thumbnails.py": 11,
     "volume_reachability.py": 8,
-    "web/app_hooks.py": 2,
-    "web/encounters.py": 13,
-    "web/export.py": 3,
-    "web/inat.py": 3,
-    "web/settings.py": 2,
-    "web/system.py": 6,
-    "web/workspaces.py": 10,
     "working_copy_cache.py": 9,
 }
 

@@ -512,6 +512,14 @@ def test_get_new_images_for_workspace_uses_cache(db, monkeypatch):
 # -- legacy config migrations -------------------------------------------------
 
 
+def test_get_workspace_id_by_name_matches_the_exact_name(db):
+    ws_id = db.create_workspace("Shorebirds")
+    assert db.get_workspace_id_by_name("Shorebirds") == ws_id
+    # ``workspaces.name`` has no NOCASE collation: the lookup is exact.
+    assert db.get_workspace_id_by_name("shorebirds") is None
+    assert db.get_workspace_id_by_name("Nope") is None
+
+
 # -- structure: the workspace SQL lives in the repository ---------------------
 
 # Database methods whose SQL moved to repositories/workspaces.py. Each stays
@@ -522,6 +530,7 @@ _DELEGATING_WORKSPACE_METHODS = (
     "invalidate_new_images_cache_for_folders",
     "create_workspace",
     "get_workspace",
+    "get_workspace_id_by_name",
     "get_workspaces",
     "update_workspace",
     "delete_workspace",

@@ -13,7 +13,8 @@ companion resolution, the new-images cache invalidation and the pipeline
 cache prune on the façade; ``add_photo`` keeps the duplicate auto-resolve
 hook. Ratings, flags, wildlife exclusion (``photo_review``) and color labels
 (``photo_labels``) have their own repositories. The working-copy and
-thumbnail column writes here are the ones the on-demand image routes make.
+thumbnail column writes here are the ones the on-demand image routes make,
+plus the catalog-wide eviction reset a raised working-copy quota triggers.
 """
 
 import os
@@ -1216,6 +1217,32 @@ class PhotoRepository:
             params,
         )
         self.conn.commit()
+
+    def clear_working_copy_evictions(self):
+        """Make every evicted working copy eligible for backfill again, and commit.
+
+        Clears ``working_copy_evicted_mtime`` on every evicted row, and the
+        ``working_copy_failed_*`` marker on those rows where it was recorded
+        against the RAW source (``'source'``) of a photo with a companion
+        JPEG. The commit retries while SQLite reports locked or busy.
+        """
+        self.conn.execute(
+            "UPDATE photos SET working_copy_evicted_mtime=NULL, "
+            "working_copy_failed_at=CASE WHEN "
+            "working_copy_failed_source='source' "
+            "AND companion_path IS NOT NULL THEN NULL "
+            "ELSE working_copy_failed_at END, "
+            "working_copy_failed_mtime=CASE WHEN "
+            "working_copy_failed_source='source' "
+            "AND companion_path IS NOT NULL THEN NULL "
+            "ELSE working_copy_failed_mtime END, "
+            "working_copy_failed_source=CASE WHEN "
+            "working_copy_failed_source='source' "
+            "AND companion_path IS NOT NULL THEN NULL "
+            "ELSE working_copy_failed_source END "
+            "WHERE working_copy_evicted_mtime IS NOT NULL"
+        )
+        self.commit_with_retry(self.conn)
 
     def set_thumb_path(self, photo_id, thumb_path):
         """Store the photo's thumbnail filename and commit."""

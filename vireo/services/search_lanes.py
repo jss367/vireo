@@ -78,7 +78,11 @@ def parse_lane(lane, seq):
 
 
 def cancel_when_superseded(conn, superseded):
-    """Interrupt ``conn``'s running statement once ``superseded()`` is true."""
+    """Interrupt ``conn``'s running statement once ``superseded()`` is true.
+
+    ``conn`` is a ``Database`` or a ``sqlite3.Connection``: anything with
+    ``set_progress_handler``.
+    """
     conn.set_progress_handler(
         lambda: 1 if superseded() else 0, PROGRESS_INSTRUCTIONS,
     )
