@@ -1237,6 +1237,13 @@ class KeywordRepository:
         if _commit:
             self.conn.commit()
 
+    def name_of(self, keyword_id):
+        """The stored name of one keyword, or None when the id is unknown."""
+        row = self.conn.execute(
+            "SELECT name FROM keywords WHERE id = ?", (keyword_id,)
+        ).fetchone()
+        return row["name"] if row else None
+
     def get_for_photo(self, photo_id):
         """Return all keywords for a photo."""
         return self.conn.execute(

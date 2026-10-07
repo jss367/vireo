@@ -70,6 +70,10 @@ that information for interactive use.
   (`_active_workspace_id`, `_ws_id()`) outside `db.py` and the repositories,
   and caps each module's remaining `<expr>.conn` uses at today's count, so
   that SQL can only move into repositories, never grow.
+  Transaction control goes through `Database` as well: `db.commit()`,
+  `db.rollback()`, `db.in_transaction` and `db.begin_immediate()` are the
+  connection calls they name (`commit()` still honors `_commits_held`), so a
+  caller that owns a transaction never needs `db.conn` for it.
 - Schema changes are ordered migrations in `vireo/schema.py`. They execute once
   at startup, use a transaction, advance `PRAGMA user_version`, and validate
   before committing. Request connections must use the initialized schema. The

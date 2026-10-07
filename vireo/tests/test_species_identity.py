@@ -1205,10 +1205,12 @@ RAW_SCIENTIFIC_NAME_READERS = {
     "culling.py": "identity via SpeciesResolver.prediction",
     "pipeline.py": "identity via SpeciesResolver.prediction",
     "repositories/masks_features.py": "presence ordering and class routing only; guesses keep the right class",
-    "repositories/predictions.py": "get_top_prediction_for_photo returns provenance; web/inat.py resolves it",
+    "repositories/predictions.py": (
+        "get_top_prediction_for_photo returns provenance; web/inat.py resolves it; "
+        "get_predictions_by_id's decision rows resolved via SpeciesResolver in web/predictions.py"
+    ),
     "repositories/stats.py": "presence ordering only",
     "web/pipeline.py": "Pipeline Inspector payload via resolved_prediction_taxonomy",
-    "web/predictions.py": "decision rows resolved via SpeciesResolver",
 }
 
 

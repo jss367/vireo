@@ -280,6 +280,20 @@ class SyncRepository:
         return [claimed[key] for c in changes
                 if (key := (c["id"], c["change_token"])) in claimed]
 
+    def flat_keyword_removals(self, photo_id, value):
+        """The queued ``keyword_remove_flat`` rows for one photo and keyword.
+
+        Every workspace's, since the sidecar they target belongs to the photo,
+        matched case-insensitively. Returned as ``{"workspace_id", "value"}``
+        dicts.
+        """
+        return [dict(row) for row in self.conn.execute(
+            """SELECT workspace_id, value FROM pending_changes
+               WHERE photo_id = ? AND change_type = 'keyword_remove_flat'
+                 AND value = ? COLLATE NOCASE""",
+            (photo_id, value),
+        )]
+
     def delete_matching(self, photo_id, workspace_id, change_type=None, value=None):
         """Delete a photo's pending changes in one workspace; return the rows.
 

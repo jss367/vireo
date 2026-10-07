@@ -893,6 +893,37 @@ class Database:
         with contextlib.suppress(Exception):
             self.close()
 
+    # -- Transaction control --
+    #
+    # How code outside the data layer opens, ends or abandons a transaction
+    # without touching ``conn``. Each is exactly the ``sqlite3.Connection``
+    # operation it names, on this connection: ``commit`` goes through
+    # ``_Connection.commit``, so it is a no-op while ``_commits_held`` holds
+    # commits, as ``db.conn.commit()`` always was.
+
+    @property
+    def in_transaction(self):
+        """True while the connection has an open transaction."""
+        return self.conn.in_transaction
+
+    def commit(self):
+        """Commit the open transaction (a no-op while commits are held)."""
+        self.conn.commit()
+
+    def rollback(self):
+        """Roll back the open transaction."""
+        self.conn.rollback()
+
+    def begin_immediate(self):
+        """Open a transaction that holds SQLite's writer lock from the start.
+
+        ``BEGIN IMMEDIATE`` waits up to the connection's ``busy_timeout`` for
+        the lock and raises ``sqlite3.OperationalError`` if it is not freed in
+        time, or if a transaction is already open (BEGIN does not nest), so
+        commit or roll back first.
+        """
+        self.conn.execute("BEGIN IMMEDIATE")
+
     def _canonical_schema(self):
         """Build the canonical-schema setup on this connection."""
         from canonical_schema import CanonicalSchema
@@ -6313,6 +6344,10 @@ class Database:
         """
         return self._keyword_repository().untag(photo_id, keyword_id, _commit=_commit)
 
+    def get_keyword_name(self, keyword_id):
+        """The stored name of one keyword, or None when the id is unknown."""
+        return self._keyword_repository().name_of(keyword_id)
+
     def get_photo_keywords(self, photo_id):
         """Return all keywords for a photo."""
         return self._keyword_repository().get_for_photo(photo_id)
@@ -7823,6 +7858,86 @@ class Database:
             prediction_id, _commit=_commit,
         )
 
+    # Reads the prediction-decision routes run under ``BEGIN IMMEDIATE``
+    # (see ``services.prediction_decisions``). None of them commits.
+
+    def get_prediction_decision_row(self, prediction_id):
+        """One prediction with its photo, label-set scope and review state, or None.
+
+        Columns: ``id``, ``species``, ``detection_id``, ``model``,
+        ``labels_fingerprint``, ``photo_id``, and the active workspace's
+        ``group_id`` and ``status`` (``pending`` without a review row).
+        """
+        return self._prediction_repository().get_decision_row(prediction_id)
+
+    def get_prediction_status(self, prediction_id):
+        """Active-workspace review status of one prediction; None if the id is unknown."""
+        return self._prediction_repository().current_status(prediction_id)
+
+    def get_predictions_by_id(self, prediction_ids):
+        """The named predictions, any label set or status, with their burst votes."""
+        return self._prediction_repository().get_rows_by_ids(prediction_ids)
+
+    def get_decided_prediction_ids(self, prediction_ids):
+        """Which of ``prediction_ids`` already carry a decision (``DECIDED_PREDICTION_STATUSES``)."""
+        return self._prediction_repository().decided_ids(
+            prediction_ids, self.DECIDED_PREDICTION_STATUSES,
+        )
+
+    def get_superseded_prediction_ids(self, prediction_ids):
+        """Which of ``prediction_ids`` a later label set for their detection replaced."""
+        return self._prediction_repository().superseded_ids(prediction_ids)
+
+    def get_out_of_workspace_prediction_ids(self, prediction_ids):
+        """Which of ``prediction_ids`` sit on a photo the active workspace cannot see."""
+        return self._prediction_repository().out_of_workspace_ids(prediction_ids)
+
+    def get_prediction_photo_ids(self, prediction_ids, stop_after_photos=None):
+        """``{prediction_id: photo_id}`` for the ids that exist, in id order.
+
+        ``stop_after_photos`` stops reading once more than that many distinct
+        photos are found, leaving the overflow visible in the partial result.
+        """
+        return self._prediction_repository().photo_ids_by_prediction(
+            prediction_ids, stop_after_photos=stop_after_photos,
+        )
+
+    def get_non_alternative_predictions_for_photos(self, photo_ids):
+        """Rows (``id``, ``photo_id``, ``in_group``) for each photo's non-``alternative`` predictions."""
+        return self._prediction_repository().non_alternative_rows_for_photos(photo_ids)
+
+    def get_scope_review_statuses(self, prediction_ids):
+        """Rows (``pick_id``, ``prediction_id``, ``status``) for each named row's reviewed scope siblings."""
+        return self._prediction_repository().scope_review_statuses(prediction_ids)
+
+    def get_prediction_scope(self, prediction_id):
+        """``(detection_id, classifier_model, labels_fingerprint)`` of one prediction, or None."""
+        return self._prediction_repository().get_scope(prediction_id)
+
+    def get_open_scope_sibling_ids(self, detection_id, classifier_model,
+                                   labels_fingerprint, exclude_ids):
+        """Ids in one label-set scope still pending, alternative or accepted, minus ``exclude_ids``."""
+        return self._prediction_repository().open_scope_sibling_ids(
+            detection_id, classifier_model, labels_fingerprint, exclude_ids,
+        )
+
+    def get_alternative_sibling_ids(self, detection_id, classifier_model,
+                                    labels_fingerprint, exclude_id):
+        """Ids in one label-set scope marked ``alternative``, minus ``exclude_id``."""
+        return self._prediction_repository().alternative_sibling_ids(
+            detection_id, classifier_model, labels_fingerprint, exclude_id,
+        )
+
+    def get_prediction_statuses_with_supersession(self, prediction_ids):
+        """Rows (``prediction_id``, ``photo_id``, ``status``, ``is_superseded``) per named prediction."""
+        return self._prediction_repository().statuses_with_supersession(prediction_ids)
+
+    def get_burst_group_members(self, group_id, classifier_model, exclude_id):
+        """Rows (``id``, ``photo_id``, ``status``) for a burst group's other visible members."""
+        return self._prediction_repository().burst_group_members(
+            group_id, classifier_model, exclude_id,
+        )
+
     # -- Detections --
 
     def _model_runs_repository(self):
@@ -8804,6 +8919,14 @@ class Database:
         if synced_changes:
             self.clear_equivalent_flat_removals(synced_changes, _commit=False)
         repo.commit()
+
+    def get_flat_keyword_removals(self, photo_id, keyword_name):
+        """Queued ``keyword_remove_flat`` rows for a photo's keyword, in every workspace.
+
+        Matched case-insensitively; each row is a ``{"workspace_id",
+        "value"}`` dict.
+        """
+        return self._sync_repository().flat_keyword_removals(photo_id, keyword_name)
 
     def clear_equivalent_flat_removals(self, changes, _commit=True):
         """Clear shared-sidecar flat removals represented by ``changes``."""
