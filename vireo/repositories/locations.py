@@ -234,6 +234,35 @@ class LocationRepository:
 
         return leaves
 
+    def get_first_linked_leaves(self, photo_ids):
+        """``{photo_id: row}``: each photo's first-linked location keyword.
+
+        "First" is the lowest ``photo_keywords`` rowid, the single-photo
+        ``serialize_photo_location``'s ``LIMIT 1`` choice. Rows carry the
+        photo id and the keyword's ``id``, ``name``, ``place_id``,
+        ``latitude``, ``longitude`` and ``parent_id``. Reads 400 photos per
+        statement; photos with no location keyword are absent.
+        """
+        leaves = {}
+        for start in range(0, len(photo_ids), 400):
+            chunk = photo_ids[start:start + 400]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self.conn.execute(
+                f"""
+                SELECT pk.photo_id, k.id, k.name, k.place_id, k.latitude,
+                       k.longitude, k.parent_id
+                FROM photo_keywords pk
+                JOIN keywords k ON k.id = pk.keyword_id
+                WHERE pk.photo_id IN ({placeholders})
+                  AND k.type = 'location'
+                ORDER BY pk.rowid
+                """,
+                chunk,
+            ).fetchall()
+            for row in rows:
+                leaves.setdefault(row["photo_id"], row)
+        return leaves
+
     def get_photo_paths(self, leaves):
         """Return ``{photo_id: [broadest, ..., leaf]}`` for chosen leaf rows.
 

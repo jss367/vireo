@@ -55,6 +55,53 @@ class CachesRepository:
         ).fetchone()
         return row["total"]
 
+    def preview_entry_count(self):
+        """Number of tracked ordinary plus paired preview entries."""
+        return self.conn.execute(
+            "SELECT (SELECT COUNT(*) FROM preview_cache) + "
+            "(SELECT COUNT(*) FROM paired_preview_cache) AS c"
+        ).fetchone()["c"]
+
+    def preview_average_bytes(self):
+        """Mean size of the non-empty ordinary and paired entries, or None if there are none."""
+        return self.conn.execute(
+            "SELECT AVG(bytes) AS a FROM ("
+            "SELECT bytes FROM preview_cache UNION ALL "
+            "SELECT bytes FROM paired_preview_cache) WHERE bytes > 0"
+        ).fetchone()["a"]
+
+    def preview_delete_all_except(self, keep_keys):
+        """Delete every ordinary entry except the ``(photo_id, size)`` pairs in ``keep_keys``.
+
+        Paired entries are untouched. Does not commit. The kept keys are
+        staged in a temp table, 400 pairs (800 bind parameters) per insert,
+        so the delete is not a giant ``NOT IN`` list past SQLite's variable
+        limit; the table is dropped even if a statement fails. With no kept
+        keys every ordinary entry is deleted.
+        """
+        if keep_keys:
+            self.conn.execute(
+                "CREATE TEMP TABLE _pc_failed (photo_id INTEGER, size INTEGER)"
+            )
+            try:
+                CHUNK = 400
+                for i in range(0, len(keep_keys), CHUNK):
+                    batch = keep_keys[i:i + CHUNK]
+                    placeholders = ",".join(["(?,?)"] * len(batch))
+                    flat = [v for pair in batch for v in pair]
+                    self.conn.execute(
+                        f"INSERT INTO _pc_failed (photo_id, size) VALUES {placeholders}",
+                        flat,
+                    )
+                self.conn.execute(
+                    "DELETE FROM preview_cache WHERE (photo_id, size) NOT IN "
+                    "(SELECT photo_id, size FROM _pc_failed)"
+                )
+            finally:
+                self.conn.execute("DROP TABLE _pc_failed")
+        else:
+            self.conn.execute("DELETE FROM preview_cache")
+
     def preview_oldest_first(self):
         """Return all rows ordered by last_access_at ascending (oldest first)."""
         return self.conn.execute(
@@ -193,3 +240,9 @@ class CachesRepository:
             "WHERE status='cached'"
         ).fetchone()
         return row["total"]
+
+    def offline_original_cached_count(self):
+        """Number of offline originals with ``status='cached'``."""
+        return self.conn.execute(
+            "SELECT COUNT(*) AS c FROM offline_originals WHERE status='cached'"
+        ).fetchone()["c"]

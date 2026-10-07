@@ -139,23 +139,9 @@ def _discard_history_items(db, changes):
     for change in changes:
         discarded_keyword_id = ""
         if change["change_type"] == "keyword_add":
-            associations = db.conn.execute(
-                """SELECT pk.keyword_id, pk.source,
-                          EXISTS (
-                              SELECT 1
-                              FROM edit_history_items item
-                              JOIN edit_history edit ON edit.id = item.edit_id
-                              WHERE item.photo_id = pk.photo_id
-                                AND edit.action_type = 'keyword_add'
-                                AND edit.undone = 0
-                                AND item.new_value = CAST(pk.keyword_id AS TEXT)
-                          ) AS has_exact_history
-                   FROM photo_keywords pk
-                   JOIN keywords k ON k.id = pk.keyword_id
-                   WHERE pk.photo_id = ?
-                     AND k.name = ? COLLATE NOCASE""",
-                (change["photo_id"], change["value"]),
-            ).fetchall()
+            associations = db.get_photo_keyword_associations_by_name(
+                change["photo_id"], change["value"],
+            )
             evidenced = [
                 row for row in associations
                 if row["source"] == "manual" or row["has_exact_history"]
@@ -606,11 +592,8 @@ def _sync_preview_pending_fingerprint(db, ws_id):
     ``change_type``, or ``photo_id`` differ, and the cached snapshot
     would then be served to a client that had never seen the new row.
     """
-    row = db.conn.execute(
-        "SELECT value FROM db_meta WHERE key = ?",
-        (f"pending_changes_version:{ws_id}",),
-    ).fetchone()
-    return int(row[0]) if row else 0
+    value = db.get_meta(f"pending_changes_version:{ws_id}")
+    return int(value) if value is not None else 0
 
 
 def _sync_preview_build_snapshot(db, ws_id):
@@ -622,17 +605,7 @@ def _sync_preview_build_snapshot(db, ws_id):
     # the rows would risk stamping stale rows with a post-write version
     # and serving them from cache.
     fingerprint = _sync_preview_pending_fingerprint(db, ws_id)
-    changes = db.conn.execute(
-        """
-        SELECT pc.*, p.filename, p.folder_id, f.path AS folder_path
-        FROM pending_changes pc
-        JOIN photos p ON p.id = pc.photo_id
-        LEFT JOIN folders f ON f.id = p.folder_id
-        WHERE pc.workspace_id = ?
-        ORDER BY pc.created_at, pc.id
-        """,
-        (ws_id,),
-    ).fetchall()
+    changes = db.get_pending_changes_for_review(ws_id)
 
     revision_hash = hashlib.sha256()
     change_type_counts = {}
@@ -859,9 +832,9 @@ class _SyncPreviewPage:
         self.location_paths = db.get_photo_location_paths(location_photo_ids)
         from keyword_identity import keyword_paths, resolve_merge_target
         self.resolve_merge_target = resolve_merge_target
-        self.merge_paths = keyword_paths(db.conn.execute(
-            'SELECT id, name, parent_id FROM keywords'
-        ).fetchall()) if any(
+        self.merge_paths = keyword_paths(
+            db.get_keyword_parent_rows()
+        ) if any(
             change['type'] == 'keyword_merge'
             for photo in self.photos for change in photo['changes']
         ) else {}
@@ -1051,26 +1024,9 @@ def create_sync_blueprint(get_db, json_error, get_runner):
         if not photo_ids:
             return {}
 
-        leaves = {}
         # Keep the first linked location, matching the single-photo helper's
         # LIMIT 1 behavior without relying on a window-function result shape.
-        for start in range(0, len(photo_ids), 400):
-            chunk = photo_ids[start:start + 400]
-            placeholders = ",".join("?" for _ in chunk)
-            rows = db.conn.execute(
-                f"""
-                SELECT pk.photo_id, k.id, k.name, k.place_id, k.latitude,
-                       k.longitude, k.parent_id
-                FROM photo_keywords pk
-                JOIN keywords k ON k.id = pk.keyword_id
-                WHERE pk.photo_id IN ({placeholders})
-                  AND k.type = 'location'
-                ORDER BY pk.rowid
-                """,
-                chunk,
-            ).fetchall()
-            for row in rows:
-                leaves.setdefault(row["photo_id"], row)
+        leaves = db.get_first_linked_location_keywords(photo_ids)
 
         chain_cache = {}
         result = {}
@@ -1101,15 +1057,7 @@ def create_sync_blueprint(get_db, json_error, get_runner):
         db = get_db()
         # One statement keeps totals and per-type counts in the same snapshot,
         # without loading every queued row into Python on each progress poll.
-        counts = db.conn.execute(
-            """SELECT NULL AS change_type, COUNT(*) AS changes,
-                      COUNT(DISTINCT photo_id) AS photos
-               FROM pending_changes WHERE workspace_id = ?
-               UNION ALL
-               SELECT change_type, COUNT(*), 0
-               FROM pending_changes WHERE workspace_id = ? GROUP BY change_type""",
-            (db.require_workspace_id(), db.require_workspace_id()),
-        ).fetchall()
+        counts = db.get_pending_change_counts()
         return jsonify({
             "pending_count": counts[0]["changes"],
             "pending_photo_count": counts[0]["photos"],
@@ -1133,15 +1081,7 @@ def create_sync_blueprint(get_db, json_error, get_runner):
 
         effective_config = db.get_effective_config(cfg.load())
         photos = db.count_photos_with_location()
-        queued = db.conn.execute(
-            """SELECT COUNT(DISTINCT pc.photo_id)
-               FROM pending_changes pc
-               JOIN photo_keywords pk ON pk.photo_id = pc.photo_id
-               JOIN keywords k ON k.id = pk.keyword_id
-               WHERE pc.workspace_id = ? AND pc.change_type = 'location'
-                 AND k.type = 'location'""",
-            (db.require_workspace_id(),),
-        ).fetchone()[0]
+        queued = db.count_photos_with_queued_location_change()
         return jsonify({
             "photos_with_location": photos,
             "already_queued": queued,
@@ -1266,10 +1206,10 @@ def create_sync_blueprint(get_db, json_error, get_runner):
                 # Validate and delete under one write transaction. This keeps
                 # another request from replacing or adding a pending row
                 # between the revision check and the workspace-wide delete.
-                db.conn.execute("BEGIN IMMEDIATE")
+                db.begin_immediate()
                 snapshot = _sync_preview_get_snapshot(db, ws_id, revision)
                 if snapshot["revision"] != revision:
-                    db.conn.rollback()
+                    db.rollback()
                     return json_error(
                         "pending changes changed since they were reviewed",
                         409,
@@ -1279,14 +1219,7 @@ def create_sync_blueprint(get_db, json_error, get_runner):
                             "discarding all."
                         ),
                     )
-                changes = db.conn.execute(
-                    "SELECT * FROM pending_changes WHERE workspace_id = ?",
-                    (ws_id,),
-                ).fetchall()
-                db.conn.execute(
-                    "DELETE FROM pending_changes WHERE workspace_id = ?",
-                    (ws_id,),
-                )
+                changes = db.delete_workspace_pending_changes(ws_id)
                 db.clear_equivalent_flat_removals(changes, _commit=False)
                 if changes:
                     items = _discard_history_items(db, changes)
@@ -1298,9 +1231,9 @@ def create_sync_blueprint(get_db, json_error, get_runner):
                         is_batch=len(changes) > 1,
                         _commit=False,
                     )
-                db.conn.commit()
+                db.commit()
             except Exception:
-                db.conn.rollback()
+                db.rollback()
                 raise
 
             if changes:
@@ -1313,17 +1246,9 @@ def create_sync_blueprint(get_db, json_error, get_runner):
             return json_error("change_ids required")
 
         # Look up changes before deleting so we can record what was discarded.
-        # Keep each IN clause below SQLite's bound-parameter limit, just as
+        # The read is chunked below SQLite's bound-parameter limit, just as
         # clear_pending does for the subsequent delete.
-        from db import _chunks  # noqa: PLC0415
-        changes = []
-        for chunk in _chunks(change_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            changes.extend(db.conn.execute(
-                f"SELECT * FROM pending_changes "
-                f"WHERE id IN ({placeholders}) AND workspace_id = ?",
-                list(chunk) + [db.require_workspace_id()],
-            ).fetchall())
+        changes = db.get_pending_changes_by_ids(change_ids)
 
         db.clear_pending(
             change_ids, clear_equivalent_flat_removals=True,

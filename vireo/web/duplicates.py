@@ -72,14 +72,10 @@ def create_duplicates_blueprint(
         total_rejected = 0
         deferred_hashes = []
         for h in hashes:
-            rows = db.conn.execute(
-                "SELECT id FROM photos "
-                "WHERE file_hash = ? AND (flag IS NULL OR flag != 'rejected')",
-                (h,),
-            ).fetchall()
-            if len(rows) < 2:
+            ids = db.get_live_duplicate_photo_ids(h)
+            if len(ids) < 2:
                 continue
-            result = db.apply_duplicate_resolution([r["id"] for r in rows])
+            result = db.apply_duplicate_resolution(ids)
             total_rejected += result.get("rejected", 0)
             if result.get("deferred"):
                 deferred_hashes.append(h)
@@ -173,22 +169,10 @@ def create_duplicates_blueprint(
                 return json_error("photo_ids must be a list of integers")
 
         db = get_db()
-        # Chunk the lookup SELECT — bulk cleanup actions may hand us thousands
+        # The lookup is chunked — bulk cleanup actions may hand us thousands
         # of ids at once, and SQLite builds with the legacy 999-parameter cap
         # would otherwise fail before any cleanup runs.
-        rows_by_id = {}
-        for chunk in chunked(photo_ids):
-            placeholders = ",".join("?" * len(chunk))
-            chunk_rows = db.conn.execute(
-                f"""SELECT p.id, p.flag, p.file_hash, p.filename,
-                           f.path AS folder_path
-                    FROM photos p
-                    LEFT JOIN folders f ON f.id = p.folder_id
-                    WHERE p.id IN ({placeholders})""",
-                chunk,
-            ).fetchall()
-            for r in chunk_rows:
-                rows_by_id[r["id"]] = r
+        rows_by_id = db.get_duplicate_loser_candidates(photo_ids)
 
         # One query per distinct hash to find kept-row anchors. Cheap because
         # the hash column is indexed and a typical bulk action shares hashes
@@ -197,11 +181,7 @@ def create_duplicates_blueprint(
         hashes = {r["file_hash"] for r in rows_by_id.values() if r["file_hash"]}
         anchors_by_hash = {}
         for h in hashes:
-            anchors = db.conn.execute(
-                "SELECT p.filename, f.path FROM photos p JOIN folders f ON f.id=p.folder_id "
-                "WHERE p.file_hash = ? AND (p.flag IS NULL OR p.flag != 'rejected')",
-                (h,),
-            ).fetchall()
+            anchors = db.get_live_duplicate_paths(h)
             anchors_by_hash[h] = [os.path.join(a["path"], a["filename"]) for a in anchors]
 
         trash_candidates = []
@@ -357,15 +337,7 @@ def create_duplicates_blueprint(
         ``{found: true, job_id, started_at, finished_at, result}``.
         """
         db = get_db()
-        row = db.conn.execute(
-            """SELECT id, started_at, finished_at, result
-                 FROM job_history
-                WHERE type = 'duplicate-scan'
-                  AND status = 'completed'
-                  AND result IS NOT NULL
-                ORDER BY finished_at DESC
-                LIMIT 1"""
-        ).fetchone()
+        row = db.get_last_completed_job("duplicate-scan")
         if row is None:
             return jsonify({"found": False})
         try:
@@ -404,18 +376,7 @@ def create_duplicates_blueprint(
         exists before trashing.
         """
         db = get_db()
-        row = db.conn.execute(
-            """
-            SELECT COUNT(*) AS n, COALESCE(SUM(file_size), 0) AS total_bytes
-            FROM photos p
-            WHERE p.flag = 'rejected'
-              AND p.file_hash IS NOT NULL
-              AND EXISTS (
-                  SELECT 1 FROM photos q
-                  WHERE q.file_hash = p.file_hash AND (q.flag IS NULL OR q.flag != 'rejected')
-              )
-            """
-        ).fetchone()
+        row = db.get_duplicate_loser_disk_summary()
         return jsonify({
             "count": row["n"],
             "total_size": row["total_bytes"],

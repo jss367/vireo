@@ -1259,6 +1259,43 @@ def test_set_photo_thumb_path_commits(db, lib):
         ).fetchone()[0] == f"{lib['a']}.jpg"
 
 
+def _thumb_paths(db):
+    with _reader(db) as r:
+        return {
+            row["id"]: row["thumb_path"]
+            for row in r.execute("SELECT id, thumb_path FROM photos")
+        }
+
+
+def test_clear_all_photo_thumb_paths_commits(db, lib):
+    for pid in (lib["a"], lib["f"]):
+        db.set_photo_thumb_path(pid, f"{pid}.jpg")
+    db.clear_all_photo_thumb_paths()
+    assert not db.conn.in_transaction
+    assert set(_thumb_paths(db).values()) == {None}
+
+
+def test_clear_photo_thumb_paths_clears_only_named_photos_in_chunks_of_900(db, lib):
+    for pid in (lib["a"], lib["b"], lib["f"]):
+        db.set_photo_thumb_path(pid, f"{pid}.jpg")
+    statements = _trace(db)
+    db.clear_photo_thumb_paths([lib["a"]] + list(range(100_000, 100_899)) + [lib["f"]])
+    db.conn.set_trace_callback(None)
+    assert not db.conn.in_transaction
+    assert len(_sql(statements, "SET thumb_path = NULL")) == 2
+    paths = _thumb_paths(db)
+    assert paths[lib["a"]] is None
+    assert paths[lib["f"]] is None
+    assert paths[lib["b"]] == f"{lib['b']}.jpg"
+
+
+def test_count_catalog_photos_spans_every_workspace(db, lib):
+    assert db.count_catalog_photos() == 4
+    assert db.count_photos_in_workspace() == 3
+    db.set_active_workspace(None)
+    assert db.count_catalog_photos() == 4
+
+
 # -- structure -----------------------------------------------------------------
 
 MOVED = [
@@ -1276,6 +1313,8 @@ MOVED = [
     "get_photo_working_copy_path", "record_generated_original",
     "set_photo_thumb_path",
     "get_photo_ids_at_paths",
+    "clear_all_photo_thumb_paths", "clear_photo_thumb_paths",
+    "count_catalog_photos",
     "get_photo_ids_in_folders",
 ]
 

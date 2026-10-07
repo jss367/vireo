@@ -3,8 +3,10 @@
 ``Database`` keeps the composition: it decides when to resolve, calls the
 winner/loser merge, and re-tags the winner through ``Database.tag_photo`` so
 the keyword-provenance fold and any patched ``tag_photo`` still apply. This
-repository owns the SQL those steps read and write. Every method is
-catalog-wide (photos are global), so it takes no workspace id.
+repository owns the SQL those steps read and write, plus the reads the
+``/api/duplicates/*`` routes make (live twins of a hash, loser-file
+candidates, the disk-cleanup summary). Every method is catalog-wide
+(photos are global), so it takes no workspace id.
 
 Not to be confused with the top-level ``duplicates`` module, the pure
 resolver this repository feeds.
@@ -13,6 +15,7 @@ resolver this repository feeds.
 import os
 
 from keyword_identity import embedded_keyword_associations_for_merge
+from sql_chunks import chunked
 
 
 class _DeferredPlan:
@@ -104,6 +107,57 @@ class DuplicatesRepository:
             (file_hash,),
         ).fetchall()
         return [r["id"] for r in dup_rows]
+
+    def live_paths_for_hash(self, file_hash):
+        """Rows (``filename``, ``path``) of the non-rejected photos with ``file_hash``.
+
+        Inner-joins ``folders``, so a photo whose folder row is gone is absent.
+        """
+        return self.conn.execute(
+            "SELECT p.filename, f.path FROM photos p JOIN folders f ON f.id=p.folder_id "
+            "WHERE p.file_hash = ? AND (p.flag IS NULL OR p.flag != 'rejected')",
+            (file_hash,),
+        ).fetchall()
+
+    def loser_candidate_rows(self, photo_ids):
+        """``{photo_id: row}`` for the named photos that exist.
+
+        Each row is ``id``, ``flag``, ``file_hash``, ``filename`` and
+        ``folder_path`` (None when the folder row is gone). Chunked with
+        ``sql_chunks.chunked`` (900 ids per statement).
+        """
+        rows_by_id = {}
+        for chunk in chunked(photo_ids):
+            placeholders = ",".join("?" * len(chunk))
+            chunk_rows = self.conn.execute(
+                f"""SELECT p.id, p.flag, p.file_hash, p.filename,
+                           f.path AS folder_path
+                    FROM photos p
+                    LEFT JOIN folders f ON f.id = p.folder_id
+                    WHERE p.id IN ({placeholders})""",
+                chunk,
+            ).fetchall()
+            for r in chunk_rows:
+                rows_by_id[r["id"]] = r
+        return rows_by_id
+
+    def loser_disk_summary(self):
+        """Row (``n``, ``total_bytes``): rejected photos whose hash a kept photo shares.
+
+        ``total_bytes`` sums their stored ``file_size`` (0 when there are none).
+        """
+        return self.conn.execute(
+            """
+            SELECT COUNT(*) AS n, COALESCE(SUM(file_size), 0) AS total_bytes
+            FROM photos p
+            WHERE p.flag = 'rejected'
+              AND p.file_hash IS NOT NULL
+              AND EXISTS (
+                  SELECT 1 FROM photos q
+                  WHERE q.file_hash = p.file_hash AND (q.flag IS NULL OR q.flag != 'rejected')
+              )
+            """
+        ).fetchone()
 
     def find_groups(self, include_resolved=False):
         """Return duplicate groups; see ``Database.find_duplicate_groups``.

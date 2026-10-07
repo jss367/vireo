@@ -970,6 +970,105 @@ def test_staged_sync_scope_chunks(staged):
     assert by_photo[1:] == (1, 0, 1)
 
 
+# -- review, status and discard reads -------------------------------------------
+
+
+def test_get_pending_changes_for_review_joins_photo_and_folder(lib):
+    db, ws, other = lib["db"], lib["ws"], lib["other"]
+    late = _insert(db, lib["c"], "rating", "3", ws)
+    early = _insert(db, lib["a"], "flag", "flagged", ws)
+    _insert(db, lib["b"], "rating", "1", other)
+    db.conn.execute(
+        "UPDATE pending_changes SET created_at = '2000-01-01 00:00:00' WHERE id = ?",
+        (early,),
+    )
+    db.conn.commit()
+    rows = db.get_pending_changes_for_review(ws)
+    assert [r["id"] for r in rows] == [early, late]
+    assert [(r["filename"], r["folder_path"]) for r in rows] == [
+        ("a.jpg", "/lib/one"), ("c.jpg", "/lib/two"),
+    ]
+    assert rows[0]["folder_id"] == lib["f1"]
+    assert rows[0]["change_type"] == "flag"
+    assert [r["id"] for r in db.get_pending_changes_for_review(other)] != []
+    assert db.get_pending_changes_for_review(987_654) == []
+
+
+def test_get_pending_changes_for_review_keeps_rows_without_a_folder(lib):
+    db, ws = lib["db"], lib["ws"]
+    cid = _insert(db, lib["a"], "rating", "2", ws)
+    db.conn.execute("PRAGMA foreign_keys = OFF")
+    db.conn.execute("UPDATE photos SET folder_id = 987654 WHERE id = ?", (lib["a"],))
+    db.conn.commit()
+    db.conn.execute("PRAGMA foreign_keys = ON")
+    rows = db.get_pending_changes_for_review(ws)
+    assert [(r["id"], r["folder_path"]) for r in rows] == [(cid, None)]
+
+
+def test_get_pending_change_counts(lib):
+    db, ws, other = lib["db"], lib["ws"], lib["other"]
+    assert [tuple(r) for r in db.get_pending_change_counts()] == [(None, 0, 0)]
+    _insert(db, lib["a"], "rating", "2", ws)
+    _insert(db, lib["a"], "flag", "flagged", ws)
+    _insert(db, lib["b"], "rating", "1", ws)
+    _insert(db, lib["c"], "rating", "1", other)
+    rows = db.get_pending_change_counts()
+    assert tuple(rows[0]) == (None, 3, 2)
+    assert {r["change_type"]: r["changes"] for r in rows[1:]} == {
+        "flag": 1, "rating": 2,
+    }
+    db.set_active_workspace(None)
+    with pytest.raises(RuntimeError, match="No active workspace"):
+        db.get_pending_change_counts()
+
+
+def test_count_photos_with_queued_location_change(lib):
+    db, ws, other = lib["db"], lib["ws"], lib["other"]
+    place = db.add_keyword("Pond", kw_type="location")
+    plain = db.add_keyword("Heron")
+    db.tag_photo(lib["a"], place)
+    db.tag_photo(lib["b"], plain)
+    db.tag_photo(lib["c"], place)
+    _insert(db, lib["a"], "location", "x", ws)
+    _insert(db, lib["a"], "location", "y", ws)
+    _insert(db, lib["b"], "location", "x", ws)
+    _insert(db, lib["c"], "location", "x", other)
+    _insert(db, lib["c"], "rating", "2", ws)
+    assert db.count_photos_with_queued_location_change() == 1
+    db.set_active_workspace(None)
+    with pytest.raises(RuntimeError, match="No active workspace"):
+        db.count_photos_with_queued_location_change()
+
+
+def test_get_pending_changes_by_ids_scopes_and_chunks(lib):
+    db, ws, other = lib["db"], lib["ws"], lib["other"]
+    mine = _insert(db, lib["a"], "rating", "2", ws)
+    theirs = _insert(db, lib["b"], "rating", "1", other)
+    statements = _trace(db)
+    rows = db.get_pending_changes_by_ids(
+        [mine, theirs] + list(range(100_000, 100_800))
+    )
+    db.conn.set_trace_callback(None)
+    assert [r["id"] for r in rows] == [mine]
+    assert rows[0]["value"] == "2"
+    assert len([s for s in statements if "FROM pending_changes" in s]) == 2
+
+
+def test_delete_workspace_pending_changes_returns_rows_uncommitted(lib):
+    db, ws, other = lib["db"], lib["ws"], lib["other"]
+    a = _insert(db, lib["a"], "rating", "2", ws)
+    b = _insert(db, lib["b"], "flag", "flagged", ws)
+    _insert(db, lib["c"], "rating", "1", other)
+    rows = db.delete_workspace_pending_changes(ws)
+    assert sorted(r["id"] for r in rows) == [a, b]
+    assert set(rows[0].keys()) >= {"id", "photo_id", "change_type", "value"}
+    assert db.conn.in_transaction
+    assert [r[3] for r in _rows(db)] == [other]
+    assert len(_visible_rows(db)) == 3
+    db.conn.rollback()
+    assert len(_rows(db)) == 3
+
+
 # -- structure ----------------------------------------------------------------------------
 
 
@@ -989,6 +1088,11 @@ _DELEGATING_SYNC_METHODS = (
     "clear_equivalent_flat_removals",
     "get_flat_keyword_removals",
     "queue_flag_change_if_enabled",
+    "get_pending_changes_for_review",
+    "get_pending_change_counts",
+    "count_photos_with_queued_location_change",
+    "get_pending_changes_by_ids",
+    "delete_workspace_pending_changes",
 )
 
 

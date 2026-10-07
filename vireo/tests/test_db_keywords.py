@@ -597,6 +597,47 @@ def test_photo_ids_with_species_rank_keyword(db, lib):
     assert len([s for s in dict.fromkeys(statements) if "pk.photo_id IN" in s]) == 2
 
 
+def test_get_photo_keyword_associations_by_name(db, lib):
+    p0, p1, _, _ = lib["p"]
+    north = db.add_keyword("North", kw_type="location")
+    south = db.add_keyword("South", kw_type="location")
+    marsh_n = db.add_keyword("Marsh", parent_id=north)
+    marsh_s = db.add_keyword("marsh", parent_id=south)
+    other = db.add_keyword("Pond")
+    db.tag_photo(p0, marsh_n, source="accept")
+    db.tag_photo(p0, marsh_s, source="manual")
+    db.tag_photo(p0, other)
+    db.tag_photo(p1, marsh_n, source="accept")
+    db.record_edit(
+        "keyword_add", "add", "",
+        [{"photo_id": p0, "old_value": "", "new_value": str(marsh_n)}],
+    )
+    undone = db.record_edit(
+        "keyword_add", "add again", "",
+        [{"photo_id": p1, "old_value": "", "new_value": str(marsh_n)}],
+    )
+    db.conn.execute("UPDATE edit_history SET undone = 1 WHERE id = ?", (undone,))
+    db.conn.commit()
+    rows = db.get_photo_keyword_associations_by_name(p0, "MARSH")
+    assert sorted(tuple(r) for r in rows) == sorted([
+        (marsh_n, "accept", 1), (marsh_s, "manual", 0),
+    ])
+    # The p1 history entry was undone, so it is no longer evidence.
+    assert [tuple(r) for r in db.get_photo_keyword_associations_by_name(p1, "marsh")] == [
+        (marsh_n, "accept", 0),
+    ]
+    assert db.get_photo_keyword_associations_by_name(p0, "Heron") == []
+
+
+def test_get_keyword_parent_rows(db, lib):
+    root = db.add_keyword("Root")
+    child = db.add_keyword("Child", parent_id=root)
+    rows = {r["id"]: (r["name"], r["parent_id"]) for r in db.get_keyword_parent_rows()}
+    assert rows[root] == ("Root", None)
+    assert rows[child] == ("Child", root)
+    assert len(rows) == db.conn.execute("SELECT COUNT(*) FROM keywords").fetchone()[0]
+
+
 def test_species_keywords_and_equivalents(db, lib):
     p0, p1, p2, p3 = lib["p"]
     root = db.add_keyword("American Robin", is_species=True)
@@ -1142,6 +1183,8 @@ _DELEGATING_KEYWORD_METHODS = (
     "get_top_level_species_keyword",
     "get_keyword_row",
     "get_photo_ids_with_keyword",
+    "get_photo_keyword_associations_by_name",
+    "get_keyword_parent_rows",
     "get_species_rank_keywords_for_photo",
     "get_photo_ids_with_species_rank_keyword",
     "get_photo_keywords",

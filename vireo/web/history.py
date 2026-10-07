@@ -48,11 +48,7 @@ def create_history_blueprint(
 
     def _edit_recipe_history_updates(db, edit_id):
         from image_edits import recipe_to_json
-        rows = db.conn.execute(
-            "SELECT photo_id FROM edit_history_items WHERE edit_id = ?",
-            (edit_id,),
-        ).fetchall()
-        photo_ids = [r["photo_id"] for r in rows]
+        photo_ids = db.get_edit_item_photo_ids(edit_id)
         if not photo_ids:
             return {}
         invalidate_photo_render_cache(db, photo_ids)
@@ -96,11 +92,10 @@ def create_history_blueprint(
             action = (payload.get("photo_edit") or {}).get("action_type")
         if action not in ("species_replace", "keyword_add", "prediction_accept"):
             return
-        photo_id_rows = db.conn.execute(
-            "SELECT DISTINCT photo_id FROM edit_history_items WHERE edit_id = ?",
-            (entry["id"],),
-        ).fetchall()
-        photo_ids = [r["photo_id"] for r in photo_id_rows if r["photo_id"] is not None]
+        photo_ids = [
+            pid for pid in db.get_edit_item_photo_ids(entry["id"], distinct=True)
+            if pid is not None
+        ]
         if not photo_ids:
             return
         try:
@@ -132,10 +127,7 @@ def create_history_blueprint(
             action = (json.loads(entry["new_value"]).get("photo_edit") or {}).get("action_type")
         if action != "flag":
             return False
-        return db.conn.execute(
-            "SELECT 1 FROM edit_history_items WHERE edit_id = ? AND old_value != new_value LIMIT 1",
-            (entry["id"],),
-        ).fetchone() is not None
+        return db.edit_has_changed_items(entry["id"])
 
     @blueprint.route("/api/undo", methods=["POST"])
     def api_undo():
@@ -186,20 +178,10 @@ def create_history_blueprint(
     @blueprint.route("/api/undo/status")
     def api_undo_status():
         db = get_db()
-        from db import Database
-        non_undoable = Database._NON_UNDOABLE
-        placeholders = ",".join("?" for _ in non_undoable)
-        latest = db.conn.execute(
-            f"SELECT id, description FROM edit_history WHERE workspace_id = ? AND undone = 0 AND action_type NOT IN ({placeholders}) "
-            "ORDER BY created_at DESC, id DESC LIMIT 1",
-            (db.require_workspace_id(), *non_undoable),
-        ).fetchone()
+        latest = db.get_next_undo_summary()
         if not latest:
             return jsonify({"available": False, "description": "", "count": 0})
-        total = db.conn.execute(
-            f"SELECT COUNT(*) FROM edit_history WHERE workspace_id = ? AND undone = 0 AND action_type NOT IN ({placeholders})",
-            (db.require_workspace_id(), *non_undoable),
-        ).fetchone()[0]
+        total = db.count_undoable_edits()
         return jsonify({
             "available": True,
             "description": latest["description"],
@@ -248,14 +230,7 @@ def create_history_blueprint(
     @blueprint.route("/api/redo/status")
     def api_redo_status():
         db = get_db()
-        from db import Database
-        non_undoable = Database._NON_UNDOABLE
-        placeholders = ",".join("?" for _ in non_undoable)
-        latest = db.conn.execute(
-            f"SELECT id, description FROM edit_history WHERE workspace_id = ? AND undone = 1 AND action_type NOT IN ({placeholders}) "
-            "ORDER BY created_at ASC, id ASC LIMIT 1",
-            (db.require_workspace_id(), *non_undoable),
-        ).fetchone()
+        latest = db.get_next_redo_summary()
         if not latest:
             return jsonify({"available": False, "description": ""})
         return jsonify({
