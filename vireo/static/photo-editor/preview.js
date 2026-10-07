@@ -258,6 +258,9 @@ function updatePreview(options) {
   };
   var img = document.getElementById('editorImg');
   if (img.getAttribute('src') === url && img.complete && img.naturalWidth) {
+    // Reusing the displayed result also supersedes any slower in-flight tier.
+    // Keep the timers: reusing a quick preview must still allow refinement.
+    editorState.previewSeq++;
     editorPreviewQueue.pending = null;
     presentEditorPreview(request, img);
     return;

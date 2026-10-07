@@ -120,6 +120,25 @@ def test_failed_render_keeps_last_image_and_queue_recovers(page, live_server, pr
     page.wait_for_function('editorImageMatchesZoomRecipe(document.getElementById("editorImg"))')
 
 
+def test_reusing_detailed_preview_invalidates_slow_quick_render(page, live_server, preview_photo):
+    open_photo(page, live_server, preview_photo)
+    original = page.locator('#editorImg').get_attribute('src')
+    original_width = page.locator('#editorImg').evaluate('img => img.naturalWidth')
+    held = []
+    page.route('**/edit-preview?*', lambda route: held.append(route))
+    # A resize within the same render-size bucket schedules the same recipe.
+    page.evaluate('schedulePreview()')
+    page.wait_for_function('editorState.previewTimings.some(t => !t.interactive)')
+    assert len(held) == 1
+    assert int(query(held[0].request.url)['size'][0]) == 1024
+    assert page.locator('#editorImg').get_attribute('src') == original
+    fill(held.pop())
+    page.wait_for_function('editorPreviewQueue.active === null')
+    assert page.locator('#editorImg').get_attribute('src') == original
+    assert page.locator('#editorImg').evaluate('img => img.naturalWidth') == original_width
+    expect(page.locator('#previewStatus')).not_to_contain_text('Quick preview')
+
+
 def test_photo_switch_invalidates_pending_render(page, live_server, preview_photo):
     open_photo(page, live_server, preview_photo)
     held = []
