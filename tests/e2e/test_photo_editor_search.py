@@ -1090,38 +1090,62 @@ def test_photo_editor_continuous_zoom_has_fit_and_native_stops(live_server, page
     assert fit["width"] > 0
     assert fit["zoomed"] is False
 
-    loaded_geometry_refresh = page.evaluate(
-        """() => new Promise((resolve) => {
-            const img = document.getElementById('editorImg');
-            const originalControl = window.updateEditorZoomControl;
-            const originalRenderSize = window.previewRenderSize;
-            const originalSchedule = window.schedulePreview;
-            let calls = 0;
+    page.evaluate(
+        """() => {
+            cancelEditorPreview({abortActive: true});
+            const probe = window.__zoomGeometryRefresh = {
+                image: document.getElementById('editorImg'),
+                originalControl: window.updateEditorZoomControl,
+                originalRenderSize: window.previewRenderSize,
+                originalSchedule: window.schedulePreview,
+                calls: 0,
+                scheduled: 0
+            };
             let renderSizeCalls = 0;
-            let scheduled = 0;
             window.updateEditorZoomControl = function() {
-                calls += 1;
-                return originalControl();
+                probe.calls += 1;
+                return probe.originalControl();
             };
             window.previewRenderSize = function() {
                 renderSizeCalls += 1;
                 return renderSizeCalls === 1 ? 2048 : 4096;
             };
-            window.schedulePreview = function() { scheduled += 1; };
-            editorState.recipe.exposure += 0.013;
+            window.schedulePreview = function() { probe.scheduled += 1; };
+            const adjustments = editorState.recipe.adjustments || {};
+            adjustments.exposure = (adjustments.exposure || 0) + 0.013;
+            editorState.recipe.adjustments = adjustments;
             updatePreview();
-            const beforeLoad = calls;
-            const originalLoad = img.onload;
-            img.onload = function() {
-                originalLoad.call(this);
-                const afterLoad = calls;
-                window.updateEditorZoomControl = originalControl;
-                window.previewRenderSize = originalRenderSize;
-                window.schedulePreview = originalSchedule;
-                resolve({beforeLoad, afterLoad, scheduled});
-            };
-        })"""
+            probe.beforeLoad = probe.calls;
+        }"""
     )
+    try:
+        # Previews load into a new Image and replace the displayed element.
+        # Waiting on the old element's onload would never complete.
+        page.wait_for_function(
+            """() => {
+                const img = document.getElementById('editorImg');
+                return img !== window.__zoomGeometryRefresh.image &&
+                    img.complete && img.naturalWidth > 0;
+            }""",
+            timeout=5000,
+        )
+        loaded_geometry_refresh = page.evaluate(
+            """() => ({
+                beforeLoad: window.__zoomGeometryRefresh.beforeLoad,
+                afterLoad: window.__zoomGeometryRefresh.calls,
+                scheduled: window.__zoomGeometryRefresh.scheduled
+            })"""
+        )
+    finally:
+        page.evaluate(
+            """() => {
+                const probe = window.__zoomGeometryRefresh;
+                window.updateEditorZoomControl = probe.originalControl;
+                window.previewRenderSize = probe.originalRenderSize;
+                window.schedulePreview = probe.originalSchedule;
+                delete window.__zoomGeometryRefresh;
+            }"""
+        )
     assert loaded_geometry_refresh["afterLoad"] > loaded_geometry_refresh["beforeLoad"]
     assert loaded_geometry_refresh["scheduled"] == 1
 
