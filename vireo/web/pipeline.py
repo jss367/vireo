@@ -205,17 +205,9 @@ def create_pipeline_blueprint(
         scope_photo_ids = None
         folder_ids = body.get("folder_ids")
         if folder_ids is not None:
-            if (
-                not isinstance(folder_ids, list)
-                or not folder_ids
-                or any(
-                    isinstance(fid, bool) or not isinstance(fid, int)
-                    for fid in folder_ids
-                )
-            ):
-                return json_error(
-                    "folder_ids must be a non-empty list of integers"
-                )
+            err = folder_ids_error(folder_ids, json_error)
+            if err is not None:
+                return err
             db = get_db()
             subtree_ids = set()
             # Mirror the /api/jobs/pipeline folder resolution exactly so the
@@ -1879,6 +1871,39 @@ def _save_recent_destination(destination):
         log.warning("Failed to save recent destination to config", exc_info=True)
 
 
+_SQLITE_INT_MIN = -(1 << 63)
+_SQLITE_INT_MAX = (1 << 63) - 1
+
+
+def folder_ids_error(folder_ids, json_error):
+    """The 400 response for a malformed ``folder_ids``, or None if valid.
+
+    Shared by ``/api/jobs/pipeline`` and ``/api/pipeline/plan`` so both
+    reject the same inputs with the same error. ``folder_ids`` must be a
+    non-empty list of (non-bool) integers, each inside SQLite's signed
+    64-bit range: a JSON payload can carry a wider integer (e.g. 2**63),
+    which would raise OverflowError at sqlite3 parameter binding and
+    escape as a 500.
+    """
+    if (
+        not isinstance(folder_ids, list)
+        or not folder_ids
+        or any(
+            isinstance(fid, bool) or not isinstance(fid, int)
+            for fid in folder_ids
+        )
+    ):
+        return json_error("folder_ids must be a non-empty list of integers")
+    if any(
+        fid < _SQLITE_INT_MIN or fid > _SQLITE_INT_MAX for fid in folder_ids
+    ):
+        return json_error(
+            "folder_ids contains a value outside SQLite's "
+            "signed 64-bit integer range"
+        )
+    return None
+
+
 def _job_config_scan_paths(job_config):
     """The ``source``/``sources``/``destination`` paths a run will walk."""
     scan_paths = [
@@ -2112,34 +2137,7 @@ class _PipelineLaunch:
                 "folder_ids cannot be combined with "
                 + ", ".join(other_scopes)
             )
-        if (
-            not isinstance(folder_ids, list)
-            or not folder_ids
-            or any(
-                isinstance(fid, bool) or not isinstance(fid, int)
-                for fid in folder_ids
-            )
-        ):
-            return json_error(
-                "folder_ids must be a non-empty list of integers"
-            )
-        # Range-check each folder id before it ever reaches sqlite3
-        # parameter binding. A JSON payload can carry an integer wider
-        # than SQLite's signed 64-bit column type (e.g. 2**63), which
-        # would raise OverflowError inside the workspace-linked lookup
-        # below and escape as a 500. source_snapshot_id already has the
-        # same guard just below; folder-scoped runs need it too.
-        _SQLITE_INT_MIN = -(1 << 63)
-        _SQLITE_INT_MAX = (1 << 63) - 1
-        if any(
-            fid < _SQLITE_INT_MIN or fid > _SQLITE_INT_MAX
-            for fid in folder_ids
-        ):
-            return json_error(
-                "folder_ids contains a value outside SQLite's "
-                "signed 64-bit integer range"
-            )
-        return None
+        return folder_ids_error(folder_ids, json_error)
 
     def _folder_subtree_ids(self):
         """Every workspace folder under ``folder_ids``, or a 404 response.
