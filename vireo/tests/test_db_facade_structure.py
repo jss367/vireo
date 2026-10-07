@@ -15,7 +15,7 @@ passed as a call argument is allowed. Anything else (``self.conn.execute``,
 transaction control on the façade and belongs in a repository, except in the
 connection-lifecycle methods listed below. The tests at the end pin the
 public transaction-control methods among them (``commit``, ``rollback``,
-``in_transaction``, ``begin_immediate``, ``transaction``) to the connection
+``in_transaction``, ``begin``, ``begin_immediate``, ``transaction``) to the connection
 calls they replace, and ``commit_with_retry`` (which only hands the connection
 to ``db.commit_with_retry``, so the guard needs no exception for it) to that
 helper.

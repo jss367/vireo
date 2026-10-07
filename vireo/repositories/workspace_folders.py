@@ -341,6 +341,19 @@ class WorkspaceFolderRepository:
         ).fetchone()
         return row is not None
 
+    def has_direct_link(self, workspace_id, folder_id):
+        """True iff ``workspace_folders`` has a row for exactly this folder.
+
+        No inheritance from a recursive root and no photo-only grants: only
+        the folder's own membership row counts. A ``None`` workspace matches
+        nothing.
+        """
+        row = self.conn.execute(
+            "SELECT 1 FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+            (workspace_id, folder_id),
+        ).fetchone()
+        return row is not None
+
     def visible_ids(self, workspace_id, folder_ids):
         """The subset of ``folder_ids`` the workspace sees, as a set.
 

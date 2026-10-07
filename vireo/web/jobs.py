@@ -307,7 +307,7 @@ def create_jobs_blueprint(
                     cancel_check=lambda: ctx.runner.is_cancelled(job["id"]),
                 )
             finally:
-                thread_db.conn.close()
+                thread_db.close()
 
         return ctx.start("duplicate-scan", work, pausable=True)
 
@@ -583,7 +583,7 @@ def create_jobs_blueprint(
                 seed_informal_groups(bg_db)
             except Exception:
                 log.error("Post-download taxa DB population failed", exc_info=True)
-                bg_db.conn.rollback()
+                bg_db.rollback()
                 raise
 
             # Retype existing keywords that match the new taxonomy so the
@@ -620,7 +620,7 @@ def create_jobs_blueprint(
                 log.info("Retyped %d existing keywords as taxonomy after download", updated)
             except Exception:
                 log.error("Post-download keyword retype failed", exc_info=True)
-                bg_db.conn.rollback()
+                bg_db.rollback()
                 raise
             return {"ok": True, "keywords_retyped": updated}
 

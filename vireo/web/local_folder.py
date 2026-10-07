@@ -243,10 +243,7 @@ def create_local_folder_blueprint(
         """Pre-stage source paths for ``root_ids`` (before rebase)."""
         paths = []
         for root_id in root_ids:
-            row = db.conn.execute(
-                "SELECT path FROM folders WHERE id=?",
-                (int(root_id),),
-            ).fetchone()
+            row = db.get_folder(int(root_id))
             if row and row["path"]:
                 paths.append(row["path"])
         return paths
@@ -396,15 +393,9 @@ def create_local_folder_blueprint(
         names = {}
         paths = {}
         for root_id in root_ids:
-            row = db.conn.execute(
-                """SELECT COALESCE(lfm.source_path, f.path) AS source_path
-                   FROM folders f
-                   LEFT JOIN local_folder_mappings lfm
-                     ON lfm.folder_id=f.id AND lfm.is_root=1
-                   WHERE f.id=?""",
-                (root_id,),
-            ).fetchone()
-            path = row["source_path"] if row else ""
+            path = db.get_folder_source_path(root_id)
+            if path is None:
+                path = ""
             paths[root_id] = path
             names[root_id] = os.path.basename(path.rstrip("/\\")) or "Folder"
         return names, paths
@@ -504,14 +495,7 @@ def create_local_folder_blueprint(
                 visible.add(int(covering))
         if not visible:
             return ""
-        placeholders = ",".join("?" for _ in visible)
-        rows = db.conn.execute(
-            f"""SELECT root_folder_id, state, activated_at, created_at
-                FROM local_folders
-                WHERE root_folder_id IN ({placeholders})
-                ORDER BY root_folder_id""",
-            tuple(sorted(visible)),
-        ).fetchall()
+        rows = db.get_local_folder_states(sorted(visible))
         parts = [
             "{root}:{state}:{activated}:{created}".format(
                 root=row["root_folder_id"],

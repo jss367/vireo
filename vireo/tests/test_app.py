@@ -324,6 +324,31 @@ def test_api_photos_extensions_scoped_to_active_workspace(app_and_db):
     assert '.jpg' in resp.get_json()
 
 
+@pytest.mark.parametrize("route, message", [
+    ("/api/jobs/offline-cache", "no cacheable photos in current workspace"),
+    ("/api/jobs/prepare-full-resolution",
+     "no photos in the current workspace can be prepared"),
+])
+def test_photo_job_launch_without_active_workspace_sees_no_photos(
+    client_with_photo, monkeypatch, route, message,
+):
+    """With no active workspace no photo is visible: the route answers its 400.
+
+    Request databases always restore a workspace today; this pins the
+    behaviour the inline visibility query had when it bound a NULL id, so
+    the route never reaches the workspace-scoped read and 500s instead.
+    """
+    from db import Database
+
+    app, _db, pid = client_with_photo
+    monkeypatch.setattr(
+        Database, "_restore_active_workspace", lambda self: self.set_active_workspace(None),
+    )
+    resp = app.test_client().post(route, json={"photo_ids": [pid]})
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == message
+
+
 def test_offline_cache_job_copies_original_and_xmp(client_with_photo):
     """Selected photos can be copied into the managed offline cache."""
     app, db, pid = client_with_photo

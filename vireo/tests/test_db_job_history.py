@@ -1,14 +1,17 @@
-"""Behavior pins for the read-only job-history domain of ``Database``.
+"""Behavior pins for the job-history domain of ``Database``.
 
-``JobRunner`` creates and writes ``job_history`` on its own connection; the
-façade only reads finished jobs back (the Duplicates page restoring its last
-scan). The structural test at the end keeps that SQL in
-``repositories/job_history.py``.
+``jobs.JobRunner`` creates the table and keeps its own writes; these tests
+cover what the job routes do through the public ``Database`` façade: reading
+a job type's newest completed result back (the Duplicates page restoring its
+last scan), the single-record lookup, and the result rewrite. The structural
+test at the end keeps their SQL in ``repositories/job_history.py``.
 """
 
 import ast
+import contextlib
 import inspect
 import json
+import sqlite3
 import textwrap
 
 import pytest
@@ -55,7 +58,88 @@ def test_get_last_completed_job_is_catalog_wide(db, history):
     assert db.get_last_completed_job("duplicate-scan")["id"] == "j"
 
 
-_DELEGATING_JOB_HISTORY_METHODS = ("get_last_completed_job",)
+@pytest.fixture
+def history_db(db):
+    """``db`` with the ``job_history`` table the job runner creates at startup."""
+    JobRunner(db)
+    return db
+
+
+def _insert(db, job_id, *, workspace_id=None, result=None, job_type="move-folder",
+            status="completed"):
+    db.conn.execute(
+        "INSERT INTO job_history (id, type, status, result, config, workspace_id) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (job_id, job_type, status, result, json.dumps({"k": 1}), workspace_id),
+    )
+    db.conn.commit()
+
+
+def _committed_result(db, job_id):
+    with contextlib.closing(sqlite3.connect(db._db_path)) as other:
+        row = other.execute(
+            "SELECT result FROM job_history WHERE id = ?", (job_id,)
+        ).fetchone()
+    return row[0] if row else None
+
+
+def test_get_job_history_row_returns_every_column(history_db):
+    db = history_db
+    ws = db.active_workspace_id
+    _insert(db, "job-a", workspace_id=ws, result='{"moved": 2}')
+    row = db.get_job_history_row("job-a")
+    assert isinstance(row, sqlite3.Row)
+    columns = [r[1] for r in db.conn.execute("PRAGMA table_info(job_history)")]
+    assert row.keys() == columns
+    assert dict(row)["type"] == "move-folder"
+    assert row["status"] == "completed"
+    assert row["workspace_id"] == ws
+    assert row["result"] == '{"moved": 2}'
+
+
+def test_get_job_history_row_is_exact_and_unscoped(history_db):
+    db = history_db
+    other = db.create_workspace("History other")
+    _insert(db, "job-b", workspace_id=other)
+    db.set_active_workspace(None)
+    # Any workspace's record: the caller compares ``workspace_id`` itself.
+    assert db.get_job_history_row("job-b")["workspace_id"] == other
+    assert db.get_job_history_row("job-") is None
+    assert db.get_job_history_row("JOB-B") is None
+    assert db.get_job_history_row("missing") is None
+
+
+def test_set_job_history_result_rewrites_one_row_and_commits(history_db):
+    db = history_db
+    _insert(db, "job-c", result='{"moved": 1}')
+    _insert(db, "job-d", result='{"moved": 9}')
+    assert db.set_job_history_result("job-c", '{"moved": 1, "cleanup": true}') is None
+    assert not db.in_transaction
+    assert _committed_result(db, "job-c") == '{"moved": 1, "cleanup": true}'
+    assert _committed_result(db, "job-d") == '{"moved": 9}'
+
+
+def test_set_job_history_result_for_unknown_id_writes_nothing(history_db):
+    db = history_db
+    db.set_job_history_result("missing", "{}")
+    assert db.get_job_history_row("missing") is None
+
+
+def test_set_job_history_result_commit_is_held_with_other_commits(history_db):
+    db = history_db
+    _insert(db, "job-e", result="{}")
+    with db._commits_held():
+        db.set_job_history_result("job-e", '{"x": 1}')
+        assert db.in_transaction
+        assert _committed_result(db, "job-e") == "{}"
+    assert _committed_result(db, "job-e") == '{"x": 1}'
+
+
+# -- structure ------------------------------------------------------------------
+
+_DELEGATING_JOB_HISTORY_METHODS = (
+    "get_last_completed_job", "get_job_history_row", "set_job_history_result",
+)
 
 
 @pytest.mark.parametrize("name", _DELEGATING_JOB_HISTORY_METHODS)

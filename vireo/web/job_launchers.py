@@ -21,7 +21,7 @@ from types import SimpleNamespace
 
 from artifact_flight import ArtifactProducerFailed
 from config import read_raw_config_file, settings_write_lock
-from db import Database, commit_with_retry
+from db import Database
 from flask import Blueprint, current_app, jsonify, request
 from preview_cache import (
     evict_if_over_quota as evict_preview_cache_if_over_quota,
@@ -44,7 +44,6 @@ from services.local_workspace import (
     stage_boundary_lock,
 )
 from services.startup_tasks import metadata_repair_count
-from sql_chunks import chunked
 from web.background_jobs import make_background_job
 from web.request_args import (
     coerce_collection_id,
@@ -221,7 +220,7 @@ def create_job_launchers_blueprint(
                         job["errors"].append(msg)
                 return result
             finally:
-                thread_db.conn.close()
+                thread_db.close()
 
         return ctx.start(
             "batch-delete",
@@ -1139,16 +1138,13 @@ def create_job_launchers_blueprint(
             except (ValueError, TypeError):
                 return json_error("photo_ids must be integers")
 
-        visible_set = set()
-        for chunk in chunked(photo_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            rows = db.conn.execute(
-                f"""SELECT p.id FROM photos p
-                    JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-                    WHERE wf.workspace_id = ? AND p.id IN ({placeholders})""",
-                [ctx.workspace_id, *chunk],
-            ).fetchall()
-            visible_set.update(r["id"] for r in rows)
+        # Scoped to the request database's active workspace (``ctx.workspace_id``).
+        # With none active nothing is visible, as the inline query binding a
+        # NULL workspace id behaved, so the route answers its 400, not a 500.
+        visible_set = (
+            set(db.filter_photo_ids_in_workspace(photo_ids))
+            if ctx.workspace_id is not None else set()
+        )
         photo_ids = [pid for pid in photo_ids if pid in visible_set]
         if not photo_ids:
             return json_error("no cacheable photos in current workspace")
@@ -1194,7 +1190,7 @@ def create_job_launchers_blueprint(
                                 f'{photo["filename"]}: {result["status"]}'
                             )
                     except Exception as exc:
-                        thread_db.conn.rollback()
+                        thread_db.rollback()
                         failed += 1
                         job["errors"].append(f'{photo["filename"]}: {exc}')
                         log.warning("Offline cache failed for %s: %s", filename, exc, exc_info=True)
@@ -1269,16 +1265,13 @@ def create_job_launchers_blueprint(
                 photo_ids.append(photo_id)
 
         db = get_db()
-        visible_set = set()
-        for chunk in chunked(photo_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            rows = db.conn.execute(
-                f"""SELECT p.id FROM photos p
-                    JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-                    WHERE wf.workspace_id = ? AND p.id IN ({placeholders})""",
-                [ctx.workspace_id, *chunk],
-            ).fetchall()
-            visible_set.update(row["id"] for row in rows)
+        # Scoped to the request database's active workspace (``ctx.workspace_id``).
+        # With none active nothing is visible, as the inline query binding a
+        # NULL workspace id behaved, so the route answers its 400, not a 500.
+        visible_set = (
+            set(db.filter_photo_ids_in_workspace(photo_ids))
+            if ctx.workspace_id is not None else set()
+        )
         photo_ids = [photo_id for photo_id in photo_ids if photo_id in visible_set]
         if not photo_ids:
             return json_error("no photos in the current workspace can be prepared")
@@ -1463,7 +1456,7 @@ def create_job_launchers_blueprint(
                                                 )
                                                 break
                             except Exception as exc:
-                                thread_db.conn.rollback()
+                                thread_db.rollback()
                                 error = str(exc) or exc.__class__.__name__
                                 if photo_source_matches(photo, thread_db.get_photo(photo_id)):
                                     log.warning(
@@ -1477,17 +1470,16 @@ def create_job_launchers_blueprint(
                         # including the offline row attached to that replacement.
                         # Purge disposable caches only if we actually attempted
                         # work, leaving replacements found before our turn alone.
-                        with thread_db.conn:
-                            thread_db.conn.execute("BEGIN IMMEDIATE")
+                        with thread_db.transaction():
+                            thread_db.begin_immediate()
                             current_photo = thread_db.get_photo(photo_id)
                             if not attempted or not photo_source_matches(photo, current_photo):
                                 from preview_cache import cleanup_cached_files_for_deleted_photos
 
                                 skipped_deleted += 1
                                 if attempted:
-                                    thread_db.conn.execute(
-                                        "DELETE FROM offline_originals WHERE photo_id=?",
-                                        (photo_id,),
+                                    thread_db.offline_original_delete(
+                                        photo_id, _commit=False,
                                     )
                                     if current_photo is None:
                                         cleanup_cached_files_for_deleted_photos(
@@ -1640,9 +1632,7 @@ def create_job_launchers_blueprint(
             )
 
         request_db = get_db()
-        folder = request_db.conn.execute(
-            "SELECT path, name FROM folders WHERE id = ?", (folder_id,)
-        ).fetchone()
+        folder = request_db.get_folder(folder_id)
         if not folder or not request_db.workspace_has_folder_link(folder_id):
             return json_error("Folder not found", status=404)
 
@@ -2169,7 +2159,7 @@ def _import_mask_extraction_deps():
     from pipeline_locks import acquire_photo_mask
     from quality import compute_all_quality_features
     from resource_ledger import ResourceWaitCancelled
-    from subjects import primary_order_sql, sync_primary
+    from subjects import sync_primary
 
     return SimpleNamespace(
         np=np,
@@ -2186,7 +2176,6 @@ def _import_mask_extraction_deps():
         acquire_photo_mask=acquire_photo_mask,
         compute_all_quality_features=compute_all_quality_features,
         ResourceWaitCancelled=ResourceWaitCancelled,
-        primary_order_sql=primary_order_sql,
         sync_primary=sync_primary,
     )
 
@@ -2350,27 +2339,13 @@ class _MaskExtractionRun:
     def _workspace_candidates(self):
         """All workspace photos with at least one real (non full-image) detection.
 
-        Direct SQL keeps this one round-trip to SQLite per workspace; the
+        One query keeps this one round-trip to SQLite per workspace; the
         per-photo cache check inside the loop handles "skip when already
         masked for this variant".
         """
-        thread_db = self.thread_db
-        ws_id = thread_db.active_workspace_id
-        rows = thread_db.conn.execute(
-            f"""SELECT p.id, p.folder_id, p.filename,
-                      d.detector_model,
-                      d.box_x, d.box_y, d.box_w, d.box_h,
-                      d.detector_confidence
-                 FROM photos p
-                 JOIN photo_workspace_visibility wf
-                      ON wf.photo_id = p.id
-                 JOIN detections d ON d.photo_id = p.id
-                WHERE wf.workspace_id = ?
-                  AND d.detector_model != 'full-image'
-                  AND d.detector_confidence >= ?
-                ORDER BY p.id, {self.deps.primary_order_sql("d")}""",
-            (ws_id, self.min_detector_conf),
-        ).fetchall()
+        rows = self.thread_db.get_workspace_mask_candidate_detections(
+            self.min_detector_conf,
+        )
         seen = set()
         photos = []
         for r in rows:
@@ -2467,7 +2442,7 @@ class _MaskExtractionRun:
         self.deps.sync_primary(
             thread_db, photo_id, min_conf=self.min_detector_conf,
         )
-        commit_with_retry(thread_db.conn)
+        thread_db.commit_with_retry()
         # A user can change primary after this job was queued.
         current = [d for d in thread_db.get_detections(photo_id, min_conf=self.min_detector_conf)
                    if d["detector_model"] != "full-image"]
@@ -2514,12 +2489,7 @@ class _MaskExtractionRun:
                 and existing["path"]
                 and os.path.isfile(existing["path"])):
             return False
-        state = thread_db.conn.execute(
-            "SELECT active_mask_variant, "
-            "dino_embedding_variant, quality_input_recipe FROM photos "
-            "WHERE id = ?",
-            (item.photo_id,),
-        ).fetchone()
+        state = thread_db.get_photo_mask_state(item.photo_id)
         if (state is not None
                 and state["active_mask_variant"]
                 == self.sam2_variant
@@ -2641,7 +2611,7 @@ class _MaskExtractionRun:
             _commit=False,
         )
         item.mask_file_stage.install()
-        commit_with_retry(thread_db.conn)
+        thread_db.commit_with_retry()
         item.mask_file_stage.finish()
         item.mask_file_stage = None
 

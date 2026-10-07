@@ -206,6 +206,30 @@ class FolderRepository:
         """Rows (``id``, ``path``, ``name``) for every folder, any workspace or status."""
         return self.conn.execute("SELECT id, path, name FROM folders").fetchall()
 
+    def id_by_path(self, path):
+        """The id of the folder stored at exactly ``path``, or None."""
+        row = self.conn.execute(
+            "SELECT id FROM folders WHERE path = ?", (path,)
+        ).fetchone()
+        return row["id"] if row else None
+
+    def source_path(self, folder_id):
+        """The folder's pre-staging path, or None for an unknown id.
+
+        A local-copy root's ``folders.path`` is rebased under
+        ``local-folders/``; its root ``local_folder_mappings`` row keeps the
+        original, which wins. Any other folder answers its stored path.
+        """
+        row = self.conn.execute(
+            """SELECT COALESCE(lfm.source_path, f.path) AS source_path
+               FROM folders f
+               LEFT JOIN local_folder_mappings lfm
+                 ON lfm.folder_id=f.id AND lfm.is_root=1
+               WHERE f.id=?""",
+            (folder_id,),
+        ).fetchone()
+        return row["source_path"] if row else None
+
     def _subtree_clause(self, path):
         """``(sql, params)`` matching folder ``f`` at ``path`` or stored below it.
 

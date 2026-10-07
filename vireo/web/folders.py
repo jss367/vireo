@@ -64,12 +64,12 @@ def create_folders_blueprint(
         # legacy array response is preserved for every other caller.
         include_workspace = request.args.get("with_workspace") in ("1", "true")
         if include_workspace:
-            db.conn.execute("BEGIN")
+            db.begin()
             try:
                 folders = [dict(f) for f in db.get_folder_tree()]
                 active_workspace_id = db.require_workspace_id()
             finally:
-                db.conn.rollback()
+                db.rollback()
             return jsonify(
                 {"folders": folders, "active_workspace_id": active_workspace_id}
             )
@@ -82,12 +82,12 @@ def create_folders_blueprint(
         # Keep the rows and their monotonic observation marker on one read
         # snapshot so clients can compare this response with /api/browse/init
         # independent of network delivery order.
-        db.conn.execute("BEGIN")
+        db.begin()
         missing = db.get_missing_folders()
         health_version = db.get_folder_health_version()
         response = jsonify([dict(f) for f in missing])
         response.headers["X-Vireo-Folder-Health-Version"] = str(health_version)
-        db.conn.rollback()
+        db.rollback()
         return response
 
     @blueprint.route("/api/folders/check-health", methods=["POST"])
@@ -110,7 +110,7 @@ def create_folders_blueprint(
         # next full scan.
         if changed:
             invalidate_missing_originals()
-        db.conn.execute("BEGIN")
+        db.begin()
         missing = db.get_missing_folders()
         ws_missing_after = {f["id"] for f in missing}
         health_version = db.get_folder_health_version()
@@ -120,7 +120,7 @@ def create_folders_blueprint(
             "missing": [dict(f) for f in missing],
             "folder_health_version": health_version,
         })
-        db.conn.rollback()
+        db.rollback()
         return response
 
     @blueprint.route("/api/folders/<int:folder_id>", methods=["GET"])
@@ -136,11 +136,7 @@ def create_folders_blueprint(
         folder = db.get_folder(folder_id)
         if not folder:
             return json_error("folder not found", 404)
-        linked = db.conn.execute(
-            "SELECT 1 FROM workspace_visible_folders WHERE workspace_id = ? AND folder_id = ?",
-            (db.active_workspace_id, folder_id),
-        ).fetchone()
-        if not linked:
+        if folder_id not in db.get_workspace_visible_folder_ids([folder_id]):
             return json_error("folder not found", 404)
         return jsonify({
             "id": folder["id"],
@@ -251,18 +247,14 @@ def create_folders_blueprint(
             # are nested under developed_folder_key(folder_path), so a path
             # change invalidates the old key and would silently regress export
             # to RAW until the user re-developed.
-            old_row = db.conn.execute(
-                "SELECT path, status FROM folders WHERE id = ?", (folder_id,)
-            ).fetchone()
+            old_row = db.get_folder(folder_id)
             old_path = old_row["path"] if old_row else ""
 
             try:
                 cascaded = db.relocate_folder(folder_id, new_path)
             except ValueError as e:
                 if old_row and old_row["status"] == "missing":
-                    current_row = db.conn.execute(
-                        "SELECT status FROM folders WHERE id = ?", (folder_id,)
-                    ).fetchone()
+                    current_row = db.get_folder(folder_id)
                     if current_row and current_row["status"] == "ok":
                         invalidate_missing_originals()
                 return json_error(str(e), 409)
@@ -357,11 +349,7 @@ def create_folders_blueprint(
         # no claim on — otherwise a stale UI or crafted request could pollute
         # this workspace with scan output from an unrelated folder, and
         # add_folder's auto-link would silently attach it.
-        linked = db.conn.execute(
-            "SELECT 1 FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
-            (ctx.workspace_id, folder_id),
-        ).fetchone()
-        if not linked:
+        if not db.workspace_has_direct_folder_link(ctx.workspace_id, folder_id):
             return json_error("folder not found", 404)
         root = folder["path"]
         from image_loader import is_excluded_scan_path
@@ -440,7 +428,7 @@ def create_folders_blueprint(
         # ``os.path.dirname(...)`` — same trap bulk_resolve_by_folder
         # patched.
         norm_paths = [os.path.normpath(p) for p in paths]
-        all_rows = db.conn.execute("SELECT path FROM folders").fetchall()
+        all_rows = db.get_all_folders()
         known_norm = {os.path.normpath(r["path"]) for r in all_rows}
 
         revealed = []
