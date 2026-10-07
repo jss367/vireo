@@ -677,6 +677,23 @@ def test_get_or_create_text_location_rejects_none_and_commits(db):
     assert db.get_or_create_text_location("Back garden") == kid
 
 
+def test_fill_missing_location_coordinates_keeps_an_established_point(db):
+    empty = _kw(db, "Back garden")
+    half = _kw(db, "Pond", lat=1.5)
+    placed = _kw(db, "Marsh", lat=10.0, lng=20.0)
+    for kid in (empty, half, placed):
+        db.fill_missing_location_coordinates(kid, 3.0, 4.0)
+        assert not db.conn.in_transaction
+    with _reader(db) as other:
+        rows = {
+            row["id"]: (row["latitude"], row["longitude"])
+            for row in other.execute("SELECT id, latitude, longitude FROM keywords")
+        }
+    assert rows[empty] == (3.0, 4.0)
+    assert rows[half] == (1.5, 4.0)
+    assert rows[placed] == (10.0, 20.0)
+
+
 def test_get_or_create_text_location_matches_case_insensitively(db):
     # ``add_keyword`` dedupes location names case-insensitively; the text
     # path must agree, or one place splits into two keyword rows.
@@ -888,6 +905,7 @@ _DELEGATING_LOCATION_METHODS = (
     "set_photo_location",
     "clear_photo_location",
     "get_or_create_text_location",
+    "fill_missing_location_coordinates",
     "reverse_geocode_cache_get",
     "reverse_geocode_cache_put",
 )

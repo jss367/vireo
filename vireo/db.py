@@ -4701,11 +4701,25 @@ class Database:
             photo_id, flag, verify_workspace=verify_workspace, _commit=_commit
         )
 
-    def update_photo_wildlife_excluded(self, photo_id, excluded, verify_workspace=True):
-        """Set whether a photo is excluded from wildlife detection/classification."""
+    def update_photo_wildlife_excluded(self, photo_id, excluded, verify_workspace=True,
+                                       _commit=True):
+        """Set whether a photo is excluded from wildlife detection/classification.
+
+        ``_commit=False`` leaves the write in the caller's open transaction.
+        """
         if verify_workspace:
             self._verify_photo_in_workspace(photo_id)
-        self._photo_review_repository().set_wildlife_excluded(photo_id, excluded)
+        self._photo_review_repository().set_wildlife_excluded(
+            photo_id, excluded, _commit=_commit,
+        )
+
+    def get_wildlife_excluded_states(self, photo_ids):
+        """``{photo_id: 0 or 1}`` for the named photos the active workspace can see.
+
+        Ids that don't exist or sit outside the workspace are absent. Raises
+        ``RuntimeError`` when no workspace is active.
+        """
+        return self._photo_review_repository().wildlife_excluded_states(photo_ids)
 
     def batch_update_photo_flag(self, photo_ids, flag, verify_workspace=True):
         """Set flag for multiple photos in a single transaction.
@@ -6152,6 +6166,15 @@ class Database:
                 longitude=None,
             )
 
+    def fill_missing_location_coordinates(self, keyword_id, latitude, longitude):
+        """Set a keyword's latitude/longitude where each is NULL, and commit.
+
+        A location reused from the map keeps its established point.
+        """
+        self._location_repository().fill_missing_coordinates(
+            keyword_id, latitude, longitude,
+        )
+
     def link_keyword_to_place(self, keyword_id, details):
         """Attach Google place data to an existing keyword.
 
@@ -6460,6 +6483,14 @@ class Database:
         first, then lowest id.
         """
         return self._keyword_repository().top_level_species_keyword(name)
+
+    def get_keyword_row(self, keyword_id):
+        """Row (``id``, ``name``, ``type``) of one keyword, or None when the id is unknown."""
+        return self._keyword_repository().get_row(keyword_id)
+
+    def get_photo_ids_with_keyword(self, keyword_id, photo_ids):
+        """The set of ``photo_ids`` that carry ``keyword_id``."""
+        return self._keyword_repository().photo_ids_tagged_with(keyword_id, photo_ids)
 
     def get_photo_keywords(self, photo_id):
         """Return all keywords for a photo."""

@@ -1260,6 +1260,25 @@ class KeywordRepository:
             (name,),
         ).fetchone()
 
+    def get_row(self, keyword_id):
+        """Row (``id``, ``name``, ``type``) of one keyword, or None when the id is unknown."""
+        return self.conn.execute(
+            "SELECT id, name, type FROM keywords WHERE id = ?", (keyword_id,)
+        ).fetchone()
+
+    def photo_ids_tagged_with(self, keyword_id, photo_ids):
+        """The set of ``photo_ids`` that carry ``keyword_id``."""
+        tagged = set()
+        for chunk in self._chunks(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self.conn.execute(
+                f"""SELECT photo_id FROM photo_keywords
+                    WHERE keyword_id = ? AND photo_id IN ({placeholders})""",
+                [keyword_id] + chunk,
+            ).fetchall()
+            tagged.update(row["photo_id"] for row in rows)
+        return tagged
+
     def get_for_photo(self, photo_id):
         """Return all keywords for a photo."""
         return self.conn.execute(

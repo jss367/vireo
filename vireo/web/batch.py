@@ -116,12 +116,7 @@ def create_batch_blueprint(
             # A custom name chosen from the map should be available as a
             # nearby saved suggestion next time. Preserve an existing
             # location's established map point when the name is reused.
-            db.conn.execute(
-                "UPDATE keywords SET latitude = COALESCE(latitude, ?), "
-                "longitude = COALESCE(longitude, ?) WHERE id = ?",
-                (latitude, longitude, leaf_id),
-            )
-            db.conn.commit()
+            db.fill_missing_location_coordinates(leaf_id, latitude, longitude)
 
         items = []
         for pid in photo_ids:
@@ -141,7 +136,7 @@ def create_batch_blueprint(
                 is_batch=True,
                 _commit=False,
             )
-        db.conn.commit()
+        db.commit()
         db._prune_edit_history()
         return jsonify({
             "ok": True,
@@ -208,7 +203,7 @@ def create_batch_blueprint(
                     is_batch=True,
                     _commit=False,
                 )
-            db.conn.commit()
+            db.commit()
             db._prune_edit_history()
             return jsonify({
                 "ok": True,
@@ -254,7 +249,7 @@ def create_batch_blueprint(
                 is_batch=True,
                 _commit=False,
             )
-        db.conn.commit()
+        db.commit()
         db._prune_edit_history()
         return jsonify({
             "ok": True,
@@ -339,7 +334,7 @@ def create_batch_blueprint(
                 is_batch=True,
                 _commit=False,
             )
-        db.conn.commit()
+        db.commit()
         if items:
             db._prune_edit_history()
 
@@ -388,10 +383,7 @@ def create_batch_blueprint(
         for pid in photo_ids:
             new_flag = desired_flags[pid]
             old_flag = photos_map[pid]["flag"]
-            db.conn.execute(
-                "UPDATE photos SET flag = ? WHERE id = ?",
-                (new_flag, pid),
-            )
+            db.update_photo_flag(pid, new_flag, verify_workspace=False, _commit=False)
             db.queue_flag_change_if_enabled(pid, new_flag, _commit=False)
             items.append({
                 "photo_id": pid,
@@ -411,7 +403,7 @@ def create_batch_blueprint(
             is_batch=True,
             _commit=False,
         )
-        db.conn.commit()
+        db.commit()
         db._prune_edit_history()
         return jsonify({
             "ok": True,
@@ -441,9 +433,7 @@ def create_batch_blueprint(
         if keyword_id is not None:
             if isinstance(keyword_id, bool) or not isinstance(keyword_id, int):
                 return json_error("keyword_id must be an integer")
-            keyword_row = db.conn.execute(
-                "SELECT id, name FROM keywords WHERE id = ?", (keyword_id,)
-            ).fetchone()
+            keyword_row = db.get_keyword_row(keyword_id)
             if keyword_row is None:
                 return json_error("keyword not found", 404)
             kid = keyword_row["id"]
@@ -465,26 +455,14 @@ def create_batch_blueprint(
             except ValueError as exc:
                 return json_error(str(exc))
             # Queue/record the stored spelling (see api_add_keyword).
-            stored = db.conn.execute(
-                "SELECT name FROM keywords WHERE id = ?", (kid,)
-            ).fetchone()
-            if stored:
-                name = stored["name"]
+            stored = db.get_keyword_name(kid)
+            if stored is not None:
+                name = stored
 
-        already_tagged = set()
-        batch_size = 800
-        for i in range(0, len(photo_ids), batch_size):
-            chunk = list(photo_ids[i:i + batch_size])
-            placeholders = ",".join("?" for _ in chunk)
-            existing_rows = db.conn.execute(
-                f"""SELECT photo_id FROM photo_keywords
-                    WHERE keyword_id = ? AND photo_id IN ({placeholders})""",
-                [kid] + chunk,
-            ).fetchall()
-            already_tagged.update(row["photo_id"] for row in existing_rows)
+        already_tagged = db.get_photo_ids_with_keyword(kid, photo_ids)
         added_ids = [pid for pid in photo_ids if pid not in already_tagged]
 
-        with db.conn:
+        with db.transaction():
             for pid in added_ids:
                 db.tag_photo(pid, kid, source='manual', _commit=False)
                 queue_keyword_add(db, pid, name, _commit=False)
@@ -527,25 +505,7 @@ def create_batch_blueprint(
                 photo_ids.append(raw)
                 seen.add(raw)
 
-        ws_id = db.require_workspace_id()
-        accessible_state = {}
-        batch_size = 800
-        for i in range(0, len(photo_ids), batch_size):
-            chunk = photo_ids[i:i + batch_size]
-            placeholders = ",".join("?" for _ in chunk)
-            rows = db.conn.execute(
-                f"""SELECT p.id, COALESCE(p.wildlife_excluded, 0) AS excluded
-                    FROM photos p
-                    WHERE p.id IN ({placeholders})
-                      AND EXISTS (
-                          SELECT 1 FROM photo_workspace_visibility wf
-                          WHERE wf.photo_id = p.id
-                            AND wf.workspace_id = ?
-                      )""",
-                [*chunk, ws_id],
-            ).fetchall()
-            for row in rows:
-                accessible_state[row["id"]] = int(row["excluded"])
+        accessible_state = db.get_wildlife_excluded_states(photo_ids)
         accessible_ids = [pid for pid in photo_ids if pid in accessible_state]
         skipped_count = len(photo_ids) - len(accessible_ids)
 
@@ -558,9 +518,8 @@ def create_batch_blueprint(
         items = []
         for photo_id in changed_ids:
             old_value = "1" if accessible_state[photo_id] else "0"
-            db.conn.execute(
-                "UPDATE photos SET wildlife_excluded = ? WHERE id = ?",
-                (desired, photo_id),
+            db.update_photo_wildlife_excluded(
+                photo_id, excluded, verify_workspace=False, _commit=False,
             )
             items.append({
                 "photo_id": photo_id,
@@ -582,7 +541,7 @@ def create_batch_blueprint(
                 is_batch=True,
                 _commit=False,
             )
-            db.conn.commit()
+            db.commit()
             db._prune_edit_history()
 
         return jsonify({
@@ -615,9 +574,7 @@ def create_batch_blueprint(
         if not clean_ids:
             return json_error("photo_ids required")
 
-        keyword_row = db.conn.execute(
-            "SELECT id, name, type FROM keywords WHERE id = ?", (keyword_id,)
-        ).fetchone()
+        keyword_row = db.get_keyword_row(keyword_id)
         if keyword_row is None:
             return json_error("keyword not found", 404)
 
@@ -627,19 +584,7 @@ def create_batch_blueprint(
                     f"Photo {pid} does not belong to the active workspace", 403
                 )
 
-        tagged_ids = []
-        batch_size = 800
-        for i in range(0, len(clean_ids), batch_size):
-            chunk = clean_ids[i:i + batch_size]
-            placeholders = ",".join("?" for _ in chunk)
-            rows = db.conn.execute(
-                f"""SELECT photo_id FROM photo_keywords
-                    WHERE keyword_id = ? AND photo_id IN ({placeholders})""",
-                [keyword_id] + chunk,
-            ).fetchall()
-            tagged_ids.extend(row["photo_id"] for row in rows)
-
-        tagged_set = set(tagged_ids)
+        tagged_set = db.get_photo_ids_with_keyword(keyword_id, clean_ids)
         removed_ids = [pid for pid in clean_ids if pid in tagged_set]
         name = keyword_row["name"]
         is_location = (keyword_row["type"] or "") == "location"
