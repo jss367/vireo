@@ -5790,8 +5790,14 @@ class _ScanRun:
 
             conn.create_function("_scan_collection_changed", 0, collection_changed)
             for operation in ("INSERT", "UPDATE", "DELETE"):
+                # IF NOT EXISTS keeps this idempotent when a prior scan on
+                # the same sqlite connection has already created the TEMP
+                # triggers — e.g. a test that re-wraps the connection loses
+                # the Python-side counter attribute but the triggers persist
+                # for the lifetime of the connection.
                 conn.execute(
-                    f"CREATE TEMP TRIGGER _scan_collection_{operation.lower()} "
+                    f"CREATE TEMP TRIGGER IF NOT EXISTS "
+                    f"_scan_collection_{operation.lower()} "
                     f"AFTER {operation} ON main.collections BEGIN "
                     "SELECT _scan_collection_changed(); END"
                 )
