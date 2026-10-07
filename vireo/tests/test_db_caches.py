@@ -499,6 +499,20 @@ def test_preview_cache_clear_all_empties_both_families_and_commits(db):
     assert _preview_state(db) == (set(), set())
 
 
+def test_is_preview_cache_invalid_reads_the_marker(db):
+    from preview_cache import (
+        ensure_preview_cache_invalidations_table,
+        mark_preview_cache_invalid,
+    )
+
+    pid = _photo(db)
+    ensure_preview_cache_invalidations_table(db)
+    assert db.is_preview_cache_invalid(pid, 1920) is False
+    mark_preview_cache_invalid(db, pid, 1920)
+    assert db.is_preview_cache_invalid(pid, 1920) is True
+    assert db.is_preview_cache_invalid(pid, 2560) is False
+
+
 # -- structure ----------------------------------------------------------------
 
 
@@ -509,6 +523,7 @@ _MOVED_CACHE_METHODS = [
     "preview_cache_total_bytes",
     "preview_cache_oldest_first",
     "preview_cache_get",
+    "is_preview_cache_invalid",
     "preview_cache_delete_entries",
     "preview_cache_clear_all",
     "paired_preview_cache_delete",

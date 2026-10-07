@@ -618,6 +618,27 @@ def test_get_existing_detection_photo_ids_delegates(db, monkeypatch):
     assert calls == ["megadetector-v6", "other"]
 
 
+def test_get_detection_subject_exposure_ev(db):
+    pid = _photo(db)
+    det = _raw_det(db, pid)
+    assert db.get_detection_subject_exposure_ev(det) is None
+    db.conn.execute(
+        """INSERT INTO detection_subjects
+             (detection_id, source_key, crop, quality_score, exposure_ev, features)
+           VALUES (?, 'k', '{}', 0.5, 0.0, '{}')""",
+        (det,),
+    )
+    db.conn.commit()
+    # 0.0 is a real correction, not a missing analysis.
+    assert db.get_detection_subject_exposure_ev(det) == 0.0
+    db.conn.execute(
+        "UPDATE detection_subjects SET exposure_ev = -1.25 WHERE detection_id = ?",
+        (det,),
+    )
+    assert db.get_detection_subject_exposure_ev(det) == -1.25
+    assert db.get_detection_subject_exposure_ev(99999) is None
+
+
 def test_get_detection_ids_for_photos(db):
     fid = _folder(db)
     p1, p2, p3 = (_photo(db, n, fid) for n in ("1.jpg", "2.jpg", "3.jpg"))
@@ -930,6 +951,7 @@ _DELEGATING_DETECTION_METHODS = (
     "bulk_reject_miss_category",
     "get_detection_ids_for_photos",
     "delete_detections_by_ids",
+    "get_detection_subject_exposure_ev",
 )
 
 

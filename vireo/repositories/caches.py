@@ -1,5 +1,9 @@
 """Persistence for the on-disk caches: the preview LRU and offline originals.
 
+It also reads the "do not adopt this preview" markers in
+``preview_cache_invalidations``; ``preview_cache`` still creates that table
+lazily and writes it.
+
 The caches are catalog-wide (keyed by photo id, not by workspace), so the
 repository takes no workspace id. The lock-retry helpers
 (``execute_with_retry`` / ``commit_with_retry``) live in ``db``; the façade
@@ -65,6 +69,19 @@ class CachesRepository:
             "WHERE photo_id=? AND size=?",
             (photo_id, size),
         ).fetchone()
+
+    def preview_invalidated(self, photo_id, size):
+        """True when ``(photo_id, size)`` carries a "do not adopt" marker.
+
+        Reads ``preview_cache_invalidations``, which the caller creates first
+        (``preview_cache.ensure_preview_cache_invalidations_table``).
+        """
+        row = self.conn.execute(
+            "SELECT 1 FROM preview_cache_invalidations "
+            "WHERE photo_id=? AND size=?",
+            (photo_id, size),
+        ).fetchone()
+        return row is not None
 
     def paired_preview_insert(self, photo_id, filename, bytes_):
         """Join the publisher's transaction; the filename includes source state."""

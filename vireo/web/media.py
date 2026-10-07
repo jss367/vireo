@@ -228,12 +228,7 @@ def _sweep_stale_paired_previews(paired_dir):
 
 def _is_preview_cache_invalid(db, photo_id, size):
     ensure_preview_cache_invalidations_table(db)
-    row = db.conn.execute(
-        "SELECT 1 FROM preview_cache_invalidations "
-        "WHERE photo_id=? AND size=?",
-        (photo_id, size),
-    ).fetchone()
-    return row is not None
+    return db.is_preview_cache_invalid(photo_id, size)
 
 def _full_resolution_render_signature(photo, recipe, file_state=None):
     """Describe every catalogued input to a cached inspection render.
@@ -456,12 +451,12 @@ def _preparation_publication(db, photo_id, prepare_source, captured_recipe=_UNSE
         if check_recipe and db.get_photo_edit_recipe(photo_id) != captured_recipe:
             raise _source_changed_response()
 
-    if db.conn.in_transaction:
+    if db.in_transaction:
         check_source()
         yield
     else:
-        with db.conn:
-            db.conn.execute("BEGIN IMMEDIATE")
+        with db.transaction():
+            db.begin_immediate()
             check_source()
             yield
 
@@ -1653,27 +1648,14 @@ class _OriginalPhotoRequest:
 
     def _commit_generated_original(self, uw, uh, *, tracked):
         photo = self.photo
-        if tracked:
-            updates = [
-                "working_copy_path=?",
-                "working_copy_evicted_mtime=NULL",
-            ]
-            params = [self.wc_rel]
-        else:
-            updates = [
-                "working_copy_path=NULL",
-                "working_copy_evicted_mtime=COALESCE(file_mtime, -1)",
-            ]
-            params = []
-        if not photo["width"] or not photo["height"]:
-            updates.extend(["width=?", "height=?"])
-            params.extend([uw, uh])
-        params.append(self.photo_id)
-        self.db.conn.execute(
-            f"UPDATE photos SET {', '.join(updates)} WHERE id=?",
-            params,
+        self.db.record_generated_original(
+            self.photo_id,
+            self.wc_rel,
+            tracked=tracked,
+            dimensions=(
+                (uw, uh) if not photo["width"] or not photo["height"] else None
+            ),
         )
-        self.db.conn.commit()
 
     def _commit_untracked_generated_original(self, uw, uh):
         # A transient full-resolution response must not orphan
@@ -1684,13 +1666,9 @@ class _OriginalPhotoRequest:
         # ``photo`` snapshot may predate a concurrent eviction;
         # restoring that stale path would point consumers at a
         # file that no longer exists.
-        current_row = self.db.conn.execute(
-            "SELECT working_copy_path FROM photos WHERE id=?",
-            (self.photo_id,),
-        ).fetchone()
+        # Only non-RAW primaries get here, so ``wc_rel`` is never None.
         preserve_existing_copy = bool(
-            current_row
-            and current_row["working_copy_path"] == self.wc_rel
+            self.db.get_photo_working_copy_path(self.photo_id) == self.wc_rel
             and os.path.isfile(self.wc_abs)
         )
         self._commit_generated_original(
@@ -2310,11 +2288,7 @@ class _ThumbnailRequest:
         if self.pair_source or self.served_from_regen_sidecar:
             return
         try:
-            self.db.conn.execute(
-                "UPDATE photos SET thumb_path=? WHERE id=?",
-                (f"{self.photo_id}.jpg", self.photo_id),
-            )
-            self.db.conn.commit()
+            self.db.set_photo_thumb_path(self.photo_id, f"{self.photo_id}.jpg")
         except Exception:
             # Coverage column drift is recoverable via the backfill job;
             # don't fail the request if the UPDATE racks up a transient
@@ -2742,10 +2716,7 @@ def _load_active_mask(db, photo_id):
     from PIL import Image
 
     for _attempt in range(3):
-        row = db.conn.execute(
-            "SELECT active_mask_variant FROM photos WHERE id=?", (photo_id,)
-        ).fetchone()
-        variant = row["active_mask_variant"] if row else None
+        variant = db.get_active_mask_variant(photo_id)
         mask_row = db.get_photo_mask(photo_id, variant) if variant else None
         if not mask_row or not mask_row.get("path"):
             return None
@@ -3004,18 +2975,11 @@ def create_media_blueprint(
         pid = int(m.group(1))
         db = get_db()
         real = os.path.realpath(mask_path)
-        for row in db.conn.execute(
-            "SELECT path FROM photo_masks WHERE photo_id = ?", (pid,)
-        ):
-            if row["path"] and os.path.realpath(row["path"]) == real:
+        for mask in db.list_masks_for_photo(pid):
+            if mask["path"] and os.path.realpath(mask["path"]) == real:
                 return True
-        row = db.conn.execute(
-            "SELECT mask_path FROM photos WHERE id = ?", (pid,)
-        ).fetchone()
-        return bool(
-            row and row["mask_path"]
-            and os.path.realpath(row["mask_path"]) == real
-        )
+        mask_path = db.get_photo_mask_path(pid)
+        return bool(mask_path and os.path.realpath(mask_path) == real)
 
     def _read_mask_bytes(mask_path):
         """Read an immutable mask generation, or lose a cleanup race.
@@ -3069,10 +3033,7 @@ def create_media_blueprint(
             # lookup but before open. Re-resolve after that narrow race; do
             # not block this HTTP request on full model regeneration.
             for _attempt in range(3):
-                row = db.conn.execute(
-                    "SELECT active_mask_variant FROM photos WHERE id=?", (pid,)
-                ).fetchone()
-                active = row["active_mask_variant"] if row else None
+                active = db.get_active_mask_variant(pid)
                 if active:
                     mask = db.get_photo_mask(pid, active)
                     if mask and mask.get("path"):
@@ -3144,10 +3105,7 @@ def create_media_blueprint(
         if db.get_photo(pid, verify_workspace=True) is None:
             return photo_not_found_error()
         masks = db.list_masks_for_photo(pid)
-        row = db.conn.execute(
-            "SELECT active_mask_variant FROM photos WHERE id=?", (pid,)
-        ).fetchone()
-        active = row["active_mask_variant"] if row else None
+        active = db.get_active_mask_variant(pid)
         return jsonify({
             "photo_id": pid,
             "active": active,
@@ -3199,9 +3157,7 @@ def create_media_blueprint(
                 image_path = wc
                 using_working_copy = True
         if image_path is None:
-            folder = db.conn.execute(
-                "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
-            ).fetchone()
+            folder = db.get_folder(photo["folder_id"])
             if not folder:
                 return "Not found", 404
             image_path = os.path.join(folder["path"], photo["filename"])
@@ -3234,9 +3190,7 @@ def create_media_blueprint(
             # existence check above but before Pillow opens it. Re-resolve
             # the primary source once so an otherwise healthy crop request
             # does not become a transient 500 during eviction.
-            folder = db.conn.execute(
-                "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
-            ).fetchone()
+            folder = db.get_folder(photo["folder_id"])
             original_path = (
                 os.path.join(folder["path"], photo["filename"])
                 if folder else None
@@ -3270,13 +3224,10 @@ def create_media_blueprint(
                 img = crop
 
         if requested_detection is not None and request.args.get("suggested") == "1":
-            analysis = db.conn.execute(
-                "SELECT exposure_ev FROM detection_subjects WHERE detection_id=?",
-                (requested_detection,),
-            ).fetchone()
-            if analysis:
+            exposure_ev = db.get_detection_subject_exposure_ev(requested_detection)
+            if exposure_ev is not None:
                 from image_edits import apply_recipe
-                img = apply_recipe(img, {"adjustments": {"exposure": analysis["exposure_ev"]}})
+                img = apply_recipe(img, {"adjustments": {"exposure": exposure_ev}})
         img.thumbnail((800, 800), Image.LANCZOS)
         import io
 
@@ -3344,9 +3295,7 @@ def create_media_blueprint(
         preview_dir = os.path.join(vireo_dir, "previews")
         cache_path = os.path.join(preview_dir, f"{photo_id}_{size}.jpg")
         recipe = db.get_photo_edit_recipe(photo_id)
-        folder_row = db.conn.execute(
-            "SELECT id, path FROM folders WHERE id=?", (photo["folder_id"],)
-        ).fetchone()
+        folder_row = db.get_folder(photo["folder_id"])
         if not folder_row:
             return "Not found", 404
         pair_source, pair_source_path = _requested_pair_source(
@@ -3829,9 +3778,7 @@ def create_media_blueprint(
             if not apply_crop:
                 display_recipe.pop("crop", None)
             vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
-            folder_row = db.conn.execute(
-                "SELECT id, path FROM folders WHERE id=?", (photo["folder_id"],)
-            ).fetchone()
+            folder_row = db.get_folder(photo["folder_id"])
             if not folder_row:
                 return "Not found", 404
             edit = _EditPreviewRequest(
@@ -3894,9 +3841,7 @@ def create_media_blueprint(
             for key in ("version", "rotation", "flip", "straighten", "crop")
             if key in recipe
         }
-        folder_row = db.conn.execute(
-            "SELECT id, path FROM folders WHERE id=?", (photo["folder_id"],)
-        ).fetchone()
+        folder_row = db.get_folder(photo["folder_id"])
         if not folder_row:
             return json_error("Photo not found", 404)
         edit = _EditPreviewRequest(
@@ -3958,9 +3903,7 @@ def create_media_blueprint(
             os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
         )
 
-        folder = db.conn.execute(
-            "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
-        ).fetchone()
+        folder = db.get_folder(photo["folder_id"])
         if not folder:
             return "Not found", 404
 
