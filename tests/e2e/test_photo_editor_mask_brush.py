@@ -145,3 +145,25 @@ def test_painted_mask_follows_rotated_cropped_preview(page, live_server, masked_
     assert result.ok
     alpha = np.asarray(Image.open(io.BytesIO(result.body())))[..., 3]
     assert alpha[round(alpha.shape[0] * 0.8), alpha.shape[1] // 2] > 60
+
+
+def test_point_color_picker_exits_mask_brush_without_painting(page, live_server, masked_photo):
+    open_mask(page, live_server, masked_photo)
+    page.locator('#maskBrushAdd').click()
+    page.wait_for_function('maskBrush.mode && !maskBrush.busy')
+    corrections = []
+    page.on('request', lambda request: corrections.append(request.url)
+            if '/local-mask/correct' in request.url else None)
+    page.locator('#pointColorPick').click()
+    expect(page.locator('#pointColorStatus')).to_contain_text('Click a color')
+    assert page.evaluate('maskBrush.mode') is None
+    box = page.locator('#editorImg').bounding_box()
+    page.mouse.click(box['x'] + box['width'] * 0.8, box['y'] + box['height'] * 0.5)
+    page.wait_for_function('pointColorSamples().length === 1')
+    assert corrections == []
+    assert page.evaluate('editorState.recipe.local || null') is None
+    # Selecting the brush again exits the picker in the other direction too.
+    page.locator('#maskBrushAdd').click()
+    page.wait_for_function('maskBrush.mode && !maskBrush.busy')
+    assert page.evaluate('colorEditor.picking') is False
+

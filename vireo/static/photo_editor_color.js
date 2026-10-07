@@ -224,6 +224,8 @@ function cancelPointColorPicker() {
 function togglePointColorPicker() {
   if (colorEditor.picking) { cancelPointColorPicker(); return; }
   if (editorState.loading || pointColorSamples().length >= 8) return;
+  // The image click belongs to one tool, including during mask preparation.
+  cancelMaskBrush();
   // A new picking session supersedes any preview request still in flight.
   colorEditor.pickSequence++;
   colorEditor.picking = true;
