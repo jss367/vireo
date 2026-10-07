@@ -77,11 +77,6 @@ PREDICTION_DECISION_ROUTES = frozenset({
     "api_redo",
 })
 
-# Same cap and rationale as ``vireo/app.py``'s ``_SQL_PARAM_CHUNK``: stay under
-# SQLite's 999-variable limit on older builds, with headroom for the extra
-# bound workspace id.
-_SQL_PARAM_CHUNK = 900
-
 
 def begin_prediction_decision(db, *, json_error):
     """Hold SQLite's write lock across a decision's checks *and* its writes.
@@ -118,12 +113,12 @@ def begin_prediction_decision(db, *, json_error):
     plainly beats a silent non-atomic fallback: the caller can retry, and
     nothing has been written.
     """
-    if db.conn.in_transaction:
+    if db.in_transaction:
         # A previous statement in this request may have opened sqlite3's
         # implicit transaction; BEGIN cannot nest.
-        db.conn.commit()
+        db.commit()
     try:
-        db.conn.execute("BEGIN IMMEDIATE")
+        db.begin_immediate()
     except sqlite3.OperationalError:
         return json_error(
             "another prediction decision is in progress; nothing was "
@@ -152,8 +147,8 @@ def under_prediction_decision_lock(db, work, *, json_error):
     try:
         return work()
     finally:
-        if db.conn.in_transaction:
-            db.conn.rollback()
+        if db.in_transaction:
+            db.rollback()
 
 
 def out_of_workspace_prediction_ids(db, pred_ids):
@@ -174,31 +169,6 @@ def out_of_workspace_prediction_ids(db, pred_ids):
     problem the way ``CORE_PHILOSOPHY.md`` rules out.
 
     Call it after ``begin_prediction_decision``: only an in-lock read closes
-    the window. Chunked for the same reason every other id query is (see
-    ``_SQL_PARAM_CHUNK``).
+    the window.
     """
-    if not pred_ids:
-        return set()
-    pred_ids = list(pred_ids)
-    ws = db.require_workspace_id()
-    # Rows whose ``workspace_folders`` join misses are out of scope. The
-    # LEFT JOIN keeps a row for every prediction id regardless of folder
-    # membership; the WHERE clause selects the misses.
-    found = set()
-    for start in range(0, len(pred_ids), _SQL_PARAM_CHUNK):
-        chunk = pred_ids[start:start + _SQL_PARAM_CHUNK]
-        placeholders = ",".join("?" for _ in chunk)
-        found.update(
-            row["id"] for row in db.conn.execute(
-                f"""SELECT pr.id FROM predictions pr
-                    JOIN detections d ON d.id = pr.detection_id
-                    JOIN photos ph ON ph.id = d.photo_id
-                    LEFT JOIN photo_workspace_visibility wf
-                      ON wf.photo_id = ph.id
-                     AND wf.workspace_id = ?
-                    WHERE pr.id IN ({placeholders})
-                      AND wf.workspace_id IS NULL""",
-                (ws, *chunk),
-            )
-        )
-    return found
+    return db.get_out_of_workspace_prediction_ids(pred_ids)

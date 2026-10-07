@@ -13,11 +13,15 @@ SQL — a ``_<domain>_repository()`` factory, ``canonical_schema.create_tables``
 passed as a call argument is allowed. Anything else (``self.conn.execute``,
 ``self.conn.commit()``, ``with self.conn:``, aliasing it to a local) is SQL or
 transaction control on the façade and belongs in a repository, except in the
-connection-lifecycle methods listed below.
+connection-lifecycle methods listed below. The tests at the end pin the
+public transaction-control methods among them (``commit``, ``rollback``,
+``in_transaction``, ``begin_immediate``) to the connection calls they replace.
 """
 
 import ast
+import contextlib
 import inspect
+import sqlite3
 
 import pytest
 from db import Database
@@ -30,6 +34,17 @@ CONNECTION_LIFECYCLE = {
     # Holds the connection's commits so an undo/redo replay is one
     # transaction; it commits or rolls back the connection as a whole.
     "_commits_held",
+    # Public transaction control, so callers outside the data layer never
+    # reach for the connection. Each is the one sqlite3.Connection call it
+    # names:
+    # Reports whether the connection has a transaction open.
+    "in_transaction",
+    # Commits through _Connection.commit, so held commits stay no-ops.
+    "commit",
+    # Rolls the connection's open transaction back.
+    "rollback",
+    # Takes SQLite's writer lock up front (the prediction-decision lock).
+    "begin_immediate",
 }
 
 
@@ -94,3 +109,56 @@ def test_connection_lifecycle_allowlist_is_not_stale(name):
         f"Database.{name} no longer uses self.conn; drop it from "
         "CONNECTION_LIFECYCLE so the guard covers it."
     )
+
+
+# -- transaction control ------------------------------------------------------------------
+
+
+def _committed_markers(db):
+    """Test rows in ``db_meta`` as a second connection sees them."""
+    with contextlib.closing(sqlite3.connect(db._db_path)) as conn:
+        return conn.execute(
+            "SELECT COUNT(*) FROM db_meta WHERE key LIKE 'tx-test-%'"
+        ).fetchone()[0]
+
+
+def _write(db, name):
+    db.conn.execute(
+        "INSERT INTO db_meta (key, value) VALUES (?, '1')", (f"tx-test-{name}",),
+    )
+
+
+def test_commit_rollback_and_in_transaction(db):
+    assert not db.in_transaction
+    _write(db, "a")
+    assert db.in_transaction
+    db.rollback()
+    assert not db.in_transaction
+    assert _committed_markers(db) == 0
+    _write(db, "b")
+    db.commit()
+    assert not db.in_transaction
+    assert _committed_markers(db) == 1
+
+
+def test_commit_is_a_no_op_while_commits_are_held(db):
+    with db._commits_held():
+        _write(db, "a")
+        db.commit()
+        assert db.in_transaction
+        assert _committed_markers(db) == 0
+    assert not db.in_transaction
+    assert _committed_markers(db) == 1
+
+
+def test_begin_immediate_holds_the_writer_lock(db):
+    db.begin_immediate()
+    assert db.in_transaction
+    with contextlib.closing(sqlite3.connect(db._db_path, timeout=0)) as other:
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            other.execute("BEGIN IMMEDIATE")
+    # BEGIN does not nest: a caller must commit or roll back first.
+    with pytest.raises(sqlite3.OperationalError):
+        db.begin_immediate()
+    db.rollback()
+    assert not db.in_transaction

@@ -31,7 +31,6 @@ from services import prediction_decisions
 from services.pending_changes import queue_keyword_add
 from services.prediction_ambiguity import ambiguous_prediction_ids, effective_category_resolver, prediction_is_ambiguous
 from services.visual_scope import inject_active_visual_model
-from sql_chunks import chunked
 from web.request_args import (
     MAX_SELECTION_PHOTOS,
     parse_selection_photo_ids,
@@ -487,21 +486,11 @@ def create_predictions_blueprint(
             return lock_err
         try:
             if prediction_decisions.out_of_workspace_prediction_ids(db, [pred_id]):
-                db.conn.rollback()
+                db.rollback()
                 return json_error("Prediction does not belong to the active workspace", 404)
-            pred = db.conn.execute(
-                """SELECT pr.id, pr.species, d.photo_id,
-                          COALESCE(pr_rev.status, 'pending') AS status
-                   FROM predictions pr
-                   JOIN detections d ON d.id = pr.detection_id
-                   LEFT JOIN prediction_review pr_rev
-                     ON pr_rev.prediction_id = pr.id
-                    AND pr_rev.workspace_id = ?
-                   WHERE pr.id = ?""",
-                (db.require_workspace_id(), pred_id),
-            ).fetchone()
+            pred = db.get_prediction_decision_row(pred_id)
             if pred is None:
-                db.conn.rollback()
+                db.rollback()
                 return json_error("prediction not found", 404)
             # Only pending predictions may transition to reviewed. Without
             # this guard a stale/double request or a direct API call against
@@ -509,7 +498,7 @@ def create_predictions_blueprint(
             # overwrite the prior decision, corrupting review state and
             # audit history.
             if pred["status"] != "pending":
-                db.conn.rollback()
+                db.rollback()
                 return json_error(
                     f'prediction already {pred["status"]}; cannot mark reviewed',
                     409,
@@ -526,10 +515,10 @@ def create_predictions_blueprint(
                 }],
                 _commit=False,
             )
-            db.conn.commit()
+            db.commit()
             return jsonify({"ok": True})
         except Exception:
-            db.conn.rollback()
+            db.rollback()
             raise
 
     @blueprint.route("/api/predictions/<int:pred_id>/replace-keywords", methods=["POST"])
@@ -551,14 +540,14 @@ def create_predictions_blueprint(
             return lock_err
         try:
             if prediction_decisions.out_of_workspace_prediction_ids(db, [pred_id]):
-                db.conn.rollback()
+                db.rollback()
                 return json_error("Prediction does not belong to the active workspace", 404)
             current_status = _prediction_status(db, pred_id)
             if current_status is None:
-                db.conn.rollback()
+                db.rollback()
                 return json_error("prediction not found", 404)
             if current_status in _DECIDED_PREDICTION_STATUSES:
-                db.conn.rollback()
+                db.rollback()
                 return json_error(
                     f"prediction already {current_status}; cannot accept",
                     409,
@@ -571,7 +560,7 @@ def create_predictions_blueprint(
                 pred_id, replace_species=True, _commit=False,
             )
             if result is None:
-                db.conn.rollback()
+                db.rollback()
                 return json_error("prediction not found", 404)
             items = [
                 {
@@ -593,7 +582,7 @@ def create_predictions_blueprint(
                 is_batch=is_batch,
                 _commit=False,
             )
-            db.conn.commit()
+            db.commit()
             # Same reason as ``api_accept_prediction``: replace goes through
             # the same grouped expansion, so a looping caller needs the rows
             # this transaction decided rather than the one it asked about.
@@ -603,7 +592,7 @@ def create_predictions_blueprint(
                 "photo_ids": result["photo_ids"],
             })
         except Exception:
-            db.conn.rollback()
+            db.rollback()
             raise
 
     @blueprint.route("/api/predictions/batch-accept", methods=["POST"])
@@ -723,15 +712,15 @@ def create_predictions_blueprint(
                 # photos that have no prediction rows to validate below.
                 all_photo_ids, err = parse_selection_photo_ids(db, body, json_error=json_error)
                 if err is not None:
-                    db.conn.rollback()
+                    db.rollback()
                     return err
                 selected = set(all_photo_ids)
                 if any(row["photo_id"] not in selected for row in _load_prediction_rows(db, pred_ids)):
-                    db.conn.rollback()
+                    db.rollback()
                     return json_error("prediction_ids must belong to the selected photos")
             return _batch_accept_under_lock(db, pred_ids, expected_species, all_photo_ids)
         except Exception:
-            db.conn.rollback()
+            db.rollback()
             raise
 
     def _batch_accept_under_lock(db, pred_ids, expected_species=None, all_photo_ids=None):
@@ -878,7 +867,7 @@ def create_predictions_blueprint(
                 keyword_id, species = result["keyword_id"], result["species"]
                 species_key = result["species_key"]
             elif result["species_key"] != species_key:
-                db.conn.rollback()
+                db.rollback()
                 return json_error(
                     "prediction_ids must all resolve to one species", 400,
                 )
@@ -917,9 +906,7 @@ def create_predictions_blueprint(
                     identity.display_name, is_species=True, _commit=False,
                     source_taxon_id=identity.taxon_id if explicit else None,
                 )
-                species = db.conn.execute(
-                    "SELECT name FROM keywords WHERE id = ?", (keyword_id,),
-                ).fetchone()["name"]
+                species = db.get_keyword_name(keyword_id)
             already_tagged = db.get_photos_with_equivalent_species(all_photo_ids, keyword_id)
             for photo_id in all_photo_ids:
                 if photo_id in already_tagged:
@@ -942,15 +929,8 @@ def create_predictions_blueprint(
                 if old_meta.get("no_tag"):
                     continue
                 photo_id = item["photo_id"]
-                item_species = db.conn.execute(
-                    "SELECT name FROM keywords WHERE id = ?", (int(item["new_value"]),),
-                ).fetchone()["name"]
-                flat_removals = [dict(row) for row in db.conn.execute(
-                    """SELECT workspace_id, value FROM pending_changes
-                       WHERE photo_id = ? AND change_type = 'keyword_remove_flat'
-                         AND value = ? COLLATE NOCASE""",
-                    (photo_id, item_species),
-                )]
+                item_species = db.get_keyword_name(int(item["new_value"]))
+                flat_removals = db.get_flat_keyword_removals(photo_id, item_species)
                 # accept_prediction queues an add directly. Reconcile it
                 # with any pending removal before applying the shared helper.
                 db.remove_pending_changes(photo_id, "keyword_add", item_species, _commit=False)
@@ -975,7 +955,7 @@ def create_predictions_blueprint(
                 "prediction_accept", desc, str(keyword_id), items,
                 is_batch=photo_count > 1, _commit=False,
             )
-        db.conn.commit()
+        db.commit()
         if items:
             # ``record_edit`` skips its prune under ``_commit=False``; run it
             # once the decision is durable so history stays bounded.
@@ -1035,27 +1015,7 @@ def create_predictions_blueprint(
         Chunked for the same reason every other id query here is — a legal
         payload runs past the 999-variable limit older SQLite builds enforce.
         """
-        if not pred_ids:
-            return []
-        ws = db.require_workspace_id()
-        rows = []
-        for chunk in chunked(pred_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            rows.extend(db.conn.execute(
-                f"""SELECT pr.id, pr.species, pr.category, pr.detection_id,
-                           pr.source_taxon_id, pr.scientific_name, pr.labels_fingerprint,
-                           pr.classifier_model AS model, d.photo_id,
-                           pr_rev.group_id AS group_id,
-                           pr_rev.individual AS individual
-                    FROM predictions pr
-                    JOIN detections d ON d.id = pr.detection_id
-                    LEFT JOIN prediction_review pr_rev
-                      ON pr_rev.prediction_id = pr.id
-                     AND pr_rev.workspace_id = ?
-                    WHERE pr.id IN ({placeholders})""",
-                (ws, *chunk),
-            ).fetchall())
-        return rows
+        return db.get_predictions_by_id(pred_ids)
 
     # The one definition of "already decided" for every prediction-decision
     # endpoint (batch and single-row alike). ``pending`` rows are the normal
@@ -1097,25 +1057,9 @@ def create_predictions_blueprint(
         drift apart again on what "still actionable" means.
 
         Chunked: a legal payload runs well past the 999-variable limit older
-        SQLite builds enforce (see ``_SQL_PARAM_CHUNK``).
+        SQLite builds enforce.
         """
-        ws = db.require_workspace_id()
-        statuses = _DECIDED_PREDICTION_STATUSES
-        if not pred_ids:
-            return set()
-        status_ph = ",".join("?" for _ in statuses)
-        found = set()
-        for chunk in chunked(pred_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            found.update(
-                row["prediction_id"] for row in db.conn.execute(
-                    f"""SELECT prediction_id FROM prediction_review
-                        WHERE workspace_id = ? AND status IN ({status_ph})
-                          AND prediction_id IN ({placeholders})""",
-                    (ws, *statuses, *chunk),
-                )
-            )
-        return found
+        return db.get_decided_prediction_ids(pred_ids)
 
     def _prediction_status(db, pred_id):
         """Current review status of one prediction in the active workspace.
@@ -1135,16 +1079,7 @@ def create_predictions_blueprint(
         prediction id is unknown. Callers combine that with
         ``_DECIDED_PREDICTION_STATUSES`` to decide whether to 409.
         """
-        row = db.conn.execute(
-            """SELECT COALESCE(pr_rev.status, 'pending') AS status
-               FROM predictions pr
-               LEFT JOIN prediction_review pr_rev
-                 ON pr_rev.prediction_id = pr.id
-                AND pr_rev.workspace_id = ?
-               WHERE pr.id = ?""",
-            (db.require_workspace_id(), pred_id),
-        ).fetchone()
-        return row["status"] if row else None
+        return db.get_prediction_status(pred_id)
 
     def _superseded_prediction_ids(db, pred_ids):
         """Which of ``pred_ids`` belong to a label set the catalog moved past.
@@ -1177,28 +1112,9 @@ def create_predictions_blueprint(
         ``get_top_prediction_for_photo`` both use: newest ``created_at``, ties
         broken by ``id``.
 
-        Chunked for the same reason every other id query here is (see
-        ``_SQL_PARAM_CHUNK``).
+        Chunked for the same reason every other id query here is.
         """
-        if not pred_ids:
-            return set()
-        found = set()
-        for chunk in chunked(pred_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            found.update(
-                row["id"] for row in db.conn.execute(
-                    f"""SELECT pr.id FROM predictions pr
-                        WHERE pr.id IN ({placeholders})
-                          AND pr.labels_fingerprint != (
-                              SELECT pr2.labels_fingerprint FROM predictions pr2
-                              WHERE pr2.detection_id = pr.detection_id
-                                AND pr2.classifier_model = pr.classifier_model
-                              ORDER BY pr2.created_at DESC, pr2.id DESC
-                              LIMIT 1)""",
-                    chunk,
-                )
-            )
-        return found
+        return db.get_superseded_prediction_ids(pred_ids)
 
     def _parse_observed_statuses(body):
         """Validate ``/api/predictions/group/apply``'s render-time baseline.
@@ -1251,43 +1167,21 @@ def create_predictions_blueprint(
         if not by_photo:
             return by_photo
         if observed:
-            for chunk in chunked(sorted(observed)):
-                placeholders = ",".join("?" for _ in chunk)
-                for row in db.conn.execute(
-                    f"""SELECT pr.id, d.photo_id FROM predictions pr
-                        JOIN detections d ON d.id = pr.detection_id
-                        WHERE pr.id IN ({placeholders})
-                        ORDER BY pr.id""",
-                    chunk,
-                ):
-                    if row["photo_id"] in by_photo:
-                        by_photo[row["photo_id"]].append(row["id"])
+            observed_photos = db.get_prediction_photo_ids(sorted(observed))
+            for pred_id, photo_id in observed_photos.items():
+                if photo_id in by_photo:
+                    by_photo[photo_id].append(pred_id)
         missing = [pid for pid, ids in by_photo.items() if not ids]
         if missing:
-            ws = db.require_workspace_id()
-            for chunk in chunked(missing):
-                placeholders = ",".join("?" for _ in chunk)
-                grouped = {}
-                for row in db.conn.execute(
-                    f"""SELECT pr.id, d.photo_id,
-                               pr_rev.group_id IS NOT NULL AS in_group
-                        FROM predictions pr
-                        JOIN detections d ON d.id = pr.detection_id
-                        LEFT JOIN prediction_review pr_rev
-                          ON pr_rev.prediction_id = pr.id
-                         AND pr_rev.workspace_id = ?
-                        WHERE d.photo_id IN ({placeholders})
-                          AND COALESCE(pr_rev.status, 'pending') != 'alternative'
-                        ORDER BY pr.id""",
-                    [ws, *chunk],
-                ):
-                    by_photo[row["photo_id"]].append(row["id"])
-                    if row["in_group"]:
-                        grouped.setdefault(row["photo_id"], []).append(row["id"])
-                # Prefer the burst member rows: a runner-up an earlier reject
-                # turned ``rejected`` is no longer ``alternative``, but it is
-                # still not the member the burst modal showed.
-                by_photo.update(grouped)
+            grouped = {}
+            for row in db.get_non_alternative_predictions_for_photos(missing):
+                by_photo[row["photo_id"]].append(row["id"])
+                if row["in_group"]:
+                    grouped.setdefault(row["photo_id"], []).append(row["id"])
+            # Prefer the burst member rows: a runner-up an earlier reject
+            # turned ``rejected`` is no longer ``alternative``, but it is
+            # still not the member the burst modal showed.
+            by_photo.update(grouped)
         return by_photo
 
     def _snapshot_pick_prior_statuses(db, pick_pred_ids):
@@ -1311,26 +1205,10 @@ def create_predictions_blueprint(
                          for pred_id in ids}
         if not pick_to_photo:
             return {}
-        ws = db.require_workspace_id()
         out = {}
-        for chunk in chunked(sorted(pick_to_photo)):
-            placeholders = ",".join("?" for _ in chunk)
-            for row in db.conn.execute(
-                f"""SELECT pick.id AS pick_id, pr.id AS prediction_id,
-                           pr_rev.status AS status
-                    FROM predictions pick
-                    JOIN predictions pr
-                      ON pr.detection_id = pick.detection_id
-                     AND pr.classifier_model = pick.classifier_model
-                     AND pr.labels_fingerprint = pick.labels_fingerprint
-                    JOIN prediction_review pr_rev
-                      ON pr_rev.prediction_id = pr.id
-                     AND pr_rev.workspace_id = ?
-                    WHERE pick.id IN ({placeholders})""",
-                (ws, *chunk),
-            ):
-                photo_id = pick_to_photo[row["pick_id"]]
-                out.setdefault(photo_id, {})[row["prediction_id"]] = row["status"]
+        for row in db.get_scope_review_statuses(sorted(pick_to_photo)):
+            photo_id = pick_to_photo[row["pick_id"]]
+            out.setdefault(photo_id, {})[row["prediction_id"]] = row["status"]
         return out
 
     def _accept_group_pick_rows(db, pick_pred_ids):
@@ -1346,32 +1224,16 @@ def create_predictions_blueprint(
         records the sibling's prior ``accepted`` so undo restores it, and
         ``Database._redo_prediction_accept_statuses`` re-rejects it on redo.
         """
-        ws = db.require_workspace_id()
         accepted_by_scope = {}
         for ids in pick_pred_ids.values():
             for pred_id in ids:
                 db.update_prediction_status(pred_id, "accepted", _commit=False)
-                scope = db.conn.execute(
-                    """SELECT detection_id, classifier_model, labels_fingerprint
-                       FROM predictions WHERE id = ?""",
-                    (pred_id,),
-                ).fetchone()
+                scope = db.get_prediction_scope(pred_id)
                 accepted_by_scope.setdefault(tuple(scope), set()).add(pred_id)
         for scope, accepted_ids in accepted_by_scope.items():
-            placeholders = ",".join("?" for _ in accepted_ids)
-            sibling_ids = [row["id"] for row in db.conn.execute(
-                f"""SELECT pr.id FROM predictions pr
-                    LEFT JOIN prediction_review pr_rev
-                      ON pr_rev.prediction_id = pr.id
-                     AND pr_rev.workspace_id = ?
-                    WHERE pr.detection_id = ?
-                      AND pr.classifier_model = ?
-                      AND pr.labels_fingerprint = ?
-                      AND pr.id NOT IN ({placeholders})
-                      AND COALESCE(pr_rev.status, 'pending')
-                          IN ('pending', 'alternative', 'accepted')""",
-                (ws, *scope, *sorted(accepted_ids)),
-            )]
+            sibling_ids = db.get_open_scope_sibling_ids(
+                *scope, sorted(accepted_ids),
+            )
             for sid in sibling_ids:
                 db.update_prediction_status(sid, "rejected", _commit=False)
 
@@ -1421,31 +1283,11 @@ def create_predictions_blueprint(
         """
         if not observed:
             return set()
-        ws = db.require_workspace_id()
         stale = set()
-        for chunk in chunked(list(observed)):
-            placeholders = ",".join("?" for _ in chunk)
-            for row in db.conn.execute(
-                f"""SELECT pr.id AS prediction_id, d.photo_id AS photo_id,
-                           COALESCE(pr_rev.status, 'pending') AS status,
-                           (pr.labels_fingerprint != (
-                               SELECT pr2.labels_fingerprint FROM predictions pr2
-                               WHERE pr2.detection_id = pr.detection_id
-                                 AND pr2.classifier_model = pr.classifier_model
-                               ORDER BY pr2.created_at DESC, pr2.id DESC
-                               LIMIT 1
-                           )) AS is_superseded
-                      FROM predictions pr
-                      JOIN detections d ON d.id = pr.detection_id
-                      LEFT JOIN prediction_review pr_rev
-                        ON pr_rev.prediction_id = pr.id
-                       AND pr_rev.workspace_id = ?
-                     WHERE pr.id IN ({placeholders})""",
-                (ws, *chunk),
-            ):
-                if (row["status"] != observed[row["prediction_id"]]
-                        or row["is_superseded"]):
-                    stale.add(row["photo_id"])
+        for row in db.get_prediction_statuses_with_supersession(list(observed)):
+            if (row["status"] != observed[row["prediction_id"]]
+                    or row["is_superseded"]):
+                stale.add(row["photo_id"])
         return stale
 
     def _species_drifted_prediction_ids(db, rows, expected_species):
@@ -1523,26 +1365,15 @@ def create_predictions_blueprint(
                 pred_ids.append(raw)
                 seen.add(raw)
 
-        # Chunked because a legal payload runs to many thousands of ids, and a
-        # single IN clause that wide exceeds the 999-variable limit older
-        # SQLite builds enforce. ``_SQL_PARAM_CHUNK`` is the module-wide
-        # convention for exactly this.
-        photo_by_pred = {}
-        for chunk in chunked(pred_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            photo_by_pred.update({
-                row["id"]: row["photo_id"] for row in db.conn.execute(
-                    f"""SELECT pr.id, d.photo_id
-                        FROM predictions pr
-                        JOIN detections d ON d.id = pr.detection_id
-                        WHERE pr.id IN ({placeholders})""",
-                    chunk,
-                ).fetchall()
-            })
-            # Bail as soon as the payload outgrows a legal selection rather
-            # than resolving the rest of a runaway request.
-            if len(set(photo_by_pred.values())) > MAX_SELECTION_PHOTOS:
-                return None, json_error("too many photos in selection", 400)
+        # A legal payload runs to many thousands of ids, so the lookup is
+        # chunked under SQLite's variable limit, and it stops as soon as the
+        # payload outgrows a legal selection rather than resolving the rest
+        # of a runaway request.
+        photo_by_pred = db.get_prediction_photo_ids(
+            pred_ids, stop_after_photos=MAX_SELECTION_PHOTOS,
+        )
+        if len(set(photo_by_pred.values())) > MAX_SELECTION_PHOTOS:
+            return None, json_error("too many photos in selection", 400)
         for pid in pred_ids:
             if pid not in photo_by_pred:
                 return None, json_error(f"Prediction {pid} not found", 404)
@@ -1584,7 +1415,7 @@ def create_predictions_blueprint(
         try:
             return _batch_reject_under_lock(db, pred_ids)
         except Exception:
-            db.conn.rollback()
+            db.rollback()
             raise
 
     def _batch_reject_under_lock(db, pred_ids):
@@ -1624,19 +1455,10 @@ def create_predictions_blueprint(
         )
         pred_ids = [pid for pid in pred_ids if pid not in out_of_workspace_ids]
 
-        ws = db.require_workspace_id()
         items = []
         species = None
         for pid in pred_ids:
-            pred = db.conn.execute(
-                """SELECT pr.id, pr.species, pr.detection_id,
-                          pr.classifier_model AS model,
-                          pr.labels_fingerprint, d.photo_id
-                   FROM predictions pr
-                   JOIN detections d ON d.id = pr.detection_id
-                   WHERE pr.id = ?""",
-                (pid,),
-            ).fetchone()
+            pred = db.get_prediction_decision_row(pid)
             if pred is None:
                 continue
             species = species or pred["species"]
@@ -1644,18 +1466,11 @@ def create_predictions_blueprint(
             # Sibling alternatives go down with the parent, scoped by
             # fingerprint so a new label set can't rewrite an old one's
             # review state — same rule as the single-prediction reject.
-            for row in db.conn.execute(
-                """SELECT pr.id FROM predictions pr
-                   JOIN prediction_review pr_rev
-                     ON pr_rev.prediction_id = pr.id
-                    AND pr_rev.workspace_id = ?
-                   WHERE pr.detection_id = ? AND pr.classifier_model = ?
-                     AND pr.labels_fingerprint = ? AND pr.id != ?
-                     AND pr_rev.status = 'alternative'""",
-                (ws, pred["detection_id"], pred["model"],
-                 pred["labels_fingerprint"], pid),
-            ).fetchall():
-                db.update_prediction_status(row["id"], "rejected", _commit=False)
+            for sibling_id in db.get_alternative_sibling_ids(
+                pred["detection_id"], pred["model"],
+                pred["labels_fingerprint"], pid,
+            ):
+                db.update_prediction_status(sibling_id, "rejected", _commit=False)
             items.append({
                 "photo_id": pred["photo_id"],
                 "old_value": "pending",
@@ -1673,7 +1488,7 @@ def create_predictions_blueprint(
                 "prediction_reject", desc, "rejected", items,
                 is_batch=photo_count > 1, _commit=False,
             )
-        db.conn.commit()
+        db.commit()
         if items:
             db._prune_edit_history()
         return jsonify({
@@ -1717,14 +1532,14 @@ def create_predictions_blueprint(
             return lock_err
         try:
             if prediction_decisions.out_of_workspace_prediction_ids(db, [pred_id]):
-                db.conn.rollback()
+                db.rollback()
                 return json_error("Prediction does not belong to the active workspace", 404)
             current_status = _prediction_status(db, pred_id)
             # Missing row falls through to ``accept_prediction`` returning None
             # — the endpoint's historical contract for unknown ids is a 200
             # no-op, not a 404.
             if current_status in _DECIDED_PREDICTION_STATUSES:
-                db.conn.rollback()
+                db.rollback()
                 return json_error(
                     f"prediction already {current_status}; cannot accept",
                     409,
@@ -1761,7 +1576,7 @@ def create_predictions_blueprint(
                     'prediction_accept', desc, str(result['keyword_id']),
                     items, is_batch=is_batch, _commit=False,
                 )
-            db.conn.commit()
+            db.commit()
             # Name every row this call decided, not just the one in the URL.
             # A grouped accept expands through the burst, so a caller looping
             # over a selection can have its next row already decided *by this
@@ -1779,7 +1594,7 @@ def create_predictions_blueprint(
                 "photo_ids": result["photo_ids"] if result else [],
             })
         except Exception:
-            db.conn.rollback()
+            db.rollback()
             raise
 
     @blueprint.route("/api/predictions/<int:pred_id>/accept-subject", methods=["POST"])
@@ -1801,17 +1616,17 @@ def create_predictions_blueprint(
         try:
             current_status = _prediction_status(db, pred_id)
             if current_status is None:
-                db.conn.rollback()
+                db.rollback()
                 return json_error("prediction not found", 404)
             if current_status in _DECIDED_PREDICTION_STATUSES:
-                db.conn.rollback()
+                db.rollback()
                 return json_error(
                     f"prediction already {current_status}; cannot accept",
                     409,
                 )
             result = db.accept_subject_species(pred_id, _commit=False)
             if result is None:
-                db.conn.rollback()
+                db.rollback()
                 return json_error("prediction not found", 404)
             if result["affected"]:
                 # Accept-subject can accept agreeing predictions from
@@ -1847,7 +1662,7 @@ def create_predictions_blueprint(
                     }],
                     _commit=False,
                 )
-            db.conn.commit()
+            db.commit()
             return jsonify({
                 "ok": True,
                 "species": result["species"],
@@ -1855,7 +1670,7 @@ def create_predictions_blueprint(
                 "photo_ids": [result["photo_id"]],
             })
         except Exception:
-            db.conn.rollback()
+            db.rollback()
             raise
 
     @blueprint.route("/api/predictions/<int:pred_id>/reject", methods=["POST"])
@@ -1882,36 +1697,22 @@ def create_predictions_blueprint(
             return lock_err
         try:
             if prediction_decisions.out_of_workspace_prediction_ids(db, [pred_id]):
-                db.conn.rollback()
+                db.rollback()
                 return json_error("Prediction does not belong to the active workspace", 404)
             # Review state lives in prediction_review now; predictions.model
             # is renamed to classifier_model. Sibling-alternative rejection
             # goes through the workspace-scoped review table.
-            ws = db.require_workspace_id()
-            pred = db.conn.execute(
-                """SELECT pr.id, pr.species, pr.detection_id,
-                          pr.classifier_model AS model,
-                          pr.labels_fingerprint, d.photo_id,
-                          pr_rev.group_id,
-                          COALESCE(pr_rev.status, 'pending') AS status
-                   FROM predictions pr
-                   JOIN detections d ON d.id = pr.detection_id
-                   LEFT JOIN prediction_review pr_rev
-                     ON pr_rev.prediction_id = pr.id
-                    AND pr_rev.workspace_id = ?
-                   WHERE pr.id = ?""",
-                (ws, pred_id),
-            ).fetchone()
+            pred = db.get_prediction_decision_row(pred_id)
             # prediction_review has an FK on prediction_id; writing review
             # state for a missing pred would raise an IntegrityError and
             # return 500 where the legacy endpoint returned a harmless
             # no-op. Gate the write on existence so stale IDs stay a clean
             # 404.
             if pred is None:
-                db.conn.rollback()
+                db.rollback()
                 return json_error("prediction not found", 404)
             if pred["status"] in _DECIDED_PREDICTION_STATUSES:
-                db.conn.rollback()
+                db.rollback()
                 return json_error(
                     f'prediction already {pred["status"]}; cannot reject',
                     409,
@@ -1924,28 +1725,15 @@ def create_predictions_blueprint(
             # rule: it only discovers members that are still undecided.
             targets = [(pred["photo_id"], pred_id)]
             if pred["group_id"]:
-                for gp in db.conn.execute(
-                    """SELECT pr.id, d.photo_id,
-                              COALESCE(pr_rev.status, 'pending') AS status
-                       FROM predictions pr
-                       JOIN prediction_review pr_rev
-                         ON pr_rev.prediction_id = pr.id
-                        AND pr_rev.workspace_id = ?
-                       JOIN detections d ON d.id = pr.detection_id
-                       JOIN photos ph ON ph.id = d.photo_id
-                       JOIN photo_workspace_visibility wf
-                         ON wf.photo_id = ph.id AND wf.workspace_id = ?
-                       WHERE pr_rev.group_id = ? AND pr.classifier_model = ?
-                         AND pr.id != ?
-                       ORDER BY pr.id""",
-                    (ws, ws, pred["group_id"], pred["model"], pred_id),
+                for gp in db.get_burst_group_members(
+                    pred["group_id"], pred["model"], pred_id,
                 ):
                     if gp["status"] not in _DECIDED_PREDICTION_STATUSES:
                         targets.append((gp["photo_id"], gp["id"]))
             rejected_ids = []
             for _target_photo, target_id in targets:
                 rejected_ids.append(target_id)
-                _reject_prediction_row(db, ws, target_id)
+                _reject_prediction_row(db, target_id)
             target_photos = list(dict.fromkeys(t[0] for t in targets))
             desc = f'Rejected prediction "{pred["species"]}"'
             if len(target_photos) > 1:
@@ -1962,39 +1750,25 @@ def create_predictions_blueprint(
                 is_batch=len(target_photos) > 1,
                 _commit=False,
             )
-            db.conn.commit()
+            db.commit()
             return jsonify({"ok": True, "rejected_prediction_ids": rejected_ids})
         except Exception:
-            db.conn.rollback()
+            db.rollback()
             raise
 
-    def _reject_prediction_row(db, ws, pred_id):
+    def _reject_prediction_row(db, pred_id):
         """Reject one prediction and its ``alternative`` siblings, in-transaction."""
-        scope = db.conn.execute(
-            """SELECT detection_id, classifier_model, labels_fingerprint
-               FROM predictions WHERE id = ?""",
-            (pred_id,),
-        ).fetchone()
+        scope = db.get_prediction_scope(pred_id)
         db.update_prediction_status(pred_id, "rejected", _commit=False)
         # Also reject sibling alternative predictions for the same
         # (detection, classifier_model, labels_fingerprint) in this
         # workspace. Fingerprint scoping matters: without it, rejecting a
         # prediction from a new label set would rewrite review state for
         # prior fingerprints' alternatives on the same detection.
-        sibling_ids = [row["id"] for row in db.conn.execute(
-            """SELECT pr.id
-               FROM predictions pr
-               JOIN prediction_review pr_rev
-                 ON pr_rev.prediction_id = pr.id
-                AND pr_rev.workspace_id = ?
-               WHERE pr.detection_id = ?
-                 AND pr.classifier_model = ?
-                 AND pr.labels_fingerprint = ?
-                 AND pr.id != ?
-                 AND pr_rev.status = 'alternative'""",
-            (ws, scope["detection_id"], scope["classifier_model"],
-             scope["labels_fingerprint"], pred_id),
-        ).fetchall()]
+        sibling_ids = db.get_alternative_sibling_ids(
+            scope["detection_id"], scope["classifier_model"],
+            scope["labels_fingerprint"], pred_id,
+        )
         for sid in sibling_ids:
             db.update_prediction_status(sid, "rejected", _commit=False)
 
@@ -2068,11 +1842,9 @@ def create_predictions_blueprint(
                         local_species, is_species=True, _commit=False,
                     )
                     # Queue/record the stored spelling (see api_add_keyword).
-                    stored = db.conn.execute(
-                        "SELECT name FROM keywords WHERE id = ?", (kid,)
-                    ).fetchone()
-                    if stored and stored["name"]:
-                        local_species = stored["name"]
+                    stored_name = db.get_keyword_name(kid)
+                    if stored_name:
+                        local_species = stored_name
                     already_has_species = db.get_photos_with_equivalent_species(
                         actionable_picks, kid
                     )
@@ -2204,7 +1976,7 @@ def create_predictions_blueprint(
             # of them means — so it is not gated on the baseline.
             for pred_id in removed:
                 db.ungroup_prediction(pred_id, _commit=False)
-            db.conn.commit()
+            db.commit()
             # ``record_edit`` skips its prune under ``_commit=False``; run it
             # once the decision is durable so history stays bounded — same
             # shape the batch endpoints use.

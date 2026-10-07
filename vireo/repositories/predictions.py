@@ -14,9 +14,18 @@ This module owns the SQL behind the predictions domain:
   ``ungroup``), the auto-match reconciliation, the raw
   ``get_review_status`` / ``set_review_status`` pair, the legacy
   mixed-species burst repair, and ``accept_subject_species``' target and
-  agreeing-row reads.
+  agreeing-row reads;
+- the prediction-decision reads: the status, supersession, workspace,
+  scope-sibling and burst-member checks the decision routes in
+  ``web/predictions.py`` and ``services/prediction_decisions`` run under
+  ``BEGIN IMMEDIATE`` (``get_decision_row`` through
+  ``burst_group_members``). Their SQL came from those modules unchanged,
+  except that chunking goes through ``self._chunks`` and the three
+  single-row reads of a decision's target (reject, batch reject, mark
+  reviewed) share ``get_decision_row``, which selects the union of their
+  columns.
 
-The method bodies were moved verbatim from ``Database``. The only edits are
+The other method bodies were moved verbatim from ``Database``. The only edits are
 ``self._ws_id()`` -> ``self.workspace_id`` and ``NAME`` -> ``self.NAME`` for
 the ``db`` module helpers and constants listed in ``__init__``; the SQL text,
 parameter order, chunk sizes and commit placement are unchanged.
@@ -1375,3 +1384,330 @@ class PredictionRepository:
             (prediction_id, workspace_id, status, individual, group_id),
         )
         self.conn.commit()
+
+    # -- prediction-decision reads ----------------------------------------------------
+    #
+    # The checks the decision routes (``web/predictions.py``) and
+    # ``services/prediction_decisions`` run under ``BEGIN IMMEDIATE``. None of
+    # these writes or commits. "Latest label set" is the expression
+    # ``get_rows`` and ``get_top_for_photo`` use: newest ``created_at`` for the
+    # ``(detection, classifier_model)``, ties broken by ``id``.
+
+    def get_decision_row(self, prediction_id):
+        """One prediction with its photo, scope and review state, or None.
+
+        Columns: ``id``, ``species``, ``detection_id``, ``model`` (the
+        classifier model), ``labels_fingerprint``, ``photo_id``, and the
+        active workspace's ``group_id`` and ``status`` (``pending`` when it
+        has no review row).
+        """
+        return self.conn.execute(
+            """SELECT pr.id, pr.species, pr.detection_id,
+                      pr.classifier_model AS model,
+                      pr.labels_fingerprint, d.photo_id,
+                      pr_rev.group_id,
+                      COALESCE(pr_rev.status, 'pending') AS status
+               FROM predictions pr
+               JOIN detections d ON d.id = pr.detection_id
+               LEFT JOIN prediction_review pr_rev
+                 ON pr_rev.prediction_id = pr.id
+                AND pr_rev.workspace_id = ?
+               WHERE pr.id = ?""",
+            (self.workspace_id, prediction_id),
+        ).fetchone()
+
+    def current_status(self, prediction_id):
+        """The active workspace's review status of one prediction.
+
+        ``pending`` when it has no review row, None when the prediction id is
+        unknown.
+        """
+        row = self.conn.execute(
+            """SELECT COALESCE(pr_rev.status, 'pending') AS status
+               FROM predictions pr
+               LEFT JOIN prediction_review pr_rev
+                 ON pr_rev.prediction_id = pr.id
+                AND pr_rev.workspace_id = ?
+               WHERE pr.id = ?""",
+            (self.workspace_id, prediction_id),
+        ).fetchone()
+        return row["status"] if row else None
+
+    def get_rows_by_ids(self, prediction_ids):
+        """The named predictions in the shape ``ambiguous_prediction_ids`` reads.
+
+        Selected by id, whatever their label set or status, with the active
+        workspace's burst ``group_id`` and ``individual`` votes.
+        """
+        if not prediction_ids:
+            return []
+        ws = self.workspace_id
+        rows = []
+        for chunk in self._chunks(prediction_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows.extend(self.conn.execute(
+                f"""SELECT pr.id, pr.species, pr.category, pr.detection_id,
+                           pr.source_taxon_id, pr.scientific_name, pr.labels_fingerprint,
+                           pr.classifier_model AS model, d.photo_id,
+                           pr_rev.group_id AS group_id,
+                           pr_rev.individual AS individual
+                    FROM predictions pr
+                    JOIN detections d ON d.id = pr.detection_id
+                    LEFT JOIN prediction_review pr_rev
+                      ON pr_rev.prediction_id = pr.id
+                     AND pr_rev.workspace_id = ?
+                    WHERE pr.id IN ({placeholders})""",
+                (ws, *chunk),
+            ).fetchall())
+        return rows
+
+    def decided_ids(self, prediction_ids, statuses):
+        """Which of ``prediction_ids`` have one of ``statuses`` in the active workspace."""
+        ws = self.workspace_id
+        if not prediction_ids:
+            return set()
+        status_ph = ",".join("?" for _ in statuses)
+        found = set()
+        for chunk in self._chunks(prediction_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            found.update(
+                row["prediction_id"] for row in self.conn.execute(
+                    f"""SELECT prediction_id FROM prediction_review
+                        WHERE workspace_id = ? AND status IN ({status_ph})
+                          AND prediction_id IN ({placeholders})""",
+                    (ws, *statuses, *chunk),
+                )
+            )
+        return found
+
+    def superseded_ids(self, prediction_ids):
+        """Which of ``prediction_ids`` are not from their detection's latest label set."""
+        if not prediction_ids:
+            return set()
+        found = set()
+        for chunk in self._chunks(prediction_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            found.update(
+                row["id"] for row in self.conn.execute(
+                    f"""SELECT pr.id FROM predictions pr
+                        WHERE pr.id IN ({placeholders})
+                          AND pr.labels_fingerprint != (
+                              SELECT pr2.labels_fingerprint FROM predictions pr2
+                              WHERE pr2.detection_id = pr.detection_id
+                                AND pr2.classifier_model = pr.classifier_model
+                              ORDER BY pr2.created_at DESC, pr2.id DESC
+                              LIMIT 1)""",
+                    chunk,
+                )
+            )
+        return found
+
+    def out_of_workspace_ids(self, prediction_ids):
+        """Which of ``prediction_ids`` sit on a photo the active workspace cannot see."""
+        if not prediction_ids:
+            return set()
+        ws = self.workspace_id
+        # The LEFT JOIN keeps a row for every prediction id regardless of
+        # folder membership; the WHERE clause selects the misses.
+        found = set()
+        for chunk in self._chunks(prediction_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            found.update(
+                row["id"] for row in self.conn.execute(
+                    f"""SELECT pr.id FROM predictions pr
+                        JOIN detections d ON d.id = pr.detection_id
+                        JOIN photos ph ON ph.id = d.photo_id
+                        LEFT JOIN photo_workspace_visibility wf
+                          ON wf.photo_id = ph.id
+                         AND wf.workspace_id = ?
+                        WHERE pr.id IN ({placeholders})
+                          AND wf.workspace_id IS NULL""",
+                    (ws, *chunk),
+                )
+            )
+        return found
+
+    def photo_ids_by_prediction(self, prediction_ids, stop_after_photos=None):
+        """``{prediction_id: photo_id}`` for the ids that exist, in id order.
+
+        With ``stop_after_photos``, stops reading once the rows found span
+        more than that many distinct photos, so a runaway payload is not
+        resolved in full; the caller sees the overflow in the partial result.
+        """
+        photo_by_pred = {}
+        for chunk in self._chunks(prediction_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            photo_by_pred.update({
+                row["id"]: row["photo_id"] for row in self.conn.execute(
+                    f"""SELECT pr.id, d.photo_id
+                        FROM predictions pr
+                        JOIN detections d ON d.id = pr.detection_id
+                        WHERE pr.id IN ({placeholders})
+                        ORDER BY pr.id""",
+                    chunk,
+                ).fetchall()
+            })
+            if (stop_after_photos is not None
+                    and len(set(photo_by_pred.values())) > stop_after_photos):
+                break
+        return photo_by_pred
+
+    def non_alternative_rows_for_photos(self, photo_ids):
+        """Every prediction on ``photo_ids`` not marked ``alternative`` here.
+
+        Rows carry ``id``, ``photo_id`` and ``in_group`` (whether the row has
+        a burst ``group_id`` in the active workspace), in id order per chunk.
+        """
+        ws = self.workspace_id
+        rows = []
+        for chunk in self._chunks(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows.extend(self.conn.execute(
+                f"""SELECT pr.id, d.photo_id,
+                           pr_rev.group_id IS NOT NULL AS in_group
+                    FROM predictions pr
+                    JOIN detections d ON d.id = pr.detection_id
+                    LEFT JOIN prediction_review pr_rev
+                      ON pr_rev.prediction_id = pr.id
+                     AND pr_rev.workspace_id = ?
+                    WHERE d.photo_id IN ({placeholders})
+                      AND COALESCE(pr_rev.status, 'pending') != 'alternative'
+                    ORDER BY pr.id""",
+                [ws, *chunk],
+            ).fetchall())
+        return rows
+
+    def scope_review_statuses(self, prediction_ids):
+        """Stored review statuses across each prediction's label-set scope.
+
+        One row (``pick_id``, ``prediction_id``, ``status``) per prediction
+        sharing a named row's detection, classifier model and label set
+        (the named row included) that has a review row in the active
+        workspace. Predictions with no review row are omitted.
+        """
+        ws = self.workspace_id
+        rows = []
+        for chunk in self._chunks(prediction_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows.extend(self.conn.execute(
+                f"""SELECT pick.id AS pick_id, pr.id AS prediction_id,
+                           pr_rev.status AS status
+                    FROM predictions pick
+                    JOIN predictions pr
+                      ON pr.detection_id = pick.detection_id
+                     AND pr.classifier_model = pick.classifier_model
+                     AND pr.labels_fingerprint = pick.labels_fingerprint
+                    JOIN prediction_review pr_rev
+                      ON pr_rev.prediction_id = pr.id
+                     AND pr_rev.workspace_id = ?
+                    WHERE pick.id IN ({placeholders})""",
+                (ws, *chunk),
+            ).fetchall())
+        return rows
+
+    def get_scope(self, prediction_id):
+        """``(detection_id, classifier_model, labels_fingerprint)`` of one prediction, or None."""
+        return self.conn.execute(
+            """SELECT detection_id, classifier_model, labels_fingerprint
+               FROM predictions WHERE id = ?""",
+            (prediction_id,),
+        ).fetchone()
+
+    def open_scope_sibling_ids(self, detection_id, classifier_model,
+                               labels_fingerprint, exclude_ids):
+        """Ids in one label-set scope still ``pending``, ``alternative`` or ``accepted``.
+
+        Review state is the active workspace's; ``exclude_ids`` are left out.
+        """
+        placeholders = ",".join("?" for _ in exclude_ids)
+        return [row["id"] for row in self.conn.execute(
+            f"""SELECT pr.id FROM predictions pr
+                LEFT JOIN prediction_review pr_rev
+                  ON pr_rev.prediction_id = pr.id
+                 AND pr_rev.workspace_id = ?
+                WHERE pr.detection_id = ?
+                  AND pr.classifier_model = ?
+                  AND pr.labels_fingerprint = ?
+                  AND pr.id NOT IN ({placeholders})
+                  AND COALESCE(pr_rev.status, 'pending')
+                      IN ('pending', 'alternative', 'accepted')""",
+            (self.workspace_id, detection_id, classifier_model,
+             labels_fingerprint, *exclude_ids),
+        )]
+
+    def alternative_sibling_ids(self, detection_id, classifier_model,
+                                labels_fingerprint, exclude_id):
+        """Ids in one label-set scope marked ``alternative`` in the active workspace.
+
+        ``exclude_id`` (the row being decided) is left out.
+        """
+        return [row["id"] for row in self.conn.execute(
+            """SELECT pr.id
+               FROM predictions pr
+               JOIN prediction_review pr_rev
+                 ON pr_rev.prediction_id = pr.id
+                AND pr_rev.workspace_id = ?
+               WHERE pr.detection_id = ?
+                 AND pr.classifier_model = ?
+                 AND pr.labels_fingerprint = ?
+                 AND pr.id != ?
+                 AND pr_rev.status = 'alternative'""",
+            (self.workspace_id, detection_id, classifier_model,
+             labels_fingerprint, exclude_id),
+        ).fetchall()]
+
+    def statuses_with_supersession(self, prediction_ids):
+        """Current status and label-set currency of each named prediction.
+
+        Rows carry ``prediction_id``, ``photo_id``, ``status`` (the active
+        workspace's, ``pending`` without a review row) and ``is_superseded``
+        (the row is not from its detection's latest label set).
+        """
+        ws = self.workspace_id
+        rows = []
+        for chunk in self._chunks(prediction_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows.extend(self.conn.execute(
+                f"""SELECT pr.id AS prediction_id, d.photo_id AS photo_id,
+                           COALESCE(pr_rev.status, 'pending') AS status,
+                           (pr.labels_fingerprint != (
+                               SELECT pr2.labels_fingerprint FROM predictions pr2
+                               WHERE pr2.detection_id = pr.detection_id
+                                 AND pr2.classifier_model = pr.classifier_model
+                               ORDER BY pr2.created_at DESC, pr2.id DESC
+                               LIMIT 1
+                           )) AS is_superseded
+                      FROM predictions pr
+                      JOIN detections d ON d.id = pr.detection_id
+                      LEFT JOIN prediction_review pr_rev
+                        ON pr_rev.prediction_id = pr.id
+                       AND pr_rev.workspace_id = ?
+                     WHERE pr.id IN ({placeholders})""",
+                (ws, *chunk),
+            ).fetchall())
+        return rows
+
+    def burst_group_members(self, group_id, classifier_model, exclude_id):
+        """The other members of a burst group for one classifier model.
+
+        Rows (``id``, ``photo_id``, ``status``) for predictions in
+        ``group_id`` in the active workspace, on photos it can see, other
+        than ``exclude_id``, in id order.
+        """
+        ws = self.workspace_id
+        return self.conn.execute(
+            """SELECT pr.id, d.photo_id,
+                      COALESCE(pr_rev.status, 'pending') AS status
+               FROM predictions pr
+               JOIN prediction_review pr_rev
+                 ON pr_rev.prediction_id = pr.id
+                AND pr_rev.workspace_id = ?
+               JOIN detections d ON d.id = pr.detection_id
+               JOIN photos ph ON ph.id = d.photo_id
+               JOIN photo_workspace_visibility wf
+                 ON wf.photo_id = ph.id AND wf.workspace_id = ?
+               WHERE pr_rev.group_id = ? AND pr.classifier_model = ?
+                 AND pr.id != ?
+               ORDER BY pr.id""",
+            (ws, ws, group_id, classifier_model, exclude_id),
+        ).fetchall()

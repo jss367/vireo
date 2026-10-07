@@ -623,6 +623,21 @@ def test_clear_pending_equivalent_flat_removals_by_id(lib, monkeypatch):
     ]
 
 
+def test_get_flat_keyword_removals_spans_workspaces_case_insensitively(lib):
+    db, ws, other = lib["db"], lib["ws"], lib["other"]
+    _insert(db, lib["a"], "keyword_remove_flat", "Robin", ws)
+    _insert(db, lib["a"], "keyword_remove_flat", "ROBIN", other)
+    _insert(db, lib["a"], "keyword_remove", "Robin", ws)      # not flat
+    _insert(db, lib["a"], "keyword_remove_flat", "Jay", ws)   # other keyword
+    _insert(db, lib["b"], "keyword_remove_flat", "Robin", ws)  # other photo
+    removals = db.get_flat_keyword_removals(lib["a"], "robin")
+    assert sorted((r["workspace_id"], r["value"]) for r in removals) == sorted(
+        [(ws, "Robin"), (other, "ROBIN")]
+    )
+    assert all(isinstance(r, dict) for r in removals)
+    assert db.get_flat_keyword_removals(lib["c"], "Robin") == []
+
+
 def test_clear_pending_flat_flag_without_flat_rows_skips_helper(lib, monkeypatch):
     db, ws = lib["db"], lib["ws"]
     add = _insert(db, lib["a"], "keyword_add", "Jay", ws)
@@ -972,6 +987,7 @@ _DELEGATING_SYNC_METHODS = (
     "clear_pending",
     "clear_pending_by_token",
     "clear_equivalent_flat_removals",
+    "get_flat_keyword_removals",
     "queue_flag_change_if_enabled",
 )
 

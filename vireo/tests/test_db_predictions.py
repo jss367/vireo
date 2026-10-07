@@ -659,6 +659,197 @@ def test_decided_statuses_are_pinned():
     assert Database.DECIDED_PREDICTION_STATUSES == ("accepted", "rejected", "reviewed")
 
 
+# -- prediction-decision reads ------------------------------------------------------------
+
+
+def _scope_preds(db, photo_id, species, model="m1", fp="fp1", x=0.1):
+    """One detection carrying a prediction per species in one label set."""
+    det = _det(db, photo_id, x=x)
+    ids = []
+    for name in species:
+        db.add_prediction(det, name, 0.5, model, labels_fingerprint=fp)
+        ids.append(_pred_id(db, det, name, model=model, fp=fp))
+    return det, ids
+
+
+def test_decision_row_and_status(db, cat):
+    det, (pid,) = _scope_preds(db, cat["p"][0], ["Robin"])
+    other = db.create_workspace("Other")
+    db.set_review_status(pid, other, "accepted", group_id="other-g")
+
+    row = db.get_prediction_decision_row(pid)
+    assert dict(row) == {
+        "id": pid, "species": "Robin", "detection_id": det, "model": "m1",
+        "labels_fingerprint": "fp1", "photo_id": cat["p"][0],
+        "group_id": None, "status": "pending",
+    }
+    assert db.get_prediction_status(pid) == "pending"
+
+    db.set_review_status(pid, cat["ws"], "rejected", group_id="g")
+    row = db.get_prediction_decision_row(pid)
+    assert (row["status"], row["group_id"]) == ("rejected", "g")
+    assert db.get_prediction_status(pid) == "rejected"
+
+    assert db.get_prediction_decision_row(987_654) is None
+    assert db.get_prediction_status(987_654) is None
+    assert not db.conn.in_transaction
+
+
+def test_predictions_by_id_keeps_superseded_rows_and_votes(db, cat):
+    det = _det(db, cat["p"][0])
+    db.add_prediction(det, "Robin", 0.5, "m1", labels_fingerprint="old")
+    db.add_prediction(det, "Robin", 0.6, "m1", labels_fingerprint="new",
+                      group_id="g", individual="Robin")
+    old = _pred_id(db, det, "Robin", fp="old")
+    new = _pred_id(db, det, "Robin", fp="new")
+    rows = {r["id"]: r for r in db.get_predictions_by_id([old, new, 987_654])}
+    assert set(rows) == {old, new}
+    assert rows[new]["photo_id"] == cat["p"][0]
+    assert rows[new]["model"] == "m1"
+    assert (rows[new]["group_id"], rows[new]["individual"]) == ("g", "Robin")
+    assert (rows[old]["group_id"], rows[old]["individual"]) == (None, None)
+    assert db.get_predictions_by_id([]) == []
+
+
+def test_decided_and_superseded_prediction_ids(db, cat):
+    det = _det(db, cat["p"][0])
+    db.add_prediction(det, "Robin", 0.5, "m1", labels_fingerprint="old")
+    db.add_prediction(det, "Robin", 0.5, "m1", labels_fingerprint="new")
+    db.add_prediction(det, "Jay", 0.5, "m2", labels_fingerprint="old")
+    old = _pred_id(db, det, "Robin", fp="old")
+    new = _pred_id(db, det, "Robin", fp="new")
+    jay = _pred_id(db, det, "Jay", model="m2", fp="old")
+    # m2 has only the one label set, so its row is current.
+    assert db.get_superseded_prediction_ids([old, new, jay]) == {old}
+
+    db.update_prediction_status(old, "accepted")
+    db.update_prediction_status(new, "alternative")
+    db.update_prediction_status(jay, "reviewed")
+    other = db.create_workspace("Other")
+    db.set_review_status(new, other, "rejected")
+    assert db.get_decided_prediction_ids([old, new, jay]) == {old, jay}
+    assert db.get_decided_prediction_ids([]) == set()
+    assert db.get_superseded_prediction_ids([]) == set()
+
+    # Chunked under SQLite's variable limit.
+    statements = _trace(db)
+    padded = list(range(1_000_000, 1_000_900)) + [old]
+    assert db.get_decided_prediction_ids(padded) == {old}
+    assert db.get_superseded_prediction_ids(padded) == {old}
+    db.conn.set_trace_callback(None)
+    assert len([s for s in dict.fromkeys(statements)
+                if "FROM prediction_review" in s]) == 2
+
+
+def test_out_of_workspace_prediction_ids(db, cat):
+    _, (inside,) = _scope_preds(db, cat["p"][0], ["Robin"])
+    _, (outside,) = _scope_preds(db, cat["outside"], ["Robin"])
+    assert db.get_out_of_workspace_prediction_ids([inside, outside]) == {outside}
+    assert db.get_out_of_workspace_prediction_ids([]) == set()
+
+
+def test_prediction_photo_ids_in_id_order_and_stops_early(db, cat):
+    _, (a,) = _scope_preds(db, cat["p"][1], ["Robin"])
+    _, (b,) = _scope_preds(db, cat["p"][0], ["Jay"])
+    got = db.get_prediction_photo_ids([b, 987_654, a])
+    assert list(got.items()) == [(a, cat["p"][1]), (b, cat["p"][0])]
+
+    statements = _trace(db)
+    payload = [a, b] + list(range(1_000_000, 1_000_900))
+    assert db.get_prediction_photo_ids(payload) == {a: cat["p"][1], b: cat["p"][0]}
+    assert len([s for s in dict.fromkeys(statements) if "pr.id IN" in s]) == 2
+    statements.clear()
+    # Two photos in the first chunk already exceed the bound: stop there.
+    assert len(db.get_prediction_photo_ids(payload, stop_after_photos=1)) == 2
+    db.conn.set_trace_callback(None)
+    assert len([s for s in dict.fromkeys(statements) if "pr.id IN" in s]) == 1
+
+
+def test_non_alternative_predictions_for_photos(db, cat):
+    p0, p1 = cat["p"][0], cat["p"][1]
+    _, (lead, runner_up) = _scope_preds(db, p0, ["Robin", "Jay"])
+    _, (plain,) = _scope_preds(db, p1, ["Wren"])
+    db.update_prediction_status(runner_up, "alternative")
+    db.set_review_status(lead, cat["ws"], "pending", group_id="g")
+    rows = db.get_non_alternative_predictions_for_photos([p1, p0])
+    assert [(r["id"], r["photo_id"], bool(r["in_group"])) for r in rows] == [
+        (lead, p0, True), (plain, p1, False),
+    ]
+
+
+def test_scope_review_statuses(db, cat):
+    det, (pick, sib, unreviewed) = _scope_preds(
+        db, cat["p"][0], ["Robin", "Jay", "Wren"],
+    )
+    db.add_prediction(det, "Robin", 0.5, "m1", labels_fingerprint="fp2")
+    other_set = _pred_id(db, det, "Robin", fp="fp2")
+    db.update_prediction_status(pick, "rejected")
+    db.update_prediction_status(sib, "accepted")
+    db.update_prediction_status(other_set, "accepted")
+    rows = db.get_scope_review_statuses([pick])
+    assert sorted((r["pick_id"], r["prediction_id"], r["status"]) for r in rows) == [
+        (pick, pick, "rejected"), (pick, sib, "accepted"),
+    ]
+    assert unreviewed not in {r["prediction_id"] for r in rows}
+
+
+def test_prediction_scope_and_sibling_reads(db, cat):
+    det, (lead, alt, decided, pending) = _scope_preds(
+        db, cat["p"][0], ["Robin", "Jay", "Wren", "Crow"],
+    )
+    db.add_prediction(det, "Robin", 0.5, "m1", labels_fingerprint="fp2")
+    other_set = _pred_id(db, det, "Robin", fp="fp2")
+    db.update_prediction_status(alt, "alternative")
+    db.update_prediction_status(decided, "rejected")
+    db.update_prediction_status(other_set, "alternative")
+
+    scope = db.get_prediction_scope(lead)
+    assert tuple(scope) == (det, "m1", "fp1")
+    assert db.get_prediction_scope(987_654) is None
+
+    assert sorted(db.get_open_scope_sibling_ids(*scope, [lead])) == sorted(
+        [alt, pending]
+    )
+    assert db.get_open_scope_sibling_ids(*scope, [lead, alt]) == [pending]
+    assert db.get_alternative_sibling_ids(*scope, lead) == [alt]
+    assert db.get_alternative_sibling_ids(*scope, alt) == []
+
+
+def test_prediction_statuses_with_supersession(db, cat):
+    det = _det(db, cat["p"][0])
+    db.add_prediction(det, "Robin", 0.5, "m1", labels_fingerprint="old")
+    db.add_prediction(det, "Robin", 0.5, "m1", labels_fingerprint="new")
+    old = _pred_id(db, det, "Robin", fp="old")
+    new = _pred_id(db, det, "Robin", fp="new")
+    db.update_prediction_status(new, "accepted")
+    rows = {
+        r["prediction_id"]: (r["photo_id"], r["status"], bool(r["is_superseded"]))
+        for r in db.get_prediction_statuses_with_supersession([old, new])
+    }
+    assert rows == {
+        old: (cat["p"][0], "pending", True),
+        new: (cat["p"][0], "accepted", False),
+    }
+
+
+def test_burst_group_members(db, cat):
+    ws = cat["ws"]
+    _, (lead,) = _scope_preds(db, cat["p"][0], ["Robin"])
+    _, (member,) = _scope_preds(db, cat["p"][1], ["Robin"])
+    _, (decided,) = _scope_preds(db, cat["p"][2], ["Robin"])
+    _, (other_model,) = _scope_preds(db, cat["p"][3], ["Robin"], model="m2")
+    _, (hidden,) = _scope_preds(db, cat["outside"], ["Robin"])
+    db.set_review_status(lead, ws, "pending", group_id="g")
+    db.set_review_status(member, ws, "pending", group_id="g")
+    db.set_review_status(decided, ws, "rejected", group_id="g")
+    db.set_review_status(other_model, ws, "pending", group_id="g")
+    db.set_review_status(hidden, ws, "pending", group_id="g")
+    rows = db.get_burst_group_members("g", "m1", lead)
+    assert [(r["id"], r["photo_id"], r["status"]) for r in rows] == [
+        (member, cat["p"][1], "pending"), (decided, cat["p"][2], "rejected"),
+    ]
+
+
 # -- structure ----------------------------------------------------------------------------
 
 
@@ -682,6 +873,20 @@ _DELEGATING_PREDICTION_METHODS = (
     "accept_subject_species",
     "get_review_status",
     "set_review_status",
+    "get_prediction_decision_row",
+    "get_prediction_status",
+    "get_predictions_by_id",
+    "get_decided_prediction_ids",
+    "get_superseded_prediction_ids",
+    "get_out_of_workspace_prediction_ids",
+    "get_prediction_photo_ids",
+    "get_non_alternative_predictions_for_photos",
+    "get_scope_review_statuses",
+    "get_prediction_scope",
+    "get_open_scope_sibling_ids",
+    "get_alternative_sibling_ids",
+    "get_prediction_statuses_with_supersession",
+    "get_burst_group_members",
 )
 
 # ``test_route_contract`` looks these up by name on ``Database``.

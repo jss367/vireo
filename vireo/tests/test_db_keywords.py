@@ -490,6 +490,13 @@ def test_keywords_for_photos_chunks(db, lib):
     assert len([s for s in dict.fromkeys(statements) if "pk.photo_id IN" in s]) == 2
 
 
+def test_get_keyword_name_reads_the_stored_spelling(db):
+    kid = db.add_keyword("Robin")
+    db.conn.execute("UPDATE keywords SET name = 'ROBIN' WHERE id = ?", (kid,))
+    assert db.get_keyword_name(kid) == "ROBIN"
+    assert db.get_keyword_name(987_654) is None
+
+
 def test_species_keywords_and_equivalents(db, lib):
     p0, p1, p2, p3 = lib["p"]
     root = db.add_keyword("American Robin", is_species=True)
@@ -1031,6 +1038,7 @@ _DELEGATING_KEYWORD_METHODS = (
     "_reparent_disambiguated",
     "get_keyword_tree",
     "untag_photo",
+    "get_keyword_name",
     "get_photo_keywords",
     "get_keywords_for_photos",
     "get_species_keywords_for_photos",
