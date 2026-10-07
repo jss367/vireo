@@ -580,21 +580,29 @@ def create_highlights_blueprint(get_db, json_error):
                 parsed["species"], parsed["photo_id"]
             )
             return jsonify({"ok": True, **parsed, "rank": rank})
-        db.set_species_representative(
-            parsed["species"], parsed["photo_id"], _commit=False
-        )
-        # Only promote to `species_highlights` when the photo is actually a
-        # Highlights candidate. Otherwise the row is invisible on the
-        # Highlights page (which filters by quality_score) — the user could
-        # neither see it nor remove it.
-        rank = None
-        if _photo_can_be_highlights_preference(
-            db, parsed["species"], parsed["photo_id"]
-        ):
-            rank = db.promote_species_highlight(
+        # The representative write stays uncommitted until the promotion
+        # below succeeds; roll it back if anything in between raises so the
+        # half-done write is not left open on the request connection (where
+        # a later commit on it would persist it).
+        try:
+            db.set_species_representative(
                 parsed["species"], parsed["photo_id"], _commit=False
             )
-        db.commit()
+            # Only promote to `species_highlights` when the photo is actually
+            # a Highlights candidate. Otherwise the row is invisible on the
+            # Highlights page (which filters by quality_score) — the user
+            # could neither see it nor remove it.
+            rank = None
+            if _photo_can_be_highlights_preference(
+                db, parsed["species"], parsed["photo_id"]
+            ):
+                rank = db.promote_species_highlight(
+                    parsed["species"], parsed["photo_id"], _commit=False
+                )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
         return jsonify({"ok": True, **parsed, "highlight_rank": rank})
 
     @blueprint.route("/api/photo-preferences", methods=["DELETE"])
