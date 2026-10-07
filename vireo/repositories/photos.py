@@ -329,20 +329,6 @@ class PhotoRepository:
         self.conn.execute("DROP TABLE IF EXISTS _imported_paths")
         return photo_ids
 
-    def ids_under_path(self, path):
-        """Ids of the photos in the folder at ``path`` and every folder below it.
-
-        Descendants match ``f.path LIKE '<path>/%'``, so the match is
-        ASCII-case-insensitive and ``_`` / ``%`` in ``path`` act as wildcards.
-        """
-        rows = self.conn.execute(
-            """SELECT p.id FROM photos p
-               JOIN folders f ON p.folder_id = f.id
-               WHERE f.path = ? OR f.path LIKE ?""",
-            (path, path.rstrip("/") + "/%"),
-        ).fetchall()
-        return [r["id"] for r in rows]
-
     def ids_in_folders(self, folder_ids):
         """Ids of every photo whose folder is one of ``folder_ids``."""
         ids = []

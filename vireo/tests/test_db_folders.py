@@ -1168,6 +1168,92 @@ def test_count_present_photos_under_path(db):
     assert db.count_present_photos_under_path("/arc") == 5
 
 
+def test_get_photo_ids_under_path(db):
+    # Paths are spelled out rather than built with os.path, so the
+    # separators under test are the same on every platform.
+    root = db.add_folder("/photos/lib", name="lib")
+    child = db.add_folder("/photos/lib/c", name="c", parent_id=root)
+    missing = db.add_folder("/photos/lib/gone", name="gone", parent_id=root)
+    unlinked = _raw_folder(db, "/photos/lib/unlinked")
+    a = _photo(db, root, "a.jpg")
+    b = _photo(db, root, "b.jpg")
+    c = _photo(db, child, "c.jpg")
+    m = _photo(db, missing, "m.jpg")
+    u = _photo(db, unlinked, "u.jpg")
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (missing,))
+    db.conn.commit()
+    everything = sorted([a, b, c, m, u])
+    # Any status, any workspace.
+    assert sorted(db.get_photo_ids_under_path("/photos/lib")) == everything
+    # The root itself matches by exact stored path, so a trailing slash
+    # finds only the descendants.
+    assert sorted(db.get_photo_ids_under_path("/photos/lib/")) == sorted([c, m, u])
+    assert db.get_photo_ids_under_path("/photos/lib/c") == [c]
+    # A sibling sharing the prefix is not a descendant.
+    sib = db.add_folder("/photos/library", name="library")
+    _photo(db, sib, "s.jpg")
+    assert sorted(db.get_photo_ids_under_path("/photos/lib")) == everything
+    assert db.get_photo_ids_under_path("/photos/nowhere") == []
+    db.set_active_workspace(None)
+    assert sorted(db.get_photo_ids_under_path("/photos/lib")) == everything
+
+
+@pytest.mark.parametrize("sibling", ["/a/myXtrip", "/a/my-trip"])
+def test_photo_ids_under_path_treats_underscore_literally(db, sibling):
+    """``_`` in the root is a character, not LIKE's any-one-character."""
+    trip = db.add_folder("/a/my_trip", name="my_trip")
+    day = db.add_folder("/a/my_trip/day1", name="day1", parent_id=trip)
+    other = db.add_folder(sibling, name=sibling.rsplit("/", 1)[1])
+    other_day = db.add_folder(sibling + "/day1", name="day1", parent_id=other)
+    mine = [_photo(db, trip, "t.jpg"), _photo(db, day, "d.jpg")]
+    _photo(db, other, "x.jpg")
+    _photo(db, other_day, "y.jpg")
+    assert sorted(db.get_photo_ids_under_path("/a/my_trip")) == sorted(mine)
+
+
+def test_photo_ids_under_path_treats_percent_literally(db):
+    """``%`` in the root is a character, not LIKE's any-run-of-characters."""
+    pct = db.add_folder("/a/100%", name="100%")
+    pct_day = db.add_folder("/a/100%/day1", name="day1", parent_id=pct)
+    sibling = db.add_folder("/a/100 birds", name="100 birds")
+    sibling_day = db.add_folder("/a/100 birds/day1", name="day1", parent_id=sibling)
+    mine = [_photo(db, pct, "p.jpg"), _photo(db, pct_day, "q.jpg")]
+    _photo(db, sibling, "s.jpg")
+    _photo(db, sibling_day, "t.jpg")
+    assert sorted(db.get_photo_ids_under_path("/a/100%")) == sorted(mine)
+    # Nor does a ``%`` folder swallow everything below its parent's prefix.
+    assert db.get_photo_ids_under_path("/a/100%/day1") == [mine[1]]
+
+
+def test_photo_ids_under_path_folds_backslash_separators(db):
+    """Windows paths are stored with ``\\``; descendants are found as they
+    are by the rest of the folder domain."""
+    root = db.add_folder("C:\\Pictures\\Trip", name="Trip")
+    day = db.add_folder("C:\\Pictures\\Trip\\day1", name="day1", parent_id=root)
+    deep = db.add_folder("C:\\Pictures\\Trip\\day1\\burst", name="burst", parent_id=day)
+    sibling = db.add_folder("C:\\Pictures\\Trip2", name="Trip2")
+    mine = [_photo(db, root, "r.jpg"), _photo(db, day, "d.jpg"),
+            _photo(db, deep, "b.jpg")]
+    _photo(db, sibling, "s.jpg")
+    assert sorted(db.get_photo_ids_under_path("C:\\Pictures\\Trip")) == sorted(mine)
+    assert sorted(db.get_photo_ids_under_path("C:\\Pictures\\Trip\\day1")) == sorted(mine[1:])
+
+
+def test_photo_ids_under_path_is_case_sensitive(db):
+    """On a case-sensitive filesystem ``/Photos/Trip`` and ``/photos/trip``
+    are different folders; neither collects the other's photos. Case
+    aliases of one folder are resolved before the query, by
+    ``file_identity.catalog_scan_root``."""
+    upper = db.add_folder("/Photos/Trip", name="Trip")
+    upper_day = db.add_folder("/Photos/Trip/day1", name="day1", parent_id=upper)
+    lower = db.add_folder("/photos/trip", name="trip")
+    lower_day = db.add_folder("/photos/trip/day1", name="day1", parent_id=lower)
+    mine = [_photo(db, upper, "u.jpg"), _photo(db, upper_day, "v.jpg")]
+    theirs = [_photo(db, lower, "l.jpg"), _photo(db, lower_day, "m.jpg")]
+    assert sorted(db.get_photo_ids_under_path("/Photos/Trip")) == sorted(mine)
+    assert sorted(db.get_photo_ids_under_path("/photos/trip")) == sorted(theirs)
+
+
 def test_get_folders_with_quality_data(db):
     ws = db._ws_id()
     root = db.add_folder("/q")
@@ -1240,6 +1326,7 @@ _DELEGATING_FOLDER_METHODS = (
     "count_folders",
     "get_all_folders",
     "count_present_photos_under_path",
+    "get_photo_ids_under_path",
     "get_folders_with_quality_data",
     "update_folder_counts",
 )

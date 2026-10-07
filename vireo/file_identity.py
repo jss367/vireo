@@ -38,6 +38,18 @@ def catalog_folder_path(db, path, *, aliases=None):
     return canonical
 
 
+def catalog_scan_root(db, path):
+    """The catalog spelling ``scanner.scan`` uses for the scan root ``path``.
+
+    Made absolute, then mapped by ``catalog_folder_path``: a case, symlink or
+    separator alias of a cataloged folder becomes that folder's stored path.
+    Code that later asks which folders a scan covered resolves the root here,
+    so it matches the folder rows the scan wrote instead of the spelling the
+    user typed.
+    """
+    return catalog_folder_path(db, os.path.abspath(os.fspath(path)))
+
+
 def distinct_existing_file(path, other, *, timeout=None, allow_missing_source=False):
     """Prove two regular files are distinct; errors/timeouts fail closed.
 
