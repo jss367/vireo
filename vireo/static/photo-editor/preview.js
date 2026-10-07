@@ -161,6 +161,17 @@ var editorPreviewQueue = {active: null, pending: null};
 var EDITOR_INTERACTIVE_SIZE = 1024;
 var EDITOR_PREVIEW_INTERVAL = 60;
 var EDITOR_REFINE_DELAY = 300;
+var EDITOR_PREVIEW_TIMEOUT = 60000;
+
+function hidePreviewRetry() {
+  document.getElementById('previewRetryBtn').hidden = true;
+}
+
+function retryEditorPreview() {
+  if (editorState.loading || !editorState.photoId) return;
+  cancelEditorPreview({abortActive: true});
+  updatePreview();
+}
 
 function cancelEditorPreview(options) {
   editorState.previewSeq++;
@@ -169,17 +180,21 @@ function cancelEditorPreview(options) {
   editorState.previewTimer = null;
   editorState.previewRefineTimer = null;
   editorPreviewQueue.pending = null;
+  hidePreviewRetry();
   if (options && options.abortActive && editorPreviewQueue.active) {
     // Navigation must not wait on a slow render of the previous photo. Keep
     // coalescing ordinary edits, but release the slot when the photo changes.
-    var image = editorPreviewQueue.active.image;
+    var active = editorPreviewQueue.active;
+    var image = active.image;
     editorPreviewQueue.active = null;
+    clearTimeout(active.timeout);
     image.onload = image.onerror = null;
     image.removeAttribute('src');
   }
 }
 
 function presentEditorPreview(request, image) {
+  hidePreviewRetry();
   var old = document.getElementById('editorImg');
   if (old !== image) {
     // Move the decoded element into the document: assigning its URL to the old
@@ -216,23 +231,35 @@ function pumpEditorPreview() {
   var image = new Image();
   request.image = image;
   editorPreviewQueue.active = request;
-  function finish(ok) {
+  hidePreviewRetry();
+  function finish(ok, timedOut) {
+    clearTimeout(request.timeout);
     image.onload = image.onerror = null;
     // An obsolete event must not clear the next photo's active request.
     if (editorPreviewQueue.active !== request) return;
     editorPreviewQueue.active = null;
+    if (timedOut) image.removeAttribute('src');
     if (request.seq === editorState.previewSeq && !editorState.loading) {
       if (ok) presentEditorPreview(request, image);
       else {
         document.getElementById('previewStatus').textContent =
-          'Could not render preview — showing the previous image';
+          timedOut ? 'Preview timed out. Retry or keep editing.' :
+            'Could not render preview. Retry or keep editing.';
+        document.getElementById('previewRetryBtn').hidden = false;
         clearHistogramFeedback();
       }
+    }
+    if (!ok && editorPreviewQueue.pending) {
+      document.getElementById('previewStatus').textContent = editorPreviewQueue.pending.interactive
+        ? 'Rendering quick preview…' : 'Refining preview…';
     }
     pumpEditorPreview();
   }
   image.onload = function() { finish(true); };
   image.onerror = function() { finish(false); };
+  // Bound the lifetime of the actual request, even if newer input reuses it.
+  // A timeout releases the slot for the latest queued edit, with no retry loop.
+  request.timeout = setTimeout(function() { finish(false, true); }, EDITOR_PREVIEW_TIMEOUT);
   image.src = request.url;
 }
 
@@ -278,6 +305,7 @@ function updatePreview(options) {
 }
 
 function schedulePreview() {
+  hidePreviewRetry();
   editorState.previewSeq++; // invalidate at input time, before either timer fires
   editorState.previewInputAt = performance.now();
   editorPreviewQueue.pending = null;

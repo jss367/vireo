@@ -61,6 +61,9 @@ is retained. A decoded image is moved into the page only if its input revision
 is still current. Photo navigation invalidates timers and pending results.
 `editorState.previewTimings` retains at most 100 input-to-display samples in
 memory, with size and tier but no photo identifiers or recipes.
+Each dispatched image has a 60-second deadline. Timeout detaches the image and
+releases the slot for the latest pending edit. A current failure offers Retry
+preview without an automatic retry loop; navigation clears the old timer.
 
 Brush coordinates are mapped back through crop, straighten, flips and rotation
 into the EXIF-oriented source. The server paints a new content-addressed mask;
@@ -82,3 +85,6 @@ python -m pytest -o addopts='' -o junit_family=xunit1 -q \
 
 Cold RAW decoding still uses the full-precision decoder. The quick tier reduces
 render/output work; it does not replace that decode with an embedded JPEG.
+See [RAW preview benchmarks](../../../docs/raw-preview-benchmarks.md) for the
+real-camera corpus runner, memory measurements, regression comparisons, and
+the limits of browser cancellation.

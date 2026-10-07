@@ -1,0 +1,110 @@
+# RAW preview benchmarks and recovery
+
+`scripts/benchmark_raw_previews.py` measures the production edit-preview HTTP
+handler with real RAW files. It exercises full-precision decoding, exposure and
+Shadows adjustments, resizing, and JPEG encoding. It fails if decoding falls
+back to an embedded JPEG or delivers the wrong output size.
+
+Keep the corpus outside Git. Create a local JSON manifest, using descriptive
+names that are safe to include in reports:
+
+```json
+[
+  {"name": "camera-24mp", "path": "camera-24mp.nef"},
+  {"name": "camera-46mp", "path": "camera-46mp.nef"}
+]
+```
+
+Paths are relative to the manifest (absolute paths also work). Use the same
+files and storage location on repeat runs. The report stores content hashes,
+dimensions and these names, but omits file paths and image contents. Include
+representative 24–60 MP cameras when available; a synthetic DNG smoke test in
+the normal test suite verifies the harness but does not represent camera speed.
+
+Install the development dependencies, close other heavy applications, then run:
+
+```sh
+python scripts/benchmark_raw_previews.py \
+  --manifest .context/raw-benchmark/corpus.json \
+  --machine-label dedicated-benchmark-machine \
+  --output .context/raw-benchmark/baseline.json
+```
+
+Each file runs six scenarios in separate processes: quick (1,024 pixels), fit
+(a fixed 2,048 pixels), and native resolution (100% zoom), with cold and warm
+decoded-source caches. Each scenario uses five changing recipes. Numeric
+libraries use at most four threads; scenarios run sequentially.
+
+- **Cold** clears Vireo's decoded-source cache before each sample. It does not
+  flush the OS disk cache. This is not a cold-disk or network-storage benchmark.
+- **Warm** primes the same-size source once before timing changing recipes.
+- **Latency** is handler time through encoded JPEG completion. It excludes
+  browser image decoding, network transfer, scheduling and display. The browser
+  suite separately measures input-to-display latency on a synthetic JPEG.
+- **Memory** is peak resident memory of the server worker, sampled every 10 ms
+  during measured requests. It includes retained caches and interpreter memory,
+  excludes the parent/browser, and may miss peaks shorter than the interval.
+- **Percentiles** use the median and nearest-rank p95. With five samples, p95
+  is the slowest sample; use more samples for a steadier tail estimate.
+
+Compare after changes to decoding, rendering or caching:
+
+```sh
+python scripts/benchmark_raw_previews.py \
+  --manifest .context/raw-benchmark/corpus.json \
+  --machine-label dedicated-benchmark-machine \
+  --baseline .context/raw-benchmark/baseline.json \
+  --output .context/raw-benchmark/current.json
+```
+
+The command exits unsuccessfully for p50/p95 increases exceeding both 25% and
+50 ms, or peak-memory increases exceeding both 15% and 64 MiB. It refuses
+comparisons with different inputs, sizes, sample counts, machine labels or
+recorded software environments. These thresholds allow measurement noise;
+confirm a regression on an otherwise idle machine before changing a baseline.
+The local camera corpus is not uploaded to CI. CI runs the small real-LibRaw
+smoke test and tests the comparison logic. Changes to this measurement protocol
+must increment the report schema version.
+
+## Initial camera measurements
+
+[Reference report](performance/raw-preview-reference.json), recorded on a shared
+16-core arm64 Mac with four numeric threads, uses real 24 MP and 46 MP Nikon RAW
+files copied to local storage. It contains five samples per scenario. The
+24 MP measurements overlapped a browser-test run, so this is an initial
+reference, not a dedicated-runner release budget. A 60 MP camera file was not
+available for this run; the manifest can include one without code changes.
+
+| Source | Preview | Cache | Median | p95 | Peak worker memory |
+| --- | --- | --- | ---: | ---: | ---: |
+| 24 MP | Quick | Cold | 1.46 s | 1.61 s | 1,211 MiB |
+| 24 MP | Quick | Warm | 169 ms | 345 ms | 1,228 MiB |
+| 24 MP | Native | Cold | 9.68 s | 9.82 s | 2,703 MiB |
+| 24 MP | Native | Warm | 8.43 s | 8.46 s | 2,775 MiB |
+| 46 MP | Quick | Cold | 2.44 s | 2.64 s | 2,080 MiB |
+| 46 MP | Quick | Warm | 164 ms | 167 ms | 1,413 MiB |
+| 46 MP | Native | Cold | 20.72 s | 21.01 s | 4,029 MiB |
+| 46 MP | Native | Warm | 19.26 s | 20.89 s | 4,093 MiB |
+
+These measurements establish a starting point; they are not a before/after
+speed comparison. Memory includes allocations retained by the process allocator
+after decoding, in addition to live buffers. The report also includes the fit
+scenarios and every individual timing sample.
+
+## Stalled preview recovery
+
+The editor gives an image request 60 seconds from dispatch. Reusing a request
+for newer input does not extend that deadline. On timeout it detaches the old
+image, releases the queue slot and starts the latest pending edit. The last
+displayed image stays visible. If the current request fails with no replacement,
+the footer offers **Retry preview**; editing also schedules a new request.
+There is no automatic retry loop. Navigation clears the old timer, and late
+load/error events cannot replace the new preview or release its queue slot.
+
+This bounds the browser's wait, not server computation. The current renderer
+calls LibRaw's synchronous native decoder and has no safe interrupt hook for
+an in-progress decode. Disconnecting an image request does not stop that work.
+Concurrent misses for the same source and size already share a decode; a hung
+decode can therefore also block a retry. Safely terminating native work would
+require supervised worker processes and coordinated cache ownership. That is
+separate from this browser recovery change; no server cancellation is claimed.
