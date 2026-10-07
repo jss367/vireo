@@ -202,6 +202,26 @@ class FolderRepository:
             (self.workspace_id,),
         ).fetchone()[0]
 
+    def all_rows(self):
+        """Rows (``id``, ``path``, ``name``) for every folder, any workspace or status."""
+        return self.conn.execute("SELECT id, path, name FROM folders").fetchall()
+
+    def present_photo_count_under(self, path):
+        """Count photos in ``ok``/``partial`` folders at ``path`` or below it.
+
+        Subtree membership folds ``\\`` to ``/`` in the stored path, as the
+        rest of this module does.
+        """
+        prefix = self.subtree_prefix(path)
+        return self.conn.execute(
+            """SELECT COUNT(*) AS c
+                 FROM photos p JOIN folders f ON f.id = p.folder_id
+                WHERE (f.path = ?
+                       OR substr(REPLACE(f.path, '\\', '/'), 1, ?) = ?)
+                  AND f.status IN ('ok', 'partial')""",
+            (path, len(prefix), prefix),
+        ).fetchone()["c"]
+
     def with_quality_data(self):
         """Return workspace folders with scored photos in their subtree."""
         ws = self.workspace_id

@@ -105,7 +105,6 @@ CONN_USE_LIMITS = {
     "web/export.py": 3,
     "web/folders.py": 11,
     "web/history.py": 6,
-    "web/imports.py": 19,
     "web/inat.py": 3,
     "web/job_launchers.py": 13,
     "web/jobs.py": 3,

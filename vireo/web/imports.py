@@ -19,7 +19,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 import source_discovery
-from db import Database, _chunks
+from db import Database
 from flask import Blueprint, Response, abort, jsonify, make_response, request
 from jobs import describe_jobs
 from metadata import scan_metadata_warning
@@ -93,7 +93,7 @@ def _all_folders(db):
     see this tree". A transfer is defined by a path on disk, so resolve it
     from the path.
     """
-    return db.conn.execute("SELECT id, path FROM folders").fetchall()
+    return db.get_all_folders()
 
 
 def _staging_folder_ids(db, staging_destination):
@@ -215,14 +215,7 @@ def _staged_photo_ids(db, folder_ids):
     """
     if not folder_ids:
         return []
-    ids = []
-    for chunk in _chunks(folder_ids):
-        placeholders = ",".join("?" for _ in chunk)
-        ids.extend(row["id"] for row in db.conn.execute(
-            f"SELECT id FROM photos WHERE folder_id IN ({placeholders})",
-            list(chunk),
-        ))
-    return ids
+    return db.get_photo_ids_in_folders(folder_ids)
 
 
 def _residual_staged_changes(db, photo_ids, undeliverable):
@@ -999,32 +992,10 @@ class _ImportFullRun:
             # Collection from copied files (existing logic)
             copied_paths = self.copied_paths
             if copied_paths:
-                thread_db.conn.execute(
-                    "CREATE TEMP TABLE IF NOT EXISTS _imported_paths (dirpath TEXT, fname TEXT)"
-                )
-                thread_db.conn.execute("DELETE FROM _imported_paths")
-                thread_db.conn.executemany(
-                    "INSERT INTO _imported_paths (dirpath, fname) VALUES (?, ?)",
-                    [(os.path.dirname(p), os.path.basename(p)) for p in copied_paths],
-                )
-                rows = thread_db.conn.execute(
-                    """SELECT p.id FROM photos p
-                       JOIN folders f ON p.folder_id = f.id
-                       JOIN _imported_paths ip ON f.path = ip.dirpath
-                                               AND p.filename = ip.fname"""
-                ).fetchall()
-                photo_ids = [r["id"] for r in rows]
-                thread_db.conn.execute("DROP TABLE IF EXISTS _imported_paths")
+                photo_ids = thread_db.get_photo_ids_at_paths(copied_paths)
         else:
             # Collection from all photos in the scanned folder
-            scan_target = self.scan_target
-            rows = thread_db.conn.execute(
-                """SELECT p.id FROM photos p
-                   JOIN folders f ON p.folder_id = f.id
-                   WHERE f.path = ? OR f.path LIKE ?""",
-                (scan_target, scan_target.rstrip("/") + "/%"),
-            ).fetchall()
-            photo_ids = [r["id"] for r in rows]
+            photo_ids = thread_db.get_photo_ids_under_path(self.scan_target)
         return photo_ids
 
     def _create_collection(self):
@@ -1117,12 +1088,7 @@ def create_imports_blueprint(
         from pending_archives import active_archive_jobs
         db = get_db()
         jobs = active_archive_jobs(get_runner(), db.require_workspace_id())
-        rows = db.conn.execute(
-            "SELECT a.*, c.id AS review_collection_id, c.name AS collection_name FROM pending_archives a "
-            "LEFT JOIN collections c ON c.id = a.collection_id AND c.workspace_id = a.workspace_id "
-            "WHERE a.workspace_id = ? AND a.state != 'complete' ORDER BY a.created_at",
-            (db.require_workspace_id(),),
-        ).fetchall()
+        rows = db.get_open_pending_archives()
         # Only pay for the folder read when something is actually pending —
         # three pages poll this endpoint every 5s with an empty list most of
         # the time.
@@ -1179,11 +1145,7 @@ def create_imports_blueprint(
                 return json_error("Local originals are available. Send them to NAS before removing this transfer", 409)
             # Forget only the transfer, never files or catalog entries. This is
             # explicit recovery for lost storage, including interrupted sends.
-            db.conn.execute(
-                "DELETE FROM pending_archives WHERE id = ? AND workspace_id = ?",
-                (archive_id, db.require_workspace_id()),
-            )
-            db.conn.commit()
+            db.delete_pending_archive(archive_id)
         return jsonify({"ok": True})
 
     @blueprint.post("/api/import/pending-archives/<archive_id>/send")
@@ -1242,11 +1204,7 @@ def create_imports_blueprint(
             def work(job):
                 with Database(db_path) as thread_db:
                     thread_db.set_active_workspace(workspace_id)
-                    thread_db.conn.execute(
-                        "UPDATE pending_archives SET state = 'sending', error = '' WHERE id = ?",
-                        (archive_id,),
-                    )
-                    thread_db.conn.commit()
+                    thread_db.set_pending_archive_state(archive_id, "sending")
                     steps = None
                     try:
                         remote = json.loads(archive["target_json"]).get("transport") != "mounted"
@@ -1403,10 +1361,7 @@ def create_imports_blueprint(
                             steps.finish("cleanup", error=(
                                 f"Local cleanup needs attention at {archive['staging_destination']}: "
                                 f"{result['cleanup_error']}"))
-                        thread_db.conn.execute(
-                            "UPDATE pending_archives SET state = 'complete', error = '' WHERE id = ?", (archive_id,),
-                        )
-                        thread_db.conn.commit()
+                        thread_db.set_pending_archive_state(archive_id, "complete")
                         try:
                             invalidate_missing_originals()
                         except Exception:
@@ -1417,11 +1372,7 @@ def create_imports_blueprint(
                     except Exception as e:
                         if steps is not None:
                             steps.fail(str(e), status="cancelled" if runner.is_cancelled(job["id"]) else "failed")
-                        thread_db.conn.execute(
-                            "UPDATE pending_archives SET state = 'pending', error = ? WHERE id = ?",
-                            (str(e), archive_id),
-                        )
-                        thread_db.conn.commit()
+                        thread_db.set_pending_archive_state(archive_id, "pending", str(e))
                         raise
 
             job_id, _, _ = runner.start_singleton(
@@ -1700,7 +1651,7 @@ def create_imports_blueprint(
             )
             return json_error(f"collection rules cannot be resolved: {e}", 400)
 
-        folder_rows = db.conn.execute("SELECT id, path, name FROM folders").fetchall()
+        folder_rows = db.get_all_folders()
         folder_map = {r["id"]: dict(r) for r in folder_rows}
 
         files = []
@@ -1782,22 +1733,13 @@ def create_imports_blueprint(
         # probe.
         from move import _tracked_destination_ancestor
         db = get_db()
-        from db import _subtree_prefix
 
         def _archive_photo_count(archive_path):
-            prefix = _subtree_prefix(archive_path)
             # Count only ok/partial folders — the same set ingest treats as
             # "the archive" — so the callout's "N photos" matches what the
             # merge actually considers present. Pure catalog read; no on-disk
             # check.
-            return db.conn.execute(
-                """SELECT COUNT(*) AS c
-                     FROM photos p JOIN folders f ON f.id = p.folder_id
-                    WHERE (f.path = ?
-                           OR substr(REPLACE(f.path, '\\', '/'), 1, ?) = ?)
-                      AND f.status IN ('ok', 'partial')""",
-                (archive_path, len(prefix), prefix),
-            ).fetchone()["c"]
+            return db.count_present_photos_under_path(archive_path)
 
         managed_archives = []
         managed_archive = None
