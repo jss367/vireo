@@ -933,6 +933,17 @@ class Database:
         """
         self.conn.execute("BEGIN IMMEDIATE")
 
+    def begin(self):
+        """Open a deferred transaction, so the reads that follow share one snapshot.
+
+        Plain ``BEGIN``: no lock is taken until the first statement, and every
+        read after that sees the same snapshot until ``commit()`` or
+        ``rollback()`` (read-only callers release it with ``rollback()``).
+        Raises ``sqlite3.OperationalError`` if a transaction is already open
+        (BEGIN does not nest).
+        """
+        self.conn.execute("BEGIN")
+
     @contextlib.contextmanager
     def transaction(self):
         """``with db.conn:``: commit when the block exits, roll back if it raises.
@@ -3406,6 +3417,21 @@ class Database:
         Not workspace-scoped: check the photo against the workspace first.
         """
         return self._photos_repository(scoped=False).get_with_folder_path(photo_id)
+
+    def get_photo_file_in_workspace(self, photo_id, workspace_id):
+        """``filename`` and ``folder_path`` of one photo ``workspace_id`` can see, or None.
+
+        ``workspace_id`` is explicit (not the active one), so ``None`` finds
+        nothing instead of raising.
+        """
+        return self._photos_repository(scoped=False).file_in_workspace(photo_id, workspace_id)
+
+    def get_best_batch_rows_by_ids(self, photo_ids):
+        """Best Batch rows for the named workspace photos in online folders, unordered.
+
+        One unchunked statement, so the caller bounds ``photo_ids``.
+        """
+        return self._photos_repository().best_batch_rows_by_ids(photo_ids)
 
     def get_photo_flags_ratings_and_eyes(self, photo_ids):
         """``{photo_id: Row}`` with ``id``, ``flag``, ``rating``, ``eye_x``, ``eye_y``, ``eye_conf``, ``eye_tenengrad``."""
@@ -6538,6 +6564,14 @@ class Database:
         """Return keywords for a batch of photos keyed by photo id."""
         return self._keyword_repository().get_for_photos(photo_ids)
 
+    def get_species_keyword_identity_rows(self):
+        """Every species/taxonomy keyword: ``id``, ``name``, ``source_id``, ``scientific_name``.
+
+        ``source_id`` is ``source_taxon_id`` falling back to the linked
+        taxon's ``inat_id``; unordered, catalog-wide.
+        """
+        return self._keyword_repository().species_identity_rows()
+
     def get_species_keywords_for_photos(self, photo_ids, include_identities=False):
         """Return deduplicated species-rank keyword names for photos.
 
@@ -9265,6 +9299,15 @@ class Database:
         """Return recent edit history entries (most recent first) with item counts."""
         return self._edit_history_repository().list_recent(limit, offset)
 
+    def get_photo_edit_recipe_history(self, photo_id, limit):
+        """The workspace's ``edit_recipe`` history items for one photo, newest first.
+
+        Rows carry ``id``, ``description``, ``created_at``, ``undone``,
+        ``old_value`` and ``new_value``; undone edits are included. Raises
+        ``RuntimeError`` when no workspace is active.
+        """
+        return self._edit_history_repository().recipe_history_for_photo(photo_id, limit)
+
     # Action types that appear in history but cannot be reversed
     _NON_UNDOABLE = (
         'prediction_reject', 'discard',
@@ -9969,6 +10012,30 @@ class Database:
     def get_collections(self):
         """Return all collections for the active workspace."""
         return self._collection_repository().list_all()
+
+    def get_collections_for_picker(self):
+        """The workspace's collections ordered by name case-insensitively, then id.
+
+        Rows carry ``id``, ``name``, ``rules`` and ``visual_json``.
+        """
+        return self._collection_repository().list_for_picker()
+
+    def get_collection(self, collection_id):
+        """One collection row (``id``, ``name``, ``rules``, ``visual_json``), or None.
+
+        None when the id is unknown or belongs to another workspace.
+        """
+        return self._collection_repository().get(collection_id)
+
+    def update_collection(self, collection_id, *, name=_UNSET, rules_json=_UNSET,
+                          visual_json=_UNSET):
+        """Set the given columns of a workspace collection, and commit.
+
+        Only the arguments passed are written; with none passed nothing runs.
+        """
+        self._collection_repository().update(
+            collection_id, name=name, rules_json=rules_json, visual_json=visual_json,
+        )
 
     def delete_collection(self, collection_id):
         """Delete a collection."""

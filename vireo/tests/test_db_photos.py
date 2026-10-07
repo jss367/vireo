@@ -279,6 +279,50 @@ def test_get_photo_with_folder_path(db, lib, tmp_path):
     assert db.get_photo_with_folder_path(999999) is None
 
 
+def test_get_photo_file_in_workspace(db, lib, tmp_path):
+    ws = db.active_workspace_id
+    row = db.get_photo_file_in_workspace(lib["c"], ws)
+    assert dict(row) == {
+        "filename": "c.jpg", "folder_path": str(tmp_path / "lib" / "c"),
+    }
+    # The workspace is the argument, not the active one.
+    assert db.get_photo_file_in_workspace(lib["f"], ws) is None
+    assert db.get_photo_file_in_workspace(lib["f"], lib["other_ws"])["filename"] == "f.jpg"
+    assert db.get_photo_file_in_workspace(999999, ws) is None
+    # None matches nothing instead of raising, with or without an active one.
+    assert db.get_photo_file_in_workspace(lib["a"], None) is None
+    db.set_active_workspace(None)
+    assert db.get_photo_file_in_workspace(lib["a"], ws)["filename"] == "a.jpg"
+
+
+def test_get_best_batch_rows_by_ids(db, lib):
+    db.conn.execute(
+        "UPDATE photos SET rating = 4, flag = 'flagged', quality_score = 0.5, "
+        "sharpness = 12.0 WHERE id = ?", (lib["a"],),
+    )
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (lib["child"],))
+    db.conn.commit()
+    rows = db.get_best_batch_rows_by_ids([lib["a"], lib["b"], lib["c"], lib["f"], 999999])
+    assert {tuple(r.keys()) for r in rows} == {(
+        "id", "folder_id", "filename", "extension", "timestamp",
+        "flag", "rating", "quality_score", "sharpness",
+    )}
+    # c sits in a missing folder, f in another workspace's folder.
+    by_id = {r["id"]: dict(r) for r in rows}
+    assert set(by_id) == {lib["a"], lib["b"]}
+    assert by_id[lib["a"]] == {
+        "id": lib["a"], "folder_id": lib["root"], "filename": "a.jpg",
+        "extension": ".jpg", "timestamp": "2024-01-05T10:00:00",
+        "flag": "flagged", "rating": 4, "quality_score": 0.5, "sharpness": 12.0,
+    }
+    db.conn.execute("UPDATE folders SET status = 'partial' WHERE id = ?", (lib["child"],))
+    assert {r["id"] for r in db.get_best_batch_rows_by_ids([lib["c"]])} == {lib["c"]}
+    db.conn.rollback()
+    db.set_active_workspace(None)
+    with pytest.raises(RuntimeError):
+        db.get_best_batch_rows_by_ids([lib["a"]])
+
+
 def test_get_photo_flags_ratings_and_eyes(db, lib):
     assert db.get_photo_flags_ratings_and_eyes([]) == {}
     db.update_photo_flag(lib["b"], "flagged")
@@ -1248,6 +1292,7 @@ MOVED = [
     "count_photos_with_companions", "resolve_photos_for_delete",
     "delete_photos", "update_photo_sharpness", "update_photo_quality",
     "get_photo_with_folder_path", "get_photo_flags_ratings_and_eyes",
+    "get_photo_file_in_workspace", "get_best_batch_rows_by_ids",
     "get_workspace_photos_in_folders",
     "get_photo_working_copy_path", "record_generated_original",
     "set_photo_thumb_path",

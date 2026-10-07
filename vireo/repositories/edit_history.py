@@ -72,6 +72,27 @@ class EditHistoryRepository:
                 entry['new_value'] = None
         return entries
 
+    def recipe_history_for_photo(self, photo_id, limit):
+        """The workspace's ``edit_recipe`` items for one photo, newest first.
+
+        Rows carry ``id``, ``description``, ``created_at``, ``undone`` (from
+        the edit) and ``old_value``, ``new_value`` (from the photo's item),
+        ordered by ``created_at`` then ``id`` descending, at most ``limit``.
+        Undone edits are included.
+        """
+        return self.conn.execute(
+            """SELECT eh.id, eh.description, eh.created_at, eh.undone,
+                      ehi.old_value, ehi.new_value
+               FROM edit_history eh
+               JOIN edit_history_items ehi ON ehi.edit_id = eh.id
+               WHERE eh.workspace_id = ?
+                 AND eh.action_type = 'edit_recipe'
+                 AND ehi.photo_id = ?
+               ORDER BY eh.created_at DESC, eh.id DESC
+               LIMIT ?""",
+            (self.workspace_id, photo_id, limit),
+        ).fetchall()
+
     # -- undo / redo cursor ---------------------------------------------------
 
     def next_undo(self, non_undoable):

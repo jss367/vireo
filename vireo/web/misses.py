@@ -445,7 +445,7 @@ def create_misses_blueprint(
                 db.queue_flag_change_if_enabled(
                     item["photo_id"], item["new_value"], _commit=False
                 )
-            db.conn.commit()
+            db.commit()
             db.record_edit(
                 "flag",
                 f"Rejected {len(items)} miss photos (category={category})",

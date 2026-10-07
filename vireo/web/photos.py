@@ -274,14 +274,7 @@ def create_photos_blueprint(
             except (TypeError, ValueError):
                 skipped += 1
                 continue
-            row = db.conn.execute(
-                """SELECT p.filename, f.path AS folder_path
-                   FROM photos p
-                   JOIN folders f ON p.folder_id = f.id
-                   JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-                   WHERE p.id = ? AND wf.workspace_id = ?""",
-                (pid, ws_id),
-            ).fetchone()
+            row = db.get_photo_file_in_workspace(pid, ws_id)
             if not row:
                 skipped += 1
                 continue
@@ -394,14 +387,7 @@ def create_photos_blueprint(
             except (TypeError, ValueError):
                 skipped += 1
                 continue
-            row = db.conn.execute(
-                """SELECT p.filename, f.path AS folder_path
-                   FROM photos p
-                   JOIN folders f ON p.folder_id = f.id
-                   JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-                   WHERE p.id = ? AND wf.workspace_id = ?""",
-                (pid, ws_id),
-            ).fetchone()
+            row = db.get_photo_file_in_workspace(pid, ws_id)
             if not row:
                 skipped += 1
                 continue
@@ -612,12 +598,12 @@ def create_photos_blueprint(
         # — and release it on every exit, error paths included (Codex review on
         # PR #1658). Reads only; ``rollback`` is what releases it.
         if query.focus_photo_id is not None:
-            db.conn.execute("BEGIN")
+            db.begin()
 
             @after_this_request
             def _release_focus_snapshot(response):
-                if db.conn.in_transaction:
-                    db.conn.rollback()
+                if db.in_transaction:
+                    db.rollback()
                 return response
 
         visual_info = None
@@ -660,15 +646,15 @@ def create_photos_blueprint(
         # raise something other than ValueError, and the snapshot has to be
         # released on those paths too.
         focus_snapshot = query.focus_photo_id is not None
-        if focus_snapshot and not db.conn.in_transaction:
-            db.conn.execute("BEGIN")
+        if focus_snapshot and not db.in_transaction:
+            db.begin()
         try:
             return query.rules_page_response(visual_info)
         finally:
             # rollback(), not commit(): this endpoint is read-only, and the
             # rollback is what releases the snapshot.
-            if focus_snapshot and db.conn.in_transaction:
-                db.conn.rollback()
+            if focus_snapshot and db.in_transaction:
+                db.rollback()
 
     @blueprint.route("/api/photos/ids")
     def api_photo_ids():
@@ -826,9 +812,7 @@ def create_photos_blueprint(
         result["full_preview_max_size"] = 1920 if preview_max_size is None else preview_max_size
 
         # Read XMP sidecar keywords
-        folder = db.conn.execute(
-            "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
-        ).fetchone()
+        folder = db.get_folder(photo["folder_id"])
         if folder:
             # Full on-disk path: mirrors the folder-join logic in
             # api_files_reveal. Exposed so the browse-grid "Copy Path"
@@ -966,16 +950,7 @@ def create_photos_blueprint(
         if len(photo_ids) < 2:
             return json_error("at least two selected photos are required", 400)
 
-        placeholders = ",".join("?" for _ in photo_ids)
-        rows = db.conn.execute(
-            f"""SELECT p.id, p.folder_id, p.filename, p.extension, p.timestamp,
-                      p.flag, p.rating, p.quality_score, p.sharpness
-               FROM photos p
-               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-               JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
-               WHERE wf.workspace_id = ? AND p.id IN ({placeholders})""",
-            (db.require_workspace_id(), *photo_ids),
-        ).fetchall()
+        rows = db.get_best_batch_rows_by_ids(photo_ids)
         by_id = {row["id"]: row for row in rows}
         rows = [by_id[pid] for pid in photo_ids if pid in by_id]
         if len(rows) < 2:
@@ -1198,9 +1173,7 @@ def create_photos_blueprint(
                 results.append({"photo_id": photo_id, "sharpness": None, "error": "not found"})
                 continue
 
-            folder = db.conn.execute(
-                "SELECT id, path FROM folders WHERE id = ?", (photo["folder_id"],)
-            ).fetchone()
+            folder = db.get_folder(photo["folder_id"])
             if not folder:
                 results.append({"photo_id": photo_id, "sharpness": None, "error": "folder not found"})
                 continue
