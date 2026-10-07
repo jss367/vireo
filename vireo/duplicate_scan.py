@@ -117,38 +117,87 @@ def revalidate_scan_result(db, result):
     )
 
 
-def _group_state(status, photo_ids, winner_id=None):
-    # For a resolved group the kept/rejected partition is part of the
-    # identity: an id set like {A, B} with A kept reads the same as the
-    # same set with B kept, but a rescan would show the opposite winner
-    # and its cleanup controls would act on the other copy. Carry
-    # ``winner_id`` for resolved groups so that swap counts as changed.
-    # Unresolved groups have no single winner yet, so this stays None.
+def _group_state(status, photo_ids, winner_id):
+    # The members alone don't say which copy the page shows as KEEP: a flag
+    # edit can swap a resolved group's kept and rejected copies, and a
+    # changed mtime can make the resolver pick the other copy of an
+    # unresolved one, which ``/api/duplicates/apply`` would then keep.
     return status, frozenset(photo_ids), winner_id
+
+
+def _entry_ids(proposal):
+    return [
+        e.get("id")
+        for e in [proposal.get("winner") or {}] + list(proposal.get("losers") or [])
+    ]
+
+
+def _unresolved_winners(db, groups, shown_entries):
+    """Return ``{file_hash: winner_id}`` the resolver would pick now for each
+    unresolved group whose copies the restored scan all shows.
+
+    Path and mtime come from the catalog; whether each file exists comes
+    from the stored scan, so this does no filesystem I/O. A group with a
+    copy the scan never saw differs in its members anyway.
+    """
+    groups = [
+        g for g in groups
+        if all(pid in shown_entries for pid in g["photo_ids"])
+    ]
+    rows = _fetch_photo_rows(
+        db, sorted({pid for g in groups for pid in g["photo_ids"]}),
+        columns="p.id, p.filename, p.file_mtime, f.path AS folder_path",
+    )
+    by_id = {r["id"]: r for r in rows}
+    winners = {}
+    for g in groups:
+        candidates = []
+        for pid in g["photo_ids"]:
+            row = by_id.get(pid)
+            if row is None:
+                break
+            entry = shown_entries[pid]
+            candidates.append(DupCandidate(
+                id=pid,
+                path=os.path.join(row["folder_path"] or "", row["filename"] or ""),
+                mtime=row["file_mtime"] or 0.0,
+                exists=bool(entry.get("exists", True) or entry.get("volume_offline")),
+            ))
+        else:
+            winners[g["file_hash"]] = resolve_duplicates(candidates)[0]
+    return winners
 
 
 def _changes_since_scan(db, stored_proposals, shown_proposals):
     """Compare the groups a restored scan shows with the catalog's groups now.
 
     Returns ``(new_group_count, changed_group_count)``. A group is the same
-    when its status and member ids match what a new scan would find: an
-    unresolved group lists its non-rejected copies, a resolved one every
-    copy and its current winner, exactly as ``find_duplicate_groups``
-    reports them. A group dropped by revalidation counts as changed only
-    if its hash still forms a group.
+    when a new scan would show the same copies with the same one kept: an
+    unresolved group lists its non-rejected copies and the copy the resolver
+    picks from current metadata, a resolved one every copy and the one kept,
+    as ``find_duplicate_groups`` reports them. A group dropped by
+    revalidation counts as changed only if its hash still forms a group.
     """
+    groups = db.find_duplicate_groups(include_resolved=True)
+    shown_entries = {
+        e.get("id"): e
+        for p in shown_proposals
+        for e in [p.get("winner") or {}] + list(p.get("losers") or [])
+    }
+    unresolved_winners = _unresolved_winners(
+        db, [g for g in groups if g["status"] == "unresolved"], shown_entries,
+    )
     current = {
         g["file_hash"]: _group_state(
-            g["status"], g["photo_ids"], g.get("winner_id"),
+            g["status"], g["photo_ids"],
+            g.get("winner_id") if g["status"] == "resolved"
+            else unresolved_winners.get(g["file_hash"]),
         )
-        for g in db.find_duplicate_groups(include_resolved=True)
+        for g in groups
     }
     shown = {
         p.get("file_hash"): _group_state(
-            p.get("status"),
-            [e.get("id") for e in [p.get("winner") or {}] + list(p.get("losers") or [])],
-            (p.get("winner") or {}).get("id")
-            if p.get("status") == "resolved" else None,
+            p.get("status"), _entry_ids(p), (p.get("winner") or {}).get("id"),
         )
         for p in shown_proposals
     }

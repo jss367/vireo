@@ -889,6 +889,25 @@ def test_last_scan_counts_resolved_group_whose_winner_was_swapped(app_and_db):
     assert result["changed_group_count"] == 1
 
 
+def test_last_scan_counts_unresolved_group_whose_winner_would_change(app_and_db):
+    """An mtime refreshed since the scan can make the resolver keep the other
+    copy; apply would follow the new pick, so the shown KEEP is out of date."""
+    app, db = app_and_db
+    fid = db.add_folder("/tmp/duplastscanmtime")
+    older, newer = _seed_pair(db, "HMTIME", fid, name_a="a.jpg", name_b="b.jpg")
+    client = app.test_client()
+    first = _scan_and_restore(client)
+    (proposal,) = first["proposals"]
+    assert proposal["winner"]["id"] == older  # same-length paths: older mtime wins
+    assert first["changed_group_count"] == 0
+
+    db.conn.execute("UPDATE photos SET file_mtime = 300.0 WHERE id = ?", (older,))
+    db.conn.commit()
+
+    result = client.get("/api/duplicates/last-scan").get_json()["result"]
+    assert result["changed_group_count"] == 1
+
+
 def test_last_scan_group_whose_copy_was_removed_is_not_a_change(app_and_db):
     """Removing the only extra copy hides the group as stale; a rescan would
     not show it either, so it is no reason to rescan."""
