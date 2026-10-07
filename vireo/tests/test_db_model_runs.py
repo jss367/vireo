@@ -337,6 +337,50 @@ def test_get_unscored_current_prediction_runs(db):
     assert db.get_unscored_current_prediction_runs(pid) == []
 
 
+def test_get_current_prediction_detector_confidences(db):
+    fid = _folder(db)
+    pid = _photo(db, "a.jpg", fid)
+    other = _photo(db, "b.jpg", fid)
+    for full_image in (False, True):
+        assert db.get_current_prediction_detector_confidences(
+            pid, full_image=full_image,
+        ) == []
+
+    low = _det(db, pid, "megadetector-v6", conf=0.05)
+    _pred(db, low, "fp-old")
+    current = _pred(db, low, "fp-new", species="Wren")
+    full = _det(db, pid, "full-image", conf=1.0)
+    full_pred = _pred(db, full, "fp-new")
+    _pred(db, _det(db, other), "fp-new")
+
+    # Only the latest label set per (detection, model), at any confidence.
+    rows = db.get_current_prediction_detector_confidences(pid, full_image=False)
+    assert [(r["id"], r["detector_confidence"]) for r in rows] == [(current, 0.05)]
+    rows = db.get_current_prediction_detector_confidences(pid, full_image=True)
+    assert [(r["id"], r["detector_confidence"]) for r in rows] == [(full_pred, 1.0)]
+
+
+def test_get_classifier_runs_for_photo(db):
+    fid = _folder(db)
+    pid = _photo(db, "a.jpg", fid)
+    other = _photo(db, "b.jpg", fid)
+    assert db.get_classifier_runs_for_photo(pid, full_image=False) == []
+
+    low = _det(db, pid, "megadetector-v6", conf=0.05)
+    db.record_classifier_run(low, MODEL, "fp-a", prediction_count=0)
+    db.record_classifier_run(low, MODEL, "fp-b", prediction_count=2)
+    full = _det(db, pid, "full-image", conf=1.0)
+    db.record_classifier_run(full, MODEL, "fp-a", prediction_count=5)
+    db.record_classifier_run(_det(db, other), MODEL, "fp-a", prediction_count=1)
+
+    rows = db.get_classifier_runs_for_photo(pid, full_image=False)
+    assert sorted(
+        (r["prediction_count"], r["detector_confidence"]) for r in rows
+    ) == [(0, 0.05), (2, 0.05)]
+    rows = db.get_classifier_runs_for_photo(pid, full_image=True)
+    assert [(r["prediction_count"], r["detector_confidence"]) for r in rows] == [(5, 1.0)]
+
+
 def test_get_match_scores_for_photo_orders_and_stamps_is_current(db):
     fid = _folder(db)
     pid = _photo(db, "a.jpg", fid)
@@ -899,6 +943,8 @@ _DELEGATING_MODEL_RUN_METHODS = (
     "has_classifier_match_score",
     "get_unscored_current_prediction_runs",
     "get_match_scores_for_photo",
+    "get_current_prediction_detector_confidences",
+    "get_classifier_runs_for_photo",
     "get_classifier_run_keys",
     "get_classifier_run_key_gate",
     "get_classifier_run_cache_hits",

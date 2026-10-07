@@ -122,7 +122,6 @@ CONN_USE_LIMITS = {
     "web/photo_edit_recipes.py": 4,
     "web/photo_location_keywords.py": 5,
     "web/photos.py": 12,
-    "web/pipeline.py": 25,
     "web/settings.py": 2,
     "web/species.py": 1,
     "web/storage.py": 5,

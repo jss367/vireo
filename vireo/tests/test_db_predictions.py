@@ -475,6 +475,44 @@ def test_prediction_for_photo(db, cat):
     assert db.get_prediction_for_photo(cat["outside"], "m1") is None
 
 
+def test_inspector_predictions_for_photo(db, cat):
+    p0 = cat["p"][0]
+    ws = cat["ws"]
+    high = _det(db, p0, conf=0.9, x=0.1, model="md-a")
+    low = _det(db, p0, conf=0.1, x=0.6, model="md-b")
+    full = _det(db, p0, conf=1.0, model="full-image")
+    db.add_prediction(high, "Old Robin", 0.99, "m1", labels_fingerprint="fp-old")
+    db.add_prediction(high, "Robin", 0.6, "m1", labels_fingerprint="fp-new",
+                      taxonomy={"scientific_name": "T. m."})
+    db.add_prediction(high, "Wren", 0.7, "m2", labels_fingerprint="fp-x")
+    db.add_prediction(low, "Hawk", 0.95, "m1", labels_fingerprint="fp-new")
+    db.add_prediction(full, "Heron", 0.8, "m1", labels_fingerprint="fp-new")
+    robin = _pred_id(db, high, "Robin", fp="fp-new")
+    db.set_review_status(robin, ws, "accepted", individual="Bob", group_id="g1")
+    other_ws = db.create_workspace("Other")
+    wren = _pred_id(db, high, "Wren", model="m2", fp="fp-x")
+    db.set_review_status(wren, other_ws, "rejected")
+
+    rows = db.get_inspector_predictions_for_photo(p0, 0.5)
+    # Latest label set per (detection, model), real detections at or above
+    # the floor, best first; review state comes from the active workspace.
+    assert [(r["species"], r["model"], r["status"]) for r in rows] == [
+        ("Wren", "m2", "pending"), ("Robin", "m1", "accepted"),
+    ]
+    robin_row = rows[1]
+    assert (robin_row["individual"], robin_row["group_id"]) == ("Bob", "g1")
+    assert (robin_row["scientific_name"], robin_row["labels_fingerprint"]) == ("T. m.", "fp-new")
+    assert robin_row["detector_confidence"] == 0.9
+    assert rows[0]["vote_count"] is None
+
+    assert [r["species"] for r in db.get_inspector_predictions_for_photo(p0, 0.0)] == [
+        "Hawk", "Wren", "Robin",
+    ]
+    db.set_active_workspace(None)
+    assert {r["status"] for r in db.get_inspector_predictions_for_photo(p0, 0.5)} == {"pending"}
+    assert db.get_inspector_predictions_for_photo(cat["p"][1], 0.0) == []
+
+
 # -- review mutators and their _commit seams ----------------------------------------------
 
 
@@ -887,6 +925,7 @@ _DELEGATING_PREDICTION_METHODS = (
     "get_alternative_sibling_ids",
     "get_prediction_statuses_with_supersession",
     "get_burst_group_members",
+    "get_inspector_predictions_for_photo",
 )
 
 # ``test_route_contract`` looks these up by name on ``Database``.

@@ -1035,6 +1035,50 @@ def test_verify_photo_in_workspace_goes_through_the_facade(db, monkeypatch):
         db._verify_photo_in_workspace(pid)
 
 
+# -- get_workspace_visible_folder_ids ------------------------------------------------
+
+
+def test_get_workspace_visible_folder_ids_links_grants_and_other_workspaces(db, tree):
+    ws, p, a, b, q = tree
+    other = db.create_workspace("Other")
+    _link_raw(db, ws, p, 1)
+    db.add_workspace_folder(other, q)
+    granted = _photo(db, b, "granted.jpg")
+    db.conn.execute(
+        "INSERT INTO workspace_photos (workspace_id, photo_id) VALUES (?, ?)",
+        (ws, granted),
+    )
+    db.conn.commit()
+    # /p is linked, /p/a/b is reached through a photo-only grant, /p/a is
+    # unlinked (raw link without descendants) and /q belongs to another
+    # workspace; an unknown id is simply absent.
+    assert db.get_workspace_visible_folder_ids([p, a, b, q, 999999]) == {p, b}
+    assert db.get_workspace_visible_folder_ids([a]) == set()
+    assert db.get_workspace_visible_folder_ids([]) == set()
+
+
+def test_get_workspace_visible_folder_ids_without_active_workspace_is_empty(db, tree):
+    ws, p, a, b, q = tree
+    _link_raw(db, ws, p, 1)
+    db.set_active_workspace(None)
+    assert db.get_workspace_visible_folder_ids([p]) == set()
+
+
+def test_get_workspace_visible_folder_ids_chunks(db, tree, monkeypatch):
+    import db as db_module
+
+    ws, p, a, b, q = tree
+    _link_raw(db, ws, p, 1)
+    _link_raw(db, ws, q, 1)
+    monkeypatch.setattr(db_module, "_SQLITE_PARAM_CHUNK_SIZE", 2)
+    statements = []
+    db.conn.set_trace_callback(statements.append)
+    got = db.get_workspace_visible_folder_ids([p, a, b, q, 999999])
+    db.conn.set_trace_callback(None)
+    assert got == {p, q}
+    assert len([s for s in statements if "FROM workspace_visible_folders" in s]) == 3
+
+
 # -- structure -------------------------------------------------------------------
 
 _MOVED_METHODS = [
@@ -1059,6 +1103,7 @@ _MOVED_METHODS = [
     "_prune_ws_nonroot_links_outside_roots",
     "workspace_unlinked_folder_count",
     "_photo_in_workspace",
+    "get_workspace_visible_folder_ids",
 ]
 
 

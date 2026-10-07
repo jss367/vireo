@@ -15,7 +15,10 @@ passed as a call argument is allowed. Anything else (``self.conn.execute``,
 transaction control on the façade and belongs in a repository, except in the
 connection-lifecycle methods listed below. The tests at the end pin the
 public transaction-control methods among them (``commit``, ``rollback``,
-``in_transaction``, ``begin_immediate``) to the connection calls they replace.
+``in_transaction``, ``begin_immediate``) to the connection calls they replace,
+and ``commit_with_retry`` (which only hands the connection to
+``db.commit_with_retry``, so the guard needs no exception for it) to that
+helper.
 """
 
 import ast
@@ -162,3 +165,41 @@ def test_begin_immediate_holds_the_writer_lock(db):
         db.begin_immediate()
     db.rollback()
     assert not db.in_transaction
+
+
+def test_commit_with_retry_commits_through_the_module_helper(db, monkeypatch):
+    import db as db_module
+
+    calls = []
+    real = db_module.commit_with_retry
+
+    def recording(conn, *args, **kwargs):
+        calls.append(conn)
+        return real(conn, *args, **kwargs)
+
+    monkeypatch.setattr(db_module, "commit_with_retry", recording)
+    _write(db, "a")
+    db.commit_with_retry()
+    assert calls == [db.conn]
+    assert not db.in_transaction
+    assert _committed_markers(db) == 1
+
+
+def test_commit_with_retry_retries_a_transient_lock(db, monkeypatch):
+    import db as db_module
+
+    attempts = []
+    real_commit = db.conn.commit
+
+    def flaky_commit():
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise sqlite3.OperationalError("database is locked")
+        real_commit()
+
+    monkeypatch.setattr(db_module.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(db.conn, "commit", flaky_commit)
+    _write(db, "a")
+    db.commit_with_retry()
+    assert len(attempts) == 2
+    assert _committed_markers(db) == 1

@@ -258,6 +258,78 @@ def test_get_photo_folder_statuses_dedupes_before_chunking(db, lib):
     assert len(_sql(statements, "SELECT p.id, f.status")) == 1
 
 
+def test_get_photo_with_folder_path(db, lib, tmp_path):
+    row = db.get_photo_with_folder_path(lib["c"])
+    assert row["filename"] == "c.jpg"
+    assert row["folder_path"] == str(tmp_path / "lib" / "c")
+    # The whole row, BLOB columns included, from any workspace.
+    assert "dino_global_embedding" in set(row.keys())
+    assert db.get_photo_with_folder_path(lib["f"])["filename"] == "f.jpg"
+    assert db.get_photo_with_folder_path(999999) is None
+
+
+def test_get_photo_flags_ratings_and_eyes(db, lib):
+    assert db.get_photo_flags_ratings_and_eyes([]) == {}
+    db.update_photo_flag(lib["b"], "flagged")
+    db.conn.execute(
+        "UPDATE photos SET rating = 3, eye_x = 0.25, eye_y = 0.5, eye_conf = 0.9,"
+        " eye_tenengrad = 12.0 WHERE id = ?",
+        (lib["a"],),
+    )
+    got = db.get_photo_flags_ratings_and_eyes([lib["a"], lib["b"], lib["f"], 999999])
+    assert sorted(got) == sorted([lib["a"], lib["b"], lib["f"]])
+    assert dict(got[lib["a"]]) == {
+        "id": lib["a"], "flag": "none", "rating": 3,
+        "eye_x": 0.25, "eye_y": 0.5, "eye_conf": 0.9, "eye_tenengrad": 12.0,
+    }
+    assert got[lib["b"]]["flag"] == "flagged"
+    assert got[lib["b"]]["eye_x"] is None
+
+
+def test_get_photo_flags_ratings_and_eyes_chunks(db, lib):
+    ids = [lib["a"]] + list(range(10**6, 10**6 + _SQLITE_PARAM_CHUNK_SIZE))
+    statements = _trace(db)
+    got = db.get_photo_flags_ratings_and_eyes(ids)
+    db.conn.set_trace_callback(None)
+    assert list(got) == [lib["a"]]
+    assert len(_sql(statements, "SELECT id, flag, rating")) == 2
+
+
+def test_get_workspace_photos_in_folders(db, lib):
+    assert db.get_workspace_photos_in_folders([]) == []
+    rows = db.get_workspace_photos_in_folders(
+        [lib["root"], lib["child"], lib["foreign"]],
+    )
+    got = {(r["id"], r["folder_id"], r["filename"]) for r in rows}
+    # The foreign folder's photo is in another workspace.
+    assert got == {
+        (lib["a"], lib["root"], "a.jpg"),
+        (lib["b"], lib["root"], "b.jpg"),
+        (lib["c"], lib["child"], "c.jpg"),
+    }
+    # A photo-only grant makes that one photo visible, not its siblings.
+    db.conn.execute(
+        "INSERT INTO workspace_photos (workspace_id, photo_id) VALUES (?, ?)",
+        (db.active_workspace_id, lib["f"]),
+    )
+    rows = db.get_workspace_photos_in_folders([lib["foreign"]])
+    assert [r["id"] for r in rows] == [lib["f"]]
+
+
+def test_get_workspace_photos_in_folders_without_workspace_is_empty(db, lib):
+    db.set_active_workspace(None)
+    assert db.get_workspace_photos_in_folders([lib["root"]]) == []
+
+
+def test_get_workspace_photos_in_folders_chunks(db, lib):
+    ids = [lib["root"]] + list(range(10**6, 10**6 + _SQLITE_PARAM_CHUNK_SIZE))
+    statements = _trace(db)
+    rows = db.get_workspace_photos_in_folders(ids)
+    db.conn.set_trace_callback(None)
+    assert sorted(r["id"] for r in rows) == sorted([lib["a"], lib["b"]])
+    assert len(_sql(statements, "JOIN photo_workspace_visibility pv")) == 2
+
+
 # -- counts ------------------------------------------------------------------
 
 
@@ -1033,6 +1105,8 @@ MOVED = [
     "count_filtered_photos", "get_browse_summary",
     "count_photos_with_companions", "resolve_photos_for_delete",
     "delete_photos", "update_photo_sharpness", "update_photo_quality",
+    "get_photo_with_folder_path", "get_photo_flags_ratings_and_eyes",
+    "get_workspace_photos_in_folders",
 ]
 
 

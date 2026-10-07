@@ -1244,6 +1244,22 @@ class KeywordRepository:
         ).fetchone()
         return row["name"] if row else None
 
+    def top_level_species_keyword(self, name):
+        """The top-level species keyword ``add_keyword(name, is_species=True)`` matches.
+
+        A row (``id``, ``name``) or None: a ``parent_id IS NULL`` taxonomy
+        or general keyword named ``name`` case-insensitively, taxonomy
+        first, then lowest id. Other types (individual, location, genre)
+        never match, so a homonym of another kind is not mistaken for the
+        species.
+        """
+        return self.conn.execute(
+            "SELECT id, name FROM keywords WHERE name = ? COLLATE NOCASE "
+            "AND parent_id IS NULL AND type IN ('taxonomy', 'general') "
+            "ORDER BY (type = 'taxonomy') DESC, id ASC LIMIT 1",
+            (name,),
+        ).fetchone()
+
     def get_for_photo(self, photo_id):
         """Return all keywords for a photo."""
         return self.conn.execute(

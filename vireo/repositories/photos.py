@@ -194,6 +194,53 @@ class PhotoRepository:
             result.update({row["id"]: row["status"] for row in rows})
         return result
 
+    def get_with_folder_path(self, photo_id):
+        """One photo's whole row plus its folder's ``folder_path``, or None.
+
+        ``SELECT p.*``, so the row carries the embedding BLOBs too.
+        """
+        return self.conn.execute(
+            """SELECT p.*, f.path as folder_path FROM photos p
+               JOIN folders f ON f.id = p.folder_id WHERE p.id = ?""",
+            (photo_id,),
+        ).fetchone()
+
+    def flags_ratings_and_eyes(self, photo_ids):
+        """``{photo_id: Row}`` with ``id``, ``flag``, ``rating`` and the eye fields.
+
+        The eye fields are ``eye_x``, ``eye_y``, ``eye_conf`` and
+        ``eye_tenengrad``. Ids with no photo row are absent.
+        """
+        result = {}
+        for chunk in self._chunks(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self.conn.execute(
+                f"""SELECT id, flag, rating,
+                           eye_x, eye_y, eye_conf, eye_tenengrad
+                      FROM photos WHERE id IN ({placeholders})""",
+                chunk,
+            ).fetchall()
+            result.update({r["id"]: r for r in rows})
+        return result
+
+    def in_workspace_folders(self, folder_ids, workspace_id):
+        """Rows (``id``, ``folder_id``, ``filename``) of the workspace's photos in ``folder_ids``.
+
+        Visibility is ``photo_workspace_visibility`` (folder links plus
+        photo-only grants). Rows come one ``IN`` chunk at a time, in the
+        order of ``folder_ids``' chunks; no ORDER BY within a chunk.
+        """
+        photos = []
+        for chunk in self._chunks(folder_ids):
+            marks = ",".join("?" for _ in chunk)
+            photos.extend(self.conn.execute(
+                f"SELECT p.id, p.folder_id, p.filename FROM photos p "
+                f"JOIN photo_workspace_visibility pv ON pv.photo_id = p.id "
+                f"WHERE p.folder_id IN ({marks}) AND pv.workspace_id = ?",
+                [*chunk, workspace_id],
+            ))
+        return photos
+
     def count(self):
         """Return the workspace's photo count, skipping missing folders."""
         return self.conn.execute(

@@ -914,6 +914,15 @@ class Database:
         """Roll back the open transaction."""
         self.conn.rollback()
 
+    def commit_with_retry(self):
+        """Commit like ``commit``, retrying while SQLite reports locked or busy.
+
+        ``db.commit_with_retry`` (the module function) on this connection:
+        transient "database is locked"/"busy" errors back off and retry, and
+        anything else, or the last retry's error, propagates.
+        """
+        commit_with_retry(self.conn)
+
     def begin_immediate(self):
         """Open a transaction that holds SQLite's writer lock from the start.
 
@@ -1123,6 +1132,17 @@ class Database:
         """Return True if the photo belongs to a folder visible in the active workspace."""
         return self._workspace_folder_repository().photo_in_workspace(
             photo_id, self._ws_id()
+        )
+
+    def get_workspace_visible_folder_ids(self, folder_ids):
+        """The subset of ``folder_ids`` the active workspace sees, as a set.
+
+        Visible means linked or holding a photo-only grant
+        (``workspace_visible_folders``). With no active workspace nothing
+        is visible.
+        """
+        return self._workspace_folder_repository().visible_ids(
+            self._active_workspace_id, folder_ids,
         )
 
     def _verify_photo_in_workspace(self, photo_id):
@@ -2055,6 +2075,9 @@ class Database:
         """
         return self._folder_repository(scoped=False).get(folder_id)
 
+    def get_folder_paths(self, folder_ids):
+        """``{folder_id: stored path}`` for the ids that exist, in any workspace."""
+        return self._folder_repository(scoped=False).paths_by_id(folder_ids)
     def check_folder_health(self):
         """Check all folders for existence on disk. Update status column.
 
@@ -3360,6 +3383,26 @@ class Database:
     def get_photo_folder_statuses(self, photo_ids):
         """Return ``{photo_id: folder_status}`` for the requested photos."""
         return self._photos_repository(scoped=False).get_folder_statuses(photo_ids)
+
+    def get_photo_with_folder_path(self, photo_id):
+        """One photo's whole row (``p.*``, BLOBs included) plus ``folder_path``, or None.
+
+        Not workspace-scoped: check the photo against the workspace first.
+        """
+        return self._photos_repository(scoped=False).get_with_folder_path(photo_id)
+
+    def get_photo_flags_ratings_and_eyes(self, photo_ids):
+        """``{photo_id: Row}`` with ``id``, ``flag``, ``rating``, ``eye_x``, ``eye_y``, ``eye_conf``, ``eye_tenengrad``."""
+        return self._photos_repository(scoped=False).flags_ratings_and_eyes(photo_ids)
+
+    def get_workspace_photos_in_folders(self, folder_ids):
+        """Rows (``id``, ``folder_id``, ``filename``) of the active workspace's photos in ``folder_ids``.
+
+        With no active workspace the list is empty.
+        """
+        return self._photos_repository(scoped=False).in_workspace_folders(
+            folder_ids, self._active_workspace_id,
+        )
 
     def count_photos(self):
         """Return photo count for the active workspace.
@@ -5061,6 +5104,18 @@ class Database:
             photo_id, variant,
         )
 
+    def get_workspace_photo_ids_with_mask_variant(self, variant):
+        """Ids of the active workspace's photos that have a ``variant`` mask row."""
+        return self._masks_features_repository().workspace_photo_ids_with_variant(
+            variant,
+        )
+
+    def get_photo_pipeline_features(self, photo_id):
+        """One photo's pipeline-feature columns, or None. Not workspace-scoped."""
+        return self._masks_features_repository(scoped=False).pipeline_feature_row(
+            photo_id,
+        )
+
     def list_masks_for_photo(self, photo_id):
         return self._masks_features_repository(
             scoped=False,
@@ -6347,6 +6402,14 @@ class Database:
     def get_keyword_name(self, keyword_id):
         """The stored name of one keyword, or None when the id is unknown."""
         return self._keyword_repository().name_of(keyword_id)
+
+    def get_top_level_species_keyword(self, name):
+        """The top-level keyword row (``id``, ``name``) ``add_keyword(name, is_species=True)`` matches, or None.
+
+        Taxonomy or general rows only, matched case-insensitively, taxonomy
+        first, then lowest id.
+        """
+        return self._keyword_repository().top_level_species_keyword(name)
 
     def get_photo_keywords(self, photo_id):
         """Return all keywords for a photo."""
@@ -7932,6 +7995,19 @@ class Database:
         """Rows (``prediction_id``, ``photo_id``, ``status``, ``is_superseded``) per named prediction."""
         return self._prediction_repository().statuses_with_supersession(prediction_ids)
 
+    def get_inspector_predictions_for_photo(self, photo_id, min_detector_confidence):
+        """The Pipeline inspector's prediction rows for one photo, best first.
+
+        Current-label-set predictions on real detections at or above
+        ``min_detector_confidence``, with the active workspace's review state
+        (``pending`` without a review row; none at all with no active
+        workspace). The stored taxonomy is raw: resolve it with
+        ``species_identity.resolved_prediction_taxonomy`` before showing it.
+        """
+        return self._prediction_repository().inspector_rows_for_photo(
+            photo_id, self._active_workspace_id, min_detector_confidence,
+        )
+
     def get_burst_group_members(self, group_id, classifier_model, exclude_id):
         """Rows (``id``, ``photo_id``, ``status``) for a burst group's other visible members."""
         return self._prediction_repository().burst_group_members(
@@ -8143,6 +8219,26 @@ class Database:
         caller, as the existing per-photo routes do before reaching here.
         """
         return self._model_runs_repository().get_match_scores_for_photo(photo_id)
+
+    def get_current_prediction_detector_confidences(self, photo_id, *, full_image):
+        """Rows (``id``, ``detector_confidence``) of a photo's current-label-set predictions.
+
+        ``full_image=True`` reads the full-image pseudo-detection's, otherwise
+        every real detection's regardless of threshold. Not workspace-scoped.
+        """
+        return self._model_runs_repository().current_prediction_detector_confidences(
+            photo_id, full_image=full_image,
+        )
+
+    def get_classifier_runs_for_photo(self, photo_id, *, full_image):
+        """Rows (``prediction_count``, ``detector_confidence``) of a photo's classifier runs.
+
+        ``full_image=True`` reads the full-image pseudo-detection's runs,
+        otherwise every real detection's regardless of threshold.
+        """
+        return self._model_runs_repository().classifier_runs_for_photo(
+            photo_id, full_image=full_image,
+        )
 
     def get_classifier_run_keys(self, detection_id, runtime_fingerprint=None):
         return self._model_runs_repository().get_classifier_run_keys(
