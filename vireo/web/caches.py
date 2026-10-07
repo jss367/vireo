@@ -186,17 +186,11 @@ def create_caches_blueprint(get_db, json_error, db_path, config):
         Returns 0 when the photos table is empty (avoids a "recommended
         0 MB" surprise on a fresh install).
         """
-        photo_count = db.conn.execute(
-            "SELECT COUNT(*) FROM photos"
-        ).fetchone()[0]
+        photo_count = db.count_catalog_photos()
         if not photo_count:
             return 0
-        avg_row = db.conn.execute(
-            "SELECT AVG(bytes) AS a FROM ("
-            "SELECT bytes FROM preview_cache UNION ALL "
-            "SELECT bytes FROM paired_preview_cache) WHERE bytes > 0"
-        ).fetchone()
-        avg_bytes = (avg_row["a"] if avg_row and avg_row["a"] else 500 * 1024)
+        avg = db.preview_cache_average_bytes()
+        avg_bytes = avg if avg else 500 * 1024
         recommended_bytes = photo_count * avg_bytes
         return max(1, int(recommended_bytes / 1024 / 1024) + 1)
 
@@ -205,14 +199,11 @@ def create_caches_blueprint(get_db, json_error, db_path, config):
         """Return counts and totals for both preview cache families, plus quota."""
         import config as cfg
         db = get_db()
-        count_row = db.conn.execute(
-            "SELECT (SELECT COUNT(*) FROM preview_cache) + "
-            "(SELECT COUNT(*) FROM paired_preview_cache) AS c"
-        ).fetchone()
+        count = db.preview_cache_entry_count()
         total = db.preview_cache_total_bytes()
         quota_mb = cfg.load().get("preview_cache_max_mb", 20480)
         return jsonify({
-            "count": count_row["c"],
+            "count": count,
             "total_size": total,
             "quota_bytes": int(quota_mb) * 1024 * 1024,
             "recommended_mb": _recommended_preview_cache_mb(db),
@@ -235,11 +226,7 @@ def create_caches_blueprint(get_db, json_error, db_path, config):
         vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
         preview_dir = os.path.join(vireo_dir, "previews")
 
-        count_row = db.conn.execute(
-            "SELECT (SELECT COUNT(*) FROM preview_cache) + "
-            "(SELECT COUNT(*) FROM paired_preview_cache) AS c"
-        ).fetchone()
-        tracked = count_row["c"]
+        tracked = db.preview_cache_entry_count()
         paired_rows = db.paired_preview_cache_oldest_first()
 
         # Matches {id}.jpg (legacy /full cache) and {id}_{size}.jpg (current).
@@ -259,32 +246,10 @@ def create_caches_blueprint(get_db, json_error, db_path, config):
                     if m:
                         failed_tracked.append((int(m.group(1)), int(m.group(2))))
 
-        if failed_tracked:
-            # Stage failed keys in a temp table so the DELETE isn't a giant
-            # NOT IN clause that blows past SQLite's default variable limit
-            # (~999) with a few hundred unlinkable files. Insert in chunks
-            # of 400 pairs (800 bind parameters) for the same reason.
-            db.conn.execute(
-                "CREATE TEMP TABLE _pc_failed (photo_id INTEGER, size INTEGER)"
-            )
-            try:
-                CHUNK = 400
-                for i in range(0, len(failed_tracked), CHUNK):
-                    batch = failed_tracked[i:i + CHUNK]
-                    placeholders = ",".join(["(?,?)"] * len(batch))
-                    flat = [v for pair in batch for v in pair]
-                    db.conn.execute(
-                        f"INSERT INTO _pc_failed (photo_id, size) VALUES {placeholders}",
-                        flat,
-                    )
-                db.conn.execute(
-                    "DELETE FROM preview_cache WHERE (photo_id, size) NOT IN "
-                    "(SELECT photo_id, size FROM _pc_failed)"
-                )
-            finally:
-                db.conn.execute("DROP TABLE _pc_failed")
-        else:
-            db.conn.execute("DELETE FROM preview_cache")
+        # Drop every ordinary row except the ones whose file couldn't be
+        # unlinked. Uncommitted here: preview_cache_delete_entries below
+        # commits it with the paired rows.
+        db.preview_cache_delete_all_except(failed_tracked)
 
         # Paired previews live under their own source-state filenames, but
         # the Clear Preview Cache control covers the shared disk budget.
@@ -309,10 +274,7 @@ def create_caches_blueprint(get_db, json_error, db_path, config):
              if row["filename"] not in failed_paired],
         )
 
-        remaining = db.conn.execute(
-            "SELECT (SELECT COUNT(*) FROM preview_cache) + "
-            "(SELECT COUNT(*) FROM paired_preview_cache) AS c"
-        ).fetchone()["c"]
+        remaining = db.preview_cache_entry_count()
         cleared = tracked - remaining
 
         return jsonify({
@@ -436,7 +398,7 @@ def create_caches_blueprint(get_db, json_error, db_path, config):
                 db.queue_flag_change_if_enabled(
                     item["photo_id"], item["new_value"], _commit=False
                 )
-            db.conn.commit()
+            db.commit()
             summary = f'Culling: flagged {len(keepers)}, rejected {len(rejects)}'
             if cleared:
                 summary += f', cleared {len(cleared)}'

@@ -18,7 +18,6 @@ import sys
 
 from flask import Blueprint, jsonify, request
 from proc import no_window_kwargs
-from sql_chunks import chunked
 from working_copy_cache import working_copy_stats
 
 log = logging.getLogger(__name__)
@@ -99,9 +98,7 @@ def create_storage_blueprint(get_db, json_error, db_path, config):
         models_size = _dir_size_recursive(DEFAULT_MODELS_DIR)
         db = get_db()
         offline_size = db.offline_original_total_bytes()
-        offline_count_row = db.conn.execute(
-            "SELECT COUNT(*) AS c FROM offline_originals WHERE status='cached'"
-        ).fetchone()
+        offline_count = db.offline_original_cached_count()
         masks = _storage_masks_data(db)
         masks_size = masks["total_bytes"]
         storage_root = os.path.dirname(config["THUMB_CACHE_DIR"])
@@ -328,7 +325,7 @@ def create_storage_blueprint(get_db, json_error, db_path, config):
                 "models": {"size": models_size, "path": DEFAULT_MODELS_DIR},
                 "hf_cache": {"size": hf_size, "path": hf_cache, "models": hf_models},
                 "offline_originals": {
-                    "count": offline_count_row["c"],
+                    "count": offline_count,
                     "size": offline_size,
                     "path": os.path.join(os.path.dirname(config["THUMB_CACHE_DIR"]), "offline"),
                 },
@@ -500,11 +497,7 @@ def create_storage_blueprint(get_db, json_error, db_path, config):
             # report "Already done" even though the next run would
             # regenerate every thumbnail.
             db = get_db()
-            db.conn.execute(
-                "UPDATE photos SET thumb_path = NULL "
-                "WHERE thumb_path IS NOT NULL"
-            )
-            db.conn.commit()
+            db.clear_all_photo_thumb_paths()
             return jsonify({"ok": True})
         elif cache_type == "embeddings":
             from classifier import CACHE_DIR
@@ -637,20 +630,13 @@ def create_storage_blueprint(get_db, json_error, db_path, config):
         if cache_type == "previews" and preview_rows_removed:
             log.info("Removed %d preview_cache rows alongside files", preview_rows_removed)
         if cache_type == "thumbnails" and thumb_ids_cleared:
-            # Chunk the IN-list under SQLite's SQLITE_MAX_VARIABLE_NUMBER cap
-            # (999 on older builds). The storage UI's "delete selected" can
-            # send thousands of files at once; a single statement with one
-            # bind per id would raise OperationalError after the files have
-            # already been removed, leaving photos.thumb_path out of sync
-            # with disk.
-            for chunk in chunked(thumb_ids_cleared):
-                placeholders = ",".join("?" for _ in chunk)
-                db.conn.execute(
-                    f"UPDATE photos SET thumb_path = NULL "
-                    f"WHERE id IN ({placeholders})",
-                    chunk,
-                )
-            db.conn.commit()
+            # The write is chunked under SQLite's SQLITE_MAX_VARIABLE_NUMBER
+            # cap (999 on older builds). The storage UI's "delete selected"
+            # can send thousands of files at once; a single statement with
+            # one bind per id would raise OperationalError after the files
+            # have already been removed, leaving photos.thumb_path out of
+            # sync with disk.
+            db.clear_photo_thumb_paths(thumb_ids_cleared)
             log.info(
                 "Cleared photos.thumb_path for %d photos alongside files",
                 len(thumb_ids_cleared),

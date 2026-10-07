@@ -129,6 +129,48 @@ class EditHistoryRepository:
         ).fetchall()
         return entry, items
 
+    def latest_undoable(self, non_undoable):
+        """``id`` and ``description`` of the newest undoable edit, or None."""
+        placeholders = ",".join("?" for _ in non_undoable)
+        return self.conn.execute(
+            f"SELECT id, description FROM edit_history WHERE workspace_id = ? AND undone = 0 AND action_type NOT IN ({placeholders}) "
+            "ORDER BY created_at DESC, id DESC LIMIT 1",
+            (self.workspace_id, *non_undoable),
+        ).fetchone()
+
+    def count_undoable(self, non_undoable):
+        """How many edits are undoable (not undone, not a non-undoable type)."""
+        placeholders = ",".join("?" for _ in non_undoable)
+        return self.conn.execute(
+            f"SELECT COUNT(*) FROM edit_history WHERE workspace_id = ? AND undone = 0 AND action_type NOT IN ({placeholders})",
+            (self.workspace_id, *non_undoable),
+        ).fetchone()[0]
+
+    def oldest_redoable(self, non_undoable):
+        """``id`` and ``description`` of the edit redo would replay next, or None."""
+        placeholders = ",".join("?" for _ in non_undoable)
+        return self.conn.execute(
+            f"SELECT id, description FROM edit_history WHERE workspace_id = ? AND undone = 1 AND action_type NOT IN ({placeholders}) "
+            "ORDER BY created_at ASC, id ASC LIMIT 1",
+            (self.workspace_id, *non_undoable),
+        ).fetchone()
+
+    def item_photo_ids(self, edit_id, *, distinct=False):
+        """The ``photo_id`` of each of an edit's items; ``distinct=True`` drops repeats."""
+        sql = (
+            "SELECT DISTINCT photo_id FROM edit_history_items WHERE edit_id = ?"
+            if distinct else
+            "SELECT photo_id FROM edit_history_items WHERE edit_id = ?"
+        )
+        return [row["photo_id"] for row in self.conn.execute(sql, (edit_id,))]
+
+    def has_changed_items(self, edit_id):
+        """Whether any of an edit's items has ``old_value != new_value``."""
+        return self.conn.execute(
+            "SELECT 1 FROM edit_history_items WHERE edit_id = ? AND old_value != new_value LIMIT 1",
+            (edit_id,),
+        ).fetchone() is not None
+
     def mark_undone(self, entry_id):
         """Flag an entry as undone and commit."""
         self.conn.execute("UPDATE edit_history SET undone = 1 WHERE id = ?", (entry_id,))

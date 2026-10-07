@@ -917,6 +917,69 @@ def test_backfill_marker_makes_second_open_a_noop(db, folder):
         db2.close()
 
 
+# -- route reads: live twins, loser candidates, the cleanup summary -------------
+
+
+def _orphan_folder(db, photo_id):
+    """Point a photo at a folder row that doesn't exist."""
+    db.conn.execute("PRAGMA foreign_keys = OFF")
+    db.conn.execute("UPDATE photos SET folder_id = 987654 WHERE id = ?", (photo_id,))
+    db.conn.commit()
+    db.conn.execute("PRAGMA foreign_keys = ON")
+
+
+def test_get_live_duplicate_photo_ids_and_paths(db, folder):
+    fid, path = folder
+    kept = _photo(db, fid, "a.jpg", "H")
+    picked = _photo(db, fid, "b.jpg", "H", flag="flagged")
+    null_flag = _photo(db, fid, "c.jpg", "H")
+    db.conn.execute("UPDATE photos SET flag = NULL WHERE id = ?", (null_flag,))
+    db.conn.commit()
+    _photo(db, fid, "d.jpg", "H", flag="rejected")
+    _photo(db, fid, "e.jpg", "OTHER")
+    assert sorted(db.get_live_duplicate_photo_ids("H")) == sorted([kept, picked, null_flag])
+    assert db.get_live_duplicate_photo_ids("NONE") == []
+
+    _orphan_folder(db, picked)
+    rows = db.get_live_duplicate_paths("H")
+    assert sorted(tuple(r) for r in rows) == [("a.jpg", path), ("c.jpg", path)]
+    assert db.get_live_duplicate_paths("NONE") == []
+
+
+def test_get_duplicate_loser_candidates_reads_named_rows_in_chunks_of_900(db, folder):
+    fid, path = folder
+    loser = _photo(db, fid, "a.jpg", "H", flag="rejected")
+    homeless = _photo(db, fid, "b.jpg", None)
+    _photo(db, fid, "c.jpg", "H")
+    _orphan_folder(db, homeless)
+    statements = []
+    db.conn.set_trace_callback(statements.append)
+    rows = db.get_duplicate_loser_candidates(
+        [loser] + list(range(100_000, 100_899)) + [homeless]
+    )
+    db.conn.set_trace_callback(None)
+    assert len([s for s in statements if "AS folder_path" in s]) == 2
+    assert set(rows) == {loser, homeless}
+    assert tuple(rows[loser]) == (loser, "rejected", "H", "a.jpg", path)
+    assert tuple(rows[homeless]) == (homeless, "none", None, "b.jpg", None)
+
+
+def test_get_duplicate_loser_disk_summary(db, folder):
+    fid, _ = folder
+    assert tuple(db.get_duplicate_loser_disk_summary()) == (0, 0)
+    _photo(db, fid, "keep.jpg", "H")
+    loser1 = _photo(db, fid, "l1.jpg", "H", flag="rejected")
+    loser2 = _photo(db, fid, "l2.jpg", "H", flag="rejected")
+    # Rejected with no live twin, and rejected with no hash: not losers.
+    _photo(db, fid, "lone.jpg", "SOLO", flag="rejected")
+    _photo(db, fid, "nohash.jpg", None, flag="rejected")
+    db.conn.execute("UPDATE photos SET file_size = 40 WHERE id = ?", (loser1,))
+    db.conn.execute("UPDATE photos SET file_size = NULL WHERE id = ?", (loser2,))
+    db.conn.commit()
+    row = db.get_duplicate_loser_disk_summary()
+    assert (row["n"], row["total_bytes"]) == (2, 40)
+
+
 # -- structure: the SQL lives in DuplicatesRepository ---------------------------
 #
 # ``_apply_winner_loser_merge`` keeps its provenance fold (keyword_source_max)
@@ -932,6 +995,10 @@ DUPLICATE_METHODS = [
     "_apply_winner_loser_merge",
     "bulk_resolve_by_folder",
     "reopen_duplicate_group",
+    "get_live_duplicate_photo_ids",
+    "get_live_duplicate_paths",
+    "get_duplicate_loser_candidates",
+    "get_duplicate_loser_disk_summary",
 ]
 
 

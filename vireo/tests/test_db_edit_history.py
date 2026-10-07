@@ -1194,6 +1194,74 @@ def test_edit_prediction_ids(db, meta, fallback, ids):
     assert db._edit_prediction_id(meta, fallback) == (ids[0] if ids else None)
 
 
+# -- undo/redo status and item reads -------------------------------------
+
+
+def test_undo_and_redo_summaries_skip_non_undoable_and_other_workspaces(db, pids):
+    assert db.get_next_undo_summary() is None
+    assert db.count_undoable_edits() == 0
+    assert db.get_next_redo_summary() is None
+    other = db.create_workspace("Other")
+    old = _raw_edit(db, "rating", description="old", created_at="2020-01-01 00:00:00")
+    new = _raw_edit(db, "flag", description="new", created_at="2020-01-02 00:00:00")
+    _raw_edit(db, "discard", description="skip", created_at="2020-01-03 00:00:00")
+    _raw_edit(db, "rating", description="theirs", workspace_id=other,
+              created_at="2020-01-04 00:00:00")
+    _raw_edit(db, "rating", description="undone-late", undone=1,
+              created_at="2020-01-06 00:00:00")
+    early_undone = _raw_edit(db, "rating", description="undone-early", undone=1,
+                             created_at="2020-01-05 00:00:00")
+    _raw_edit(db, "location_set", description="skip-redo", undone=1,
+              created_at="2020-01-01 00:00:00")
+    assert tuple(db.get_next_undo_summary()) == (new, "new")
+    assert db.count_undoable_edits() == 2
+    assert tuple(db.get_next_redo_summary()) == (early_undone, "undone-early")
+    assert old != new
+
+
+def test_undo_summary_breaks_created_at_ties_by_id(db, pids):
+    first = _raw_edit(db, "rating", description="a", created_at="2020-01-01 00:00:00")
+    second = _raw_edit(db, "rating", description="b", created_at="2020-01-01 00:00:00")
+    assert db.get_next_undo_summary()["id"] == second
+    db.conn.execute("UPDATE edit_history SET undone = 1")
+    db.conn.commit()
+    assert db.get_next_redo_summary()["id"] == first
+
+
+def test_undo_and_redo_summaries_require_a_workspace(db, pids):
+    db.set_active_workspace(None)
+    for read in (db.get_next_undo_summary, db.count_undoable_edits,
+                 db.get_next_redo_summary):
+        with pytest.raises(RuntimeError, match="No active workspace"):
+            read()
+
+
+def test_get_edit_item_photo_ids_keeps_order_and_repeats(db, pids):
+    edit = _raw_edit(db, "keyword_add", items=[
+        (pids[1], "", "1"), (pids[0], "", "1"), (pids[1], "", "2"),
+    ])
+    assert db.get_edit_item_photo_ids(edit) == [pids[1], pids[0], pids[1]]
+    assert sorted(db.get_edit_item_photo_ids(edit, distinct=True)) == sorted(pids[:2])
+    assert db.get_edit_item_photo_ids(987_654) == []
+    # Item reads are id-keyed: no active workspace needed.
+    db.set_active_workspace(None)
+    assert len(db.get_edit_item_photo_ids(edit)) == 3
+
+
+def test_edit_has_changed_items(db, pids):
+    same = _raw_edit(db, "flag", items=[(pids[0], "flagged", "flagged")])
+    changed = _raw_edit(db, "flag", items=[
+        (pids[0], "none", "none"), (pids[1], "none", "flagged"),
+    ])
+    null_old = _raw_edit(db, "flag", items=[(pids[2], None, "flagged")])
+    assert db.edit_has_changed_items(same) is False
+    assert db.edit_has_changed_items(changed) is True
+    # ``NULL != value`` is NULL in SQL, so a NULL old value never counts.
+    assert db.edit_has_changed_items(null_old) is False
+    db.set_active_workspace(None)
+    assert db.edit_has_changed_items(changed) is True
+
+
 # -- structure ------------------------------------------------------------
 
 _DELEGATING = (
@@ -1203,6 +1271,8 @@ _DELEGATING = (
     "_undo_keyword_add", "_undo_prediction_accept_statuses",
     "_redo_prediction_accept_statuses", "_restore_relabel_curation",
     "_reapply_relabel_curation", "_prune_edit_history",
+    "get_next_undo_summary", "count_undoable_edits", "get_next_redo_summary",
+    "get_edit_item_photo_ids", "edit_has_changed_items",
 )
 
 _DOMAIN = _DELEGATING + (

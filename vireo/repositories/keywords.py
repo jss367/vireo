@@ -1279,6 +1279,38 @@ class KeywordRepository:
             tagged.update(row["photo_id"] for row in rows)
         return tagged
 
+    def photo_associations_by_name(self, photo_id, name):
+        """A photo's keyword associations whose keyword is named ``name``.
+
+        Matched case-insensitively, so homonyms under different parents all
+        come back. Each row is ``keyword_id``, ``source`` and
+        ``has_exact_history`` (1 when a live ``keyword_add`` history item
+        recorded this photo gaining this exact keyword id, else 0).
+        """
+        return self.conn.execute(
+            """SELECT pk.keyword_id, pk.source,
+                      EXISTS (
+                          SELECT 1
+                          FROM edit_history_items item
+                          JOIN edit_history edit ON edit.id = item.edit_id
+                          WHERE item.photo_id = pk.photo_id
+                            AND edit.action_type = 'keyword_add'
+                            AND edit.undone = 0
+                            AND item.new_value = CAST(pk.keyword_id AS TEXT)
+                      ) AS has_exact_history
+               FROM photo_keywords pk
+               JOIN keywords k ON k.id = pk.keyword_id
+               WHERE pk.photo_id = ?
+                 AND k.name = ? COLLATE NOCASE""",
+            (photo_id, name),
+        ).fetchall()
+
+    def parent_rows(self):
+        """Every keyword's ``id``, ``name`` and ``parent_id`` (for ``keyword_paths``)."""
+        return self.conn.execute(
+            'SELECT id, name, parent_id FROM keywords'
+        ).fetchall()
+
     def species_rank_keywords_for_photo(self, photo_id):
         """A photo's species-rank identification keywords.
 

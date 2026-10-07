@@ -3188,6 +3188,25 @@ class Database:
             include_resolved=include_resolved,
         )
 
+    def get_live_duplicate_photo_ids(self, file_hash):
+        """Ids of the non-rejected photos with ``file_hash``."""
+        return self._duplicates_repository().live_ids_for_hash(file_hash)
+
+    def get_live_duplicate_paths(self, file_hash):
+        """Rows (``filename``, ``path``) of the non-rejected photos with
+        ``file_hash`` whose folder row exists."""
+        return self._duplicates_repository().live_paths_for_hash(file_hash)
+
+    def get_duplicate_loser_candidates(self, photo_ids):
+        """``{photo_id: row}`` (``id``, ``flag``, ``file_hash``, ``filename``,
+        ``folder_path``) for the named photos that exist."""
+        return self._duplicates_repository().loser_candidate_rows(photo_ids)
+
+    def get_duplicate_loser_disk_summary(self):
+        """Row (``n``, ``total_bytes``) over rejected photos whose hash a
+        non-rejected photo shares."""
+        return self._duplicates_repository().loser_disk_summary()
+
     def is_duplicate_group_member(self, photo_id):
         """Whether ``photo_id`` shares its ``file_hash`` with another photo
         (rejected rows included). Catalog-wide, like the duplicate scan."""
@@ -3468,6 +3487,10 @@ class Database:
         only the volume is offline.
         """
         return self._photos_repository().count_in_workspace()
+
+    def count_catalog_photos(self):
+        """Return the number of photos in the catalog, across every workspace."""
+        return self._photos_repository(scoped=False).count_all()
 
     def count_folders(self):
         """Return folder count for the active workspace."""
@@ -4605,6 +4628,17 @@ class Database:
         leaves = self._get_photo_location_leaves(photo_ids)
         return self._location_repository().get_photo_paths(leaves)
 
+    def get_first_linked_location_keywords(self, photo_ids):
+        """``{photo_id: row}``: each photo's first-linked location keyword.
+
+        "First" is the lowest ``photo_keywords`` rowid (the single-photo
+        location summary's choice), not the effective leaf
+        :meth:`get_photo_location_paths` picks. Rows carry ``photo_id``,
+        ``id``, ``name``, ``place_id``, ``latitude``, ``longitude`` and
+        ``parent_id``; photos with no location keyword are absent.
+        """
+        return self._location_repository().get_first_linked_leaves(photo_ids)
+
     def has_pending_location_change(self, photo_id):
         """Return whether a ``location`` change is queued for ``photo_id``.
 
@@ -5071,6 +5105,19 @@ class Database:
         """Delete a preview_cache entry (caller removes the file)."""
         self._caches_repository().preview_delete(photo_id, size)
 
+    def preview_cache_entry_count(self):
+        """Number of tracked ordinary plus paired preview entries."""
+        return self._caches_repository().preview_entry_count()
+
+    def preview_cache_average_bytes(self):
+        """Mean size of the non-empty ordinary and paired preview entries, or None."""
+        return self._caches_repository().preview_average_bytes()
+
+    def preview_cache_delete_all_except(self, keep_keys):
+        """Delete every ordinary preview entry except the ``(photo_id, size)``
+        pairs in ``keep_keys``. Does not commit."""
+        self._caches_repository().preview_delete_all_except(keep_keys)
+
     def preview_cache_total_bytes(self):
         """Return total bytes tracked across ordinary and paired previews."""
         return self._caches_repository().preview_total_bytes()
@@ -5154,6 +5201,10 @@ class Database:
     def offline_original_total_bytes(self):
         return self._caches_repository().offline_original_total_bytes()
 
+    def offline_original_cached_count(self):
+        """Number of offline originals with ``status='cached'``."""
+        return self._caches_repository().offline_original_cached_count()
+
     def update_photo_sharpness(self, photo_id, sharpness):
         """Set photo sharpness score."""
         self._photos_repository(scoped=False).update_sharpness(photo_id, sharpness)
@@ -5196,6 +5247,14 @@ class Database:
     def set_photo_thumb_path(self, photo_id, thumb_path):
         """Store the photo's thumbnail filename (``photos.thumb_path``) and commit."""
         self._photos_repository(scoped=False).set_thumb_path(photo_id, thumb_path)
+
+    def clear_all_photo_thumb_paths(self):
+        """Set every photo's ``thumb_path`` to NULL and commit."""
+        self._photos_repository(scoped=False).clear_all_thumb_paths()
+
+    def clear_photo_thumb_paths(self, photo_ids):
+        """Set ``thumb_path`` to NULL for ``photo_ids`` and commit once."""
+        self._photos_repository(scoped=False).clear_thumb_paths(photo_ids)
 
     def _masks_features_repository(self, *, scoped=True):
         """Build the masks/features repository on this connection.
@@ -6550,6 +6609,15 @@ class Database:
     def get_photo_ids_with_keyword(self, keyword_id, photo_ids):
         """The set of ``photo_ids`` that carry ``keyword_id``."""
         return self._keyword_repository().photo_ids_tagged_with(keyword_id, photo_ids)
+
+    def get_photo_keyword_associations_by_name(self, photo_id, name):
+        """Rows (``keyword_id``, ``source``, ``has_exact_history``) of a photo's
+        keywords named ``name``, matched case-insensitively."""
+        return self._keyword_repository().photo_associations_by_name(photo_id, name)
+
+    def get_keyword_parent_rows(self):
+        """Every keyword's ``id``, ``name`` and ``parent_id``."""
+        return self._keyword_repository().parent_rows()
 
     def get_species_rank_keywords_for_photo(self, photo_id):
         """Rows (``id``, ``name``, ``is_species``, ``type``) of a photo's
@@ -9051,6 +9119,36 @@ class Database:
         """Return all pending changes ordered by creation time."""
         return self._sync_repository().list_all()
 
+    def get_pending_changes_for_review(self, workspace_id):
+        """``workspace_id``'s pending changes, oldest first, each with the
+        photo's ``filename``, ``folder_id`` and ``folder_path``."""
+        return self._sync_repository().list_for_review(workspace_id)
+
+    def get_pending_change_counts(self):
+        """The active workspace's queue totals and per-type counts in one read.
+
+        The first row has ``change_type`` NULL, ``changes`` the queue length
+        and ``photos`` the distinct photo count; each later row is one
+        ``change_type`` with its ``changes`` count.
+        """
+        return self._sync_repository().status_counts()
+
+    def count_photos_with_queued_location_change(self):
+        """Photos in the active workspace's queue with a ``location`` change
+        that carry a location keyword."""
+        return self._sync_repository().count_queued_location_photos()
+
+    def get_pending_changes_by_ids(self, change_ids):
+        """The active workspace's pending rows among ``change_ids``."""
+        return self._sync_repository().get_by_ids(change_ids)
+
+    def delete_workspace_pending_changes(self, workspace_id):
+        """Delete every pending change in ``workspace_id`` and return the rows.
+
+        Does not commit; the caller owns the transaction.
+        """
+        return self._sync_repository().delete_workspace(workspace_id)
+
     def claim_pending_changes_for_sync(self, changes):
         """Mark selected edits as possibly written and return surviving rows.
 
@@ -9312,6 +9410,28 @@ class Database:
         ``RuntimeError`` when no workspace is active.
         """
         return self._edit_history_repository().recipe_history_for_photo(photo_id, limit)
+
+    def get_next_undo_summary(self):
+        """``id`` and ``description`` of the edit undo would reverse next, or None."""
+        return self._edit_history_repository().latest_undoable(self._NON_UNDOABLE)
+
+    def count_undoable_edits(self):
+        """How many of the active workspace's edits undo can still reverse."""
+        return self._edit_history_repository().count_undoable(self._NON_UNDOABLE)
+
+    def get_next_redo_summary(self):
+        """``id`` and ``description`` of the edit redo would replay next, or None."""
+        return self._edit_history_repository().oldest_redoable(self._NON_UNDOABLE)
+
+    def get_edit_item_photo_ids(self, edit_id, *, distinct=False):
+        """The ``photo_id`` of each of an edit's items; ``distinct=True`` drops repeats."""
+        return self._edit_history_repository(scoped=False).item_photo_ids(
+            edit_id, distinct=distinct,
+        )
+
+    def edit_has_changed_items(self, edit_id):
+        """Whether any of an edit's items changed its value."""
+        return self._edit_history_repository(scoped=False).has_changed_items(edit_id)
 
     # Action types that appear in history but cannot be reversed
     _NON_UNDOABLE = (
@@ -11089,6 +11209,21 @@ class Database:
         from repositories.inat import InatRepository
 
         return InatRepository(self.conn, chunk_size=_SQLITE_PARAM_CHUNK_SIZE)
+
+    # -- Job history (read-only; ``JobRunner`` owns the table) --
+
+    def _job_history_repository(self):
+        """Build the (catalog-wide) read-only job-history repository on this connection."""
+        from repositories.job_history import JobHistoryRepository
+
+        return JobHistoryRepository(self.conn)
+
+    def get_last_completed_job(self, job_type):
+        """Newest completed ``job_type`` job that stored a result, or None.
+
+        A row (``id``, ``started_at``, ``finished_at``, raw ``result`` JSON).
+        """
+        return self._job_history_repository().last_completed_with_result(job_type)
 
     # -- Pending NAS transfers --
 

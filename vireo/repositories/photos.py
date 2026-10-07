@@ -20,6 +20,7 @@ import os
 
 from repositories.photo_row_deletion import photo_row_deletion
 from repositories.top_species import TOP_SPECIES_RANKING_SQL
+from sql_chunks import chunked
 
 
 class PhotoRepository:
@@ -309,6 +310,10 @@ class PhotoRepository:
                WHERE wf.workspace_id = ?""",
             (self.workspace_id,),
         ).fetchone()[0]
+
+    def count_all(self):
+        """Return the number of photo rows in the catalog, every workspace's."""
+        return self.conn.execute("SELECT COUNT(*) FROM photos").fetchone()[0]
 
     def by_paths(self, paths):
         """Return {abs_path: photo_id} for any of ``paths`` already in DB."""
@@ -1218,4 +1223,26 @@ class PhotoRepository:
             "UPDATE photos SET thumb_path=? WHERE id=?",
             (thumb_path, photo_id),
         )
+        self.conn.commit()
+
+    def clear_all_thumb_paths(self):
+        """Set every photo's ``thumb_path`` to NULL and commit."""
+        self.conn.execute(
+            "UPDATE photos SET thumb_path = NULL "
+            "WHERE thumb_path IS NOT NULL"
+        )
+        self.conn.commit()
+
+    def clear_thumb_paths(self, photo_ids):
+        """Set ``thumb_path`` to NULL for ``photo_ids`` and commit once.
+
+        Chunked with ``sql_chunks.chunked`` (900 ids per statement).
+        """
+        for chunk in chunked(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            self.conn.execute(
+                f"UPDATE photos SET thumb_path = NULL "
+                f"WHERE id IN ({placeholders})",
+                chunk,
+            )
         self.conn.commit()

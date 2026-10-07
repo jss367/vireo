@@ -499,6 +499,80 @@ def test_preview_cache_clear_all_empties_both_families_and_commits(db):
     assert _preview_state(db) == (set(), set())
 
 
+def test_preview_cache_entry_count_spans_both_families(db):
+    assert db.preview_cache_entry_count() == 0
+    _seed_both_preview_families(db)
+    assert db.preview_cache_entry_count() == 4
+
+
+def test_preview_cache_average_bytes_skips_empty_entries(db):
+    assert db.preview_cache_average_bytes() is None
+    pid = _photo(db)
+    db.preview_cache_insert(pid, 1920, 0)
+    assert db.preview_cache_average_bytes() is None
+    db.preview_cache_insert(pid, 2560, 10)
+    db.paired_preview_cache_insert(pid, "a.jpg", 30)
+    db.conn.commit()
+    assert db.preview_cache_average_bytes() == 20
+
+
+def _temp_tables(db):
+    return {
+        row[0] for row in db.conn.execute(
+            "SELECT name FROM sqlite_temp_master WHERE type = 'table'"
+        )
+    }
+
+
+def test_preview_cache_delete_all_except_keeps_named_rows_uncommitted(db):
+    pid = _seed_both_preview_families(db)
+    statements = []
+    db.conn.set_trace_callback(statements.append)
+    # 401 kept keys, most of them for rows that don't exist: two staging inserts.
+    keep = [(pid, 1920)] + [(10_000 + i, 1) for i in range(400)]
+    db.preview_cache_delete_all_except(keep)
+    db.conn.set_trace_callback(None)
+
+    assert db.conn.in_transaction
+    assert len([s for s in statements if s.startswith("INSERT INTO _pc_failed")]) == 2
+    assert "_pc_failed" not in _temp_tables(db)
+    rows = {(r["photo_id"], r["size"]) for r in db.conn.execute("SELECT * FROM preview_cache")}
+    assert rows == {(pid, 1920)}
+    assert db.conn.execute("SELECT COUNT(*) FROM paired_preview_cache").fetchone()[0] == 2
+    db.conn.commit()
+    assert _preview_state(db) == ({(pid, 1920)}, {"a.jpg", "b.jpg"})
+
+
+def test_preview_cache_delete_all_except_nothing_kept_deletes_every_ordinary_row(db):
+    _seed_both_preview_families(db)
+    statements = []
+    db.conn.set_trace_callback(statements.append)
+    db.preview_cache_delete_all_except([])
+    db.conn.set_trace_callback(None)
+    assert not any("_pc_failed" in s for s in statements)
+    assert db.conn.in_transaction
+    db.conn.commit()
+    assert _preview_state(db) == (set(), {"a.jpg", "b.jpg"})
+
+
+def test_preview_cache_delete_all_except_drops_the_temp_table_on_error(db):
+    pid = _seed_both_preview_families(db)
+    with pytest.raises(sqlite3.Error):
+        db.preview_cache_delete_all_except([(pid,)])
+    assert "_pc_failed" not in _temp_tables(db)
+    db.conn.rollback()
+    assert db.preview_cache_entry_count() == 4
+
+
+def test_offline_original_cached_count_counts_only_cached_rows(db):
+    assert db.offline_original_cached_count() == 0
+    p1 = _photo(db, "a.jpg")
+    p2 = _photo(db, "b.jpg")
+    db.offline_original_upsert(**_offline_args(p1))
+    db.offline_original_upsert(**_offline_args(p2, status="error"))
+    assert db.offline_original_cached_count() == 1
+
+
 def test_is_preview_cache_invalid_reads_the_marker(db):
     from preview_cache import (
         ensure_preview_cache_invalidations_table,
@@ -531,6 +605,10 @@ _MOVED_CACHE_METHODS = [
     "offline_original_get",
     "offline_original_delete",
     "offline_original_total_bytes",
+    "preview_cache_entry_count",
+    "preview_cache_average_bytes",
+    "preview_cache_delete_all_except",
+    "offline_original_cached_count",
 ]
 
 

@@ -67,6 +67,83 @@ class SyncRepository:
             (self.workspace_id,),
         ).fetchall()
 
+    def list_for_review(self, workspace_id):
+        """``workspace_id``'s pending changes with each photo's filename and folder.
+
+        Oldest first (``created_at``, then ``id``). Each row is the full
+        ``pending_changes`` row plus ``filename``, ``folder_id`` and
+        ``folder_path`` (None when the folder row is gone).
+        """
+        return self.conn.execute(
+            """
+            SELECT pc.*, p.filename, p.folder_id, f.path AS folder_path
+            FROM pending_changes pc
+            JOIN photos p ON p.id = pc.photo_id
+            LEFT JOIN folders f ON f.id = p.folder_id
+            WHERE pc.workspace_id = ?
+            ORDER BY pc.created_at, pc.id
+            """,
+            (workspace_id,),
+        ).fetchall()
+
+    def status_counts(self):
+        """Totals and per-type counts of the queue, read in one statement.
+
+        The first row has ``change_type`` NULL, ``changes`` the queue length
+        and ``photos`` the distinct photo count; each later row is one
+        ``change_type`` with its ``changes`` count (``photos`` 0).
+        """
+        return self.conn.execute(
+            """SELECT NULL AS change_type, COUNT(*) AS changes,
+                      COUNT(DISTINCT photo_id) AS photos
+               FROM pending_changes WHERE workspace_id = ?
+               UNION ALL
+               SELECT change_type, COUNT(*), 0
+               FROM pending_changes WHERE workspace_id = ? GROUP BY change_type""",
+            (self.workspace_id, self.workspace_id),
+        ).fetchall()
+
+    def count_queued_location_photos(self):
+        """Photos with a queued ``location`` change that carry a location keyword."""
+        return self.conn.execute(
+            """SELECT COUNT(DISTINCT pc.photo_id)
+               FROM pending_changes pc
+               JOIN photo_keywords pk ON pk.photo_id = pc.photo_id
+               JOIN keywords k ON k.id = pk.keyword_id
+               WHERE pc.workspace_id = ? AND pc.change_type = 'location'
+                 AND k.type = 'location'""",
+            (self.workspace_id,),
+        ).fetchone()[0]
+
+    def get_by_ids(self, change_ids):
+        """The active workspace's pending rows among ``change_ids``, chunked."""
+        changes = []
+        for chunk in self._chunks(change_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            changes.extend(self.conn.execute(
+                f"SELECT * FROM pending_changes "
+                f"WHERE id IN ({placeholders}) AND workspace_id = ?",
+                list(chunk) + [self.workspace_id],
+            ).fetchall())
+        return changes
+
+    def delete_workspace(self, workspace_id):
+        """Delete every pending change in ``workspace_id`` and return the rows.
+
+        The rows are read before the delete. Does not commit: the discard
+        route holds ``BEGIN IMMEDIATE`` across its revision check, this
+        delete and the history record.
+        """
+        changes = self.conn.execute(
+            "SELECT * FROM pending_changes WHERE workspace_id = ?",
+            (workspace_id,),
+        ).fetchall()
+        self.conn.execute(
+            "DELETE FROM pending_changes WHERE workspace_id = ?",
+            (workspace_id,),
+        )
+        return changes
+
     def staged_scope_by_photos(self, photo_ids):
         """Photo-id scoped variant of :meth:`staged_scope`.
 

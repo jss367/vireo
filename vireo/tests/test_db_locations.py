@@ -879,6 +879,38 @@ def test_reverse_geocode_cache_put_upserts_negative_result(db):
     assert Database._reverse_geocode_grid(-0.0004, 0.0006) == (0, 1)
 
 
+def test_get_first_linked_location_keywords_picks_lowest_rowid(db, fid):
+    country = _kw(db, "Country")
+    later = _kw(db, "Later", parent_id=country, lat=1.0, lng=2.0, place_id="pl")
+    first = _kw(db, "First", parent_id=country)
+    general = _kw(db, "Heron", kw_type="general")
+    p0 = _photo(db, fid, "a.jpg")
+    p1 = _photo(db, fid, "b.jpg")
+    p2 = _photo(db, fid, "c.jpg")
+    # Link order, not keyword id or coordinates, decides the "first" leaf.
+    db.tag_photo(p0, general)
+    db.tag_photo(p0, first)
+    db.tag_photo(p0, later)
+    db.tag_photo(p1, later)
+    db.tag_photo(p2, general)
+    leaves = db.get_first_linked_location_keywords([p0, p1, p2])
+    assert set(leaves) == {p0, p1}
+    assert leaves[p0]["id"] == first
+    assert tuple(leaves[p1]) == (p1, later, "Later", "pl", 1.0, 2.0, country)
+    assert db.get_first_linked_location_keywords([]) == {}
+
+
+def test_get_first_linked_location_keywords_chunks_by_400(db, fid):
+    place = _kw(db, "Pond")
+    pid = _photo(db, fid, "a.jpg")
+    db.tag_photo(pid, place)
+    statements = _trace(db)
+    leaves = db.get_first_linked_location_keywords(list(range(100_000, 100_400)) + [pid])
+    db.conn.set_trace_callback(None)
+    assert list(leaves) == [pid]
+    assert len(_selects(statements, "ORDER BY pk.rowid")) == 2
+
+
 # -- structure: the location SQL lives in the repository -----------------------
 
 # Database methods whose SQL moved to repositories/locations.py. Each stays on
@@ -892,6 +924,7 @@ _DELEGATING_LOCATION_METHODS = (
     "get_assigned_photo_location",
     "_get_photo_location_leaves",
     "get_photo_location_paths",
+    "get_first_linked_location_keywords",
     "has_pending_location_change",
     "count_photos_with_location",
     "queue_location_changes_for_tagged_photos",
