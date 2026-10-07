@@ -857,13 +857,14 @@
 
   function syncQuickSearchInput() {
     const input = $('.vf-search input');
-    if (!input || quickSearchTimer !== null || document.activeElement === input || input.getAttribute('aria-invalid') === 'true') return;
+    if (!input) return;
     const group = quickSearchGroup();
-    input.value = group ? group._qs_text : (state.visual ? state.visual.prompt : '');
-    // The user's explicit scope toggle wins over a restored search's own
-    // scope. The restored chip keeps its saved scope label, but new typed
-    // searches use the toggle's current choice.
+    // Scope belongs to the restored group even while the input has focus;
+    // preserve focused/pending text without leaving its next search in an
+    // unrelated stored scope. An explicit toggle remains authoritative.
     if (group && !scopeExplicit) searchScope = groupScope(group);
+    if (quickSearchTimer !== null || document.activeElement === input || input.getAttribute('aria-invalid') === 'true') return;
+    input.value = group ? group._qs_text : (state.visual ? state.visual.prompt : '');
   }
 
   function renderSearchScope() {

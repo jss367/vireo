@@ -8,7 +8,7 @@ from playwright.sync_api import expect
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def start_filter_bar(page, delayed_endpoint):
+def start_filter_bar(page, delayed_endpoint, stored_scope=None):
     page.set_content((ROOT / 'vireo/templates/_filterbar.html').read_text())
     page.evaluate('''endpoint => {
       window.savedFilter = {
@@ -35,6 +35,12 @@ def start_filter_bar(page, delayed_endpoint):
         return {ok: true, json: async () => data};
       };
     }''', delayed_endpoint)
+    if stored_scope is not None:
+        page.evaluate("""scope => {
+          Object.defineProperty(window, 'localStorage', {configurable: true, value: {
+            getItem: () => scope, setItem: () => {},
+          }});
+        }""", stored_scope)
     for name in ['vireo-search.js', 'vireo-filter.js']:
         page.add_script_tag(path=str(ROOT / 'vireo/static' / name))
     page.evaluate('''() => {
@@ -133,4 +139,31 @@ def test_scope_toggle_survives_delayed_restore_with_empty_search(page):
     search.fill('hawk')
     search.press('Enter')
     field = 'keyword' if chosen == 'true' else 'metadata'
+    assert page.evaluate('VireoFilter.getUserRules().rules[0].rules[0].field') == field
+
+
+@pytest.mark.parametrize('saved_scope', ['all', 'keyword'])
+def test_focused_input_restores_saved_scope_without_replacing_text(page, saved_scope):
+    search = start_filter_bar(
+        page, '/api/workspaces/active',
+        stored_scope='all' if saved_scope == 'keyword' else 'keyword',
+    )
+    page.evaluate("""scope => {
+      const group = window.savedFilter.root.rules[0];
+      group._qs_scope = scope;
+      group.rules[0].field = scope === 'keyword' ? 'keyword' : 'metadata';
+    }""", saved_scope)
+    search.focus()
+    expect(search).to_be_focused()
+    page.evaluate("""async () => {
+      window.releaseStartup();
+      await window.filterInit;
+    }""")
+    expect(search).to_be_focused()
+    expect(search).to_have_value('')
+    toggle = page.locator('.vf-search-scope')
+    expect(toggle).to_have_attribute('aria-pressed', 'true' if saved_scope == 'keyword' else 'false')
+    search.fill('hawk')
+    search.press('Enter')
+    field = 'keyword' if saved_scope == 'keyword' else 'metadata'
     assert page.evaluate('VireoFilter.getUserRules().rules[0].rules[0].field') == field
