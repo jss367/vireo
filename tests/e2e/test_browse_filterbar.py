@@ -1125,6 +1125,67 @@ def test_extension_picker_saved_case_keeps_keyboard_focus(live_server, page):
     expect(jpg).to_be_focused()
 
 
+@pytest.mark.parametrize("empty_workspace", [False, True])
+def test_extension_picker_unavailable_chip_keeps_keyboard_focus(live_server, page, empty_workspace):
+    if empty_workspace:
+        page.route("**/api/filters/values?field=extension*",
+                   lambda route: route.fulfill(json={"values": []}))
+    _open_browse(page, live_server)
+    page.evaluate("""() => VireoFilter.loadExpression({mode: 'all', rules: [
+        {field: 'extension', op: 'in', value: ['.dng']}
+    ]})""")
+    page.click(".vf-filters-btn")
+    picker = page.locator(".vf-extension-picker")
+    expect(picker).to_contain_text("Select one or more formats")
+    remove = picker.get_by_role("button", name="Remove DNG", exact=True)
+    remove.focus()
+    page.keyboard.press("Enter")
+    expect(remove).to_have_count(0)
+    if empty_workspace:
+        expect(picker).to_be_focused()
+        expect(picker).to_contain_text("No file formats in this workspace.")
+    else:
+        jpg = picker.get_by_role("checkbox", name="JPG", exact=True)
+        expect(jpg).to_be_focused()
+        page.keyboard.press("Space")
+        expect(jpg).to_be_checked()
+
+
+@pytest.mark.parametrize("outcome", ["success", "failure", "empty"])
+def test_extension_picker_keyboard_retry_keeps_focus(live_server, page, outcome):
+    page.route("**/api/filters/values?field=extension*",
+               lambda route: route.fulfill(status=500, json={"error": "Unavailable"}))
+    _open_browse(page, live_server)
+    page.click(".vf-filters-btn")
+    page.click(".vf-add-filter")
+    page.click('[data-add-field="extension"]')
+    picker = page.locator(".vf-extension-picker")
+    retry = picker.get_by_role("button", name="Retry")
+    expect(retry).to_be_visible()
+    page.unroute("**/api/filters/values?field=extension*")
+    held = []
+    page.route("**/api/filters/values?field=extension*", lambda route: held.append(route))
+    retry.focus()
+    page.keyboard.press("Enter")
+    expect(picker.locator('.vf-extension-status')).to_contain_text("Loading formats")
+    expect(picker.locator('.vf-extension-status')).to_be_focused()
+    assert held, "retry did not request formats"
+    if outcome == "failure":
+        held[0].fulfill(status=500, json={"error": "Unavailable"})
+        expect(retry).to_be_focused()
+    else:
+        values = [{"value": ".jpg"}] if outcome == "success" else []
+        held[0].fulfill(json={"values": values})
+        if outcome == "success":
+            jpg = picker.get_by_role("checkbox", name="JPG", exact=True)
+            expect(jpg).to_be_focused()
+            page.keyboard.press("Space")
+            expect(jpg).to_be_checked()
+        else:
+            expect(picker).to_be_focused()
+            expect(picker).to_contain_text("No file formats in this workspace.")
+
+
 def test_extension_picker_load_failure_retry_and_empty_workspace(live_server, page):
     page.route("**/api/filters/values?field=extension*",
                lambda route: route.fulfill(status=500, json={"error": "Unavailable"}))

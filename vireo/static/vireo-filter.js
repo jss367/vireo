@@ -1245,12 +1245,16 @@
     loadExtensionPickers();
     if (restore) {
       const controls = Array.from(tree.querySelectorAll('[data-action][data-path]'));
-      const el = controls.find((candidate) =>
+      let el = controls.find((candidate) =>
         candidate.dataset.action === restore.action && candidate.dataset.path === restore.path &&
         candidate.dataset.value === restore.value) || (['extension-remove', 'extension-pick'].includes(restore.action) &&
           controls.find((candidate) => candidate.dataset.action === 'extension-pick' &&
             candidate.dataset.path === restore.path &&
             candidate.dataset.value.toLowerCase() === restore.value.toLowerCase()));
+      if (!el && ['extension-remove', 'extension-pick'].includes(restore.action)) {
+        const picker = $$('.vf-extension-picker').find((candidate) => candidate.dataset.path === restore.path);
+        if (picker) el = extensionFocusTarget(picker);
+      }
       if (el) {
         el.focus({ preventScroll: true });
         if (restore.start != null) {
@@ -1316,6 +1320,11 @@
     return String(value).replace(/^\./, '').toUpperCase();
   }
 
+  function extensionFocusTarget(picker) {
+    return picker.querySelector('[data-action="extension-pick"]') ||
+      picker.querySelector('[data-action="extension-retry"]') || picker;
+  }
+
   function renderExtensionPicker(node, path) {
     const selected = extensionValues(node);
     const multiple = node.op === 'in' || node.op === 'not_in';
@@ -1325,14 +1334,14 @@
       if (!values.has(v.toLowerCase())) values.set(v.toLowerCase(), v);
     });
     const selectedKeys = new Set(selected.map((v) => String(v).toLowerCase()));
-    return `<div class="vf-extension-picker" data-path="${path}">
+    return `<div class="vf-extension-picker" data-path="${path}" tabindex="-1">
       ${multiple && selected.length ? `<div class="vf-enum-multi">${selected.map((v) =>
         `<button type="button" class="vf-enum-pill active" data-action="extension-remove" data-path="${path}" data-value="${esc(v)}" aria-label="Remove ${esc(extensionLabel(v))}">${esc(extensionLabel(v))} ×</button>`).join('')}</div>` : ''}
       <div class="vf-extension-options" role="group" aria-label="File extensions">
         ${Array.from(values.values()).sort((a, b) => String(a).localeCompare(String(b))).map((v) =>
           `<label><input type="${multiple ? 'checkbox' : 'radio'}" name="extension-${path}" data-action="extension-pick" data-path="${path}" data-value="${esc(v)}" ${selectedKeys.has(String(v).toLowerCase()) ? 'checked' : ''}><span>${esc(extensionLabel(v))}</span></label>`).join('')}
       </div>
-      <div class="vf-extension-status" role="status">${extensionOptions === null ? 'Loading formats…' : !values.size ? 'No file formats in this workspace.' : multiple ? 'Select one or more formats' : 'Select a format'}</div>
+      <div class="vf-extension-status" role="status" tabindex="-1">${extensionOptions === null ? 'Loading formats…' : !values.size ? 'No file formats in this workspace.' : multiple ? 'Select one or more formats' : 'Select a format'}</div>
     </div>`;
   }
 
@@ -1357,14 +1366,18 @@
           const replacement = $$('.vf-extension-picker [data-action]').find((el) =>
             el.dataset.path === path && el.dataset.action === active.dataset.action &&
             el.dataset.value === active.dataset.value);
-          if (replacement) replacement.focus({ preventScroll: true });
+          const updatedPicker = $$('.vf-extension-picker').find((el) => el.dataset.path === path);
+          if (updatedPicker) (replacement || extensionFocusTarget(updatedPicker)).focus({ preventScroll: true });
         }
       });
     }).catch(() => {
       if (extensionRequest !== request) return;
       pickers.forEach((picker) => {
         if (!document.contains(picker)) return;
-        picker.querySelector('.vf-extension-status').innerHTML = 'Could not load formats. <button type="button" data-action="extension-retry">Retry</button>';
+        const hadFocus = picker.contains(document.activeElement);
+        const status = picker.querySelector('.vf-extension-status');
+        status.innerHTML = 'Could not load formats. <button type="button" data-action="extension-retry">Retry</button>';
+        if (hadFocus) status.querySelector('button').focus({ preventScroll: true });
       });
     });
   }
@@ -1835,8 +1848,11 @@
         return;
       }
       if (action === 'extension-retry') {
+        const picker = target.closest('.vf-extension-picker');
+        const restoreFocus = picker.contains(document.activeElement);
         extensionRequest = null;
         $$('.vf-extension-status').forEach((status) => { status.textContent = 'Loading formats…'; });
+        if (restoreFocus) picker.querySelector('.vf-extension-status').focus({ preventScroll: true });
         loadExtensionPickers();
         return;
       }
