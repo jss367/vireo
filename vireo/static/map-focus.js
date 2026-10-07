@@ -24,7 +24,7 @@ function describeUnplottableFocus(focus) {
   if (focus.reason === 'unavailable') {
     return {
       title: name + ' is not on the map',
-      detail: 'It has map coordinates, but its folder is offline or missing, '
+      detail: 'Its folder is offline or missing, '
         + 'so the map cannot show it right now.',
       actions: [browse],
     };

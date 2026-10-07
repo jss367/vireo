@@ -46,10 +46,10 @@ test('no location at all points at assigning one', () => {
   same(view.actions, [{label: 'Assign a location in Browse', href: '/browse?photo_id=5'}]);
 });
 
-test('coordinates in an offline folder are not called missing coordinates', () => {
+test('an offline-folder photo blames the folder, not the coordinates', () => {
   const view = describeUnplottableFocus({id: 5, filename: 'a.jpg', reason: 'unavailable'});
   assert.equal(view.title, 'a.jpg is not on the map');
-  assert.match(view.detail, /has map coordinates, but its folder is offline or missing/);
+  assert.match(view.detail, /^Its folder is offline or missing/);
 });
 
 test('an unknown photo says so', () => {

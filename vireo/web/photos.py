@@ -137,15 +137,26 @@ def _unplottable_map_focus(db, photo_id):
     """Explain why a deep-linked photo is absent from the Map's photo set.
 
     ``reason`` is ``not_found`` (no such photo in the active workspace),
-    ``no_coordinates`` (no EXIF GPS pair and no assigned location with
-    coordinates; ``location_keywords`` lists the name-only locations that
-    could be linked to a place), or ``unavailable`` (it has coordinates but
-    the map's scope excludes it, e.g. its folder is offline or missing).
+    ``unavailable`` (its folder is offline or missing, so the map excludes
+    it regardless of coordinates), or ``no_coordinates`` (folder is
+    available but the photo has no EXIF GPS pair and no assigned location
+    with coordinates; ``location_keywords`` lists the name-only locations
+    that could be linked to a place).
+
+    Folder availability is checked before coordinate status: a photo in a
+    missing folder with a name-only location keyword would otherwise be
+    reported as ``no_coordinates``, promising that linking the keyword
+    puts it on the map, when the map's folder-status filter would keep it
+    off regardless.
     """
     photo = db.get_photo(photo_id, verify_workspace=True)
     if photo is None:
         return {"id": photo_id, "reason": "not_found"}
     focus = {"id": photo_id, "filename": photo["filename"]}
+    folder_status = db.get_photo_folder_statuses([photo_id]).get(photo_id)
+    if folder_status not in ("ok", "partial"):
+        focus["reason"] = "unavailable"
+        return focus
     status = db.get_photo_location_statuses([photo_id]).get(photo_id, "none")
     if status != "none":
         focus["reason"] = "unavailable"

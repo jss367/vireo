@@ -1570,6 +1570,33 @@ def test_api_photos_geo_unplottable_focus_unavailable_and_not_found(app_and_db):
     assert missing["unplottable_focus"] == {"id": 999999, "reason": "not_found"}
 
 
+def test_api_photos_geo_unplottable_focus_missing_folder_outranks_no_coordinates(
+    app_and_db,
+):
+    """A photo in a missing folder with only a name-only location keyword is
+    ``unavailable``, not ``no_coordinates``: linking the keyword would not
+    put it on the map while the folder-status filter still excludes it, so
+    the notice must not offer that recovery."""
+    app, db = app_and_db
+    photos = {p["filename"]: (p["id"], p["folder_id"]) for p in db.get_photos()}
+    bird2_id, folder_id = photos["bird2.jpg"]
+    lake = db.add_keyword("Laguna Lake", kw_type="location")
+    db.tag_photo(bird2_id, lake)
+    db.conn.execute(
+        "UPDATE folders SET status = 'missing' WHERE id = ?", (folder_id,),
+    )
+    db.conn.commit()
+
+    data = app.test_client().get(f"/api/photos/geo?photo_id={bird2_id}").get_json()
+
+    assert data["photos"] == []
+    assert data["unplottable_focus"] == {
+        "id": bird2_id,
+        "filename": "bird2.jpg",
+        "reason": "unavailable",
+    }
+
+
 def test_api_photos_geo_plottable_focus_has_no_unplottable_notice(app_and_db):
     app, db = app_and_db
     photo = db.get_photos()[0]
