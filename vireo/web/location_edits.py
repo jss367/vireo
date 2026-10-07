@@ -200,10 +200,7 @@ def walk_parent_chain(db, leaf_parent_id):
     for _ in range(10):
         if current_parent_id is None:
             break
-        row = db.conn.execute(
-            "SELECT id, name, parent_id FROM keywords WHERE id = ?",
-            (current_parent_id,),
-        ).fetchone()
+        row = db.get_keyword_place_row(current_parent_id)
         if row is None:
             break
         parents.append({"id": row["id"], "name": row["name"]})
@@ -229,14 +226,7 @@ def serialize_photo_location(db, photo_id):
 
     Returns ``None`` if the photo has no ``type='location'`` keyword link.
     """
-    leaf = db.conn.execute(
-        "SELECT k.id, k.name, k.place_id, k.latitude, k.longitude, k.parent_id "
-        "FROM photo_keywords pk "
-        "JOIN keywords k ON k.id = pk.keyword_id "
-        "WHERE pk.photo_id = ? AND k.type = 'location' "
-        "LIMIT 1",
-        (photo_id,),
-    ).fetchone()
+    leaf = db.get_photo_location_leaf(photo_id)
     if leaf is None:
         return None
 
@@ -293,9 +283,7 @@ class LocationErrors:
 
     def photo_location_edit_error(self, db, photo_id):
         """Return an error response when a photo cannot be edited in this workspace."""
-        if db.conn.execute(
-            "SELECT 1 FROM photos WHERE id = ?", (photo_id,)
-        ).fetchone() is None:
+        if photo_id not in db.get_existing_photo_ids([photo_id]):
             return self._photo_not_found_error()
         if not db._photo_in_workspace(photo_id):
             return self._json_error(
@@ -307,9 +295,7 @@ class LocationErrors:
         """Return an error response unless ``keyword_id`` is a location keyword."""
         if keyword_id is None:
             return self._json_error("invalid keyword_id", 400)
-        row = db.conn.execute(
-            "SELECT id, type FROM keywords WHERE id = ?", (keyword_id,),
-        ).fetchone()
+        row = db.get_keyword_row(keyword_id)
         if row is None:
             return self.keyword_not_found_error()
         if row["type"] != "location":

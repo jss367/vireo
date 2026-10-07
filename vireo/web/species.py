@@ -69,17 +69,11 @@ def create_species_blueprint(get_db):
 
         # Also search existing species keywords in the database
         db = get_db()
-        kw_rows = db.conn.execute(
-            """SELECT name FROM keywords
-               WHERE is_species = 1
-                 AND vireo_keyword_text_match(name, ?, ?, ?)""",
-            (q, 1 if match_case else 0, 1 if whole_word else 0),
-        ).fetchall()
-        for row in kw_rows:
-            name_key = row["name"].casefold()
+        for kw_name in db.search_species_keyword_names(q, match_case, whole_word):
+            name_key = kw_name.casefold()
             if name_key not in seen:
                 seen.add(name_key)
-                matches.append(row["name"])
+                matches.append(kw_name)
 
         return jsonify(matches[:20])
 
