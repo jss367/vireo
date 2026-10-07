@@ -167,3 +167,42 @@ def test_point_color_picker_exits_mask_brush_without_painting(page, live_server,
     page.wait_for_function('maskBrush.mode && !maskBrush.busy')
     assert page.evaluate('colorEditor.picking') is False
 
+def test_brush_reacquires_mask_after_feather_only_edit(page, live_server, masked_photo):
+    open_mask(page, live_server, masked_photo)
+    page.locator('#maskBrushAdd').click()
+    page.wait_for_function('maskBrush.mode && !maskBrush.busy')
+    page.locator('#featherRange').evaluate("el => {el.value='10'; el.dispatchEvent(new Event('input', {bubbles:true}));}")
+    page.wait_for_function('editorImageMatchesZoomRecipe(document.getElementById("editorImg")) && !editorPreviewQueue.active')
+    assert page.evaluate('editorState.localMask') is None
+    box = page.locator('#editorImg').bounding_box()
+    with page.expect_response('**/local-mask/correct') as response:
+        page.mouse.click(box['x'] + box['width'] * 0.8, box['y'] + box['height'] * 0.5)
+    assert response.value.ok
+    page.wait_for_function('!maskBrush.busy')
+    assert page.evaluate('editorState.recipe.local.mask.corrected') is True
+    assert page.evaluate('editorState.recipe.local.mask.feather') == 10
+    assert page.evaluate('saveRecipe()') is True
+
+
+def test_cancel_during_brush_mask_reacquisition_never_paints(page, live_server, masked_photo):
+    open_mask(page, live_server, masked_photo)
+    page.locator('#maskBrushAdd').click()
+    page.wait_for_function('maskBrush.mode && !maskBrush.busy')
+    page.evaluate('setLocalFeather(10)')
+    page.wait_for_function('!editorPreviewQueue.active')
+    held = []
+    corrections = []
+    page.route('**/local-mask/snapshot', lambda route: held.append(route))
+    page.on('request', lambda request: corrections.append(request.url)
+            if '/local-mask/correct' in request.url else None)
+    box = page.locator('#editorImg').bounding_box()
+    page.mouse.click(box['x'] + box['width'] * 0.8, box['y'] + box['height'] * 0.5)
+    page.wait_for_function('maskBrush.busy')
+    page.wait_for_timeout(50)
+    assert len(held) == 1
+    page.keyboard.press('Escape')
+    held[0].fulfill(response=held[0].fetch())
+    page.wait_for_timeout(100)
+    assert corrections == []
+    assert page.evaluate('editorState.recipe.local || null') is None
+    assert page.evaluate('maskBrush.mode') is None

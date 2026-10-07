@@ -118,9 +118,18 @@ async function finishMaskBrush(event) {
   syncMaskBrushButtons();
   maskBrushStatus('Applying mask correction…');
   try {
+    // Feather-only edits and zeroing the last local adjustment deliberately
+    // release an unreferenced snapshot. Brush mode can outlive that snapshot,
+    // so reacquire it before publishing rather than sending a null mask.
+    var mask = await ensureLocalMask();
+    if (sequence !== maskBrush.sequence || loadSeq !== editorState.loadSeq) return;
+    if (recipeAtStart !== recipeKey(editorState.recipe)) {
+      maskBrushStatus('Edits changed while preparing the mask. Paint the stroke again.');
+      return;
+    }
     var data = await safeFetch('/api/photos/' + photoId + '/local-mask/correct', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({mask: editorState.localMask, mode: stroke.mode,
+      body: JSON.stringify({mask: mask, mode: stroke.mode,
         radius: stroke.radius, points: stroke.points}),
     }, {toast: false});
     if (sequence !== maskBrush.sequence || loadSeq !== editorState.loadSeq) return;
