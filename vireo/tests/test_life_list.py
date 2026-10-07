@@ -291,6 +291,50 @@ def test_representative_preference_promotes_existing_highlight_to_top(life_app):
     }
 
 
+@pytest.mark.parametrize(
+    "failing_method",
+    ["get_highlights_candidates", "promote_species_highlight"],
+)
+def test_representative_preference_rolls_back_when_promotion_step_raises(
+    life_app, monkeypatch, failing_method,
+):
+    # The route writes the representative with _commit=False, then runs the
+    # Highlights eligibility check (get_highlights_candidates) and the
+    # promotion. If either raises, the uncommitted representative write must
+    # be rolled back rather than left open on the request connection, where
+    # a later commit on it would persist it.
+    from db import Database
+    from flask import g
+
+    app, db, ids = life_app
+
+    def boom(self, *args, **kwargs):
+        raise RuntimeError("forced failure")
+
+    monkeypatch.setattr(Database, failing_method, boom)
+
+    # teardown_appcontext runs in reverse registration order, so this runs
+    # before close_request_db and sees the request connection still open.
+    seen = {}
+
+    @app.teardown_appcontext
+    def _record_request_db_state(exc):
+        request_db = g.get("db")
+        if request_db is not None:
+            seen["in_transaction"] = request_db.in_transaction
+
+    resp = app.test_client().post("/api/photo-preferences", json={
+        "purpose": "life_list",
+        "species": "Northern Cardinal",
+        "photo_id": ids["p1"],
+    })
+    assert resp.status_code == 500
+    assert seen == {"in_transaction": False}
+    monkeypatch.undo()
+    assert "Northern Cardinal" not in db.get_species_representatives()
+    assert db.get_species_highlights("Northern Cardinal") == {}
+
+
 def test_representative_preference_promotes_unscored_pick_to_highlight(life_app):
     # p3 (sparrow) has no quality_score, but Highlights now admits
     # unscored photos at min_quality=0 so users can curate a pick before
