@@ -298,6 +298,57 @@ def test_inline_comment_edits_wake_reconciliation_on_the_live_head():
     assert "expected-head:" not in block
 
 
+def test_routine_works_on_and_pushes_against_the_expected_head_only():
+    prompt = _read(ROUTINE_PROMPT)
+
+    # The workflow binds fix-ci to the failing run's head, but the routine
+    # runs later: if someone pushes meanwhile, checking out the branch by name
+    # lands on their newer commit and a plain push stacks a fix for a stale
+    # failure on top of it (#2011). Every task confirms it is on
+    # EXPECTED_HEAD after checkout and pushes with a lease pinned to it, so
+    # git itself rejects a push onto a head that moved.
+    on_expected = 'test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD" || exit 0'
+    lease = '--force-with-lease="refs/heads/$HEAD:$EXPECTED_HEAD"'
+    assert lease in prompt
+    assert "no rebase onto the\nnew head" in prompt
+
+    fix_ci = prompt.split("## Task: `fix-ci`", 1)[1].split("\n## Task:", 1)[0]
+    assert on_expected in fix_ci
+    assert "`EXPECTED_HEAD` lease" in fix_ci
+    assert "never a plain `git push`" in fix_ci
+
+    reconcile = prompt.split("## Task: `fix-ci`", 1)[0]
+    assert reconcile.count(on_expected) >= 2  # Common Setup + reconciliation checkout
+    assert "push to the same branch with\n    the `EXPECTED_HEAD` lease" in reconcile
+
+    # Absolute Rules must not contradict the lease by telling the routine to
+    # rebase onto a newer head after a rejected push: that would recreate the
+    # stale-fix-on-top-of-newer-head regression this change exists to prevent
+    # (#2011). The rule names the lease as the only push, and spells out that
+    # a lease rejection is a silent stop with no rebase onto the new head.
+    absolute = prompt.split("## Absolute Rules", 1)[1].split("\n## ", 1)[0]
+    assert "unconditionally force-push" in absolute
+    assert "--force-with-lease" in absolute
+    assert "no rebase onto the\n  new head" in absolute
+    assert "pull\n  with rebase" not in absolute  # the old contradictory rule
+    # Base-divergence (merge conflicts) still has a separate recovery path.
+    assert "`origin/$BASE`" in absolute
+
+    # The lease push is scoped to tasks that carry `EXPECTED_HEAD`, and
+    # `fix-main` is explicitly exempt: it opens a brand-new
+    # `claude/fix-main-*` branch from current `main` with no
+    # `EXPECTED_HEAD` to lease against, so an absolute "only push used"
+    # that named only the lease would conflict with step 8's first push
+    # for that new remote branch (Codex #2020). The scoping and the
+    # exemption are both pinned so a future edit cannot silently
+    # reintroduce the contradiction.
+    assert "every task that carries `EXPECTED_HEAD`" in absolute
+    assert "`fix-main` is the one task this scoping exempts" in absolute
+    fix_main = prompt.split("## Task: `fix-main`", 1)[1].split("\n## ", 1)[0]
+    assert 'git push -u origin "claude/fix-main-$WORKFLOW_RUN"' in fix_main
+    assert "explicitly\n   exempt" in fix_main
+
+
 def test_routine_contract_is_state_based_quiet_and_resolves_addressed_threads():
     prompt = _read(ROUTINE_PROMPT)
 
