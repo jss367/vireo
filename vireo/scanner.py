@@ -4387,14 +4387,7 @@ class _ScanRun:
         # clear-to-NULL — see ``_write_photo_columns``), and by the
         # end-of-scan safety net ``_refill_owners_from_companions``.
         self._pending_companion_fills = {}
-        # Named-id set for ``_drop_inherited_collection_membership``,
-        # paired with the ``PRAGMA data_version`` snapshot that produced
-        # it. Our own writes to collections do not bump data_version, so
-        # the cache stays valid across inserts unless another connection
-        # commits a change; a bump drops the cache so the next insert
-        # catches a stale id the user saved into a collection in between.
-        self._collection_named_ids = None
-        self._collection_named_ids_version = None
+        self._init_collection_membership_cache()
 
         # Build folder cache: path -> folder_id
         self.folder_cache = {}
@@ -5778,6 +5771,33 @@ class _ScanRun:
             self.invalidated_photo_ids.add(photo_id)
         return photo_id
 
+    def _init_collection_membership_cache(self):
+        """Track collection edits on this connection, including rolled-back ones.
+
+        data_version detects other connections' commits only. TEMP triggers
+        notify a monotonic Python counter for this connection's collection
+        writes; unlike a SQL counter, rollback cannot reuse a cache version.
+        The triggers/function last only as long as the connection and never
+        change the persistent catalog schema.
+        """
+        conn = self.db.conn
+        if not hasattr(conn, "_scan_collection_revision"):
+            conn._scan_collection_revision = 0
+
+            def collection_changed():
+                conn._scan_collection_revision += 1
+                return 0
+
+            conn.create_function("_scan_collection_changed", 0, collection_changed)
+            for operation in ("INSERT", "UPDATE", "DELETE"):
+                conn.execute(
+                    f"CREATE TEMP TRIGGER _scan_collection_{operation.lower()} "
+                    f"AFTER {operation} ON main.collections BEGIN "
+                    "SELECT _scan_collection_changed(); END"
+                )
+        self._collection_named_ids = None
+        self._collection_named_ids_version = None
+
     def _drop_inherited_collection_membership(self, photo_id):
         """Take a just-inserted photo out of collections it never joined.
 
@@ -5787,19 +5807,17 @@ class _ScanRun:
         deletion from before deletes cleaned collections). SQLite hands the
         highest freed id to the next insert, which would then appear in
         that collection. A photo that did not exist until now cannot be a
-        member of anything, so any listing of its id is stale. The named
-        set is cached across the scan and dropped when ``PRAGMA
-        data_version`` reports another connection has committed since the
-        last read: our own writes don't bump it, but a user saving a
-        collection naming a currently free id between the scan's inserts
-        does, so the next insert that would reuse that id catches it
-        (a cache loaded once would miss the entry added since, and the
-        startup repair cannot catch it afterwards -- the id then names a
-        valid row). Reads of large catalogs' collections traverse every
-        ``photo_ids`` entry, so re-reading on every insert would make
-        imports O(new photos * saved photo ids).
+        member of anything, so any listing of its id is stale. Reuse the
+        named-id set until either another connection commits (data_version)
+        or this connection edits collections (the non-transactional counter).
+        Check both after the INSERT has acquired its writer lock, so a stale
+        UI save between insert commits cannot become a new photo's membership.
         """
-        version = self.db.conn.execute("PRAGMA data_version").fetchone()[0]
+        conn = self.db.conn
+        version = (
+            conn.execute("PRAGMA data_version").fetchone()[0],
+            conn._scan_collection_revision,
+        )
         if (
             self._collection_named_ids is None
             or version != self._collection_named_ids_version
@@ -5812,6 +5830,9 @@ class _ScanRun:
             return
         self._collection_named_ids.discard(photo_id)
         rewritten = self.db.remap_collection_photo_ids({photo_id: None})
+        # This remap only removed photo_id, already discarded above. Keep
+        # the cache current without traversing all other memberships again.
+        self._collection_named_ids_version = (version[0], conn._scan_collection_revision)
         commit_with_retry(self.db.conn)
         log.warning(
             "New photo %d reused the id of a deleted photo that %d "

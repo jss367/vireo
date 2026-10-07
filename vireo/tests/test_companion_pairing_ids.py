@@ -1327,3 +1327,72 @@ def test_database_add_photo_returning_inserted(tmp_path):
     )
     assert third_id != first
     assert third_inserted is True
+
+
+@pytest.mark.parametrize("separate_writer", [False, True])
+def test_scan_refreshes_collection_membership_between_insert_commits(tmp_path, separate_writer):
+    """A stale UI save between insertions must not capture the next reused id."""
+    from db import Database
+    from scanner import scan
+
+    card = tmp_path / "card"
+    card.mkdir()
+    for name in ["first.jpg", "second.jpg"]:
+        Image.new("RGB", (32, 32), "green").save(card / name)
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    writer = Database(db_path) if separate_writer else db
+    state = {}
+
+    def save_stale_selection(photo_id, *_args):
+        if state:
+            return
+        state["first"] = photo_id
+        state["next"] = photo_id + 1
+        state["collection"] = writer.add_collection(
+            "Selection saved during scan",
+            json.dumps([{"field": "photo_ids", "value": [photo_id, photo_id + 1]}]),
+        )
+
+    try:
+        scan(str(card), db, photo_callback=save_stale_selection)
+        assert state["next"] in _photo_ids_by_filename(db).values()
+        assert _collection_photo_ids(db, state["collection"]) == [state["first"]]
+    finally:
+        if separate_writer:
+            writer.close()
+        db.close()
+
+
+
+def test_scan_collection_cache_does_not_reuse_rolled_back_revision(tmp_path):
+    from db import Database
+    from scanner import _ScanRun
+
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        collection = db.add_collection(
+            "Selection", json.dumps([{"field": "photo_ids", "value": [101]}]),
+        )
+        scanner = _ScanRun.__new__(_ScanRun)
+        scanner.db = db
+        scanner._init_collection_membership_cache()
+        # Read a modified rule inside a transaction that later rolls back.
+        db.conn.execute("UPDATE collections SET rules=? WHERE id=?", (
+            json.dumps([{"field": "photo_ids", "value": [102]}]), collection,
+        ))
+        scanner._drop_inherited_collection_membership(999)
+        db.conn.rollback()
+        # A transactional counter could reuse the same version for this
+        # different update, missing newly saved stale membership 103.
+        db.conn.execute("UPDATE collections SET rules=? WHERE id=?", (
+            json.dumps([{"field": "photo_ids", "value": [103]}]), collection,
+        ))
+        scanner._drop_inherited_collection_membership(103)
+        assert _collection_photo_ids(db, collection) == []
+        # Tracking is entirely connection-local.
+        assert not db.conn.execute(
+            "SELECT name FROM sqlite_schema WHERE name LIKE '_scan_collection_%'",
+        ).fetchall()
+    finally:
+        db.close()
