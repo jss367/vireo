@@ -61,6 +61,44 @@ class StartupTasks:
                 repaired_location_ancestors,
             )
         init_db.create_default_collections_for_all_workspaces()
+        self.prune_collection_ids_of_missing_photos()
+
+    def prune_collection_ids_of_missing_photos(self):
+        """Take photos that no longer exist out of every static collection.
+
+        Every boot, not once behind a marker: deletes are covered at the
+        source (``repositories.photo_row_deletion``), but a collection can
+        still be saved with an id list captured before a delete (the filter
+        bar or collection editor submitting rules it loaded earlier, a job
+        saving the ids it gathered while photos were being deleted), and no
+        delete-side hook sees that. The check reads every collection's rules
+        and the catalog's photo ids, about 40 ms on a 100k-photo catalog
+        with 90k collection entries, and writes nothing when there is
+        nothing to remove. A hit is logged per collection, so a path that
+        still leaks shows up in the log.
+        """
+        db = self._init_db
+        started_at = time.time()
+        try:
+            pruned = db.prune_collection_ids_of_missing_photos()
+        except Exception:
+            log.exception("Could not check collections for deleted photos")
+            db.conn.rollback()
+            return []
+        if not pruned:
+            return []
+        for entry in pruned:
+            log.info(
+                "Removed %d deleted photo(s) from collection %d %r (workspace %s)",
+                entry["removed"], entry["collection_id"], entry["name"],
+                entry["workspace_id"],
+            )
+        log.warning(
+            "Removed %d entries for deleted photos from %d collection(s) in %.2fs",
+            sum(entry["removed"] for entry in pruned), len(pruned),
+            time.time() - started_at,
+        )
+        return pruned
 
     def retire_wildlife_genre(self):
         """Run the catalog-wide XMP migration outside startup readiness.

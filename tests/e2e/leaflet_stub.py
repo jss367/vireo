@@ -16,6 +16,7 @@ window.L = {
         return this;
       },
       addLayer: function() { return this; },
+      invalidateSize: function() { return this; },
       fitBounds: function(bounds) {
         window.__lastFitBounds = bounds;
         return this;

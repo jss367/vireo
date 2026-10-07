@@ -55,6 +55,7 @@ from preview_cache import (
 )
 from render_source import exif_orientation as _exif_orientation_from_data
 from render_source import is_undersized
+from repositories.photo_row_deletion import photo_row_deletion
 from resource_ledger import (
     ResourceRequest,
     cpu_inference_request,
@@ -1263,8 +1264,12 @@ def _defer_recipe_snapshot_transfer(
     post_commit_fs_actions.append(_apply_recipe_transfer_fs)
 
 
-def _delete_companion_row(db, primary, companion):
-    """Move the companion's remaining per-photo state to the primary, then delete its row."""
+def _delete_companion_row(db, primary, companion, photo_rows):
+    """Move the companion's remaining per-photo state to the primary, then delete its row.
+
+    ``photo_rows`` is the caller's ``PhotoRowDeletion``; the companion's
+    collection entries move to the primary when the caller's block exits.
+    """
     # Remove keyword associations then the duplicate JPEG record
     db._transfer_gps_review_for_merge(companion["id"], primary["id"])
     db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (companion["id"],))
@@ -1280,7 +1285,7 @@ def _delete_companion_row(db, primary, companion):
     from repositories.photo_visibility import remap_photo_visibility
 
     remap_photo_visibility(db.conn, {companion["id"]: primary["id"]})
-    db.conn.execute("DELETE FROM photos WHERE id = ?", (companion["id"],))
+    photo_rows.delete({companion["id"]: primary["id"]})
 
 
 def _defer_companion_derivative_cleanup(
@@ -1317,12 +1322,14 @@ def _defer_companion_derivative_cleanup(
 
 def _merge_companion_into_primary(
     db, primary, companion, vireo_dir, thumb_cache_dir, post_commit_fs_actions,
+    photo_rows,
 ):
     """Fold one JPEG companion row into its RAW primary inside the open transaction.
 
     Every DB write joins the caller's transaction; every filesystem change
     is appended to ``post_commit_fs_actions`` (only when ``vireo_dir`` is
-    set) for the caller to run once the commit succeeds.
+    set) for the caller to run once the commit succeeds. The companion row
+    is deleted through the caller's ``PhotoRowDeletion`` (``photo_rows``).
     """
     primary_full, companion_full = _read_metadata_transfer_rows(
         db, primary, companion,
@@ -1347,7 +1354,7 @@ def _merge_companion_into_primary(
         db, primary, companion, vireo_dir, thumb_cache_dir,
         post_commit_fs_actions,
     )
-    _delete_companion_row(db, primary, companion)
+    _delete_companion_row(db, primary, companion, photo_rows)
 
 
 def _run_post_commit_fs_actions(post_commit_fs_actions):
@@ -1434,39 +1441,29 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
     # commit below succeeds — the whole loop shares one transaction, so a
     # commit failure rolls every deletion back and none of them happened.
     merged_ids = _MergedPhotoIds()
-    # ``companion_id -> primary_id`` accumulated across every pair so we can
-    # remap collection ``photo_ids`` rules once at the end of the loop.
-    # ``remap_collection_photo_ids`` scans and JSON-parses every collection
-    # that carries ``photo_ids``, then writes each rewritten row; a per-pair
-    # call would repeat that O(collections) work N times and, for a static
-    # collection containing many companions, rewrite the same row once per
-    # deletion. One post-loop call is O(pairs + collections) instead of
-    # O(pairs * collections). The remap runs in the same transaction as the
-    # pair deletes below and is rolled back with them if the commit fails.
-    collection_remap = {}
 
-    for (_folder_id, _base), members in groups.items():
-        for primary, companion in _pick_compatible_raw_jpeg_pairs(members):
-            _merge_companion_into_primary(
-                db, primary, companion, vireo_dir, thumb_cache_dir,
-                post_commit_fs_actions,
-            )
-            collection_remap[companion["id"]] = primary["id"]
-            merged_ids[companion["id"]] = primary["id"]
-            merged_ids.owners[primary["id"]] = (
-                primary["folder_id"], primary["filename"],
-            )
-            merged_ids.companions[companion["id"]] = (
-                companion["folder_id"], companion["filename"],
-            )
-            if vireo_dir:
-                _defer_companion_derivative_cleanup(
-                    post_commit_fs_actions, companion, vireo_dir,
-                    thumb_cache_dir,
+    # The deletion chokepoint batches collection rewrites for all pairs;
+    # retain each RAW identity for ownership-checked callback publication.
+    with photo_row_deletion(db.conn) as photo_rows:
+        for (_folder_id, _base), members in groups.items():
+            for primary, companion in _pick_compatible_raw_jpeg_pairs(members):
+                _merge_companion_into_primary(
+                    db, primary, companion, vireo_dir, thumb_cache_dir,
+                    post_commit_fs_actions, photo_rows,
                 )
+                merged_ids[companion["id"]] = primary["id"]
+                merged_ids.owners[primary["id"]] = (
+                    primary["folder_id"], primary["filename"],
+                )
+                merged_ids.companions[companion["id"]] = (
+                    companion["folder_id"], companion["filename"],
+                )
+                if vireo_dir:
+                    _defer_companion_derivative_cleanup(
+                        post_commit_fs_actions, companion, vireo_dir,
+                        thumb_cache_dir,
+                    )
 
-    if collection_remap:
-        db.remap_collection_photo_ids(collection_remap)
     commit_with_retry(db.conn)
     # DB state is durable now. Run the collected filesystem operations.
     _run_post_commit_fs_actions(post_commit_fs_actions)
@@ -4390,9 +4387,7 @@ class _ScanRun:
         # clear-to-NULL — see ``_write_photo_columns``), and by the
         # end-of-scan safety net ``_refill_owners_from_companions``.
         self._pending_companion_fills = {}
-        # Photo ids static collections list, read on the first insert (see
-        # ``_drop_inherited_collection_membership``).
-        self._collection_named_ids = None
+        self._init_collection_membership_cache()
 
         # Build folder cache: path -> folder_id
         self.folder_cache = {}
@@ -5467,21 +5462,32 @@ class _ScanRun:
             # would correct it because the JPEG never had a row of its
             # own. Taking the writer lock under ``_commits_held`` makes
             # the check-then-publish atomic against concurrent deletes.
-            with db._commits_held():
+            prepare = getattr(self.photo_callback, "prepare_publication", None)
+            publication = (
+                prepare(owner_id, str(image_path)) if prepare is not None
+                else contextlib.nullcontext(
+                    lambda: self.photo_callback(owner_id, str(image_path)),
+                )
+            )
+            # A streaming receiver waits for Pause and queue capacity before
+            # the writer lock, then publishes through a nonblocking callback.
+            # Ownership is revalidated AFTER that wait, keeping rowid reuse
+            # protection without preventing the consumer's thumbnail commits.
+            with publication as publish, db._commits_held():
                 owner_still_valid = self._lock_companion_owner(
                     owner_id, ownership,
                 )
-            if owner_still_valid:
-                self._reported_identities[owner_id] = (
-                    owner["folder_id"], owner["filename"],
-                )
-                self.photo_callback(owner_id, str(image_path))
-            else:
-                log.warning(
-                    "Companion attach for %s lost RAW owner %s before "
-                    "publishing; the next scan will catalog the JPEG",
-                    image_path, owner_id,
-                )
+                if owner_still_valid:
+                    self._reported_identities[owner_id] = (
+                        owner["folder_id"], owner["filename"],
+                    )
+                    publish()
+                else:
+                    log.warning(
+                        "Companion attach for %s lost RAW owner %s before "
+                        "publishing; the next scan will catalog the JPEG",
+                        image_path, owner_id,
+                    )
         else:
             self._reported_identities[owner_id] = (
                 owner["folder_id"], owner["filename"],
@@ -5765,6 +5771,39 @@ class _ScanRun:
             self.invalidated_photo_ids.add(photo_id)
         return photo_id
 
+    def _init_collection_membership_cache(self):
+        """Track collection edits on this connection, including rolled-back ones.
+
+        data_version detects other connections' commits only. TEMP triggers
+        notify a monotonic Python counter for this connection's collection
+        writes; unlike a SQL counter, rollback cannot reuse a cache version.
+        The triggers/function last only as long as the connection and never
+        change the persistent catalog schema.
+        """
+        conn = self.db.conn
+        if not hasattr(conn, "_scan_collection_revision"):
+            conn._scan_collection_revision = 0
+
+            def collection_changed():
+                conn._scan_collection_revision += 1
+                return 0
+
+            conn.create_function("_scan_collection_changed", 0, collection_changed)
+            for operation in ("INSERT", "UPDATE", "DELETE"):
+                # IF NOT EXISTS keeps this idempotent when a prior scan on
+                # the same sqlite connection has already created the TEMP
+                # triggers — e.g. a test that re-wraps the connection loses
+                # the Python-side counter attribute but the triggers persist
+                # for the lifetime of the connection.
+                conn.execute(
+                    f"CREATE TEMP TRIGGER IF NOT EXISTS "
+                    f"_scan_collection_{operation.lower()} "
+                    f"AFTER {operation} ON main.collections BEGIN "
+                    "SELECT _scan_collection_changed(); END"
+                )
+        self._collection_named_ids = None
+        self._collection_named_ids_version = None
+
     def _drop_inherited_collection_membership(self, photo_id):
         """Take a just-inserted photo out of collections it never joined.
 
@@ -5774,17 +5813,32 @@ class _ScanRun:
         deletion from before deletes cleaned collections). SQLite hands the
         highest freed id to the next insert, which would then appear in
         that collection. A photo that did not exist until now cannot be a
-        member of anything, so any listing of its id is stale. The listed
-        ids are read once per scan, on the first insert.
+        member of anything, so any listing of its id is stale. Reuse the
+        named-id set until either another connection commits (data_version)
+        or this connection edits collections (the non-transactional counter).
+        Check both after the INSERT has acquired its writer lock, so a stale
+        UI save between insert commits cannot become a new photo's membership.
         """
-        if self._collection_named_ids is None:
+        conn = self.db.conn
+        version = (
+            conn.execute("PRAGMA data_version").fetchone()[0],
+            conn._scan_collection_revision,
+        )
+        if (
+            self._collection_named_ids is None
+            or version != self._collection_named_ids_version
+        ):
             self._collection_named_ids = (
                 self.db.photo_ids_named_by_collections()
             )
+            self._collection_named_ids_version = version
         if photo_id not in self._collection_named_ids:
             return
         self._collection_named_ids.discard(photo_id)
         rewritten = self.db.remap_collection_photo_ids({photo_id: None})
+        # This remap only removed photo_id, already discarded above. Keep
+        # the cache current without traversing all other memberships again.
+        self._collection_named_ids_version = (version[0], conn._scan_collection_revision)
         commit_with_retry(self.db.conn)
         log.warning(
             "New photo %d reused the id of a deleted photo that %d "

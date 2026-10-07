@@ -83,6 +83,93 @@ log = logging.getLogger(__name__)
 MAP_RENDER_PHOTO_LIMIT = 10_000
 
 
+def _map_selection_ids(raw):
+    """Validate a Map selection's ``photo_ids``: non-empty integers, deduplicated."""
+    if not isinstance(raw, list) or not raw:
+        raise ValueError("photo_ids must be a non-empty list")
+    for value in raw:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("photo_ids must be integers")
+    return list(dict.fromkeys(raw))
+
+
+def _within_selection(selection_ids, rules):
+    """``rules`` (None, a flat list or a group) narrowed to the selected photos."""
+    clauses = [{"field": "photo_ids", "value": selection_ids}]
+    if isinstance(rules, list):
+        clauses.extend(rules)
+    elif rules is not None:
+        clauses.append(rules)
+    return {"mode": "all", "rules": clauses}
+
+
+def _map_selection_summary(db, selection_ids, shown, *, filtered):
+    """Account for every selected photo the map shows or leaves off.
+
+    The buckets partition the selection, so the Map page can say why each
+    missing photo is missing rather than just how many markers it drew:
+    the map filters hid it, it has no coordinates, its folder is offline
+    or missing, or it is no longer in this workspace (deleted, or the
+    selection came from another tab before a workspace switch).
+    """
+    visible = db.filter_photo_ids_in_workspace(selection_ids)
+    statuses = db.get_photo_location_statuses(visible)
+    located = {pid for pid in visible if statuses.get(pid, "none") != "none"}
+    if filtered:
+        plottable = {
+            row["id"] for row in db.get_geolocated_photos(
+                rules=_within_selection(selection_ids, None),
+            )
+        }
+    else:
+        plottable = {row["id"] for row in shown}
+    return {
+        "selected": len(selection_ids),
+        "shown": len(shown),
+        "hidden_by_filters": len(plottable) - len(shown),
+        "without_location": len(visible) - len(located),
+        "folder_unavailable": len(located - plottable),
+        "not_in_workspace": len(selection_ids) - len(visible),
+    }
+
+
+def _unplottable_map_focus(db, photo_id):
+    """Explain why a deep-linked photo is absent from the Map's photo set.
+
+    ``reason`` is ``not_found`` (no such photo in the active workspace),
+    ``unavailable`` (its folder is offline or missing, so the map excludes
+    it regardless of coordinates), or ``no_coordinates`` (folder is
+    available but the photo has no EXIF GPS pair and no assigned location
+    with coordinates; ``location_keywords`` lists the name-only locations
+    that could be linked to a place).
+
+    Folder availability is checked before coordinate status: a photo in a
+    missing folder with a name-only location keyword would otherwise be
+    reported as ``no_coordinates``, promising that linking the keyword
+    puts it on the map, when the map's folder-status filter would keep it
+    off regardless.
+    """
+    photo = db.get_photo(photo_id, verify_workspace=True)
+    if photo is None:
+        return {"id": photo_id, "reason": "not_found"}
+    focus = {"id": photo_id, "filename": photo["filename"]}
+    folder_status = db.get_photo_folder_statuses([photo_id]).get(photo_id)
+    if folder_status not in ("ok", "partial"):
+        focus["reason"] = "unavailable"
+        return focus
+    status = db.get_photo_location_statuses([photo_id]).get(photo_id, "none")
+    if status != "none":
+        focus["reason"] = "unavailable"
+        return focus
+    focus["reason"] = "no_coordinates"
+    focus["location_keywords"] = [
+        {"id": k["id"], "name": k["name"]}
+        for k in db.get_photo_keywords(photo_id)
+        if k["type"] == "location"
+    ]
+    return focus
+
+
 def create_photos_blueprint(
     get_db,
     json_error,
@@ -901,14 +988,32 @@ def create_photos_blueprint(
         attach_nested_edit_recipes(db, result)
         return jsonify(result)
 
-    @blueprint.route("/api/photos/geo")
+    @blueprint.route("/api/photos/geo", methods=["GET", "POST"])
     def api_photos_geo():
+        """Plottable photos for the Map page.
+
+        GET reads the filter bar's ``rules`` and ``visual`` from the query
+        string. POST carries them in a JSON body together with
+        ``photo_ids`` — a Browse selection opened with View on Map, which
+        can be too long for a URL — and limits the map to those photos. Its
+        response adds ``selection``, which accounts for every selected photo
+        the map does not show.
+        """
         db = get_db()
         folder_id = request.args.get("folder_id", None, type=int)
         focus_photo_id = request.args.get("photo_id", None, type=int)
+        selection_ids = None
         try:
-            rules = request_rules_arg()
-            visual = request_visual_arg()
+            if request.method == "POST":
+                body = request.get_json(silent=True)
+                if not isinstance(body, dict):
+                    raise ValueError("request body must be a JSON object")
+                selection_ids = _map_selection_ids(body.get("photo_ids"))
+                rules = body.get("rules") or None
+                visual = validate_visual_arg(body.get("visual"))
+            else:
+                rules = request_rules_arg()
+                visual = request_visual_arg()
             # Fill in the active visual model on any UI-emitted
             # ``has_visual_index`` rule that omits it. Without this a Map
             # filter for "has index" (rule sent without a ``model`` key)
@@ -928,6 +1033,9 @@ def create_photos_blueprint(
                 db.get_plottable_photo_ids(folder_id=folder_id)
                 if visual is not None else None
             )
+            if plottable_ids is not None and selection_ids is not None:
+                selected = set(selection_ids)
+                plottable_ids = [pid for pid in plottable_ids if pid in selected]
             rules, visual_info = visual_scope.apply_to_rules(
                 db, rules, visual, folder_id=folder_id,
                 candidate_photo_ids=plottable_ids,
@@ -938,7 +1046,10 @@ def create_photos_blueprint(
         try:
             photos = db.get_geolocated_photos(
                 folder_id=folder_id,
-                rules=rules,
+                rules=(
+                    rules if selection_ids is None
+                    else _within_selection(selection_ids, rules)
+                ),
             )
         except ValueError as e:
             return json_error(str(e), 400)
@@ -948,7 +1059,18 @@ def create_photos_blueprint(
         total_geolocated = total_photos - total_without_coordinates
 
         total_filtered = len(photos)
-        visible_photos = list(photos[:MAP_RENDER_PHOTO_LIMIT])
+        unplottable_focus = None
+        if (
+            focus_photo_id is not None
+            and selection_ids is None
+            and all(p["id"] != focus_photo_id for p in photos)
+        ):
+            # Plotting the whole library around a photo that is not on it
+            # reads as "here is your photo". Send no markers and say why.
+            unplottable_focus = _unplottable_map_focus(db, focus_photo_id)
+            visible_photos = []
+        else:
+            visible_photos = list(photos[:MAP_RENDER_PHOTO_LIMIT])
         # A deep-linked photo must remain reachable even when it falls beyond
         # the safety ceiling in the default date ordering. Replace the last
         # visible row rather than exceeding the bound.
@@ -969,7 +1091,9 @@ def create_photos_blueprint(
             "total_filtered": total_filtered,
             "total_rendered": len(photo_dicts),
             "render_limit": MAP_RENDER_PHOTO_LIMIT,
-            "truncated": total_filtered > len(photo_dicts),
+            "truncated": (
+                unplottable_focus is None and total_filtered > len(photo_dicts)
+            ),
             "total_photos": total_photos,
             "total_geolocated": total_geolocated,
             "total_without_coordinates": total_without_coordinates,
@@ -983,6 +1107,15 @@ def create_photos_blueprint(
         # visual search that silently returned metadata-only matches.
         if visual_info is not None:
             response["visual"] = visual_info
+        if selection_ids is not None:
+            response["selection"] = _map_selection_summary(
+                db, selection_ids, photos,
+                filtered=rules is not None or folder_id is not None,
+            )
+
+
+        if unplottable_focus is not None:
+            response["unplottable_focus"] = unplottable_focus
         return jsonify(response)
 
     @blueprint.route("/api/photos/<int:photo_id>/wildlife_excluded", methods=["POST"])

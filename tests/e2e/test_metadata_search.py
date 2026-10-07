@@ -80,6 +80,26 @@ def test_searches_file_metadata_and_folders(live_server, page):
     expect(page.locator(".vf-total strong")).to_have_text("0")
 
 
+def test_keywords_toggle_limits_search_to_keyword_names(live_server, page):
+    search = open_browse(page, live_server)
+    search.fill("hawk")
+    expect(page.locator(".vf-total strong")).to_have_text("3")
+    toggle = page.locator(".vf-search-scope")
+    with page.expect_response(lambda r: r.request.method == 'PUT' and '/api/workspaces/' in r.url):
+        toggle.click()
+    expect(toggle).to_have_attribute("aria-pressed", "true")
+    # Only hawk1 carries a Hawk keyword; the filename/prediction matches drop.
+    expect(page.locator(".vf-total strong")).to_have_text("1")
+    expect(page.locator(".vf-chip-row")).to_contain_text("Keywords: “hawk”")
+    page.reload()
+    expect(page.locator(".vf-search input")).to_have_value("hawk")
+    expect(page.locator(".vf-search-scope")).to_have_attribute("aria-pressed", "true")
+    expect(page.locator(".vf-total strong")).to_have_text("1")
+    page.locator(".vf-search-scope").click()
+    expect(page.locator(".vf-total strong")).to_have_text("3")
+    expect(page.locator(".vf-chip-row")).to_contain_text("Search: “hawk”")
+
+
 def test_collection_editor_supports_metadata_rules(live_server, page):
     open_browse(page, live_server)
     page.get_by_role("button", name="+ New Collection").click()

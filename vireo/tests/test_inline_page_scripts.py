@@ -30,7 +30,7 @@ INLINE_SCRIPT_LINE_LIMITS = {
     "keywords.html": 1204,
     "lightroom.html": 135,
     "logs.html": 64,
-    "map.html": 416,
+    "map.html": 389,
     "misses.html": 1438,
     "move.html": 1660,
     "pipeline_rapid_review.html": 1614,

@@ -7,21 +7,21 @@ import pytest
 from db import Database
 
 
-def parse_queries(queries):
+def parse_queries(queries, options=None):
     node = shutil.which("node")
     if not node:
         pytest.skip("Node is required to exercise the browser search parser")
     parser = Path(__file__).parents[1] / "static" / "vireo-search.js"
     script = """
       const {parse} = require(process.argv[1]);
-      const queries = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+      const {queries, options} = JSON.parse(require('fs').readFileSync(0, 'utf8'));
       process.stdout.write(JSON.stringify(queries.map(q => {
-        try { return {rules: [parse(q)]}; }
+        try { return {rules: [parse(q, options)]}; }
         catch (e) { return {error: e.message}; }
       })));
     """
     result = subprocess.run(
-        [node, "-e", script, str(parser)], input=json.dumps(queries),
+        [node, "-e", script, str(parser)], input=json.dumps({"queries": queries, "options": options}),
         capture_output=True, text=True, check=True, timeout=15,
     )
     return json.loads(result.stdout)
@@ -122,6 +122,16 @@ def test_quoted_escapes_and_literal_paths():
     queries = [r'"say \"hello\""', r'C:\Photos\bird.jpg', r'"C:\Photos\bird.jpg"']
     values = [result["rules"][0]["value"] for result in parse_queries(queries)]
     assert values == ['say "hello"', r'C:\Photos\bird.jpg', r'C:\Photos\bird.jpg']
+
+
+def test_keyword_scope_matches_keyword_names_only(catalog):
+    db, ids = catalog
+    [metadata] = parse_queries(['"Lake visit" OR Perched'])
+    [keyword] = parse_queries(['"Lake visit" OR Perched'], {"field": "keyword"})
+    assert {r["field"] for r in keyword["rules"][0]["rules"]} == {"keyword"}
+    # The folder name matches every photo as metadata, never as a keyword.
+    assert set(db.query_photo_ids(metadata["rules"])) == set(ids.values())
+    assert set(db.query_photo_ids(keyword["rules"])) == {ids["hawk"], ids["owl"]}
 
 
 def test_number_search_matches_where_a_number_starts(catalog):
