@@ -1247,7 +1247,7 @@
       const controls = Array.from(tree.querySelectorAll('[data-action][data-path]'));
       const el = controls.find((candidate) =>
         candidate.dataset.action === restore.action && candidate.dataset.path === restore.path &&
-        candidate.dataset.value === restore.value) || (restore.action === 'extension-remove' &&
+        candidate.dataset.value === restore.value) || (['extension-remove', 'extension-pick'].includes(restore.action) &&
           controls.find((candidate) => candidate.dataset.action === 'extension-pick' &&
             candidate.dataset.path === restore.path &&
             candidate.dataset.value.toLowerCase() === restore.value.toLowerCase()));

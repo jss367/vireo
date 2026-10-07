@@ -1103,6 +1103,28 @@ def test_extension_picker_multiple_formats_and_saved_values(live_server, page):
     expect(picker.get_by_role("checkbox", name="JPG", exact=True)).not_to_be_checked()
 
 
+def test_extension_picker_saved_case_keeps_keyboard_focus(live_server, page):
+    _open_browse(page, live_server)
+    page.evaluate("""() => VireoFilter.loadExpression({mode: 'all', rules: [
+        {field: 'extension', op: 'in', value: ['.JPG']}
+    ]})""")
+    page.click(".vf-filters-btn")
+    picker = page.locator(".vf-extension-picker")
+    jpg = picker.get_by_role("checkbox", name="JPG", exact=True)
+    expect(jpg).to_be_checked()
+    expect(jpg).to_have_attribute("data-value", ".JPG")
+    # Wait for workspace formats before removing the saved spelling.
+    expect(picker).to_contain_text("Select one or more formats")
+    jpg.focus()
+    page.keyboard.press("Space")
+    expect(jpg).not_to_be_checked()
+    expect(jpg).to_have_attribute("data-value", ".jpg")
+    expect(jpg).to_be_focused()
+    page.keyboard.press("Space")
+    expect(jpg).to_be_checked()
+    expect(jpg).to_be_focused()
+
+
 def test_extension_picker_load_failure_retry_and_empty_workspace(live_server, page):
     page.route("**/api/filters/values?field=extension*",
                lambda route: route.fulfill(status=500, json={"error": "Unavailable"}))
