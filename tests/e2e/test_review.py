@@ -1,5 +1,7 @@
 import re
+from urllib.parse import quote
 
+import pytest
 from playwright.sync_api import expect
 
 
@@ -177,3 +179,34 @@ def test_review_photo_deep_link_pill_sits_under_controls_and_clears(live_server,
     expect(pill).to_have_count(0)
     expect(cards).to_have_count(len(live_server["data"]["photos"]))
     assert "photo_id" not in page.url
+
+
+@pytest.mark.parametrize("fingerprint", [
+    "normal-fingerprint-that-is-truncated",
+    "<img src=x>",
+    "&lt;b&gt;",
+])
+def test_review_fingerprint_deep_link_is_literal_text_and_clears(
+    live_server, page, fingerprint,
+):
+    """URL-supplied fingerprints are text, and clearing keeps the photo scope."""
+    photo_id = live_server["data"]["photos"][0]
+    page.goto(
+        f"{live_server['url']}/review?photo_id={photo_id}"
+        f"&labels_fingerprint={quote(fingerprint, safe='')}",
+        timeout=5000,
+    )
+
+    pill = page.locator("#fpFilterPill")
+    expect(pill).to_be_visible()
+    expect(pill.locator("code")).to_have_text(fingerprint[:12])
+    expect(pill.locator("code > *")).to_have_count(0)
+    assert pill.evaluate("el => el.parentElement.id") == "reviewFilterPills"
+
+    page.locator("#fpFilterClear").click()
+
+    expect(pill).to_have_count(0)
+    assert "labels_fingerprint" not in page.url
+    assert f"photo_id={photo_id}" in page.url
+    assert page.evaluate("currentLabelsFingerprint") is None
+    expect(page.locator(".card[data-pred-id]")).to_have_count(1)

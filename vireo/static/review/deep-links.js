@@ -37,7 +37,7 @@ function renderFingerprintFilterPill() {
     'border-radius:12px;background:color-mix(in srgb,var(--accent) 15%,transparent);' +
     'color:var(--accent);font-size:12px;margin:6px 0;';
   pill.innerHTML = 'Filtered to fingerprint <code>' +
-    currentLabelsFingerprint.substring(0, 12) +
+    escapeHtml(currentLabelsFingerprint.substring(0, 12)) +
     '</code> <a href="#" id="fpFilterClear" style="color:inherit;text-decoration:none;">×</a>';
   insertFilterPill(pill);
   document.getElementById('fpFilterClear').addEventListener('click', function(e) {
