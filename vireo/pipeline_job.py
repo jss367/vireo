@@ -1967,16 +1967,21 @@ class _StageState:
 
     @contextlib.contextmanager
     def prepare_scan_item(self, item):
-        """Wait for Pause/backpressure before entering a publication lock.
+        """Wait for Pause/backpressure, then yield an unlocked publisher.
 
-        The scanner is the queue's only producer. Once it observes space,
-        only the consumer can change its occupancy until this publication,
-        so the guarded enqueue needs neither a wait nor a pause checkpoint.
+        The ``break`` below leaves ``with self.scan_to_thumb.not_full:``,
+        which invokes the context manager's ``__exit__`` and releases the
+        queue mutex before control reaches the ``yield``. The returned
+        lambda therefore calls ``put_nowait`` with the mutex free and
+        acquires it itself — there is no re-acquisition across the yield.
+
+        The scanner is the queue's only producer, so once we observe free
+        space nothing else can refill the queue before ``put_nowait``.
         """
         while not self.control.should_abort(self.control.abort):
             with self.scan_to_thumb.not_full:
                 if self.scan_to_thumb._qsize() < self.scan_to_thumb.maxsize:
-                    break
+                    break  # releases scan_to_thumb.not_full before the yield
                 self.scan_to_thumb.not_full.wait(timeout=0.5)
         else:
             yield None
