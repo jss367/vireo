@@ -298,6 +298,30 @@ def test_inline_comment_edits_wake_reconciliation_on_the_live_head():
     assert "expected-head:" not in block
 
 
+def test_routine_works_on_and_pushes_against_the_expected_head_only():
+    prompt = _read(ROUTINE_PROMPT)
+
+    # The workflow binds fix-ci to the failing run's head, but the routine
+    # runs later: if someone pushes meanwhile, checking out the branch by name
+    # lands on their newer commit and a plain push stacks a fix for a stale
+    # failure on top of it (#2011). Every task confirms it is on
+    # EXPECTED_HEAD after checkout and pushes with a lease pinned to it, so
+    # git itself rejects a push onto a head that moved.
+    on_expected = 'test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD" || exit 0'
+    lease = '--force-with-lease="refs/heads/$HEAD:$EXPECTED_HEAD"'
+    assert lease in prompt
+    assert "no rebase onto the\nnew head" in prompt
+
+    fix_ci = prompt.split("## Task: `fix-ci`", 1)[1].split("\n## Task:", 1)[0]
+    assert on_expected in fix_ci
+    assert "`EXPECTED_HEAD` lease" in fix_ci
+    assert "never a plain `git push`" in fix_ci
+
+    reconcile = prompt.split("## Task: `fix-ci`", 1)[0]
+    assert reconcile.count(on_expected) >= 2  # Common Setup + reconciliation checkout
+    assert "push to the same branch with\n    the `EXPECTED_HEAD` lease" in reconcile
+
+
 def test_routine_contract_is_state_based_quiet_and_resolves_addressed_threads():
     prompt = _read(ROUTINE_PROMPT)
 

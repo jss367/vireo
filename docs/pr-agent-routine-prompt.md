@@ -119,6 +119,29 @@ test "$CURRENT_HEAD" = "$EXPECTED_HEAD" || exit 0
 Repeat the state/head check immediately before every push. A closed/merged PR
 or a changed head is a silent no-op: do not push and do not post a comment.
 
+Work on `EXPECTED_HEAD` itself, not on whatever the branch name points to by
+the time you check it out: someone else can push to the PR while you
+diagnose, and their push may already fix (differently) what you were sent to
+fix. After checking out the branch, confirm you are on the expected commit:
+
+```bash
+test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD" || exit 0
+```
+
+Push only with a lease pinned to `EXPECTED_HEAD`, so a push that would land
+on top of someone else's newer commit is rejected by git even if the
+re-check above was skipped or raced:
+
+```bash
+git push origin "HEAD:refs/heads/$HEAD" \
+  --force-with-lease="refs/heads/$HEAD:$EXPECTED_HEAD"
+```
+
+Your new commit's parent is `EXPECTED_HEAD`, so this is an ordinary
+fast-forward when nothing moved. A rejected push means the head moved:
+treat it like a changed head — a silent no-op, no retry, no rebase onto the
+new head, no comment.
+
 ## Validation
 
 Use the strongest validation that exists in the current checkout. Prefer the
@@ -159,6 +182,7 @@ signal; do not limit the work to the triggering payload.
    BASE=$(gh pr view "$PR" --json baseRefName -q .baseRefName)
    git fetch origin "$BASE" "$HEAD"
    git checkout "$HEAD"
+   test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD" || exit 0
    ```
 3. For `address-codex-review` only, add the `claude-agent` label if needed.
    The workflow already labels both reconciliation task kinds.
@@ -249,7 +273,8 @@ signal; do not limit the work to the triggering payload.
    same growth.
 10. Repeat the live state/head check against `EXPECTED_HEAD` immediately before
     the push. Commit once with a descriptive subject and include
-    `[pr-agent-review-fix:$PR]` in the body, then push to the same branch. If
+    `[pr-agent-review-fix:$PR]` in the body, then push to the same branch with
+    the `EXPECTED_HEAD` lease from Common Setup (never a plain `git push`). If
     this round resumes a CI repair that the drift checkpoint stopped, include
     `[pr-agent-fix-ci:$PR]` as well: the workflow's one-retry guard greps the
     head commit for that marker, so a resumed repair carrying only the
@@ -270,10 +295,14 @@ signal; do not limit the work to the triggering payload.
    gh pr view "$PR" --json title,body,headRefName
    gh pr diff "$PR"
    ```
-2. Check out the PR head branch:
+2. Check out the PR head branch and confirm it is still `EXPECTED_HEAD`, the
+   commit whose CI run failed (Common Setup). If the branch has moved on, the
+   failure you were sent is stale — a newer push may already fix it another
+   way — so stop silently:
    ```bash
    HEAD=$(gh pr view "$PR" --json headRefName -q .headRefName)
    git checkout "$HEAD"
+   test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD" || exit 0
    ```
 3. Diagnose and fix the root cause. Common failures:
    - `pytest` failures — fix the code or the test
@@ -288,9 +317,10 @@ signal; do not limit the work to the triggering payload.
    If the checkpoint fires here, reset, post the drift comment (after
    rechecking live state), and stop instead of committing.
 6. Commit with subject `fix: resolve CI failures on PR #$PR` and include the
-   marker `[pr-agent-fix-ci:$PR]` in the commit body, then push. The GitHub
-   workflow uses that marker to avoid repeated automated retries if the fix
-   still fails CI.
+   marker `[pr-agent-fix-ci:$PR]` in the commit body. Repeat the live
+   state/head check, then push with the `EXPECTED_HEAD` lease from Common
+   Setup (never a plain `git push`). The GitHub workflow uses the marker to
+   avoid repeated automated retries if the fix still fails CI.
 7. If you cannot resolve everything, post a PR comment explaining what is
    left instead of pushing a half-fix:
    ```bash
