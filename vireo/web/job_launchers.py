@@ -87,34 +87,33 @@ def _photo_is_raw_jpeg_pair(photo):
     return companion_ext in {".jpg", ".jpeg"}
 
 
-# Shadow directory name used by ``web.media._paired_preview_path`` for
-# source-specific preview renders. Kept in sync with that module.
-_PAIRED_PREVIEW_DIRNAME = "paired"
+def _paired_jpeg_preview_exists(preview_dir, photo, size, folder_path, db):
+    """Check the exact current JPEG artifact using the renderer's predicate."""
+    from web.media import (
+        _fresh_paired_artifact,
+        _paired_preview_path,
+        _paired_render_state_hash,
+    )
 
-
-def _paired_jpeg_preview_exists(preview_dir, photo_id, size):
-    """Any non-empty paired-JPEG shadow-cache file for this (photo_id, size).
-
-    ``web.media._paired_preview_path`` keys the filename by the paired
-    render's state hash, so the prepare-full-resolution job scans the
-    directory rather than recomputing the hash from the catalog row —
-    this stays correct across future changes to the hash inputs.
-    """
-    paired_dir = os.path.join(preview_dir, _PAIRED_PREVIEW_DIRNAME)
-    try:
-        entries = os.listdir(paired_dir)
-    except OSError:
+    if not photo or not folder_path or not photo["companion_path"]:
         return False
-    prefix = f"{photo_id}_{size}_jpeg_"
-    for name in entries:
-        if not name.startswith(prefix) or not name.endswith(".jpg"):
-            continue
-        try:
-            if os.path.getsize(os.path.join(paired_dir, name)) > 0:
-                return True
-        except OSError:
-            continue
-    return False
+    source_path = os.path.join(folder_path, photo["companion_path"])
+    if not os.path.isfile(source_path):
+        # Match the renderer's live-source-first, offline-companion fallback.
+        cached = db.offline_original_get(photo["id"])
+        source_path = cached["companion_path"] if cached else None
+        if not source_path:
+            return False
+        if not os.path.isabs(source_path):
+            source_path = os.path.join(os.path.dirname(preview_dir), source_path)
+        if not os.path.isfile(source_path):
+            return False
+    state_hash = _paired_render_state_hash(
+        photo, size, "jpeg", source_path, None,
+    )
+    return _fresh_paired_artifact(_paired_preview_path(
+        preview_dir, photo["id"], size, "jpeg", state_hash,
+    ))
 
 
 def create_job_launchers_blueprint(
@@ -1450,8 +1449,9 @@ def create_job_launchers_blueprint(
                                                 is_pair
                                                 and not
                                                 _paired_jpeg_preview_exists(
-                                                    preview_dir, photo_id,
-                                                    size,
+                                                    preview_dir, photo, size,
+                                                    folders.get(photo["folder_id"]),
+                                                    thread_db,
                                                 )
                                             ):
                                                 error = (
@@ -1542,6 +1542,7 @@ def create_job_launchers_blueprint(
                 if preview_sizes and pending_ready_meta:
                     preview_dir = os.path.join(vireo_dir, "previews")
                     for photo_id, info in pending_ready_meta.items():
+                        current_photo = thread_db.get_photo(photo_id)
                         missing_size = None
                         missing_kind = None
                         for size in preview_sizes:
@@ -1558,7 +1559,9 @@ def create_job_launchers_blueprint(
                             if (
                                 info["is_pair"]
                                 and not _paired_jpeg_preview_exists(
-                                    preview_dir, photo_id, size,
+                                    preview_dir, current_photo, size,
+                                    folders.get(current_photo["folder_id"]) if current_photo else None,
+                                    thread_db,
                                 )
                             ):
                                 missing_size = size

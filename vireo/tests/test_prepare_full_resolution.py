@@ -1207,8 +1207,9 @@ def test_preparation_guard_accepts_matching_recipe(client_with_photo):
         assert (preview_dir / f"{photo_id}_{size}.jpg").is_file(), size
 
 
+@pytest.mark.parametrize("cache_fault", [None, "expired", "wrong_state", "publication_failure"])
 def test_prepare_raw_jpeg_pair_warms_paired_jpeg_tiers(
-    client_with_photo, monkeypatch,
+    client_with_photo, monkeypatch, cache_fault,
 ):
     """A RAW+JPEG pair's paired-JPEG preview tiers are a cache hit after prep.
 
@@ -1274,12 +1275,55 @@ def test_prepare_raw_jpeg_pair_warms_paired_jpeg_tiers(
         image_loader, "load_image", paired_aware_load_image,
     )
 
+    from types import SimpleNamespace
+
+    from web import job_launchers, media
+
+    if cache_fault == "expired":
+        # Advance the renderer's clock at the final cross-selection check,
+        # after all three tiers passed their immediate warming checks.
+        clock = {"offset": 0}
+        monkeypatch.setattr(media, "time", SimpleNamespace(
+            time=lambda: time.time() + clock["offset"],
+        ))
+        original_check = job_launchers._paired_jpeg_preview_exists
+        checks = []
+
+        def expire_before_final_check(*args):
+            checks.append(args)
+            if len(checks) > 3:
+                clock["offset"] = media._PAIRED_PREVIEW_TTL_SEC + 1
+            return original_check(*args)
+
+        monkeypatch.setattr(job_launchers, "_paired_jpeg_preview_exists",
+                            expire_before_final_check)
+    elif cache_fault in {"wrong_state", "publication_failure"}:
+        original_write = media.atomic_write_bytes
+
+        def fail_current_paired_publication(data, path):
+            if "_jpeg_" in str(path) and Path(path).parent.name == "paired":
+                if cache_fault == "wrong_state":
+                    # A nonempty artifact for a different source/render
+                    # state cannot stand in for the failed current write.
+                    wrong = Path(str(path).rsplit("_", 1)[0] + "_wrongstate.jpg")
+                    wrong.parent.mkdir(parents=True, exist_ok=True)
+                    wrong.write_bytes(data)
+                raise OSError("simulated paired artifact publication failure")
+            return original_write(data, path)
+
+        monkeypatch.setattr(media, "atomic_write_bytes", fail_current_paired_publication)
+
     started = client.post(
         "/api/jobs/prepare-full-resolution", json={"photo_ids": [photo_id]},
     )
     job = wait_for_job_via_client(client, started.get_json()["job_id"])
-    assert job["status"] == "completed", job
+    assert job["status"] == ("failed" if cache_fault else "completed"), job
     result = job["result"]
+    if cache_fault is not None:
+        assert result["ready"] == 0, result
+        assert result["failed"] == 1, result
+        assert result["ok"] is False, result
+        return
     assert result["ok"] is True, result
     assert result["ready"] == 1, result
     assert result["failed"] == 0, result
