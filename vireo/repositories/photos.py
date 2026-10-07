@@ -290,6 +290,57 @@ class PhotoRepository:
                         out[original_path] = r["id"]
         return out
 
+    def ids_at_paths(self, paths):
+        """Ids of the photos stored at ``paths``, in one join.
+
+        The (directory, filename) pairs go through a temp table rather than
+        bound parameters, so any number of paths is one statement. A path
+        listed twice yields its id twice. The temp-table insert opens a
+        transaction on the connection that this method does not end.
+        """
+        self.conn.execute(
+            "CREATE TEMP TABLE IF NOT EXISTS _imported_paths (dirpath TEXT, fname TEXT)"
+        )
+        self.conn.execute("DELETE FROM _imported_paths")
+        self.conn.executemany(
+            "INSERT INTO _imported_paths (dirpath, fname) VALUES (?, ?)",
+            [(os.path.dirname(p), os.path.basename(p)) for p in paths],
+        )
+        rows = self.conn.execute(
+            """SELECT p.id FROM photos p
+               JOIN folders f ON p.folder_id = f.id
+               JOIN _imported_paths ip ON f.path = ip.dirpath
+                                       AND p.filename = ip.fname"""
+        ).fetchall()
+        photo_ids = [r["id"] for r in rows]
+        self.conn.execute("DROP TABLE IF EXISTS _imported_paths")
+        return photo_ids
+
+    def ids_under_path(self, path):
+        """Ids of the photos in the folder at ``path`` and every folder below it.
+
+        Descendants match ``f.path LIKE '<path>/%'``, so the match is
+        ASCII-case-insensitive and ``_`` / ``%`` in ``path`` act as wildcards.
+        """
+        rows = self.conn.execute(
+            """SELECT p.id FROM photos p
+               JOIN folders f ON p.folder_id = f.id
+               WHERE f.path = ? OR f.path LIKE ?""",
+            (path, path.rstrip("/") + "/%"),
+        ).fetchall()
+        return [r["id"] for r in rows]
+
+    def ids_in_folders(self, folder_ids):
+        """Ids of every photo whose folder is one of ``folder_ids``."""
+        ids = []
+        for chunk in self._chunks(folder_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            ids.extend(row["id"] for row in self.conn.execute(
+                f"SELECT id FROM photos WHERE folder_id IN ({placeholders})",
+                list(chunk),
+            ))
+        return ids
+
     # -- workspace-scoped listing -------------------------------------------
 
     def get_calendar_data(

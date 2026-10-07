@@ -3443,6 +3443,14 @@ class Database:
         """Return folder count for the active workspace."""
         return self._folder_repository().count()
 
+    def get_all_folders(self):
+        """Rows (``id``, ``path``, ``name``) for every folder, in any workspace or status."""
+        return self._folder_repository(scoped=False).all_rows()
+
+    def count_present_photos_under_path(self, path):
+        """Photos in ``ok``/``partial`` folders at ``path`` or below, in any workspace."""
+        return self._folder_repository(scoped=False).present_photo_count_under(path)
+
     def count_keywords(self):
         """Return count of keywords used by photos in the active workspace.
 
@@ -3692,6 +3700,22 @@ class Database:
         respects SQLite's parameter cap.
         """
         return self._photos_repository(scoped=False).by_paths(paths)
+
+    def get_photo_ids_at_paths(self, paths):
+        """Ids of the photos stored at ``paths`` (one per listed path), in any workspace.
+
+        Leaves the connection's temp-table transaction open; the caller's
+        next commit ends it.
+        """
+        return self._photos_repository(scoped=False).ids_at_paths(paths)
+
+    def get_photo_ids_under_path(self, path):
+        """Ids of the photos at ``path`` and below (``LIKE`` match), in any workspace."""
+        return self._photos_repository(scoped=False).ids_under_path(path)
+
+    def get_photo_ids_in_folders(self, folder_ids):
+        """Ids of every photo in the given folders, in any workspace."""
+        return self._photos_repository(scoped=False).ids_in_folders(folder_ids)
 
     def workspace_unlinked_folder_count(self, folder_paths):
         """Count distinct paths in ``folder_paths`` whose folders are not
@@ -10934,3 +10958,35 @@ class Database:
         from repositories.inat import InatRepository
 
         return InatRepository(self.conn, chunk_size=_SQLITE_PARAM_CHUNK_SIZE)
+
+    # -- Pending NAS transfers --
+
+    def _pending_archive_repository(self, *, scoped=True):
+        """Build the pending-NAS-transfer repository on this connection.
+
+        ``scoped=True`` binds it to the active workspace (raising
+        ``RuntimeError`` when none is set); ``set_pending_archive_state``
+        addresses a transfer by its unique id and passes ``scoped=False``.
+        """
+        from repositories.pending_archives import PendingArchiveRepository
+
+        return PendingArchiveRepository(
+            self.conn, self._ws_id() if scoped else None,
+        )
+
+    def get_open_pending_archives(self):
+        """The active workspace's transfers not yet ``complete``, oldest first.
+
+        Each row carries every ``pending_archives`` column plus
+        ``review_collection_id`` and ``collection_name`` (NULL when the
+        import's review collection is gone).
+        """
+        return self._pending_archive_repository().open_with_review_collection()
+
+    def delete_pending_archive(self, archive_id):
+        """Forget one of the active workspace's transfers (the row only) and commit."""
+        self._pending_archive_repository().delete(archive_id)
+
+    def set_pending_archive_state(self, archive_id, state, error=""):
+        """Set a transfer's ``state`` and ``error`` by id, in any workspace, and commit."""
+        self._pending_archive_repository(scoped=False).set_state(archive_id, state, error)

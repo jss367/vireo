@@ -382,6 +382,75 @@ def test_photos_by_paths_batches_filenames_per_directory(db, tmp_path):
     assert len(_sql(statements, "SELECT p.id, p.filename")) == 3
 
 
+# -- photo-id reads by path and folder ---------------------------------------
+
+
+def test_get_photo_ids_at_paths(db, lib, tmp_path):
+    a_path = str(tmp_path / "lib" / "a.jpg")
+    c_path = str(tmp_path / "lib" / "c" / "c.jpg")
+    f_path = str(tmp_path / "foreign" / "f.jpg")
+    new_path = str(tmp_path / "lib" / "new.jpg")
+    # Photos are global; an unknown path matches nothing.
+    got = db.get_photo_ids_at_paths([a_path, c_path, f_path, new_path])
+    assert sorted(got) == sorted([lib["a"], lib["c"], lib["f"]])
+    # Same filename in another directory does not match.
+    assert db.get_photo_ids_at_paths([str(tmp_path / "foreign" / "a.jpg")]) == []
+    # The temp table is reset per call and dropped afterwards.
+    assert db.get_photo_ids_at_paths([c_path]) == [lib["c"]]
+    assert db.conn.execute(
+        "SELECT name FROM sqlite_temp_master WHERE name = '_imported_paths'"
+    ).fetchone() is None
+
+
+def test_get_photo_ids_at_paths_is_one_statement_for_many_paths(db, tmp_path):
+    fid = db.add_folder(str(tmp_path / "big"), name="big")
+    pid = _photo(db, fid, "keep.jpg")
+    paths = [str(tmp_path / "big" / "keep.jpg")] + [
+        str(tmp_path / "big" / f"n{i}.jpg") for i in range(1200)
+    ]
+    statements = _trace(db)
+    got = db.get_photo_ids_at_paths(paths)
+    db.conn.set_trace_callback(None)
+    assert got == [pid]
+    assert len(_sql(statements, "JOIN _imported_paths")) == 1
+
+
+def test_get_photo_ids_under_path(db):
+    # The query matches descendants by a "/" separator (as the in-place
+    # import route always has), so build POSIX-style paths explicitly rather
+    # than through os.path, which uses backslashes on Windows.
+    root = db.add_folder("/photos/lib", name="lib")
+    child = db.add_folder("/photos/lib/c", name="c", parent_id=root)
+    a = _photo(db, root, "a.jpg")
+    b = _photo(db, root, "b.jpg")
+    c = _photo(db, child, "c.jpg")
+    assert sorted(db.get_photo_ids_under_path("/photos/lib")) == sorted([a, b, c])
+    # The root itself matches by exact path, so a trailing slash finds only
+    # the descendants.
+    assert db.get_photo_ids_under_path("/photos/lib/") == [c]
+    assert db.get_photo_ids_under_path("/photos/lib/c") == [c]
+    # A sibling sharing the prefix is not a descendant.
+    sib = db.add_folder("/photos/library", name="library")
+    _photo(db, sib, "s.jpg")
+    assert sorted(db.get_photo_ids_under_path("/photos/lib")) == sorted([a, b, c])
+    assert db.get_photo_ids_under_path("/photos/nowhere") == []
+
+
+def test_get_photo_ids_in_folders(db, lib):
+    assert sorted(db.get_photo_ids_in_folders([lib["root"], lib["foreign"]])) == sorted(
+        [lib["a"], lib["b"], lib["f"]])
+    assert db.get_photo_ids_in_folders([]) == []
+
+
+def test_get_photo_ids_in_folders_chunks(db, lib):
+    folder_ids = [lib["child"]] + list(range(10_000, 10_000 + _SQLITE_PARAM_CHUNK_SIZE))
+    statements = _trace(db)
+    got = db.get_photo_ids_in_folders(folder_ids)
+    db.conn.set_trace_callback(None)
+    assert got == [lib["c"]]
+    assert len(_sql(statements, "WHERE folder_id IN")) == 2
+
+
 # -- filter_out_wildlife_excluded ---------------------------------------------
 
 
@@ -1170,6 +1239,8 @@ MOVED = [
     "get_workspace_photos_in_folders",
     "get_photo_working_copy_path", "record_generated_original",
     "set_photo_thumb_path",
+    "get_photo_ids_at_paths", "get_photo_ids_under_path",
+    "get_photo_ids_in_folders",
 ]
 
 

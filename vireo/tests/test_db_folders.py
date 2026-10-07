@@ -1133,6 +1133,41 @@ def test_count_folders(db):
         db.count_folders()
 
 
+def test_get_all_folders_is_catalog_wide(db):
+    a = db.add_folder("/all/a", name="a")
+    gone = _raw_folder(db, "/all/gone", status="missing", name="gone")
+    rows = {r["id"]: dict(r) for r in db.get_all_folders()}
+    # Not scoped to a workspace or a status, and needs no active workspace.
+    assert rows[a] == {"id": a, "path": "/all/a", "name": "a"}
+    assert rows[gone] == {"id": gone, "path": "/all/gone", "name": "gone"}
+    db.set_active_workspace(None)
+    assert {r["id"] for r in db.get_all_folders()} == set(rows)
+
+
+def test_count_present_photos_under_path(db):
+    root = db.add_folder("/arc", name="arc")
+    child = db.add_folder("/arc/2024", name="2024", parent_id=root)
+    partial = db.add_folder("/arc/partial", name="partial", parent_id=root)
+    missing = db.add_folder("/arc/missing", name="missing", parent_id=root)
+    unlinked = _raw_folder(db, "/arc/unlinked")
+    windows = _raw_folder(db, "\\arc\\win")
+    sibling = db.add_folder("/arcade", name="arcade")
+    for fid, name in [(root, "r.jpg"), (child, "c.jpg"), (partial, "p.jpg"),
+                      (missing, "m.jpg"), (unlinked, "u.jpg"),
+                      (windows, "w.jpg"), (sibling, "s.jpg")]:
+        _photo(db, fid, name)
+    db.conn.execute("UPDATE folders SET status = 'partial' WHERE id = ?", (partial,))
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (missing,))
+    db.conn.commit()
+    # ok + partial folders anywhere in the catalog; the missing folder and the
+    # prefix-sharing sibling are left out, and a backslash path is folded.
+    assert db.count_present_photos_under_path("/arc") == 5
+    assert db.count_present_photos_under_path("/arc/2024") == 1
+    assert db.count_present_photos_under_path("/nowhere") == 0
+    db.set_active_workspace(None)
+    assert db.count_present_photos_under_path("/arc") == 5
+
+
 def test_get_folders_with_quality_data(db):
     ws = db._ws_id()
     root = db.add_folder("/q")
@@ -1203,6 +1238,8 @@ _DELEGATING_FOLDER_METHODS = (
     "_folders_linked_in_other_workspace",
     "delete_folder",
     "count_folders",
+    "get_all_folders",
+    "count_present_photos_under_path",
     "get_folders_with_quality_data",
     "update_folder_counts",
 )
