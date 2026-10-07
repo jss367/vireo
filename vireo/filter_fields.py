@@ -95,6 +95,10 @@ FILTER_FIELDS = {
         "Uncounted identification", "Organization", "text", ["is"], pages=[],
         changed_by=_KEYWORD_DERIVED,
     ),
+    "top_predicted_species": _field(
+        "Top predicted species", "Quality & AI", "text", ["is"],
+        pages=["browse"], changed_by=[MUTATION_PREDICTION],
+    ),
     "species": _field("Species", "Organization", "text",
                       ["contains", "not_contains", "is", "is not"],
                       suggest=True, changed_by=_KEYWORD_DERIVED),
