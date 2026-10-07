@@ -120,6 +120,50 @@ def test_failed_render_keeps_last_image_and_queue_recovers(page, live_server, pr
     page.wait_for_function('editorImageMatchesZoomRecipe(document.getElementById("editorImg"))')
 
 
+@pytest.mark.parametrize('latest_exposure', [0.5, 1.5])
+def test_stalled_preview_releases_slot_for_latest_edit(page, live_server, preview_photo, latest_exposure):
+    open_photo(page, live_server, preview_photo)
+    original = page.locator('#editorImg').get_attribute('src')
+    held = []
+    page.route('**/edit-preview?*', lambda route: held.append(route))
+    page.evaluate("EDITOR_PREVIEW_TIMEOUT = 1200; setAdjustment('exposure', 0.5)")
+    page.wait_for_function('editorPreviewQueue.active !== null')
+    page.evaluate('() => { window.obsoletePreviewCallback = editorPreviewQueue.active.image.onload; }')
+    if latest_exposure != 0.5:
+        page.evaluate("value => setAdjustment('exposure', value)", latest_exposure)
+    page.wait_for_function('''value => editorPreviewQueue.active && editorPreviewQueue.active.size > 1024 &&
+      JSON.parse(new URL(editorPreviewQueue.active.url, location.href).searchParams.get('recipe'))
+        .adjustments.exposure === value''', arg=latest_exposure)
+    assert len(held) == 2
+    assert page.locator('#editorImg').get_attribute('src') == original
+    expect(page.locator('#previewStatus')).to_contain_text('Refining preview')
+    page.evaluate('window.obsoletePreviewCallback()')
+    fill(held.pop())
+    page.wait_for_function('editorPreviewQueue.active === null')
+    assert json.loads(query(page.locator('#editorImg').get_attribute('src'))['recipe'][0])['adjustments']['exposure'] == latest_exposure
+    expect(page.locator('#previewRetryBtn')).to_be_hidden()
+    held.pop().abort()
+
+
+def test_stalled_preview_offers_manual_retry_without_retry_loop(page, live_server, preview_photo):
+    open_photo(page, live_server, preview_photo)
+    original = page.locator('#editorImg').get_attribute('src')
+    held = []
+    page.route('**/edit-preview?*', lambda route: held.append(route))
+    page.evaluate("EDITOR_PREVIEW_TIMEOUT = 500; editorState.recipe.adjustments = {exposure: 1}; updatePreview()")
+    expect(page.locator('#previewStatus')).to_contain_text('Preview timed out')
+    expect(page.locator('#previewRetryBtn')).to_be_visible()
+    assert page.locator('#editorImg').get_attribute('src') == original
+    page.wait_for_timeout(700)
+    assert len(held) == 1
+    held.pop().abort()
+    page.unroute('**/edit-preview?*')
+    page.route('**/edit-preview?*', fill)
+    page.locator('#previewRetryBtn').click()
+    page.wait_for_function('editorImageMatchesZoomRecipe(document.getElementById("editorImg"))')
+    expect(page.locator('#previewRetryBtn')).to_be_hidden()
+
+
 def test_reusing_detailed_preview_invalidates_slow_quick_render(page, live_server, preview_photo):
     open_photo(page, live_server, preview_photo)
     original = page.locator('#editorImg').get_attribute('src')
