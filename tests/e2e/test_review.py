@@ -1,5 +1,7 @@
 import re
+from urllib.parse import quote
 
+import pytest
 from playwright.sync_api import expect
 
 
@@ -138,3 +140,73 @@ def test_history_undo_refreshes_review_prediction_state(live_server, page):
 
     expect(card).not_to_have_class(re.compile(r"\baccepted\b"))
     expect(card.locator(".btn-accept")).to_be_visible()
+
+
+def test_review_photo_deep_link_pill_sits_under_controls_and_clears(live_server, page):
+    """``/review?photo_id=N`` (Browse's ambiguous-prediction handoff) narrows
+    the queue to one photo under a "Showing one photo from Browse" pill.
+
+    The pill once anchored on a ``.toolbar`` Review doesn't have, so it was
+    appended to the end of ``<body>``, where it sat behind the bottom-panel
+    toggle and a real click on "show all ×" never reached it: the user was
+    stuck in the one-photo view. It must sit between the action bar and the
+    grid, and a real (unforced) click must bring the full queue back.
+    """
+    url = live_server["url"]
+    photo_id = live_server["data"]["photos"][0]
+    page.goto(f"{url}/review?photo_id={photo_id}", timeout=5000)
+
+    cards = page.locator(".card[data-pred-id]")
+    cards.first.wait_for(state="visible", timeout=5000)
+    expect(cards).to_have_count(1)
+
+    pill = page.locator("#photoFilterPill")
+    expect(pill).to_be_visible()
+    expect(pill).to_contain_text("Showing one photo from Browse")
+
+    bar_box = page.locator("#reviewBar").bounding_box()
+    pill_box = pill.bounding_box()
+    grid_box = page.locator("#grid").bounding_box()
+    assert bar_box["y"] + bar_box["height"] <= pill_box["y"] + 1, (
+        f"pill {pill_box} should sit below the action bar {bar_box}"
+    )
+    assert pill_box["y"] + pill_box["height"] <= grid_box["y"] + 1, (
+        f"pill {pill_box} should sit above the grid {grid_box}, not after it"
+    )
+
+    page.locator("#photoFilterClear").click()
+
+    expect(pill).to_have_count(0)
+    expect(cards).to_have_count(len(live_server["data"]["photos"]))
+    assert "photo_id" not in page.url
+
+
+@pytest.mark.parametrize("fingerprint", [
+    "normal-fingerprint-that-is-truncated",
+    "<img src=x>",
+    "&lt;b&gt;",
+])
+def test_review_fingerprint_deep_link_is_literal_text_and_clears(
+    live_server, page, fingerprint,
+):
+    """URL-supplied fingerprints are text, and clearing keeps the photo scope."""
+    photo_id = live_server["data"]["photos"][0]
+    page.goto(
+        f"{live_server['url']}/review?photo_id={photo_id}"
+        f"&labels_fingerprint={quote(fingerprint, safe='')}",
+        timeout=5000,
+    )
+
+    pill = page.locator("#fpFilterPill")
+    expect(pill).to_be_visible()
+    expect(pill.locator("code")).to_have_text(fingerprint[:12])
+    expect(pill.locator("code > *")).to_have_count(0)
+    assert pill.evaluate("el => el.parentElement.id") == "reviewFilterPills"
+
+    page.locator("#fpFilterClear").click()
+
+    expect(pill).to_have_count(0)
+    assert "labels_fingerprint" not in page.url
+    assert f"photo_id={photo_id}" in page.url
+    assert page.evaluate("currentLabelsFingerprint") is None
+    expect(page.locator(".card[data-pred-id]")).to_have_count(1)
