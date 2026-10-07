@@ -369,6 +369,18 @@
     return walk(state.root);
   }
 
+  // Clone the tree with every leaf whose field is in ``fields`` dropped,
+  // wherever it sits in the rule tree. The caller still has to handle
+  // what to do with empty groups left behind.
+  function rulesWithoutFields(root, fields) {
+    function walk(node) {
+      if (!isGroup(node)) return fields.includes(node.field) ? null : clone(node);
+      const kept = node.rules.map(walk).filter((c) => c !== null);
+      return { ...clone({ ...node, rules: [] }), rules: kept };
+    }
+    return walk(root);
+  }
+
   // ---- labels -----------------------------------------------------------
 
   function valueLabel(spec, rule) {
@@ -1582,8 +1594,27 @@
     picker.pending = true;
     picker.error = false;
     refreshPickerOptions(node, picker);
-    const params = new URLSearchParams({ field: node.field, limit: '50', q: picker.query.trim() });
-    const url = node.field === 'folder' ? '/api/folders' : `/api/filters/values?${params}`;
+    let url;
+    if (node.field === 'folder') {
+      url = '/api/folders';
+    } else {
+      const params = new URLSearchParams({ field: node.field, limit: '50', q: picker.query.trim() });
+      // Mirror the typeahead's scope (other rules, visual, page scope) so a
+      // folder- or collection-scoped Browse view lists values present in
+      // the current grid. Without these the global 50-value cap can omit
+      // values that are actually in scope (Codex review r4208710522).
+      const context = state.getContextRules ? state.getContextRules() : [];
+      const others = rulesWithout(node);
+      const scopedRules = { mode: 'all', rules: clone(context).concat(others.rules) };
+      params.set('rules', JSON.stringify(scopedRules));
+      if (state.visual && !state.muted) params.set('visual', JSON.stringify(state.visual));
+      const scope = state.getScope ? state.getScope() : null;
+      if (scope) {
+        if (scope.folder_id != null) params.set('folder_id', scope.folder_id);
+        if (scope.collection_id != null) params.set('collection_id', scope.collection_id);
+      }
+      url = `/api/filters/values?${params}`;
+    }
     fetchJson(url).then((data) => {
       if (picker.request !== seq || valuePickerStates.get(node) !== picker) return;
       picker.values = node.field === 'folder' ? data : data.values;
@@ -2535,9 +2566,18 @@
       if (!Array.isArray(photoIds) || !photoIds.length) return;
       mutate(() => {
         const rule = { field: 'photo_ids', op: 'in', value: photoIds.slice(), value_label: label };
-        state.root.rules = state.root.rules.filter((node) => !['photo_ids', 'burst_id', 'duplicate_group'].includes(node.field));
-        if (state.root.mode === 'all') state.root.rules.push(rule);
-        else state.root = { mode: 'all', rules: [state.root, rule] };
+        // Strip every ``photo_ids``/``burst_id``/``duplicate_group`` leaf
+        // from the whole tree. A nested identity leaf (saved advanced
+        // group, say) would otherwise intersect its disjoint old
+        // membership with the new rule and empty the grid instead of
+        // switching to the selected group (Codex review r4208710529).
+        const stripped = rulesWithoutFields(state.root, ['photo_ids', 'burst_id', 'duplicate_group']);
+        if (stripped.mode === 'all') {
+          stripped.rules.push(rule);
+          state.root = stripped;
+        } else {
+          state.root = { mode: 'all', rules: [stripped, rule] };
+        }
         state.muted = false;
       });
     },
