@@ -435,23 +435,36 @@ def create_storage_blueprint(get_db, json_error, db_path, config):
         directories = [(cache_dir, "")]
         if cache_type == "previews":
             directories.append((os.path.join(cache_dir, "paired"), "paired/"))
-        for directory, prefix in directories:
-            if not os.path.isdir(directory):
-                continue
-            with os.scandir(directory) as entries:
-                ordered = sorted(entries, key=lambda e: e.name) if limit is None else entries
-                for info in ordered:
-                    if not info.is_file() or info.name == "manifest.json":
-                        continue
-                    if limit is not None and len(files) >= limit:
-                        truncated = True
-                        break
-                    entry = {"name": prefix + info.name, "size": info.stat().st_size}
-                    if info.name in manifest:
-                        entry["meta"] = manifest[info.name]
-                    files.append(entry)
-            if truncated:
-                break
+        from contextlib import ExitStack
+        from itertools import chain, zip_longest
+
+        def named_files(entries, prefix):
+            for info in entries:
+                if info.is_file() and info.name != "manifest.json":
+                    yield info, prefix
+
+        with ExitStack() as stack:
+            iterators = []
+            for directory, prefix in directories:
+                if os.path.isdir(directory):
+                    entries = stack.enter_context(os.scandir(directory))
+                    ordered = sorted(entries, key=lambda e: e.name) if limit is None else entries
+                    iterators.append(named_files(ordered, prefix))
+            # Share bounded listings between cache families so a large ordinary
+            # cache cannot hide all paired previews from the Storage control.
+            combined = (chain.from_iterable(zip_longest(*iterators)) if limit is not None
+                        else chain.from_iterable(iterators))
+            for item in combined:
+                if item is None:
+                    continue
+                if limit is not None and len(files) >= limit:
+                    truncated = True
+                    break
+                info, prefix = item
+                entry = {"name": prefix + info.name, "size": info.stat().st_size}
+                if info.name in manifest:
+                    entry["meta"] = manifest[info.name]
+                files.append(entry)
         return jsonify({
             "type": cache_type,
             "path": cache_dir,

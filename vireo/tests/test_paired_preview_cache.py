@@ -148,3 +148,26 @@ def test_dedicated_clear_control_includes_paired_cache(client_with_photo, monkey
     assert paired.exists() == locked
     assert not ordinary.exists()
     assert not legacy.exists()
+
+
+@pytest.mark.parametrize('ordinary_count,paired_count,limit', [
+    (501, 1, 500), (1, 501, 500), (3, 3, 4), (1, 1, 2), (0, 3, 4), (3, 0, 4),
+])
+def test_limited_storage_listing_shares_space_between_preview_families(
+    client_with_photo, ordinary_count, paired_count, limit,
+):
+    app, _, _ = client_with_photo
+    root = Path(app.config['THUMB_CACHE_DIR']).parent / 'previews'
+    paired = root / 'paired'
+    paired.mkdir(parents=True, exist_ok=True)
+    for count, directory in [(ordinary_count, root), (paired_count, paired)]:
+        for index in range(count):
+            (directory / f'{index}_1920.jpg').write_bytes(b'preview')
+    result = app.test_client().get(
+        f'/api/storage/files?type=previews&limit={limit}'
+    ).get_json()
+    names = [entry['name'] for entry in result['files']]
+    assert len(names) == min(limit, ordinary_count + paired_count)
+    assert result['truncated'] == (ordinary_count + paired_count > limit)
+    assert any(name.startswith('paired/') for name in names) == bool(paired_count)
+    assert any(not name.startswith('paired/') for name in names) == bool(ordinary_count)
