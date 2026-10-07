@@ -264,7 +264,7 @@ class BulkGpsLocations:
         row = db.conn.execute(
             "SELECT id, visual_json FROM collections "
             "WHERE id = ? AND workspace_id = ?",
-            (collection_id, db._ws_id()),
+            (collection_id, db.require_workspace_id()),
         ).fetchone()
         if row is None:
             return None, json_error("collection not found", 404)

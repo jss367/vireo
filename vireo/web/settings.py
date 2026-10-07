@@ -39,9 +39,9 @@ def queue_location_keyword_cleanup_for_workspace(db, workspace_id):
     Runs the workspace-scoped backfill under an explicit active-workspace
     switch so the caller's active workspace is left untouched.
     """
-    saved_active = db._active_workspace_id
+    saved_active = db.active_workspace_id
     try:
-        db._active_workspace_id = int(workspace_id)
+        db.set_active_workspace(int(workspace_id))
         db.queue_location_changes_for_tagged_photos()
     except Exception:
         log.warning(
@@ -49,7 +49,7 @@ def queue_location_keyword_cleanup_for_workspace(db, workspace_id):
             workspace_id, exc_info=True,
         )
     finally:
-        db._active_workspace_id = saved_active
+        db.set_active_workspace(saved_active)
 
 
 def workspace_effective_setting(raw_override, global_cfg, key):
@@ -137,7 +137,7 @@ def read_workspace_overrides(db):
     create/update APIs) to ``{}`` so dotted-key mutation in the schema
     write paths can't crash on a malformed override.
     """
-    ws = db.get_workspace(db._active_workspace_id)
+    ws = db.get_workspace(db.active_workspace_id)
     if not ws or not ws["config_overrides"]:
         return {}
     try:
@@ -149,7 +149,7 @@ def read_workspace_overrides(db):
 
 def write_workspace_overrides(db, overrides):
     db.update_workspace(
-        db._active_workspace_id,
+        db.active_workspace_id,
         config_overrides=overrides if overrides else None,
     )
 
@@ -577,7 +577,7 @@ def create_settings_blueprint(
         # Workspace layer: parse config_overrides for the active workspace.
         workspace_layer = {}
         db = get_db()
-        ws = db.get_workspace(db._active_workspace_id)
+        ws = db.get_workspace(db.active_workspace_id)
         if ws and ws["config_overrides"]:
             try:
                 overrides = (
@@ -736,7 +736,7 @@ def create_settings_blueprint(
                 )
                 if prev_effective_val and not new_effective_val:
                     queue_location_keyword_cleanup_for_workspace(
-                        db, db._active_workspace_id,
+                        db, db.active_workspace_id,
                     )
         return jsonify({"ok": True, "key": key, "value": value})
 
@@ -764,7 +764,7 @@ def create_settings_blueprint(
                 )
                 if prev_effective_val and not new_effective_val:
                     queue_location_keyword_cleanup_for_workspace(
-                        db, db._active_workspace_id,
+                        db, db.active_workspace_id,
                     )
         return jsonify({"ok": True, "key": key})
 

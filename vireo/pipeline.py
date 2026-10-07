@@ -237,7 +237,7 @@ def load_photo_features(db, collection_id=None, config=None,
     Returns:
         list of photo dicts
     """
-    ws_id = db._ws_id()
+    ws_id = db.require_workspace_id()
 
     # Resolve optional scopes to a single ID set.
     scoped_photo_ids = _resolve_feature_scope(db, collection_id, photo_ids)
@@ -1979,7 +1979,7 @@ def _count_stage_targets(db):
     """
     import config as cfg
 
-    ws = db._ws_id()
+    ws = db.require_workspace_id()
     min_conf = db.get_effective_config(cfg.load()).get(
         "detector_confidence", 0.2
     )
@@ -2006,7 +2006,7 @@ def _count_usable_embeddings(db, expected_variant, detected_only=False):
     via :func:`_embedding_usable`. Without ``expected_variant`` we accept any
     non-null embedding (back-compat for callers that don't know the variant).
     """
-    ws = db._ws_id()
+    ws = db.require_workspace_id()
     join_detection = ""
     params_prefix = []
     if detected_only:
@@ -2080,7 +2080,7 @@ def _count_eye_keypoint_attempts(db):
     """
     import config as cfg
 
-    ws = db._ws_id()
+    ws = db.require_workspace_id()
     min_conf = db.get_effective_config(cfg.load()).get(
         "detector_confidence", 0.2
     )

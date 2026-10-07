@@ -4489,14 +4489,14 @@ class _ScanRun:
         if (
             is_restrict_target
             and not self.register_restrict_dirs_as_roots
-            and db._active_workspace_id is not None
+            and db.active_workspace_id is not None
         ):
             # Snapshot imports and metadata repair select exact leaf folders
             # below an existing workspace root. Link only that leaf: the
             # regular subtree-linking API would also attach unrelated known
             # descendants that this restricted scan never touched.
             db.add_workspace_folder_exact(
-                db._active_workspace_id, folder_id, is_root=False,
+                db.active_workspace_id, folder_id, is_root=False,
             )
         self.folder_cache[folder_str] = folder_id
         return folder_id

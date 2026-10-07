@@ -143,7 +143,7 @@ def create_local_folder_blueprint(
 
     def _active_context():
         db = get_db()
-        workspace_id = db._active_workspace_id
+        workspace_id = db.active_workspace_id
         if workspace_id is None:
             return None, None, json_error("No active workspace", 400)
         return db, int(workspace_id), None

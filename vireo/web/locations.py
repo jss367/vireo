@@ -428,7 +428,7 @@ def create_locations_blueprint(
                WHERE wf.workspace_id = ? AND k.type = 'location'
                  AND k.latitude IS NOT NULL AND k.longitude IS NOT NULL
                GROUP BY k.id""",
-            (db._ws_id(),),
+            (db.require_workspace_id(),),
         ).fetchall()
 
         def distance_m(row):

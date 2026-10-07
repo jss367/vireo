@@ -65,6 +65,11 @@ that information for interactive use.
   state, and runs no SQL itself: `test_db_facade_structure.py` fails if a
   `Database` method other than the connection-lifecycle ones uses
   `self.conn` for anything but handing it to a repository.
+  Code outside the data layer goes through `Database` methods too:
+  `test_sql_boundary.py` forbids its private workspace state
+  (`_active_workspace_id`, `_ws_id()`) outside `db.py` and the repositories,
+  and caps each module's remaining `<expr>.conn` uses at today's count, so
+  that SQL can only move into repositories, never grow.
 - Schema changes are ordered migrations in `vireo/schema.py`. They execute once
   at startup, use a transaction, advance `PRAGMA user_version`, and validate
   before committing. Request connections must use the initialized schema. The

@@ -527,7 +527,7 @@ def create_batch_blueprint(
                 photo_ids.append(raw)
                 seen.add(raw)
 
-        ws_id = db._ws_id()
+        ws_id = db.require_workspace_id()
         accessible_state = {}
         batch_size = 800
         for i in range(0, len(photo_ids), batch_size):

@@ -210,7 +210,7 @@ def create_system_blueprint(
             # matching the photo branch's verify_workspace gate.
             linked = db.conn.execute(
                 "SELECT 1 FROM workspace_visible_folders WHERE workspace_id = ? AND folder_id = ?",
-                (db._active_workspace_id, fid_int),
+                (db.active_workspace_id, fid_int),
             ).fetchone()
             if not linked:
                 return json_error("folder not found", 404)
@@ -665,7 +665,7 @@ def create_system_blueprint(
                    JOIN photos p ON p.id = d.photo_id
                    JOIN photo_workspace_visibility wf
                      ON wf.photo_id = p.id AND wf.workspace_id = ?""",
-                (db._ws_id(),)
+                (db.require_workspace_id(),)
             ).fetchone()[0]
         except Exception:
             # Issue reports are how users report a degraded catalog; collect

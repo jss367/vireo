@@ -93,7 +93,7 @@ def create_jobs_blueprint(
             "workload_metrics": {
                 "embedding_cache": get_embedding_cache_diagnostics(),
             },
-            "active_workspace_id": db._active_workspace_id,
+            "active_workspace_id": db.active_workspace_id,
             "workspace_names": ws_names,
         })
 
@@ -201,7 +201,7 @@ def create_jobs_blueprint(
             if isinstance(ws_id, bool) or not isinstance(ws_id, int):
                 return json_error("workspace_id must be an integer", 400)
         else:
-            ws_id = db._active_workspace_id
+            ws_id = db.active_workspace_id
             if ws_id is None:
                 return json_error("workspace_id is required", 400)
 

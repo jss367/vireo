@@ -2357,7 +2357,7 @@ class _MaskExtractionRun:
         masked for this variant".
         """
         thread_db = self.thread_db
-        ws_id = thread_db._active_workspace_id
+        ws_id = thread_db.active_workspace_id
         rows = thread_db.conn.execute(
             f"""SELECT p.id, p.folder_id, p.filename,
                       d.detector_model,

@@ -1615,7 +1615,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         initialize_schema=(db_path == ":memory:"),
     )
     log.info("Database init took %.2fs (workspace: %s)", time.time() - _t0,
-             init_db.get_workspace(init_db._active_workspace_id)["name"])
+             init_db.get_workspace(init_db.active_workspace_id)["name"])
     # Startup/maintenance passes; the per-app instance caches the startup
     # taxonomy parse so overlapping one-time migrations and the immediate
     # background species pass do not each parse taxonomy.json.

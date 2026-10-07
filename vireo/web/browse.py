@@ -106,7 +106,7 @@ def create_browse_blueprint(
             coll_row = db.conn.execute(
                 "SELECT visual_json FROM collections "
                 "WHERE id = ? AND workspace_id = ?",
-                (collection_id, db._ws_id()),
+                (collection_id, db.require_workspace_id()),
             ).fetchone()
             if coll_row is not None and coll_row["visual_json"] is not None:
                 visual_first_paint = True
@@ -297,7 +297,7 @@ def create_browse_blueprint(
             # the destructive folder-removal call so a cross-tab
             # workspace switch between render and click cannot redirect
             # the DELETE at another workspace.
-            "active_workspace_id": db._ws_id(),
+            "active_workspace_id": db.require_workspace_id(),
         }
         if stacks:
             response_payload["underlying_total"] = underlying_total
@@ -769,7 +769,7 @@ def create_browse_blueprint(
                 "missing_count": 0,
             })
 
-        ws_id = db._ws_id()
+        ws_id = db.require_workspace_id()
         included = 0
         excluded = 0
         batch_size = 800

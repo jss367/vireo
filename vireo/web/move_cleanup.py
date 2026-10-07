@@ -23,7 +23,7 @@ def create_move_cleanup_blueprint(get_db, get_runner, json_error, trash_paths,
         # after the worker finished. The runner's snapshot may predate cleanup.
         row = db.conn.execute("SELECT * FROM job_history WHERE id = ?", (job_id,)).fetchone()
         job = dict(row) if row else runner.get(job_id)
-        if not job or job.get("workspace_id") != db._active_workspace_id:
+        if not job or job.get("workspace_id") != db.active_workspace_id:
             return json_error("Move job not found in this workspace", 404)
         config = job.get("config") or {}
         result = job.get("result") or {}
@@ -43,12 +43,12 @@ def create_move_cleanup_blueprint(get_db, get_runner, json_error, trash_paths,
         try:
             with cleanup_lock, ExitStack() as reservations:
                 reservations.enter_context(runner.workspace_mutation(
-                    db._active_workspace_id, exclusive=True, label=CLEANUP_LABEL))
+                    db.active_workspace_id, exclusive=True, label=CLEANUP_LABEL))
                 if request.method == "POST":
                     # An import in any workspace can discover this source.
                     # Hold every workspace reservation through review and Trash,
                     # including workspaces created while reservations are acquired.
-                    reserved = {db._active_workspace_id}
+                    reserved = {db.active_workspace_id}
                     while pending := {item[0] for item in db.conn.execute("SELECT id FROM workspaces")} - reserved:
                         for workspace_id in sorted(pending):
                             reservations.enter_context(runner.workspace_mutation(

@@ -762,7 +762,7 @@ def _extract_plan(db, params, photo_ids, pipeline_cfg, new_count=0):
     prior_raw_analysis = db.conn.execute(
         "SELECT 1 FROM photos p JOIN photo_workspace_visibility wf ON wf.photo_id=p.id "
         "WHERE wf.workspace_id=? AND p.quality_input_recipe IS NOT NULL"
-        + scope_sql + " LIMIT 1", [db._ws_id(), *scope_params],
+        + scope_sql + " LIMIT 1", [db.require_workspace_id(), *scope_params],
     ).fetchone()
     if prior_raw_analysis:
         return {
@@ -1523,7 +1523,7 @@ def compute_plan(db, params, db_path):
 
     effective_cfg = db.get_effective_config(cfg.load())
     pipeline_cfg = effective_cfg.get("pipeline", {})
-    ws_id = db._ws_id()
+    ws_id = db.require_workspace_id()
 
     photo_ids = None
     new_count = 0

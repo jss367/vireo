@@ -1911,7 +1911,7 @@ class JobRunner:
             limit: max number of rows
         """
         try:
-            ws_id = db._active_workspace_id
+            ws_id = db.active_workspace_id
             terminal = ("completed", "failed", "cancelled")
             placeholders = ",".join(["?"] * len(terminal))
             if ws_id is not None:

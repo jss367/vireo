@@ -239,7 +239,7 @@ def payload(db, photo_id):
         AND pr.labels_fingerprint=(SELECT pr2.labels_fingerprint FROM predictions pr2
             WHERE pr2.detection_id=pr.detection_id AND pr2.classifier_model=pr.classifier_model
             ORDER BY pr2.created_at DESC, pr2.id DESC LIMIT 1)
-        ORDER BY pr.confidence DESC, pr.id ASC""", (db._ws_id(), photo_id, floor)).fetchall()
+        ORDER BY pr.confidence DESC, pr.id ASC""", (db.require_workspace_id(), photo_id, floor)).fetchall()
     grouped = {}
     for prediction in predictions:
         grouped.setdefault(prediction["detection_id"], []).append(dict(prediction))

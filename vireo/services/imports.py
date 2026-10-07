@@ -720,7 +720,7 @@ class ImportService:
         so import-to-new-workspace jobs get default collections and do not
         inherit stale per-workspace caches from a reused SQLite rowid.
         """
-        previous_active_ws = db._active_workspace_id
+        previous_active_ws = db.active_workspace_id
         if "new_workspace_name" not in body:
             active_ws = previous_active_ws
             if active_ws is None:

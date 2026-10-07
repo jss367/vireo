@@ -392,7 +392,7 @@ def create_predictions_blueprint(
         if err is not None:
             return err
 
-        workspace_id = db._ws_id()
+        workspace_id = db.require_workspace_id()
         store = config["ID_CONFLICTS_SNAPSHOTS"]
         snapshot = store.get(request.args.get("token"))
         if snapshot is not None and not snapshot.matches(
@@ -498,7 +498,7 @@ def create_predictions_blueprint(
                      ON pr_rev.prediction_id = pr.id
                     AND pr_rev.workspace_id = ?
                    WHERE pr.id = ?""",
-                (db._ws_id(), pred_id),
+                (db.require_workspace_id(), pred_id),
             ).fetchone()
             if pred is None:
                 db.conn.rollback()
@@ -1037,7 +1037,7 @@ def create_predictions_blueprint(
         """
         if not pred_ids:
             return []
-        ws = db._ws_id()
+        ws = db.require_workspace_id()
         rows = []
         for chunk in chunked(pred_ids):
             placeholders = ",".join("?" for _ in chunk)
@@ -1099,7 +1099,7 @@ def create_predictions_blueprint(
         Chunked: a legal payload runs well past the 999-variable limit older
         SQLite builds enforce (see ``_SQL_PARAM_CHUNK``).
         """
-        ws = db._ws_id()
+        ws = db.require_workspace_id()
         statuses = _DECIDED_PREDICTION_STATUSES
         if not pred_ids:
             return set()
@@ -1142,7 +1142,7 @@ def create_predictions_blueprint(
                  ON pr_rev.prediction_id = pr.id
                 AND pr_rev.workspace_id = ?
                WHERE pr.id = ?""",
-            (db._ws_id(), pred_id),
+            (db.require_workspace_id(), pred_id),
         ).fetchone()
         return row["status"] if row else None
 
@@ -1264,7 +1264,7 @@ def create_predictions_blueprint(
                         by_photo[row["photo_id"]].append(row["id"])
         missing = [pid for pid, ids in by_photo.items() if not ids]
         if missing:
-            ws = db._ws_id()
+            ws = db.require_workspace_id()
             for chunk in chunked(missing):
                 placeholders = ",".join("?" for _ in chunk)
                 grouped = {}
@@ -1311,7 +1311,7 @@ def create_predictions_blueprint(
                          for pred_id in ids}
         if not pick_to_photo:
             return {}
-        ws = db._ws_id()
+        ws = db.require_workspace_id()
         out = {}
         for chunk in chunked(sorted(pick_to_photo)):
             placeholders = ",".join("?" for _ in chunk)
@@ -1346,7 +1346,7 @@ def create_predictions_blueprint(
         records the sibling's prior ``accepted`` so undo restores it, and
         ``Database._redo_prediction_accept_statuses`` re-rejects it on redo.
         """
-        ws = db._ws_id()
+        ws = db.require_workspace_id()
         accepted_by_scope = {}
         for ids in pick_pred_ids.values():
             for pred_id in ids:
@@ -1421,7 +1421,7 @@ def create_predictions_blueprint(
         """
         if not observed:
             return set()
-        ws = db._ws_id()
+        ws = db.require_workspace_id()
         stale = set()
         for chunk in chunked(list(observed)):
             placeholders = ",".join("?" for _ in chunk)
@@ -1624,7 +1624,7 @@ def create_predictions_blueprint(
         )
         pred_ids = [pid for pid in pred_ids if pid not in out_of_workspace_ids]
 
-        ws = db._ws_id()
+        ws = db.require_workspace_id()
         items = []
         species = None
         for pid in pred_ids:
@@ -1887,7 +1887,7 @@ def create_predictions_blueprint(
             # Review state lives in prediction_review now; predictions.model
             # is renamed to classifier_model. Sibling-alternative rejection
             # goes through the workspace-scoped review table.
-            ws = db._ws_id()
+            ws = db.require_workspace_id()
             pred = db.conn.execute(
                 """SELECT pr.id, pr.species, pr.detection_id,
                           pr.classifier_model AS model,

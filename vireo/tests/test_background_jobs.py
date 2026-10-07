@@ -22,6 +22,10 @@ class FakeDb:
     def set_active_workspace(self, workspace_id):
         self._active_workspace_id = workspace_id
 
+    @property
+    def active_workspace_id(self):
+        return self._active_workspace_id
+
 
 def _make_app(runner, workspace_id=7, db_factory=FakeDb):
     app = Flask(__name__)

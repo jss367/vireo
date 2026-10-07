@@ -120,7 +120,7 @@ def _resolve_entry(vireo_dir: str, cleanup_root: str, pause_callback=None) -> St
 
 
 def _catalog_candidates(db, filename: str, size: int, staging_root: str) -> list[dict]:
-    ws_id = db._ws_id()
+    ws_id = db.require_workspace_id()
     rows = db.conn.execute(
         """SELECT p.id AS photo_id, p.filename, p.file_size, f.path AS folder_path
              FROM photos p
