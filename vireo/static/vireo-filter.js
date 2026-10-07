@@ -81,9 +81,13 @@
   // What quick-search terms match: 'all' (every metadata value) or
   // 'keyword' (keyword names only). The toggle is remembered across pages;
   // an applied search records its own scope in ``_qs_scope``, and the
-  // toggle follows it when the search is restored.
+  // toggle follows it when the search is restored, unless the user has
+  // explicitly toggled scope on this page — tracked separately so a
+  // pending workspace restore can finish applying saved rules/mute/visual
+  // state without stomping on the user's forward-looking scope choice.
   const SEARCH_SCOPE_KEY = 'vireo.filter.searchScope';
   let searchScope = readSearchScope();
+  let scopeExplicit = false;
 
   const $ = (sel) => rootEl.querySelector(sel);
   const $$ = (sel) => Array.from(rootEl.querySelectorAll(sel));
@@ -854,7 +858,10 @@
     if (!input || quickSearchTimer !== null || document.activeElement === input || input.getAttribute('aria-invalid') === 'true') return;
     const group = quickSearchGroup();
     input.value = group ? group._qs_text : (state.visual ? state.visual.prompt : '');
-    if (group) searchScope = groupScope(group);
+    // The user's explicit scope toggle wins over a restored search's own
+    // scope. The restored chip keeps its saved scope label, but new typed
+    // searches use the toggle's current choice.
+    if (group && !scopeExplicit) searchScope = groupScope(group);
   }
 
   function renderSearchScope() {
@@ -872,15 +879,20 @@
   }
 
   function toggleSearchScope() {
-    // A scope choice is a local edit even when there is no text to apply.
-    // A pending workspace restore must not replace that newer intent.
-    localEdits = true;
+    // Track the scope choice separately so a pending workspace restore
+    // can still restore saved rules, mute state and the visual clause,
+    // while the user's forward-looking scope choice survives. Setting
+    // ``localEdits`` here would make ``restorePersisted()`` skip the
+    // whole saved filter tree merely because the user picked Keywords.
+    scopeExplicit = true;
     searchScope = searchScope === 'keyword' ? 'all' : 'keyword';
     try { window.localStorage.setItem(SEARCH_SCOPE_KEY, searchScope); } catch (e) { /* private mode */ }
     renderSearchScope();
     const input = $('.vf-search input');
     // Re-run the typed search in the new scope. A visual clause keeps its
     // prompt; the toggle only decides what the next text search matches.
+    // ``applyQuickSearch`` goes through ``mutate`` and sets ``localEdits``
+    // on its own, which protects the applied text from a stale restore.
     if (input.value.trim() && !state.visual) applyQuickSearch(input.value);
     if (document.activeElement === input) showSearchSuggest();
   }

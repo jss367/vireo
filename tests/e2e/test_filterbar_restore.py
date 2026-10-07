@@ -100,6 +100,15 @@ def test_untouched_search_restores_saved_filters(page):
 
 def test_scope_toggle_survives_delayed_restore_with_empty_search(page):
     search = start_filter_bar(page, '/api/workspaces/active')
+    # Also exercise mute preservation: picking a scope must not discard
+    # unrelated saved state (saved rules, mute, visual clause).
+    page.evaluate('''() => {
+      window.savedFilter = {
+        root: window.savedFilter.root,
+        muted: true,
+        visual: null,
+      };
+    }''')
     toggle = page.locator('.vf-search-scope')
     # Choose a different scope while the input is empty and restore is
     # pending. Returning to the input's default scope is a newer choice too.
@@ -111,9 +120,16 @@ def test_scope_toggle_survives_delayed_restore_with_empty_search(page):
       window.releaseStartup();
       await window.filterInit;
     }''')
+    # The explicit scope choice survives the restore ...
     expect(toggle).to_have_attribute('aria-pressed', chosen)
-    expect(search).to_have_value('')
-    assert page.evaluate('VireoFilter.getUserRules().rules') == []
+    # ... and the saved filter tree still restores, so saved search text,
+    # saved rules, and mute state are not discarded merely because the
+    # user toggled the scope.
+    expect(search).to_have_value('kingf')
+    assert page.evaluate('VireoFilter.getUserRules().rules[0]._qs_text') == 'kingf'
+    assert page.evaluate('VireoFilter.isMuted()') is True
+    # A newly typed search uses the toggle's current scope, overriding the
+    # restored chip's own scope.
     search.fill('hawk')
     search.press('Enter')
     field = 'keyword' if chosen == 'true' else 'metadata'
