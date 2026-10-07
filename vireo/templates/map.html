@@ -23,7 +23,35 @@
   display: flex;
   flex: 1;
   min-height: 0;
+  position: relative;
 }
+
+/* "View on Map" for a photo with no map location (static/map-focus.js). */
+.map-focus-notice {
+  position: absolute;
+  top: 50%;
+  left: calc(50% + 140px);
+  transform: translate(-50%, -50%);
+  z-index: 1000;
+  width: min(460px, calc(100% - 320px));
+  padding: 18px 20px;
+  border: 1px solid var(--border, #1a4a5a);
+  border-radius: 8px;
+  background: var(--bg-secondary, #0a2a3a);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  font-size: 13px;
+  color: var(--text-secondary, #C0D8D8);
+}
+.map-focus-notice[hidden] { display: none; }
+.map-focus-notice-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary, #E0F0F0);
+  overflow-wrap: anywhere;
+}
+.map-focus-notice p { margin: 8px 0 14px; line-height: 1.45; }
+.map-focus-notice-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.map-focus-notice-actions a.btn { text-decoration: none; }
 
 /* Sidebar */
 .map-sidebar {
@@ -284,6 +312,7 @@
       <div class="sidebar-list" id="sidebarList"></div>
     </div>
     <div id="map"></div>
+    <div class="map-focus-notice" id="mapFocusNotice" hidden role="status"></div>
   </div>
 
   <div class="map-status" id="mapStatus">Loading...</div>
@@ -296,6 +325,7 @@
 <script src="/static/map-selection.js"></script>
 <script src="/static/map-status.js"></script>
 <script src="/static/map-container-size.js"></script>
+<script src="/static/map-focus.js"></script>
 <script>
 /* ── Tile layers ── */
 var streetLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -694,6 +724,7 @@ async function loadPhotos() {
     if (window.VireoFilter && VireoFilter.setVisualInfo) {
       VireoFilter.setVisualInfo(data.visual || null);
     }
+    hideUnplottableFocusNotice();
     markers.clearLayers();
     photoMarkers = {};
     activePhotoId = null;
@@ -702,7 +733,7 @@ async function loadPhotos() {
       renderSidebar([]);
       var emptyStatus = document.getElementById('mapStatus');
       if (focusPhotoId !== null && !data.selection) {
-        emptyStatus.textContent = 'No map location found for this photo.';
+        showUnplottableFocusNotice(data.unplottable_focus, loadPhotos);
       } else {
         emptyStatus.innerHTML = mapStatusHtml(data);
       }
@@ -715,12 +746,7 @@ async function loadPhotos() {
     renderSidebar(data.photos);
     if (!await renderPhotoMarkers(data.photos, myEpoch)) return;
     map.fitBounds(markers.getBounds(), { padding: [30, 30] });
-    if (focusPhotoId !== null) {
-      if (!openPhotoMarker(focusPhotoId)) {
-        document.getElementById('mapStatus').textContent =
-          'No map location found for this photo.';
-      }
-    }
+    if (focusPhotoId !== null) openPhotoMarker(focusPhotoId);
 
     if (data.selection || focusPhotoId === null || photoMarkers[focusPhotoId]) {
       document.getElementById('mapStatus').innerHTML = mapStatusHtml(data);

@@ -36,7 +36,11 @@ def test_map_photo_id_deep_link_reports_missing_location(live_server, page):
     page.route("https://unpkg.com/**", stub_leaflet)
     page.goto(f"{live_server['url']}/map?photo_id={pid}")
 
-    expect(page.locator("#mapStatus")).to_contain_text("No map location found for this photo.")
+    filename = live_server["db"].get_photo(pid)["filename"]
+    notice = page.locator("#mapFocusNotice")
+    expect(notice).to_be_visible()
+    expect(notice).to_contain_text(f"{filename} has no map location")
+    expect(notice.get_by_role("link", name="Assign a location in Browse")).to_have_attribute("href", f"/browse?photo_id={pid}")
 
 
 def test_empty_map_links_to_photos_without_coordinates(live_server, page):

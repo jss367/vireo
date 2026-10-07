@@ -179,6 +179,12 @@ function buildPhotoContextMenu(photoIds, contextPhotoId) {
   var developmentSourceId = contextPhotoId != null
     ? Number(contextPhotoId)
     : (one ? Number(photoIds[0]) : null);
+  // Only a loaded photo's known status disables "View on Map"; anything else
+  // goes to the map, which explains a photo it cannot place. A right-click on
+  // an expanded stack member finds it through browseStackMembers, not the
+  // top-level photos array, so look it up through findBrowsePhoto.
+  var oneLoaded = one ? findBrowsePhoto(Number(photoIds[0])) : null;
+  var noMapLocation = !!oneLoaded && oneLoaded.location_status === 'none';
   var copiedDevelopment = window.vireoEditNav
     ? window.vireoEditNav.getCopiedRecipe()
     : null;
@@ -232,7 +238,8 @@ function buildPhotoContextMenu(photoIds, contextPhotoId) {
     { separator: true },
     { label: 'Find Similar', disabled: !one, disabledHint: hint,
       onClick: function() { if (typeof findSimilar === 'function') findSimilar(photoIds[0]); } },
-    { label: 'View on Map',
+    { label: 'View on Map', disabled: noMapLocation,
+      disabledHint: 'No map coordinates: no EXIF GPS and no location linked to a place',
       onClick: function() { viewPhotosOnMap(photoIds); } },
     { label: 'Review on Map',
       onClick: function() { reviewLocationsForSelection(); } },
