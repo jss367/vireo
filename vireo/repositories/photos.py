@@ -319,14 +319,18 @@ class PhotoRepository:
     def ids_under_path(self, path):
         """Ids of the photos in the folder at ``path`` and every folder below it.
 
-        Descendants match ``f.path LIKE '<path>/%'``, so the match is
-        ASCII-case-insensitive and ``_`` / ``%`` in ``path`` act as wildcards.
+        Subtree membership folds ``\\`` to ``/`` in both the stored folder
+        path and the query path, so a Windows-native path matches catalog
+        entries written with either separator — the same convention as
+        ``FolderRepository.present_photo_count_under``.
         """
+        prefix = path.replace("\\", "/").rstrip("/") + "/"
         rows = self.conn.execute(
             """SELECT p.id FROM photos p
                JOIN folders f ON p.folder_id = f.id
-               WHERE f.path = ? OR f.path LIKE ?""",
-            (path, path.rstrip("/") + "/%"),
+               WHERE f.path = ?
+                  OR substr(REPLACE(f.path, '\\', '/'), 1, ?) = ?""",
+            (path, len(prefix), prefix),
         ).fetchall()
         return [r["id"] for r in rows]
 
