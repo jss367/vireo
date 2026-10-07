@@ -169,6 +169,16 @@ function cancelEditorPreview() {
   editorState.previewTimer = null;
   editorState.previewRefineTimer = null;
   editorPreviewQueue.pending = null;
+  // Release the in-flight render. Without this, pumpEditorPreview() would
+  // still see editorPreviewQueue.active populated and refuse to start the
+  // next photo's preview — a stalled or very slow previous request would
+  // then leave the previous photo on screen while the metadata already
+  // described the new photo, indefinitely on a hung request.
+  var stale = editorPreviewQueue.active;
+  if (stale) {
+    editorPreviewQueue.active = null;
+    if (stale.image) stale.image.onload = stale.image.onerror = null;
+  }
 }
 
 function presentEditorPreview(request, image) {
@@ -205,11 +215,15 @@ function pumpEditorPreview() {
   if (editorPreviewQueue.active || !editorPreviewQueue.pending) return;
   var request = editorPreviewQueue.pending;
   editorPreviewQueue.pending = null;
-  editorPreviewQueue.active = request;
   var image = new Image();
+  request.image = image;
+  editorPreviewQueue.active = request;
   function finish(ok) {
     image.onload = image.onerror = null;
-    editorPreviewQueue.active = null;
+    // cancelEditorPreview may have released this request already; only
+    // clear the slot when we're still its owner, so a late response from
+    // a cancelled fetch doesn't clobber a newer active request.
+    if (editorPreviewQueue.active === request) editorPreviewQueue.active = null;
     if (request.seq === editorState.previewSeq && !editorState.loading) {
       if (ok) presentEditorPreview(request, image);
       else {

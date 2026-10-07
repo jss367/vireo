@@ -137,6 +137,35 @@ def test_photo_switch_invalidates_pending_render(page, live_server, preview_phot
     assert page.evaluate('editorState.recipe.adjustments || null') is None
 
 
+def test_hung_render_does_not_block_the_next_photo_preview(page, live_server, preview_photo):
+    # A slow or hung render on the previous photo must not keep its pixels on
+    # screen while the metadata describes a newly loaded photo: cancelling
+    # the preview must release the active request so the new photo's render
+    # can start without waiting for the stalled one to resolve.
+    open_photo(page, live_server, preview_photo)
+    held = []
+    page.route(f'**/photos/{preview_photo}/edit-preview?*', lambda route: held.append(route))
+    page.evaluate("setAdjustment('exposure', 0.5)")
+    page.wait_for_function('editorPreviewQueue.active !== null')
+    assert len(held) == 1
+    other = live_server['data']['photos'][0]
+    page.evaluate('(id) => { loadPhoto(id); }', other)
+    page.wait_for_function('(id) => editorState.photoId === id && !editorState.loading', arg=other)
+    # Without unblocking the previous photo's held request, the new photo's
+    # preview still displays — matching its loaded photo id and clean recipe.
+    page.wait_for_function(
+        '(id) => {'
+        '  var img = document.getElementById("editorImg");'
+        '  if (!img || !img.getAttribute("src")) return false;'
+        '  var m = img.getAttribute("src").match(/\\/photos\\/(\\d+)\\/edit-preview/);'
+        '  return !!m && Number(m[1]) === id && img.complete && img.naturalWidth > 0;'
+        '}',
+        arg=other,
+    )
+    displayed = page.locator('#editorImg').get_attribute('src')
+    assert json.loads(query(displayed)['recipe'][0]).get('adjustments') is None
+
+
 def test_slow_quick_preview_still_displays_before_queued_refinement(page, live_server, preview_photo):
     open_photo(page, live_server, preview_photo)
     held = []
