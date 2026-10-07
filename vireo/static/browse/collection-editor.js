@@ -515,6 +515,15 @@ function renderRuleNode(node, path, depth) {
     return groupHtml;
   }
   var ops = FIELD_OPS[node.field] || [];
+  // Preserve newer filter-bar expressions instead of presenting a text
+  // input that flattens a value list on edit, or a misleading field/op.
+  if (!FIELD_OPS[node.field] || ops.indexOf(node.op) === -1) {
+    var description = window.VireoFilter
+      ? VireoFilter.describeRule(node) : node.field + ' ' + node.op;
+    return '<div class="rule-row" style="margin-left:' + indent + 'px;">' +
+      '<span class="collection-preserved-rule" style="flex:1;">' + escapeHtml(description) + '</span>' +
+      '<span class="remove-rule" onclick="removeRule(\'' + p + '\')">&times;</span></div>';
+  }
   var opOptions = ops.map(function(op) {
     var label = OP_LABELS[op] || op;
     return '<option value="' + escapeAttr(op) + '"' + (node.op===op?' selected':'') + '>' + escapeHtml(label) + '</option>';
@@ -566,7 +575,9 @@ function coerceRuleForSave(node) {
       var to   = Array.isArray(val) ? (val[1] || '') : '';
       val = [from, to];
   }
-  return {field: node.field, op: node.op, value: val};
+  var saved = {field: node.field, op: node.op, value: val};
+  if (typeof node.value_label === 'string') saved.value_label = node.value_label;
+  return saved;
 }
 
 function serializeCollectionRules() {

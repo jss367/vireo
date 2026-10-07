@@ -119,6 +119,17 @@ function viewPhotosOnMap(photoIds) {
   window.location.href = '/map?source=selection';
 }
 
+// Stack membership comes from the same projection as the visible grid.
+// The old burst_id metadata column is not a reliable burst identifier.
+function filterToBrowseGroup(photoId) {
+  var coverId = browseStackCoverIdForPhoto(photoId);
+  var cover = findBrowsePhoto(coverId == null ? photoId : coverId);
+  var ids = browseStackMemberIdsFor(cover);
+  if (!ids) return;
+  VireoFilter.selectPhotoGroup(ids,
+    (cover.browse_stack.kind === 'burst' ? 'Burst' : 'Duplicate group') + ' containing ' + cover.filename);
+}
+
 async function copyPhotoPaths(photoIds) {
   var settled = await Promise.allSettled(photoIds.map(function(id) {
     return safeFetch('/api/photos/' + id, {}, { toast: false });
@@ -185,6 +196,9 @@ function buildPhotoContextMenu(photoIds, contextPhotoId) {
   // top-level photos array, so look it up through findBrowsePhoto.
   var oneLoaded = one ? findBrowsePhoto(Number(photoIds[0])) : null;
   var noMapLocation = !!oneLoaded && oneLoaded.location_status === 'none';
+  var groupCoverId = browseStackCoverIdForPhoto(developmentSourceId);
+  var groupPhoto = findBrowsePhoto(groupCoverId == null ? developmentSourceId : groupCoverId);
+  var groupStack = groupPhoto && groupPhoto.browse_stack;
   var copiedDevelopment = window.vireoEditNav
     ? window.vireoEditNav.getCopiedRecipe()
     : null;
@@ -236,6 +250,14 @@ function buildPhotoContextMenu(photoIds, contextPhotoId) {
       flagChip('none', '\u25CB', 'Unflag'),
     ] },
     { separator: true },
+    { label: 'Filter to This Burst',
+      disabled: !groupStack || groupStack.kind !== 'burst',
+      disabledHint: 'Enable Stacks and choose a burst',
+      onClick: function() { filterToBrowseGroup(developmentSourceId); } },
+    { label: 'Filter to This Duplicate Group',
+      disabled: !groupStack || groupStack.kind !== 'duplicate',
+      disabledHint: 'Enable Stacks and choose a duplicate group',
+      onClick: function() { filterToBrowseGroup(developmentSourceId); } },
     { label: 'Find Similar', disabled: !one, disabledHint: hint,
       onClick: function() { if (typeof findSimilar === 'function') findSimilar(photoIds[0]); } },
     { label: 'View on Map', disabled: noMapLocation,

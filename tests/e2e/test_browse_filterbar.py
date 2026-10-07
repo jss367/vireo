@@ -838,6 +838,7 @@ def test_rule_builder_typeahead_counts_and_pick(live_server, page):
     page.click(".vf-add-filter")
     page.fill(".vf-field-search", "species")
     page.click('[data-add-field="species"]')
+    page.locator('[data-action="op"]').select_option("contains")
     page.wait_for_timeout(400)
     value_input = page.locator('.vf-rule-tree [data-suggest="1"]')
     value_input.click()

@@ -133,6 +133,7 @@
 
   function defaultOp(spec) {
     if (!spec) return 'is';
+    if (spec.default_op) return spec.default_op;
     if (spec.type === 'text') return 'contains';
     if (spec.type === 'date') return 'recent';
     if (spec.type === 'enum') return 'in';
@@ -403,9 +404,13 @@
       return MISSING_TAG_LABELS[rule.field];
     }
     if (rule.field === 'keyword_identity') return 'Keyword · ' + (rule.label || 'Selected species or place');
+    if (['burst_id', 'duplicate_group'].includes(rule.field)) {
+      const label = rule.value_label || (rule.field === 'burst_id' ? 'Saved burst' : 'Saved duplicate group');
+      return `${rule.op === 'is not' ? 'Outside' : 'In'} ${label}`;
+    }
     if (rule.field === 'photo_ids') {
       const n = Array.isArray(rule.value) ? rule.value.length : 0;
-      return `${n} hand-picked photo${n === 1 ? '' : 's'}`;
+      return rule.value_label ? `${rule.value_label} · ${n} selected photos` : `${n} hand-picked photo${n === 1 ? '' : 's'}`;
     }
     if (rule.field === 'life_list_uncounted') {
       try {
@@ -1296,6 +1301,7 @@
           action: active.dataset.action,
           path: active.dataset.path,
           value: active.dataset.value,
+          folder: active.dataset.folder,
           start: active.selectionStart,
           end: active.selectionEnd,
           suggest: Boolean(active.dataset.suggest),
@@ -1313,17 +1319,22 @@
       ? state.root.rules.map((node, i) => renderNode(node, String(i), 0)).join('')
       : (visualRow ? '' : '<div class="vf-empty-rules">No rules yet. Use a quick filter or add any metadata field.</div>'));
     loadExtensionPickers();
+    loadValuePickers();
     if (restore) {
       const controls = Array.from(tree.querySelectorAll('[data-action][data-path]'));
       let el = controls.find((candidate) =>
         candidate.dataset.action === restore.action && candidate.dataset.path === restore.path &&
-        candidate.dataset.value === restore.value) || (['extension-remove', 'extension-pick'].includes(restore.action) &&
+        candidate.dataset.value === restore.value && candidate.dataset.folder === restore.folder) || (['extension-remove', 'extension-pick'].includes(restore.action) &&
           controls.find((candidate) => candidate.dataset.action === 'extension-pick' &&
             candidate.dataset.path === restore.path &&
             candidate.dataset.value.toLowerCase() === restore.value.toLowerCase()));
       if (!el && ['extension-remove', 'extension-pick'].includes(restore.action)) {
         const picker = $$('.vf-extension-picker').find((candidate) => candidate.dataset.path === restore.path);
         if (picker) el = extensionFocusTarget(picker);
+      }
+      if (!el && ['choice-pick', 'choice-remove', 'choice-folder-toggle'].includes(restore.action)) {
+        el = controls.find((candidate) => candidate.dataset.path === restore.path &&
+          candidate.dataset.action === 'choice-search');
       }
       if (el) {
         el.focus({ preventScroll: true });
@@ -1359,7 +1370,7 @@
         </div>
       </div>`;
     }
-    if (node.field === 'keyword_identity') {
+    if (node.field === 'keyword_identity' || node.field === 'photo_ids') {
       // Chart links select a confirmed identity, which cannot be edited as
       // free text. Keep its readable label and allow removing the constraint.
       return `<div class="vf-rule-row vf-identity-row">
@@ -1369,7 +1380,7 @@
     }
     const spec = fieldSpec(node.field) || { label: node.field, type: 'text', ops: ['is'] };
     const fieldOptions = state.fieldOrder.filter((key) =>
-      fieldAvailable(key) || key === node.field).map((key) =>
+      (fieldAvailable(key) && !state.fields[key].picker_hidden) || key === node.field).map((key) =>
       `<option value="${key}" ${key === node.field ? 'selected' : ''}>${esc(state.fields[key].label)}</option>`).join('');
     const opOptions = spec.ops.map((op) =>
       `<option value="${esc(op)}" ${op === node.op ? 'selected' : ''}>${esc(OP_LABELS[op] || op)}</option>`).join('');
@@ -1452,7 +1463,153 @@
     });
   }
 
+  // Picker searches select stored values; typing here never changes a rule.
+  // Per-node state keeps searches and expanded folders across value edits.
+  let valuePickerStates = new WeakMap();
+
+  function valuePickerState(node) {
+    let picker = valuePickerStates.get(node);
+    if (!picker || picker.field !== node.field) {
+      picker = { field: node.field, query: '', open: false, values: null, error: false, request: 0, pending: false, collapsed: new Set() };
+      valuePickerStates.set(node, picker);
+    }
+    return picker;
+  }
+
+  function usesValuePicker(node) {
+    const spec = fieldSpec(node.field);
+    return spec && spec.picker && ['is', 'is not', 'in', 'not_in', 'under', 'not_under'].includes(node.op);
+  }
+
+  function pickerValueKey(node, value) {
+    return ['camera_make', 'camera_model', 'lens'].includes(node.field)
+      ? String(value).toLowerCase() : String(value);
+  }
+
+  function pickerChoice(node, path, value, label) {
+    const multiple = node.op === 'in' || node.op === 'not_in';
+    const selected = extensionValues(node).some((v) => pickerValueKey(node, v) === pickerValueKey(node, value));
+    return `<label class="vf-choice" title="${esc(value)}"><input type="${multiple ? 'checkbox' : 'radio'}" name="choice-${path}" data-action="choice-pick" data-path="${path}" data-value="${esc(value)}" ${selected ? 'checked' : ''}><span>${esc(label || value)}</span></label>`;
+  }
+
+  function renderFolderChoices(node, path, picker) {
+    const folders = picker.values || [];
+    const byId = new Map(folders.map((f) => [f.id, f]));
+    const children = new Map();
+    const visible = new Set();
+    const q = picker.query.toLowerCase().trim();
+    folders.forEach((f) => {
+      const parent = byId.has(f.parent_id) ? f.parent_id : null;
+      if (!children.has(parent)) children.set(parent, []);
+      children.get(parent).push(f);
+      if (!q || f.path.toLowerCase().includes(q)) {
+        let current = f;
+        while (current && !visible.has(current.id)) {
+          visible.add(current.id);
+          current = byId.get(current.parent_id);
+        }
+      }
+    });
+    const renderBranch = (parent) => (children.get(parent) || [])
+      .filter((f) => visible.has(f.id)).sort((a, b) => a.path.localeCompare(b.path)).map((f) => {
+        const hasChildren = (children.get(f.id) || []).some((child) => visible.has(child.id));
+        const expanded = Boolean(q) || !picker.collapsed.has(f.id);
+        return `<li><div class="vf-folder-choice">${hasChildren
+          ? `<button type="button" class="vf-folder-toggle" data-action="choice-folder-toggle" data-path="${path}" data-folder="${f.id}" aria-label="${expanded ? 'Collapse' : 'Expand'} ${esc(f.name || f.path)}" aria-expanded="${expanded}">${expanded ? '▾' : '▸'}</button>`
+          : '<span class="vf-folder-spacer"></span>'}
+          ${pickerChoice(node, path, f.path, parent === null ? f.path : f.name || f.path)}</div>
+          ${hasChildren && expanded ? `<ul>${renderBranch(f.id)}</ul>` : ''}</li>`;
+      }).join('');
+    // Keep a saved folder available even after it leaves the workspace.
+    const saved = extensionValues(node).filter((v) => !folders.some((f) => f.path === v));
+    return saved.map((v) => pickerChoice(node, path, v)).join('') + `<ul class="vf-folder-choices">${renderBranch(null)}</ul>`;
+  }
+
+  function renderPickerChoices(node, path, picker) {
+    if (node.field === 'folder') return renderFolderChoices(node, path, picker);
+    const values = new Map(extensionValues(node).map((v) => [pickerValueKey(node, v), v]));
+    (picker.values || []).forEach((entry) => {
+      const key = pickerValueKey(node, entry.value);
+      if (entry.value != null && entry.value !== '' && !values.has(key)) values.set(key, entry.value);
+    });
+    return Array.from(values.values()).map((v) => pickerChoice(node, path, v)).join('');
+  }
+
+  function pickerStatus(node, picker) {
+    if (picker.pending || picker.values === null && !picker.error) return 'Loading choices…';
+    if (picker.error) return 'Could not load choices.';
+    if (!picker.values.length) return picker.query ? 'No matching choices.' : 'No choices in this workspace.';
+    if (node.field === 'folder') {
+      if (picker.query.trim() && !picker.values.some((f) => f.path.toLowerCase().includes(picker.query.trim().toLowerCase()))) return 'No matching folders.';
+      return 'Includes the selected folder and its subfolders.';
+    }
+    return picker.values.length >= 50 ? 'Showing up to 50 choices. Search to narrow the list.' : '';
+  }
+
+  function renderValuePicker(node, spec, path) {
+    const picker = valuePickerState(node);
+    const selected = extensionValues(node);
+    return `<div class="vf-value-picker" data-path="${path}">
+      <div class="vf-enum-multi">${selected.map((v) => `<button type="button" class="vf-enum-pill active" data-action="choice-remove" data-path="${path}" data-value="${esc(v)}" aria-label="Remove ${esc(v)}">${esc(v)} ×</button>`).join('')}</div>
+      <details ${picker.open ? 'open' : ''}><summary data-action="choice-open" data-path="${path}">Choose ${esc(spec.label.toLowerCase())}…</summary>
+        <input type="search" data-action="choice-search" data-path="${path}" value="${esc(picker.query)}" placeholder="Search choices…" aria-label="Search ${esc(spec.label.toLowerCase())} choices" autocomplete="off">
+        <div class="vf-choice-options" role="group" aria-label="${esc(spec.label)} choices">${renderPickerChoices(node, path, picker)}</div>
+        <div class="vf-choice-status" role="status">${esc(pickerStatus(node, picker))}</div>
+        <button type="button" data-action="choice-retry" data-path="${path}" ${picker.error ? '' : 'hidden'}>Retry</button>
+      </details>
+    </div>`;
+  }
+
+  function refreshPickerOptions(node, picker) {
+    $$('.vf-value-picker').forEach((wrap) => {
+      if (getNodeAtPath(wrap.dataset.path) !== node || !usesValuePicker(node)) return;
+      const options = wrap.querySelector('.vf-choice-options');
+      const active = options.contains(document.activeElement) ? document.activeElement : null;
+      options.innerHTML = renderPickerChoices(node, wrap.dataset.path, picker);
+      if (active) {
+        const replacement = Array.from(options.querySelectorAll('[data-action]')).find((el) =>
+          el.dataset.action === active.dataset.action && el.dataset.value === active.dataset.value &&
+          el.dataset.folder === active.dataset.folder);
+        (replacement || wrap.querySelector('[data-action="choice-search"]')).focus({ preventScroll: true });
+      }
+      wrap.querySelector('.vf-choice-status').textContent = pickerStatus(node, picker);
+      wrap.querySelector('[data-action="choice-retry"]').hidden = !picker.error;
+    });
+  }
+
+  function requestPickerValues(node, picker) {
+    const seq = ++picker.request;
+    picker.pending = true;
+    picker.error = false;
+    refreshPickerOptions(node, picker);
+    const params = new URLSearchParams({ field: node.field, limit: '50', q: picker.query.trim() });
+    const url = node.field === 'folder' ? '/api/folders' : `/api/filters/values?${params}`;
+    fetchJson(url).then((data) => {
+      if (picker.request !== seq || valuePickerStates.get(node) !== picker) return;
+      picker.values = node.field === 'folder' ? data : data.values;
+      picker.pending = false;
+      refreshPickerOptions(node, picker);
+    }).catch(() => {
+      if (picker.request !== seq || valuePickerStates.get(node) !== picker) return;
+      picker.pending = false;
+      picker.error = true;
+      refreshPickerOptions(node, picker);
+    });
+  }
+
+  function loadValuePickers() {
+    $$('.vf-value-picker').forEach((wrap) => {
+      const node = getNodeAtPath(wrap.dataset.path);
+      const picker = valuePickerState(node);
+      if (picker.open && picker.values === null && !picker.pending && !picker.error) requestPickerValues(node, picker);
+    });
+  }
+
   function renderValueInput(node, spec, path) {
+    if (usesValuePicker(node)) return renderValuePicker(node, spec, path);
+    if (['burst_id', 'duplicate_group'].includes(node.field)) {
+      return `<span class="vf-group-reference" title="${esc(node.value)}">${esc(node.value_label || 'Saved group')}<small>Choose groups from a stack’s context menu.</small></span>`;
+    }
     if (node.field === 'extension') return renderExtensionPicker(node, path);
     if ((node.op === 'in' || node.op === 'not_in') && spec.values) {
       const selected = Array.isArray(node.value) ? node.value : [node.value];
@@ -1570,6 +1727,7 @@
     if (shouldOpen) {
       extensionOptions = null;
       extensionRequest = null;
+      valuePickerStates = new WeakMap();
       renderRules();
     }
     if (restoreFocus) $('.vf-filters-btn').focus();
@@ -1587,7 +1745,7 @@
     const byCategory = new Map();
     state.fieldOrder.forEach((key) => {
       const spec = fieldSpec(key);
-      if (!fieldAvailable(key)) return;
+      if (!fieldAvailable(key) || spec.picker_hidden) return;
       if (needle && !`${spec.label} ${spec.category}`.toLowerCase().includes(needle)) return;
       if (!byCategory.has(spec.category)) byCategory.set(spec.category, []);
       byCategory.get(spec.category).push([key, spec]);
@@ -1629,6 +1787,7 @@
         node.op = defaultOp(next);
         node.value = defaultValue(next, node.op);
         delete node.case;
+        delete node.value_label;
       } else if (action === 'op') {
         node.op = target.value;
         node.value = coerceValue(spec, node.op, node.value);
@@ -1853,12 +2012,32 @@
     });
 
     const tree = $('.vf-rule-tree');
+    tree.addEventListener('toggle', (e) => {
+      if (!e.target.matches('.vf-value-picker details') || !document.contains(e.target)) return;
+      const wrap = e.target.closest('.vf-value-picker');
+      const node = getNodeAtPath(wrap.dataset.path);
+      valuePickerState(node).open = e.target.open;
+      if (e.target.open) loadValuePickers();
+    }, true);
     tree.addEventListener('change', (e) => {
       // Typed inputs commit through the debounced input path; their blur
       // 'change' would re-render mid-click and destroy a suggest option
       // before its pick lands (blur fires before click).
       const action = e.target.dataset.action;
       if (['value-input', 'between-lo', 'between-hi', 'recent-n', 'multi-text'].includes(action)) return;
+      if (action === 'choice-search') return;
+      if (action === 'choice-pick') {
+        const node = getNodeAtPath(e.target.dataset.path);
+        const value = e.target.dataset.value;
+        const checked = e.target.checked;
+        mutate(() => {
+          if (node.op === 'in' || node.op === 'not_in') {
+            const values = extensionValues(node).filter((v) => pickerValueKey(node, v) !== pickerValueKey(node, value));
+            node.value = checked ? values.concat(value) : values;
+          } else node.value = value;
+        }, { reason: checked ? undefined : 'filterRemoved' });
+        return;
+      }
       if (action === 'extension-pick') {
         const node = getNodeAtPath(e.target.dataset.path);
         if (!node || node.field !== 'extension') return;
@@ -1876,6 +2055,19 @@
     });
     tree.addEventListener('input', (e) => {
       const action = e.target.dataset.action;
+      if (action === 'choice-search') {
+        const node = getNodeAtPath(e.target.dataset.path);
+        const picker = valuePickerState(node);
+        picker.query = e.target.value;
+        clearTimeout(picker.timer);
+        picker.request++;
+        if (node.field === 'folder' && picker.values !== null) refreshPickerOptions(node, picker);
+        else {
+          picker.pending = true;
+          picker.timer = setTimeout(() => requestPickerValues(node, picker), 150);
+        }
+        return;
+      }
       if (['value-input', 'between-lo', 'between-hi', 'recent-n', 'multi-text'].includes(action)) {
         clearTimeout(editDebounce);
         const target = e.target;
@@ -1915,6 +2107,28 @@
       if (action === 'visual-remove') {
         clearVisual();
         toast('Visual search removed', true);
+        return;
+      }
+      if (action === 'choice-retry') {
+        const node = getNodeAtPath(path);
+        requestPickerValues(node, valuePickerState(node));
+        return;
+      }
+      if (action === 'choice-folder-toggle') {
+        const node = getNodeAtPath(path);
+        const picker = valuePickerState(node);
+        const folderId = Number(target.dataset.folder);
+        if (picker.collapsed.has(folderId)) picker.collapsed.delete(folderId);
+        else picker.collapsed.add(folderId);
+        renderRules();
+        return;
+      }
+      if (action === 'choice-remove') {
+        const node = getNodeAtPath(path);
+        mutate(() => {
+          if (node.op === 'in' || node.op === 'not_in') node.value = extensionValues(node).filter((v) => v !== target.dataset.value);
+          else removeByReference(state.root, node);
+        }, { reason: 'filterRemoved' });
         return;
       }
       if (action === 'extension-retry') {
@@ -2316,6 +2530,16 @@
         state.root.rules = state.root.rules.filter((n) => isGroup(n) || n.field !== field);
         state.root.rules.unshift(rule);
       }, { reason: removing ? 'filterRemoved' : undefined });
+    },
+    selectPhotoGroup(photoIds, label) {
+      if (!Array.isArray(photoIds) || !photoIds.length) return;
+      mutate(() => {
+        const rule = { field: 'photo_ids', op: 'in', value: photoIds.slice(), value_label: label };
+        state.root.rules = state.root.rules.filter((node) => !['photo_ids', 'burst_id', 'duplicate_group'].includes(node.field));
+        if (state.root.mode === 'all') state.root.rules.push(rule);
+        else state.root = { mode: 'all', rules: [state.root, rule] };
+        state.muted = false;
+      });
     },
     quickSearch(text) { applyQuickSearch(text); },
     removeField(field, opts) {

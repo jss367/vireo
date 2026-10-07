@@ -1333,6 +1333,20 @@ class CollectionRepository:
         extra_params = []
         if field in self._SUGGEST_VALUE_EXPRS:
             display_expr, group_expr = self._SUGGEST_VALUE_EXPRS[field]
+        elif field == "classifier_model":
+            extra_joins = (
+                " JOIN detections pick_det ON pick_det.photo_id = p.id"
+                " JOIN predictions pick_pred ON pick_pred.detection_id = pick_det.id"
+            )
+            display_expr = group_expr = "pick_pred.classifier_model"
+            # Use the exact same current-prediction, confidence and review
+            # visibility rules as an exact model filter. Old/alternative-only
+            # models must not become choices that cannot match any photos.
+            predicate, predicate_params = _RuleQueryBuilder(self, False)._prediction_exists(
+                "pred.classifier_model = pick_pred.classifier_model", []
+            )
+            conditions.append(predicate)
+            extra_params.extend(predicate_params)
         elif field in ("keyword", "species"):
             extra_joins = (
                 " JOIN photo_keywords pkv ON pkv.photo_id = p.id"
@@ -2122,6 +2136,15 @@ class _RuleQueryBuilder:
         field = rule["field"]
         op = rule.get("op", "")
         value = rule.get("value")
+        if field in ("camera_make", "camera_model", "lens", "keyword", "species") and op in ("in", "not_in"):
+            # Reuse exact-match semantics (case folding, species identity,
+            # and missing-value handling). Excluding several values means
+            # none may match, not merely that one selected value is absent.
+            return self.build_node({
+                "mode": "any" if op == "in" else "all",
+                "rules": [{**rule, "op": "is" if op == "in" else "is not", "value": item}
+                          for item in value],
+            }) if value else (("0" if op == "in" else "1"), [])
         build = _LEAF_RULE_BUILDERS.get(field) if isinstance(field, str) else None
         result = None if build is None else build(self, field, op, value, rule)
         if result is None:
