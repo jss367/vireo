@@ -728,9 +728,9 @@
 
     if (_proposals.length === 0) {
       setEmptyVisible(false);
-      // A restored scan with every group revalidated out tells us the old
-      // groups are stale, not that the library is currently clean. The
-      // user needs a fresh scan to rule out duplicates added since.
+      // A restored scan with every group revalidated out is only out of
+      // date if the catalog has duplicates a new scan would show: groups
+      // added since, or a stale group's hash that still forms one.
       var staleCount = result.stale_group_count || 0;
       var newCount = result.new_group_count || 0;
       if (newCount > 0) {
@@ -740,12 +740,12 @@
           (newCount === 1 ? ' new duplicate group has' : ' new duplicate groups have') +
           ' appeared since. Run a new scan to see ' +
           (newCount === 1 ? 'it' : 'them') + '.</div>';
-      } else if (staleCount > 0) {
+      } else if (staleCount > 0 && result.changed_group_count > 0) {
         document.getElementById('results').innerHTML =
           '<div class="no-results">The last scan is out of date — ' +
-          staleCount.toLocaleString() +
-          (staleCount === 1 ? ' group no longer matches' : ' groups no longer match') +
-          ' your catalog. Run a new scan to check for duplicates.</div>';
+          result.changed_group_count.toLocaleString() +
+          (result.changed_group_count === 1 ? ' group from it has' : ' groups from it have') +
+          ' changed since. Run a new scan to check for duplicates.</div>';
       } else {
         document.getElementById('results').innerHTML =
           '<div class="no-results">No duplicates found. Your library is clean.</div>';
