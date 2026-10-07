@@ -74,6 +74,30 @@ def test_duplicates_page_restores_prior_scan(live_server, page):
     expect(page.locator("#emptyState")).not_to_be_visible()
     expect(page.locator("#results")).to_contain_text("HFAKE")
     expect(banner).not_to_contain_text("no longer")
+    expect(banner).to_contain_text("Still up to date")
+    expect(banner).not_to_contain_text("Scan again")
+
+
+def test_duplicates_page_says_when_duplicates_appeared_since_the_scan(
+    live_server, page,
+):
+    """A group imported after the restored scan is something only a new scan
+    shows, so the banner asks for one instead of calling the scan current."""
+    db = live_server["db"]
+    _seed_prior_scan(db)
+    fid = db.add_folder("/later")
+    for name in ("c.jpg", "c (2).jpg"):
+        db.add_photo(folder_id=fid, filename=name, extension=".jpg",
+                     file_size=1000, file_mtime=100.0, file_hash="HLATER")
+    db.conn.execute("UPDATE photos SET flag='none' WHERE file_hash='HLATER'")
+    db.conn.commit()
+    page.goto(f"{live_server['url']}/duplicates")
+
+    banner = page.locator("#restoredBanner")
+    expect(banner).to_contain_text(
+        "Since then, 1 new duplicate group has appeared. Scan again"
+    )
+    expect(banner).not_to_contain_text("Still up to date")
 
 
 def test_duplicates_page_hides_restored_groups_that_no_longer_match(
@@ -109,6 +133,28 @@ def test_duplicates_page_all_stale_does_not_declare_library_clean(
     # it is suppressed when nothing remains to show alongside it.
     expect(page.locator("#restoredBanner")).to_be_visible()
     expect(page.locator("#restoredStale")).to_have_text("")
+
+
+def test_duplicates_page_empty_restore_names_duplicates_added_since(
+    live_server, page,
+):
+    """A restored scan with nothing left to show is not a clean bill of
+    health when duplicates have been imported since it ran."""
+    db = live_server["db"]
+    _seed_prior_scan(db, only_stale=True)
+    fid = db.add_folder("/later")
+    for name in ("c.jpg", "c (2).jpg"):
+        db.add_photo(folder_id=fid, filename=name, extension=".jpg",
+                     file_size=1000, file_mtime=100.0, file_hash="HLATER")
+    db.conn.execute("UPDATE photos SET flag='none' WHERE file_hash='HLATER'")
+    db.conn.commit()
+    page.goto(f"{live_server['url']}/duplicates")
+
+    results = page.locator("#results")
+    expect(results).to_contain_text(
+        "1 new duplicate group has appeared since. Run a new scan to see it."
+    )
+    expect(results).not_to_contain_text("Your library is clean")
 
 
 def test_duplicates_page_no_prior_scan_shows_empty_state(live_server, page):

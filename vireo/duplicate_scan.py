@@ -52,6 +52,13 @@ def revalidate_scan_result(db, result):
     are rebuilt from the groups that remain. Returns a new result dict with
     ``stale_group_count`` set to the number of groups dropped. Does no
     filesystem I/O, so a sleeping NAS cannot stall the page load.
+
+    Also says whether a new scan would find the same groups, so the page
+    only asks for one when it would show something different:
+    ``new_group_count`` counts duplicate groups in the catalog now whose
+    hash the scan never saw, and ``changed_group_count`` counts the scan's
+    groups that a new scan would show differently (another copy added or
+    gone, a decision applied since, or the group no longer a duplicate).
     """
     proposals = result.get("proposals") or []
     photo_ids = sorted({
@@ -87,6 +94,9 @@ def revalidate_scan_result(db, result):
             continue
         kept.append(dict(p, losers=losers))
 
+    new_group_count, changed_group_count = _changes_since_scan(
+        db, proposals, kept,
+    )
     return dict(
         result,
         proposals=kept,
@@ -102,7 +112,41 @@ def revalidate_scan_result(db, result):
             len(p["losers"]) for p in kept if p.get("status") == "resolved"
         ),
         stale_group_count=len(proposals) - len(kept),
+        new_group_count=new_group_count,
+        changed_group_count=changed_group_count,
     )
+
+
+def _group_state(status, photo_ids):
+    return status, frozenset(photo_ids)
+
+
+def _changes_since_scan(db, stored_proposals, shown_proposals):
+    """Compare the groups a restored scan shows with the catalog's groups now.
+
+    Returns ``(new_group_count, changed_group_count)``. A group is the same
+    when its status and member ids match what a new scan would find: an
+    unresolved group lists its non-rejected copies, a resolved one every
+    copy, exactly as ``find_duplicate_groups`` reports them. A group dropped
+    by revalidation counts as changed only if its hash still forms a group.
+    """
+    current = {
+        g["file_hash"]: _group_state(g["status"], g["photo_ids"])
+        for g in db.find_duplicate_groups(include_resolved=True)
+    }
+    shown = {
+        p.get("file_hash"): _group_state(
+            p.get("status"),
+            [e.get("id") for e in [p.get("winner") or {}] + list(p.get("losers") or [])],
+        )
+        for p in shown_proposals
+    }
+    scanned = {p.get("file_hash") for p in stored_proposals}
+    new_group_count = sum(1 for h in current if h not in scanned)
+    changed_group_count = sum(
+        1 for h in scanned if shown.get(h) != current.get(h)
+    )
+    return new_group_count, changed_group_count
 
 
 def _volume_offline(path):
