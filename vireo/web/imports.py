@@ -20,6 +20,7 @@ from urllib.parse import quote
 
 import source_discovery
 from db import Database
+from file_identity import catalog_scan_root
 from flask import Blueprint, Response, abort, jsonify, make_response, request
 from jobs import describe_jobs
 from metadata import scan_metadata_warning
@@ -994,8 +995,13 @@ class _ImportFullRun:
             if copied_paths:
                 photo_ids = thread_db.get_photo_ids_at_paths(copied_paths)
         else:
-            # Collection from all photos in the scanned folder
-            photo_ids = thread_db.get_photo_ids_under_path(self.scan_target)
+            # Collection from all photos in the scanned folder. The scanner
+            # filed them under the catalog's spelling of the root, which
+            # differs from ``scan_target`` when the user typed a case or
+            # symlink alias of an already-cataloged folder; match that.
+            photo_ids = thread_db.get_photo_ids_under_path(
+                catalog_scan_root(thread_db, self.scan_target)
+            )
         return photo_ids
 
     def _create_collection(self):

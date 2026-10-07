@@ -3877,10 +3877,14 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             "Skipping other-app data bundle as scan root: %s", root_path,
         )
         return counts
-    from file_identity import catalog_folder_aliases, catalog_folder_path
+    from file_identity import (
+        catalog_folder_aliases,
+        catalog_folder_path,
+        catalog_scan_root,
+    )
 
     original_root = os.path.abspath(root_path)
-    root_path = Path(catalog_folder_path(db, original_root))
+    root_path = Path(catalog_scan_root(db, original_root))
     if str(root_path) != original_root:
         restrict_dirs, restrict_files, skip_paths, discovered_files = (
             _rebase_scan_inputs(

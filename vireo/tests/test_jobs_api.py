@@ -13483,3 +13483,138 @@ def test_expanded_scope_tag_retry_preserves_paid_parent_tags(app_and_db, tmp_pat
         assert len(handoffs) == 1
         assert _tagged_count(db, own) == 0
         assert _tagged_count(db, list(child_ids)) == len(child_ids)
+
+
+# -- In-place import collection: which photos count as "under" the root ------
+
+
+def _import_collection_photo_ids(db, collection_id):
+    row = next(c for c in db.get_collections() if c["id"] == collection_id)
+    rules = json.loads(row["rules"])
+    return sorted(next(r["value"] for r in rules if r["field"] == "photo_ids"))
+
+
+def _import_in_place(client, source):
+    resp = client.post("/api/jobs/import-full", json={
+        "source": str(source), "copy": False, "file_types": [".jpg"],
+    })
+    assert resp.status_code == 200, resp.get_json()
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "completed", job
+    return job["result"]
+
+
+def _photo_ids_in(db, folder):
+    return sorted(
+        r["id"] for r in db.conn.execute(
+            "SELECT p.id FROM photos p JOIN folders f ON f.id = p.folder_id "
+            "WHERE f.path = ?", (str(folder),),
+        )
+    )
+
+
+def test_import_in_place_collection_excludes_wildcard_sibling(app_and_db, tmp_path):
+    """Importing ``my_trip`` in place must not sweep ``myXtrip``'s photos
+    into the "Import ..." collection: ``_`` in a folder name is a literal
+    character, not LIKE's single-character wildcard."""
+    app, db = app_and_db
+    client = app.test_client()
+    lib = tmp_path / "lib"
+    for name in ("my_trip", "myXtrip"):
+        (lib / name / "day1").mkdir(parents=True)
+        Image.new("RGB", (10, 10)).save(str(lib / name / "day1" / f"{name}.jpg"))
+    # The sibling is already in the catalog, from an earlier import.
+    _import_in_place(client, lib / "myXtrip")
+
+    result = _import_in_place(client, lib / "my_trip")
+
+    mine = _photo_ids_in(db, lib / "my_trip" / "day1")
+    assert len(mine) == 1
+    assert result["photos_indexed"] == 1
+    assert _import_collection_photo_ids(db, result["collection_id"]) == mine
+
+
+class _CollectionStepCtx:
+    """The slice of ``JobLaunch`` that ``_create_collection`` touches."""
+
+    class _Runner:
+        def update_step(self, *args, **kwargs):
+            pass
+
+    def __init__(self):
+        self.runner = self._Runner()
+
+    def checkpoint(self, job):
+        pass
+
+
+def _collect_in_place(db, scan_target):
+    """Run the import's collection step for an in-place import of
+    ``scan_target`` whose scan already cataloged the photos."""
+    from types import SimpleNamespace
+
+    from web.imports import _ImportFullRun
+
+    run = _ImportFullRun(
+        _CollectionStepCtx(), SimpleNamespace(copy=False), {},
+        lambda: None, {"id": "job-1"},
+    )
+    run.thread_db = db
+    run.scan_target = scan_target
+    result = run._create_collection()
+    if result["collection_id"] is None:
+        return []
+    return _import_collection_photo_ids(db, result["collection_id"])
+
+
+def _add_photo(db, folder_id, filename):
+    return db.add_photo(
+        folder_id=folder_id, filename=filename, extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+
+
+def test_import_in_place_collection_follows_case_alias_of_root(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """On a case-insensitive filesystem the user can import ``éTÉ`` when the
+    catalog stores the folder as ``Été``. The scanner files the photos under
+    the stored spelling (``file_identity.catalog_folder_path``), so the
+    collection must look there too, descendants included. Case folding is
+    simulated through ``samefile`` so the test behaves the same on every
+    host; the non-ASCII name defeats LIKE's ASCII-only case folding."""
+    import file_identity
+
+    _app, db = app_and_db
+    base = os.path.realpath(str(tmp_path))
+    stored = os.path.join(base, "Été")
+    root = db.add_folder(stored, name="Été")
+    day = db.add_folder(os.path.join(stored, "day1"), name="day1", parent_id=root)
+    mine = sorted([_add_photo(db, root, "r.jpg"), _add_photo(db, day, "d.jpg")])
+
+    def case_insensitive_samefile(a, b):
+        return (os.path.normpath(os.fspath(a)).casefold()
+                == os.path.normpath(os.fspath(b)).casefold())
+
+    monkeypatch.setattr(file_identity.os.path, "samefile", case_insensitive_samefile)
+
+    assert _collect_in_place(db, os.path.join(base, "éTÉ")) == mine
+
+
+def test_import_in_place_collection_is_case_sensitive_on_case_sensitive_fs(
+    app_and_db, tmp_path,
+):
+    """Where the catalog holds both ``Photos/Trip`` and ``photos/trip``, the
+    filesystem is case-sensitive and they are different folders: importing
+    one must not collect the other's photos."""
+    _app, db = app_and_db
+    base = os.path.realpath(str(tmp_path))
+    ids = {}
+    for top, sub in (("Photos", "Trip"), ("photos", "trip")):
+        path = os.path.join(base, top, sub)
+        fid = db.add_folder(path, name=sub)
+        day = db.add_folder(os.path.join(path, "day1"), name="day1", parent_id=fid)
+        ids[top] = sorted([_add_photo(db, fid, "a.jpg"), _add_photo(db, day, "b.jpg")])
+
+    assert _collect_in_place(db, os.path.join(base, "Photos", "Trip")) == ids["Photos"]
+    assert _collect_in_place(db, os.path.join(base, "photos", "trip")) == ids["photos"]

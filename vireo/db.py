@@ -3714,8 +3714,13 @@ class Database:
         return self._photos_repository(scoped=False).ids_at_paths(paths)
 
     def get_photo_ids_under_path(self, path):
-        """Ids of the photos at ``path`` and below (``LIKE`` match), in any workspace."""
-        return self._photos_repository(scoped=False).ids_under_path(path)
+        """Ids of the photos in the folder stored at ``path`` and below it, in any workspace.
+
+        ``path`` is the catalog's spelling of the root (see
+        ``file_identity.catalog_scan_root``); descendants match by exact
+        stored-path prefix with ``\\`` folded to ``/``.
+        """
+        return self._folder_repository(scoped=False).photo_ids_under(path)
 
     def get_photo_ids_in_folders(self, folder_ids):
         """Ids of every photo in the given folders, in any workspace."""

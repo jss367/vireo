@@ -426,27 +426,6 @@ def test_get_photo_ids_at_paths_is_one_statement_for_many_paths(db, tmp_path):
     assert len(_sql(statements, "JOIN _imported_paths")) == 1
 
 
-def test_get_photo_ids_under_path(db):
-    # The query matches descendants by a "/" separator (as the in-place
-    # import route always has), so build POSIX-style paths explicitly rather
-    # than through os.path, which uses backslashes on Windows.
-    root = db.add_folder("/photos/lib", name="lib")
-    child = db.add_folder("/photos/lib/c", name="c", parent_id=root)
-    a = _photo(db, root, "a.jpg")
-    b = _photo(db, root, "b.jpg")
-    c = _photo(db, child, "c.jpg")
-    assert sorted(db.get_photo_ids_under_path("/photos/lib")) == sorted([a, b, c])
-    # The root itself matches by exact path, so a trailing slash finds only
-    # the descendants.
-    assert db.get_photo_ids_under_path("/photos/lib/") == [c]
-    assert db.get_photo_ids_under_path("/photos/lib/c") == [c]
-    # A sibling sharing the prefix is not a descendant.
-    sib = db.add_folder("/photos/library", name="library")
-    _photo(db, sib, "s.jpg")
-    assert sorted(db.get_photo_ids_under_path("/photos/lib")) == sorted([a, b, c])
-    assert db.get_photo_ids_under_path("/photos/nowhere") == []
-
-
 def test_get_photo_ids_in_folders(db, lib):
     assert sorted(db.get_photo_ids_in_folders([lib["root"], lib["foreign"]])) == sorted(
         [lib["a"], lib["b"], lib["f"]])
@@ -1251,7 +1230,7 @@ MOVED = [
     "get_workspace_photos_in_folders",
     "get_photo_working_copy_path", "record_generated_original",
     "set_photo_thumb_path",
-    "get_photo_ids_at_paths", "get_photo_ids_under_path",
+    "get_photo_ids_at_paths",
     "get_photo_ids_in_folders",
 ]
 

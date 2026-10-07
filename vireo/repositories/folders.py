@@ -206,21 +206,50 @@ class FolderRepository:
         """Rows (``id``, ``path``, ``name``) for every folder, any workspace or status."""
         return self.conn.execute("SELECT id, path, name FROM folders").fetchall()
 
-    def present_photo_count_under(self, path):
-        """Count photos in ``ok``/``partial`` folders at ``path`` or below it.
+    def _subtree_clause(self, path):
+        """``(sql, params)`` matching folder ``f`` at ``path`` or stored below it.
 
-        Subtree membership folds ``\\`` to ``/`` in the stored path, as the
-        rest of this module does.
+        The catalog's subtree is lexical on the stored path: the folder whose
+        path is exactly ``path``, plus every folder whose path, with ``\\``
+        folded to ``/``, starts with ``path`` and a separator. ``substr`` is
+        a byte comparison, so ``_`` and ``%`` are literal and case is
+        significant (``/Photos/Trip`` does not contain ``/photos/trip/x``),
+        the same rule ``nearest_ancestor_id`` and ``repair_stale_parents``
+        derive ``parent_id`` from. ``path`` must be the catalog's spelling of
+        the root; resolve a user-supplied one with
+        ``file_identity.catalog_scan_root`` first.
         """
         prefix = self.subtree_prefix(path)
-        return self.conn.execute(
-            """SELECT COUNT(*) AS c
-                 FROM photos p JOIN folders f ON f.id = p.folder_id
-                WHERE (f.path = ?
-                       OR substr(REPLACE(f.path, '\\', '/'), 1, ?) = ?)
-                  AND f.status IN ('ok', 'partial')""",
+        return (
+            "(f.path = ? OR substr(REPLACE(f.path, '\\', '/'), 1, ?) = ?)",
             (path, len(prefix), prefix),
+        )
+
+    def present_photo_count_under(self, path):
+        """Count photos in ``ok``/``partial`` folders at ``path`` or below it."""
+        subtree, params = self._subtree_clause(path)
+        return self.conn.execute(
+            f"""SELECT COUNT(*) AS c
+                  FROM photos p JOIN folders f ON f.id = p.folder_id
+                 WHERE {subtree}
+                   AND f.status IN ('ok', 'partial')""",
+            params,
         ).fetchone()["c"]
+
+    def photo_ids_under(self, path):
+        """Ids of the photos in the folder at ``path`` and every folder below it.
+
+        Any folder status, any workspace; see ``_subtree_clause`` for what
+        "below" means.
+        """
+        subtree, params = self._subtree_clause(path)
+        rows = self.conn.execute(
+            f"""SELECT p.id FROM photos p
+                  JOIN folders f ON p.folder_id = f.id
+                 WHERE {subtree}""",
+            params,
+        ).fetchall()
+        return [r["id"] for r in rows]
 
     def with_quality_data(self):
         """Return workspace folders with scored photos in their subtree."""
