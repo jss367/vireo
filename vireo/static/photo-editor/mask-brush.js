@@ -256,11 +256,14 @@ async function finishMaskBrush(event) {
     wrap.addEventListener(type, finishMaskBrush, true);
   });
   document.addEventListener('keydown', function(event) {
-    if (!maskBrush.mode || !editorHistoryOwnsEvent(event)) return;
-    if (event.key === 'Escape' && maskBrush.mode) {
+    if (!maskBrush.mode) return;
+    // Escape finishes painting even from a text field; an open dialog still
+    // owns Escape. Ignore only the focus target when checking that boundary.
+    if (event.key === 'Escape' && editorHistoryOwnsEvent({target: null})) {
       cancelMaskBrush(); event.preventDefault(); event.stopImmediatePropagation();
       return;
     }
+    if (!editorHistoryOwnsEvent(event)) return;
     if (event.key === 'Alt') { maskBrush.erase = true; updateMaskBrushCursor(); }
     if (event.code === 'Space') document.getElementById('maskBrushCursor').hidden = true;
     if (event.metaKey || event.ctrlKey || event.altKey || maskBrush.stroke || maskBrush.busy) return;

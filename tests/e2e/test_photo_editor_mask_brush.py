@@ -323,3 +323,21 @@ def test_brush_outline_tracks_radius_limit_and_zoom(page, live_server, masked_ph
         page.mouse.click(box['x'] + box['width'] * 0.7, box['y'] + box['height'] * 0.5)
     assert request.value.post_data_json['radius'] * 128 * 2 * 2 == pytest.approx(120)
     page.wait_for_function('!maskBrush.busy')
+
+
+def test_escape_finishes_brush_from_text_field_but_leaves_dialogs_in_control(page, live_server, masked_photo):
+    open_mask(page, live_server, masked_photo)
+    page.locator('#maskBrushAdd').click()
+    page.wait_for_function('maskBrush.mode && !maskBrush.busy')
+    page.locator('#editorSearchInput').fill('heron')
+    page.keyboard.press('Escape')
+    assert page.evaluate('maskBrush.mode') is None
+    expect(page.locator('#editorSearchInput')).to_have_value('heron')
+    expect(page.locator('#maskBrushCursor')).to_be_hidden()
+    page.locator('#maskBrushAdd').click()
+    page.wait_for_function('maskBrush.mode && !maskBrush.busy')
+    page.evaluate('openExportModal()')
+    expect(page.locator('#exportOverlay')).to_be_visible()
+    page.keyboard.press('Escape')
+    expect(page.locator('#exportOverlay')).to_be_hidden()
+    assert page.evaluate('maskBrush.mode') == 'add'
