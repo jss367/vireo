@@ -1044,3 +1044,162 @@ def test_compact_header_and_floating_selection_actions(live_server, page, width)
             .filter(el => el.getBoundingClientRect().width)
             .every(el => el.getBoundingClientRect().right <= right + 1);
     }""")
+
+
+def test_extension_picker_multiple_formats_and_saved_values(live_server, page):
+    db = live_server["db"]
+    db.add_photo(folder_id=live_server["data"]["folders"][0], filename="raw.nef",
+                 extension=".nef", file_size=1000, file_mtime=1.0)
+    db.conn.commit()
+    _open_browse(page, live_server)
+    page.click(".vf-filters-btn")
+    page.click(".vf-add-filter")
+    page.click('[data-add-field="extension"]')
+    picker = page.locator(".vf-extension-picker")
+    expect(picker.locator('input[type="text"]')).to_have_count(0)
+    jpg = picker.get_by_role("checkbox", name="JPG", exact=True)
+    nef = picker.get_by_role("checkbox", name="NEF", exact=True)
+    jpg.check()
+    _wait_total(page, 5)
+    nef.check()
+    _wait_total(page, 6)
+    expect(jpg).to_be_checked()
+    expect(nef).to_be_checked()
+    picker.get_by_role("button", name="Remove JPG", exact=True).click()
+    _wait_total(page, 1)
+    expect(jpg).not_to_be_checked()
+    # Keyboard selection remains on the format that was toggled after render.
+    nef.focus()
+    page.keyboard.press("Space")
+    expect(nef).not_to_be_checked()
+    expect(nef).to_be_focused()
+    page.keyboard.press("Space")
+    expect(nef).to_be_checked()
+    page.locator('[data-action="op"]').select_option("not_in")
+    _wait_total(page, 5)
+    # Switching operator uses a single choice without rewriting its value.
+    page.locator('[data-action="op"]').select_option("is")
+    _wait_total(page, 1)
+    expect(picker.get_by_role("radio", name="NEF", exact=True)).to_be_checked()
+    picker.get_by_role("radio", name="JPG", exact=True).check()
+    _wait_total(page, 5)
+    page.locator('[data-action="op"]').select_option("is not")
+    _wait_total(page, 1)
+
+    # A saved format absent from this workspace stays visible and removable.
+    page.evaluate("""() => VireoFilter.loadExpression({mode: 'all', rules: [
+        {field: 'extension', op: 'in', value: ['.JPG', '.dng']}
+    ]})""")
+    _wait_total(page, 5)
+    expect(picker.get_by_role("checkbox", name="JPG", exact=True)).to_have_count(1)
+    expect(picker.get_by_role("checkbox", name="JPG", exact=True)).to_be_checked()
+    expect(picker.get_by_role("checkbox", name="DNG", exact=True)).to_be_checked()
+    with page.expect_response(lambda r: '/api/workspaces/' in r.url and r.request.method == 'PUT'):
+        picker.get_by_role("button", name="Remove JPG", exact=True).click()
+    page.reload()
+    page.wait_for_function("VireoFilter.isReady()")
+    page.click(".vf-filters-btn")
+    expect(picker.get_by_role("checkbox", name="DNG", exact=True)).to_be_checked()
+    expect(picker.get_by_role("checkbox", name="JPG", exact=True)).not_to_be_checked()
+
+
+def test_extension_picker_saved_case_keeps_keyboard_focus(live_server, page):
+    _open_browse(page, live_server)
+    page.evaluate("""() => VireoFilter.loadExpression({mode: 'all', rules: [
+        {field: 'extension', op: 'in', value: ['.JPG']}
+    ]})""")
+    page.click(".vf-filters-btn")
+    picker = page.locator(".vf-extension-picker")
+    jpg = picker.get_by_role("checkbox", name="JPG", exact=True)
+    expect(jpg).to_be_checked()
+    expect(jpg).to_have_attribute("data-value", ".JPG")
+    # Wait for workspace formats before removing the saved spelling.
+    expect(picker).to_contain_text("Select one or more formats")
+    jpg.focus()
+    page.keyboard.press("Space")
+    expect(jpg).not_to_be_checked()
+    expect(jpg).to_have_attribute("data-value", ".jpg")
+    expect(jpg).to_be_focused()
+    page.keyboard.press("Space")
+    expect(jpg).to_be_checked()
+    expect(jpg).to_be_focused()
+
+
+@pytest.mark.parametrize("empty_workspace", [False, True])
+def test_extension_picker_unavailable_chip_keeps_keyboard_focus(live_server, page, empty_workspace):
+    if empty_workspace:
+        page.route("**/api/photos/extensions",
+                   lambda route: route.fulfill(json=[]))
+    _open_browse(page, live_server)
+    page.evaluate("""() => VireoFilter.loadExpression({mode: 'all', rules: [
+        {field: 'extension', op: 'in', value: ['.dng']}
+    ]})""")
+    page.click(".vf-filters-btn")
+    picker = page.locator(".vf-extension-picker")
+    expect(picker).to_contain_text("Select one or more formats")
+    remove = picker.get_by_role("button", name="Remove DNG", exact=True)
+    remove.focus()
+    page.keyboard.press("Enter")
+    expect(remove).to_have_count(0)
+    if empty_workspace:
+        expect(picker).to_be_focused()
+        expect(picker).to_contain_text("No file formats in this workspace.")
+    else:
+        jpg = picker.get_by_role("checkbox", name="JPG", exact=True)
+        expect(jpg).to_be_focused()
+        page.keyboard.press("Space")
+        expect(jpg).to_be_checked()
+
+
+@pytest.mark.parametrize("outcome", ["success", "failure", "empty"])
+def test_extension_picker_keyboard_retry_keeps_focus(live_server, page, outcome):
+    page.route("**/api/photos/extensions",
+               lambda route: route.fulfill(status=500, json={"error": "Unavailable"}))
+    _open_browse(page, live_server)
+    page.click(".vf-filters-btn")
+    page.click(".vf-add-filter")
+    page.click('[data-add-field="extension"]')
+    picker = page.locator(".vf-extension-picker")
+    retry = picker.get_by_role("button", name="Retry")
+    expect(retry).to_be_visible()
+    page.unroute("**/api/photos/extensions")
+    held = []
+    page.route("**/api/photos/extensions", lambda route: held.append(route))
+    retry.focus()
+    page.keyboard.press("Enter")
+    expect(picker.locator('.vf-extension-status')).to_contain_text("Loading formats")
+    expect(picker.locator('.vf-extension-status')).to_be_focused()
+    assert held, "retry did not request formats"
+    if outcome == "failure":
+        held[0].fulfill(status=500, json={"error": "Unavailable"})
+        expect(retry).to_be_focused()
+    else:
+        values = [".jpg"] if outcome == "success" else []
+        held[0].fulfill(json=values)
+        if outcome == "success":
+            jpg = picker.get_by_role("checkbox", name="JPG", exact=True)
+            expect(jpg).to_be_focused()
+            page.keyboard.press("Space")
+            expect(jpg).to_be_checked()
+        else:
+            expect(picker).to_be_focused()
+            expect(picker).to_contain_text("No file formats in this workspace.")
+
+
+def test_extension_picker_load_failure_retry_and_empty_workspace(live_server, page):
+    page.route("**/api/photos/extensions",
+               lambda route: route.fulfill(status=500, json={"error": "Unavailable"}))
+    _open_browse(page, live_server)
+    page.click(".vf-filters-btn")
+    page.click(".vf-add-filter")
+    page.click('[data-add-field="extension"]')
+    picker = page.locator(".vf-extension-picker")
+    expect(picker).to_contain_text("Could not load formats")
+    page.unroute("**/api/photos/extensions")
+    picker.get_by_role("button", name="Retry").click()
+    expect(picker.get_by_role("checkbox", name="JPG", exact=True)).to_be_visible()
+    page.click(".vf-done")
+    page.route("**/api/photos/extensions",
+               lambda route: route.fulfill(json=[]))
+    page.click(".vf-filters-btn")
+    expect(picker).to_contain_text("No file formats in this workspace.")
