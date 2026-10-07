@@ -69,6 +69,10 @@ class FeatureReader:
     def require_workspace_id(self):
         return self.workspace
 
+    def _ws_id(self):
+        """Support historical feature loaders used in paired comparisons."""
+        return self.require_workspace_id()
+
     def get_species_keywords_for_photos(self, photo_ids, *, include_identities=False):
         return {}
 

@@ -57,7 +57,12 @@ def test_paired_run_uses_identical_read_only_scope(library,tmp_path,monkeypatch)
     original_output = continuity_compare.subprocess.check_output
     def source_output(command, **kwargs):
         if command[:2] == ['git', 'show']:
-            return b'from pipeline import load_photo_features\n'
+            return (
+                b'from pipeline import load_photo_features as current_loader\n'
+                b'def load_photo_features(db, **kwargs):\n'
+                b'    assert db._ws_id() == 1\n'
+                b'    return current_loader(db, **kwargs)\n'
+            )
         return original_output(command, **kwargs)
     monkeypatch.setattr(continuity_compare.subprocess, 'check_output', source_output)
 
