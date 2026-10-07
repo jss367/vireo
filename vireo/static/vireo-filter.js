@@ -1350,11 +1350,11 @@
     if (!pickers.length || extensionOptions !== null) return;
     // One request per popover session, independent of the active rules so
     // selecting one format cannot hide the other choices. No facet counts.
-    if (!extensionRequest) extensionRequest = fetchJson('/api/filters/values?field=extension&limit=50');
+    if (!extensionRequest) extensionRequest = fetchJson('/api/photos/extensions');
     const request = extensionRequest;
     request.then((data) => {
       if (extensionRequest !== request) return;
-      extensionOptions = data.values.map((entry) => String(entry.value)).filter(Boolean);
+      extensionOptions = (Array.isArray(data) ? data : []).map((value) => String(value)).filter(Boolean);
       pickers.forEach((picker) => {
         if (!document.contains(picker)) return;
         const node = getNodeAtPath(picker.dataset.path);

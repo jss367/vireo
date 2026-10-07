@@ -1128,8 +1128,8 @@ def test_extension_picker_saved_case_keeps_keyboard_focus(live_server, page):
 @pytest.mark.parametrize("empty_workspace", [False, True])
 def test_extension_picker_unavailable_chip_keeps_keyboard_focus(live_server, page, empty_workspace):
     if empty_workspace:
-        page.route("**/api/filters/values?field=extension*",
-                   lambda route: route.fulfill(json={"values": []}))
+        page.route("**/api/photos/extensions",
+                   lambda route: route.fulfill(json=[]))
     _open_browse(page, live_server)
     page.evaluate("""() => VireoFilter.loadExpression({mode: 'all', rules: [
         {field: 'extension', op: 'in', value: ['.dng']}
@@ -1153,7 +1153,7 @@ def test_extension_picker_unavailable_chip_keeps_keyboard_focus(live_server, pag
 
 @pytest.mark.parametrize("outcome", ["success", "failure", "empty"])
 def test_extension_picker_keyboard_retry_keeps_focus(live_server, page, outcome):
-    page.route("**/api/filters/values?field=extension*",
+    page.route("**/api/photos/extensions",
                lambda route: route.fulfill(status=500, json={"error": "Unavailable"}))
     _open_browse(page, live_server)
     page.click(".vf-filters-btn")
@@ -1162,9 +1162,9 @@ def test_extension_picker_keyboard_retry_keeps_focus(live_server, page, outcome)
     picker = page.locator(".vf-extension-picker")
     retry = picker.get_by_role("button", name="Retry")
     expect(retry).to_be_visible()
-    page.unroute("**/api/filters/values?field=extension*")
+    page.unroute("**/api/photos/extensions")
     held = []
-    page.route("**/api/filters/values?field=extension*", lambda route: held.append(route))
+    page.route("**/api/photos/extensions", lambda route: held.append(route))
     retry.focus()
     page.keyboard.press("Enter")
     expect(picker.locator('.vf-extension-status')).to_contain_text("Loading formats")
@@ -1174,8 +1174,8 @@ def test_extension_picker_keyboard_retry_keeps_focus(live_server, page, outcome)
         held[0].fulfill(status=500, json={"error": "Unavailable"})
         expect(retry).to_be_focused()
     else:
-        values = [{"value": ".jpg"}] if outcome == "success" else []
-        held[0].fulfill(json={"values": values})
+        values = [".jpg"] if outcome == "success" else []
+        held[0].fulfill(json=values)
         if outcome == "success":
             jpg = picker.get_by_role("checkbox", name="JPG", exact=True)
             expect(jpg).to_be_focused()
@@ -1187,7 +1187,7 @@ def test_extension_picker_keyboard_retry_keeps_focus(live_server, page, outcome)
 
 
 def test_extension_picker_load_failure_retry_and_empty_workspace(live_server, page):
-    page.route("**/api/filters/values?field=extension*",
+    page.route("**/api/photos/extensions",
                lambda route: route.fulfill(status=500, json={"error": "Unavailable"}))
     _open_browse(page, live_server)
     page.click(".vf-filters-btn")
@@ -1195,11 +1195,11 @@ def test_extension_picker_load_failure_retry_and_empty_workspace(live_server, pa
     page.click('[data-add-field="extension"]')
     picker = page.locator(".vf-extension-picker")
     expect(picker).to_contain_text("Could not load formats")
-    page.unroute("**/api/filters/values?field=extension*")
+    page.unroute("**/api/photos/extensions")
     picker.get_by_role("button", name="Retry").click()
     expect(picker.get_by_role("checkbox", name="JPG", exact=True)).to_be_visible()
     page.click(".vf-done")
-    page.route("**/api/filters/values?field=extension*",
-               lambda route: route.fulfill(json={"values": []}))
+    page.route("**/api/photos/extensions",
+               lambda route: route.fulfill(json=[]))
     page.click(".vf-filters-btn")
     expect(picker).to_contain_text("No file formats in this workspace.")
