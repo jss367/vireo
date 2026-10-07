@@ -334,6 +334,20 @@ def test_routine_works_on_and_pushes_against_the_expected_head_only():
     # Base-divergence (merge conflicts) still has a separate recovery path.
     assert "`origin/$BASE`" in absolute
 
+    # The lease push is scoped to tasks that carry `EXPECTED_HEAD`, and
+    # `fix-main` is explicitly exempt: it opens a brand-new
+    # `claude/fix-main-*` branch from current `main` with no
+    # `EXPECTED_HEAD` to lease against, so an absolute "only push used"
+    # that named only the lease would conflict with step 8's first push
+    # for that new remote branch (Codex #2020). The scoping and the
+    # exemption are both pinned so a future edit cannot silently
+    # reintroduce the contradiction.
+    assert "every task that carries `EXPECTED_HEAD`" in absolute
+    assert "`fix-main` is the one task this scoping exempts" in absolute
+    fix_main = prompt.split("## Task: `fix-main`", 1)[1].split("\n## ", 1)[0]
+    assert 'git push -u origin "claude/fix-main-$WORKFLOW_RUN"' in fix_main
+    assert "explicitly\n   exempt" in fix_main
+
 
 def test_routine_contract_is_state_based_quiet_and_resolves_addressed_threads():
     prompt = _read(ROUTINE_PROMPT)

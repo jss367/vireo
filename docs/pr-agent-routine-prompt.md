@@ -450,11 +450,16 @@ the open `main-red` tracking issue, and `Workflow run` is the failing run.
      || [ "$latest_conclusion" != "success" ] || exit 0
    ```
 8. Commit, push, and open a ready-for-review PR against `main` with the
-   `fix-main` label. The body names the failing run, lists each failure with
-   its root cause and fix, and ends with `Refs #$ISSUE` (not `Fixes`: the
+   `fix-main` label. The branch is brand new on the remote and the task
+   carries no `EXPECTED_HEAD`, so this is the one place a plain
+   `git push` is used — the Absolute Rules' lease requirement is scoped
+   to tasks that carry `EXPECTED_HEAD`, and this task is explicitly
+   exempt. The body names the failing run, lists each failure with its
+   root cause and fix, and ends with `Refs #$ISSUE` (not `Fixes`: the
    issue closes itself on the next green run) and
    `<!-- pr-agent-generated -->`:
    ```bash
+   git push -u origin "claude/fix-main-$WORKFLOW_RUN"
    gh pr create --base main --label fix-main --title "fix: <what broke> on main" --body-file <file>
    ```
 9. If you cannot fix it, comment on the issue instead, explaining what you
@@ -466,7 +471,10 @@ the open `main-red` tracking issue, and `Workflow run` is the failing run.
 - Never create a new branch or new PR, except the one `claude/fix-main-*`
   branch and PR that the `fix-main` task opens. Every other push goes to the
   existing PR head branch.
-- Never unconditionally force-push (`git push --force` or `-f`). The
+- Never unconditionally force-push (`git push --force` or `-f`). For
+  every single-PR task — every task that carries `EXPECTED_HEAD`, i.e.
+  `reconcile-pr`, `reconcile-pr-auto`, `address-review`,
+  `address-comment`, `address-codex-review`, and `fix-ci` — the
   `--force-with-lease="refs/heads/$HEAD:$EXPECTED_HEAD"` push documented
   in Common Setup is the only push used: when the branch head still
   matches `EXPECTED_HEAD` it lands as an ordinary fast-forward, and git
@@ -476,6 +484,13 @@ the open `main-red` tracking issue, and `Workflow run` is the failing run.
   (merge conflicts flagged by `CONFLICTING`/`DIRTY`) is handled by
   merging `origin/$BASE` into the PR head inside the reconciliation
   flow, never by rebasing to recover from a lease rejection.
+  `fix-main` is the one task this scoping exempts: it opens a new
+  `claude/fix-main-*` branch from current `main` and carries no
+  `EXPECTED_HEAD`, so the brand-new remote branch's initial
+  `git push -u origin "$BRANCH"` in step 8 is the ordinary push that
+  task needs. The lease has nothing to pin against on a ref that does
+  not yet exist, and the task's own live-state revalidation (steps 1
+  and 7) is what guards against publishing on a stale incident.
 - Never invent or skip validation. If a validation command cannot run, explain
   exactly what blocked it.
 - Never merge PRs yourself. Merging is handled by the GitHub Actions workflow's
