@@ -4900,7 +4900,7 @@ class Database:
         self._caches_repository().preview_delete(photo_id, size)
 
     def preview_cache_total_bytes(self):
-        """Return total bytes tracked in preview_cache."""
+        """Return total bytes tracked across ordinary and paired previews."""
         return self._caches_repository().preview_total_bytes()
 
     def preview_cache_oldest_first(self):
@@ -4910,6 +4910,19 @@ class Database:
     def preview_cache_get(self, photo_id, size):
         """Return the row for (photo_id, size), or None."""
         return self._caches_repository().preview_get(photo_id, size)
+
+    def paired_preview_cache_insert(self, photo_id, filename, bytes_):
+        """Register a source-keyed preview in the publisher's transaction."""
+        self._caches_repository().paired_preview_insert(photo_id, filename, bytes_)
+
+    def paired_preview_cache_get(self, filename):
+        return self._caches_repository().paired_preview_get(filename)
+
+    def paired_preview_cache_touch(self, filename):
+        self._caches_repository().paired_preview_touch(filename)
+
+    def paired_preview_cache_oldest_first(self):
+        return self._caches_repository().paired_preview_oldest_first()
 
     # ------------------------------------------------------------------
     # offline original cache

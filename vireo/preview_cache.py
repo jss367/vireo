@@ -139,7 +139,10 @@ def cleanup_cached_files_for_deleted_photos(
                         "photo delete — will be reclaimed by Clear Cache: %s",
                         cached, e,
                     )
-        for variant in _glob.glob(os.path.join(preview_dir, f"{pid}_*.jpg")):
+        for variant in (
+            _glob.glob(os.path.join(preview_dir, f"{pid}_*.jpg"))
+            + _glob.glob(os.path.join(preview_dir, "paired", f"{pid}_*.jpg"))
+        ):
             try:
                 os.remove(variant)
             except OSError as e:
@@ -293,6 +296,7 @@ def _recycled_id_probe_patterns(thumb_cache_dir, photo_id, vireo_dir=None):
     return (
         os.path.join(thumb_cache_dir, f"{photo_id}_*.jpg"),
         os.path.join(vireo_dir, "previews", f"{photo_id}_*.jpg"),
+        os.path.join(vireo_dir, "previews", "paired", f"{photo_id}_*.jpg"),
         os.path.join(vireo_dir, "originals", f"{photo_id}_*.jpg"),
         os.path.join(vireo_dir, "masks", f"{photo_id}.*.png"),
         os.path.join(vireo_dir, "external-edits", f"{photo_id}.json"),
@@ -351,6 +355,7 @@ def _derivative_dirs(thumb_cache_dir, vireo_dir=None):
     return (
         thumb_cache_dir,
         os.path.join(vireo_dir, "previews"),
+        os.path.join(vireo_dir, "previews", "paired"),
         os.path.join(vireo_dir, "working"),
         os.path.join(vireo_dir, "originals"),
         os.path.join(vireo_dir, "masks"),
@@ -800,95 +805,113 @@ def purge_cached_files_for_recycled_id(
     return True
 
 
+def paired_preview_ready(db, path):
+    """Only registered, nonempty current-state files are durable cache hits.
+
+    Callers construct ``path`` with the renderer's source-state hash. Never
+    adopt untracked files: they may belong to an older incarnation of a
+    recycled photo id, or to the pre-migration transient shadow cache.
+    """
+    row = db.paired_preview_cache_get(os.path.basename(path))
+    if not row or row["bytes"] <= 0:
+        return False
+    try:
+        return os.path.getsize(path) == row["bytes"]
+    except OSError:
+        return False
+
+
+def _preview_entries(db):
+    """Both preview families compete in one least-recently-used disk quota."""
+    entries = [
+        {**dict(row), "filename": f"{row['photo_id']}_{row['size']}.jpg",
+         "paired": False}
+        for row in db.preview_cache_oldest_first()
+    ]
+    entries.extend({**dict(row), "paired": True}
+                   for row in db.paired_preview_cache_oldest_first())
+    return sorted(entries, key=lambda row: row["last_access_at"])
+
+
+def _entry_path(preview_dir, row):
+    return os.path.join(preview_dir, "paired" if row["paired"] else "",
+                        row["filename"])
+
+
+def _delete_preview_entries(db, rows):
+    db.conn.executemany(
+        "DELETE FROM preview_cache WHERE photo_id=? AND size=?",
+        [(r["photo_id"], r["size"]) for r in rows if not r["paired"]],
+    )
+    db.conn.executemany(
+        "DELETE FROM paired_preview_cache WHERE filename=?",
+        [(r["filename"],) for r in rows if r["paired"]],
+    )
+    db.conn.commit()
+
+
 def evict_if_over_quota(db, vireo_dir):
-    """Evict oldest preview_cache entries until under preview_cache_max_mb.
+    """Evict ordinary and paired previews under one preview_cache_max_mb LRU.
 
-    Walks rows in ascending ``last_access_at`` order, removes files and
-    rows, and stops as soon as total <= quota. Self-healing: if a file
-    is already missing, the ghost row is still deleted. If ``unlink``
-    fails for any other OS reason the row is *left in place* so the
-    bytes stay accounted for and a future pass can retry; otherwise the
-    accounting under-reports and eviction stops targeting the leaked
-    bytes.
-
-    Deletes are batched into one transaction to avoid hundreds of
-    fsyncs when the quota is shrunk dramatically.
+    Missing files lose their rows too. Failed unlinks keep their rows, so
+    bytes remain accounted for and a later eviction can retry. A paired
+    artifact's source-state key replaces time-based expiration; disk quota,
+    source changes, photo deletion and Clear Cache govern its lifetime.
     """
     import config as cfg
 
-    quota_mb = cfg.load().get("preview_cache_max_mb", 20480)
-    max_bytes = int(quota_mb) * 1024 * 1024
+    max_bytes = int(cfg.load().get("preview_cache_max_mb", 20480)) * 1024 * 1024
     total = db.preview_cache_total_bytes()
     if total <= max_bytes:
         return
-
     preview_dir = os.path.join(vireo_dir, "previews")
     to_delete = []
     freed_bytes = 0
-    for row in db.preview_cache_oldest_first():
+    for row in _preview_entries(db):
         if total <= max_bytes:
             break
-        path = os.path.join(
-            preview_dir, f"{row['photo_id']}_{row['size']}.jpg"
-        )
-        removed = True
+        path = _entry_path(preview_dir, row)
         try:
             os.remove(path)
         except FileNotFoundError:
             pass
         except OSError as e:
             log.warning("Failed to remove preview cache file %s: %s", path, e)
-            removed = False
-        if removed:
-            to_delete.append((row["photo_id"], row["size"]))
-            total -= row["bytes"]
-            freed_bytes += row["bytes"]
-
+            continue
+        to_delete.append(row)
+        total -= row["bytes"]
+        freed_bytes += row["bytes"]
     if to_delete:
-        db.conn.executemany(
-            "DELETE FROM preview_cache WHERE photo_id=? AND size=?",
-            to_delete,
-        )
-        db.conn.commit()
-        log.info(
-            "Preview cache eviction: removed %d entries, freed %.1f MB",
-            len(to_delete), freed_bytes / 1024 / 1024,
-        )
+        _delete_preview_entries(db, to_delete)
+        log.info("Preview cache eviction: removed %d entries, freed %.1f MB",
+                 len(to_delete), freed_bytes / 1024 / 1024)
 
 
 def reconcile_preview_cache(db, vireo_dir):
-    """Drop preview_cache rows whose on-disk file is missing.
+    """Remove missing-file rows and untracked paired files at startup.
 
-    Counterpart to ``evict_if_over_quota``'s self-heal: that path only
-    cleans up ghost rows when the cache is *over* quota. If the cache
-    accounting drifts while *under* quota — e.g. files deleted by an
-    external process, or a previous eviction pass that removed files
-    after the row's ``last_access_at`` was recently touched — the
-    table keeps reporting ``total_bytes`` for files that no longer
-    exist, and eviction stays asleep. That's invisible to the user
-    until the next pipeline run regenerates everything from RAW
-    because none of the cache files actually exist.
-
-    Run at startup so a stale table can't poison the rest of the
-    session. Returns the number of rows dropped.
+    Untracked paired files include pre-migration shadow previews and files
+    left by interrupted publications or failed deletion cleanup. They are
+    never adopted as cache hits and must not grow outside the disk quota.
     """
     preview_dir = os.path.join(vireo_dir, "previews")
-    to_delete = []
-    for row in db.preview_cache_oldest_first():
-        path = os.path.join(
-            preview_dir, f"{row['photo_id']}_{row['size']}.jpg"
-        )
-        if not os.path.exists(path):
-            to_delete.append((row["photo_id"], row["size"]))
-
+    entries = _preview_entries(db)
+    to_delete = [row for row in entries
+                 if not os.path.exists(_entry_path(preview_dir, row))]
     if to_delete:
-        db.conn.executemany(
-            "DELETE FROM preview_cache WHERE photo_id=? AND size=?",
-            to_delete,
-        )
-        db.conn.commit()
-        log.info(
-            "Preview cache reconcile: dropped %d ghost rows (files missing on disk)",
-            len(to_delete),
-        )
+        _delete_preview_entries(db, to_delete)
+        log.info("Preview cache reconcile: dropped %d ghost rows", len(to_delete))
+    tracked = {row["filename"] for row in entries if row["paired"]}
+    for path in _glob.glob(os.path.join(preview_dir, "paired", "*.jpg")):
+        if os.path.basename(path) not in tracked:
+            try:
+                # Another app may publish after the startup snapshot. Use
+                # the publisher's writer lock and recheck before unlinking.
+                with db.conn:
+                    db.conn.execute("BEGIN IMMEDIATE")
+                    if db.paired_preview_cache_get(os.path.basename(path)) is None:
+                        os.remove(path)
+            except OSError:
+                log.warning("Could not remove untracked paired preview %s", path,
+                            exc_info=True)
     return len(to_delete)
