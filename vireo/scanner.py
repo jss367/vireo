@@ -4387,6 +4387,14 @@ class _ScanRun:
         # clear-to-NULL — see ``_write_photo_columns``), and by the
         # end-of-scan safety net ``_refill_owners_from_companions``.
         self._pending_companion_fills = {}
+        # Named-id set for ``_drop_inherited_collection_membership``,
+        # paired with the ``PRAGMA data_version`` snapshot that produced
+        # it. Our own writes to collections do not bump data_version, so
+        # the cache stays valid across inserts unless another connection
+        # commits a change; a bump drops the cache so the next insert
+        # catches a stale id the user saved into a collection in between.
+        self._collection_named_ids = None
+        self._collection_named_ids_version = None
 
         # Build folder cache: path -> folder_id
         self.folder_cache = {}
@@ -5779,15 +5787,30 @@ class _ScanRun:
         deletion from before deletes cleaned collections). SQLite hands the
         highest freed id to the next insert, which would then appear in
         that collection. A photo that did not exist until now cannot be a
-        member of anything, so any listing of its id is stale. The listed
-        ids are re-read on every insert: another connection can save a
-        collection naming a currently free id between the scan's inserts,
-        and a cached set loaded on the first insert would silently admit
-        the next photo that reuses that id (the startup repair cannot
-        catch it afterwards -- the id then names a valid row).
+        member of anything, so any listing of its id is stale. The named
+        set is cached across the scan and dropped when ``PRAGMA
+        data_version`` reports another connection has committed since the
+        last read: our own writes don't bump it, but a user saving a
+        collection naming a currently free id between the scan's inserts
+        does, so the next insert that would reuse that id catches it
+        (a cache loaded once would miss the entry added since, and the
+        startup repair cannot catch it afterwards -- the id then names a
+        valid row). Reads of large catalogs' collections traverse every
+        ``photo_ids`` entry, so re-reading on every insert would make
+        imports O(new photos * saved photo ids).
         """
-        if photo_id not in self.db.photo_ids_named_by_collections():
+        version = self.db.conn.execute("PRAGMA data_version").fetchone()[0]
+        if (
+            self._collection_named_ids is None
+            or version != self._collection_named_ids_version
+        ):
+            self._collection_named_ids = (
+                self.db.photo_ids_named_by_collections()
+            )
+            self._collection_named_ids_version = version
+        if photo_id not in self._collection_named_ids:
             return
+        self._collection_named_ids.discard(photo_id)
         rewritten = self.db.remap_collection_photo_ids({photo_id: None})
         commit_with_retry(self.db.conn)
         log.warning(

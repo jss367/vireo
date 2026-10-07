@@ -698,6 +698,50 @@ def test_new_photo_rechecks_collections_between_scan_inserts(tmp_path):
         db.close()
 
 
+def test_drop_inherited_collection_membership_reuses_cache_across_inserts(
+    tmp_path, monkeypatch,
+):
+    """The cache is cheap when no other connection has written.
+
+    Reading ``photo_ids_named_by_collections`` on every insert made
+    imports O(new photos * saved photo ids) for catalogs with large
+    static collections. The cache is invalidated through SQLite's
+    ``PRAGMA data_version`` -- our own writes don't bump it, so a run
+    of inserts with no concurrent writer rebuilds it exactly once.
+    """
+    import repositories.collections as collections_module
+    from db import Database
+    from scanner import scan
+
+    card = tmp_path / "card"
+    card.mkdir()
+    # Three photos: enough that a per-insert cache would show up as > 1
+    # read, and few enough that the test stays quick.
+    for name in ("a.jpg", "b.jpg", "c.jpg"):
+        Image.new("RGB", (32, 32), "red").save(card / name)
+
+    db = Database(str(tmp_path / "test.db"))
+    real = collections_module.photo_ids_named_by_collections
+    calls = {"n": 0}
+
+    def counting(conn):
+        calls["n"] += 1
+        return real(conn)
+
+    monkeypatch.setattr(
+        collections_module, "photo_ids_named_by_collections", counting,
+    )
+
+    try:
+        scan(str(card), db)
+        assert len(_photo_ids_by_filename(db)) == 3
+        # Three inserts share one named-id read: no concurrent writer
+        # bumped the data_version.
+        assert calls["n"] == 1
+    finally:
+        db.close()
+
+
 def test_jpeg_becomes_its_own_photo_when_its_raw_changes_under_it(
     tmp_path, monkeypatch,
 ):
