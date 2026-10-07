@@ -28,13 +28,7 @@ def _create_current_local_mask_snapshot(
     import local_masks
 
     for attempt in range(3):
-        variant_row = db.conn.execute(
-            "SELECT active_mask_variant FROM photos WHERE id=?",
-            (photo_id,),
-        ).fetchone()
-        variant = (
-            variant_row["active_mask_variant"] if variant_row else None
-        )
+        variant = db.get_active_mask_variant(photo_id)
         mask_row = (
             db.get_photo_mask(photo_id, variant) if variant else None
         )
@@ -65,11 +59,7 @@ def _local_mask_stale(db, photo_id, recipe):
     if not recipe or not recipe.get("local"):
         return False
     import local_masks
-    variant_row = db.conn.execute(
-        "SELECT active_mask_variant FROM photos WHERE id=?",
-        (photo_id,),
-    ).fetchone()
-    variant = variant_row["active_mask_variant"] if variant_row else None
+    variant = db.get_active_mask_variant(photo_id)
     mask_row = db.get_photo_mask(photo_id, variant) if variant else None
     return local_masks.is_stale(recipe, mask_row)
 
@@ -396,7 +386,7 @@ def create_photo_edit_recipes_blueprint(
         if items:
             # Commit recipes, sidecar intents, and the single undo record
             # together. A failed write rolls back the whole adjustment.
-            with db.conn:
+            with db.transaction():
                 for item in items:
                     pid = item["photo_id"]
                     db.set_photo_edit_recipe(pid, applied_recipes[str(pid)], verify_workspace=False, _commit=False)
@@ -428,18 +418,7 @@ def create_photo_edit_recipes_blueprint(
         if not photo:
             return photo_not_found_error(legacy_error="not found")
         limit = min(max(1, request.args.get("limit", 50, type=int)), 200)
-        rows = db.conn.execute(
-            """SELECT eh.id, eh.description, eh.created_at, eh.undone,
-                      ehi.old_value, ehi.new_value
-               FROM edit_history eh
-               JOIN edit_history_items ehi ON ehi.edit_id = eh.id
-               WHERE eh.workspace_id = ?
-                 AND eh.action_type = 'edit_recipe'
-                 AND ehi.photo_id = ?
-               ORDER BY eh.created_at DESC, eh.id DESC
-               LIMIT ?""",
-            (db.require_workspace_id(), photo_id, limit),
-        ).fetchall()
+        rows = db.get_photo_edit_recipe_history(photo_id, limit)
 
         from image_edits import copy_recipe
 

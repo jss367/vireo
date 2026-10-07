@@ -219,6 +219,42 @@ class PhotoRepository:
             (photo_id,),
         ).fetchone()
 
+    def file_in_workspace(self, photo_id, workspace_id):
+        """``filename`` and ``folder_path`` of one photo ``workspace_id`` can see, or None.
+
+        ``workspace_id`` is explicit, so ``None`` matches no row rather than
+        raising.
+        """
+        return self.conn.execute(
+            """SELECT p.filename, f.path AS folder_path
+               FROM photos p
+               JOIN folders f ON p.folder_id = f.id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
+               WHERE p.id = ? AND wf.workspace_id = ?""",
+            (photo_id, workspace_id),
+        ).fetchone()
+
+    def best_batch_rows_by_ids(self, photo_ids):
+        """Best Batch rows for the named photos the workspace can see in online folders.
+
+        Rows carry ``id``, ``folder_id``, ``filename``, ``extension``,
+        ``timestamp``, ``flag``, ``rating``, ``quality_score`` and
+        ``sharpness``, in no particular order. Photos in folders that are not
+        ``'ok'``/``'partial'`` are absent. One statement, unchunked: the
+        caller bounds the list (``POST /api/photos/best-batch`` takes at
+        most 500 ids).
+        """
+        placeholders = ",".join("?" for _ in photo_ids)
+        return self.conn.execute(
+            f"""SELECT p.id, p.folder_id, p.filename, p.extension, p.timestamp,
+                      p.flag, p.rating, p.quality_score, p.sharpness
+               FROM photos p
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
+               JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
+               WHERE wf.workspace_id = ? AND p.id IN ({placeholders})""",
+            (self.workspace_id, *photo_ids),
+        ).fetchall()
+
     def flags_ratings_and_eyes(self, photo_ids):
         """``{photo_id: Row}`` with ``id``, ``flag``, ``rating`` and the eye fields.
 

@@ -48,6 +48,8 @@ CONNECTION_LIFECYCLE = {
     "rollback",
     # Takes SQLite's writer lock up front (the prediction-decision lock).
     "begin_immediate",
+    # Opens a deferred transaction (a read snapshot for multi-query reads).
+    "begin",
     # sqlite3's own context manager (``with conn:``): commits on exit and
     # rolls back on error, exactly as the ``with db.conn:`` blocks it replaces.
     "transaction",
@@ -168,6 +170,30 @@ def test_begin_immediate_holds_the_writer_lock(db):
         db.begin_immediate()
     db.rollback()
     assert not db.in_transaction
+
+
+def test_begin_holds_one_read_snapshot_without_the_writer_lock(db):
+    db.begin()
+    assert db.in_transaction
+    assert _committed_markers(db) == 0
+    # The first read fixes the snapshot.
+    before = db.conn.execute(
+        "SELECT COUNT(*) FROM db_meta WHERE key LIKE 'tx-test-%'"
+    ).fetchone()[0]
+    with contextlib.closing(sqlite3.connect(db._db_path, timeout=0)) as other:
+        # Deferred: another connection can still write and commit.
+        other.execute("INSERT INTO db_meta (key, value) VALUES ('tx-test-other', '1')")
+        other.commit()
+    after = db.conn.execute(
+        "SELECT COUNT(*) FROM db_meta WHERE key LIKE 'tx-test-%'"
+    ).fetchone()[0]
+    assert after == before == 0
+    # BEGIN does not nest.
+    with pytest.raises(sqlite3.OperationalError):
+        db.begin()
+    db.rollback()
+    assert not db.in_transaction
+    assert _committed_markers(db) == 1
 
 
 def test_commit_with_retry_commits_through_the_module_helper(db, monkeypatch):

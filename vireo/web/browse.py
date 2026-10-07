@@ -86,7 +86,7 @@ def create_browse_blueprint(
         # post-transition folder tree. Since the navbar poll may already have
         # completed, there is no guaranteed immediate observation to repair
         # that split response.
-        db.conn.execute("BEGIN")
+        db.begin()
 
         # ``db.get_photos(collection_id=...)`` / ``count_filtered_photos`` both
         # expand only ``collections.rules`` — the same rules-only path guarded
@@ -103,11 +103,7 @@ def create_browse_blueprint(
         # so the sidebar bootstraps.
         visual_first_paint = False
         if collection_id is not None:
-            coll_row = db.conn.execute(
-                "SELECT visual_json FROM collections "
-                "WHERE id = ? AND workspace_id = ?",
-                (collection_id, db.require_workspace_id()),
-            ).fetchone()
+            coll_row = db.get_collection(collection_id)
             if coll_row is not None and coll_row["visual_json"] is not None:
                 visual_first_paint = True
 
@@ -167,7 +163,7 @@ def create_browse_blueprint(
                         sort=sort,
                     )
             except ValueError as exc:
-                db.conn.rollback()
+                db.rollback()
                 return json_error(str(exc), 400)
             if not stacks:
                 if not any([folder_id, collection_id]):
@@ -179,7 +175,7 @@ def create_browse_blueprint(
                             collection_id=collection_id,
                         )
                     except ValueError as exc:
-                        db.conn.rollback()
+                        db.rollback()
                         return json_error(str(exc), 400)
                 underlying_total = total
             # Photo deep links need the target's position in the exact sort
@@ -215,7 +211,7 @@ def create_browse_blueprint(
                             sort=sort,
                         )
                     except ValueError as exc:
-                        db.conn.rollback()
+                        db.rollback()
                         return json_error(str(exc), 400)
                 # Return only the bounded page containing the target from the
                 # same SQLite read snapshot as its position and total. Sending
@@ -236,7 +232,7 @@ def create_browse_blueprint(
                                 sort=sort,
                             )
                         except ValueError as exc:
-                            db.conn.rollback()
+                            db.rollback()
                             return json_error(str(exc), 400)
         folders = db.get_folder_tree()
         keywords = db.get_keyword_tree()
@@ -306,7 +302,7 @@ def create_browse_blueprint(
         # End the read transaction after every value in the response has been
         # materialized. rollback() is intentional: this endpoint is read-only
         # and it releases the snapshot without implying a write commit.
-        db.conn.rollback()
+        db.rollback()
         return response
 
     @blueprint.route("/api/browse/summary")
@@ -449,33 +445,23 @@ def create_browse_blueprint(
         if err is not None:
             return err
 
-        rows = []
-        batch_size = 800
-        for i in range(0, len(photo_ids), batch_size):
-            chunk = photo_ids[i:i + batch_size]
-            placeholders = ",".join("?" for _ in chunk)
-            rows.extend(db.conn.execute(
-                f"""SELECT pk.photo_id, k.id, k.name, k.type
-                    FROM photo_keywords pk
-                    JOIN keywords k ON k.id = pk.keyword_id
-                    WHERE pk.photo_id IN ({placeholders})
-                    ORDER BY LOWER(k.name), k.id""",
-                chunk,
-            ).fetchall())
+        # Row order doesn't matter: ``keywords`` is fully sorted below.
+        keywords_by_photo = db.get_keywords_for_photos(photo_ids)
 
         selected_count = len(photo_ids)
         by_keyword = {}
-        for row in rows:
-            entry = by_keyword.setdefault(
-                row["id"],
-                {
-                    "id": row["id"],
-                    "name": row["name"],
-                    "type": row["type"],
-                    "photo_ids": set(),
-                },
-            )
-            entry["photo_ids"].add(row["photo_id"])
+        for photo_id, photo_keywords in keywords_by_photo.items():
+            for row in photo_keywords:
+                entry = by_keyword.setdefault(
+                    row["id"],
+                    {
+                        "id": row["id"],
+                        "name": row["name"],
+                        "type": row["type"],
+                        "photo_ids": set(),
+                    },
+                )
+                entry["photo_ids"].add(photo_id)
 
         keywords = []
         for entry in by_keyword.values():
@@ -615,11 +601,7 @@ def create_browse_blueprint(
         # spelling, so a hierarchical Birds|Verdin tag counts as keyworded.
         # Look up existing rows only — asking here must not create keywords.
         kid_by_key = {}
-        for row in db.conn.execute(
-            "SELECT k.id, k.name, COALESCE(k.source_taxon_id, t.inat_id) AS source_id, "
-            "t.name AS scientific_name FROM keywords k LEFT JOIN taxa t ON t.id = k.taxon_id "
-            "WHERE k.is_species = 1 OR k.type = 'taxonomy'"
-        ).fetchall():
+        for row in db.get_species_keyword_identity_rows():
             source = {"taxon_id": row["source_id"], "scientific_name": row["scientific_name"]} if row["source_id"] else None
             identity = resolver.resolve(row["name"], row["scientific_name"], source)
             kid_by_key.setdefault(identity.key, row["id"])
@@ -775,29 +757,9 @@ def create_browse_blueprint(
                 "missing_count": 0,
             })
 
-        ws_id = db.require_workspace_id()
-        included = 0
-        excluded = 0
-        batch_size = 800
-        for i in range(0, len(photo_ids), batch_size):
-            chunk = photo_ids[i:i + batch_size]
-            placeholders = ",".join("?" for _ in chunk)
-            rows = db.conn.execute(
-                f"""SELECT COALESCE(p.wildlife_excluded, 0) AS excluded
-                    FROM photos p
-                    WHERE p.id IN ({placeholders})
-                      AND EXISTS (
-                          SELECT 1 FROM photo_workspace_visibility wf
-                          WHERE wf.photo_id = p.id
-                            AND wf.workspace_id = ?
-                      )""",
-                [*chunk, ws_id],
-            ).fetchall()
-            for row in rows:
-                if row["excluded"]:
-                    excluded += 1
-                else:
-                    included += 1
+        states = db.get_wildlife_excluded_states(photo_ids)
+        excluded = sum(1 for state in states.values() if state)
+        included = len(states) - excluded
 
         accessible = included + excluded
         return jsonify({

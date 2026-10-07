@@ -31,6 +31,7 @@ import math
 import re
 
 from keyword_identity import identity_sql
+from repositories import UNSET
 from repositories.top_species import TOP_SPECIES_RANKING_SQL
 from sql_chunks import chunked
 
@@ -125,6 +126,58 @@ class CollectionRepository:
             "WHERE workspace_id = ? ORDER BY name",
             (self.workspace_id,),
         ).fetchall()
+
+    def list_for_picker(self):
+        """The workspace's collections ordered by name case-insensitively, then id.
+
+        Rows carry ``id``, ``name``, ``rules`` and ``visual_json``; the
+        Dashboard scope picker lists them in this order.
+        """
+        return self.conn.execute(
+            "SELECT id, name, rules, visual_json FROM collections "
+            "WHERE workspace_id = ? ORDER BY name COLLATE NOCASE, id",
+            (self.workspace_id,),
+        ).fetchall()
+
+    def get(self, collection_id):
+        """One collection row (``id``, ``name``, ``rules``, ``visual_json``), or None.
+
+        None when the id is unknown or belongs to another workspace.
+        """
+        return self.conn.execute(
+            "SELECT id, name, rules, visual_json FROM collections "
+            "WHERE id = ? AND workspace_id = ?",
+            (collection_id, self.workspace_id),
+        ).fetchone()
+
+    def update(self, collection_id, *, name=UNSET, rules_json=UNSET,
+               visual_json=UNSET):
+        """Set the given columns of a workspace collection, and commit.
+
+        Only the arguments passed are written, in the order ``name``,
+        ``rules``, ``visual_json``; with none passed nothing runs. An id
+        outside the active workspace matches no row.
+        """
+        updates = []
+        params = []
+        if name is not UNSET:
+            updates.append("name = ?")
+            params.append(name)
+        if rules_json is not UNSET:
+            updates.append("rules = ?")
+            params.append(rules_json)
+        if visual_json is not UNSET:
+            updates.append("visual_json = ?")
+            params.append(visual_json)
+        if not updates:
+            return
+        params.extend([collection_id, self.workspace_id])
+        self.conn.execute(
+            f"UPDATE collections SET {', '.join(updates)} "
+            "WHERE id = ? AND workspace_id = ?",
+            params,
+        )
+        self.conn.commit()
 
     def delete(self, collection_id):
         """Delete a collection."""

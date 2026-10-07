@@ -1320,6 +1320,20 @@ class KeywordRepository:
             )
         return found
 
+    def species_identity_rows(self):
+        """Every species or taxonomy keyword with what its identity resolves from.
+
+        Rows carry ``id``, ``name``, ``source_id`` (the keyword's
+        ``source_taxon_id``, else its linked taxon's ``inat_id``) and
+        ``scientific_name`` (the linked taxon's name, None when unlinked), in
+        no particular order. Keywords are global, so this is catalog-wide.
+        """
+        return self.conn.execute(
+            "SELECT k.id, k.name, COALESCE(k.source_taxon_id, t.inat_id) AS source_id, "
+            "t.name AS scientific_name FROM keywords k LEFT JOIN taxa t ON t.id = k.taxon_id "
+            "WHERE k.is_species = 1 OR k.type = 'taxonomy'"
+        ).fetchall()
+
     def get_for_photo(self, photo_id):
         """Return all keywords for a photo."""
         return self.conn.execute(

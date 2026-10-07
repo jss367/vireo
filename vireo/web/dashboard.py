@@ -35,11 +35,7 @@ def create_dashboard_blueprint(get_db, json_error):
         """
         db = get_db()
         folders = [dict(row) for row in db.get_folder_tree()]
-        collection_rows = db.conn.execute(
-            "SELECT id, name, rules, visual_json FROM collections "
-            "WHERE workspace_id = ? ORDER BY name COLLATE NOCASE, id",
-            (db.require_workspace_id(),),
-        ).fetchall()
+        collection_rows = db.get_collections_for_picker()
         collections = []
         for row in collection_rows:
             _, degraded = collection_rules_state(db, row["rules"])

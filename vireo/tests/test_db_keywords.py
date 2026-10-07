@@ -536,6 +536,31 @@ def test_get_photo_ids_with_keyword_and_chunks(db, lib):
     assert len([s for s in dict.fromkeys(statements) if "photo_id IN" in s]) == 2
 
 
+def test_species_keyword_identity_rows(db, lib):
+    linked = _raw_kw(db, "American Robin", kw_type="taxonomy", is_species=1, taxon_id=3)
+    sourced = _raw_kw(db, "Cougar", kw_type="taxonomy", is_species=1, taxon_id=5)
+    db.conn.execute(
+        "UPDATE keywords SET source_taxon_id = ? WHERE id = ?", (99_999, sourced),
+    )
+    unlinked_taxonomy = _raw_kw(db, "Mystery", kw_type="taxonomy")
+    flagged = _raw_kw(db, "Old Species", is_species=1)
+    _raw_kw(db, "Sunset")
+    _raw_kw(db, "Back garden", kw_type="location")
+    db.conn.commit()
+    rows = db.get_species_keyword_identity_rows()
+    assert {tuple(r.keys()) for r in rows} == {
+        ("id", "name", "source_id", "scientific_name")
+    }
+    assert {r["id"]: tuple(r) for r in rows} == {
+        # source_id falls back to the linked taxon's inat_id ...
+        linked: (linked, "American Robin", 12727, "Turdus migratorius"),
+        # ... but a keyword's own source_taxon_id wins.
+        sourced: (sourced, "Cougar", 99_999, "Puma concolor"),
+        unlinked_taxonomy: (unlinked_taxonomy, "Mystery", None, None),
+        flagged: (flagged, "Old Species", None, None),
+    }
+
+
 def test_species_rank_keywords_for_photo(db, lib):
     p0, p1 = lib["p"][0], lib["p"][1]
     unlinked = _raw_kw(db, "Mystery", kw_type="taxonomy")
@@ -1121,6 +1146,7 @@ _DELEGATING_KEYWORD_METHODS = (
     "get_photo_ids_with_species_rank_keyword",
     "get_photo_keywords",
     "get_keywords_for_photos",
+    "get_species_keyword_identity_rows",
     "get_species_keywords_for_photos",
     "get_photos_with_equivalent_species",
     "update_keyword",

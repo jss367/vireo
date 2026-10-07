@@ -197,6 +197,44 @@ def test_get_edit_history_requires_active_workspace(db):
         db.get_edit_history()
 
 
+# -- get_photo_edit_recipe_history ------------------------------------------
+
+
+def test_photo_edit_recipe_history_filters_orders_and_limits(db, pids):
+    other = db.create_workspace("Other")
+    same_ts = "2024-01-01 00:00:00"
+    a = _raw_edit(db, "edit_recipe", created_at=same_ts, description="a",
+                  items=[(pids[0], "", '{"exposure": 1}'), (pids[1], "", "x")])
+    b = _raw_edit(db, "edit_recipe", created_at=same_ts, description="b", undone=1,
+                  items=[(pids[0], '{"exposure": 1}', '{"exposure": 2}')])
+    c = _raw_edit(db, "edit_recipe", created_at="2024-01-02 00:00:00", description="c",
+                  items=[(pids[0], '{"exposure": 2}', None)])
+    # Another action type, another photo, another workspace: none listed.
+    _raw_edit(db, "rating", created_at="2024-01-03 00:00:00", items=[(pids[0], "0", "1")])
+    _raw_edit(db, "edit_recipe", created_at="2024-01-03 00:00:00", items=[(pids[1], "", "y")])
+    _raw_edit(db, "edit_recipe", workspace_id=other, items=[(pids[0], "", "z")])
+
+    rows = db.get_photo_edit_recipe_history(pids[0], 50)
+    assert [tuple(r.keys()) for r in rows] == [
+        ("id", "description", "created_at", "undone", "old_value", "new_value")
+    ] * 3
+    # Newest first; a created_at tie falls back to the higher id. Undone
+    # edits are listed.
+    assert [r["id"] for r in rows] == [c, b, a]
+    assert [r["undone"] for r in rows] == [0, 1, 0]
+    assert dict(rows[0]) == {
+        "id": c, "description": "c", "created_at": "2024-01-02 00:00:00",
+        "undone": 0, "old_value": '{"exposure": 2}', "new_value": None,
+    }
+    assert [r["id"] for r in db.get_photo_edit_recipe_history(pids[0], 2)] == [c, b]
+
+
+def test_photo_edit_recipe_history_requires_active_workspace(db, pids):
+    db.set_active_workspace(None)
+    with pytest.raises(RuntimeError):
+        db.get_photo_edit_recipe_history(pids[0], 50)
+
+
 # -- undo / redo cursor ---------------------------------------------------
 
 
@@ -1159,7 +1197,8 @@ def test_edit_prediction_ids(db, meta, fallback, ids):
 # -- structure ------------------------------------------------------------
 
 _DELEGATING = (
-    "record_edit", "get_edit_history", "undo_last_edit", "redo_last_undo",
+    "record_edit", "get_edit_history", "get_photo_edit_recipe_history",
+    "undo_last_edit", "redo_last_undo",
     "_retire_stale_grouping_entry", "_keyword_name", "_prediction_scope",
     "_undo_keyword_add", "_undo_prediction_accept_statuses",
     "_redo_prediction_accept_statuses", "_restore_relabel_curation",

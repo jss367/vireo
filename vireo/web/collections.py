@@ -249,21 +249,16 @@ def create_collections_blueprint(get_db, json_error):
         """Update a collection. Body: {"name": "...", "rules": [...|group]}."""
         db = get_db()
         body = request.get_json(silent=True) or {}
-        row = db.conn.execute(
-            "SELECT id, name, rules FROM collections WHERE id = ? AND workspace_id = ?",
-            (collection_id, db.require_workspace_id()),
-        ).fetchone()
+        row = db.get_collection(collection_id)
         if not row:
             return json_error("collection not found", 404)
 
-        updates = []
-        params = []
+        updates = {}
         if "name" in body:
             name = (body.get("name") or "").strip()
             if not name:
                 return json_error("name required")
-            updates.append("name = ?")
-            params.append(name)
+            updates["name"] = name
         if "rules" in body:
             rules = body.get("rules")
             try:
@@ -274,23 +269,15 @@ def create_collections_blueprint(get_db, json_error):
                 db.count_photos_for_rules(rules)
             except ValueError as e:
                 return json_error(str(e), 400)
-            updates.append("rules = ?")
-            params.append(json.dumps(rules))
+            updates["rules_json"] = json.dumps(rules)
         if "visual" in body:
             try:
                 visual = validate_visual_arg(body.get("visual"))
             except ValueError as e:
                 return json_error(str(e), 400)
-            updates.append("visual_json = ?")
-            params.append(json.dumps(visual) if visual else None)
+            updates["visual_json"] = json.dumps(visual) if visual else None
         if updates:
-            params.extend([collection_id, db.require_workspace_id()])
-            db.conn.execute(
-                f"UPDATE collections SET {', '.join(updates)} "
-                "WHERE id = ? AND workspace_id = ?",
-                params,
-            )
-            db.conn.commit()
+            db.update_collection(collection_id, **updates)
         return jsonify({"ok": True})
 
     @blueprint.route("/api/collections/<int:collection_id>/add-photos", methods=["POST"])
@@ -319,10 +306,7 @@ def create_collections_blueprint(get_db, json_error):
                 f"photo_ids not in the active workspace: {foreign}", 403
             )
 
-        row = db.conn.execute(
-            "SELECT rules, visual_json FROM collections WHERE id = ? AND workspace_id = ?",
-            (collection_id, db.require_workspace_id()),
-        ).fetchone()
+        row = db.get_collection(collection_id)
         if not row:
             return json_error("Collection not found", 404)
 
@@ -376,11 +360,7 @@ def create_collections_blueprint(get_db, json_error):
             existing.add(pid)
         ids_rule["value"] = sorted(existing)
 
-        db.conn.execute(
-            "UPDATE collections SET rules = ? WHERE id = ? AND workspace_id = ?",
-            (json.dumps(rules), collection_id, db.require_workspace_id()),
-        )
-        db.conn.commit()
+        db.update_collection(collection_id, rules_json=json.dumps(rules))
         return jsonify({"ok": True, "total": len(ids_rule["value"])})
 
     @blueprint.route("/api/collections/<int:collection_id>/duplicate", methods=["POST"])
@@ -446,9 +426,9 @@ def create_collections_blueprint(get_db, json_error):
         # carry a ``focus_page`` whose rows omit it — clearing the very
         # selection this path exists to preserve (the reasoning
         # ``/api/photos/query`` documents at its own focused lookup).
-        focus_snapshot = bool(focus_candidates) and not db.conn.in_transaction
+        focus_snapshot = bool(focus_candidates) and not db.in_transaction
         if focus_snapshot:
-            db.conn.execute("BEGIN")
+            db.begin()
         # If the saved rules can't be resolved (e.g. an unknown field/op left
         # over from an older schema), surface a 400 instead of a 500 so
         # callers can render a real error — this is the same collection state
@@ -494,8 +474,8 @@ def create_collections_blueprint(get_db, json_error):
             )
             return json_error(f"collection rules cannot be resolved: {e}", 400)
         finally:
-            if focus_snapshot and db.conn.in_transaction:
-                db.conn.rollback()
+            if focus_snapshot and db.in_transaction:
+                db.rollback()
         photo_dicts = prepare_browse_photo_dicts(db, photos)
         response = {
             "photos": photo_dicts,

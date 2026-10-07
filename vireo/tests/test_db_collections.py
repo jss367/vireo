@@ -171,6 +171,88 @@ def test_duplicate_collection_missing_raises(db):
         db.duplicate_collection(9999)
 
 
+def test_get_collections_for_picker_orders_case_insensitively_then_by_id(db):
+    b = db.add_collection("b", "[]")
+    upper_a = db.add_collection("A", "[]", "{}")
+    lower_a = db.add_collection("a", "[]")
+    other_ws = db.create_workspace("other")
+    db.set_active_workspace(other_ws)
+    db.add_collection("elsewhere", "[]")
+    db.set_active_workspace(1)
+    rows = db.get_collections_for_picker()
+    assert [tuple(r.keys()) for r in rows] == [("id", "name", "rules", "visual_json")] * 3
+    # get_collections() would put "A" before "a" before "b" by binary order;
+    # here "A"/"a" tie on NOCASE and fall back to id.
+    assert [r["id"] for r in rows] == [upper_a, lower_a, b]
+    assert rows[0]["visual_json"] == "{}"
+
+
+def test_get_collection_is_workspace_scoped(db):
+    cid = db.add_collection("Mine", '[{"field": "all"}]', '{"prompt": "owl"}')
+    other_ws = db.create_workspace("other")
+    db.set_active_workspace(other_ws)
+    foreign = db.add_collection("foreign", "[]")
+    db.set_active_workspace(1)
+    assert dict(db.get_collection(cid)) == {
+        "id": cid, "name": "Mine", "rules": '[{"field": "all"}]',
+        "visual_json": '{"prompt": "owl"}',
+    }
+    assert db.get_collection(foreign) is None
+    assert db.get_collection(9999) is None
+    db.set_active_workspace(None)
+    with pytest.raises(RuntimeError):
+        db.get_collection(cid)
+
+
+def test_update_collection_writes_only_the_given_columns_and_commits(db):
+    cid = db.add_collection("old", '[{"field": "all"}]', '{"prompt": "owl"}')
+
+    def stored():
+        with _reader(db) as other:
+            return dict(other.execute(
+                "SELECT name, rules, visual_json FROM collections WHERE id = ?",
+                (cid,),
+            ).fetchone())
+
+    db.update_collection(cid, name="new")
+    assert not db.in_transaction
+    assert stored() == {
+        "name": "new", "rules": '[{"field": "all"}]', "visual_json": '{"prompt": "owl"}',
+    }
+    db.update_collection(cid, rules_json="[]")
+    assert stored()["rules"] == "[]"
+    # An explicit None clears the visual clause; omitting it leaves it alone.
+    db.update_collection(cid, name="newer", rules_json='[{"field": "flag"}]', visual_json=None)
+    assert stored() == {"name": "newer", "rules": '[{"field": "flag"}]', "visual_json": None}
+
+
+def test_update_collection_with_nothing_runs_no_statement(db):
+    cid = db.add_collection("old", "[]")
+    statements = []
+    db.conn.set_trace_callback(statements.append)
+    try:
+        db.update_collection(cid)
+    finally:
+        db.conn.set_trace_callback(None)
+    assert statements == []
+
+
+def test_update_collection_ignores_other_workspace(db):
+    other_ws = db.create_workspace("other")
+    db.set_active_workspace(other_ws)
+    foreign = db.add_collection("foreign", "[]")
+    db.set_active_workspace(1)
+    db.update_collection(foreign, name="stolen", rules_json='[{"field": "all"}]')
+    with _reader(db) as other:
+        row = other.execute(
+            "SELECT name, rules FROM collections WHERE id = ?", (foreign,)
+        ).fetchone()
+    assert dict(row) == {"name": "foreign", "rules": "[]"}
+    db.set_active_workspace(None)
+    with pytest.raises(RuntimeError):
+        db.update_collection(foreign, name="x")
+
+
 # -- Rules engine ------------------------------------------------------------
 
 
@@ -845,6 +927,9 @@ def test_create_default_collections_for_explicit_workspace_skips_active(db):
 
 _DELEGATING_COLLECTION_METHODS = (
     "add_collection",
+    "get_collections_for_picker",
+    "get_collection",
+    "update_collection",
     "get_collections",
     "delete_collection",
     "rename_collection",
