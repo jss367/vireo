@@ -397,6 +397,31 @@ def test_offline_original_delete_missing_is_noop(db):
     assert db.offline_original_total_bytes() == 0
 
 
+def test_offline_original_delete_without_commit_stays_in_the_callers_transaction(db):
+    p1 = _photo(db, "a.jpg")
+    db.offline_original_upsert(**_offline_args(p1))
+    with db.transaction():
+        db.begin_immediate()
+        assert db.offline_original_delete(p1, _commit=False) is None
+        # Still inside the writer-locked transaction, and nothing committed.
+        assert db.conn.in_transaction
+        assert db.offline_original_get(p1) is None
+        assert _reader(db).execute(
+            "SELECT COUNT(*) FROM offline_originals"
+        ).fetchone()[0] == 1
+    assert _reader(db).execute(
+        "SELECT COUNT(*) FROM offline_originals"
+    ).fetchone()[0] == 0
+
+
+def test_offline_original_delete_without_commit_rolls_back_with_the_caller(db):
+    p1 = _photo(db, "a.jpg")
+    db.offline_original_upsert(**_offline_args(p1))
+    db.offline_original_delete(p1, _commit=False)
+    db.rollback()
+    assert db.offline_original_get(p1) is not None
+
+
 def test_offline_original_delete_retries_locked_errors(db, no_sleep):
     pid = _photo(db)
     db.offline_original_upsert(**_offline_args(pid))

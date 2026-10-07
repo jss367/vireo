@@ -226,13 +226,14 @@ class CachesRepository:
             (photo_id,),
         ).fetchone()
 
-    def offline_original_delete(self, photo_id):
+    def offline_original_delete(self, photo_id, _commit=True):
         self.execute_with_retry(
             self.conn,
             "DELETE FROM offline_originals WHERE photo_id=?",
             (photo_id,),
         )
-        self.commit_with_retry(self.conn)
+        if _commit:
+            self.commit_with_retry(self.conn)
 
     def offline_original_total_bytes(self):
         row = self.conn.execute(

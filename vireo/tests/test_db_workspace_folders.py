@@ -1079,6 +1079,35 @@ def test_get_workspace_visible_folder_ids_chunks(db, tree, monkeypatch):
     assert len([s for s in statements if "FROM workspace_visible_folders" in s]) == 3
 
 
+# -- workspace_has_direct_folder_link -------------------------------------------
+
+
+def test_workspace_has_direct_folder_link_needs_the_folders_own_row(db, tree):
+    ws, p, a, b, q = tree
+    # ``a`` sits under a recursive root but has no row of its own: the
+    # inherited link that ``workspace_has_folder_link`` honors does not count.
+    _link_raw(db, ws, p, 1)
+    _link_raw(db, ws, b, 0)
+    other = db.create_workspace("Direct-link other")
+    _link_raw(db, other, q, 1)
+    assert db.workspace_has_folder_link(a, ws)
+    assert db.workspace_has_direct_folder_link(ws, p)
+    assert db.workspace_has_direct_folder_link(ws, b)
+    assert not db.workspace_has_direct_folder_link(ws, a)
+    assert not db.workspace_has_direct_folder_link(ws, q)
+    assert db.workspace_has_direct_folder_link(other, q)
+    assert not db.workspace_has_direct_folder_link(ws, 999999)
+
+
+def test_workspace_has_direct_folder_link_takes_the_workspace_explicitly(db, tree):
+    ws, p, a, b, q = tree
+    _link_raw(db, ws, p, 1)
+    db.set_active_workspace(None)
+    # No active-workspace fallback: a None workspace matches nothing.
+    assert db.workspace_has_direct_folder_link(ws, p)
+    assert not db.workspace_has_direct_folder_link(None, p)
+
+
 # -- structure -------------------------------------------------------------------
 
 _MOVED_METHODS = [
@@ -1104,6 +1133,7 @@ _MOVED_METHODS = [
     "workspace_unlinked_folder_count",
     "_photo_in_workspace",
     "get_workspace_visible_folder_ids",
+    "workspace_has_direct_folder_link",
 ]
 
 

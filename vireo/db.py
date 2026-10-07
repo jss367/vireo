@@ -1766,6 +1766,10 @@ class Database:
             workspace_id, folder_id,
         )
 
+    def workspace_has_direct_folder_link(self, workspace_id, folder_id):
+        """True iff ``workspace_id`` has its own ``workspace_folders`` row for the folder."""
+        return self._workspace_folder_repository().has_direct_link(workspace_id, folder_id)
+
     def get_audit_root_paths(self, workspace_id=None):
         """Paths of the active workspace's audit scan roots.
 
@@ -3500,6 +3504,14 @@ class Database:
         """Rows (``id``, ``path``, ``name``) for every folder, in any workspace or status."""
         return self._folder_repository(scoped=False).all_rows()
 
+    def get_folder_id_by_path(self, path):
+        """The id of the folder stored at exactly ``path`` (any workspace), or None."""
+        return self._folder_repository(scoped=False).id_by_path(path)
+
+    def get_folder_source_path(self, folder_id):
+        """A folder's pre-staging path (its local-copy root mapping, else ``path``), or None."""
+        return self._folder_repository(scoped=False).source_path(folder_id)
+
     def count_present_photos_under_path(self, path):
         """Photos in ``ok``/``partial`` folders at ``path`` or below, in any workspace."""
         return self._folder_repository(scoped=False).present_photo_count_under(path)
@@ -5195,8 +5207,8 @@ class Database:
     def offline_original_get(self, photo_id):
         return self._caches_repository().offline_original_get(photo_id)
 
-    def offline_original_delete(self, photo_id):
-        self._caches_repository().offline_original_delete(photo_id)
+    def offline_original_delete(self, photo_id, _commit=True):
+        self._caches_repository().offline_original_delete(photo_id, _commit=_commit)
 
     def offline_original_total_bytes(self):
         return self._caches_repository().offline_original_total_bytes()
@@ -5302,6 +5314,10 @@ class Database:
     def get_photo_mask_path(self, photo_id):
         """The photo's denormalized ``mask_path``, or None (unset or unknown id)."""
         return self._masks_features_repository(scoped=False).photo_mask_path(photo_id)
+
+    def get_photo_mask_state(self, photo_id):
+        """Row (``active_mask_variant``, ``dino_embedding_variant``, ``quality_input_recipe``), or None."""
+        return self._masks_features_repository(scoped=False).photo_mask_state(photo_id)
 
     def set_active_mask_variant(self, photo_id, variant, _commit=True, *, weak_rescue_min_conf=None):
         """Mark `variant` as active for `photo_id` and denormalize its
@@ -5555,6 +5571,10 @@ class Database:
             quality_input_recipe=quality_input_recipe,
             _commit=_commit,
         )
+
+    def get_workspace_mask_candidate_detections(self, min_conf):
+        """The active workspace's non-``full-image`` detections at ``min_conf``+, primary first per photo."""
+        return self._masks_features_repository().workspace_mask_candidate_detections(min_conf)
 
     def get_photos_missing_masks(self, folder_ids=None):
         """Get photos that have detections but no masks yet.
@@ -6566,6 +6586,16 @@ class Database:
     def set_meta(self, key, value, _commit=True):
         """Upsert a db_meta row."""
         self._meta_repository().set(key, value, _commit=_commit)
+
+    def _local_folder_repository(self):
+        """Build the (catalog-wide) folder-level local-copy repository on this connection."""
+        from repositories.local_folders import LocalFolderRepository
+
+        return LocalFolderRepository(self.conn)
+
+    def get_local_folder_states(self, root_folder_ids):
+        """``local_folders`` rows (root id, state, timestamps) for these roots, by root id."""
+        return self._local_folder_repository().state_rows(root_folder_ids)
 
     def _exif_search_repository(self):
         """Build the (catalog-wide) EXIF search text backfill on this connection."""
@@ -11210,10 +11240,10 @@ class Database:
 
         return InatRepository(self.conn, chunk_size=_SQLITE_PARAM_CHUNK_SIZE)
 
-    # -- Job history (read-only; ``JobRunner`` owns the table) --
+    # -- Job history (``JobRunner`` owns the table and its own writes) --
 
     def _job_history_repository(self):
-        """Build the (catalog-wide) read-only job-history repository on this connection."""
+        """Build the (catalog-wide) job-history repository on this connection."""
         from repositories.job_history import JobHistoryRepository
 
         return JobHistoryRepository(self.conn)
@@ -11224,6 +11254,14 @@ class Database:
         A row (``id``, ``started_at``, ``finished_at``, raw ``result`` JSON).
         """
         return self._job_history_repository().last_completed_with_result(job_type)
+
+    def get_job_history_row(self, job_id):
+        """The full ``job_history`` row for ``job_id`` (any workspace), or None."""
+        return self._job_history_repository().get(job_id)
+
+    def set_job_history_result(self, job_id, result_json):
+        """Replace a ``job_history`` row's ``result`` JSON and commit."""
+        self._job_history_repository().set_result(job_id, result_json)
 
     # -- Pending NAS transfers --
 

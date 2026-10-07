@@ -1302,6 +1302,47 @@ def test_update_folder_counts_recomputes_and_commits(db):
     assert counts == {a: 2, b: 0}
 
 
+# -- get_folder_id_by_path / get_folder_source_path --------------------------
+
+
+def test_get_folder_id_by_path_matches_the_stored_path_exactly(db):
+    a = _raw_folder(db, "/u/by-path")
+    db.conn.commit()
+    db.set_active_workspace(None)
+    assert db.get_folder_id_by_path("/u/by-path") == a
+    assert db.get_folder_id_by_path("/u/by-path/") is None
+    assert db.get_folder_id_by_path("/U/BY-PATH") is None
+    assert db.get_folder_id_by_path("/u/nowhere") is None
+
+
+def _stage_root(db, root_id, source_path, *, mapped_folder_id=None, is_root=1):
+    db.conn.execute(
+        "INSERT OR IGNORE INTO local_folders (root_folder_id, state) VALUES (?, 'active')",
+        (root_id,),
+    )
+    db.conn.execute(
+        "INSERT INTO local_folder_mappings "
+        "(root_folder_id, folder_id, source_path, local_path, is_root) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (root_id, mapped_folder_id or root_id, source_path, "/local/x", is_root),
+    )
+    db.conn.commit()
+
+
+def test_get_folder_source_path_prefers_the_root_mapping(db):
+    root = _raw_folder(db, "/local-folders/1/birds")
+    child = _raw_folder(db, "/local-folders/1/birds/day1", root)
+    plain = _raw_folder(db, "/u/plain")
+    _stage_root(db, root, "/archive/birds")
+    # A non-root mapping is not consulted: the folder answers its own path.
+    _stage_root(db, root, "/archive/birds/day1", mapped_folder_id=child, is_root=0)
+    db.set_active_workspace(None)
+    assert db.get_folder_source_path(root) == "/archive/birds"
+    assert db.get_folder_source_path(child) == "/local-folders/1/birds/day1"
+    assert db.get_folder_source_path(plain) == "/u/plain"
+    assert db.get_folder_source_path(999999) is None
+
+
 # -- structure ----------------------------------------------------------------
 
 _DELEGATING_FOLDER_METHODS = (
@@ -1325,6 +1366,8 @@ _DELEGATING_FOLDER_METHODS = (
     "delete_folder",
     "count_folders",
     "get_all_folders",
+    "get_folder_id_by_path",
+    "get_folder_source_path",
     "count_present_photos_under_path",
     "get_photo_ids_under_path",
     "get_folders_with_quality_data",

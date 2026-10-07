@@ -61,6 +61,21 @@ class MasksFeaturesRepository:
         ).fetchone()
         return row["mask_path"] if row else None
 
+    def photo_mask_state(self, photo_id):
+        """Row (``active_mask_variant``, ``dino_embedding_variant``,
+        ``quality_input_recipe``) of the photo's mask-derived state, or None.
+
+        A cached mask is only current when the photo row still names its
+        variant and the embedding variant, with no recipe-rendered quality
+        input in the way.
+        """
+        return self.conn.execute(
+            "SELECT active_mask_variant, "
+            "dino_embedding_variant, quality_input_recipe FROM photos "
+            "WHERE id = ?",
+            (photo_id,),
+        ).fetchone()
+
     def set_active_variant(self, photo_id, variant, min_conf, _commit=True, *,
                            weak_rescue_min_conf=None):
         """Activate ``variant`` for ``photo_id`` against the ``min_conf`` floor.
@@ -530,6 +545,33 @@ class MasksFeaturesRepository:
             self.commit_with_retry(self.conn)
 
     # -- stage selectors -----------------------------------------------------
+
+    def workspace_mask_candidate_detections(self, min_conf):
+        """Every real detection of the bound workspace's photos, primary first.
+
+        Rows (``id``, ``folder_id``, ``filename``, ``detector_model``, the
+        box and ``detector_confidence``) for each non-``full-image``
+        detection at or above ``min_conf``, ordered by photo id and then
+        ``subjects.primary_order_sql`` so a photo's first row is its primary.
+        Unlike ``photos_missing_masks`` it keeps photos that already have a
+        mask; the Extract Masks job decides per photo whether one is current.
+        """
+        from subjects import primary_order_sql
+        return self.conn.execute(
+            f"""SELECT p.id, p.folder_id, p.filename,
+                      d.detector_model,
+                      d.box_x, d.box_y, d.box_w, d.box_h,
+                      d.detector_confidence
+                 FROM photos p
+                 JOIN photo_workspace_visibility wf
+                      ON wf.photo_id = p.id
+                 JOIN detections d ON d.photo_id = p.id
+                WHERE wf.workspace_id = ?
+                  AND d.detector_model != 'full-image'
+                  AND d.detector_confidence >= ?
+                ORDER BY p.id, {primary_order_sql("d")}""",
+            (self.workspace_id, min_conf),
+        ).fetchall()
 
     def photos_missing_masks(self, folder_ids, min_conf):
         """Photos in the bound workspace with detections but no mask yet.

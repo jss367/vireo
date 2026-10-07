@@ -803,6 +803,67 @@ def test_get_photos_missing_masks_folder_filter_stays_workspace_scoped(db):
     assert [r["id"] for r in db.get_photos_missing_masks(folder_ids=[])] == [a, b]
 
 
+# -- get_workspace_mask_candidate_detections ----------------------------------
+
+
+def test_workspace_mask_candidate_detections_rows_and_order(db):
+    fid = _folder(db)
+    a, b, c = (_photo(db, n, fid) for n in ("a.jpg", "b.jpg", "c.jpg"))
+    _det(db, a, conf=0.5, box=OTHER_BOX)
+    _det(db, a, conf=0.9, box=BOX)
+    _det(db, a, detector_model="full-image", conf=1.0)
+    _det(db, b, conf=0.1)  # below the floor the caller passes
+    _det(db, c, conf=0.3)
+    # Already masked photos stay: the job checks the cache per photo.
+    db.update_photo_pipeline_features(c, mask_path="/m/c.png")
+    foreign = _other_workspace_photo(db)
+    _det(db, foreign, conf=0.9)
+
+    rows = db.get_workspace_mask_candidate_detections(0.2)
+    got = [(r["id"], r["detector_confidence"]) for r in rows]
+    # Photo id first, then the primary ordering (confidence among animals).
+    assert got == [(a, 0.9), (a, 0.5), (c, 0.3)]
+    first = dict(rows[0])
+    assert first == {
+        "id": a, "folder_id": fid, "filename": "a.jpg",
+        "detector_model": "megadetector-v6",
+        "box_x": BOX[0], "box_y": BOX[1], "box_w": BOX[2], "box_h": BOX[3],
+        "detector_confidence": 0.9,
+    }
+    assert [r["id"] for r in db.get_workspace_mask_candidate_detections(0.6)] == [a]
+
+
+def test_workspace_mask_candidate_detections_needs_a_workspace(db):
+    db.set_active_workspace(None)
+    with pytest.raises(RuntimeError):
+        db.get_workspace_mask_candidate_detections(0.2)
+
+
+# -- get_photo_mask_state -------------------------------------------------------
+
+
+def test_get_photo_mask_state_reads_the_three_columns(db):
+    pid = _photo(db, "a.jpg")
+    state = db.get_photo_mask_state(pid)
+    assert dict(state) == {
+        "active_mask_variant": None,
+        "dino_embedding_variant": None,
+        "quality_input_recipe": None,
+    }
+    _det(db, pid)
+    _mask(db, pid, path="/m/a.png")
+    db.set_active_mask_variant(pid, "sam2-small")
+    db.update_photo_embeddings(pid, dino_subject_embedding=b"s",
+                               dino_global_embedding=b"g", variant="vit-b14")
+    db.update_photo_pipeline_features(pid, quality_input_recipe="r1")
+    assert dict(db.get_photo_mask_state(pid)) == {
+        "active_mask_variant": "sam2-small",
+        "dino_embedding_variant": "vit-b14",
+        "quality_input_recipe": "r1",
+    }
+    assert db.get_photo_mask_state(99999) is None
+
+
 # -- list_photos_for_eye_keypoint_stage ----------------------------------------
 
 
@@ -999,6 +1060,7 @@ _DELEGATING_MASKS_FEATURES_METHODS = (
     "set_active_mask_variant",
     "get_active_mask_variant",
     "get_photo_mask_path",
+    "get_photo_mask_state",
     "delete_masks_for_variant",
     "delete_inactive_masks",
     "find_stale_masks",
@@ -1010,6 +1072,7 @@ _DELEGATING_MASKS_FEATURES_METHODS = (
     "save_subject_raw_analysis",
     "update_photo_pipeline_features",
     "get_photos_missing_masks",
+    "get_workspace_mask_candidate_detections",
     "list_photos_for_eye_keypoint_stage",
     "update_photo_embeddings",
     "get_photo_embedding",

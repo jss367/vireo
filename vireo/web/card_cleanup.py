@@ -37,9 +37,7 @@ def create_card_cleanup_blueprint(get_db, json_error, get_runner, db_path, confi
         """
         scan_job = runner.get(scan_job_id)
         if scan_job is None:
-            row = db.conn.execute(
-                "SELECT type, status FROM job_history WHERE id = ?",
-                (scan_job_id,)).fetchone()
+            row = db.get_job_history_row(scan_job_id)
             scan_job = dict(row) if row is not None else None
         if scan_job is None or scan_job.get("type") != "card-cleanup-scan":
             return None, json_error("unknown scan job", status=404)
@@ -112,7 +110,7 @@ def create_card_cleanup_blueprint(get_db, json_error, get_runner, db_path, confi
         # counts grow much larger or roots live on network mounts where
         # each realpath/listdir is a round trip.
         source_real = os.path.realpath(source)
-        for row in db.conn.execute("SELECT path FROM folders").fetchall():
+        for row in db.get_all_folders():
             froot = row["path"]
             if not froot:
                 continue
