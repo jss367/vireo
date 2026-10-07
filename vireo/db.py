@@ -4937,6 +4937,18 @@ class Database:
     def paired_preview_cache_oldest_first(self):
         return self._caches_repository().paired_preview_oldest_first()
 
+    def paired_preview_cache_delete(self, filename):
+        """Delete one paired preview entry (caller removes the file)."""
+        self._caches_repository().paired_preview_delete(filename)
+
+    def preview_cache_delete_entries(self, preview_keys, paired_filenames):
+        """Delete ordinary entries by (photo_id, size) and paired ones by filename."""
+        self._caches_repository().preview_delete_entries(preview_keys, paired_filenames)
+
+    def preview_cache_clear_all(self):
+        """Delete every ordinary and paired preview entry (caller removes the files)."""
+        self._caches_repository().preview_clear_all()
+
     # ------------------------------------------------------------------
     # offline original cache
     # ------------------------------------------------------------------

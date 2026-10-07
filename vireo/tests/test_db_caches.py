@@ -447,6 +447,58 @@ def test_caches_are_catalog_wide(db):
     db.offline_original_upsert(**_offline_args(pid))
 
 
+def _seed_both_preview_families(db):
+    pid = _photo(db)
+    db.preview_cache_insert(pid, 1920, 10)
+    db.preview_cache_insert(pid, 2560, 20)
+    db.paired_preview_cache_insert(pid, "a.jpg", 30)
+    db.paired_preview_cache_insert(pid, "b.jpg", 40)
+    db.conn.commit()
+    return pid
+
+
+def _preview_state(db):
+    reader = _reader(db)
+    plain = {(r["photo_id"], r["size"]) for r in reader.execute("SELECT * FROM preview_cache")}
+    paired = {r["filename"] for r in reader.execute("SELECT * FROM paired_preview_cache")}
+    return plain, paired
+
+
+def test_preview_cache_delete_entries_removes_only_the_named_rows_and_commits(db):
+    pid = _seed_both_preview_families(db)
+
+    db.preview_cache_delete_entries([(pid, 1920)], ["a.jpg"])
+
+    assert not db.conn.in_transaction
+    assert _preview_state(db) == ({(pid, 2560)}, {"b.jpg"})
+
+
+def test_preview_cache_delete_entries_accepts_one_empty_family(db):
+    pid = _seed_both_preview_families(db)
+
+    db.preview_cache_delete_entries([], ["a.jpg", "b.jpg"])
+
+    assert _preview_state(db) == ({(pid, 1920), (pid, 2560)}, set())
+
+
+def test_paired_preview_cache_delete_removes_one_entry_and_commits(db):
+    pid = _seed_both_preview_families(db)
+
+    db.paired_preview_cache_delete("b.jpg")
+
+    assert not db.conn.in_transaction
+    assert _preview_state(db) == ({(pid, 1920), (pid, 2560)}, {"a.jpg"})
+
+
+def test_preview_cache_clear_all_empties_both_families_and_commits(db):
+    _seed_both_preview_families(db)
+
+    db.preview_cache_clear_all()
+
+    assert not db.conn.in_transaction
+    assert _preview_state(db) == (set(), set())
+
+
 # -- structure ----------------------------------------------------------------
 
 
@@ -457,6 +509,9 @@ _MOVED_CACHE_METHODS = [
     "preview_cache_total_bytes",
     "preview_cache_oldest_first",
     "preview_cache_get",
+    "preview_cache_delete_entries",
+    "preview_cache_clear_all",
+    "paired_preview_cache_delete",
     "offline_original_upsert",
     "offline_original_get",
     "offline_original_delete",

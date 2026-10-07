@@ -93,6 +93,31 @@ class CachesRepository:
             "SELECT * FROM paired_preview_cache ORDER BY last_access_at",
         ).fetchall()
 
+    def paired_preview_delete(self, filename):
+        """Delete one paired_preview_cache entry (caller removes the file)."""
+        self.conn.execute(
+            "DELETE FROM paired_preview_cache WHERE filename=?", (filename,),
+        )
+        self.conn.commit()
+
+    def preview_delete_entries(self, preview_keys, paired_filenames):
+        """Delete ordinary entries by (photo_id, size) and paired ones by filename, then commit."""
+        self.conn.executemany(
+            "DELETE FROM preview_cache WHERE photo_id=? AND size=?",
+            list(preview_keys),
+        )
+        self.conn.executemany(
+            "DELETE FROM paired_preview_cache WHERE filename=?",
+            [(filename,) for filename in paired_filenames],
+        )
+        self.conn.commit()
+
+    def preview_clear_all(self):
+        """Delete every ordinary and paired preview entry (caller removes the files)."""
+        self.conn.execute("DELETE FROM preview_cache")
+        self.conn.execute("DELETE FROM paired_preview_cache")
+        self.conn.commit()
+
     # -- offline original cache ----------------------------------------------
 
     def offline_original_upsert(
