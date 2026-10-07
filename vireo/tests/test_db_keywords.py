@@ -563,6 +563,41 @@ def test_keyword_tree_and_counts(db, lib):
             method()
 
 
+def test_get_all_keywords_counts(db, lib):
+    """``photo_count`` is distinct workspace photos in the subtree; ``direct_photo_count`` is the keyword's own."""
+    p0, p1, p2 = lib["p"][:3]
+    other_fid = db.add_folder("/elsewhere", name="elsewhere")
+    hidden = db.add_photo(other_fid, "hidden.jpg", ".jpg", 99, 9.0)
+    db.conn.execute("DELETE FROM workspace_folders WHERE folder_id = ?", (other_fid,))
+    birds = db.add_keyword("Birds")
+    herons = db.add_keyword("Herons", parent_id=birds)
+    heron = db.add_keyword("Great Blue Heron", parent_id=herons)
+    egret = db.add_keyword("Great Egret", parent_id=herons)
+    db.tag_photo(p0, heron)
+    db.tag_photo(p0, egret)  # one photo under two siblings counts once for each ancestor
+    db.tag_photo(p1, egret)
+    db.tag_photo(p2, birds)
+    db.tag_photo(hidden, heron)  # tagged, but outside the active workspace
+    rows = {r["name"]: (r["photo_count"], r["direct_photo_count"]) for r in db.get_all_keywords()}
+    assert rows == {
+        "Birds": (3, 1),
+        "Herons": (2, 0),
+        "Great Blue Heron": (1, 1),
+        "Great Egret": (2, 2),
+    }
+
+
+def test_get_all_keywords_counts_without_per_keyword_subqueries(db, lib):
+    """A correlated count per keyword re-scanned the workspace's links for every row (~150 s on 65k photos)."""
+    db.tag_photo(lib["p"][0], db.add_keyword("Heron", parent_id=db.add_keyword("Birds")))
+    statements = _trace(db)
+    db.get_all_keywords()
+    db.conn.set_trace_callback(None)
+    (sql,) = [s for s in statements if "ws_links" in s]
+    plan = [row[3] for row in db.conn.execute("EXPLAIN QUERY PLAN " + sql)]
+    assert not [step for step in plan if "CORRELATED" in step], plan
+
+
 def test_get_accepted_species(db, lib):
     p0, p1, p2 = lib["p"][:3]
     db.tag_photo(p0, db.add_keyword("American Robin", is_species=True))

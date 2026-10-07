@@ -1516,11 +1516,20 @@ class KeywordRepository:
         return result
 
     def list_all(self):
-        """Return keywords used in the active workspace (plus ancestors) with photo counts, type, and taxon info."""
+        """Return keywords used in the active workspace (plus ancestors) with photo counts, type, and taxon info.
+
+        Both counts are grouped aggregates over one materialized pass of the
+        workspace's keyword links. ``photo_count`` walks each tagged keyword
+        up its parent chain (at most 20 levels) and counts distinct photos
+        per ancestor, so a photo tagged with two species under one genus
+        counts once for the genus. Correlated per-keyword subqueries here
+        re-ran the link scan for every row: about 150 s on a 65k-photo
+        workspace, which left the Keywords page empty.
+        """
         ws = self.workspace_id
         return self.conn.execute(
             """WITH RECURSIVE
-               ws_links AS (
+               ws_links AS MATERIALIZED (
                    SELECT pk.keyword_id, pk.photo_id
                    FROM photo_keywords pk
                    JOIN photos p ON p.id = pk.photo_id
@@ -1536,24 +1545,39 @@ class KeywordRepository:
                    JOIN ancestors a ON a.id = k.id
                    WHERE k.parent_id IS NOT NULL
                ),
-               descendants(ancestor_id, descendant_id, depth) AS (
-                   SELECT id, id, 0 FROM ancestors
+               lineage(keyword_id, ancestor_id, depth) AS (
+                   SELECT id, id, 0 FROM ws_kw
                    UNION ALL
-                   SELECT d.ancestor_id, k.id, d.depth + 1
-                   FROM descendants d
-                   JOIN keywords k ON k.parent_id = d.descendant_id
-                   WHERE d.depth < 20
+                   SELECT l.keyword_id, k.parent_id, l.depth + 1
+                   FROM lineage l
+                   JOIN keywords k ON k.id = l.ancestor_id
+                   WHERE k.parent_id IS NOT NULL AND l.depth < 20
+               ),
+               lineage_pairs AS (
+                   SELECT DISTINCT keyword_id, ancestor_id FROM lineage
+               ),
+               subtree_counts AS (
+                   SELECT lp.ancestor_id AS id,
+                          COUNT(DISTINCT wl.photo_id) AS photo_count
+                   FROM lineage_pairs lp
+                   JOIN ws_links wl ON wl.keyword_id = lp.keyword_id
+                   GROUP BY lp.ancestor_id
+               ),
+               direct_counts AS (
+                   SELECT keyword_id AS id, COUNT(*) AS direct_photo_count
+                   FROM ws_links
+                   GROUP BY keyword_id
                )
                SELECT k.id, k.name, k.parent_id, k.type, k.taxon_id,
                       k.latitude, k.longitude, k.place_id,
                       t.name AS taxon_name, t.common_name AS taxon_common_name,
-                      (SELECT COUNT(DISTINCT wl.photo_id) FROM descendants d
-                       JOIN ws_links wl ON wl.keyword_id = d.descendant_id
-                       WHERE d.ancestor_id = k.id) AS photo_count,
-                      (SELECT COUNT(*) FROM ws_links wl WHERE wl.keyword_id = k.id) AS direct_photo_count
+                      COALESCE(sc.photo_count, 0) AS photo_count,
+                      COALESCE(dc.direct_photo_count, 0) AS direct_photo_count
                FROM keywords k
                JOIN ancestors a ON a.id = k.id
                LEFT JOIN taxa t ON t.id = k.taxon_id
+               LEFT JOIN subtree_counts sc ON sc.id = k.id
+               LEFT JOIN direct_counts dc ON dc.id = k.id
                ORDER BY k.name""",
             (ws,),
         ).fetchall()

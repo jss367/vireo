@@ -189,7 +189,7 @@ def create_export_blueprint(
                 normalize_max_size,
                 normalize_output_format,
                 normalize_subfolder_name,
-                preview_export_renames,
+                preview_export,
             )
             output_format = normalize_output_format(output_format)["extension"]
             max_size = normalize_max_size(max_size)
@@ -220,7 +220,7 @@ def create_export_blueprint(
         effective_cfg = db.get_effective_config(cfg.load())
 
         try:
-            renames = preview_export_renames(
+            preview = preview_export(
                 db=db,
                 photo_ids=photo_ids,
                 destination=destination,
@@ -241,10 +241,14 @@ def create_export_blueprint(
             )
         except ExportPreflightError as exc:
             return json_error(str(exc), status=409)
+        renames = preview["renames"]
+        destination_folders = preview["destination_folders"]
         return jsonify({
             "rename_count": len(renames),
             "renames": renames[:20],
             "truncated": len(renames) > 20,
+            "destination_folder_count": len(destination_folders),
+            "destination_folders": destination_folders[:20],
         })
 
     @blueprint.route("/api/jobs/export", methods=["POST"])

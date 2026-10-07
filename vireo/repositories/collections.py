@@ -1706,6 +1706,40 @@ def remap_collection_photo_ids(conn, mapping):
     return rewritten
 
 
+def photo_ids_named_by_collections(conn):
+    """Every photo id any workspace's ``photo_ids`` rule names.
+
+    Read with the same traversal and id coercion as
+    ``remap_collection_photo_ids``, so an id found here is one that call
+    can remove.
+    """
+    named = set()
+
+    def visit(node):
+        if isinstance(node, list):
+            for child in node:
+                visit(child)
+            return
+        if not isinstance(node, dict):
+            return
+        visit(node.get("rules"))
+        if node.get("field") != "photo_ids":
+            return
+        values = node.get("value")
+        if isinstance(values, list):
+            for value in values:
+                key = _photo_id_key(value)
+                if key is not None:
+                    named.add(key)
+
+    for row in conn.execute("SELECT rules FROM collections"):
+        try:
+            visit(json.loads(row[0]))
+        except (TypeError, ValueError):
+            continue
+    return named
+
+
 def _is_scalar(value):
     return value is None or isinstance(value, str | int | float | bool)
 

@@ -113,6 +113,72 @@ def raw_text_rules_out(term):
     return not (set(folded) <= _NUMBER_TEXT_CHARS or folded in "-inf")
 
 
+# These cached file tags have authoritative, editable catalog counterparts.
+# Searching their stale copies would resurrect removed keywords/ratings.
+MANAGED_PATHS = (
+    "$.XMP.Subject", "$.XMP.HierarchicalSubject", "$.IPTC.Keywords",
+    "$.XMP.Rating", "$.XMP.Label", "$.XMP.ColorLabel",
+    "$.File.FileName", "$.File.Directory", "$.System.FileName", "$.System.Directory",
+)
+
+# How a file tag value reads back: JSON booleans as words, everything else
+# as SQLite renders the atom.
+TAG_VALUE = (
+    "(CASE WHEN search_tag.type IN ('true', 'false') "
+    "THEN search_tag.type ELSE CAST(search_tag.atom AS TEXT) END)"
+)
+
+EXIF_SEARCH_TEXT_TABLE = "photo_exif_search_text"
+
+
+def exif_tags(source):
+    """``FROM`` body yielding ``source``'s searchable file tags as ``search_tag``.
+
+    Containers and nulls drop out with the layout tags and binary
+    placeholders, because their ``TAG_VALUE`` is NULL.
+    """
+    paths_sql = ", ".join(f"'{path}'" for path in MANAGED_PATHS)
+    layout_sql = ", ".join(f"'{tag}'" for tag in LAYOUT_TAGS)
+    return (
+        f"json_tree(json_remove(CASE WHEN json_valid({source}) THEN {source} "
+        f"ELSE '{{}}' END, {paths_sql})) search_tag "
+        f"WHERE search_tag.key NOT IN ({layout_sql}) "
+        f"AND {TAG_VALUE} NOT LIKE '(Binary data %'"
+    )
+
+
+def exif_search_text(source):
+    """Every searchable tag value of ``source``, rendered and joined.
+
+    Tag names stay out: ``GPSLongitude`` is in every GPS photo's EXIF, so a
+    raw-text check let "long" through for all of them and the full walk then
+    found nothing. A value that matches a term contains it, so text lacking
+    the term proves no tag matches.
+    """
+    return (
+        f"(SELECT COALESCE(group_concat({TAG_VALUE}, char(31)), '') "
+        f"FROM {exif_tags(source)})"
+    )
+
+
+def exif_search_text_triggers():
+    """``(name, sql)`` for the triggers that keep the search text current.
+
+    Every writer of ``photos.exif_data`` goes through SQLite, so triggers
+    cover scans, repairs and capture-time edits without each one knowing.
+    """
+    upsert = (
+        f"INSERT OR REPLACE INTO {EXIF_SEARCH_TEXT_TABLE} (photo_id, value_text) "
+        f"VALUES (NEW.id, {exif_search_text('NEW.exif_data')});"
+    )
+    return [
+        (f"trg_{EXIF_SEARCH_TEXT_TABLE}_{suffix}",
+         f"CREATE TRIGGER trg_{EXIF_SEARCH_TEXT_TABLE}_{suffix} AFTER {event} ON photos "
+         f"BEGIN {upsert} END")
+        for suffix, event in (("insert", "INSERT"), ("update", "UPDATE OF exif_data"))
+    ]
+
+
 def photo_metadata_predicates(like, term):
     """Photo, folder, keyword/taxon and file-tag predicates with their binds.
 
@@ -136,36 +202,28 @@ def photo_metadata_predicates(like, term):
         ])
         + ")"
     )
-    # These cached file tags have authoritative, editable catalog counterparts.
-    # Searching their stale copies would resurrect removed keywords/ratings.
-    managed_paths = (
-        "$.XMP.Subject", "$.XMP.HierarchicalSubject", "$.IPTC.Keywords",
-        "$.XMP.Rating", "$.XMP.Label", "$.XMP.ColorLabel",
-        "$.File.FileName", "$.File.Directory", "$.System.FileName", "$.System.Directory",
-    )
-    paths_sql = ", ".join(f"'{path}'" for path in managed_paths)
-    layout_sql = ", ".join(f"'{tag}'" for tag in LAYOUT_TAGS)
-    tag_value = (
-        "(CASE WHEN search_tag.type IN ('true', 'false') "
-        "THEN search_tag.type ELSE CAST(search_tag.atom AS TEXT) END)"
-    )
-    tags = (
-        "EXISTS (SELECT 1 FROM json_tree(json_remove("
-        "CASE WHEN json_valid(p.exif_data) THEN p.exif_data ELSE '{}' END, "
-        + paths_sql
-        + f")) search_tag WHERE search_tag.key NOT IN ({layout_sql}) "
-        f"AND {tag_value} NOT LIKE '(Binary data %' AND "
-        + value_matches(tag_value, "search_tag.type", number_text=True)
-        + ")"
-    )
     binds = term_binds(like, term)
-    tag_params = list(binds)
+    # Parsing and walking every photo's EXIF is nearly all of a search's
+    # cost, so only photos whose stored tag values contain the term walk it.
+    # A photo the startup backfill has not reached yet (NULL) falls back to
+    # the raw-text check, or walks when no raw check is sound for the term.
+    indexed = (
+        f"(SELECT search_text.value_text LIKE ? ESCAPE '\\' "
+        f"FROM {EXIF_SEARCH_TEXT_TABLE} search_text WHERE search_text.photo_id = p.id)"
+    )
+    unindexed, unindexed_params = "1", []
     if raw_text_rules_out(term):
-        # Parsing and walking every photo's EXIF is nearly all of a search's
-        # cost; one pass over the raw text skips the photos that cannot match.
-        tags = (
-            "((typeof(p.exif_data) != 'text' OR p.exif_data LIKE ? ESCAPE '\\' "
-            "OR instr(p.exif_data, char(92)) > 0) AND " + tags + ")"
+        unindexed = (
+            "(typeof(p.exif_data) != 'text' OR p.exif_data LIKE ? ESCAPE '\\' "
+            "OR instr(p.exif_data, char(92)) > 0)"
         )
-        tag_params = [like, *binds]
+        unindexed_params = [like]
+    tags = (
+        f"(COALESCE({indexed}, {unindexed}) AND EXISTS (SELECT 1 FROM "
+        + exif_tags("p.exif_data")
+        + " AND "
+        + value_matches(TAG_VALUE, "search_tag.type", number_text=True)
+        + "))"
+    )
+    tag_params = [like, *unindexed_params, *binds]
     return [photo, folder, keyword, tags], [*binds, *binds, *binds, *tag_params]

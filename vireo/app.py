@@ -1710,6 +1710,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         _label_identity_timer.daemon = True
         _label_identity_timer.start()
 
+    # Searchable EXIF values for photos written before the search-text
+    # triggers existed (see StartupTasks.kickoff_exif_search_backfill).
+    # Ephemeral JobRunner job, skipped when every photo is indexed.
+    app._kickoff_exif_search_backfill = startup.kickoff_exif_search_backfill
+
+    if not os.environ.get("VIREO_DISABLE_STARTUP_BACKFILL_TIMERS"):
+        _exif_search_timer = threading.Timer(4.0, startup.kickoff_exif_search_backfill)
+        _exif_search_timer.daemon = True
+        _exif_search_timer.start()
+
     # -- Per-app services shared by several blueprints --
 
     # Resolves visual-search clauses; owns the per-app query-text
