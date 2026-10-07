@@ -1,0 +1,298 @@
+{
+  "schema": 1,
+  "environment": {
+    "machine_label": "mac-arm64-16cpu",
+    "system": "Darwin",
+    "machine": "arm64",
+    "cpu_count": 16,
+    "python": "3.14.3",
+    "threads": 4,
+    "rawpy": "0.26.1",
+    "libraw": [
+      0,
+      22,
+      0
+    ],
+    "numpy": "2.4.2",
+    "pillow": "12.1.1"
+  },
+  "samples": 5,
+  "results": [
+    {
+      "scenario": "camera-24mp/quick/cold",
+      "sha256": "696318ab924b5fd5260281b0686d015776ef50d10d736dab210abb89a7ee6f53",
+      "source_dimensions": [
+        6016,
+        4016
+      ],
+      "requested_size": 1024,
+      "output_dimensions": [
+        1024,
+        684
+      ],
+      "samples_ms": [
+        1608.36,
+        1464.63,
+        1452.44,
+        1464.57,
+        1460.37
+      ],
+      "p50_ms": 1464.57,
+      "p95_ms": 1608.36,
+      "peak_rss_mib": 1211.05
+    },
+    {
+      "scenario": "camera-24mp/quick/warm",
+      "sha256": "696318ab924b5fd5260281b0686d015776ef50d10d736dab210abb89a7ee6f53",
+      "source_dimensions": [
+        6016,
+        4016
+      ],
+      "requested_size": 1024,
+      "output_dimensions": [
+        1024,
+        684
+      ],
+      "samples_ms": [
+        167.13,
+        170.3,
+        166.31,
+        168.9,
+        345.02
+      ],
+      "p50_ms": 168.9,
+      "p95_ms": 345.02,
+      "peak_rss_mib": 1227.97
+    },
+    {
+      "scenario": "camera-24mp/fit/cold",
+      "sha256": "696318ab924b5fd5260281b0686d015776ef50d10d736dab210abb89a7ee6f53",
+      "source_dimensions": [
+        6016,
+        4016
+      ],
+      "requested_size": 2048,
+      "output_dimensions": [
+        2048,
+        1367
+      ],
+      "samples_ms": [
+        3360.9,
+        2168.64,
+        2346.69,
+        2558.03,
+        2174.15
+      ],
+      "p50_ms": 2346.69,
+      "p95_ms": 3360.9,
+      "peak_rss_mib": 1467.72
+    },
+    {
+      "scenario": "camera-24mp/fit/warm",
+      "sha256": "696318ab924b5fd5260281b0686d015776ef50d10d736dab210abb89a7ee6f53",
+      "source_dimensions": [
+        6016,
+        4016
+      ],
+      "requested_size": 2048,
+      "output_dimensions": [
+        2048,
+        1367
+      ],
+      "samples_ms": [
+        827.88,
+        740.73,
+        749.96,
+        757.16,
+        743.15
+      ],
+      "p50_ms": 749.96,
+      "p95_ms": 827.88,
+      "peak_rss_mib": 1533.59
+    },
+    {
+      "scenario": "camera-24mp/native/cold",
+      "sha256": "696318ab924b5fd5260281b0686d015776ef50d10d736dab210abb89a7ee6f53",
+      "source_dimensions": [
+        6016,
+        4016
+      ],
+      "requested_size": 6016,
+      "output_dimensions": [
+        6016,
+        4016
+      ],
+      "samples_ms": [
+        9818.72,
+        9399.26,
+        9783.65,
+        9681.78,
+        9531.8
+      ],
+      "p50_ms": 9681.78,
+      "p95_ms": 9818.72,
+      "peak_rss_mib": 2702.64
+    },
+    {
+      "scenario": "camera-24mp/native/warm",
+      "sha256": "696318ab924b5fd5260281b0686d015776ef50d10d736dab210abb89a7ee6f53",
+      "source_dimensions": [
+        6016,
+        4016
+      ],
+      "requested_size": 6016,
+      "output_dimensions": [
+        6016,
+        4016
+      ],
+      "samples_ms": [
+        8380.43,
+        8337.95,
+        8427.0,
+        8440.87,
+        8464.06
+      ],
+      "p50_ms": 8427.0,
+      "p95_ms": 8464.06,
+      "peak_rss_mib": 2775.41
+    },
+    {
+      "scenario": "camera-46mp/quick/cold",
+      "sha256": "2cddc889352b6d6ec2231955563390f82ce116b09b108259ae6e66fe0046e71f",
+      "source_dimensions": [
+        8288,
+        5520
+      ],
+      "requested_size": 1024,
+      "output_dimensions": [
+        1024,
+        682
+      ],
+      "samples_ms": [
+        2642.49,
+        2409.0,
+        2417.08,
+        2445.46,
+        2435.02
+      ],
+      "p50_ms": 2435.02,
+      "p95_ms": 2642.49,
+      "peak_rss_mib": 2080.39
+    },
+    {
+      "scenario": "camera-46mp/quick/warm",
+      "sha256": "2cddc889352b6d6ec2231955563390f82ce116b09b108259ae6e66fe0046e71f",
+      "source_dimensions": [
+        8288,
+        5520
+      ],
+      "requested_size": 1024,
+      "output_dimensions": [
+        1024,
+        682
+      ],
+      "samples_ms": [
+        167.27,
+        160.04,
+        164.55,
+        145.18,
+        164.31
+      ],
+      "p50_ms": 164.31,
+      "p95_ms": 167.27,
+      "peak_rss_mib": 1413.09
+    },
+    {
+      "scenario": "camera-46mp/fit/cold",
+      "sha256": "2cddc889352b6d6ec2231955563390f82ce116b09b108259ae6e66fe0046e71f",
+      "source_dimensions": [
+        8288,
+        5520
+      ],
+      "requested_size": 2048,
+      "output_dimensions": [
+        2048,
+        1364
+      ],
+      "samples_ms": [
+        3240.61,
+        3211.21,
+        3138.86,
+        3118.96,
+        3165.61
+      ],
+      "p50_ms": 3165.61,
+      "p95_ms": 3240.61,
+      "peak_rss_mib": 2447.03
+    },
+    {
+      "scenario": "camera-46mp/fit/warm",
+      "sha256": "2cddc889352b6d6ec2231955563390f82ce116b09b108259ae6e66fe0046e71f",
+      "source_dimensions": [
+        8288,
+        5520
+      ],
+      "requested_size": 2048,
+      "output_dimensions": [
+        2048,
+        1364
+      ],
+      "samples_ms": [
+        722.47,
+        729.36,
+        682.95,
+        667.72,
+        678.98
+      ],
+      "p50_ms": 682.95,
+      "p95_ms": 729.36,
+      "peak_rss_mib": 1926.83
+    },
+    {
+      "scenario": "camera-46mp/native/cold",
+      "sha256": "2cddc889352b6d6ec2231955563390f82ce116b09b108259ae6e66fe0046e71f",
+      "source_dimensions": [
+        8288,
+        5520
+      ],
+      "requested_size": 8288,
+      "output_dimensions": [
+        8288,
+        5520
+      ],
+      "samples_ms": [
+        20260.9,
+        20652.23,
+        20721.66,
+        21005.65,
+        20744.15
+      ],
+      "p50_ms": 20721.66,
+      "p95_ms": 21005.65,
+      "peak_rss_mib": 4029.36
+    },
+    {
+      "scenario": "camera-46mp/native/warm",
+      "sha256": "2cddc889352b6d6ec2231955563390f82ce116b09b108259ae6e66fe0046e71f",
+      "source_dimensions": [
+        8288,
+        5520
+      ],
+      "requested_size": 8288,
+      "output_dimensions": [
+        8288,
+        5520
+      ],
+      "samples_ms": [
+        18541.9,
+        20892.41,
+        19264.37,
+        19354.24,
+        19254.51
+      ],
+      "p50_ms": 19264.37,
+      "p95_ms": 20892.41,
+      "peak_rss_mib": 4093.16
+    }
+  ]
+}
