@@ -8,7 +8,7 @@ from playwright.sync_api import expect
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def start_filter_bar(page, delayed_endpoint):
+def start_filter_bar(page, delayed_endpoint, stored_scope=None):
     page.set_content((ROOT / 'vireo/templates/_filterbar.html').read_text())
     page.evaluate('''endpoint => {
       window.savedFilter = {
@@ -35,6 +35,12 @@ def start_filter_bar(page, delayed_endpoint):
         return {ok: true, json: async () => data};
       };
     }''', delayed_endpoint)
+    if stored_scope is not None:
+        page.evaluate("""scope => {
+          Object.defineProperty(window, 'localStorage', {configurable: true, value: {
+            getItem: () => scope, setItem: () => {},
+          }});
+        }""", stored_scope)
     for name in ['vireo-search.js', 'vireo-filter.js']:
         page.add_script_tag(path=str(ROOT / 'vireo/static' / name))
     page.evaluate('''() => {
@@ -96,3 +102,80 @@ def test_untouched_search_restores_saved_filters(page):
     }''')
     expect(search).to_have_value('kingf')
     assert page.evaluate('VireoFilter.getUserRules().rules[0]._qs_text') == 'kingf'
+
+
+@pytest.mark.parametrize('delayed_endpoint', [
+    '/api/filters/fields', '/api/filters/shortcuts', '/api/workspaces/active',
+])
+@pytest.mark.parametrize('stored_scope', ['all', 'keyword'])
+def test_scope_toggle_survives_delayed_restore_with_empty_search(
+    page, delayed_endpoint, stored_scope,
+):
+    search = start_filter_bar(page, delayed_endpoint, stored_scope=stored_scope)
+    # Also exercise mute preservation: picking a scope must not discard
+    # unrelated saved state (saved rules, mute, visual clause).
+    page.evaluate('''() => {
+      window.savedFilter = {
+        root: window.savedFilter.root,
+        muted: true,
+        visual: null,
+      };
+    }''')
+    toggle = page.locator('.vf-search-scope')
+    # Choose a different scope while the input is empty and restore is
+    # pending. Returning to the input's default scope is a newer choice too.
+    before = toggle.get_attribute('aria-pressed')
+    toggle.click()
+    chosen = toggle.get_attribute('aria-pressed')
+    assert chosen != before
+    page.evaluate('''async () => {
+      window.releaseStartup();
+      await window.filterInit;
+    }''')
+    # The explicit scope choice survives the restore ...
+    expect(toggle).to_have_attribute('aria-pressed', chosen)
+    # ... and the saved filter tree still restores, so saved search text,
+    # saved rules, and mute state are not discarded merely because the
+    # user toggled the scope.
+    expect(search).to_have_value('kingf')
+    assert page.evaluate('VireoFilter.getUserRules().rules[0]._qs_text') == 'kingf'
+    assert page.evaluate('VireoFilter.isMuted()') is True
+    # A newly typed search uses the toggle's current scope, overriding the
+    # restored chip's own scope.
+    search.fill('hawk')
+    search.press('Enter')
+    field = 'keyword' if chosen == 'true' else 'metadata'
+    assert page.evaluate('VireoFilter.getUserRules().rules[0].rules[0].field') == field
+    # Startup completion must not attach a second handler: a later click
+    # changes scope once and reapplies the existing text in that scope.
+    toggle.click()
+    expect(toggle).to_have_attribute('aria-pressed', 'false' if chosen == 'true' else 'true')
+    next_field = 'metadata' if field == 'keyword' else 'keyword'
+    assert page.evaluate('VireoFilter.getUserRules().rules[0].rules[0].field') == next_field
+
+
+@pytest.mark.parametrize('saved_scope', ['all', 'keyword'])
+def test_focused_input_restores_saved_scope_without_replacing_text(page, saved_scope):
+    search = start_filter_bar(
+        page, '/api/workspaces/active',
+        stored_scope='all' if saved_scope == 'keyword' else 'keyword',
+    )
+    page.evaluate("""scope => {
+      const group = window.savedFilter.root.rules[0];
+      group._qs_scope = scope;
+      group.rules[0].field = scope === 'keyword' ? 'keyword' : 'metadata';
+    }""", saved_scope)
+    search.focus()
+    expect(search).to_be_focused()
+    page.evaluate("""async () => {
+      window.releaseStartup();
+      await window.filterInit;
+    }""")
+    expect(search).to_be_focused()
+    expect(search).to_have_value('')
+    toggle = page.locator('.vf-search-scope')
+    expect(toggle).to_have_attribute('aria-pressed', 'true' if saved_scope == 'keyword' else 'false')
+    search.fill('hawk')
+    search.press('Enter')
+    field = 'keyword' if saved_scope == 'keyword' else 'metadata'
+    assert page.evaluate('VireoFilter.getUserRules().rules[0].rules[0].field') == field

@@ -2,7 +2,10 @@
 (function (root) {
   'use strict';
 
-  function parse(text) {
+  // ``options.field`` picks what each term matches: 'metadata' (default,
+  // every searchable value) or 'keyword' (keyword names only).
+  function parse(text, options) {
+    const field = (options && options.field) || 'metadata';
     if (text.length > 4096) throw new Error('Search is limited to 4,096 characters.');
     const tokens = [];
     let i = 0;
@@ -46,7 +49,7 @@
         return node;
       }
       if (peek() !== 'term') throw new Error('Expected a word or quoted phrase.');
-      return { field: 'metadata', op: 'contains', value: tokens[pos++].value };
+      return { field, op: 'contains', value: tokens[pos++].value };
     }
     function conjunction(depth) {
       const rules = [unary(depth)];
