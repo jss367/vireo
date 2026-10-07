@@ -142,3 +142,33 @@ def test_large_map_renders_in_bounded_batches_and_virtualizes_sidebar(
 
     page.locator("#sidebarList").evaluate("el => { el.scrollTop = el.scrollHeight; }")
     expect(page.locator(f".sidebar-card[data-id='{photo_count}']")).to_be_visible()
+
+
+def test_map_selection_shows_only_selected_photos_and_accounts_for_the_rest(
+    live_server, page
+):
+    """A multi-photo View on Map plots just the selection and explains omissions."""
+    located, other_located, unlocated = live_server["data"]["photos"][:3]
+    for pid, lat, lng in ((located, 37.7749, -122.4194),
+                          (other_located, 40.7128, -74.0060)):
+        live_server["db"].conn.execute(
+            "UPDATE photos SET latitude = ?, longitude = ? WHERE id = ?",
+            (lat, lng, pid),
+        )
+    live_server["db"].conn.commit()
+
+    page.route("https://unpkg.com/**", stub_leaflet)
+    page.add_init_script(
+        "sessionStorage.setItem('vireoMapSelection', "
+        f"JSON.stringify({{photo_ids: [{located}, {unlocated}]}}))"
+    )
+    page.goto(f"{live_server['url']}/map?source=selection")
+
+    status = page.locator("#mapStatus")
+    expect(status).to_contain_text("Showing 1 of 2 selected photos")
+    expect(status).to_contain_text("1 without a location")
+    expect(status.locator("a")).to_have_attribute("href", "/map")
+    expect(page.locator(".sidebar-card")).to_have_count(1)
+    expect(page.locator(f".sidebar-card[data-id='{located}']")).to_be_visible()
+    assert page.evaluate("window.__mapMarkerCount") == 1
+    assert page.evaluate("!!window.__lastFitBounds")

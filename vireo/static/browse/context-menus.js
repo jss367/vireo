@@ -94,6 +94,31 @@ function viewPhotoOnMap(photoId) {
   window.location.href = '/map?photo_id=' + encodeURIComponent(photoId);
 }
 
+// One photo opens the whole map focused on its marker; several open a map of
+// just those photos. The ids travel in sessionStorage because a large
+// selection would not fit in a URL.
+function viewPhotosOnMap(photoIds) {
+  if (photoIds.length === 1) {
+    viewPhotoOnMap(photoIds[0]);
+    return;
+  }
+  try {
+    sessionStorage.setItem('vireoMapSelection', JSON.stringify({
+      photo_ids: photoIds.map(Number),
+    }));
+  } catch (e) {
+    // sessionStorage's per-origin quota (~5MB) only runs out for selections
+    // of hundreds of thousands of photos.
+    showToast(
+      'Could not open ' + photoIds.length.toLocaleString() +
+        ' photos on the map: the selection is too large for the browser to hand over. Select fewer photos.',
+      'error'
+    );
+    return;
+  }
+  window.location.href = '/map?source=selection';
+}
+
 async function copyPhotoPaths(photoIds) {
   var settled = await Promise.allSettled(photoIds.map(function(id) {
     return safeFetch('/api/photos/' + id, {}, { toast: false });
@@ -207,8 +232,8 @@ function buildPhotoContextMenu(photoIds, contextPhotoId) {
     { separator: true },
     { label: 'Find Similar', disabled: !one, disabledHint: hint,
       onClick: function() { if (typeof findSimilar === 'function') findSimilar(photoIds[0]); } },
-    { label: 'View on Map', disabled: !one, disabledHint: hint,
-      onClick: function() { viewPhotoOnMap(photoIds[0]); } },
+    { label: 'View on Map',
+      onClick: function() { viewPhotosOnMap(photoIds); } },
     { label: 'Review on Map',
       onClick: function() { reviewLocationsForSelection(); } },
     { label: 'Add Locations by Capture Time',
