@@ -15,9 +15,10 @@ passed as a call argument is allowed. Anything else (``self.conn.execute``,
 transaction control on the façade and belongs in a repository, except in the
 connection-lifecycle methods listed below. The tests at the end pin the
 public transaction-control methods among them (``commit``, ``rollback``,
-``in_transaction``, ``begin``, ``begin_immediate``, ``transaction``) to the connection
-calls they replace, and ``commit_with_retry`` (which only hands the connection
-to ``db.commit_with_retry``, so the guard needs no exception for it) to that
+``in_transaction``, ``begin``, ``begin_immediate``, ``transaction``) and
+``set_progress_handler`` to the connection calls they replace, and
+``commit_with_retry`` (which only hands the connection to
+``db.commit_with_retry``, so the guard needs no exception for it) to that
 helper.
 """
 
@@ -53,6 +54,9 @@ CONNECTION_LIFECYCLE = {
     # sqlite3's own context manager (``with conn:``): commits on exit and
     # rolls back on error, exactly as the ``with db.conn:`` blocks it replaces.
     "transaction",
+    # Installs a SQLite progress handler (search-lane cancellation), a
+    # connection setting rather than a statement.
+    "set_progress_handler",
 }
 
 
@@ -259,3 +263,11 @@ def test_transaction_commits_even_while_commits_are_held(db):
             _write(db, "a")
         assert not db.in_transaction
         assert _committed_markers(db) == 1
+
+
+def test_set_progress_handler_interrupts_and_clears(db):
+    db.set_progress_handler(lambda: 1, 1)
+    with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+        db.conn.execute("SELECT COUNT(*) FROM db_meta").fetchone()
+    db.set_progress_handler(None, 0)
+    assert db.conn.execute("SELECT 1").fetchone()[0] == 1

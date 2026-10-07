@@ -7,7 +7,7 @@ import time
 
 import config as cfg
 from config import read_raw_config_file, settings_write_lock
-from db import Database, _chunks
+from db import Database
 from flask import Blueprint, jsonify, request
 from highlights_payload import build_highlights_payload, build_life_list_payload
 from web.background_jobs import make_background_job
@@ -45,14 +45,7 @@ def create_export_blueprint(
             return json_error(str(exc))
         db = get_db()
         ids = options["photo_ids"]
-        placeholders = ",".join("?" for _ in ids)
-        visible = db.conn.execute(
-            f"""SELECT p.id FROM photos p
-                JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-                WHERE wf.workspace_id = ? AND p.id IN ({placeholders})""",
-            [ctx.workspace_id, *ids],
-        ).fetchall()
-        if {row["id"] for row in visible} != set(ids):
+        if set(db.filter_photo_ids_in_workspace(ids)) != set(ids):
             return json_error("Every selected photo must be available in the current workspace")
         if options["destination"] and not os.path.isdir(options["destination"]):
             return json_error("Choose an existing destination folder")
@@ -201,17 +194,7 @@ def create_export_blueprint(
             return json_error(str(exc))
 
         db = get_db()
-        active_ws = db.active_workspace_id
-        visible_set = set()
-        for chunk in _chunks(photo_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            visible = db.conn.execute(
-                f"""SELECT p.id FROM photos p
-                    JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-                    WHERE wf.workspace_id = ? AND p.id IN ({placeholders})""",
-                [active_ws] + list(chunk),
-            ).fetchall()
-            visible_set.update(row["id"] for row in visible)
+        visible_set = set(db.filter_photo_ids_in_workspace(photo_ids))
         photo_ids = [pid for pid in photo_ids if pid in visible_set]
         if not photo_ids:
             return json_error("no exportable photos in current workspace")
@@ -304,18 +287,8 @@ def create_export_blueprint(
         db = get_db()
 
         # Filter to only photos visible in the active workspace,
-        # preserving the caller's original ordering. Chunked so a large
-        # selection doesn't exceed SQLite's bound-parameter cap.
-        visible_set = set()
-        for chunk in _chunks(photo_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            visible = db.conn.execute(
-                f"""SELECT p.id FROM photos p
-                    JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-                    WHERE wf.workspace_id = ? AND p.id IN ({placeholders})""",
-                [ctx.workspace_id] + list(chunk),
-            ).fetchall()
-            visible_set.update(r["id"] for r in visible)
+        # preserving the caller's original ordering (and any repeats).
+        visible_set = set(db.filter_photo_ids_in_workspace(photo_ids))
         photo_ids = [pid for pid in photo_ids if pid in visible_set]
         if not photo_ids:
             return json_error("no exportable photos in current workspace")

@@ -668,6 +668,117 @@ def test_delete_keyword_detaches_children_unlinks_photos_and_commits(db, lib):
     ) == [(p1,)]
 
 
+# -- species-confirmation reads -----------------------------------------------------------
+
+
+def test_get_species_root_keyword(db, lib):
+    legacy = _raw_kw(db, "Robin", is_species=1)
+    linked = _raw_kw(db, "robin", kw_type="taxonomy", taxon_id=3)
+    _raw_kw(db, "ROBIN", parent_id=legacy, kw_type="taxonomy", taxon_id=3)  # not a root
+    _raw_kw(db, "Robin ", kw_type="general")  # a different name
+    _raw_kw(db, "robin", kw_type="location")  # not a species row
+    db.conn.commit()
+    row = db.get_species_root_keyword("ROBIN", prefer_taxonomy=True)
+    assert tuple(row) == (linked, "robin", 3)
+    assert db.get_species_root_keyword("ROBIN")["id"] in {legacy, linked}
+    assert db.get_species_root_keyword("Wren") is None
+    assert db.get_species_root_keyword("Wren", prefer_taxonomy=True) is None
+
+
+def test_get_species_root_keyword_prefers_lowest_id_within_a_type(db, lib):
+    first = _raw_kw(db, "Thrush", is_species=1)
+    _raw_kw(db, "thrush", is_species=1)
+    db.conn.commit()
+    assert db.get_species_root_keyword("THRUSH", prefer_taxonomy=True)["id"] == first
+
+
+def test_get_other_linked_species_names(db, lib):
+    robin = _raw_kw(db, "American Robin", kw_type="taxonomy", taxon_id=3)
+    alias = _raw_kw(db, "Robin", is_species=1, taxon_id=3)
+    _raw_kw(db, "Cougar", kw_type="taxonomy", taxon_id=5)
+    legacy = _raw_kw(db, "Legacy Bird", is_species=1)  # unlinked
+    _raw_kw(db, "Thrushes", kw_type="general", taxon_id=2)  # not a species row
+    db.conn.commit()
+    # Linked target: rows on any other taxon.
+    assert db.get_other_linked_species_names(3, robin) == ["Cougar"]
+    # Unlinked target: every linked row but the target itself.
+    assert sorted(db.get_other_linked_species_names(None, legacy)) == [
+        "American Robin", "Cougar", "Robin",
+    ]
+    assert sorted(db.get_other_linked_species_names(None, alias)) == [
+        "American Robin", "Cougar",
+    ]
+
+
+@pytest.fixture
+def confirmed(db, lib):
+    """Species rows on two photos: a linked root, an alias leaf, a homonym
+    leaf on another taxon, a genus-rank row and a non-species row."""
+    p0, p1, p2, _ = lib["p"]
+    parent = _raw_kw(db, "Birds")
+    root = _raw_kw(db, "Robin", kw_type="taxonomy", taxon_id=3)
+    alias = _raw_kw(db, "Desert Robin", parent_id=parent, kw_type="taxonomy", taxon_id=3)
+    homonym = _raw_kw(db, "robin", parent_id=parent, kw_type="taxonomy", taxon_id=5)
+    genus = _raw_kw(db, "Robin", parent_id=root, kw_type="taxonomy", taxon_id=2)
+    general = _raw_kw(db, "Garden", kw_type="general")
+    db.conn.commit()
+    for pid, kid in ((p0, alias), (p0, root), (p0, general), (p1, homonym),
+                     (p1, genus), (p2, alias)):
+        db.tag_photo(pid, kid)
+    return {"p": lib["p"], "root": root, "alias": alias, "homonym": homonym}
+
+
+def _rows(rows, *cols):
+    return [tuple(r[c] for c in cols) for r in rows]
+
+
+def test_get_previous_species_candidates(db, confirmed):
+    p0, p1, p2, _ = confirmed["p"]
+    root, alias, homonym = confirmed["root"], confirmed["alias"], confirmed["homonym"]
+    # Linked root taxon: the taxon arm adds the alias. Root rows first, then
+    # by keyword id (not by photo).
+    rows = db.get_previous_species_candidates([p0, p1, p2], "ROBIN", 3)
+    assert [r["id"] for r in rows] == [root, alias, alias, homonym]
+    assert set(_rows(rows, "photo_id", "id")) == {
+        (p0, root), (p0, alias), (p2, alias), (p1, homonym),
+    }
+    assert tuple(rows[0]) == (root, "Robin", 3, p0)
+    # Name only: the alias has another name.
+    rows = db.get_previous_species_candidates([p0, p1, p2], "robin", None)
+    assert _rows(rows, "photo_id", "id") == [(p0, root), (p1, homonym)]
+    assert db.get_previous_species_candidates([], "Robin", 3) == []
+
+
+def test_get_previous_species_candidates_chunks(db, confirmed):
+    p0, p1, _, _ = confirmed["p"]
+    statements = _trace(db)
+    rows = db.get_previous_species_candidates(
+        list(range(10_000, 10_800)) + [p1, p0], "Robin", None,
+    )
+    db.conn.set_trace_callback(None)
+    assert _rows(rows, "photo_id", "id") == [
+        (p0, confirmed["root"]), (p1, confirmed["homonym"]),
+    ]
+    assert len([s for s in dict.fromkeys(statements) if "pk.photo_id IN" in s]) == 2
+
+
+def test_get_attached_species_rows(db, confirmed):
+    p0, p1, p2, p3 = confirmed["p"]
+    root, alias, homonym = confirmed["root"], confirmed["alias"], confirmed["homonym"]
+    rows = db.get_attached_species_rows([p2, p1, p0, p3])
+    # By photo, root rows first, then id; genus-rank and non-species rows
+    # are left out.
+    assert _rows(rows, "photo_id", "id") == [
+        (p0, root), (p0, alias), (p1, homonym), (p2, alias),
+    ]
+    assert tuple(rows[1]) == (p0, alias, "Desert Robin", 3)
+    statements = _trace(db)
+    rows = db.get_attached_species_rows(list(range(10_000, 10_800)) + [p1])
+    db.conn.set_trace_callback(None)
+    assert _rows(rows, "photo_id", "id") == [(p1, homonym)]
+    assert len([s for s in dict.fromkeys(statements) if "pk.photo_id IN" in s]) == 2
+
+
 def test_species_rank_keywords_for_photo(db, lib):
     p0, p1 = lib["p"][0], lib["p"][1]
     unlinked = _raw_kw(db, "Mystery", kw_type="taxonomy")
@@ -1299,6 +1410,10 @@ _DELEGATING_KEYWORD_METHODS = (
     "get_keyword_workspace_photo_count",
     "search_species_keyword_names",
     "delete_keyword",
+    "get_species_root_keyword",
+    "get_other_linked_species_names",
+    "get_previous_species_candidates",
+    "get_attached_species_rows",
     "get_species_rank_keywords_for_photo",
     "get_photo_ids_with_species_rank_keyword",
     "get_photo_keywords",

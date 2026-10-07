@@ -939,6 +939,17 @@ def test_burst_group_members(db, cat):
     ]
 
 
+def test_count_workspace_predictions_counts_visible_photos_only(db, cat):
+    assert db.count_workspace_predictions() == 0
+    _scope_preds(db, cat["p"][0], ["Robin", "Wren"])
+    _scope_preds(db, cat["p"][1], ["Robin"], model="m2")
+    _scope_preds(db, cat["outside"], ["Robin"])
+    assert db.count_workspace_predictions() == 3
+    db.set_active_workspace(None)
+    with pytest.raises(RuntimeError, match="No active workspace"):
+        db.count_workspace_predictions()
+
+
 # -- structure ----------------------------------------------------------------------------
 
 
@@ -978,6 +989,7 @@ _DELEGATING_PREDICTION_METHODS = (
     "get_prediction_statuses_with_supersession",
     "get_burst_group_members",
     "get_inspector_predictions_for_photo",
+    "count_workspace_predictions",
 )
 
 # ``test_route_contract`` looks these up by name on ``Database``.

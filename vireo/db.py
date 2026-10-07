@@ -956,6 +956,15 @@ class Database:
         with self.conn:
             yield
 
+    def set_progress_handler(self, handler, n):
+        """``sqlite3.Connection.set_progress_handler`` on this connection.
+
+        ``handler`` runs every ``n`` SQLite VM instructions, and a truthy
+        return interrupts the running statement (``OperationalError:
+        interrupted``); ``None`` removes it.
+        """
+        self.conn.set_progress_handler(handler, n)
+
     def _canonical_schema(self):
         """Build the canonical-schema setup on this connection."""
         from canonical_schema import CanonicalSchema
@@ -1211,6 +1220,10 @@ class Database:
     def get_workspace(self, workspace_id):
         """Return a single workspace by id, or None."""
         return self._workspace_repository(scoped=False).get(workspace_id)
+
+    def get_workspace_id_by_name(self, name):
+        """Return the id of the workspace named exactly ``name``, or None."""
+        return self._workspace_repository(scoped=False).id_for_name(name)
 
     def get_workspaces(self):
         """Return all workspaces, pinned first then alphabetical."""
@@ -1659,6 +1672,28 @@ class Database:
         # The folder no longer contributes to this workspace's new-images
         # backlog. Drop the cached payload so the banner reflects the change.
         self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
+
+    def get_local_session_folder_ids(self, root_folder_id):
+        """Ids of every folder in the local session rooted at ``root_folder_id``."""
+        return self._workspace_folder_repository().local_session_folder_ids(root_folder_id)
+
+    def unlink_exact_workspace_folders_no_commit(self, workspace_id, folder_ids):
+        """Delete exactly these folders' ``workspace_folders`` rows, uncommitted.
+
+        No subtree walk, removal record, ``workspace_photos`` cleanup or cache
+        invalidation; the caller commits.
+        """
+        self._workspace_folder_repository().unlink_exact_no_commit(workspace_id, folder_ids)
+
+    def transfer_exact_workspace_folders_no_commit(self, source_workspace_id,
+                                                   target_workspace_id, folder_ids):
+        """Move exactly these folder links to ``target_workspace_id`` (non-root), uncommitted.
+
+        No subtree walk or cache invalidation; the caller commits.
+        """
+        self._workspace_folder_repository().transfer_exact_no_commit(
+            source_workspace_id, target_workspace_id, folder_ids,
+        )
 
     def _materialize_workspace_descendants(self, workspace_id):
         """Ensure linked folders include all known path descendants.
@@ -3500,6 +3535,10 @@ class Database:
         """Return folder count for the active workspace."""
         return self._folder_repository().count()
 
+    def count_all_folders(self):
+        """Every folder row in the catalog, in any workspace or status."""
+        return self._folder_repository(scoped=False).count_all()
+
     def get_all_folders(self):
         """Rows (``id``, ``path``, ``name``) for every folder, in any workspace or status."""
         return self._folder_repository(scoped=False).all_rows()
@@ -5256,6 +5295,15 @@ class Database:
             photo_id, working_copy_path, tracked=tracked, dimensions=dimensions,
         )
 
+    def clear_working_copy_evictions(self):
+        """Make every evicted working copy eligible for backfill again, and commit.
+
+        Clears ``working_copy_evicted_mtime`` and, for a photo with a
+        companion JPEG, a working-copy failure recorded against its RAW
+        source. The commit retries while SQLite reports locked or busy.
+        """
+        self._photos_repository(scoped=False).clear_working_copy_evictions()
+
     def set_photo_thumb_path(self, photo_id, thumb_path):
         """Store the photo's thumbnail filename (``photos.thumb_path``) and commit."""
         self._photos_repository(scoped=False).set_thumb_path(photo_id, thumb_path)
@@ -6708,6 +6756,30 @@ class Database:
     def delete_keyword(self, keyword_id):
         """Delete a keyword (children become roots, photo links go) and commit."""
         self._keyword_repository().delete(keyword_id)
+
+    def get_species_root_keyword(self, name, *, prefer_taxonomy=False):
+        """Root species keyword row (``id``, ``name``, ``taxon_id``) named ``name`` (NOCASE), or None.
+
+        ``prefer_taxonomy`` picks taxonomy rows first, then the lowest id;
+        without it SQLite returns whichever matching row it finds first.
+        """
+        return self._keyword_repository().species_root_by_name(
+            name, prefer_taxonomy=prefer_taxonomy,
+        )
+
+    def get_other_linked_species_names(self, taxon_id, keyword_id):
+        """Names of taxon-linked species keywords on another taxon (or, unlinked, another row)."""
+        return self._keyword_repository().other_linked_species_names(taxon_id, keyword_id)
+
+    def get_previous_species_candidates(self, photo_ids, name, linked_root_taxon):
+        """Species-rank rows on ``photo_ids`` named ``name`` or linked to ``linked_root_taxon``."""
+        return self._keyword_repository().previous_species_candidates(
+            photo_ids, name, linked_root_taxon,
+        )
+
+    def get_attached_species_rows(self, photo_ids):
+        """Rows (``photo_id``, ``id``, ``name``, ``taxon_id``) of the species-rank keywords on ``photo_ids``."""
+        return self._keyword_repository().attached_species_rows(photo_ids)
 
     def get_species_rank_keywords_for_photo(self, photo_id):
         """Rows (``id``, ``name``, ``is_species``, ``type``) of a photo's
@@ -8375,6 +8447,10 @@ class Database:
             group_id, classifier_model, exclude_id,
         )
 
+    def count_workspace_predictions(self):
+        """How many predictions sit on photos the active workspace can see (raises without one)."""
+        return self._prediction_repository().count_in_workspace()
+
     # -- Detections --
 
     def _model_runs_repository(self):
@@ -8987,6 +9063,14 @@ class Database:
             min_conf = effective.get("detector_confidence", 0.2)
         return self._detections_repository().get(photo_id, min_conf, detector_model)
 
+    def get_detection_confidence_summary(self, photo_ids):
+        """Rows (``photo_id``, ``max_conf``, ``n``): each photo's best detector confidence and detection count.
+
+        Over every detector model, with no confidence floor; photos with no
+        detection have no row.
+        """
+        return self._detections_repository().confidence_summary(photo_ids)
+
     def get_detections_for_photos(self, photo_ids, min_conf=None,
                                   detector_model=None):
         """Return {photo_id: [det_dict, ...]} for a batch of photos.
@@ -9469,6 +9553,10 @@ class Database:
             self.conn,
             self._ws_id() if scoped else None,
         )
+
+    def get_edit_action_and_new_value(self, edit_id):
+        """Row (``action_type``, ``new_value``) of one edit-history entry, or None."""
+        return self._edit_history_repository(scoped=False).action_and_new_value(edit_id)
 
     def record_edit(self, action_type, description, new_value, items, is_batch=False, _commit=True):
         """Record an edit action with per-photo before/after values.

@@ -5,9 +5,12 @@ and which of them are user-facing roots) and ``workspace_folder_removals``
 (read through the ``workspace_removed_folders`` view), plus the
 workspace-scoped rows that follow a folder when it moves to another
 workspace, and the photo-visibility read behind
-``Database._photo_in_workspace``. Every method takes the workspace id
-explicitly, so the
-repository is not bound to the active workspace.
+``Database._photo_in_workspace``. It also reads a local session's folder ids
+from ``local_folder_mappings`` and unlinks or transfers exactly those rows
+(no subtree walk, the caller commits) for the folder routes that sweep a
+staged descendant session the ``folders.path`` walk can't see. Every method
+takes the workspace id explicitly, so the repository is not bound to the
+active workspace.
 
 ``Database`` keeps the composition: subtree discovery
 (``_folder_subtree_ids_by_path``, ``_local_source_descendant_ids``), the
@@ -154,6 +157,51 @@ class WorkspaceFolderRepository:
             (workspace_id, folder_id),
         )
         self.conn.commit()
+
+    def local_session_folder_ids(self, root_folder_id):
+        """Ids of every folder in the local session rooted at ``root_folder_id``.
+
+        Read from ``local_folder_mappings``, whose rows keep a staged
+        folder's original ``source_path`` after ``folders.path`` is rebased
+        under ``local-folders/``.
+        """
+        rows = self.conn.execute(
+            "SELECT folder_id FROM local_folder_mappings WHERE root_folder_id = ?",
+            (root_folder_id,),
+        ).fetchall()
+        return [int(row["folder_id"]) for row in rows]
+
+    def unlink_exact_no_commit(self, workspace_id, folder_ids):
+        """Delete exactly these ``workspace_folders`` rows, without committing.
+
+        No subtree walk and no ``workspace_photos`` cleanup; one statement
+        per folder.
+        """
+        for folder_id in folder_ids:
+            self.conn.execute(
+                "DELETE FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+                (workspace_id, folder_id),
+            )
+
+    def transfer_exact_no_commit(self, source_workspace_id, target_workspace_id,
+                                 folder_ids):
+        """Move exactly these folder links to another workspace, without committing.
+
+        For each folder in turn, its ``source_workspace_id`` row is deleted
+        and a non-root ``target_workspace_id`` row inserted unless one is
+        already there. No subtree walk.
+        """
+        for folder_id in folder_ids:
+            self.conn.execute(
+                "DELETE FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+                (source_workspace_id, folder_id),
+            )
+            self.conn.execute(
+                """INSERT OR IGNORE INTO workspace_folders
+                       (workspace_id, folder_id, is_root)
+                   VALUES (?, ?, 0)""",
+                (target_workspace_id, folder_id),
+            )
 
     def remove_tree(self, workspace_id, folder_ids):
         """Unlink ``folder_ids`` (a folder's subtree) and commit."""

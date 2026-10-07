@@ -348,6 +348,26 @@ class DetectionsRepository:
                 result.setdefault(row["photo_id"], set()).add(row["id"])
         return result
 
+    def confidence_summary(self, photo_ids):
+        """Rows (``photo_id``, ``max_conf``, ``n``) for the photos with detections.
+
+        ``max_conf`` is the highest ``detector_confidence`` and ``n`` the
+        number of detection rows, over every model; photos without a
+        detection have no row. One statement per chunk.
+        """
+        rows = []
+        for chunk in self._chunks(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows.extend(self.conn.execute(
+                f"""SELECT photo_id,
+                           MAX(detector_confidence) AS max_conf,
+                           COUNT(*) AS n
+                    FROM detections WHERE photo_id IN ({placeholders})
+                    GROUP BY photo_id""",
+                chunk,
+            ).fetchall())
+        return rows
+
     def subject_exposure_ev(self, detection_id):
         """The subject analysis's ``exposure_ev`` for one detection, or None if unanalysed."""
         row = self.conn.execute(

@@ -206,6 +206,13 @@ class EditHistoryRepository:
                 return
         self.conn.execute("DELETE FROM edit_history WHERE id = ?", (entry_id,))
 
+    def action_and_new_value(self, entry_id):
+        """Row (``action_type``, ``new_value``) of one entry, or None."""
+        return self.conn.execute(
+            "SELECT action_type, new_value FROM edit_history WHERE id = ?",
+            (entry_id,),
+        ).fetchone()
+
     # -- lookups used by the replay handlers ----------------------------------
 
     def keyword_name(self, keyword_id):

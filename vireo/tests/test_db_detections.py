@@ -936,6 +936,26 @@ def test_bulk_reject_updates_in_chunks_of_500(db):
     assert {a["photo_id"] for a in affected} == set(pids)
 
 
+def test_get_detection_confidence_summary_covers_every_model_and_chunks(
+        db, monkeypatch):
+    fid = _folder(db)
+    a = _photo(db, "a.jpg", fid)
+    b = _photo(db, "b.jpg", fid)
+    bare = _photo(db, "bare.jpg", fid)
+    _raw_det(db, a, conf=0.3, x=0.0)
+    _raw_det(db, a, conf=0.05, model="other-detector", x=0.1)
+    _raw_det(db, b, conf=None, x=0.0)
+    assert db.get_detection_confidence_summary([]) == []
+    monkeypatch.setattr(db_module, "_SQLITE_PARAM_CHUNK_SIZE", 2)
+    statements = _trace(db)
+    rows = db.get_detection_confidence_summary([a, b, bare])
+    db.conn.set_trace_callback(None)
+    # No confidence floor and no model filter; a photo without detections
+    # has no row.
+    assert sorted(tuple(r) for r in rows) == [(a, 0.3, 2), (b, None, 1)]
+    assert len([s for s in statements if "MAX(detector_confidence)" in s]) == 2
+
+
 # -- structure ---------------------------------------------------------------
 
 _DELEGATING_DETECTION_METHODS = (
@@ -952,6 +972,7 @@ _DELEGATING_DETECTION_METHODS = (
     "get_detection_ids_for_photos",
     "delete_detections_by_ids",
     "get_detection_subject_exposure_ev",
+    "get_detection_confidence_summary",
 )
 
 

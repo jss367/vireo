@@ -77,7 +77,8 @@ that information for interactive use.
   they name (`commit()` still honors `_commits_held`), and
   `db.commit_with_retry()` commits with the locked/busy backoff of the
   module's `commit_with_retry`, so a caller that owns a transaction never
-  needs `db.conn` for it.
+  needs `db.conn` for it. `db.set_progress_handler()` is the connection's
+  progress-handler call, which installs the search-lane interrupt.
 - Schema changes are ordered migrations in `vireo/schema.py`. They execute once
   at startup, use a transaction, advance `PRAGMA user_version`, and validate
   before committing. Request connections must use the initialized schema. The

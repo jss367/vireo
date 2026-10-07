@@ -202,6 +202,10 @@ class FolderRepository:
             (self.workspace_id,),
         ).fetchone()[0]
 
+    def count_all(self):
+        """Every folder row in the catalog, in any workspace or status."""
+        return self.conn.execute("SELECT COUNT(*) FROM folders").fetchone()[0]
+
     def all_rows(self):
         """Rows (``id``, ``path``, ``name``) for every folder, any workspace or status."""
         return self.conn.execute("SELECT id, path, name FROM folders").fetchall()

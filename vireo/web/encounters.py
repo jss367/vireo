@@ -23,7 +23,6 @@ from keyword_normalization import keyword_match_key, normalize_keyword_display
 from pipeline_results import auto_detach_burst_for_species
 from services import prediction_decisions
 from services.pending_changes import queue_keyword_add, queue_keyword_remove
-from sql_chunks import chunked
 
 log = logging.getLogger(__name__)
 
@@ -131,12 +130,12 @@ def create_encounters_blueprint(get_db, json_error, db_path):
             confirmation.compute_cache_state()
             confirmation.record_cache_only_confirmation()
             confirmation.apply_cache_mutation()
-            db.conn.commit()
+            db.commit()
         except Exception:
             # A failed rollback must not skip the cache restore below or
             # replace the original error.
             try:
-                db.conn.rollback()
+                db.rollback()
             except Exception:
                 log.exception("Rollback failed after species confirmation failed")
             if confirmation.cache_saved:
@@ -159,15 +158,8 @@ def create_encounters_blueprint(get_db, json_error, db_path):
 
 def _photo_ids_error(db, photo_ids, json_error):
     """The error response for unknown or out-of-workspace photo_ids, else None."""
-    # Validate all photo_ids exist before mutating. Chunked so the
-    # IN-clause stays under SQLite's bound-parameter cap.
-    found_ids = set()
-    for chunk in chunked(photo_ids):
-        placeholders = ",".join("?" for _ in chunk)
-        rows = db.conn.execute(
-            f"SELECT id FROM photos WHERE id IN ({placeholders})", chunk
-        ).fetchall()
-        found_ids.update(r["id"] for r in rows)
+    # Validate all photo_ids exist before mutating.
+    found_ids = db.get_existing_photo_ids(photo_ids)
     missing = [pid for pid in photo_ids if pid not in found_ids]
     if missing:
         return json_error(f"Unknown photo_ids: {missing}")
@@ -195,17 +187,7 @@ def _low_confidence_photo_ids(db, photo_ids):
     import config as cfg
     effective_cfg = db.get_effective_config(cfg.load())
     det_conf_threshold = effective_cfg.get("detector_confidence", 0.2)
-    det_rows = []
-    for chunk in chunked(photo_ids):
-        placeholders = ",".join("?" for _ in chunk)
-        det_rows.extend(db.conn.execute(
-            f"""SELECT photo_id,
-                       MAX(detector_confidence) AS max_conf,
-                       COUNT(*) AS n
-                FROM detections WHERE photo_id IN ({placeholders})
-                GROUP BY photo_id""",
-            chunk,
-        ).fetchall())
+    det_rows = db.get_detection_confidence_summary(photo_ids)
     return [
         r["photo_id"] for r in det_rows
         if r["n"] > 0 and (r["max_conf"] or 0) < det_conf_threshold
@@ -247,24 +229,10 @@ class _HomonymConflicts:
         if cache_key in self.cache:
             return self.cache[cache_key]
         conflict = False
-        if target_taxon_id is not None:
-            hrows = self.db.conn.execute(
-                """SELECT name FROM keywords
-                   WHERE (is_species = 1 OR type = 'taxonomy')
-                     AND taxon_id IS NOT NULL
-                     AND taxon_id != ?""",
-                (target_taxon_id,),
-            ).fetchall()
-        else:
-            hrows = self.db.conn.execute(
-                """SELECT name FROM keywords
-                   WHERE (is_species = 1 OR type = 'taxonomy')
-                     AND taxon_id IS NOT NULL
-                     AND id != ?""",
-                (target_kid_id,),
-            ).fetchall()
-        for hrow in hrows:
-            if keyword_match_key(hrow["name"]) == self.old_target_key:
+        for name in self.db.get_other_linked_species_names(
+            target_taxon_id, target_kid_id,
+        ):
+            if keyword_match_key(name) == self.old_target_key:
                 conflict = True
                 break
         self.cache[cache_key] = conflict
@@ -509,13 +477,7 @@ class _SpeciesConfirmation:
         # type='taxonomy' (the Keywords type dropdown) doesn't set the
         # legacy is_species column, and the rest of the app treats
         # (is_species = 1 OR type = 'taxonomy') as species.
-        self.old_kid_row = self.db.conn.execute(
-            """SELECT id, name, taxon_id FROM keywords
-               WHERE name = ? COLLATE NOCASE
-                 AND parent_id IS NULL
-                 AND (is_species = 1 OR type = 'taxonomy')""",
-            (previous_species,),
-        ).fetchone()
+        self.old_kid_row = self.db.get_species_root_keyword(previous_species)
         if self.old_kid_row is not None and self.old_kid_row["taxon_id"] is None:
             # Unlinked root: ``previous_species`` names a specific
             # legacy row whose identity is that row's own id, not a
@@ -572,11 +534,15 @@ class _SpeciesConfirmation:
             self.old_kid_row["taxon_id"] if self.old_kid_row is not None else None
         )
         self.old_kid_row = None
-        candidate_rows = []
-        for chunk in chunked(self.photo_ids):
-            candidate_rows.extend(
-                self._old_species_candidates(chunk, linked_root_taxon)
-            )
+        # Match by the linked root's taxon (when there is one) OR by
+        # ``previous_species`` name. The taxon arm catches repaired aliases
+        # (e.g. ``Desert Verdin`` sharing the root's taxon); the name arm
+        # preserves the existing behavior for attached same-name rows under
+        # a different taxon (a legitimate homonym duplicate repair leaves
+        # alone).
+        candidate_rows = self.db.get_previous_species_candidates(
+            self.photo_ids, self.previous_species, linked_root_taxon,
+        )
         for row in candidate_rows:
             # SQL orders root rows first, then by id — first
             # candidate per photo is the most canonical.
@@ -591,47 +557,6 @@ class _SpeciesConfirmation:
             # hierarchy alias.
             self.old_kid_row = next(iter(self.per_photo_old_row.values()))
 
-    def _old_species_candidates(self, chunk, linked_root_taxon):
-        """Attached species rows on ``chunk`` that may be the previous species."""
-        placeholders_ids = ",".join("?" for _ in chunk)
-        if linked_root_taxon is not None:
-            # Match by the linked root's taxon OR by
-            # ``previous_species`` name. The taxon arm catches
-            # repaired aliases (e.g. ``Desert Verdin`` sharing
-            # the root's taxon); the name arm preserves the
-            # existing behavior for attached same-name rows
-            # under a different taxon (a legitimate homonym
-            # duplicate repair leaves alone).
-            return self.db.conn.execute(
-                f"""SELECT k.id, k.name, k.taxon_id, pk.photo_id
-                    FROM photo_keywords pk
-                    JOIN keywords k ON k.id = pk.keyword_id
-                    LEFT JOIN taxa t ON t.id = k.taxon_id
-                    WHERE pk.photo_id IN ({placeholders_ids})
-                      AND (k.is_species = 1 OR k.type = 'taxonomy')
-                      AND (t.rank = 'species' OR t.rank IS NULL)
-                      AND (k.taxon_id = ?
-                           OR k.name = ? COLLATE NOCASE)
-                    ORDER BY CASE WHEN k.parent_id IS NULL
-                                  THEN 0 ELSE 1 END,
-                             k.id""",
-                [*chunk, linked_root_taxon, self.previous_species],
-            ).fetchall()
-        return self.db.conn.execute(
-            f"""SELECT k.id, k.name, k.taxon_id, pk.photo_id
-                FROM photo_keywords pk
-                JOIN keywords k ON k.id = pk.keyword_id
-                LEFT JOIN taxa t ON t.id = k.taxon_id
-                WHERE pk.photo_id IN ({placeholders_ids})
-                  AND k.name = ? COLLATE NOCASE
-                  AND (k.is_species = 1 OR k.type = 'taxonomy')
-                  AND (t.rank = 'species' OR t.rank IS NULL)
-                ORDER BY CASE WHEN k.parent_id IS NULL
-                              THEN 0 ELSE 1 END,
-                         k.id""",
-            [*chunk, self.previous_species],
-        ).fetchall()
-
     # -- keyword writes (inside the transaction) ---------------------
 
     def resolve_target_keyword(self):
@@ -645,25 +570,18 @@ class _SpeciesConfirmation:
         if self.remove_mode:
             # Nothing is being added: never create a keyword row just to
             # remove it. Report the existing root's id when one exists.
-            stored = db.conn.execute(
-                """SELECT id, name FROM keywords
-                   WHERE name = ? COLLATE NOCASE
-                     AND parent_id IS NULL
-                     AND (is_species = 1 OR type = 'taxonomy')
-                   ORDER BY (type = 'taxonomy') DESC, id""",
-                (self.species,),
-            ).fetchone()
+            stored = db.get_species_root_keyword(
+                self.species, prefer_taxonomy=True,
+            )
             self.kid = stored["id"] if stored else None
             self.already_has_new = set()
             self.newly_tagged = []
             return
         self.kid = db.add_keyword(self.species, is_species=True, _commit=False)
         # Queue/record the stored spelling (see api_add_keyword).
-        stored = db.conn.execute(
-            "SELECT name FROM keywords WHERE id = ?", (self.kid,)
-        ).fetchone()
-        if stored and stored["name"]:
-            self.species = stored["name"]
+        stored = db.get_keyword_name(self.kid)
+        if stored:
+            self.species = stored
 
         # A species can already be attached through a hierarchical
         # keyword row with a different id/casing. Compare by taxon_id
@@ -704,32 +622,17 @@ class _SpeciesConfirmation:
 
     def _collect_old_rows(self, old_target_key, homonym_conflicts):
         """Group every attached row equivalent to the previous species by photo."""
-        for chunk in chunked(self.photo_ids):
-            placeholders_ids = ",".join("?" for _ in chunk)
-            rows = self.db.conn.execute(
-                f"""SELECT pk.photo_id, k.id, k.name, k.taxon_id
-                    FROM photo_keywords pk
-                    JOIN keywords k ON k.id = pk.keyword_id
-                    LEFT JOIN taxa t ON t.id = k.taxon_id
-                    WHERE pk.photo_id IN ({placeholders_ids})
-                      AND (k.is_species = 1 OR k.type = 'taxonomy')
-                      AND (t.rank = 'species' OR t.rank IS NULL)
-                    ORDER BY pk.photo_id,
-                             CASE WHEN k.parent_id IS NULL THEN 0 ELSE 1 END,
-                             k.id""",
-                list(chunk),
-            ).fetchall()
-            for row in rows:
-                photo_old = self.per_photo_old_row.get(row["photo_id"])
-                if photo_old is None:
-                    # ``previous_species`` did not resolve to any
-                    # row attached to this photo (no root-lookup
-                    # hit, no candidate leaf); nothing to remove.
-                    continue
-                if _is_previous_species_row(
-                    row, photo_old, old_target_key, homonym_conflicts,
-                ):
-                    self.old_rows_by_photo.setdefault(row["photo_id"], []).append(row)
+        for row in self.db.get_attached_species_rows(self.photo_ids):
+            photo_old = self.per_photo_old_row.get(row["photo_id"])
+            if photo_old is None:
+                # ``previous_species`` did not resolve to any
+                # row attached to this photo (no root-lookup
+                # hit, no candidate leaf); nothing to remove.
+                continue
+            if _is_previous_species_row(
+                row, photo_old, old_target_key, homonym_conflicts,
+            ):
+                self.old_rows_by_photo.setdefault(row["photo_id"], []).append(row)
 
     def _restore_lost_equivalence(self):
         """Re-tag photos whose only equivalent rows are about to be untagged.
@@ -1068,10 +971,7 @@ class _SpeciesConfirmation:
         ):
             # Labels and confirmation counts are part of the same user
             # action even when no burst moves to another encounter.
-            photo_edit = self.db.conn.execute(
-                "SELECT action_type, new_value FROM edit_history WHERE id = ?",
-                (self.photo_edit_id,),
-            ).fetchone()
+            photo_edit = self.db.get_edit_action_and_new_value(self.photo_edit_id)
             change = {
                 "before": before_cached["encounters"],
                 "after": cached["encounters"],

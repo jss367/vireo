@@ -103,11 +103,7 @@ def create_inat_blueprint(
         import config as cfg
 
         db = get_db()
-        photo = db.conn.execute(
-            """SELECT p.*, f.path as folder_path FROM photos p
-               JOIN folders f ON f.id = p.folder_id WHERE p.id = ?""",
-            (photo_id,),
-        ).fetchone()
+        photo = db.get_photo_with_folder_path(photo_id)
         if not photo:
             return json_error("Photo not found", 404)
         if not db._photo_in_workspace(photo_id):
@@ -689,11 +685,7 @@ def create_inat_blueprint(
             return json_error("photo_id is required")
 
         db = get_db()
-        photo = db.conn.execute(
-            """SELECT p.*, f.path as folder_path FROM photos p
-               JOIN folders f ON f.id = p.folder_id WHERE p.id = ?""",
-            (photo_id,),
-        ).fetchone()
+        photo = db.get_photo_with_folder_path(photo_id)
         if not photo:
             return json_error("Photo not found", 404)
         if not db._photo_in_workspace(photo_id):
@@ -826,11 +818,7 @@ def create_inat_blueprint(
                     "error": "latitude and longitude must be provided together",
                 })
                 continue
-            photo = db.conn.execute(
-                """SELECT p.*, f.path as folder_path FROM photos p
-                   JOIN folders f ON f.id = p.folder_id WHERE p.id = ?""",
-                (photo_id,),
-            ).fetchone()
+            photo = db.get_photo_with_folder_path(photo_id)
             if not photo:
                 results.append({"photo_id": photo_id, "error": "Photo not found"})
                 continue

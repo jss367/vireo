@@ -1262,6 +1262,21 @@ def test_edit_has_changed_items(db, pids):
     assert db.edit_has_changed_items(changed) is True
 
 
+def test_get_edit_action_and_new_value_reads_any_workspace(db, pids):
+    edit_id = _rating_edit(db, pids[0], 0, 4)
+    other = db.create_workspace("Other")
+    foreign = _raw_edit(db, "pipeline_grouping", "{}", workspace_id=other)
+    assert dict(db.get_edit_action_and_new_value(edit_id)) == {
+        "action_type": "rating", "new_value": "4",
+    }
+    # Id-keyed: an entry in another workspace, and no active workspace needed.
+    db.set_active_workspace(None)
+    assert tuple(db.get_edit_action_and_new_value(foreign)) == (
+        "pipeline_grouping", "{}",
+    )
+    assert db.get_edit_action_and_new_value(987_654) is None
+
+
 # -- structure ------------------------------------------------------------
 
 _DELEGATING = (
@@ -1273,6 +1288,9 @@ _DELEGATING = (
     "_reapply_relabel_curation", "_prune_edit_history",
     "get_next_undo_summary", "count_undoable_edits", "get_next_redo_summary",
     "get_edit_item_photo_ids", "edit_has_changed_items",
+
+
+    "get_edit_action_and_new_value",
 )
 
 _DOMAIN = _DELEGATING + (

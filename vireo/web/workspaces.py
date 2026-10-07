@@ -268,10 +268,8 @@ def create_workspace_blueprint(
         """
         if not isinstance(name, str) or not name.strip():
             return json_error("Name is required")
-        taken = db.conn.execute(
-            "SELECT id FROM workspaces WHERE name = ?", (name.strip(),),
-        ).fetchone()
-        if taken is not None and taken["id"] != ws_id:
+        taken_id = db.get_workspace_id_by_name(name.strip())
+        if taken_id is not None and taken_id != ws_id:
             return json_error(
                 f"A workspace named {name.strip()!r} already exists", 409,
             )
@@ -301,9 +299,7 @@ def create_workspace_blueprint(
             return json_error("folder_ids must be a list of integers")
         unknown = [
             fid for fid in dict.fromkeys(folder_ids)
-            if db.conn.execute(
-                "SELECT 1 FROM folders WHERE id = ?", (fid,),
-            ).fetchone() is None
+            if db.get_folder(fid) is None
         ]
         if unknown:
             return json_error(f"Unknown folder ids: {unknown}", 404)
@@ -392,7 +388,7 @@ def create_workspace_blueprint(
             db.update_workspace(ws_id, **kwargs)
         except sqlite3.IntegrityError:
             # A concurrent rename took the name after the check above.
-            db.conn.rollback()
+            db.rollback()
             return json_error(
                 f"A workspace named {kwargs.get('name')!r} already exists", 409,
             )
@@ -604,20 +600,11 @@ def create_workspace_blueprint(
                     )
             db.remove_workspace_folder_tree(ws_id, folder_id)
             for descendant_id in descendant_root_ids:
-                rows = db.conn.execute(
-                    "SELECT folder_id FROM local_folder_mappings WHERE root_folder_id = ?",
-                    (descendant_id,),
-                ).fetchall()
-                db.revoke_workspace_photo_grants_for_folders(
-                    ws_id, [int(row["folder_id"]) for row in rows],
-                )
-                for row in rows:
-                    db.conn.execute(
-                        "DELETE FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
-                        (ws_id, int(row["folder_id"])),
-                    )
+                mapped_ids = db.get_local_session_folder_ids(descendant_id)
+                db.revoke_workspace_photo_grants_for_folders(ws_id, mapped_ids)
+                db.unlink_exact_workspace_folders_no_commit(ws_id, mapped_ids)
             if descendant_root_ids:
-                db.conn.commit()
+                db.commit()
         # Unlinking a folder tree removes photos from the workspace's scope;
         # the cached ready payload would otherwise keep listing ghosts from
         # the now-detached folders until a manual rescan.
@@ -725,28 +712,15 @@ def create_workspace_blueprint(
                 swept = False
                 for descendant_ids in descendant_root_ids_by_folder.values():
                     for descendant_id in descendant_ids:
-                        rows = db.conn.execute(
-                            "SELECT folder_id FROM local_folder_mappings WHERE root_folder_id = ?",
-                            (descendant_id,),
-                        ).fetchall()
-                        db.revoke_workspace_photo_grants_for_folders(
-                            ws_id, [int(row["folder_id"]) for row in rows],
+                        mapped_ids = db.get_local_session_folder_ids(descendant_id)
+                        db.revoke_workspace_photo_grants_for_folders(ws_id, mapped_ids)
+                        db.transfer_exact_workspace_folders_no_commit(
+                            ws_id, target_ws_id, mapped_ids,
                         )
-                        for row in rows:
-                            mapped_fid = int(row["folder_id"])
-                            db.conn.execute(
-                                "DELETE FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
-                                (ws_id, mapped_fid),
-                            )
-                            db.conn.execute(
-                                """INSERT OR IGNORE INTO workspace_folders
-                                       (workspace_id, folder_id, is_root)
-                                   VALUES (?, ?, 0)""",
-                                (target_ws_id, mapped_fid),
-                            )
+                        if mapped_ids:
                             swept = True
                 if swept:
-                    db.conn.commit()
+                    db.commit()
                 # Moving folders changes membership on both source and target
                 # workspaces, so any cached missing-originals payloads for either
                 # side would go stale.
