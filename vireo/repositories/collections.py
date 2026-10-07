@@ -31,6 +31,7 @@ import math
 import re
 
 from keyword_identity import identity_sql
+from sql_chunks import chunked
 
 
 class CollectionRepository:
@@ -1714,30 +1715,116 @@ def photo_ids_named_by_collections(conn):
     can remove.
     """
     named = set()
-
-    def visit(node):
-        if isinstance(node, list):
-            for child in node:
-                visit(child)
-            return
-        if not isinstance(node, dict):
-            return
-        visit(node.get("rules"))
-        if node.get("field") != "photo_ids":
-            return
-        values = node.get("value")
-        if isinstance(values, list):
-            for value in values:
-                key = _photo_id_key(value)
-                if key is not None:
-                    named.add(key)
-
     for row in conn.execute("SELECT rules FROM collections"):
         try:
-            visit(json.loads(row[0]))
+            named.update(_photo_id_entries(json.loads(row[0])))
         except (TypeError, ValueError):
             continue
     return named
+
+
+def _photo_id_entries(node):
+    """Yield the id key of every ``photo_ids`` entry in a rule tree, repeats included."""
+    if isinstance(node, list):
+        for child in node:
+            yield from _photo_id_entries(child)
+        return
+    if not isinstance(node, dict):
+        return
+    yield from _photo_id_entries(node.get("rules"))
+    if node.get("field") != "photo_ids":
+        return
+    values = node.get("value")
+    if isinstance(values, list):
+        for value in values:
+            key = _photo_id_key(value)
+            if key is not None:
+                yield key
+
+
+# SQLite rowids are signed 64-bit integers; a key outside that range names
+# no photo and cannot be bound as a parameter.
+_ROWID_MIN = -(2 ** 63)
+_ROWID_MAX = 2 ** 63 - 1
+
+
+def _photo_ids_without_rows(conn, ids):
+    """The ids in ``ids`` that no ``photos`` row has.
+
+    Reads whichever is cheaper: every photo id (``SELECT id FROM photos``
+    scans the smallest covering index, never the wide table rows; 15 ms for
+    100k photos), or a primary-key lookup per id, which reads a table page
+    each (about 1 ms per thousand) and only wins when the ids are few next
+    to the catalog. The highest photo id stands in for the catalog's size.
+    """
+    wanted = {i for i in ids if _ROWID_MIN <= i <= _ROWID_MAX}
+    missing = set(ids) - wanted
+    if not wanted:
+        return missing
+    top = conn.execute("SELECT MAX(id) FROM photos").fetchone()[0]
+    if top is None:
+        return set(ids)
+    present = set()
+    if 8 * len(wanted) < top:
+        for chunk in chunked(sorted(wanted)):
+            marks = ",".join("?" for _ in chunk)
+            present.update(
+                row[0] for row in conn.execute(
+                    f"SELECT id FROM photos WHERE id IN ({marks})", chunk,
+                )
+            )
+    else:
+        # No WHERE on purpose: an ``id BETWEEN`` bound turns this into a
+        # rowid range search over the table itself, several times slower
+        # warm and far worse on a cold cache.
+        for row in conn.execute("SELECT id FROM photos"):
+            if row[0] in wanted:
+                present.add(row[0])
+    return missing | (wanted - present)
+
+
+def prune_collection_ids_of_missing_photos(conn, *, commit):
+    """Remove every ``photo_ids`` entry that names a photo no longer cataloged.
+
+    Such an entry shows nothing today (the rules engine compiles the list to
+    ``p.id IN (...)``), but the filter bar's "N hand-picked photos" chip
+    counts it, a collection saved from that filter copies it, and a new
+    photo that is handed the freed id would silently join the collection.
+    Only the dangling entries are removed, through
+    ``remap_collection_photo_ids``; every other rule, and every id that
+    still has a photo, is left alone. No photo, file or other table is
+    touched. ``commit(conn)`` (``db.commit_with_retry``) runs only when
+    something was removed.
+
+    Returns one ``{"collection_id", "workspace_id", "name", "removed"}``
+    dict per collection rewritten, ``removed`` counting entries (a rule that
+    listed a missing id twice loses both).
+    """
+    named = photo_ids_named_by_collections(conn)
+    if not named:
+        return []
+    missing = _photo_ids_without_rows(conn, named)
+    if not missing:
+        return []
+    pruned = []
+    for row in conn.execute(
+        "SELECT id, workspace_id, name, rules FROM collections ORDER BY id"
+    ).fetchall():
+        try:
+            entries = _photo_id_entries(json.loads(row[3]))
+            removed = sum(1 for key in entries if key in missing)
+        except (TypeError, ValueError):
+            continue
+        if removed:
+            pruned.append({
+                "collection_id": row[0],
+                "workspace_id": row[1],
+                "name": row[2],
+                "removed": removed,
+            })
+    remap_collection_photo_ids(conn, dict.fromkeys(missing))
+    commit(conn)
+    return pruned
 
 
 def _is_scalar(value):

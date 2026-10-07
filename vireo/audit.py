@@ -9,6 +9,7 @@ from image_loader import (
     is_excluded_scan_path,
     safe_scan_walk,
 )
+from repositories.photo_row_deletion import photo_row_deletion
 from xmp import read_keywords
 
 log = logging.getLogger(__name__)
@@ -639,14 +640,14 @@ def remove_orphans(db, photo_ids):
         db: Database instance
         photo_ids: list of photo ids to remove
     """
-    for pid in photo_ids:
-        db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (pid,))
-        db.conn.execute(
-            "DELETE FROM photo_embedded_keyword_offered WHERE photo_id = ?", (pid,),
-        )
-        db.conn.execute("DELETE FROM pending_changes WHERE photo_id = ?", (pid,))
-        db.conn.execute("DELETE FROM photos WHERE id = ?", (pid,))
-    db.remap_collection_photo_ids(dict.fromkeys(photo_ids))
+    with photo_row_deletion(db.conn) as photo_rows:
+        for pid in photo_ids:
+            db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (pid,))
+            db.conn.execute(
+                "DELETE FROM photo_embedded_keyword_offered WHERE photo_id = ?", (pid,),
+            )
+            db.conn.execute("DELETE FROM pending_changes WHERE photo_id = ?", (pid,))
+        photo_rows.delete(dict.fromkeys(photo_ids))
     db.conn.commit()
     db.update_folder_counts()
     log.info("Removed %d orphan entries", len(photo_ids))

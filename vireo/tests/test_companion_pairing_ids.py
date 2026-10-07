@@ -641,6 +641,107 @@ def test_new_photo_preserves_collection_created_after_insert(
         db.close()
 
 
+def test_new_photo_rechecks_collections_between_scan_inserts(tmp_path):
+    """A collection write between a scan's inserts for a currently free id.
+
+    The scan's per-insert check used to read the named-id set once, on
+    the first insert. If another connection then saved a collection
+    naming an id a later insert reused, that cache missed the entry and
+    the new photo silently joined the stale collection. The repair at
+    startup cannot catch this: the id then names a valid row. Fixing
+    the cache means re-reading on every insert, so the check sees any
+    collection added since the previous insert.
+    """
+    from db import Database
+    from scanner import scan
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    card = tmp_path / "card"
+    card.mkdir()
+    # The scanner inserts both files in one run. The first insert loads
+    # the named-id cache (empty); the external write between the two
+    # inserts names the id the second insert will take.
+    Image.new("RGB", (32, 32), "red").save(card / "first.jpg")
+    Image.new("RGB", (32, 32), "blue").save(card / "second.jpg")
+
+    writer = Database(db_path)
+    writer.conn.execute("PRAGMA busy_timeout=5000")
+    state = {"collection_id": None, "inserts_seen": 0}
+
+    def after_each_insert(photo_id, path):
+        state["inserts_seen"] += 1
+        if state["inserts_seen"] == 1:
+            # Simulate a user saving a collection from stale UI state
+            # between the scan's inserts. The id (next in sequence) is
+            # currently free; the scanner's writer lock has been released
+            # for this item, so the external write lands here.
+            state["collection_id"] = writer.add_collection(
+                "Stale pick",
+                json.dumps(
+                    [{"field": "photo_ids", "value": [photo_id + 1]}],
+                ),
+            )
+
+    try:
+        scan(str(card), db, photo_callback=after_each_insert)
+        ids = _photo_ids_by_filename(db)
+        second_id = ids["second.jpg"]
+        assert state["collection_id"] is not None
+        assert second_id == ids["first.jpg"] + 1
+        # The second insert's id must NOT have inherited the stale
+        # collection entry: the pre-fix scanner silently left it in
+        # because the named-id set was cached once on the first insert.
+        assert _collection_photo_ids(writer, state["collection_id"]) == []
+    finally:
+        writer.close()
+        db.close()
+
+
+def test_drop_inherited_collection_membership_reuses_cache_across_inserts(
+    tmp_path, monkeypatch,
+):
+    """The cache is cheap when no other connection has written.
+
+    Reading ``photo_ids_named_by_collections`` on every insert made
+    imports O(new photos * saved photo ids) for catalogs with large
+    static collections. The cache is invalidated through SQLite's
+    ``PRAGMA data_version`` -- our own writes don't bump it, so a run
+    of inserts with no concurrent writer rebuilds it exactly once.
+    """
+    import repositories.collections as collections_module
+    from db import Database
+    from scanner import scan
+
+    card = tmp_path / "card"
+    card.mkdir()
+    # Three photos: enough that a per-insert cache would show up as > 1
+    # read, and few enough that the test stays quick.
+    for name in ("a.jpg", "b.jpg", "c.jpg"):
+        Image.new("RGB", (32, 32), "red").save(card / name)
+
+    db = Database(str(tmp_path / "test.db"))
+    real = collections_module.photo_ids_named_by_collections
+    calls = {"n": 0}
+
+    def counting(conn):
+        calls["n"] += 1
+        return real(conn)
+
+    monkeypatch.setattr(
+        collections_module, "photo_ids_named_by_collections", counting,
+    )
+
+    try:
+        scan(str(card), db)
+        assert len(_photo_ids_by_filename(db)) == 3
+        # Three inserts share one named-id read: no concurrent writer
+        # bumped the data_version.
+        assert calls["n"] == 1
+    finally:
+        db.close()
+
+
 def test_jpeg_becomes_its_own_photo_when_its_raw_changes_under_it(
     tmp_path, monkeypatch,
 ):
@@ -1016,6 +1117,161 @@ def test_attach_companion_skips_publishing_when_owner_vanished_before_callback(
     )
 
 
+def test_attach_companion_keeps_owner_locked_during_publication(tmp_path):
+    """A collection callback must never observe a recycled attachment ID."""
+    import scanner as scanner_mod
+    from db import Database
+
+    card = tmp_path / "card"
+    _shoot_pairs(card, ["IMG_001"])
+    raw = card / "IMG_001.cr3"
+    jpeg = card / "IMG_001.jpg"
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    writer = Database(db_path)
+    try:
+        # Catalog only the RAW, then scan only its newly discovered JPEG.
+        scanner_mod.scan(
+            str(card), db, discovered_files=[raw], incremental=False,
+            skip_working_copies=True,
+        )
+        raw_id = _photo_ids_by_filename(db)[raw.name]
+        other = tmp_path / "other"
+        other.mkdir()
+        other_folder = writer.add_folder(str(other))
+        writer.conn.execute("PRAGMA busy_timeout = 0")
+        published = []
+        blocked = []
+
+        def publish(photo_id, path):
+            # A real second connection tries to replace the owner while
+            # the receiver is consuming its ID. It must remain locked,
+            # even though the earlier attachment commit is already visible.
+            try:
+                writer.delete_photos([raw_id])
+            except sqlite3.OperationalError as error:
+                assert "locked" in str(error)
+                writer.conn.rollback()
+                blocked.append(True)
+            else:
+                replacement = writer.add_photo(
+                    other_folder, "OTHER.jpg", ".jpg", 0, None,
+                )
+                assert replacement == raw_id
+            row = db.get_photo(photo_id)
+            assert row["filename"] == raw.name
+            assert row["companion_path"] == jpeg.name
+            published.append((photo_id, path))
+
+        scanner_mod.scan(
+            str(card), db, discovered_files=[jpeg], incremental=False,
+            skip_working_copies=True, photo_callback=publish,
+        )
+        assert published == [(raw_id, str(jpeg))]
+        assert blocked == [True]
+        # The publication guard must release when the scan finishes.
+        writer.delete_photos([raw_id])
+        assert writer.add_photo(
+            other_folder, "OTHER.jpg", ".jpg", 0, None,
+        ) == raw_id
+    finally:
+        writer.close()
+        db.close()
+
+
+@pytest.mark.parametrize("wait_kind", ["backpressure", "pause", "owner_replaced"])
+def test_attach_companion_pipeline_wait_does_not_hold_writer(tmp_path, wait_kind):
+    """The real pipeline publication waits before acquiring SQLite's lock."""
+    import queue
+    import threading
+    from types import SimpleNamespace
+
+    import scanner as scanner_mod
+    from db import Database
+    from pipeline_job import _StageState
+    from pipeline_stages.scanning import _ScannedPhotoCallback, _ScanPass
+
+    card = tmp_path / "card"
+    _shoot_pairs(card, ["IMG_001"])
+    raw, jpeg = card / "IMG_001.cr3", card / "IMG_001.jpg"
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    scanner_mod.scan(str(card), db, discovered_files=[raw], incremental=False,
+                     skip_working_copies=True)
+    raw_id = _photo_ids_by_filename(db)[raw.name]
+    db.close()
+    waiting, resume = threading.Event(), threading.Event()
+    abort = threading.Event()
+    errors, collected = [], []
+
+    def should_abort(event):
+        waiting.set()
+        if wait_kind == "pause":
+            assert resume.wait(10)
+        return event.is_set()
+
+    shared = _StageState(SimpleNamespace(), SimpleNamespace(
+        abort=abort, should_abort=should_abort,
+    ))
+    shared.scan_to_thumb = queue.Queue(maxsize=1)
+    if wait_kind != "pause":
+        shared.scan_to_thumb.put(("prior", "prior.jpg"))
+
+    def producer():
+        thread_db = Database(db_path)
+        try:
+            receiver = _ScanPass.__new__(_ScanPass)
+            receiver._reported_photo_ids = set()
+            receiver._collected_ids = set()
+            receiver.collected_photo_ids = collected
+            receiver._canonical_photo_path = lambda pid, path: str(raw)
+            receiver.prepare_scan_item = shared.prepare_scan_item
+            receiver.put_scan_item = shared.put_scan_item
+            receiver.run = SimpleNamespace(
+                stages={"scan": {}}, job={"id": "test"},
+                runner=SimpleNamespace(update_step=lambda *a, **kw: None),
+            )
+            scanner_mod.scan(
+                str(card), thread_db, discovered_files=[jpeg],
+                incremental=False, skip_working_copies=True,
+                photo_callback=_ScannedPhotoCallback(receiver),
+            )
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            thread_db.close()
+
+    consumer = Database(db_path)
+    consumer.conn.execute("PRAGMA busy_timeout = 100")
+    thread = threading.Thread(target=producer)
+    thread.start()
+    assert waiting.wait(10)
+    try:
+        # This is what the thumbnail consumer must do BEFORE taking the
+        # next queued item. A callback under the writer lock deadlocks it.
+        consumer.conn.execute("UPDATE photos SET thumb_path=? WHERE id=?",
+                              ("prior.jpg", raw_id))
+        consumer.conn.commit()
+        if wait_kind == "owner_replaced":
+            consumer.delete_photos([raw_id])
+            folder_id = consumer.add_folder(str(tmp_path / "other"))
+            assert consumer.add_photo(folder_id, "OTHER.jpg", ".jpg", 0, None) == raw_id
+    finally:
+        resume.set()
+        if wait_kind != "pause":
+            shared.scan_to_thumb.get_nowait()
+        thread.join(timeout=10)
+        consumer.close()
+    assert not thread.is_alive()
+    assert errors == []
+    if wait_kind == "owner_replaced":
+        assert collected == []
+        assert shared.scan_to_thumb.empty()
+    else:
+        assert collected == [raw_id]
+        assert shared.scan_to_thumb.get_nowait() == (raw_id, str(raw))
+
+
 def test_photos_repository_add_reports_whether_it_inserted(tmp_path):
     """``PhotoRepository.add`` returns ``(photo_id, inserted)``; the second
     call for the same (folder, filename) is a no-op INSERT OR IGNORE and
@@ -1071,3 +1327,72 @@ def test_database_add_photo_returning_inserted(tmp_path):
     )
     assert third_id != first
     assert third_inserted is True
+
+
+@pytest.mark.parametrize("separate_writer", [False, True])
+def test_scan_refreshes_collection_membership_between_insert_commits(tmp_path, separate_writer):
+    """A stale UI save between insertions must not capture the next reused id."""
+    from db import Database
+    from scanner import scan
+
+    card = tmp_path / "card"
+    card.mkdir()
+    for name in ["first.jpg", "second.jpg"]:
+        Image.new("RGB", (32, 32), "green").save(card / name)
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    writer = Database(db_path) if separate_writer else db
+    state = {}
+
+    def save_stale_selection(photo_id, *_args):
+        if state:
+            return
+        state["first"] = photo_id
+        state["next"] = photo_id + 1
+        state["collection"] = writer.add_collection(
+            "Selection saved during scan",
+            json.dumps([{"field": "photo_ids", "value": [photo_id, photo_id + 1]}]),
+        )
+
+    try:
+        scan(str(card), db, photo_callback=save_stale_selection)
+        assert state["next"] in _photo_ids_by_filename(db).values()
+        assert _collection_photo_ids(db, state["collection"]) == [state["first"]]
+    finally:
+        if separate_writer:
+            writer.close()
+        db.close()
+
+
+
+def test_scan_collection_cache_does_not_reuse_rolled_back_revision(tmp_path):
+    from db import Database
+    from scanner import _ScanRun
+
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        collection = db.add_collection(
+            "Selection", json.dumps([{"field": "photo_ids", "value": [101]}]),
+        )
+        scanner = _ScanRun.__new__(_ScanRun)
+        scanner.db = db
+        scanner._init_collection_membership_cache()
+        # Read a modified rule inside a transaction that later rolls back.
+        db.conn.execute("UPDATE collections SET rules=? WHERE id=?", (
+            json.dumps([{"field": "photo_ids", "value": [102]}]), collection,
+        ))
+        scanner._drop_inherited_collection_membership(999)
+        db.conn.rollback()
+        # A transactional counter could reuse the same version for this
+        # different update, missing newly saved stale membership 103.
+        db.conn.execute("UPDATE collections SET rules=? WHERE id=?", (
+            json.dumps([{"field": "photo_ids", "value": [103]}]), collection,
+        ))
+        scanner._drop_inherited_collection_membership(103)
+        assert _collection_photo_ids(db, collection) == []
+        # Tracking is entirely connection-local.
+        assert not db.conn.execute(
+            "SELECT name FROM sqlite_schema WHERE name LIKE '_scan_collection_%'",
+        ).fetchall()
+    finally:
+        db.close()

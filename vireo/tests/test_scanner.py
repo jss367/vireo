@@ -8974,7 +8974,7 @@ def test_xmp_import_skips_a_location_keyword_the_user_already_changed(tmp_path):
     db.close()
 
 
-def test_pair_raw_jpeg_batches_collection_remap(tmp_path):
+def test_pair_raw_jpeg_batches_collection_remap(tmp_path, monkeypatch):
     """Every pair's companion→primary mapping is collapsed into one remap.
 
     ``remap_collection_photo_ids`` scans and JSON-parses every collection
@@ -8984,6 +8984,7 @@ def test_pair_raw_jpeg_batches_collection_remap(tmp_path):
     post-loop call keeps the pairing loop O(pairs + collections) and folds
     every companion in the same static collection to a single UPDATE.
     """
+    import repositories.photo_row_deletion as photo_row_deletion
     from db import Database
     from scanner import _pair_raw_jpeg_companions
 
@@ -9024,14 +9025,16 @@ def test_pair_raw_jpeg_batches_collection_remap(tmp_path):
     ).lastrowid
 
     calls = {"count": 0, "mappings": []}
-    real_remap = db.remap_collection_photo_ids
+    real_remap = photo_row_deletion.remap_collection_photo_ids
 
-    def counted(mapping):
+    def counted(conn, mapping):
         calls["count"] += 1
         calls["mappings"].append(dict(mapping))
-        return real_remap(mapping)
+        return real_remap(conn, mapping)
 
-    db.remap_collection_photo_ids = counted
+    # Companion rows are deleted through ``photo_row_deletion``, which
+    # rewrites the collections when its block exits.
+    monkeypatch.setattr(photo_row_deletion, "remap_collection_photo_ids", counted)
 
     merged = _pair_raw_jpeg_companions(db)
     assert set(merged) == set(companion_ids)
