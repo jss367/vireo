@@ -1078,6 +1078,99 @@ def test_attach_companion_keeps_owner_locked_during_publication(tmp_path):
         db.close()
 
 
+@pytest.mark.parametrize("wait_kind", ["backpressure", "pause", "owner_replaced"])
+def test_attach_companion_pipeline_wait_does_not_hold_writer(tmp_path, wait_kind):
+    """The real pipeline publication waits before acquiring SQLite's lock."""
+    import queue
+    import threading
+    from types import SimpleNamespace
+
+    import scanner as scanner_mod
+    from db import Database
+    from pipeline_job import _StageState
+    from pipeline_stages.scanning import _ScannedPhotoCallback, _ScanPass
+
+    card = tmp_path / "card"
+    _shoot_pairs(card, ["IMG_001"])
+    raw, jpeg = card / "IMG_001.cr3", card / "IMG_001.jpg"
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    scanner_mod.scan(str(card), db, discovered_files=[raw], incremental=False,
+                     skip_working_copies=True)
+    raw_id = _photo_ids_by_filename(db)[raw.name]
+    db.close()
+    waiting, resume = threading.Event(), threading.Event()
+    abort = threading.Event()
+    errors, collected = [], []
+
+    def should_abort(event):
+        waiting.set()
+        if wait_kind == "pause":
+            assert resume.wait(10)
+        return event.is_set()
+
+    shared = _StageState(SimpleNamespace(), SimpleNamespace(
+        abort=abort, should_abort=should_abort,
+    ))
+    shared.scan_to_thumb = queue.Queue(maxsize=1)
+    if wait_kind != "pause":
+        shared.scan_to_thumb.put(("prior", "prior.jpg"))
+
+    def producer():
+        thread_db = Database(db_path)
+        try:
+            receiver = _ScanPass.__new__(_ScanPass)
+            receiver._reported_photo_ids = set()
+            receiver._collected_ids = set()
+            receiver.collected_photo_ids = collected
+            receiver._canonical_photo_path = lambda pid, path: str(raw)
+            receiver.prepare_scan_item = shared.prepare_scan_item
+            receiver.put_scan_item = shared.put_scan_item
+            receiver.run = SimpleNamespace(
+                stages={"scan": {}}, job={"id": "test"},
+                runner=SimpleNamespace(update_step=lambda *a, **kw: None),
+            )
+            scanner_mod.scan(
+                str(card), thread_db, discovered_files=[jpeg],
+                incremental=False, skip_working_copies=True,
+                photo_callback=_ScannedPhotoCallback(receiver),
+            )
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            thread_db.close()
+
+    consumer = Database(db_path)
+    consumer.conn.execute("PRAGMA busy_timeout = 100")
+    thread = threading.Thread(target=producer)
+    thread.start()
+    assert waiting.wait(10)
+    try:
+        # This is what the thumbnail consumer must do BEFORE taking the
+        # next queued item. A callback under the writer lock deadlocks it.
+        consumer.conn.execute("UPDATE photos SET thumb_path=? WHERE id=?",
+                              ("prior.jpg", raw_id))
+        consumer.conn.commit()
+        if wait_kind == "owner_replaced":
+            consumer.delete_photos([raw_id])
+            folder_id = consumer.add_folder(str(tmp_path / "other"))
+            assert consumer.add_photo(folder_id, "OTHER.jpg", ".jpg", 0, None) == raw_id
+    finally:
+        resume.set()
+        if wait_kind != "pause":
+            shared.scan_to_thumb.get_nowait()
+        thread.join(timeout=10)
+        consumer.close()
+    assert not thread.is_alive()
+    assert errors == []
+    if wait_kind == "owner_replaced":
+        assert collected == []
+        assert shared.scan_to_thumb.empty()
+    else:
+        assert collected == [raw_id]
+        assert shared.scan_to_thumb.get_nowait() == (raw_id, str(raw))
+
+
 def test_photos_repository_add_reports_whether_it_inserted(tmp_path):
     """``PhotoRepository.add`` returns ``(photo_id, inserted)``; the second
     call for the same (folder, filename) is a no-op INSERT OR IGNORE and

@@ -7,6 +7,7 @@ source in place. ``_ScanPass`` holds the state those phases share (the
 worker DB, the roots fed to the scanner and the progress accumulators).
 """
 
+import contextlib
 import json
 import logging
 import os
@@ -34,6 +35,7 @@ def scanner_stage(
     remote_archive,
     skip_scan,
     snapshot_paths,
+    _prepare_scan_item=None,
 ):
     # Note: stages["scan"]["status"] is NOT set to "running" here. It is
     # flipped to "running" just before each do_scan() call below, so
@@ -45,6 +47,7 @@ def scanner_stage(
         find_broken_metadata_folders=_find_broken_metadata_folders,
         missing_archive_mount_root=_missing_archive_mount_root,
         put_scan_item=_put_scan_item,
+        prepare_scan_item=_prepare_scan_item,
         collected_photo_ids=collected_photo_ids,
         effective_thumb_cache_dir=effective_thumb_cache_dir,
         effective_vireo_dir=effective_vireo_dir,
@@ -145,6 +148,43 @@ def _rebased_folder_suffix(folder, root_real, dest_ci_root):
     return rel_suffix
 
 
+class _ScannedPhotoCallback:
+    """Separate blocking pipeline preparation from atomic ID publication."""
+
+    def __init__(self, scan):
+        self.scan = scan
+
+    def __call__(self, photo_id, path):
+        self.scan._on_scanned_photo(photo_id, path)
+
+    @contextlib.contextmanager
+    def prepare_publication(self, photo_id, path):
+        scan = self.scan
+        if photo_id in scan._reported_photo_ids:
+            yield lambda: None
+            return
+        canonical = scan._canonical_photo_path(photo_id, path)
+        published = False
+        with scan.prepare_scan_item((photo_id, canonical)) as enqueue:
+            def publish():
+                nonlocal published
+                if enqueue is None:
+                    return
+                enqueue()
+                scan._reported_photo_ids.add(photo_id)
+                scan.collected_photo_ids.append(photo_id)
+                scan._collected_ids.add(photo_id)
+                published = True
+            yield publish
+        # Job progress may acquire other locks; publish it after SQLite's
+        # writer guard has released, just like the pause/backpressure wait.
+        if published:
+            run = scan.run
+            run.stages["scan"]["count"] = len(scan.collected_photo_ids)
+            run.runner.update_step(run.job["id"], "scan",
+                                   current_file=os.path.basename(canonical))
+
+
 class _ScanPass:
     """State shared by every phase of one scanner stage run."""
 
@@ -165,6 +205,7 @@ class _ScanPass:
         remote_archive,
         skip_scan,
         snapshot_paths,
+        prepare_scan_item=None,
     ):
         self.run = run
         self.sentinel = sentinel
@@ -172,6 +213,7 @@ class _ScanPass:
         self.find_broken_metadata_folders = find_broken_metadata_folders
         self.missing_archive_mount_root = missing_archive_mount_root
         self.put_scan_item = put_scan_item
+        self.prepare_scan_item = prepare_scan_item
         self.collected_photo_ids = collected_photo_ids
         self.effective_thumb_cache_dir = effective_thumb_cache_dir
         self.effective_vireo_dir = effective_vireo_dir
@@ -493,6 +535,9 @@ class _ScanPass:
         # (pairing runs at the end), so clearing per-invocation keeps the
         # pair/companion dedup inside one pass intact.
         self._reported_photo_ids.clear()
+        if (self.prepare_scan_item is not None
+                and kwargs.get("photo_callback") == self._on_scanned_photo):
+            kwargs["photo_callback"] = _ScannedPhotoCallback(self)
         self.do_scan(
             root, self.thread_db,
             progress_callback=self._on_scan_progress,

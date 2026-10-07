@@ -5464,7 +5464,18 @@ class _ScanRun:
             # would correct it because the JPEG never had a row of its
             # own. Taking the writer lock under ``_commits_held`` makes
             # the check-then-publish atomic against concurrent deletes.
-            with db._commits_held():
+            prepare = getattr(self.photo_callback, "prepare_publication", None)
+            publication = (
+                prepare(owner_id, str(image_path)) if prepare is not None
+                else contextlib.nullcontext(
+                    lambda: self.photo_callback(owner_id, str(image_path)),
+                )
+            )
+            # A streaming receiver waits for Pause and queue capacity before
+            # the writer lock, then publishes through a nonblocking callback.
+            # Ownership is revalidated AFTER that wait, keeping rowid reuse
+            # protection without preventing the consumer's thumbnail commits.
+            with publication as publish, db._commits_held():
                 owner_still_valid = self._lock_companion_owner(
                     owner_id, ownership,
                 )
@@ -5472,7 +5483,7 @@ class _ScanRun:
                     self._reported_identities[owner_id] = (
                         owner["folder_id"], owner["filename"],
                     )
-                    self.photo_callback(owner_id, str(image_path))
+                    publish()
                 else:
                     log.warning(
                         "Companion attach for %s lost RAW owner %s before "
