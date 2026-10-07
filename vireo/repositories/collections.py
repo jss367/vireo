@@ -31,6 +31,7 @@ import math
 import re
 
 from keyword_identity import identity_sql
+from repositories.top_species import TOP_SPECIES_RANKING_SQL
 from sql_chunks import chunked
 
 
@@ -2681,6 +2682,15 @@ class _RuleQueryBuilder:
             )
         return None
 
+    def _top_predicted_species_rule(self, field, op, value, rule):
+        if op not in ("is", "equals"):
+            return None
+        return (
+            f"p.id IN (SELECT photo_id FROM ({TOP_SPECIES_RANKING_SQL}) "
+            "WHERE rn = 1 AND species = ?)",
+            [self._repo.workspace_id, self._min_detector_conf(), value],
+        )
+
     def _prediction_status_rule(self, field, op, value, rule):
         """Negative predicates split by caller:
           row_scoped=True (get_predictions) → positive EXISTS
@@ -2979,6 +2989,7 @@ _LEAF_RULE_BUILDERS = {
     "prediction_confidence": _RuleQueryBuilder._prediction_confidence_rule,
     "classifier_model": _RuleQueryBuilder._classifier_model_rule,
     "prediction_status": _RuleQueryBuilder._prediction_status_rule,
+    "top_predicted_species": _RuleQueryBuilder._top_predicted_species_rule,
     "needs_review": _RuleQueryBuilder._needs_review_rule,
     "has_mask": _RuleQueryBuilder._has_mask_rule,
     "has_jpeg_companion": _RuleQueryBuilder._has_jpeg_companion_rule,

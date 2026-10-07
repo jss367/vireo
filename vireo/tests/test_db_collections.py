@@ -997,3 +997,40 @@ def test_collection_facade_signatures_unchanged():
         "(self, photo_ids, standalone_ids=None, stack_config=None)"
     )
     assert sig["create_default_collections"] == "(self, workspace_id=None)"
+
+
+def test_top_predicted_species_matches_summary(db, folder):
+    """Clicks match current winning predictions, not keywords or runners-up."""
+    robin = _photo(db, folder, "robin.jpg")
+    hawk = _photo(db, folder, "hawk.jpg")
+    hidden = _photo(db, folder, "hidden.jpg")
+    for pid, floor in [(robin, .95), (hawk, .95), (hidden, .01)]:
+        det = db.save_detections(pid, [
+            {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": floor}
+        ], detector_model="test")[0]
+        for species, confidence, fingerprint, created in [
+            ("Stale", .99, "old", "2026-01-01"),
+            ("Runner-up", .5, "current", "2026-02-01"),
+            ("Robin" if pid == robin else "Hawk", .9, "current", "2026-02-01"),
+        ]:
+            db.conn.execute(
+                "INSERT INTO predictions (detection_id, classifier_model, labels_fingerprint, "
+                "species, confidence, created_at) VALUES (?, 'test', ?, ?, ?, ?)",
+                (det, fingerprint, species, confidence, created),
+            )
+    db.conn.commit()
+    # Conflicting saved metadata must not change a prediction drill-down.
+    db.tag_photo(hawk, db.add_keyword("Robin", is_species=True))
+    def rule(species):
+        return [{"field": "top_predicted_species", "op": "is", "value": species}]
+
+    assert _ids(db, rule("Robin")) == [robin]
+    assert _ids(db, rule("Hawk")) == [hawk]
+    assert _ids(db, rule("Runner-up")) == []
+    assert _ids(db, rule("Stale")) == []
+    for row in db.get_browse_summary(folder_id=folder)["top_species"]:
+        assert len(_ids(db, rule(row["species"]), folder_id=folder)) == row["count"]
+    pred_id = db.conn.execute("SELECT id FROM predictions WHERE species = 'Robin'").fetchone()[0]
+    db.update_prediction_status(pred_id, "rejected")
+    assert _ids(db, rule("Robin")) == []
+    assert _ids(db, rule("Runner-up")) == [robin]

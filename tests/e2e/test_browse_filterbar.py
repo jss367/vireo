@@ -1046,6 +1046,57 @@ def test_compact_header_and_floating_selection_actions(live_server, page, width)
     }""")
 
 
+@pytest.mark.parametrize("activation,scope", [("click", "combined"), ("Enter", "collection"), ("Space", "folder")])
+def test_top_species_filters_predictions_and_preserves_scope(live_server, page, activation, scope):
+    """The count includes untagged predictions; drilling down keeps other filters."""
+    db = live_server["db"]
+    # A collection omitting hawk3 makes losing collection scope observable.
+    cid = db.add_collection("First two hawks", json.dumps([
+        {"field": "photo_ids", "op": "in", "value": live_server["data"]["photos"][:2]}
+    ]))
+    folder_id = live_server["data"]["folders"][0]
+    query = {
+        "combined": f"collection_id={cid}&folder_id={folder_id}&dashboard_scope=1",
+        "collection": f"collection_id={cid}",
+        "folder": f"folder_id={folder_id}",
+    }[scope]
+    expected_ids = live_server["data"]["photos"][:3 if scope == "folder" else 2]
+    page.goto(f"{live_server['url']}/browse?{query}")
+    page.wait_for_function("VireoFilter.isReady() && !loading")
+    row = page.locator("#summarySpeciesList button").filter(has_text="Red-tailed Hawk")
+    expect(row.locator(".summary-species-count")).to_have_text(str(len(expected_ids)))
+    if activation == "click":
+        row.locator(".summary-species-count").click()
+    else:
+        row.focus()
+        row.press(activation)
+    expect(page.locator(".vf-chips")).to_contain_text("Top predicted species is Red-tailed Hawk")
+    expect(page.locator("#grid .grid-card")).to_have_count(len(expected_ids))
+    assert page.evaluate("activeFolderId") == (None if scope == "collection" else folder_id)
+    assert set(page.locator("#grid .grid-card").evaluate_all(
+        "cards => cards.map(card => Number(card.dataset.id))"
+    )) == set(expected_ids)
+    # A subsequent rating filter composes with the species rule.
+    page.evaluate("VireoFilter.addRule('rating', '>=', 4)")
+    expect(page.locator("#grid .grid-card")).to_have_count(1)
+    expect(page.locator(".vf-chips")).to_contain_text("Top predicted species is Red-tailed Hawk")
+
+
+def test_top_species_narrows_match_any_collection(live_server, page):
+    cid = live_server["db"].add_collection("Hawks or robins", json.dumps({
+        "mode": "any", "rules": [
+            {"field": "filename", "op": "contains", "value": "hawk"},
+            {"field": "filename", "op": "contains", "value": "robin"},
+        ]
+    }))
+    page.goto(f"{live_server['url']}/browse?collection_id={cid}")
+    page.wait_for_function("VireoFilter.isReady() && !loading")
+    expect(page.locator("#grid .grid-card")).to_have_count(5)
+    page.locator("#summarySpeciesList button").filter(has_text="Red-tailed Hawk").click()
+    expect(page.locator("#grid .grid-card")).to_have_count(3)
+    expect(page.locator(".vf-chips")).to_contain_text("Top predicted species is Red-tailed Hawk")
+
+
 def test_extension_picker_multiple_formats_and_saved_values(live_server, page):
     db = live_server["db"]
     db.add_photo(folder_id=live_server["data"]["folders"][0], filename="raw.nef",
