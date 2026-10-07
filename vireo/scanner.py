@@ -5468,17 +5468,17 @@ class _ScanRun:
                 owner_still_valid = self._lock_companion_owner(
                     owner_id, ownership,
                 )
-            if owner_still_valid:
-                self._reported_identities[owner_id] = (
-                    owner["folder_id"], owner["filename"],
-                )
-                self.photo_callback(owner_id, str(image_path))
-            else:
-                log.warning(
-                    "Companion attach for %s lost RAW owner %s before "
-                    "publishing; the next scan will catalog the JPEG",
-                    image_path, owner_id,
-                )
+                if owner_still_valid:
+                    self._reported_identities[owner_id] = (
+                        owner["folder_id"], owner["filename"],
+                    )
+                    self.photo_callback(owner_id, str(image_path))
+                else:
+                    log.warning(
+                        "Companion attach for %s lost RAW owner %s before "
+                        "publishing; the next scan will catalog the JPEG",
+                        image_path, owner_id,
+                    )
         else:
             self._reported_identities[owner_id] = (
                 owner["folder_id"], owner["filename"],

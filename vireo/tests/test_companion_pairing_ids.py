@@ -1016,6 +1016,68 @@ def test_attach_companion_skips_publishing_when_owner_vanished_before_callback(
     )
 
 
+def test_attach_companion_keeps_owner_locked_during_publication(tmp_path):
+    """A collection callback must never observe a recycled attachment ID."""
+    import scanner as scanner_mod
+    from db import Database
+
+    card = tmp_path / "card"
+    _shoot_pairs(card, ["IMG_001"])
+    raw = card / "IMG_001.cr3"
+    jpeg = card / "IMG_001.jpg"
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    writer = Database(db_path)
+    try:
+        # Catalog only the RAW, then scan only its newly discovered JPEG.
+        scanner_mod.scan(
+            str(card), db, discovered_files=[raw], incremental=False,
+            skip_working_copies=True,
+        )
+        raw_id = _photo_ids_by_filename(db)[raw.name]
+        other = tmp_path / "other"
+        other.mkdir()
+        other_folder = writer.add_folder(str(other))
+        writer.conn.execute("PRAGMA busy_timeout = 0")
+        published = []
+        blocked = []
+
+        def publish(photo_id, path):
+            # A real second connection tries to replace the owner while
+            # the receiver is consuming its ID. It must remain locked,
+            # even though the earlier attachment commit is already visible.
+            try:
+                writer.delete_photos([raw_id])
+            except sqlite3.OperationalError as error:
+                assert "locked" in str(error)
+                writer.conn.rollback()
+                blocked.append(True)
+            else:
+                replacement = writer.add_photo(
+                    other_folder, "OTHER.jpg", ".jpg", 0, None,
+                )
+                assert replacement == raw_id
+            row = db.get_photo(photo_id)
+            assert row["filename"] == raw.name
+            assert row["companion_path"] == jpeg.name
+            published.append((photo_id, path))
+
+        scanner_mod.scan(
+            str(card), db, discovered_files=[jpeg], incremental=False,
+            skip_working_copies=True, photo_callback=publish,
+        )
+        assert published == [(raw_id, str(jpeg))]
+        assert blocked == [True]
+        # The publication guard must release when the scan finishes.
+        writer.delete_photos([raw_id])
+        assert writer.add_photo(
+            other_folder, "OTHER.jpg", ".jpg", 0, None,
+        ) == raw_id
+    finally:
+        writer.close()
+        db.close()
+
+
 def test_photos_repository_add_reports_whether_it_inserted(tmp_path):
     """``PhotoRepository.add`` returns ``(photo_id, inserted)``; the second
     call for the same (folder, filename) is a no-op INSERT OR IGNORE and
