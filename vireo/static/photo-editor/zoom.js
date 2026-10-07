@@ -285,6 +285,7 @@ function applyEditorZoom() {
   }
   renderCropBox();
   positionMaskOverlay();
+  if (typeof updateMaskBrushCursor === 'function') updateMaskBrushCursor();
 }
 
 function setEditorZoom(percent) {

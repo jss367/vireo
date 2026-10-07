@@ -448,6 +448,8 @@ def test_brush_correction_is_immutable_and_keeps_source_staleness(tmp_path):
 @pytest.mark.parametrize('override', [
     {'mode': 'replace'}, {'radius': True}, {'radius': float('nan')},
     {'radius': 0}, {'radius': 0.5}, {'radius': 10 ** 400},
+    {'softness': True}, {'softness': -0.1}, {'softness': 1.1}, {'softness': float('nan')},
+    {'strength': False}, {'strength': 0}, {'strength': 1.1}, {'strength': float('inf')},
     {'points': []}, {'points': [[0.5, 0.5]] * 2049},
     {'points': [[float('inf'), 0.5]]}, {'points': [[True, 0.5]]},
     {'points': [[-0.1, 0.5]]}, {'points': [[0.5]]},
@@ -468,3 +470,38 @@ def test_brush_snapshot_cannot_cross_photo_ids(tmp_path):
     with pytest.raises(ValueError, match='missing'):
         local_masks.correct_snapshot(vireo_dir=str(tmp_path), photo_id=2,
                                      mask=original, mode='add', radius=0.05, points=[[0.5, 0.5]])
+
+
+@pytest.mark.parametrize('mode, initial, expected', [('add', 0, 128), ('subtract', 255, 128)])
+def test_soft_brush_fades_inward_and_strength_applies_once(tmp_path, mode, initial, expected):
+    path = str(tmp_path / 'source.png')
+    Image.new('L', (201, 201), initial).save(path)
+    original = local_masks.create_snapshot(photo_id=1, mask_row=_mask_row(path), vireo_dir=str(tmp_path))
+    options = dict(vireo_dir=str(tmp_path), photo_id=1, mask=original,
+                   mode=mode, radius=0.1, softness=1, strength=0.5)
+    def pixels(result):
+        return np.asarray(local_masks.load_snapshot(str(tmp_path), 1, _local_recipe(result)))
+
+    single = local_masks.correct_snapshot(**options, points=[[0.5, 0.5]])
+    repeated = local_masks.correct_snapshot(**options, points=[[0.5, 0.5]] * 10)
+    assert repeated == single  # sampling/retracing cannot stack opacity
+    after = pixels(single)
+    assert after[100, 100] == expected
+    effect = abs(after[100].astype(int) - initial)
+    assert effect[100] > effect[110] > effect[118] > 0
+    assert effect[123] == 0
+    assert (pixels(original) == initial).all()  # history's pixels stay intact
+    second = local_masks.correct_snapshot(**{**options, 'mask': single}, points=[[0.5, 0.5]])
+    assert abs(int(pixels(second)[100, 100]) - initial) > effect[100]
+
+
+def test_soft_brush_at_photo_edge_does_not_fade_along_clipped_edge(tmp_path):
+    path = str(tmp_path / 'source.png')
+    Image.new('L', (201, 201)).save(path)
+    original = local_masks.create_snapshot(photo_id=1, mask_row=_mask_row(path), vireo_dir=str(tmp_path))
+    corrected = local_masks.correct_snapshot(vireo_dir=str(tmp_path), photo_id=1,
+                                            mask=original, mode='add', radius=0.1,
+                                            points=[[0, 0.5]], softness=1, strength=0.5)
+    pixels = np.asarray(local_masks.load_snapshot(str(tmp_path), 1, _local_recipe(corrected)))
+    assert pixels[100, 0] == 128
+    assert 0 < pixels[100, 15] < pixels[100, 5] < 128

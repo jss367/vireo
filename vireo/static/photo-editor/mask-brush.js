@@ -1,15 +1,62 @@
 // Brush strokes publish new immutable snapshots; recipes and history retain refs.
-var maskBrush = {mode: null, stroke: null, busy: false, sequence: 0};
+var maskBrush = {mode: null, stroke: null, busy: false, sequence: 0, pointer: null, erase: false};
+
+function maskBrushFootprint(img) {
+  var rect = img.getBoundingClientRect();
+  var native = editorNativeRecipeDimensions({}, false);
+  var dims = editorNativeRecipeDimensions(editorState.recipe, editorPreviewAppliesCrop());
+  if (!native || !dims || !rect.width) return null;
+  var size = Number(document.getElementById('maskBrushSize').value);
+  var radius = Math.max(0.001, Math.min(0.25, size / 2 * dims.width / rect.width / Math.min(native.width, native.height)));
+  return {rect: rect, native: native, radius: radius,
+    screenSize: radius * 2 * Math.min(native.width, native.height) * rect.width / dims.width};
+}
+
+function updateMaskBrushCursor() {
+  var cursor = document.getElementById('maskBrushCursor');
+  var pointer = maskBrush.pointer;
+  var img = document.getElementById('editorImg');
+  cursor.hidden = true;
+  if (!maskBrush.mode || !pointer || maskBrush.busy || editorState.loading ||
+      editorState.showBefore || editorState.spacePan || !img.naturalWidth ||
+      document.querySelector('.modal-overlay.open')) return;
+  var footprint = maskBrush.stroke || maskBrushFootprint(img);
+  if (!footprint) return;
+  var rect = footprint.rect;
+  var wrap = document.getElementById('editorCanvasWrap').getBoundingClientRect();
+  if (pointer.x < Math.max(rect.left, wrap.left) || pointer.x > Math.min(rect.right, wrap.right) ||
+      pointer.y < Math.max(rect.top, wrap.top) || pointer.y > Math.min(rect.bottom, wrap.bottom)) return;
+  var softness = maskBrush.stroke ? maskBrush.stroke.softness : Number(document.getElementById('maskBrushSoftness').value) / 100;
+  var mode = maskBrush.stroke ? maskBrush.stroke.mode : (maskBrush.erase ? 'subtract' : maskBrush.mode);
+  cursor.style.left = pointer.x + 'px'; cursor.style.top = pointer.y + 'px';
+  cursor.style.width = cursor.style.height = footprint.screenSize + 'px';
+  cursor.style.setProperty('--brush-soft-inset', (softness * 50) + '%');
+  cursor.classList.toggle('subtract', mode === 'subtract');
+  cursor.hidden = false;
+}
+
+function updateMaskBrushControls() {
+  ['Size', 'Softness', 'Strength'].forEach(function(name) {
+    document.getElementById('maskBrush' + name + 'Value').textContent =
+      document.getElementById('maskBrush' + name).value + (name === 'Size' ? '' : '%');
+  });
+  updateMaskBrushCursor();
+}
 
 function maskBrushStatus(text) {
   document.getElementById('maskBrushStatus').textContent = text;
 }
 
 function cancelMaskBrush() {
+  var stroke = maskBrush.stroke;
   maskBrush.sequence++;
   maskBrush.mode = null;
   maskBrush.stroke = null;
   maskBrush.busy = false;
+  maskBrush.erase = false;
+  maskBrush.pointer = null;
+  var wrap = document.getElementById('editorCanvasWrap');
+  if (stroke && wrap.hasPointerCapture(stroke.pointerId)) wrap.releasePointerCapture(stroke.pointerId);
   document.getElementById('maskBrushCanvas').style.display = 'none';
   syncMaskBrushButtons();
 }
@@ -22,6 +69,7 @@ function syncMaskBrushButtons() {
     button.disabled = maskBrush.busy;
   });
   document.getElementById('editorCanvasWrap').classList.toggle('mask-brushing', !!maskBrush.mode);
+  updateMaskBrushCursor();
   if (window.renderHistoryControls) window.renderHistoryControls();
 }
 
@@ -43,7 +91,7 @@ async function setMaskBrushMode(mode) {
     editorState.maskOverlay = true;
     setButtonActive('maskOverlayBtn', true);
     refreshMaskOverlay();
-    maskBrushStatus('Drag on the photo to ' + (mode === 'add' ? 'add to' : 'subtract from') + ' the subject. Hold Space to pan. Escape finishes.');
+    maskBrushStatus('Drag to ' + (mode === 'add' ? 'add to' : 'subtract from') + ' the subject. Space pans. Escape finishes.');
   } catch (_) {
     if (sequence === maskBrush.sequence) maskBrushStatus('Could not prepare the subject mask. Try again.');
   } finally {
@@ -88,7 +136,9 @@ function addMaskBrushPoint(event) {
   stroke.points.push(point);
   var canvas = document.getElementById('maskBrushCanvas');
   var ctx = canvas.getContext('2d');
-  ctx.strokeStyle = ctx.fillStyle = stroke.mode === 'add' ? 'rgba(80,210,160,0.65)' : 'rgba(255,110,100,0.65)';
+  // The colored path is a stroke guide; the server renders the soft mask on
+  // release. Opacity is applied to the whole canvas, never accumulated per dab.
+  ctx.strokeStyle = ctx.fillStyle = stroke.mode === 'add' ? '#50d2a0' : '#ff6e64';
   ctx.lineWidth = stroke.screenSize;
   ctx.lineCap = 'round';
   var cx = x * canvas.width, cy = y * canvas.height;
@@ -130,7 +180,8 @@ async function finishMaskBrush(event) {
     var data = await safeFetch('/api/photos/' + photoId + '/local-mask/correct', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({mask: mask, mode: stroke.mode,
-        radius: stroke.radius, points: stroke.points}),
+        radius: stroke.radius, points: stroke.points,
+        softness: stroke.softness, strength: stroke.strength}),
     }, {toast: false});
     if (sequence !== maskBrush.sequence || loadSeq !== editorState.loadSeq) return;
     if (recipeAtStart !== recipeKey(editorState.recipe)) {
@@ -166,36 +217,67 @@ async function finishMaskBrush(event) {
     }
     var rect = img.getBoundingClientRect();
     if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) return;
-    var native = editorNativeRecipeDimensions({}, false);
-    if (!native) return;
+    var footprint = maskBrushFootprint(img);
+    if (!footprint) return;
+    var native = footprint.native;
     var recipe = cloneRecipe(editorState.recipe);
     var applyCrop = editorPreviewAppliesCrop();
-    var dims = editorNativeRecipeDimensions(recipe, applyCrop);
-    var screenSize = Number(document.getElementById('maskBrushSize').value);
-    var radius = Math.max(0.001, Math.min(0.25, screenSize / 2 * dims.width / rect.width / Math.min(native.width, native.height)));
-    screenSize = radius * 2 * Math.min(native.width, native.height) * rect.width / dims.width;
+    var screenSize = footprint.screenSize;
+    var radius = footprint.radius;
+    var softness = Number(document.getElementById('maskBrushSoftness').value) / 100;
+    var strength = Number(document.getElementById('maskBrushStrength').value) / 100;
     var canvas = document.getElementById('maskBrushCanvas');
     canvas.width = Math.ceil(rect.width); canvas.height = Math.ceil(rect.height);
     canvas.style.width = rect.width + 'px'; canvas.style.height = rect.height + 'px';
     canvas.style.display = '';
-    maskBrush.stroke = {pointerId: event.pointerId, mode: maskBrush.mode,
+    canvas.style.opacity = 0.65 * strength;
+    maskBrush.erase = event.altKey;
+    maskBrush.pointer = {x: event.clientX, y: event.clientY};
+    maskBrush.stroke = {pointerId: event.pointerId, mode: event.altKey ? 'subtract' : maskBrush.mode,
       rect: rect, recipe: recipe, applyCrop: applyCrop, native: native,
-      radius: radius, screenSize: screenSize, points: []};
+      radius: radius, screenSize: screenSize, points: [], softness: softness, strength: strength};
     wrap.setPointerCapture(event.pointerId);
     addMaskBrushPoint(event);
     syncMaskBrushButtons();
   }, true);
   wrap.addEventListener('pointermove', function(event) {
+    maskBrush.pointer = {x: event.clientX, y: event.clientY};
+    maskBrush.erase = event.altKey;
+    updateMaskBrushCursor();
     if (!maskBrush.stroke || maskBrush.stroke.pointerId !== event.pointerId) return;
     event.preventDefault(); event.stopImmediatePropagation(); addMaskBrushPoint(event);
   }, true);
+  wrap.addEventListener('pointerleave', function() {
+    maskBrush.pointer = null; updateMaskBrushCursor();
+  });
+  wrap.addEventListener('scroll', updateMaskBrushCursor);
+  window.addEventListener('resize', updateMaskBrushCursor);
   ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(function(type) {
     wrap.addEventListener(type, finishMaskBrush, true);
   });
   document.addEventListener('keydown', function(event) {
+    if (!maskBrush.mode || !editorHistoryOwnsEvent(event)) return;
     if (event.key === 'Escape' && maskBrush.mode) {
       cancelMaskBrush(); event.preventDefault(); event.stopImmediatePropagation();
+      return;
+    }
+    if (event.key === 'Alt') { maskBrush.erase = true; updateMaskBrushCursor(); }
+    if (event.code === 'Space') document.getElementById('maskBrushCursor').hidden = true;
+    if (event.metaKey || event.ctrlKey || event.altKey || maskBrush.stroke || maskBrush.busy) return;
+    if (event.key === '[' || event.key === ']') {
+      var size = document.getElementById('maskBrushSize');
+      size.value = Math.max(Number(size.min), Math.min(Number(size.max), Number(size.value) + (event.key === '[' ? -4 : 4)));
+      updateMaskBrushControls();
+      event.preventDefault(); event.stopImmediatePropagation();
     }
   }, true);
-  window.addEventListener('blur', function() { if (maskBrush.stroke) cancelMaskBrush(); });
+  document.addEventListener('keyup', function(event) {
+    if (event.key === 'Alt') { maskBrush.erase = false; updateMaskBrushCursor(); }
+    if (event.code === 'Space') setTimeout(updateMaskBrushCursor, 0);
+  }, true);
+  window.addEventListener('blur', function() {
+    maskBrush.erase = false; maskBrush.pointer = null;
+    if (maskBrush.stroke) cancelMaskBrush();
+    else updateMaskBrushCursor();
+  });
 })();
