@@ -10,7 +10,6 @@
 // returns to the normal drill cards.
 
 var rankSearchTimer = null;   // debounce for the flat-view search input
-var explorerRankReqId = 0;    // token to discard stale /rank responses (race guard)
 
 // Fetch the flat rank list for the current class and switch the body into the
 // flat view. Threads the current class root id from explorerData.root so the
@@ -21,7 +20,7 @@ async function openRankView(rank) {
   clearTimeout(rankSearchTimer);
   if (explorerRankView && explorerRankView.rank === rank) {
     explorerRankView = null;
-    explorerRankReqId++;   // invalidate any in-flight /rank fetch so it can't re-open the view
+    explorerViewReqId++;   // invalidate any in-flight /rank fetch so it can't re-open the view
     renderExplorer();
     return;
   }
@@ -31,16 +30,16 @@ async function openRankView(rank) {
   if (body) body.innerHTML = '<div class="ll-exp-empty">Loading…</div>';
   var url = '/api/life-list/explorer/rank?rank=' + encodeURIComponent(rank)
     + (rootId != null ? ('&root=' + encodeURIComponent(rootId)) : '');
-  var myReq = ++explorerRankReqId;   // claim a token; a later click/class-switch bumps it
+  var myReq = ++explorerViewReqId;   // claim the body token; any later navigation bumps it
   var data;
   try {
     data = await safeFetch(url);
   } catch (e) {
-    if (myReq !== explorerRankReqId) return;   // superseded — leave the newer view alone
+    if (myReq !== explorerViewReqId) return;   // superseded — leave the newer view alone
     if (body) body.innerHTML = '<div class="ll-exp-empty">Failed to load rank breakdown.</div>';
     return;
   }
-  if (myReq !== explorerRankReqId) return;   // a newer click/class-switch won; discard this stale response
+  if (myReq !== explorerViewReqId) return;   // the user navigated away; discard this stale response
   explorerRankView = { rank: rank, data: data, search: '', missingOnly: false, showAll: false };
   renderExplorer();   // full rebuild so the chips pick up .active and the body flips
 }
@@ -80,7 +79,7 @@ function renderRankView() {
   var back = function() {
     clearTimeout(rankSearchTimer);
     explorerRankView = null;
-    explorerRankReqId++;   // invalidate any in-flight /rank fetch so it can't re-open the view
+    explorerViewReqId++;   // invalidate any in-flight /rank fetch so it can't re-open the view
     renderExplorer();
   };
   var bc = document.getElementById('rankBackCrumb');
@@ -251,7 +250,7 @@ function openRankItem(id) {
   var node = explorerFindNode(id);
   if (!lineage || !node) return;
   explorerRankView = null;
-  explorerRankReqId++;   // invalidate any in-flight /rank fetch so it can't re-open the flat view over the drill
+  explorerViewReqId++;   // invalidate any in-flight /rank or /species fetch so it can't replace the drill
   if (node.rank === 'genus') {
     explorerPath = lineage.slice(0, -1);   // drill to the parent family
     renderExplorer();

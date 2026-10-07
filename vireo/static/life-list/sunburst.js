@@ -224,6 +224,7 @@ function wireSunburst(host) {
   svg.addEventListener('click', function(ev) {
     var center = ev.target.closest('.ll-sb-center');
     if (center) {
+      explorerViewReqId++;   // supersede any in-flight /species or /rank fetch
       if (explorerPath.length) explorerPath = explorerPath.slice(0, -1);
       hideTip();
       renderExplorerBody();
@@ -234,6 +235,7 @@ function wireSunburst(host) {
     var id = parseInt(arc.getAttribute('data-id'), 10);
     var lineage = explorerSunburstLineage[id];
     if (!lineage) return;
+    explorerViewReqId++;   // supersede any in-flight /species or /rank fetch
     hideTip();
     // Genus arcs: drilling to a genus loads its species leaf (matches card
     // behavior); anything above genus just sets the path and shows cards.

@@ -96,6 +96,7 @@ function renderExplorerBody() {
         loadExplorerSpecies(node);
       } else {
         explorerPath.push({ id: node.id, name: node.common_name || node.name, rank: node.rank });
+        explorerViewReqId++;   // supersede any in-flight /species or /rank fetch
         renderExplorerBody();
       }
     });

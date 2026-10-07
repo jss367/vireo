@@ -37,9 +37,9 @@ template tag before boot. These are not ES modules and need no bundler.
 State ownership: `currentData` (`list.js`) is the `/api/life-list` payload,
 read by the filters, the cards and the lightbox listeners; per-species paging
 state (`lifeListLoadPromises`, `lifeListLightboxSpecies`) lives in `cards.js`;
-the explorer's drill state lives in `explorer.js`, with the leaf payload in
-`explorer-species.js` and the rank-view request token and search debounce in
-`rank-view.js`.
+the explorer's drill state and its body request token (`explorerViewReqId`)
+live in `explorer.js`, with the leaf payload in `explorer-species.js` and the
+rank-view search debounce in `rank-view.js`.
 
 Keep these request-ordering rules intact when changing this code:
 
@@ -59,10 +59,18 @@ Keep these request-ordering rules intact when changing this code:
   browse when it moved.
 - `siteExportStarting` blocks a second start and keeps the dialog open while
   the job request is in flight.
-- `explorerRankReqId` (`rank-view.js`) drops stale `/explorer/rank` responses.
-  Loading a class, closing the rank view, going back to cards and opening a
-  rank row all bump it. `openRankView()` and going back clear
-  `rankSearchTimer`, and its callback ignores a closed rank view.
+- `explorerViewReqId` (`explorer.js`) drops stale responses for the requests
+  that fill `#explorerBody`: `loadExplorerSpecies()` (`/explorer/species`, a
+  genus's leaf) and `openRankView()` (`/explorer/rank`) each claim it, and a
+  response, or failure, for an older value is discarded. Every navigation that
+  replaces the body bumps it: loading a class, opening or closing a rank view,
+  going back to cards, opening a rank row, a breadcrumb, drilling a card, and a
+  sunburst arc or center click. A new navigation must bump it too. Switching
+  tabs does not: the explorer view stays where it was, so its pending request
+  still belongs to it. `loadExplorerSpecies()` clears `explorerLeafData` when it
+  starts, so returning to a genus whose request was superseded reloads it
+  rather than showing the previous genus's species. `openRankView()` and going
+  back clear `rankSearchTimer`, and its callback ignores a closed rank view.
 - `wireSummaryBar()` binds once on the persistent `#tab-explorer` panel;
   `wireBreadcrumb()` binds on each fresh `#explorerBody`. Re-rendering must not
   add per-render listeners to either.

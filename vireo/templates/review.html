@@ -90,6 +90,15 @@
   .setting-group .review-photo-size-control input[type=range] { width: 110px; }
   .setting-group .review-photo-size-control .value { min-width: 42px; }
 
+  /* ---------- Deep-link filter pills ---------- */
+  .review-filter-pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 0 24px;
+  }
+  .review-filter-pills:empty { display: none; }
+
   /* ---------- Category Tabs ---------- */
   .tabs {
     display: flex;
@@ -849,6 +858,11 @@
     <a href="/classify" style="color:var(--text-ghost);font-size:12px;text-decoration:none;">Back to Classify</a>
   </span>
 </div>
+
+<!-- Deep-link filter pills (?labels_fingerprint=, ?photo_id=), filled by
+     static/review/deep-links.js. Kept directly under the action bar so the
+     narrowing reads as part of the controls, not a footnote under the grid. -->
+<div class="review-filter-pills" id="reviewFilterPills"></div>
 
 {% include '_sync_panel.html' %}
 
