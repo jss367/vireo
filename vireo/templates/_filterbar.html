@@ -135,8 +135,10 @@
 <style>
 .vf-bar [hidden] { display: none !important; }
 .vf-secondary { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; margin-top: 4px; }
-.vf-bar { position: relative; z-index: 30; container: photo-filters / inline-size; }
-.vf-primary { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+.vf-bar { position: relative; z-index: 30; }
+/* Keep viewport-fixed dialogs and toasts outside the query container: older
+   WebViews also apply layout containment to inline-size containers. */
+.vf-primary { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; container: photo-filters / inline-size; }
 .vf-search { position: relative; flex: 1 1 260px; min-width: 240px; }
 .vf-search input { width: 100%; height: 34px; padding: 0 126px 0 30px; border: 1px solid var(--border-secondary); border-radius: 8px; background: var(--bg-input); color: var(--text-primary); }
 .vf-search input:focus { border-color: var(--accent); outline: none; }

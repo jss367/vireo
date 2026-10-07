@@ -945,10 +945,23 @@ def test_visual_strength_control_and_popover_row(live_server, page):
     page.wait_for_function("!VireoFilter.getVisual()", timeout=8000)
 
 
-def test_save_as_collection_and_reopen(live_server, page):
+@pytest.mark.parametrize("width", [1440, 1000])
+@pytest.mark.parametrize("legacy_layout_containment", [False, True], ids=["current", "legacy-containment"])
+def test_save_as_collection_and_reopen(live_server, page, width, legacy_layout_containment):
     """Phase 5: the bar's expression saves as a Collection and reopens into
     the bar as editable chips (rules + visual round-trip)."""
+    page.set_viewport_size({"width": width, "height": 900})
     _open_browse(page, live_server)
+    if legacy_layout_containment:
+        # Older WebViews apply layout containment to size-query containers.
+        # Model that behavior even when CI runs a newer browser engine.
+        page.evaluate("""() => {
+            document.querySelectorAll('#vireoFilterBar, #vireoFilterBar *').forEach(el => {
+                if (getComputedStyle(el).containerType === 'inline-size') {
+                    el.style.contain = 'layout inline-size style';
+                }
+            });
+        }""")
     search = page.locator(".vf-search input")
     search.fill("hawk")
     search.press("Enter")
@@ -959,6 +972,13 @@ def test_save_as_collection_and_reopen(live_server, page):
     page.click(".vf-filters-btn")
     page.click(".vf-save-collection")
     page.wait_for_selector(".vf-save-modal:not([hidden])", timeout=8000)
+    # Fixed overlays belong to the viewport, outside the query container.
+    assert page.locator(".vf-save-backdrop").bounding_box() == pytest.approx(
+        {"x": 0, "y": 0, "width": width, "height": 900}, abs=1,
+    )
+    modal = page.locator(".vf-save-modal").bounding_box()
+    assert modal["x"] + modal["width"] / 2 == pytest.approx(width / 2, abs=1)
+    assert modal["y"] + modal["height"] / 2 == pytest.approx(450, abs=1)
     preview = page.inner_text(".vf-save-preview")
     assert "Visually similar" in preview
     page.fill(".vf-save-name", "Soaring hawks")
@@ -974,6 +994,10 @@ def test_save_as_collection_and_reopen(live_server, page):
     # Clear everything, then reopen the collection into the bar.
     page.click(".vf-done")
     page.click(".vf-clear")
+    expect(page.locator(".vf-toast")).to_be_visible()
+    toast = page.locator(".vf-toast").bounding_box()
+    assert toast["x"] + toast["width"] / 2 == pytest.approx(width / 2, abs=1)
+    assert toast["y"] + toast["height"] == pytest.approx(900 - 22, abs=1)
     page.wait_for_function(
         "!VireoFilter.hasFilters()", timeout=8000,
     )
