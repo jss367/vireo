@@ -65,7 +65,7 @@ function rebuildLocalSection() {
   // Mirror normalize_recipe's canonical region order so the dirty-state
   // comparison stays stable against the server's saved form.
   regions.sort(function(a, b) { return a.region < b.region ? -1 : 1; });
-  if (!regions.length) {
+  if (!regions.length && !(editorState.localMask && editorState.localMask.corrected)) {
     delete editorState.recipe.local;
     // No adjustment retains this snapshot. Preview and the next adjustment
     // must both use the current active generation, including after zeroing
@@ -83,6 +83,7 @@ function rebuildLocalSection() {
     ref: editorState.localMask.ref,
     source_digest: editorState.localMask.source_digest,
   };
+  if (editorState.localMask.corrected) mask.corrected = true;
   if (Math.abs(Number(draft.feather || 0)) > 0.000001) {
     mask.feather = Number(draft.feather);
   }
@@ -101,6 +102,7 @@ function syncLocalControls() {
     editorState.localMask = {
       ref: savedMask.ref,
       source_digest: savedMask.source_digest,
+      corrected: savedMask.corrected === true,
     };
   } else {
     // No saved local recipe: clear the cached snapshot so the next local
@@ -133,7 +135,14 @@ function updateLocalBandVisibility() {
   if (band) band.style.display = available ? '' : 'none';
   if (unavailable) unavailable.style.display = available ? 'none' : '';
   var banner = document.getElementById('localStaleBanner');
-  if (banner) banner.style.display = editorState.localStale ? '' : 'none';
+  if (banner) {
+    banner.style.display = editorState.localStale ? '' : 'none';
+    var corrected = ((editorState.recipe.local || {}).mask || {}).corrected === true;
+    banner.querySelector('span').textContent = corrected
+      ? 'Newer subject mask available. Replacing it clears painted corrections; Undo restores them.'
+      : 'Newer subject mask available';
+    banner.querySelector('button').textContent = corrected ? 'Replace Mask' : 'Update';
+  }
 }
 
 function ensureLocalMask() {
@@ -220,6 +229,7 @@ function setLocalFeather(raw) {
 }
 
 function resetLocal() {
+  cancelMaskBrush();
   editorState.localMaskUpdateSeq++;
   editorState.localDraft = {subject: {}, background: {}, feather: 0};
   delete editorState.recipe.local;
@@ -228,6 +238,7 @@ function resetLocal() {
 }
 
 async function updateLocalMask() {
+  cancelMaskBrush();
   var photoId = editorState.photoId;
   var updateSeq = ++editorState.localMaskUpdateSeq;
   try {

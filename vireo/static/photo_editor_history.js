@@ -73,7 +73,7 @@ function finishEditorHistoryGesture() {
 }
 
 function editorHistoryBlocked() {
-  return editorState.loading || !editorState.photoId ||
+  return editorState.loading || !editorState.photoId || maskBrush.busy || !!maskBrush.stroke ||
     (editorState.localMaskPromise && !editorState.localMask) ||
     Object.keys(editorState.savingPhotoIds).length > 0;
 }
@@ -100,6 +100,7 @@ window.changeLocalHistory = function(operation) {
   if (!source.length) return false;
   editorHistory[operation === 'undo' ? 'redo' : 'undo'].push(editorHistorySnapshot());
   var snapshot = source.pop();
+  cancelMaskBrush();
   // Invalidate pending mask/picker work before restoring the working recipe.
   editorState.localMaskUpdateSeq++;
   editorState.localMaskPromise = null;

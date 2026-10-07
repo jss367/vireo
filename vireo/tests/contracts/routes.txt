@@ -346,6 +346,7 @@ POST         /api/photos/<int:photo_id>/color_label
 POST         /api/photos/<int:photo_id>/edit-recipe/compose
 POST         /api/photos/<int:photo_id>/flag
 POST         /api/photos/<int:photo_id>/keywords
+POST         /api/photos/<int:photo_id>/local-mask/correct
 POST         /api/photos/<int:photo_id>/local-mask/snapshot
 POST         /api/photos/<int:photo_id>/location
 POST         /api/photos/<int:photo_id>/location/text

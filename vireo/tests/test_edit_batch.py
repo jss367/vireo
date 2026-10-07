@@ -326,3 +326,16 @@ def test_batch_write_failure_rolls_back_recipes_sync_and_history(app_and_db, mon
     assert all(db.get_photo_edit_recipe(pid) is None for pid in ids)
     assert not [row for row in db.get_pending_changes() if row['change_type'] == 'edit_recipe']
     assert not [row for row in db.get_edit_history() if row['action_type'] == 'edit_recipe']
+
+
+@pytest.mark.parametrize('regions', [[], [{'region': 'subject', 'adjustments': {'exposure': 1}}]])
+def test_presets_do_not_transfer_manual_mask_corrections(regions):
+    recipe = {'local': {'mask': {'ref': 'a' * 12, 'source_digest': 'test', 'corrected': True},
+                        'regions': regions}}
+    result, fields = decode_preset(encode_preset(recipe, ['local']))
+    assert fields == ['local']
+    if regions:
+        assert 'corrected' not in result['local']['mask']
+        assert result['local']['regions'] == regions
+    else:
+        assert not result or 'local' not in result

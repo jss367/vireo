@@ -425,12 +425,14 @@ body {
   gap: 8px;
   margin: 10px 0;
 }
-#maskOverlayImg {
+#maskOverlayImg, #maskBrushCanvas {
   position: absolute;
   left: 0;
   top: 0;
   pointer-events: none;
 }
+#maskBrushCanvas { z-index: 5; }
+.mask-brushing, .mask-brushing .crop-box { cursor: crosshair; }
 .local-stale-banner {
   display: flex;
   align-items: center;
@@ -672,6 +674,7 @@ body {
       <div class="editor-canvas" id="editorCanvas">
         <img id="editorImg" alt="">
         <img id="maskOverlayImg" alt="" aria-hidden="true" style="display:none">
+        <canvas id="maskBrushCanvas" aria-hidden="true" style="display:none"></canvas>
         <div class="crop-box" id="editorCropBox" tabindex="-1">
           <span class="crop-handle nw" data-handle="nw"></span>
           <span class="crop-handle ne" data-handle="ne"></span>
@@ -1031,6 +1034,17 @@ body {
         <input id="featherRange" type="range" min="0" max="200" step="1" value="0" oninput="setLocalFeather(this.value)">
         <span class="control-value" id="featherValue">0</span>
       </div>
+      <div class="button-row" role="group" aria-label="Correct subject mask">
+        <button class="editor-btn" id="maskBrushAdd" type="button" aria-pressed="false" onclick="setMaskBrushMode('add')">Add to Subject</button>
+        <button class="editor-btn" id="maskBrushSubtract" type="button" aria-pressed="false" onclick="setMaskBrushMode('subtract')">Subtract from Subject</button>
+        <button class="editor-btn" id="maskBrushDone" type="button" onclick="setMaskBrushMode(null)">Done</button>
+      </div>
+      <div class="control-row">
+        <label for="maskBrushSize">Brush size</label>
+        <input id="maskBrushSize" type="range" min="8" max="120" value="40" oninput="document.getElementById('maskBrushSizeValue').textContent=this.value">
+        <span class="control-value" id="maskBrushSizeValue">40</span>
+      </div>
+      <p id="maskBrushStatus" class="local-unavailable-note" aria-live="polite">Paint corrections to the subject mask. Undo restores each stroke.</p>
       <div class="local-region-title">Subject</div>
       <div id="subjectLocalControls"></div>
       <div class="local-region-title">Background</div>
@@ -1187,6 +1201,7 @@ body {
 <script src="/static/photo-editor/adjustments.js"></script>
 <script src="/static/photo-editor/presets.js"></script>
 <script src="/static/photo-editor/local-adjustments.js"></script>
+<script src="/static/photo-editor/mask-brush.js"></script>
 <script src="/static/photo-editor/auto-tone.js"></script>
 <script src="/static/photo-editor/save.js"></script>
 <script src="/static/photo-editor/checkpoints.js"></script>

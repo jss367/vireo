@@ -27,7 +27,7 @@ import tempfile
 import time
 
 from file_replace import replace_file
-from PIL import Image
+from PIL import Image, ImageDraw
 
 log = logging.getLogger(__name__)
 
@@ -150,6 +150,19 @@ def create_snapshot(*, photo_id, mask_row, vireo_dir, native_size=None):
                     "local adjustments need a mask regenerated for this photo"
                 )
 
+    ref = _publish_snapshot(vireo_dir, photo_id, data)
+    # Digest the same bytes we snapshotted — never re-open src_path —
+    # so a mask-extraction job rewriting the live file mid-snapshot
+    # can't cause us to record source_digest over NEW bytes while the
+    # returned ref points at OLD ones.
+    return {
+        "ref": ref,
+        "source_digest": _source_digest_from_bytes(data, mask_row),
+    }
+
+
+def _publish_snapshot(vireo_dir, photo_id, data):
+    """Publish immutable mask bytes; identical content safely shares a file."""
     ref = hashlib.sha1(data).hexdigest()[:12]
     dest = snapshot_path(vireo_dir, photo_id, ref)
     if not os.path.exists(dest):
@@ -193,13 +206,64 @@ def create_snapshot(*, photo_id, mask_row, vireo_dir, native_size=None):
         # it, breaking the just-returned ref.
         with contextlib.suppress(OSError):
             os.utime(dest, None)
-    # Digest the same bytes we snapshotted — never re-open src_path —
-    # so a mask-extraction job rewriting the live file mid-snapshot
-    # can't cause us to record source_digest over NEW bytes while the
-    # returned ref points at OLD ones.
+    return ref
+
+
+def correct_snapshot(*, vireo_dir, photo_id, mask, mode, radius, points):
+    """Paint one bounded stroke in normalized, untransformed photo coordinates.
+
+    Preserve the AI source digest: a manual correction is not a new extraction.
+    Existing snapshots remain untouched so recipe undo can restore them exactly.
+    """
+    if (
+        not isinstance(mask, dict)
+        or not isinstance(mask.get("ref"), str)
+        or not _REF_RE.fullmatch(mask["ref"])
+    ):
+        raise ValueError("invalid edit-mask reference")
+    digest = mask.get("source_digest")
+    if not isinstance(digest, str) or not digest.strip() or len(digest) > 128:
+        raise ValueError("invalid mask source digest")
+    if mode not in ("add", "subtract"):
+        raise ValueError("brush mode must be add or subtract")
+    if (
+        isinstance(radius, bool)
+        or not isinstance(radius, (int, float))
+        or not 0.001 <= radius <= 0.25
+    ):
+        raise ValueError("brush radius must be between 0.001 and 0.25")
+    if not isinstance(points, list) or not 1 <= len(points) <= 2048:
+        raise ValueError("a stroke needs between 1 and 2048 points")
+    for point in points:
+        if not isinstance(point, list) or len(point) != 2 or any(
+            isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 <= v <= 1
+            for v in point
+        ):
+            raise ValueError("brush points must be normalized photo coordinates")
+    path = snapshot_path(vireo_dir, photo_id, mask["ref"])
+    try:
+        with Image.open(path) as source:
+            if source.width * source.height > 16_777_216:
+                raise ValueError("edit mask is too large for brush correction")
+            image = source.convert("L")
+    except (OSError, Image.DecompressionBombError) as exc:
+        raise ValueError("edit-mask snapshot is missing or unreadable") from exc
+    width, height = image.size
+    pixels = [(x * (width - 1), y * (height - 1)) for x, y in points]
+    r = max(0.5, radius * min(width, height))
+    draw = ImageDraw.Draw(image)
+    value = 255 if mode == "add" else 0
+    if len(pixels) > 1:
+        draw.line(pixels, fill=value, width=max(1, round(2 * r)))
+    for x, y in pixels:
+        draw.ellipse((x - r, y - r, x + r, y + r), fill=value)
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    image.close()
     return {
-        "ref": ref,
-        "source_digest": _source_digest_from_bytes(data, mask_row),
+        "ref": _publish_snapshot(vireo_dir, photo_id, buffer.getvalue()),
+        "source_digest": digest,
+        "corrected": True,
     }
 
 

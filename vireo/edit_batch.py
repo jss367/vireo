@@ -195,7 +195,9 @@ def encode_preset(recipe, fields):
         # Presets carry region values, never a reference to a source image's
         # snapshot. A valid sentinel keeps the normal recipe schema reusable;
         # application always replaces it with the target's own snapshot.
+        selected["local"]["mask"].pop("corrected", None)
         selected["local"]["mask"].update(ref="000000000000", source_digest="preset")
+        selected = normalize_recipe(selected) or {}
     return json.dumps({"recipe": selected, "fields": fields}, separators=(",", ":"))
 
 

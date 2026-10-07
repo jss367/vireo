@@ -155,68 +155,130 @@ function previewStatusText(img) {
     : 'Preview uses the current unsaved recipe') + suffix;
 }
 
-function updatePreview() {
-  if (!editorState.photoId) return;
-  var img = document.getElementById('editorImg');
+// Keep one render in flight and one replaceable request. Dragging never builds
+// an unbounded server queue, and obsolete pixels never replace the visible photo.
+var editorPreviewQueue = {active: null, pending: null};
+var EDITOR_INTERACTIVE_SIZE = 1024;
+var EDITOR_PREVIEW_INTERVAL = 60;
+var EDITOR_REFINE_DELAY = 300;
+
+function cancelEditorPreview() {
+  editorState.previewSeq++;
+  clearTimeout(editorState.previewTimer);
+  clearTimeout(editorState.previewRefineTimer);
+  editorState.previewTimer = null;
+  editorState.previewRefineTimer = null;
+  editorPreviewQueue.pending = null;
+}
+
+function presentEditorPreview(request, image) {
+  var old = document.getElementById('editorImg');
+  if (old !== image) {
+    // Move the decoded element into the document: assigning its URL to the old
+    // element could fetch/render the same uncached recipe a second time.
+    Array.from(old.attributes).forEach(function(attr) {
+      if (attr.name !== 'src') image.setAttribute(attr.name, attr.value);
+    });
+    old.replaceWith(image);
+  }
+  var status = previewStatusText(image);
+  if (request.interactive) status = 'Quick preview — detail will refine when editing pauses';
+  document.getElementById('previewStatus').textContent = status;
+  applyEditorZoom();
+  updateEditorZoomControl();
+  renderCropBox();
+  updateHistogramFeedback();
+  refreshMaskOverlay();
+  // Bounded, in-memory timing samples for the browser benchmark. No photo
+  // identifiers, recipes, or pixels are retained in the measurements.
+  editorState.previewTimings.push({
+    interactive: request.interactive,
+    requestedSize: request.size,
+    elapsedMs: performance.now() - request.started,
+  });
+  if (editorState.previewTimings.length > 100) editorState.previewTimings.shift();
+  if (!request.interactive && editorState.zoomMode === 'fit' &&
+      previewRenderSize() !== request.size) schedulePreview();
+}
+
+function pumpEditorPreview() {
+  if (editorPreviewQueue.active || !editorPreviewQueue.pending) return;
+  var request = editorPreviewQueue.pending;
+  editorPreviewQueue.pending = null;
+  editorPreviewQueue.active = request;
+  var image = new Image();
+  function finish(ok) {
+    image.onload = image.onerror = null;
+    editorPreviewQueue.active = null;
+    if (request.seq === editorState.previewSeq && !editorState.loading) {
+      if (ok) presentEditorPreview(request, image);
+      else {
+        document.getElementById('previewStatus').textContent =
+          'Could not render preview — showing the previous image';
+        clearHistogramFeedback();
+      }
+    }
+    pumpEditorPreview();
+  }
+  image.onload = function() { finish(true); };
+  image.onerror = function() { finish(false); };
+  image.src = request.url;
+}
+
+function updatePreview(options) {
+  if (!editorState.photoId || editorState.loading) return;
+  options = options || {};
+  if (!options.scheduled) cancelEditorPreview();
   editorClampCustomZoomToFit();
   updateFeedbackControls();
   var applyCrop = editorPreviewAppliesCrop();
   var recipe = editorState.showBefore
     ? previewRecipeFor(editorState.savedRecipe, applyCrop)
     : previewRecipe();
-  var url = '/photos/' + editorState.photoId + '/edit-preview?size=' + previewRenderSize() +
+  var targetSize = previewRenderSize();
+  var size = options.interactive ? Math.min(EDITOR_INTERACTIVE_SIZE, targetSize) : targetSize;
+  var url = '/photos/' + editorState.photoId + '/edit-preview?size=' + size +
     '&apply_crop=' + (applyCrop ? '1' : '0') +
     '&recipe=' + encodeURIComponent(JSON.stringify(recipe));
+  var request = {
+    url: url, size: size, seq: editorState.previewSeq,
+    interactive: size < targetSize,
+    started: options.started || performance.now(),
+  };
+  var img = document.getElementById('editorImg');
   if (img.getAttribute('src') === url && img.complete && img.naturalWidth) {
-    // Identical render already on screen (e.g. Before toggled twice, or a
-    // slider moved and returned) — skip the server round-trip and just
-    // refresh the dependent UI.
-    editorState.previewSeq++;
-    document.getElementById('previewStatus').textContent = previewStatusText(img);
-    applyEditorZoom();
-    updateEditorZoomControl();
-    renderCropBox();
-    updateHistogramFeedback();
-    refreshMaskOverlay();
+    editorPreviewQueue.pending = null;
+    presentEditorPreview(request, img);
     return;
   }
-  var seq = ++editorState.previewSeq;
-  document.getElementById('previewStatus').textContent = 'Rendering preview...';
-  img.onload = function() {
-    if (seq !== editorState.previewSeq) return;
-    document.getElementById('previewStatus').textContent = previewStatusText(img);
-    applyEditorZoom();
-    updateEditorZoomControl();
-    renderCropBox();
-    updateHistogramFeedback();
-    refreshMaskOverlay();
-    var loadedRenderSize = 0;
-    try {
-      loadedRenderSize = Number(new URL(img.currentSrc || img.src,
-        window.location.href).searchParams.get('size')) || 0;
-    } catch (_) {}
-    // The decoded image can reveal authoritative orientation/aspect geometry
-    // that moves Fit into another source-render bucket. Re-request that tier
-    // instead of indefinitely stretching the just-loaded preview.
-    if (editorState.zoomMode === 'fit' && loadedRenderSize &&
-        previewRenderSize() !== loadedRenderSize) {
-      schedulePreview();
-    }
-  };
-  img.onerror = function() {
-    if (seq !== editorState.previewSeq) return;
-    document.getElementById('previewStatus').textContent = 'Could not render preview';
-    clearHistogramFeedback();
-  };
-  img.src = url;
+  document.getElementById('previewStatus').textContent = request.interactive
+    ? 'Rendering quick preview…' : 'Refining preview…';
+  // Identical active requests can serve a newer revision without re-rendering.
+  if (editorPreviewQueue.active && editorPreviewQueue.active.url === url) {
+    Object.assign(editorPreviewQueue.active, request);
+    editorPreviewQueue.pending = null;
+  } else {
+    editorPreviewQueue.pending = request;
+    pumpEditorPreview();
+  }
 }
 
 function schedulePreview() {
-  if (editorState.previewTimer) clearTimeout(editorState.previewTimer);
-  editorState.previewTimer = setTimeout(function() {
-    editorState.previewTimer = null;
-    updatePreview();
-  }, 140);
+  editorState.previewSeq++; // invalidate at input time, before either timer fires
+  editorState.previewInputAt = performance.now();
+  editorPreviewQueue.pending = null;
+  // Throttle the quick tier: a continuous drag still gets intermediate frames.
+  if (!editorState.previewTimer) {
+    editorState.previewTimer = setTimeout(function() {
+      editorState.previewTimer = null;
+      updatePreview({interactive: true, scheduled: true, started: editorState.previewInputAt});
+    }, EDITOR_PREVIEW_INTERVAL);
+  }
+  clearTimeout(editorState.previewRefineTimer);
+  editorState.previewRefineTimer = setTimeout(function() {
+    editorState.previewRefineTimer = null;
+    updatePreview({scheduled: true, started: editorState.previewInputAt});
+  }, EDITOR_REFINE_DELAY);
 }
 
 function scheduleHistogramRefresh() {
