@@ -4387,9 +4387,6 @@ class _ScanRun:
         # clear-to-NULL — see ``_write_photo_columns``), and by the
         # end-of-scan safety net ``_refill_owners_from_companions``.
         self._pending_companion_fills = {}
-        # Photo ids static collections list, read on the first insert (see
-        # ``_drop_inherited_collection_membership``).
-        self._collection_named_ids = None
 
         # Build folder cache: path -> folder_id
         self.folder_cache = {}
@@ -5783,15 +5780,14 @@ class _ScanRun:
         highest freed id to the next insert, which would then appear in
         that collection. A photo that did not exist until now cannot be a
         member of anything, so any listing of its id is stale. The listed
-        ids are read once per scan, on the first insert.
+        ids are re-read on every insert: another connection can save a
+        collection naming a currently free id between the scan's inserts,
+        and a cached set loaded on the first insert would silently admit
+        the next photo that reuses that id (the startup repair cannot
+        catch it afterwards -- the id then names a valid row).
         """
-        if self._collection_named_ids is None:
-            self._collection_named_ids = (
-                self.db.photo_ids_named_by_collections()
-            )
-        if photo_id not in self._collection_named_ids:
+        if photo_id not in self.db.photo_ids_named_by_collections():
             return
-        self._collection_named_ids.discard(photo_id)
         rewritten = self.db.remap_collection_photo_ids({photo_id: None})
         commit_with_retry(self.db.conn)
         log.warning(

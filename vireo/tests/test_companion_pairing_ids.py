@@ -641,6 +641,63 @@ def test_new_photo_preserves_collection_created_after_insert(
         db.close()
 
 
+def test_new_photo_rechecks_collections_between_scan_inserts(tmp_path):
+    """A collection write between a scan's inserts for a currently free id.
+
+    The scan's per-insert check used to read the named-id set once, on
+    the first insert. If another connection then saved a collection
+    naming an id a later insert reused, that cache missed the entry and
+    the new photo silently joined the stale collection. The repair at
+    startup cannot catch this: the id then names a valid row. Fixing
+    the cache means re-reading on every insert, so the check sees any
+    collection added since the previous insert.
+    """
+    from db import Database
+    from scanner import scan
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    card = tmp_path / "card"
+    card.mkdir()
+    # The scanner inserts both files in one run. The first insert loads
+    # the named-id cache (empty); the external write between the two
+    # inserts names the id the second insert will take.
+    Image.new("RGB", (32, 32), "red").save(card / "first.jpg")
+    Image.new("RGB", (32, 32), "blue").save(card / "second.jpg")
+
+    writer = Database(db_path)
+    writer.conn.execute("PRAGMA busy_timeout=5000")
+    state = {"collection_id": None, "inserts_seen": 0}
+
+    def after_each_insert(photo_id, path):
+        state["inserts_seen"] += 1
+        if state["inserts_seen"] == 1:
+            # Simulate a user saving a collection from stale UI state
+            # between the scan's inserts. The id (next in sequence) is
+            # currently free; the scanner's writer lock has been released
+            # for this item, so the external write lands here.
+            state["collection_id"] = writer.add_collection(
+                "Stale pick",
+                json.dumps(
+                    [{"field": "photo_ids", "value": [photo_id + 1]}],
+                ),
+            )
+
+    try:
+        scan(str(card), db, photo_callback=after_each_insert)
+        ids = _photo_ids_by_filename(db)
+        second_id = ids["second.jpg"]
+        assert state["collection_id"] is not None
+        assert second_id == ids["first.jpg"] + 1
+        # The second insert's id must NOT have inherited the stale
+        # collection entry: the pre-fix scanner silently left it in
+        # because the named-id set was cached once on the first insert.
+        assert _collection_photo_ids(writer, state["collection_id"]) == []
+    finally:
+        writer.close()
+        db.close()
+
+
 def test_jpeg_becomes_its_own_photo_when_its_raw_changes_under_it(
     tmp_path, monkeypatch,
 ):
