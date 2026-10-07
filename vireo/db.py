@@ -4900,7 +4900,7 @@ class Database:
         self._caches_repository().preview_delete(photo_id, size)
 
     def preview_cache_total_bytes(self):
-        """Return total bytes tracked in preview_cache."""
+        """Return total bytes tracked across ordinary and paired previews."""
         return self._caches_repository().preview_total_bytes()
 
     def preview_cache_oldest_first(self):

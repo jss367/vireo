@@ -1,6 +1,6 @@
 """Persistence for the on-disk caches: the preview LRU and offline originals.
 
-Both tables are catalog-wide (keyed by photo id, not by workspace), so the
+The caches are catalog-wide (keyed by photo id, not by workspace), so the
 repository takes no workspace id. The lock-retry helpers
 (``execute_with_retry`` / ``commit_with_retry``) live in ``db``; the façade
 passes them in so this module imports no ``db`` code and a monkeypatch of
@@ -44,7 +44,7 @@ class CachesRepository:
         self.conn.commit()
 
     def preview_total_bytes(self):
-        """Return total bytes tracked in preview_cache."""
+        """Return total bytes tracked across ordinary and paired previews."""
         row = self.conn.execute(
             "SELECT (SELECT COALESCE(SUM(bytes), 0) FROM preview_cache) + "
             "(SELECT COALESCE(SUM(bytes), 0) FROM paired_preview_cache) AS total"

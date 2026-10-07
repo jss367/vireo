@@ -822,7 +822,7 @@ def paired_preview_ready(db, path):
 
 
 def _preview_entries(db):
-    """Both preview families compete in one last-used-first disk quota."""
+    """Both preview families compete in one least-recently-used disk quota."""
     entries = [
         {**dict(row), "filename": f"{row['photo_id']}_{row['size']}.jpg",
          "paired": False}
