@@ -104,7 +104,6 @@ CONN_USE_LIMITS = {
     "web/encounters.py": 13,
     "web/export.py": 3,
     "web/folders.py": 11,
-    "web/highlights.py": 18,
     "web/history.py": 6,
     "web/imports.py": 19,
     "web/inat.py": 3,

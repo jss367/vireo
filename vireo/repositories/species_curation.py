@@ -11,9 +11,15 @@ This module owns the SQL behind the curated-species features:
 - the Life List and taxonomy-explorer reads (candidates, found taxa,
   uncounted identifications, class ancestors, best photo per taxon, locations,
   the per-photo eligible identifications);
-- the two one-shot legacy backfills from ``photo_preferences``.
+- the two one-shot legacy backfills from ``photo_preferences``;
+- the reads ``web/highlights.py`` runs: the Highlights relabel's curation
+  snapshot (``highlight_rows_for_photos`` through
+  ``representative_rows_for_photos``) and the life-list preference
+  eligibility check (``photo_is_life_list_preference_eligible``). Their SQL
+  came from that module unchanged, except that chunking goes through
+  ``self._chunks``.
 
-The method bodies were moved verbatim from ``Database``. The only edits are
+The other method bodies were moved verbatim from ``Database``. The only edits are
 ``self._ws_id()`` -> ``self.workspace_id`` and ``NAME`` -> ``self.NAME`` for
 the ``db`` module helpers and constants listed in ``__init__``; the SQL text,
 parameter order, chunk sizes and commit placement are unchanged.
@@ -1569,3 +1575,141 @@ class SpeciesCurationRepository:
         if _commit:
             self.conn.commit()
         return moved
+
+    # -- relabel and eligibility reads ---------------------------------------------------
+    #
+    # The reads ``web/highlights.py`` runs: the Highlights relabel's curation
+    # snapshot (taken under the prediction-decision lock, before any write)
+    # and the life-list preference eligibility check. Their SQL came from
+    # that module unchanged, except that chunking goes through
+    # ``self._chunks``. None of these writes or commits.
+
+    def highlight_rows_for_photos(self, photo_ids):
+        """The active workspace's ``species_highlights`` rows on ``photo_ids``.
+
+        Rows carry ``species``, ``photo_id`` and ``rank``, in no particular
+        order.
+        """
+        ws = self.workspace_id
+        rows = []
+        for chunk in self._chunks(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows.extend(self.conn.execute(
+                f"""SELECT species, photo_id, rank FROM species_highlights
+                    WHERE workspace_id = ? AND photo_id IN ({placeholders})""",
+                (ws, *chunk),
+            ).fetchall())
+        return rows
+
+    def preference_purposes_for_species(self, species):
+        """The representative-style purposes the active workspace has a
+        ``photo_preferences`` row for under ``species``, for any photo."""
+        return {
+            r["purpose"] for r in self.conn.execute(
+                """SELECT purpose FROM photo_preferences
+                   WHERE workspace_id = ? AND species = ?
+                     AND purpose IN (
+                         'species_representative', 'life_list', 'highlights'
+                     )""",
+                (self.workspace_id, species),
+            ).fetchall()
+        }
+
+    def preference_rows_for_photos(self, photo_ids):
+        """The active workspace's representative-style ``photo_preferences``
+        rows on ``photo_ids``.
+
+        Rows carry ``species``, ``photo_id`` and ``purpose``, in no
+        particular order.
+        """
+        ws = self.workspace_id
+        rows = []
+        for chunk in self._chunks(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows.extend(self.conn.execute(
+                f"""SELECT species, photo_id, purpose FROM photo_preferences
+                    WHERE workspace_id = ?
+                      AND photo_id IN ({placeholders})
+                      AND purpose IN (
+                          'species_representative', 'life_list', 'highlights'
+                      )""",
+                (ws, *chunk),
+            ).fetchall())
+        return rows
+
+    def representative_photo_ids_for_species(self, species, photo_ids):
+        """Which of ``photo_ids`` have a ``species_representatives`` row for
+        ``species`` (representatives are global, so any workspace)."""
+        found = set()
+        for chunk in self._chunks(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            for row in self.conn.execute(
+                f"""SELECT photo_id FROM species_representatives
+                    WHERE species = ? AND photo_id IN ({placeholders})""",
+                (species, *chunk),
+            ).fetchall():
+                found.add(row["photo_id"])
+        return found
+
+    def representative_rows_for_photos(self, photo_ids):
+        """Every ``species_representatives`` row on ``photo_ids``.
+
+        Rows carry ``species``, ``photo_id`` and ``selected_order``, in no
+        particular order. Representatives are global, so this is not
+        workspace-scoped.
+        """
+        rows = []
+        for chunk in self._chunks(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows.extend(self.conn.execute(
+                f"""SELECT species, photo_id, selected_order
+                    FROM species_representatives
+                    WHERE photo_id IN ({placeholders})""",
+                chunk,
+            ).fetchall())
+        return rows
+
+    def photo_is_life_list_preference_eligible(self, species, photo_id):
+        """Whether ``photo_id`` may hold the life-list representative for
+        ``species`` in the active workspace.
+
+        The photo must be non-rejected, visible in the active workspace and
+        in an ``ok``/``partial`` folder, and carry an identification keyword
+        (``is_species`` or ``taxonomy``, linked higher ranks included) named
+        ``species``, or a linked keyword whose taxon has a root
+        identification named ``species``. Ancestor suppression applies, as
+        in :meth:`get_life_list_candidates` and
+        :meth:`get_photo_life_list_species`.
+        """
+        ws = self.workspace_id
+        row = self.conn.execute(
+            f"""SELECT 1
+               FROM photo_keywords pk
+               JOIN keywords k ON k.id = pk.keyword_id
+                AND (k.is_species = 1 OR k.type = 'taxonomy')
+               JOIN photos p ON p.id = pk.photo_id
+                AND COALESCE(p.flag, 'none') != 'rejected'
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
+                AND wf.workspace_id = ?
+               JOIN folders f ON f.id = p.folder_id
+                AND f.status IN ('ok', 'partial')
+               WHERE pk.photo_id = ?
+                 AND (
+                     k.name = ?
+                     OR (
+                         k.taxon_id IS NOT NULL
+                         AND EXISTS (
+                             SELECT 1 FROM keywords root
+                             WHERE root.parent_id IS NULL
+                               AND (root.is_species = 1
+                                    OR root.type = 'taxonomy')
+                               AND root.taxon_id = k.taxon_id
+                               AND root.name = ?
+                         )
+                     )
+                 )
+                 {self._LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE}
+               LIMIT 1""",
+            (ws, photo_id, species, species),
+        ).fetchone()
+        return row is not None

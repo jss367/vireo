@@ -220,6 +220,17 @@ def test_get_photo_filenames_chunks(db, lib):
     assert len(_sql(statements, "SELECT id, folder_id, filename")) == 2
 
 
+def test_get_existing_photo_ids_spans_workspaces_and_chunks(db, lib):
+    assert db.get_existing_photo_ids([]) == set()
+    # Photo rows are global: the foreign workspace's photo exists too.
+    assert db.get_existing_photo_ids([lib["a"], lib["f"], 999999]) == {lib["a"], lib["f"]}
+    ids = [lib["a"]] + list(range(10**6, 10**6 + _SQLITE_PARAM_CHUNK_SIZE))
+    statements = _trace(db)
+    assert db.get_existing_photo_ids(ids) == {lib["a"]}
+    db.conn.set_trace_callback(None)
+    assert len(_sql(statements, "SELECT id FROM photos WHERE id IN")) == 2
+
+
 def test_get_photos_by_ids(db, lib):
     assert db.get_photos_by_ids([]) == {}
     got = db.get_photos_by_ids([lib["a"], lib["b"], 999999])
@@ -1160,7 +1171,8 @@ def test_set_photo_thumb_path_commits(db, lib):
 
 MOVED = [
     "filter_out_wildlife_excluded", "add_photo", "get_photo",
-    "get_photo_filenames", "get_photos_by_ids", "get_photo_folder_statuses",
+    "get_photo_filenames", "get_existing_photo_ids", "get_photos_by_ids",
+    "get_photo_folder_statuses",
     "count_photos", "count_photos_in_workspace", "photos_by_paths",
     "get_calendar_data", "get_photos", "get_photo_ids", "get_photo_position",
     "count_filtered_photos", "get_browse_summary",

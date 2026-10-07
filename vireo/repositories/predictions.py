@@ -9,8 +9,10 @@ This module owns the SQL behind the predictions domain:
   reads Review, Browse, the pipeline and iNat use (``get_rows``,
   ``get_group``, ``get_states``, ``get_top_for_photo``,
   ``get_top_confidences``, ``get_for_photo``, ``get_existing_photo_ids``,
-  and the Pipeline inspector's ``inspector_rows_for_photo``, whose SQL came
-  from ``web/pipeline.py`` unchanged);
+  the Pipeline inspector's ``inspector_rows_for_photo``, whose SQL came
+  from ``web/pipeline.py`` unchanged), and the Highlights confirm/relabel
+  read of each photo's top unrejected prediction (``top_unrejected_by_photo``,
+  SQL unchanged from ``web/highlights.py``, chunked through ``self._chunks``);
 - per-workspace review state (``prediction_review``): status updates, burst
   grouping metadata (``update_group_info`` / ``clear_group_info`` /
   ``ungroup``), the auto-match reconciliation, the raw
@@ -1179,6 +1181,59 @@ class PredictionRepository:
                ORDER BY pr.confidence DESC""",
             (workspace_id, photo_id, min_detector_confidence),
         ).fetchall()
+
+    def top_unrejected_by_photo(self, photo_ids):
+        """``{photo_id: row}``: each photo's highest-confidence prediction
+        the active workspace has not rejected, from its detection's latest
+        label set.
+
+        Rows carry ``photo_id``, ``id``, ``species``, ``confidence``,
+        ``classifier_model``, and the active workspace's ``group_id`` and
+        ``status`` (``pending`` without a review row). Ties on confidence go
+        to the higher id; predictions with no species and photos with no
+        such prediction are absent. Not filtered by workspace visibility or
+        detector confidence. Empty input reads nothing and resolves no
+        workspace.
+        """
+        if not photo_ids:
+            return {}
+        ws = self.workspace_id
+        results = {}
+        for chunk in self._chunks(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self.conn.execute(
+                f"""SELECT photo_id, id, species, confidence, classifier_model,
+                          group_id, status
+                   FROM (
+                       SELECT d.photo_id, pr.id, pr.species, pr.confidence,
+                              pr.classifier_model,
+                              pr_rev.group_id,
+                              COALESCE(pr_rev.status, 'pending') AS status,
+                              ROW_NUMBER() OVER (
+                                  PARTITION BY d.photo_id
+                                  ORDER BY pr.confidence DESC, pr.id DESC
+                              ) AS rn
+                       FROM detections d
+                       JOIN predictions pr ON pr.detection_id = d.id
+                       LEFT JOIN prediction_review pr_rev
+                         ON pr_rev.prediction_id = pr.id
+                        AND pr_rev.workspace_id = ?
+                       WHERE d.photo_id IN ({placeholders})
+                         AND pr.species IS NOT NULL
+                         AND COALESCE(pr_rev.status, 'pending') != 'rejected'
+                         AND pr.labels_fingerprint = (
+                             SELECT pr2.labels_fingerprint FROM predictions pr2
+                             WHERE pr2.detection_id = pr.detection_id
+                               AND pr2.classifier_model = pr.classifier_model
+                             ORDER BY pr2.created_at DESC, pr2.id DESC
+                             LIMIT 1
+                         )
+                   ) WHERE rn = 1""",
+                (ws, *chunk),
+            ).fetchall()
+            for row in rows:
+                results[row["photo_id"]] = row
+        return results
 
     def get_for_photo(self, photo_id, model, labels_fingerprint=None):
         """Return species, confidence, and detection_id for a photo's prediction.

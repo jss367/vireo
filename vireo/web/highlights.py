@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 
-from db import _LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE
 from flask import Blueprint, jsonify, request
 from highlights_payload import (
     apply_highlight_preferences,
@@ -30,7 +29,6 @@ from keyword_normalization import keyword_match_key, normalize_keyword_display
 from photo_payload import attach_edit_recipes
 from services import prediction_decisions
 from services.pending_changes import queue_keyword_add, queue_keyword_remove
-from sql_chunks import chunked
 from web.request_args import request_bool_arg
 
 
@@ -73,10 +71,10 @@ class _HighlightsRelabel:
     def snapshot_curation(self):
         self._snapshot_predicted_species()
         self.ws_id = self.db.require_workspace_id()
-        # Chunk both lookups: photo_ids has no upstream cap
-        # (_parse_highlight_photo_ids just parses the list), so a bulk
-        # relabel of >999 photos would blow SQLITE_MAX_VARIABLE_NUMBER
-        # on the legacy builds this file already guards against.
+        # The per-photo snapshot reads chunk their IN lists: photo_ids has
+        # no upstream cap (_parse_highlight_photo_ids just parses the list),
+        # so a bulk relabel of >999 photos would otherwise blow
+        # SQLITE_MAX_VARIABLE_NUMBER on legacy SQLite builds.
         self._snapshot_current_species()
         self._snapshot_highlights()
         self._snapshot_destination_slots()
@@ -186,32 +184,25 @@ class _HighlightsRelabel:
 
     def _snapshot_highlights(self):
         species = self.species
-        for chunk in chunked(self.photo_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            rows = self.db.conn.execute(
-                f"""SELECT species, photo_id, rank FROM species_highlights
-                    WHERE workspace_id = ? AND photo_id IN ({placeholders})""",
-                (self.ws_id, *chunk),
-            ).fetchall()
-            for row in rows:
-                old_species_name = row["species"]
-                if old_species_name == species:
-                    self.hl_dst_preexisting.add(row["photo_id"])
-                    continue
-                if not self._accept_curation_source(
-                    row["photo_id"], old_species_name
-                ):
-                    continue
-                self.highlight_renames.setdefault(old_species_name, []).append(
-                    row["photo_id"]
-                )
-                # Snapshot the original rank so undo can restore each
-                # highlighted photo at its original position instead of
-                # dumping it at MAX(rank)+1 (see _restore_relabel_curation).
-                self.hl_prev_by_pid.setdefault(row["photo_id"], []).append({
-                    "species": old_species_name,
-                    "rank": row["rank"],
-                })
+        for row in self.db.get_species_highlight_rows_for_photos(self.photo_ids):
+            old_species_name = row["species"]
+            if old_species_name == species:
+                self.hl_dst_preexisting.add(row["photo_id"])
+                continue
+            if not self._accept_curation_source(
+                row["photo_id"], old_species_name
+            ):
+                continue
+            self.highlight_renames.setdefault(old_species_name, []).append(
+                row["photo_id"]
+            )
+            # Snapshot the original rank so undo can restore each
+            # highlighted photo at its original position instead of
+            # dumping it at MAX(rank)+1 (see _restore_relabel_curation).
+            self.hl_prev_by_pid.setdefault(row["photo_id"], []).append({
+                "species": old_species_name,
+                "rank": row["rank"],
+            })
         # Backfill dst_existed onto each entry now that the target-species
         # pass has finished (row order within the query is unspecified).
         for pid, entries in self.hl_prev_by_pid.items():
@@ -230,16 +221,7 @@ class _HighlightsRelabel:
         # delete it. Un-gating the old-species restore from a destination
         # row lookup lets undo recover representatives even when the
         # relabel collided with another photo holding the slot.
-        self.pref_dst_taken = {
-            r["purpose"] for r in db.conn.execute(
-                """SELECT purpose FROM photo_preferences
-                   WHERE workspace_id = ? AND species = ?
-                     AND purpose IN (
-                         'species_representative', 'life_list', 'highlights'
-                     )""",
-                (self.ws_id, species),
-            ).fetchall()
-        }
+        self.pref_dst_taken = db.get_photo_preference_purposes_for_species(species)
         # Photos that already had a (species=<target>, photo_id) row in
         # species_representatives before the relabel.
         # rename_species_representatives_species uses INSERT OR IGNORE, so
@@ -248,68 +230,45 @@ class _HighlightsRelabel:
         # both preference-covered moves (via pref_prev.rep_dst_existed in
         # _snapshot_preferences) and rep-only moves (via
         # rep_prev.dst_existed).
-        for chunk in chunked(self.photo_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            for row in db.conn.execute(
-                f"""SELECT photo_id FROM species_representatives
-                    WHERE species = ? AND photo_id IN ({placeholders})""",
-                (species, *chunk),
-            ).fetchall():
-                self.rep_dst_preexisting.add(row["photo_id"])
+        self.rep_dst_preexisting.update(
+            db.get_representative_photo_ids_for_species(species, self.photo_ids)
+        )
         # Snapshot the original selected_order for every existing
         # species_representatives row on the retagged photos. Undo restores
         # each row at its captured order rather than the fresh MAX+1 that
         # _set_global_species_representative would assign — so undoing a
         # relabel of a secondary representative does not promote it above
         # the pre-existing primary for that species.
-        for chunk in chunked(self.photo_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            for row in db.conn.execute(
-                f"""SELECT species, photo_id, selected_order
-                    FROM species_representatives
-                    WHERE photo_id IN ({placeholders})""",
-                chunk,
-            ).fetchall():
-                self.rep_selected_order_by_pid_species[
-                    (row["photo_id"], row["species"])
-                ] = row["selected_order"]
+        for row in db.get_species_representative_rows_for_photos(self.photo_ids):
+            self.rep_selected_order_by_pid_species[
+                (row["photo_id"], row["species"])
+            ] = row["selected_order"]
 
     def _snapshot_preferences(self):
         species = self.species
-        for chunk in chunked(self.photo_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            rows = self.db.conn.execute(
-                f"""SELECT species, photo_id, purpose FROM photo_preferences
-                    WHERE workspace_id = ?
-                      AND photo_id IN ({placeholders})
-                      AND purpose IN (
-                          'species_representative', 'life_list', 'highlights'
-                      )""",
-                (self.ws_id, *chunk),
-            ).fetchall()
-            for row in rows:
-                old_species_name = row["species"]
-                if old_species_name == species:
-                    continue
-                if not self._accept_curation_source(
-                    row["photo_id"], old_species_name
-                ):
-                    continue
-                self.preference_renames.setdefault(old_species_name, []).append(
-                    row["photo_id"]
-                )
-                self.pref_prev_by_pid.setdefault(row["photo_id"], []).append({
-                    "purpose": row["purpose"],
-                    "species": old_species_name,
-                    "dst_existed": row["purpose"] in self.pref_dst_taken,
-                    "rep_dst_existed": row["photo_id"] in self.rep_dst_preexisting,
-                    "rep_selected_order": self.rep_selected_order_by_pid_species.get(
-                        (row["photo_id"], old_species_name)
-                    ),
-                })
-                self.pref_covered_by_pid_species.add(
+        for row in self.db.get_photo_preference_rows_for_photos(self.photo_ids):
+            old_species_name = row["species"]
+            if old_species_name == species:
+                continue
+            if not self._accept_curation_source(
+                row["photo_id"], old_species_name
+            ):
+                continue
+            self.preference_renames.setdefault(old_species_name, []).append(
+                row["photo_id"]
+            )
+            self.pref_prev_by_pid.setdefault(row["photo_id"], []).append({
+                "purpose": row["purpose"],
+                "species": old_species_name,
+                "dst_existed": row["purpose"] in self.pref_dst_taken,
+                "rep_dst_existed": row["photo_id"] in self.rep_dst_preexisting,
+                "rep_selected_order": self.rep_selected_order_by_pid_species.get(
                     (row["photo_id"], old_species_name)
-                )
+                ),
+            })
+            self.pref_covered_by_pid_species.add(
+                (row["photo_id"], old_species_name)
+            )
 
     def _snapshot_representatives(self):
         """Global species_representatives moves. Representatives are global
@@ -325,33 +284,26 @@ class _HighlightsRelabel:
         ``_snapshot_current_species``).
         """
         species = self.species
-        for chunk in chunked(self.photo_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            rows = self.db.conn.execute(
-                f"""SELECT species, photo_id FROM species_representatives
-                    WHERE photo_id IN ({placeholders})""",
-                chunk,
-            ).fetchall()
-            for row in rows:
-                old_species_name = row["species"]
-                pid = row["photo_id"]
-                if old_species_name == species:
-                    continue
-                # rename_photo_preferences_species already migrates
-                # species_representatives for pids in preference_renames,
-                # so skip anything the preference pass will cover.
-                if (pid, old_species_name) in self.pref_covered_by_pid_species:
-                    continue
-                if not self._accept_curation_source(pid, old_species_name):
-                    continue
-                self.representative_renames.setdefault(old_species_name, []).append(pid)
-                self.rep_prev_by_pid.setdefault(pid, []).append({
-                    "species": old_species_name,
-                    "dst_existed": pid in self.rep_dst_preexisting,
-                    "selected_order": self.rep_selected_order_by_pid_species.get(
-                        (pid, old_species_name)
-                    ),
-                })
+        for row in self.db.get_species_representative_rows_for_photos(self.photo_ids):
+            old_species_name = row["species"]
+            pid = row["photo_id"]
+            if old_species_name == species:
+                continue
+            # rename_photo_preferences_species already migrates
+            # species_representatives for pids in preference_renames,
+            # so skip anything the preference pass will cover.
+            if (pid, old_species_name) in self.pref_covered_by_pid_species:
+                continue
+            if not self._accept_curation_source(pid, old_species_name):
+                continue
+            self.representative_renames.setdefault(old_species_name, []).append(pid)
+            self.rep_prev_by_pid.setdefault(pid, []).append({
+                "species": old_species_name,
+                "dst_existed": pid in self.rep_dst_preexisting,
+                "selected_order": self.rep_selected_order_by_pid_species.get(
+                    (pid, old_species_name)
+                ),
+            })
 
     def adopt_stored_spelling(self, kid):
         """Use the stored spelling from here on: add_keyword applies the
@@ -359,11 +311,9 @@ class _HighlightsRelabel:
         value, and the queued sidecar changes / curation renames /
         history payload must match the row actually tagged.
         """
-        stored = self.db.conn.execute(
-            "SELECT name FROM keywords WHERE id = ?", (kid,)
-        ).fetchone()
-        if stored and stored["name"]:
-            self.species = stored["name"]
+        stored = self.db.get_keyword_name(kid)
+        if stored:
+            self.species = stored
 
     def retag_photos(self, kid):
         for pid in self.photo_ids:
@@ -376,17 +326,7 @@ class _HighlightsRelabel:
             db.update_prediction_status(pred["id"], "rejected", _commit=False)
             self.rejected_prediction_ids.append(pred["id"])
 
-        old_rows = db.conn.execute(
-            """SELECT k.id, k.name, k.is_species, k.type
-               FROM photo_keywords pk
-               JOIN keywords k ON k.id = pk.keyword_id
-               LEFT JOIN taxa t ON t.id = k.taxon_id
-               WHERE pk.photo_id = ?
-                 AND (k.is_species = 1 OR k.type = 'taxonomy')
-                 AND (t.rank = 'species' OR t.rank IS NULL)
-               ORDER BY k.is_species DESC, pk.rowid DESC""",
-            (pid,),
-        ).fetchall()
+        old_rows = db.get_species_rank_keywords_for_photo(pid)
         old_primary = old_rows[0] if old_rows else None
         if old_primary is not None:
             self.has_old_species = True
@@ -521,17 +461,7 @@ def create_highlights_blueprint(get_db, json_error):
         return photo_ids, None
 
     def _validate_highlight_photo_ids(db, photo_ids):
-        found_ids = set()
-        batch_size = 800
-        for i in range(0, len(photo_ids), batch_size):
-            chunk = photo_ids[i:i + batch_size]
-            placeholders = ",".join("?" for _ in chunk)
-            found_ids.update(
-                r["id"] for r in db.conn.execute(
-                    f"SELECT id FROM photos WHERE id IN ({placeholders})",
-                    chunk,
-                ).fetchall()
-            )
+        found_ids = db.get_existing_photo_ids(photo_ids)
         missing = [pid for pid in photo_ids if pid not in found_ids]
         if missing:
             return f"Unknown photo_ids: {missing}", 404
@@ -542,49 +472,6 @@ def create_highlights_blueprint(get_db, json_error):
                 403,
             )
         return None, None
-
-    def _highlight_top_predictions(db, photo_ids):
-        if not photo_ids:
-            return {}
-        ws = db.require_workspace_id()
-        results = {}
-        batch_size = 800
-        for i in range(0, len(photo_ids), batch_size):
-            chunk = photo_ids[i:i + batch_size]
-            placeholders = ",".join("?" for _ in chunk)
-            rows = db.conn.execute(
-                f"""SELECT photo_id, id, species, confidence, classifier_model,
-                          group_id, status
-                   FROM (
-                       SELECT d.photo_id, pr.id, pr.species, pr.confidence,
-                              pr.classifier_model,
-                              pr_rev.group_id,
-                              COALESCE(pr_rev.status, 'pending') AS status,
-                              ROW_NUMBER() OVER (
-                                  PARTITION BY d.photo_id
-                                  ORDER BY pr.confidence DESC, pr.id DESC
-                              ) AS rn
-                       FROM detections d
-                       JOIN predictions pr ON pr.detection_id = d.id
-                       LEFT JOIN prediction_review pr_rev
-                         ON pr_rev.prediction_id = pr.id
-                        AND pr_rev.workspace_id = ?
-                       WHERE d.photo_id IN ({placeholders})
-                         AND pr.species IS NOT NULL
-                         AND COALESCE(pr_rev.status, 'pending') != 'rejected'
-                         AND pr.labels_fingerprint = (
-                             SELECT pr2.labels_fingerprint FROM predictions pr2
-                             WHERE pr2.detection_id = pr.detection_id
-                               AND pr2.classifier_model = pr.classifier_model
-                             ORDER BY pr2.created_at DESC, pr2.id DESC
-                             LIMIT 1
-                         )
-                   ) WHERE rn = 1""",
-                (ws, *chunk),
-            ).fetchall()
-            for row in rows:
-                results[row["photo_id"]] = row
-        return results
 
     def _parse_photo_preference_body(body, require_photo=True):
         purpose = body.get("purpose", "")
@@ -628,7 +515,6 @@ def create_highlights_blueprint(get_db, json_error):
         }, None
 
     def _photo_can_be_life_list_preference(db, species, photo_id):
-        ws = db.require_workspace_id()
         # Accept a hierarchy leaf whose taxon links back to a root
         # identification with the same curation name. See the matching
         # comment on Database.get_species_representative_lists: after
@@ -647,37 +533,7 @@ def create_highlights_blueprint(get_db, json_error):
         # ``Aves`` there would render as ``is_current_photo`` false on
         # the next read (see :meth:`get_species_representative_lists`)
         # and leave a curation row nothing else considers eligible.
-        row = db.conn.execute(
-            f"""SELECT 1
-               FROM photo_keywords pk
-               JOIN keywords k ON k.id = pk.keyword_id
-                AND (k.is_species = 1 OR k.type = 'taxonomy')
-               JOIN photos p ON p.id = pk.photo_id
-                AND COALESCE(p.flag, 'none') != 'rejected'
-               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-                AND wf.workspace_id = ?
-               JOIN folders f ON f.id = p.folder_id
-                AND f.status IN ('ok', 'partial')
-               WHERE pk.photo_id = ?
-                 AND (
-                     k.name = ?
-                     OR (
-                         k.taxon_id IS NOT NULL
-                         AND EXISTS (
-                             SELECT 1 FROM keywords root
-                             WHERE root.parent_id IS NULL
-                               AND (root.is_species = 1
-                                    OR root.type = 'taxonomy')
-                               AND root.taxon_id = k.taxon_id
-                               AND root.name = ?
-                         )
-                     )
-                 )
-                 {_LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE}
-               LIMIT 1""",
-            (ws, photo_id, species, species),
-        ).fetchone()
-        return row is not None
+        return db.is_photo_life_list_preference_eligible(species, photo_id)
 
     def _photo_can_be_highlights_preference(db, species, photo_id):
         candidates = db.get_highlights_candidates(None, min_quality=0.0)
@@ -738,7 +594,7 @@ def create_highlights_blueprint(get_db, json_error):
             rank = db.promote_species_highlight(
                 parsed["species"], parsed["photo_id"], _commit=False
             )
-        db.conn.commit()
+        db.commit()
         return jsonify({"ok": True, **parsed, "highlight_rank": rank})
 
     @blueprint.route("/api/photo-preferences", methods=["DELETE"])
@@ -894,23 +750,8 @@ def create_highlights_blueprint(get_db, json_error):
 
     def _highlights_confirm_under_lock(db, photo_ids):
         try:
-            top_predictions = _highlight_top_predictions(db, photo_ids)
-            accepted_photo_ids = set()
-            for i in range(0, len(photo_ids), 800):
-                chunk = photo_ids[i:i + 800]
-                placeholders = ",".join("?" for _ in chunk)
-                accepted_photo_ids.update(
-                    row["photo_id"] for row in db.conn.execute(
-                        f"""SELECT DISTINCT pk.photo_id
-                            FROM photo_keywords pk
-                            JOIN keywords k ON k.id = pk.keyword_id
-                            LEFT JOIN taxa t ON t.id = k.taxon_id
-                            WHERE pk.photo_id IN ({placeholders})
-                              AND (k.is_species = 1 OR k.type = 'taxonomy')
-                              AND (t.rank = 'species' OR t.rank IS NULL)""",
-                        chunk,
-                    ).fetchall()
-                )
+            top_predictions = db.get_top_unrejected_predictions_by_photo(photo_ids)
+            accepted_photo_ids = db.get_photo_ids_with_species_rank_keyword(photo_ids)
             processed = set()
             confirmable_photo_ids_by_key = {}
             for pid in photo_ids:
@@ -997,9 +838,9 @@ def create_highlights_blueprint(get_db, json_error):
                     _commit=False,
                 )
                 affected.extend(items)
-            db.conn.commit()
+            db.commit()
         except Exception:
-            db.conn.rollback()
+            db.rollback()
             raise
         db._prune_edit_history()
         return jsonify({"ok": True, "affected": affected, "skipped": skipped})
@@ -1046,22 +887,17 @@ def create_highlights_blueprint(get_db, json_error):
         # with type NOT IN ('taxonomy', 'general') are excluded (matching
         # add_keyword) so a deliberate individual/location/genre homonym
         # doesn't misroute the target.
-        target_row = db.conn.execute(
-            "SELECT name FROM keywords WHERE name = ? COLLATE NOCASE "
-            "AND parent_id IS NULL AND type IN ('taxonomy', 'general') "
-            "ORDER BY (type = 'taxonomy') DESC, id ASC LIMIT 1",
-            (species,),
-        ).fetchone()
-        if target_row and target_row["name"]:
-            species = target_row["name"]
+        target = db.get_top_level_species_keyword(species)
+        if target and target["name"]:
+            species = target["name"]
         error, status = _validate_highlight_photo_ids(db, photo_ids)
         if error:
             return json_error(error, status)
         # Relabelling rejects each photo's top prediction, so it is a
         # prediction-decision route and takes the shared writer lock. Taken
-        # here, before ``_highlight_top_predictions`` — the read that picks
-        # *which* row gets rejected is exactly the read that must not race a
-        # concurrent decision on that row.
+        # here, before ``get_top_unrejected_predictions_by_photo`` — the read
+        # that picks *which* row gets rejected is exactly the read that must
+        # not race a concurrent decision on that row.
         return prediction_decisions.under_prediction_decision_lock(
             db, lambda: _highlights_relabel_under_lock(db, photo_ids, species),
             json_error=json_error,
@@ -1069,7 +905,8 @@ def create_highlights_blueprint(get_db, json_error):
 
     def _highlights_relabel_under_lock(db, photo_ids, species):
         relabel = _HighlightsRelabel(
-            db, photo_ids, species, _highlight_top_predictions(db, photo_ids),
+            db, photo_ids, species,
+            db.get_top_unrejected_predictions_by_photo(photo_ids),
         )
         relabel.snapshot_curation()
         try:
@@ -1078,9 +915,9 @@ def create_highlights_blueprint(get_db, json_error):
             relabel.retag_photos(kid)
             relabel.rename_curation()
             relabel.record_relabel_edit(kid)
-            db.conn.commit()
+            db.commit()
         except Exception:
-            db.conn.rollback()
+            db.rollback()
             raise
         db._prune_edit_history()
         return jsonify({

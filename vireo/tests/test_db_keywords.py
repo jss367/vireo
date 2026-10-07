@@ -536,6 +536,42 @@ def test_get_photo_ids_with_keyword_and_chunks(db, lib):
     assert len([s for s in dict.fromkeys(statements) if "photo_id IN" in s]) == 2
 
 
+def test_species_rank_keywords_for_photo(db, lib):
+    p0, p1 = lib["p"][0], lib["p"][1]
+    unlinked = _raw_kw(db, "Mystery", kw_type="taxonomy")
+    species = _raw_kw(db, "American Robin", kw_type="taxonomy", is_species=1, taxon_id=3)
+    genus = _raw_kw(db, "Turdus", kw_type="taxonomy", taxon_id=2)  # genus rank
+    flagged = _raw_kw(db, "Old Species", is_species=1)  # general, is_species
+    plain = _raw_kw(db, "Sunset")
+    for kid in (unlinked, species, genus, flagged, plain):
+        db.tag_photo(p0, kid)
+    rows = db.get_species_rank_keywords_for_photo(p0)
+    # is_species rows first, then most recently tagged first.
+    assert [tuple(r) for r in rows] == [
+        (flagged, "Old Species", 1, "general"),
+        (species, "American Robin", 1, "taxonomy"),
+        (unlinked, "Mystery", 0, "taxonomy"),
+    ]
+    assert db.get_species_rank_keywords_for_photo(p1) == []
+
+
+def test_photo_ids_with_species_rank_keyword(db, lib):
+    p0, p1, p2, p3 = lib["p"]
+    db.tag_photo(p0, _raw_kw(db, "American Robin", kw_type="taxonomy", taxon_id=3))
+    db.tag_photo(p0, _raw_kw(db, "Mystery", is_species=1))
+    db.tag_photo(p1, _raw_kw(db, "Turdus", kw_type="taxonomy", taxon_id=2))
+    db.tag_photo(p2, _raw_kw(db, "Sunset"))
+    db.tag_photo(p3, _raw_kw(db, "Unlinked", kw_type="taxonomy"))
+    assert db.get_photo_ids_with_species_rank_keyword([p0, p1, p2, p3]) == {p0, p3}
+    assert db.get_photo_ids_with_species_rank_keyword([]) == set()
+
+    statements = _trace(db)
+    padded = list(range(10_000, 10_800)) + [p3]
+    assert db.get_photo_ids_with_species_rank_keyword(padded) == {p3}
+    db.conn.set_trace_callback(None)
+    assert len([s for s in dict.fromkeys(statements) if "pk.photo_id IN" in s]) == 2
+
+
 def test_species_keywords_and_equivalents(db, lib):
     p0, p1, p2, p3 = lib["p"]
     root = db.add_keyword("American Robin", is_species=True)
@@ -1081,6 +1117,8 @@ _DELEGATING_KEYWORD_METHODS = (
     "get_top_level_species_keyword",
     "get_keyword_row",
     "get_photo_ids_with_keyword",
+    "get_species_rank_keywords_for_photo",
+    "get_photo_ids_with_species_rank_keyword",
     "get_photo_keywords",
     "get_keywords_for_photos",
     "get_species_keywords_for_photos",

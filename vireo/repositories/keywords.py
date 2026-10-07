@@ -1279,6 +1279,47 @@ class KeywordRepository:
             tagged.update(row["photo_id"] for row in rows)
         return tagged
 
+    def species_rank_keywords_for_photo(self, photo_id):
+        """A photo's species-rank identification keywords.
+
+        Rows (``id``, ``name``, ``is_species``, ``type``) for keywords that are
+        ``is_species`` or ``taxonomy`` and linked to a ``species``-rank taxon or
+        to none; ``is_species`` rows first, then most recently tagged first.
+        """
+        return self.conn.execute(
+            """SELECT k.id, k.name, k.is_species, k.type
+               FROM photo_keywords pk
+               JOIN keywords k ON k.id = pk.keyword_id
+               LEFT JOIN taxa t ON t.id = k.taxon_id
+               WHERE pk.photo_id = ?
+                 AND (k.is_species = 1 OR k.type = 'taxonomy')
+                 AND (t.rank = 'species' OR t.rank IS NULL)
+               ORDER BY k.is_species DESC, pk.rowid DESC""",
+            (photo_id,),
+        ).fetchall()
+
+    def photo_ids_with_species_rank_keyword(self, photo_ids):
+        """Which of ``photo_ids`` carry a species-rank identification keyword.
+
+        Same keyword filter as :meth:`species_rank_keywords_for_photo`.
+        """
+        found = set()
+        for chunk in self._chunks(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            found.update(
+                row["photo_id"] for row in self.conn.execute(
+                    f"""SELECT DISTINCT pk.photo_id
+                        FROM photo_keywords pk
+                        JOIN keywords k ON k.id = pk.keyword_id
+                        LEFT JOIN taxa t ON t.id = k.taxon_id
+                        WHERE pk.photo_id IN ({placeholders})
+                          AND (k.is_species = 1 OR k.type = 'taxonomy')
+                          AND (t.rank = 'species' OR t.rank IS NULL)""",
+                    chunk,
+                ).fetchall()
+            )
+        return found
+
     def get_for_photo(self, photo_id):
         """Return all keywords for a photo."""
         return self.conn.execute(
