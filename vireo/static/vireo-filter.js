@@ -1502,10 +1502,27 @@
   function valuePickerState(node) {
     let picker = valuePickerStates.get(node);
     if (!picker || picker.field !== node.field) {
-      picker = { field: node.field, query: '', open: false, values: null, error: false, request: 0, pending: false, collapsed: new Set() };
+      picker = { field: node.field, query: '', open: false, values: null, scopedPaths: null, scopeKey: null, error: false, request: 0, pending: false, collapsed: new Set() };
       valuePickerStates.set(node, picker);
     }
     return picker;
+  }
+
+  // Stringified representation of everything the picker's value request
+  // depends on, used by ``loadValuePickers`` to detect that an already-
+  // fetched list is stale after a sibling rule change (Codex review
+  // r4209098966). The query is only part of the key for non-folder
+  // pickers: the folder picker fetches a single tree and filters it
+  // client-side, so typing in its search box must not invalidate the
+  // cache.
+  function pickerScopeKey(node, picker) {
+    const context = state.getContextRules ? state.getContextRules() : [];
+    const scopedRules = composeScopeRules(context, rulesWithout(node));
+    const scope = state.getScope ? state.getScope() : null;
+    const visual = (state.visual && !state.muted) ? state.visual : null;
+    const parts = { f: node.field, rules: scopedRules, scope, visual };
+    if (node.field !== 'folder') parts.q = picker.query.trim();
+    return JSON.stringify(parts);
   }
 
   function usesValuePicker(node) {
@@ -1526,6 +1543,17 @@
 
   function renderFolderChoices(node, path, picker) {
     const folders = picker.values || [];
+    // ``scopedPaths`` is the subset of workspace folder paths that have at
+    // least one photo matching the current sibling rules, visual clause
+    // and page scope (folder/collection) — subtree-aggregated server-side.
+    // Null means scope is inactive and every folder is reachable. Hiding
+    // out-of-scope folders stops a folder-scoped Browse view from offering
+    // picks that would silently empty the grid (Codex review r4209098975).
+    const scopedPaths = picker.scopedPaths;
+    // A folder the user has already picked must stay visible in the tree
+    // even when the current scope would otherwise hide it, so they can
+    // uncheck it in place instead of hunting for a pill at the top.
+    const selectedPaths = new Set(extensionValues(node));
     const byId = new Map(folders.map((f) => [f.id, f]));
     const children = new Map();
     const visible = new Set();
@@ -1534,6 +1562,10 @@
       const parent = byId.has(f.parent_id) ? f.parent_id : null;
       if (!children.has(parent)) children.set(parent, []);
       children.get(parent).push(f);
+    });
+    folders.forEach((f) => {
+      const inScope = !scopedPaths || scopedPaths.has(f.path);
+      if (!inScope && !selectedPaths.has(f.path)) return;
       if (!q || f.path.toLowerCase().includes(q)) {
         let current = f;
         while (current && !visible.has(current.id)) {
@@ -1572,7 +1604,13 @@
     if (picker.error) return 'Could not load choices.';
     if (!picker.values.length) return picker.query ? 'No matching choices.' : 'No choices in this workspace.';
     if (node.field === 'folder') {
-      if (picker.query.trim() && !picker.values.some((f) => f.path.toLowerCase().includes(picker.query.trim().toLowerCase()))) return 'No matching folders.';
+      const q = picker.query.trim().toLowerCase();
+      const scoped = picker.scopedPaths;
+      const inScope = scoped
+        ? picker.values.filter((f) => scoped.has(f.path))
+        : picker.values;
+      if (!inScope.length) return 'No folders in the current scope.';
+      if (q && !inScope.some((f) => f.path.toLowerCase().includes(q))) return 'No matching folders.';
       return 'Includes the selected folder and its subfolders.';
     }
     return picker.values.length >= 50 ? 'Showing up to 50 choices. Search to narrow the list.' : '';
@@ -1614,44 +1652,94 @@
     picker.pending = true;
     picker.error = false;
     refreshPickerOptions(node, picker);
-    let url;
-    if (node.field === 'folder') {
-      url = '/api/folders';
-    } else {
+    // Snapshot the scope key at request time so a sibling change
+    // mid-request still forces a refetch on the next render.
+    const scopeKey = pickerScopeKey(node, picker);
+    const context = state.getContextRules ? state.getContextRules() : [];
+    const scopedRules = composeScopeRules(context, rulesWithout(node));
+    const scope = state.getScope ? state.getScope() : null;
+    const hasVisual = state.visual && !state.muted;
+    const scopeActive = (scopedRules.rules || []).length > 0
+      || (scope && (scope.folder_id != null || scope.collection_id != null))
+      || hasVisual;
+    const scopeParams = () => {
       const params = new URLSearchParams({ field: node.field, limit: '50', q: picker.query.trim() });
-      // Mirror the typeahead's scope (other rules, visual, page scope) so a
-      // folder- or collection-scoped Browse view lists values present in
-      // the current grid. Without these the global 50-value cap can omit
-      // values that are actually in scope (Codex review r4208710522).
-      const context = state.getContextRules ? state.getContextRules() : [];
-      const scopedRules = composeScopeRules(context, rulesWithout(node));
       params.set('rules', JSON.stringify(scopedRules));
-      if (state.visual && !state.muted) params.set('visual', JSON.stringify(state.visual));
-      const scope = state.getScope ? state.getScope() : null;
+      if (hasVisual) params.set('visual', JSON.stringify(state.visual));
       if (scope) {
         if (scope.folder_id != null) params.set('folder_id', scope.folder_id);
         if (scope.collection_id != null) params.set('collection_id', scope.collection_id);
       }
-      url = `/api/filters/values?${params}`;
-    }
-    fetchJson(url).then((data) => {
+      return params;
+    };
+    const finish = (values, scopedPaths) => {
       if (picker.request !== seq || valuePickerStates.get(node) !== picker) return;
-      picker.values = node.field === 'folder' ? data : data.values;
+      picker.values = values;
+      picker.scopedPaths = scopedPaths;
+      picker.scopeKey = scopeKey;
       picker.pending = false;
       refreshPickerOptions(node, picker);
-    }).catch(() => {
+    };
+    const fail = () => {
       if (picker.request !== seq || valuePickerStates.get(node) !== picker) return;
       picker.pending = false;
       picker.error = true;
       refreshPickerOptions(node, picker);
-    });
+    };
+    if (node.field === 'folder') {
+      // Folders need two reads: ``/api/folders`` for the id/parent_id
+      // hierarchy used to render the tree, and the scoped folder facet
+      // from ``/api/filters/values`` so the picker only lists folders
+      // whose subtree has photos matching the current sibling rules,
+      // visual clause and page scope (Codex review r4209098975). The
+      // facet aggregates counts over each folder's subtree, so a scoped
+      // path's ancestors are already in the response — no manual
+      // ancestor hoisting needed. If the facet fails but the tree
+      // succeeds, fall back to the unscoped tree (same behavior as
+      // before the scope was wired in).
+      const foldersPromise = fetchJson('/api/folders');
+      // The folder facet uses a bump limit server-side so the tree is
+      // not silently truncated past the typeahead's 50-cap when the
+      // workspace has many scoped folders.
+      let scopedPromise = Promise.resolve(null);
+      if (scopeActive) {
+        const params = scopeParams();
+        params.set('limit', '10000');
+        params.delete('q');  // folder search is client-side
+        scopedPromise = fetchJson(`/api/filters/values?${params}`).catch(() => null);
+      }
+      Promise.all([foldersPromise, scopedPromise]).then(([folders, scoped]) => {
+        const paths = scoped && scoped.values
+          ? new Set(scoped.values.map((v) => v.value))
+          : null;
+        finish(folders, paths);
+      }).catch(fail);
+      return;
+    }
+    // Mirror the typeahead's scope (other rules, visual, page scope) so a
+    // folder- or collection-scoped Browse view lists values present in
+    // the current grid. Without these the global 50-value cap can omit
+    // values that are actually in scope (Codex review r4208710522).
+    fetchJson(`/api/filters/values?${scopeParams()}`).then((data) => {
+      finish(data.values, null);
+    }).catch(fail);
   }
 
   function loadValuePickers() {
     $$('.vf-value-picker').forEach((wrap) => {
       const node = getNodeAtPath(wrap.dataset.path);
       const picker = valuePickerState(node);
-      if (picker.open && picker.values === null && !picker.pending && !picker.error) requestPickerValues(node, picker);
+      if (!picker.open || picker.pending || picker.error) return;
+      // Refetch when either the picker has never loaded or when a
+      // sibling rule, visual clause or page-scope change has made the
+      // cached values stale (Codex review r4209098966). Without this
+      // the picker continues to show the previous scope's choices —
+      // and with more than 50 values can omit newly valid ones — until
+      // the user retypes the query or reopens the whole popover.
+      const scopeKey = pickerScopeKey(node, picker);
+      if (picker.values === null || picker.scopeKey !== scopeKey) {
+        requestPickerValues(node, picker);
+      }
     });
   }
 

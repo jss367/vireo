@@ -1324,11 +1324,18 @@ class CollectionRepository:
         )
         where, params = self._append_collection_restriction(collection_id, where, params)
         where, params = self._append_folder_restriction(folder_id, where, params)
-        limit = max(1, min(int(limit or 20), 50))
+        # The folder picker renders a navigable tree and wants EVERY scoped
+        # folder (not just the top 50 by count) so a scoped Browse view's
+        # tree isn't silently truncated. Folder counts are naturally bounded
+        # by the workspace's folder table, so a looser cap is safe here;
+        # free-text facets (keyword/species/camera-*) keep the tight 50-cap
+        # that backs typeahead's "Showing up to 50 choices…" message.
         if field == "folder":
+            limit = max(1, min(int(limit or 20), 10000))
             return self._folder_filter_values(
                 folder_join, join_clause, where, params, q=q, limit=limit
             )
+        limit = max(1, min(int(limit or 20), 50))
         conditions = []
         extra_joins = ""
         extra_params = []
