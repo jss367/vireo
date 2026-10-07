@@ -303,12 +303,11 @@ def create_caches_blueprint(get_db, json_error, db_path, config):
                     pass
                 except OSError:
                     failed_paired.add(name)
-        db.conn.executemany(
-            "DELETE FROM paired_preview_cache WHERE filename=?",
-            [(row["filename"],) for row in paired_rows
+        db.preview_cache_delete_entries(
+            [],
+            [row["filename"] for row in paired_rows
              if row["filename"] not in failed_paired],
         )
-        db.conn.commit()
 
         remaining = db.conn.execute(
             "SELECT (SELECT COUNT(*) FROM preview_cache) + "

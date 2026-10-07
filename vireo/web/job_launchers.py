@@ -98,9 +98,7 @@ def _paired_jpeg_preview_exists(preview_dir, photo, size, db):
         return False
     # A relocation keeps folder_id, but changes which live source the
     # renderer selects. Resolve its current path just as each request does.
-    folder = db.conn.execute(
-        "SELECT path FROM folders WHERE id=?", (photo["folder_id"],),
-    ).fetchone()
+    folder = db.get_folder(photo["folder_id"])
     if not folder:
         return False
     source_path = os.path.join(folder["path"], photo["companion_path"])

@@ -839,15 +839,10 @@ def _entry_path(preview_dir, row):
 
 
 def _delete_preview_entries(db, rows):
-    db.conn.executemany(
-        "DELETE FROM preview_cache WHERE photo_id=? AND size=?",
+    db.preview_cache_delete_entries(
         [(r["photo_id"], r["size"]) for r in rows if not r["paired"]],
+        [r["filename"] for r in rows if r["paired"]],
     )
-    db.conn.executemany(
-        "DELETE FROM paired_preview_cache WHERE filename=?",
-        [(r["filename"],) for r in rows if r["paired"]],
-    )
-    db.conn.commit()
 
 
 def evict_if_over_quota(db, vireo_dir):
