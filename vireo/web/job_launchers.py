@@ -87,7 +87,7 @@ def _photo_is_raw_jpeg_pair(photo):
     return companion_ext in {".jpg", ".jpeg"}
 
 
-def _paired_jpeg_preview_exists(preview_dir, photo, size, folder_path, db):
+def _paired_jpeg_preview_exists(preview_dir, photo, size, db):
     """Check the exact current JPEG artifact using the renderer's predicate."""
     from web.media import (
         _fresh_paired_artifact,
@@ -95,9 +95,16 @@ def _paired_jpeg_preview_exists(preview_dir, photo, size, folder_path, db):
         _paired_render_state_hash,
     )
 
-    if not photo or not folder_path or not photo["companion_path"]:
+    if not photo or not photo["companion_path"]:
         return False
-    source_path = os.path.join(folder_path, photo["companion_path"])
+    # A relocation keeps folder_id, but changes which live source the
+    # renderer selects. Resolve its current path just as each request does.
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id=?", (photo["folder_id"],),
+    ).fetchone()
+    if not folder:
+        return False
+    source_path = os.path.join(folder["path"], photo["companion_path"])
     if not os.path.isfile(source_path):
         # Match the renderer's live-source-first, offline-companion fallback.
         cached = db.offline_original_get(photo["id"])
@@ -1450,7 +1457,6 @@ def create_job_launchers_blueprint(
                                                 and not
                                                 _paired_jpeg_preview_exists(
                                                     preview_dir, photo, size,
-                                                    folders.get(photo["folder_id"]),
                                                     thread_db,
                                                 )
                                             ):
@@ -1560,7 +1566,6 @@ def create_job_launchers_blueprint(
                                 info["is_pair"]
                                 and not _paired_jpeg_preview_exists(
                                     preview_dir, current_photo, size,
-                                    folders.get(current_photo["folder_id"]) if current_photo else None,
                                     thread_db,
                                 )
                             ):

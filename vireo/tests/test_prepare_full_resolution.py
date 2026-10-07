@@ -1207,7 +1207,7 @@ def test_preparation_guard_accepts_matching_recipe(client_with_photo):
         assert (preview_dir / f"{photo_id}_{size}.jpg").is_file(), size
 
 
-@pytest.mark.parametrize("cache_fault", [None, "expired", "wrong_state", "publication_failure"])
+@pytest.mark.parametrize("cache_fault", [None, "expired", "wrong_state", "publication_failure", "relocated"])
 def test_prepare_raw_jpeg_pair_warms_paired_jpeg_tiers(
     client_with_photo, monkeypatch, cache_fault,
 ):
@@ -1279,7 +1279,7 @@ def test_prepare_raw_jpeg_pair_warms_paired_jpeg_tiers(
 
     from web import job_launchers, media
 
-    if cache_fault == "expired":
+    if cache_fault in {"expired", "relocated"}:
         # Advance the renderer's clock at the final cross-selection check,
         # after all three tiers passed their immediate warming checks.
         clock = {"offset": 0}
@@ -1292,7 +1292,26 @@ def test_prepare_raw_jpeg_pair_warms_paired_jpeg_tiers(
         def expire_before_final_check(*args):
             checks.append(args)
             if len(checks) > 3:
-                clock["offset"] = media._PAIRED_PREVIEW_TTL_SEC + 1
+                if cache_fault == "expired":
+                    clock["offset"] = media._PAIRED_PREVIEW_TTL_SEC + 1
+                elif len(checks) == 4:
+                    # Relocation retains folder_id, but the renderer now
+                    # selects a different live companion at its current path.
+                    from db import Database
+
+                    relocated = Path(folder_path).parent / "relocated"
+                    relocated.mkdir()
+                    (relocated / "paired.NEF").write_bytes(b"stub raw bytes")
+                    Image.new("RGB", (800, 600), (180, 40, 70)).save(
+                        relocated / "paired.jpg", "JPEG", quality=85,
+                    )
+                    writer = Database(db._db_path)
+                    try:
+                        folder_id = writer.get_photo(photo_id)["folder_id"]
+                        writer.relocate_folder(folder_id, str(relocated))
+                        assert writer.get_photo(photo_id)["folder_id"] == folder_id
+                    finally:
+                        writer.close()
             return original_check(*args)
 
         monkeypatch.setattr(job_launchers, "_paired_jpeg_preview_exists",
