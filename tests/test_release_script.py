@@ -317,7 +317,10 @@ def test_release_syncs_remote_source_before_testing_and_publishes_both_refs(rele
     assert "Tag pushed." in result.stdout
 
 
-@pytest.mark.parametrize("condition", ["dirty", "staged", "branch", "diverged", "local-tag", "remote-tag"])
+@pytest.mark.parametrize(
+    "condition",
+    ["dirty", "staged", "branch", "diverged", "local-ahead", "local-tag", "remote-tag"],
+)
 def test_release_preflight_rejects_unsafe_state_before_version_writes(release_repo, condition):
     repo, remote, writer, gates, _ = release_repo
     if condition == "dirty":
@@ -331,6 +334,12 @@ def test_release_preflight_rejects_unsafe_state_before_version_writes(release_re
         _git(repo, "commit", "--allow-empty", "-m", "Local work")
         _git(writer, "commit", "--allow-empty", "-m", "Remote work")
         _git(writer, "push", "origin", "main")
+    elif condition == "local-ahead":
+        # Strictly ahead of origin/main — `git merge --ff-only origin/main`
+        # succeeds with "Already up to date", so without an explicit reject
+        # the atomic push would publish this unreviewed commit along with
+        # the release bump.
+        _git(repo, "commit", "--allow-empty", "-m", "Unreviewed local work")
     elif condition == "local-tag":
         _git(repo, "tag", "v1.2.4")
     else:
@@ -400,6 +409,31 @@ def test_release_runs_the_fetched_script_after_sync_advances_main(release_repo):
 
     assert result.returncode == 0, result.stderr
     assert "fetched-release-sh" in gates.read_text()
+
+
+def test_release_reexec_skips_sync_so_bash_matches_the_script_on_disk(release_repo):
+    """After re-exec, the re-executed process must not fetch and merge again.
+
+    If the re-executed process ran its own sync, a second origin-main advance
+    between re-exec and that fetch would update release.sh and sync_version.py
+    on disk again, but the one-shot `VIREO_RELEASE_REEXECED` guard would
+    suppress another re-exec — Bash would keep running the first fetched
+    version while the atomic push read the newer one. The sync therefore only
+    runs in the first process; a later remote advance is caught by the atomic
+    push's non-fast-forward rejection.
+    """
+    repo, _, writer, _, _ = release_repo
+    # Advance origin so the first process re-execs after fast-forward.
+    _git(writer, "commit", "--allow-empty", "-m", "Advance before release")
+    _git(writer, "push", "origin", "main")
+
+    result = _run_release(release_repo)
+
+    assert result.returncode == 0, result.stderr
+    sync_banners = result.stdout.count("==> Syncing main before release checks...")
+    assert sync_banners == 1, result.stdout
+    assert "==> Release scripts advanced during sync; re-executing..." in result.stdout
+    assert "==> Already synced before re-exec; skipping second sync." in result.stdout
 
 
 def test_release_does_not_tag_or_push_when_version_commit_fails(release_repo):
