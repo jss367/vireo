@@ -60,9 +60,16 @@ that information for interactive use.
   diagnostics, and `PipelineParams` remains importable from there. New stage
   work belongs in the stage modules, not inside `run_pipeline_job`.
 - Repositories (`vireo/repositories/`) own SQL for one domain; `Database`
-  is the façade over them. It keeps each method as a one-line wrapper around
-  its repository, plus cross-domain composition and the active-workspace
-  state, and runs no SQL itself: `test_db_facade_structure.py` fails if a
+  is the façade over them. Simple persistence operations are reached through
+  a domain accessor, a property that builds a fresh repository through the
+  domain's `_<domain>_repository` factory on every access
+  (`db.job_history.get(job_id)`), so workspace scoping and connection policy
+  stay in one place without a forwarding alias per query. `Database` keeps the
+  coordinated workflows (`add_photo` and the like), cross-domain composition
+  and the active-workspace state. Older domains still carry one-line
+  forwarding wrappers; `test_db_facade_structure.py` caps their number at
+  `FORWARDING_WRAPPER_LIMIT`, which only shrinks as domains move to
+  accessors. `Database` runs no SQL itself: `test_db_facade_structure.py` fails if a
   `Database` method other than the connection-lifecycle ones uses
   `self.conn` for anything but handing it to a repository.
   Code outside the data layer goes through `Database` methods too:

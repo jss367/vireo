@@ -1,7 +1,7 @@
 """Behavior pins for the job-history domain of ``Database``.
 
 ``jobs.JobRunner`` creates the table and keeps its own writes; these tests
-cover what the job routes do through the public ``Database`` façade: reading
+cover what the job routes do through the ``db.job_history`` accessor: reading
 a job type's newest completed result back (the Duplicates page restoring its
 last scan), the single-record lookup, and the result rewrite. The structural
 test at the end keeps their SQL in ``repositories/job_history.py``.
@@ -17,6 +17,7 @@ import textwrap
 import pytest
 from db import Database
 from jobs import JobRunner
+from repositories.job_history import JobHistoryRepository
 
 
 @pytest.fixture
@@ -37,25 +38,25 @@ def history(db):
     return add
 
 
-def test_get_last_completed_job_picks_newest_completed_result(db, history):
-    assert db.get_last_completed_job("duplicate-scan") is None
+def test_last_completed_with_result_picks_newest_completed_result(db, history):
+    assert db.job_history.last_completed_with_result("duplicate-scan") is None
     history("old", "duplicate-scan", "completed", "2026-01-02T00:00:00", {"n": 1})
     history("new", "duplicate-scan", "completed", "2026-01-03T00:00:00", {"n": 2})
     history("failed", "duplicate-scan", "failed", "2026-01-09T00:00:00", {"n": 3})
     history("empty", "duplicate-scan", "completed", "2026-01-08T00:00:00", None)
     history("other", "scan", "completed", "2026-01-10T00:00:00", {"n": 4})
-    row = db.get_last_completed_job("duplicate-scan")
+    row = db.job_history.last_completed_with_result("duplicate-scan")
     assert row.keys() == ["id", "started_at", "finished_at", "result"]
     assert row["id"] == "new"
     assert json.loads(row["result"]) == {"n": 2}
-    assert db.get_last_completed_job("scan")["id"] == "other"
-    assert db.get_last_completed_job("thumbnails") is None
+    assert db.job_history.last_completed_with_result("scan")["id"] == "other"
+    assert db.job_history.last_completed_with_result("thumbnails") is None
 
 
-def test_get_last_completed_job_is_catalog_wide(db, history):
+def test_last_completed_with_result_is_catalog_wide(db, history):
     history("j", "duplicate-scan", "completed", "2026-01-02T00:00:00", {"n": 1})
     db.set_active_workspace(None)
-    assert db.get_last_completed_job("duplicate-scan")["id"] == "j"
+    assert db.job_history.last_completed_with_result("duplicate-scan")["id"] == "j"
 
 
 @pytest.fixture
@@ -83,11 +84,11 @@ def _committed_result(db, job_id):
     return row[0] if row else None
 
 
-def test_get_job_history_row_returns_every_column(history_db):
+def test_get_returns_every_column(history_db):
     db = history_db
     ws = db.active_workspace_id
     _insert(db, "job-a", workspace_id=ws, result='{"moved": 2}')
-    row = db.get_job_history_row("job-a")
+    row = db.job_history.get("job-a")
     assert isinstance(row, sqlite3.Row)
     columns = [r[1] for r in db.conn.execute("PRAGMA table_info(job_history)")]
     assert row.keys() == columns
@@ -97,39 +98,39 @@ def test_get_job_history_row_returns_every_column(history_db):
     assert row["result"] == '{"moved": 2}'
 
 
-def test_get_job_history_row_is_exact_and_unscoped(history_db):
+def test_get_is_exact_and_unscoped(history_db):
     db = history_db
     other = db.create_workspace("History other")
     _insert(db, "job-b", workspace_id=other)
     db.set_active_workspace(None)
     # Any workspace's record: the caller compares ``workspace_id`` itself.
-    assert db.get_job_history_row("job-b")["workspace_id"] == other
-    assert db.get_job_history_row("job-") is None
-    assert db.get_job_history_row("JOB-B") is None
-    assert db.get_job_history_row("missing") is None
+    assert db.job_history.get("job-b")["workspace_id"] == other
+    assert db.job_history.get("job-") is None
+    assert db.job_history.get("JOB-B") is None
+    assert db.job_history.get("missing") is None
 
 
-def test_set_job_history_result_rewrites_one_row_and_commits(history_db):
+def test_set_result_rewrites_one_row_and_commits(history_db):
     db = history_db
     _insert(db, "job-c", result='{"moved": 1}')
     _insert(db, "job-d", result='{"moved": 9}')
-    assert db.set_job_history_result("job-c", '{"moved": 1, "cleanup": true}') is None
+    assert db.job_history.set_result("job-c", '{"moved": 1, "cleanup": true}') is None
     assert not db.in_transaction
     assert _committed_result(db, "job-c") == '{"moved": 1, "cleanup": true}'
     assert _committed_result(db, "job-d") == '{"moved": 9}'
 
 
-def test_set_job_history_result_for_unknown_id_writes_nothing(history_db):
+def test_set_result_for_unknown_id_writes_nothing(history_db):
     db = history_db
-    db.set_job_history_result("missing", "{}")
-    assert db.get_job_history_row("missing") is None
+    db.job_history.set_result("missing", "{}")
+    assert db.job_history.get("missing") is None
 
 
-def test_set_job_history_result_commit_is_held_with_other_commits(history_db):
+def test_set_result_commit_is_held_with_other_commits(history_db):
     db = history_db
     _insert(db, "job-e", result="{}")
     with db._commits_held():
-        db.set_job_history_result("job-e", '{"x": 1}')
+        db.job_history.set_result("job-e", '{"x": 1}')
         assert db.in_transaction
         assert _committed_result(db, "job-e") == "{}"
     assert _committed_result(db, "job-e") == '{"x": 1}'
@@ -137,25 +138,33 @@ def test_set_job_history_result_commit_is_held_with_other_commits(history_db):
 
 # -- structure ------------------------------------------------------------------
 
-_DELEGATING_JOB_HISTORY_METHODS = (
-    "get_last_completed_job", "get_job_history_row", "set_job_history_result",
-)
+
+def test_job_history_is_a_fresh_repository_on_the_connection_per_access(db):
+    """``db.job_history`` builds a new repository each time, never a cached one.
+
+    A cached repository could outlive the connection or, for a scoped domain,
+    the active workspace it was built for; a fresh one resolves both at use,
+    exactly as a forwarding wrapper called at that moment did.
+    """
+    first, second = db.job_history, db.job_history
+    assert isinstance(first, JobHistoryRepository)
+    assert first is not second
+    assert first.conn is db.conn
 
 
-@pytest.mark.parametrize("name", _DELEGATING_JOB_HISTORY_METHODS)
-def test_job_history_method_delegates_to_repository(name):
-    source = textwrap.dedent(inspect.getsource(getattr(Database, name)))
-    fn = ast.parse(source).body[0]
+def test_job_history_has_no_forwarding_wrappers_on_database():
+    """The domain is reached through ``db.job_history``; Database keeps no aliases."""
+    for name in ("get_last_completed_job", "get_job_history_row", "set_job_history_result"):
+        assert not hasattr(Database, name), f"Database.{name} came back; call db.job_history"
+    accessor = Database.__dict__["job_history"]
+    assert isinstance(accessor, property)
+    source = textwrap.dedent(inspect.getsource(accessor.fget))
     attrs = {
         node.attr
-        for node in ast.walk(fn)
+        for node in ast.walk(ast.parse(source))
         if isinstance(node, ast.Attribute)
         and isinstance(node.value, ast.Name)
         and node.value.id == "self"
     }
-    assert "conn" not in attrs, (
-        f"Database.{name} touches self.conn; move the SQL to JobHistoryRepository"
-    )
-    assert "_job_history_repository" in attrs, (
-        f"Database.{name} no longer delegates to JobHistoryRepository"
-    )
+    assert "_job_history_repository" in attrs
+    assert "conn" not in attrs
