@@ -126,3 +126,70 @@ def test_neutral_range_controls_keep_existing_render_exact():
             apply_adjustments(src, **settings),
             apply_adjustments(src, range_radius=RANGE_RADIUS, **settings),
         )
+
+
+@pytest.mark.parametrize('encoding', ['linear', 'srgb', 'rgba'])
+@pytest.mark.parametrize('masked', [False, True])
+def test_rectangular_tiles_preserve_edges_corners_alpha_and_local_weights(encoding, masked, monkeypatch):
+    rng = np.random.default_rng(318)
+    src = rng.uniform(0, 1, (173, 257, 3)).astype(np.float32)
+    # Flat shadows and a strong subject boundary cross horizontal and vertical
+    # tile seams, including their intersections and the outer image edges.
+    src[:83, :119] = 0.03
+    src[83:, 119:] = 0.9
+    if encoding == 'rgba':
+        rgba = np.concatenate([src * 255, rng.integers(0, 256, (173, 257, 1))], axis=2).astype(np.uint8)
+        image = Image.fromarray(rgba)
+    else:
+        if encoding == 'linear':
+            src = src * 2 - 0.05  # RAW negative channels and above-white radiance
+        image = FloatImage(src, encoding=encoding)
+    before = np.asarray(image).copy()
+    recipe = {'adjustments': {'exposure': 0.4, 'shadows': 65, 'highlights': -45}}
+    mask = None
+    if masked:
+        mask = Image.fromarray(rng.integers(0, 256, (173, 257), dtype=np.uint8))
+        recipe['local'] = {
+            'mask': {'ref': '0123456789ab', 'source_digest': 'test-source'},
+            'regions': [
+                {'region': 'subject', 'adjustments': {'shadows': 30, 'exposure': -0.5}},
+                {'region': 'background', 'adjustments': {'highlights': -25}},
+            ],
+        }
+    whole = np.asarray(apply_recipe_to_loaded_image(image, recipe, local_mask=mask))
+    monkeypatch.setattr(image_edits, '_ADJUST_TILE_PIXELS', 31 * 31)
+    tiled = np.asarray(apply_recipe_to_loaded_image(image, recipe, local_mask=mask))
+    if encoding == 'rgba':
+        np.testing.assert_array_equal(tiled, whole)
+    else:
+        # Box-filter accumulation can round differently when the tile origin
+        # moves. Bound float error and require exact display/export samples.
+        np.testing.assert_allclose(tiled, whole, rtol=0, atol=2e-7)
+        for bits, dtype in ((8, np.uint8), (16, np.uint16)):
+            maximum = (1 << bits) - 1
+            np.testing.assert_array_equal(
+                (tiled * maximum + 0.5).astype(dtype),
+                (whole * maximum + 0.5).astype(dtype),
+            )
+    np.testing.assert_array_equal(np.asarray(image), before)
+    if encoding == 'rgba':
+        np.testing.assert_array_equal(tiled[..., 3], rgba[..., 3])
+
+
+def test_native_width_bounds_repeated_halo_work(monkeypatch):
+    import tone
+
+    # A shallow 8K-wide image exposes the old strip overhead without allocating
+    # a full 46MP frame. Count work instead of asserting noisy wall-clock times.
+    image = Image.new('RGB', (8288, 300), (50, 80, 110))
+    processed_pixels = []
+
+    def counted_tone(rgb, **kwargs):
+        processed_pixels.append(rgb.shape[0] * rgb.shape[1])
+        return rgb
+
+    monkeypatch.setattr(tone, 'apply_adjustments', counted_tone)
+    rendered = apply_recipe_to_loaded_image(image, {'adjustments': {'shadows': 15}})
+    assert sum(processed_pixels) < image.width * image.height * 1.2
+    assert max(processed_pixels) < image_edits._ADVANCED_COLOR_TILE_PIXELS * 1.25
+    np.testing.assert_array_equal(np.asarray(rendered), np.asarray(image))
