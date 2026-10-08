@@ -21,7 +21,18 @@ dimensions and these names, but omits file paths and image contents. Include
 representative 24–60 MP cameras when available; a synthetic DNG smoke test in
 the normal test suite verifies the harness but does not represent camera speed.
 
-Install the development dependencies, close other heavy applications, then run:
+Use an isolated environment with the declared runtime and development dependencies,
+then close other heavy applications. The runner rejects missing/outdated runtime
+dependencies and an imported OpenCV that differs from the installed headless
+distribution. For example, from the repository root:
+
+```sh
+python -m venv .context/preview-benchmark-venv
+.context/preview-benchmark-venv/bin/python -m pip install -e '.[dev]'
+source .context/preview-benchmark-venv/bin/activate
+```
+
+Record a baseline with:
 
 ```sh
 python scripts/benchmark_raw_previews.py \
@@ -71,8 +82,9 @@ smoke test and tests the comparison logic. Changes to this measurement protocol
 must increment the report schema version.
 
 Schema 2 reports include the executed command (with manifest/output/baseline paths
-redacted), Git revision, dirty-tree flag, CPU model, CPU accelerator mode and
-numeric-library versions. Commit code before recording a reference report so the
+redacted), Git revision, dirty-tree flag, CPU model, CPU accelerator mode,
+numeric-library versions and installed versions of every declared runtime
+dependency. Commit code before recording a reference report so the
 revision identifies the measured implementation. Source revisions are provenance,
 not comparison constraints, because before/after runs must use different code.
 The worker-process and aggregate-memory protocol differs from schema 1; the
@@ -171,6 +183,53 @@ This is a new reference under the process-worker protocol, not a speedup claim
 against the historical reports. It measures sequential requests with one active
 render child; simultaneous renders can consume more memory. The report includes
 the command, complete source revision, CPU and library versions for repeat runs.
+
+## Real-RAW contention benchmark
+
+`scripts/benchmark_raw_preview_stress.py` uses the same local corpus and production
+HTTP handlers with concurrent Flask test clients. At least two RAW files are
+required. Each scenario/sample gets a fresh server, catalog and worker pool;
+the corpus is read-only. It defaults to the production two numeric threads per
+worker, three samples, and six edits spaced 60 ms apart:
+
+```sh
+python scripts/benchmark_raw_preview_stress.py \
+  --manifest .context/raw-benchmark/corpus.json \
+  --machine-label dedicated-benchmark-machine \
+  --output .context/raw-benchmark/stress.json
+```
+
+- **Rapid edits:** start a native render for each camera, wait until the child
+  enters the render handler, then replace it with a burst of quick previews.
+- **Photo navigation:** alternate corpus photos within one tab, issuing explicit
+  cancellation before each replacement request.
+- **Multiple tabs:** three independent sessions compete for two workers, first
+  with edit bursts and then with concurrent native refinements. The third tab
+  exercises queueing while the native renders expose aggregate memory pressure.
+
+The report stores individual samples and p50/p95 for cancellation acknowledgement
+(superseding dispatch to the old HTTP request's 409 response), worker reaping
+(superseding dispatch to child termination/join completion), latest quick-preview
+completion, navigation cancellation POSTs, and native refinements. Reap timings
+cover only cancelled requests observed entering a child that was then stopped;
+queued cancellations and completed renders that retain a healthy worker have no
+reap sample. An unobserved metric is `null`, never a fabricated zero. Counts show
+how many cancellations and reaps each trial actually exercised. With only three
+trials, tails are descriptive observations, not a statistically stable budget.
+
+Memory is aggregate server-and-descendant RSS, sampled every 10 ms, including
+caches and the in-process HTTP harness. Shared pages can be counted twice and
+short peaks can be missed. Timing includes thread dispatch and worker startup,
+but excludes browser display and network transfer. Worker-start marker files and
+a parent-side stop observer add a small instrumentation cost; the production
+render function and worker limits are unchanged. All marker files and catalogs
+are temporary, and reports omit local corpus paths and process IDs.
+
+Unexpected statuses (including overload and timeout), failed latest requests,
+8-bit fallbacks and incorrect dimensions fail the run. These scenarios validate
+responsiveness under a bounded workload, not maximum admission capacity or a
+fixed RAM ceiling. Existing worker/browser tests cover deterministic cancellation
+and stale-display behavior; this benchmark adds actual camera timing and memory.
 
 ## Stalled preview recovery
 

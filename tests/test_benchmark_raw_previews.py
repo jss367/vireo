@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.benchmark_raw_previews import SCHEMA, compare_reports, provenance, summarize
+from scripts.benchmark_raw_previews import SCHEMA, compare_reports, environment, provenance, summarize
 
 
 def report():
@@ -95,3 +95,21 @@ def test_provenance_records_command_without_local_file_paths():
     assert '/private' not in json.dumps(record)
     assert record['command'][-4:] == ['--machine-label', 'benchmark-host', '--samples', '5']
     assert isinstance(record['working_tree_dirty'], bool)
+
+
+def test_environment_rejects_dependencies_below_declared_minimum(monkeypatch):
+    import importlib.metadata
+
+    original = importlib.metadata.version
+    monkeypatch.setattr(importlib.metadata, 'version', lambda name:
+                        '4.11.0.86' if name == 'opencv-python-headless' else original(name))
+    with pytest.raises(ValueError, match='Benchmark requires opencv-python-headless'):
+        environment(2, 'test')
+
+
+def test_environment_rejects_a_shadowing_opencv_install(monkeypatch):
+    import cv2
+
+    monkeypatch.setattr(cv2, '__version__', '0.0.0')
+    with pytest.raises(ValueError, match='Imported OpenCV differs'):
+        environment(2, 'test')
