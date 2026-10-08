@@ -28,11 +28,13 @@ distribution. For example, from the repository root:
 
 ```sh
 python -m venv .context/preview-benchmark-venv
-.context/preview-benchmark-venv/bin/python -m pip install -e '.[dev]'
+.context/preview-benchmark-venv/bin/python -m pip install -e '.[dev]' 'opencv-python-headless==4.13.0.92'
 source .context/preview-benchmark-venv/bin/activate
 ```
 
-Record a baseline with:
+The OpenCV pin matches the committed references. Other environment differences
+still require a fresh local baseline; comparisons intentionally require matching
+environments. Record a baseline with:
 
 ```sh
 python scripts/benchmark_raw_previews.py \
@@ -164,25 +166,28 @@ wall-clock timing in CI.
 
 The [schema 2 worker report](performance/raw-preview-workers.json) records the
 24 MP and 46 MP corpus on an Apple M3 Max, using four numeric threads and five
-samples per scenario. It was recorded from clean revision `51023c555` after the
-test runs finished. Every request used the supervised child-process path and
-passed the linear-source and output-dimension checks.
+samples per scenario. This refreshed reference uses OpenCV 4.13.0.92, satisfying
+the declared dependency minimum, and replaces the earlier OpenCV 4.11 report.
+It was recorded from clean revision `cd86a0a43` after the test runs finished.
+Every request used the supervised child-process path and passed the linear-source
+and output-dimension checks. Installed versions of all declared runtime dependencies
+are included in the report.
 
 | Source | Preview | Cache | Median | p95 | Peak server and child memory |
 | --- | --- | --- | ---: | ---: | ---: |
-| 24 MP | Quick | Cold | 1.32 s | 1.62 s | 1,209 MiB |
-| 24 MP | Quick | Warm | 143 ms | 153 ms | 1,138 MiB |
-| 24 MP | Native | Cold | 6.63 s | 6.88 s | 2,467 MiB |
-| 24 MP | Native | Warm | 5.62 s | 5.70 s | 2,509 MiB |
-| 46 MP | Quick | Cold | 2.26 s | 2.64 s | 1,946 MiB |
-| 46 MP | Quick | Warm | 142 ms | 157 ms | 1,407 MiB |
-| 46 MP | Native | Cold | 12.55 s | 12.84 s | 3,639 MiB |
-| 46 MP | Native | Warm | 10.60 s | 10.86 s | 3,694 MiB |
+| 24 MP | Quick | Cold | 1.34 s | 1.67 s | 1,427 MiB |
+| 24 MP | Quick | Warm | 145 ms | 151 ms | 1,253 MiB |
+| 24 MP | Native | Cold | 6.87 s | 7.90 s | 2,870 MiB |
+| 24 MP | Native | Warm | 5.70 s | 5.72 s | 2,831 MiB |
+| 46 MP | Quick | Cold | 2.27 s | 2.63 s | 2,064 MiB |
+| 46 MP | Quick | Warm | 150 ms | 167 ms | 1,570 MiB |
+| 46 MP | Native | Cold | 12.82 s | 13.07 s | 3,958 MiB |
+| 46 MP | Native | Warm | 10.82 s | 11.46 s | 3,982 MiB |
 
-This is a new reference under the process-worker protocol, not a speedup claim
-against the historical reports. It measures sequential requests with one active
-render child; simultaneous renders can consume more memory. The report includes
-the command, complete source revision, CPU and library versions for repeat runs.
+This measures sequential requests with one active render child; simultaneous
+renders can consume more memory. It is a reference for the recorded environment,
+not a speed comparison against reports made with different dependencies. The
+command, complete source revision, CPU and library versions support repeat runs.
 
 ## Real-RAW contention benchmark
 
@@ -217,7 +222,8 @@ reap sample. An unobserved metric is `null`, never a fabricated zero. Counts sho
 how many cancellations and reaps each trial actually exercised. With only three
 trials, tails are descriptive observations, not a statistically stable budget.
 
-Memory is aggregate server-and-descendant RSS, sampled every 10 ms, including
+Memory is aggregate resident set size (RSS) for the server and descendants,
+sampled every 10 ms, including
 caches and the in-process HTTP harness. Shared pages can be counted twice and
 short peaks can be missed. Timing includes thread dispatch and worker startup,
 but excludes browser display and network transfer. Worker-start marker files and
@@ -230,6 +236,30 @@ Unexpected statuses (including overload and timeout), failed latest requests,
 responsiveness under a bounded workload, not maximum admission capacity or a
 fixed RAM ceiling. Existing worker/browser tests cover deterministic cancellation
 and stale-display behavior; this benchmark adds actual camera timing and memory.
+
+### Recorded contention results
+
+The [stress report](performance/raw-preview-stress.json) uses the same two cameras
+and clean revision `cd86a0a43`, with the production two threads per worker and three
+trials per scenario. It ran after the sequential benchmark, with no other tests or
+benchmarks from this task running concurrently. All 12 trials passed: 135 requests,
+108 superseded responses, and 15 observed worker reaps. Timings below pool the
+individual observations across each scenario's three trials.
+
+| Scenario | Cancellation ack p95 | Worker reap p95 | Latest quick median / p95 | Peak aggregate RSS |
+| --- | ---: | ---: | ---: | ---: |
+| 24 MP rapid edits | 19.23 ms | 42.96 ms | 1.70 / 1.73 s | 1,148 MiB |
+| 46 MP rapid edits | 17.43 ms | 44.23 ms | 2.65 / 2.67 s | 1,673 MiB |
+| Photo navigation | 15.58 ms | 28.98 ms | 1.67 / 1.72 s | 1,135 MiB |
+| Three tabs | 22.56 ms | 44.83 ms | 1.88 / 4.07 s | 7,065 MiB |
+
+The three tabs use the 24 MP, 46 MP and 24 MP photos, respectively. Native
+refinements in that scenario had a 12.57-second median and 19.09-second p95,
+including queue time. Cancellation acknowledgement is fast, but completing the
+latest preview still needs worker startup and a fresh RAW decode after a worker
+is discarded. The three-tab case also shows that two bounded workers can consume
+about 6.9 GiB together. These are observed costs on a shared machine, not fixed
+latency or memory guarantees.
 
 ## Stalled preview recovery
 
