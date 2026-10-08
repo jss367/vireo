@@ -1,0 +1,74 @@
+{
+  "base_commit": "d6aa7b8ae7",
+  "optimized_commit": "f793d3c40",
+  "method": "Decode each RAW once to a native scene-linear FloatImage. Render the same source with the original row-strip tone pass and the rectangular-tile pass. Compare all float channels and rounded 8/16-bit channels; encode both JPEGs at quality 90 with identical sRGB ICC bytes to exclude profile creation timestamps.",
+  "recipes": {
+    "benchmark": {
+      "adjustments": {
+        "exposure": 0.3,
+        "shadows": 15
+      }
+    },
+    "range-extremes": {
+      "adjustments": {
+        "exposure": -0.5,
+        "shadows": 100,
+        "highlights": -100,
+        "white_balance": {
+          "temperature": 30,
+          "tint": -15
+        }
+      }
+    }
+  },
+  "results": [
+    {
+      "scenario": "camera-24mp/benchmark",
+      "dimensions": [
+        6016,
+        4016
+      ],
+      "max_float_error": 0.0,
+      "changed_float_channels": 0,
+      "changed_8bit_channels": 0,
+      "changed_16bit_channels": 0,
+      "jpeg_sha256_equal": true
+    },
+    {
+      "scenario": "camera-24mp/range-extremes",
+      "dimensions": [
+        6016,
+        4016
+      ],
+      "max_float_error": 5.960464477539063e-08,
+      "changed_float_channels": 5,
+      "changed_8bit_channels": 0,
+      "changed_16bit_channels": 0,
+      "jpeg_sha256_equal": true
+    },
+    {
+      "scenario": "camera-46mp/benchmark",
+      "dimensions": [
+        8288,
+        5520
+      ],
+      "max_float_error": 8.940696716308594e-08,
+      "changed_float_channels": 3,
+      "changed_8bit_channels": 0,
+      "changed_16bit_channels": 0,
+      "jpeg_sha256_equal": true
+    },
+    {
+      "scenario": "camera-46mp/range-extremes",
+      "dimensions": [
+        8288,
+        5520
+      ],
+      "max_float_error": 8.940696716308594e-08,
+      "changed_float_channels": 3,
+      "changed_8bit_channels": 0,
+      "changed_16bit_channels": 0,
+      "jpeg_sha256_equal": true
+    }
+  ]
+}

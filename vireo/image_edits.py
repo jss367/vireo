@@ -577,7 +577,7 @@ def recipe_to_json(recipe):
     return json.dumps(normalized, sort_keys=True, separators=(",", ":"))
 
 
-# Row-tile budget for the tone pass, in pixels. Bounds peak memory on
+# Tile budget for the tone pass, in pixels. Bounds peak memory on
 # full-resolution originals/exports; overridable in tests to force many tiles.
 _ADJUST_TILE_PIXELS = 4_000_000
 _ADVANCED_COLOR_TILE_PIXELS = 1_000_000
@@ -590,7 +590,7 @@ def _apply_adjustments(
     """Apply tonal adjustments to a PIL image via the linear tone pipeline.
 
     Promotes the image to RGB(A), runs the shared tone pipeline, and merges
-    alpha back unchanged. Overlapping row tiles provide full neighborhood
+    alpha back unchanged. Overlapping tiles provide full neighborhood
     support for Shadows/Highlights. Local weights use the same overlap;
     ``range_scale`` converts the range-filter radius from native pixels.
     """
@@ -637,9 +637,9 @@ def _apply_adjustments(
     channels = src.shape[2]
     output = np.empty((height, width, channels), dtype=np.float32 if floating else np.uint8)
 
-    # Process in row blocks so peak memory stays bounded on full-resolution
-    # originals/exports (45MP+). The guided range filter needs overlapping
-    # rows; all remaining tone/color operations are per-pixel.
+    # Bound working memory on full-resolution originals/exports (45MP+).
+    # The guided range filter needs a halo on every tile edge; all remaining
+    # tone/color operations are per-pixel.
     tile_budget = _ADJUST_TILE_PIXELS
     if spatial:
         tile_budget = min(tile_budget, _ADVANCED_COLOR_TILE_PIXELS)
@@ -648,45 +648,55 @@ def _apply_adjustments(
         # planes alive. Smaller tiles bound peak memory on 45MP+ exports while
         # preserving byte-identical output because every operation is per-pixel.
         tile_budget = min(tile_budget, _ADVANCED_COLOR_TILE_PIXELS)
-    rows_per_tile = max(1, tile_budget // max(1, width))
+    # Full-width strips become very short at native resolution: a 1MP strip
+    # on an 8K-wide photo has almost as many halo rows as useful rows. Square
+    # spatial tiles minimize repeated filtering without increasing the budget.
+    # Keep the contiguous row path for pointwise edits, which need no halo.
+    columns_per_tile = width
+    if spatial and width * height > tile_budget:
+        columns_per_tile = min(width, max(1, math.isqrt(tile_budget)))
+    rows_per_tile = max(1, tile_budget // max(1, columns_per_tile))
     for top in range(0, height, rows_per_tile):
         bottom = min(top + rows_per_tile, height)
         start, end = max(0, top - halo), min(height, bottom + halo)
-        tile = src[start:end].astype(np.float32)
-        if not floating:
-            tile /= 255.0
-        adj = apply_adjustments(
-            tile[..., :3],
-            exposure=exposure,
-            white_balance=white_balance,
-            highlights=highlights,
-            shadows=shadows,
-            whites=whites,
-            blacks=blacks,
-            contrast=contrast,
-            vibrance=vibrance,
-            saturation=saturation,
-            tone_curve=tone_curve,
-            point_curves=point_curves,
-            point_color=point_color,
-            hsl=hsl,
-            color_grading=color_grading,
-            local_weight=(
-                local_weight[start:end] if local_weight is not None else None
-            ),
-            local_subject=local_subject,
-            local_background=local_background,
-            input_linear=floating and img.encoding == "linear",
-            range_radius=range_radius,
-        )
-        adj = adj[top - start:bottom - start]
-        output[top:bottom, :, :3] = (
-            adj if floating else np.clip(adj * 255.0 + 0.5, 0, 255).astype(np.uint8)
-        )
-        if channels == 4:
-            # Alpha passes through unchanged (round-trip uint8->float->uint8 is
-            # identity for 8-bit values).
-            output[top:bottom, :, 3] = src[top:bottom, :, 3]
+        for x in range(0, width, columns_per_tile):
+            stop = min(x + columns_per_tile, width)
+            left, right = max(0, x - halo), min(width, stop + halo)
+            tile = src[start:end, left:right].astype(np.float32)
+            if not floating:
+                tile /= 255.0
+            adj = apply_adjustments(
+                tile[..., :3],
+                exposure=exposure,
+                white_balance=white_balance,
+                highlights=highlights,
+                shadows=shadows,
+                whites=whites,
+                blacks=blacks,
+                contrast=contrast,
+                vibrance=vibrance,
+                saturation=saturation,
+                tone_curve=tone_curve,
+                point_curves=point_curves,
+                point_color=point_color,
+                hsl=hsl,
+                color_grading=color_grading,
+                local_weight=(
+                    local_weight[start:end, left:right] if local_weight is not None else None
+                ),
+                local_subject=local_subject,
+                local_background=local_background,
+                input_linear=floating and img.encoding == "linear",
+                range_radius=range_radius,
+            )
+            adj = adj[top - start:bottom - start, x - left:stop - left]
+            output[top:bottom, x:stop, :3] = (
+                adj if floating else np.clip(adj * 255.0 + 0.5, 0, 255).astype(np.uint8)
+            )
+            if channels == 4:
+                # Alpha passes through unchanged (round-trip uint8->float->uint8 is
+                # identity for 8-bit values).
+                output[top:bottom, x:stop, 3] = src[top:bottom, x:stop, 3]
 
     if floating:
         return FloatImage(output, encoding="srgb")
