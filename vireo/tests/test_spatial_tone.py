@@ -159,7 +159,18 @@ def test_rectangular_tiles_preserve_edges_corners_alpha_and_local_weights(encodi
     whole = np.asarray(apply_recipe_to_loaded_image(image, recipe, local_mask=mask))
     monkeypatch.setattr(image_edits, '_ADJUST_TILE_PIXELS', 31 * 31)
     tiled = np.asarray(apply_recipe_to_loaded_image(image, recipe, local_mask=mask))
-    np.testing.assert_array_equal(tiled, whole)
+    if encoding == 'rgba':
+        np.testing.assert_array_equal(tiled, whole)
+    else:
+        # Box-filter accumulation can round differently when the tile origin
+        # moves. Bound float error and require exact display/export samples.
+        np.testing.assert_allclose(tiled, whole, rtol=0, atol=2e-7)
+        for bits, dtype in ((8, np.uint8), (16, np.uint16)):
+            maximum = (1 << bits) - 1
+            np.testing.assert_array_equal(
+                (tiled * maximum + 0.5).astype(dtype),
+                (whole * maximum + 0.5).astype(dtype),
+            )
     np.testing.assert_array_equal(np.asarray(image), before)
     if encoding == 'rgba':
         np.testing.assert_array_equal(tiled[..., 3], rgba[..., 3])
