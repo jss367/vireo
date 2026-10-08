@@ -13,6 +13,7 @@ protection it describes had been silently lost.
 """
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -59,7 +60,7 @@ def test_release_prepares_inherited_file_limit_before_changing_versions(
     result = subprocess.run(
         [
             "bash", "-c",
-            'set -e; ulimit -S -n "$1"; ulimit -H -n "$2"; exec bash "$3" patch --publish',
+            'set -e; ulimit -S -n "$1"; ulimit -H -n "$2"; exec bash "$3" patch',
             "release-test", str(soft_limit), str(hard_limit), str(release),
         ],
         env={**os.environ, "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"]},
@@ -203,3 +204,179 @@ def test_release_e2e_reruns_flakes_like_the_ci_release_gate():
     lines = _code_lines()
     e2e = lines[_sole_index(lines, r"^\s*python -m pytest tests/e2e/")]
     assert "--reruns 2" in e2e
+
+
+def _git(repo, *args):
+    return subprocess.run(
+        ["git", "-C", str(repo), *args], check=True,
+        capture_output=True, text=True, timeout=10,
+    ).stdout.strip()
+
+
+@pytest.fixture
+def release_repo(tmp_path):
+    """Real Git refs and pushes, with inexpensive stand-ins for build gates."""
+    if sys.platform == "win32":
+        pytest.skip("POSIX release script")
+    remote = tmp_path / "remote.git"
+    repo = tmp_path / "checkout"
+    repo.mkdir()
+    _git(tmp_path, "init", "--bare", str(remote))
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.name", "Release test")
+    _git(repo, "config", "user.email", "release@example.test")
+    _git(repo, "config", "commit.gpgsign", "false")
+    _git(repo, "config", "tag.gpgsign", "false")
+    _git(repo, "config", "core.hooksPath", "/dev/null")
+    scripts = repo / "scripts"
+    scripts.mkdir()
+    shutil.copyfile(RELEASE_SH, scripts / "release.sh")
+    shutil.copyfile(REPO_ROOT / "scripts/sync_version.py", scripts / "sync_version.py")
+    (repo / "src-tauri").mkdir()
+    (repo / "pyproject.toml").write_text('[project]\nversion = "1.2.3"\n')
+    for path in ["package.json", "src-tauri/tauri.conf.json"]:
+        (repo / path).write_text('{"version": "1.2.3"}\n')
+    for path in ["src-tauri/Cargo.toml", "src-tauri/Cargo.lock"]:
+        (repo / path).write_text('[package]\nname = "vireo"\nversion = "1.2.3"\n')
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "Initial source")
+    _git(repo, "remote", "add", "origin", str(remote))
+    _git(repo, "push", "-u", "origin", "main")
+
+    writer = tmp_path / "writer"
+    _git(tmp_path, "clone", "--branch", "main", str(remote), str(writer))
+    _git(writer, "config", "user.name", "Concurrent writer")
+    _git(writer, "config", "user.email", "writer@example.test")
+    _git(writer, "config", "commit.gpgsign", "false")
+    _git(writer, "config", "tag.gpgsign", "false")
+    _git(writer, "config", "core.hooksPath", "/dev/null")
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    gates = tmp_path / "gates.log"
+    stubs = {
+        "caffeinate": "#!/bin/bash\nexit 0\n",
+        "cargo": (
+            '#!/bin/bash\necho "cargo $*" >> "$GATES_LOG"\n'
+            'if [[ "$1" == "update" ]]; then cp Cargo.toml Cargo.lock; fi\n'
+        ),
+        "python": (
+            '#!/bin/bash\n'
+            'if [[ "$1" == "-m" && "$2" == "pytest" ]]; then\n'
+            '    echo "pytest" >> "$GATES_LOG"\n'
+            '    if [[ "${ADVANCE_REMOTE:-}" == "1" ]]; then\n'
+            '        git -C "$REMOTE_WRITER" commit --allow-empty -m "Remote advanced during tests"\n'
+            '        git -C "$REMOTE_WRITER" push origin main\n'
+            '    fi\n'
+            '    if [[ "${FAIL_COMMIT:-}" == "1" ]]; then\n'
+            '        git config user.useConfigOnly true\n'
+            '        git config user.name ""\n'
+            '        git config user.email ""\n'
+            '    fi\n'
+            '    exit 0\n'
+            'fi\n'
+            f'exec {shlex.quote(sys.executable)} "$@"\n'
+        ),
+    }
+    for name, source in stubs.items():
+        path = bin_dir / name
+        path.write_text(source)
+        path.chmod(0o755)
+
+    env = {
+        **os.environ,
+        "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+        "GATES_LOG": str(gates),
+        "REMOTE_WRITER": str(writer),
+    }
+    return repo, remote, writer, gates, env
+
+
+def _run_release(fixture, version="patch", **overrides):
+    repo, _, _, _, env = fixture
+    return subprocess.run(
+        ["bash", "scripts/release.sh", version, "--publish"], cwd=repo,
+        env={**env, **overrides}, capture_output=True, text=True, timeout=15,
+    )
+
+
+def test_release_syncs_remote_source_before_testing_and_publishes_both_refs(release_repo):
+    repo, remote, writer, gates, _ = release_repo
+    (writer / "new-source.txt").write_text("Merged before the release\n")
+    _git(writer, "add", ".")
+    _git(writer, "commit", "-m", "New source before release")
+    _git(writer, "push", "origin", "main")
+
+    result = _run_release(release_repo)
+
+    assert result.returncode == 0, result.stderr
+    assert (repo / "new-source.txt").is_file()
+    assert gates.read_text().splitlines() == ["cargo update --workspace", "cargo check --locked", "pytest"]
+    assert _git(remote, "rev-parse", "main") == _git(repo, "rev-parse", "HEAD")
+    assert _git(remote, "rev-parse", "v1.2.4") == _git(repo, "rev-parse", "HEAD")
+    assert "Tag pushed." in result.stdout
+
+
+@pytest.mark.parametrize("condition", ["dirty", "staged", "branch", "diverged", "local-tag", "remote-tag"])
+def test_release_preflight_rejects_unsafe_state_before_version_writes(release_repo, condition):
+    repo, remote, writer, gates, _ = release_repo
+    if condition == "dirty":
+        (repo / "untracked.txt").write_text("Work in progress\n")
+    elif condition == "staged":
+        (repo / "package.json").write_text('{"version": "1.2.3", "changed": true}\n')
+        _git(repo, "add", "package.json")
+    elif condition == "branch":
+        _git(repo, "checkout", "-b", "feature")
+    elif condition == "diverged":
+        _git(repo, "commit", "--allow-empty", "-m", "Local work")
+        _git(writer, "commit", "--allow-empty", "-m", "Remote work")
+        _git(writer, "push", "origin", "main")
+    elif condition == "local-tag":
+        _git(repo, "tag", "v1.2.4")
+    else:
+        _git(writer, "tag", "v1.2.4")
+        _git(writer, "push", "origin", "v1.2.4")
+    version_before = (repo / "pyproject.toml").read_text()
+    remote_before = _git(remote, "show-ref")
+
+    result = _run_release(release_repo)
+
+    assert result.returncode != 0
+    assert (repo / "pyproject.toml").read_text() == version_before
+    assert not gates.exists()
+    assert _git(remote, "show-ref") == remote_before
+    assert "Tag pushed." not in result.stdout
+
+
+def test_release_atomic_push_rejects_remote_race_and_keeps_tested_source(release_repo):
+    repo, remote, writer, _, _ = release_repo
+
+    result = _run_release(release_repo, ADVANCE_REMOTE="1")
+
+    assert result.returncode != 0
+    assert "local release commit and tag v1.2.4 are retained" in result.stderr
+    assert "Do not rerun the version bump or force-push" in result.stderr
+    assert "Tag pushed." not in result.stdout
+    assert _git(remote, "rev-parse", "main") == _git(writer, "rev-parse", "HEAD")
+    assert _git(remote, "tag", "--list") == ""
+    tested_commit = _git(repo, "rev-parse", "HEAD")
+    assert _git(repo, "rev-parse", "v1.2.4") == tested_commit
+
+    # The printed recovery preserves the tested tag while reconciling main.
+    _git(repo, "fetch", "origin", "main")
+    _git(repo, "merge", "--no-edit", "origin/main")
+    _git(repo, "push", "--atomic", "origin", "HEAD:refs/heads/main", "refs/tags/v1.2.4")
+    assert _git(remote, "rev-parse", "v1.2.4") == tested_commit
+    assert _git(remote, "rev-parse", "main") == _git(repo, "rev-parse", "HEAD")
+
+
+def test_release_does_not_tag_or_push_when_version_commit_fails(release_repo):
+    repo, remote, _, _, _ = release_repo
+    remote_before = _git(remote, "show-ref")
+
+    result = _run_release(release_repo, FAIL_COMMIT="1")
+
+    assert result.returncode != 0
+    assert _git(repo, "tag", "--list") == ""
+    assert _git(remote, "show-ref") == remote_before
+    assert "Tag pushed." not in result.stdout
