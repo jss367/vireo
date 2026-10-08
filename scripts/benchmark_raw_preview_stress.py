@@ -31,9 +31,31 @@ def observed_render(payload, output_path):
 
     marker = Path(payload['vireo_dir']) / 'starts' / f"{payload['recipe']['adjustments']['exposure']:.4f}.json"
     temporary = marker.with_suffix('.tmp')
-    temporary.write_text(json.dumps({'pid': os.getpid()}))
+    # ``started_ns`` lets ``latest_started_exposure`` name the request that
+    # actually ran on this PID when a reap happens. Dispatch order in the
+    # benchmark does not force HTTP arrival order, so a delayed earlier
+    # request can start on a healthy PID after a later, higher-exposure
+    # request has completed on that PID; the start time is what
+    # distinguishes them.
+    temporary.write_text(json.dumps({'pid': os.getpid(), 'started_ns': time.time_ns()}))
     temporary.replace(marker)
     return render_edit_preview_job(payload, output_path)
+
+
+def latest_started_exposure(markers_root, pid):
+    """Pick the exposure of the request most recently started on ``pid``."""
+    newest = exposure = None
+    for marker in Path(markers_root).glob('*.json'):
+        data = json.loads(marker.read_text())
+        if data.get('pid') != pid:
+            continue
+        started = data.get('started_ns')
+        if started is None:
+            continue
+        if newest is None or started > newest:
+            newest = started
+            exposure = float(marker.stem)
+    return exposure
 
 
 def metric(values):
@@ -113,10 +135,12 @@ def run_trial(spec):
                 ended = time.perf_counter()
                 # A completed request can race cancellation and leave a healthy
                 # child for its successor. Attribute a reap only to the last
-                # request that actually entered that child, never an older one.
-                exposures = [float(marker.stem) for marker in (root / 'starts').glob('*.json')
-                             if json.loads(marker.read_text())['pid'] == pid]
-                stopped.append({'pid': pid, 'ended': ended, 'exposure': max(exposures, default=None)})
+                # request that actually entered that child, picked by start
+                # time: HTTP arrival order lags executor dispatch, so a
+                # later-dispatched higher-exposure request can complete on a
+                # PID before an earlier-dispatched one starts on it.
+                stopped.append({'pid': pid, 'ended': ended,
+                                'exposure': latest_started_exposure(root / 'starts', pid)})
 
         pool._stop = observe_stop
         process = psutil.Process()

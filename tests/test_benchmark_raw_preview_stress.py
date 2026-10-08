@@ -7,7 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from scripts.benchmark_raw_preview_stress import aggregate_results, metric, validate_outcomes
+from scripts.benchmark_raw_preview_stress import (
+    aggregate_results,
+    latest_started_exposure,
+    metric,
+    validate_outcomes,
+)
 
 
 def test_empty_cancellation_measurements_are_not_zero_latency():
@@ -42,6 +47,21 @@ def test_aggregate_pools_samples_instead_of_averaging_percentiles():
     assert row['worker_reap']['p50_ms'] is None
     assert row['requests'] == 4
     assert row['peak_rss_mib'] == 200
+
+
+def test_reap_attribution_picks_latest_started_not_largest_exposure(tmp_path):
+    # Dispatch stamps a monotonically increasing exposure before the HTTP
+    # thread actually reaches ``PreviewWorkers.render``. A delayed earlier
+    # request can start on a healthy PID after a later, higher-exposure
+    # request has completed on that PID, so the attribution must track the
+    # start time rather than the largest exposure value — otherwise the
+    # equality check in the benchmark drops the actual reap.
+    (tmp_path / '0.1002.json').write_text(json.dumps({'pid': 7, 'started_ns': 100}))
+    (tmp_path / '0.1001.json').write_text(json.dumps({'pid': 7, 'started_ns': 300}))
+    (tmp_path / '0.1003.json').write_text(json.dumps({'pid': 8, 'started_ns': 200}))
+    assert latest_started_exposure(tmp_path, 7) == 0.1001
+    assert latest_started_exposure(tmp_path, 8) == 0.1003
+    assert latest_started_exposure(tmp_path, 9) is None
 
 
 def test_stress_runs_real_raw_workers_and_omits_private_paths(tmp_path):
