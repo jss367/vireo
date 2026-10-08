@@ -13,7 +13,7 @@ function selectJob(jobId, source) {
     var job = activeJobs.find(function(j) { return j.id === jobId; });
     if (job) { renderDetail(job); if (isLiveStatus(job.status)) connectSSE(jobId); }
   } else {
-    var job = historyJobs.find(function(j) { return j.id === jobId; });
+    job = historyJobs.find(function(j) { return j.id === jobId; });
     if (job) renderHistoryDetail(job);
   }
   updateList();

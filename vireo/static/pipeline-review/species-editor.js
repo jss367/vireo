@@ -12,7 +12,7 @@ function speciesConfirmPhotoKey(photoIds) {
 
 function speciesConfirmPendingFor(enc, burstIdx) {
   if (!enc) return false;
-  var photoIds = null;
+  var photoIds;
   if (burstIdx != null && enc.bursts && enc.bursts[burstIdx]) {
     photoIds = enc.bursts[burstIdx].photo_ids;
   } else {

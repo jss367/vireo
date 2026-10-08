@@ -695,8 +695,8 @@ function bindGroupReviewKeyboard() {
         e.preventDefault(); return;
       }
       if (e.key === 'ArrowRight') {
-        var items = grmState.items.filter(function(p) { return !grmState.removed.has(p.id); });
-        var idx = items.findIndex(function(p) { return p.id === grmState.selected; });
+        items = grmState.items.filter(function(p) { return !grmState.removed.has(p.id); });
+        idx = items.findIndex(function(p) { return p.id === grmState.selected; });
         if (idx < items.length - 1) grmSelect(items[idx + 1].id);
         e.preventDefault(); return;
       }

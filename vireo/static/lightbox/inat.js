@@ -357,7 +357,7 @@ async function exportInatQuickPhotos() {
   var itemCount = queue.length;
   var submissions = _inatQuickExportSubmissions();
   var exportLabel = itemCount === 1 ? 'Export JPEG\u2026' : 'Export ' + itemCount + ' JPEGs\u2026';
-  var destination = null;
+  var destination;
   button.disabled = true;
   button.textContent = 'Choosing folder\u2026';
   try {

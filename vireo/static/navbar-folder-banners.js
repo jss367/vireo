@@ -775,7 +775,7 @@ async function recheckNewImages() {
   const token = ++_newImagesRecheckSeq;
   _newImagesRecheckToken = token;
   _setNewImagesRecheckBusy(true);
-  let invalidated = false;
+  let invalidated;
   try {
     const resp = await fetch(
       '/api/workspaces/active/new-images/recheck', {method: 'POST'},

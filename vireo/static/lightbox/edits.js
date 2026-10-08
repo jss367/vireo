@@ -110,13 +110,13 @@ window.vireoPhotoIsRawJpegPair = function(photo) {
     '.orf': true
   };
   var primaryName = photo.filename || '';
-  var primaryMatch = String(primaryName).toLowerCase().match(/(\.[^.\/\\]+)$/);
+  var primaryMatch = String(primaryName).toLowerCase().match(/(\.[^./\\]+)$/);
   var primaryExt = primaryMatch ? primaryMatch[1] : '';
   if (!primaryExt) {
     primaryExt = String(photo.extension || '').toLowerCase();
     if (primaryExt && primaryExt.charAt(0) !== '.') primaryExt = '.' + primaryExt;
   }
-  var companionMatch = String(photo.companion_path).toLowerCase().match(/(\.[^.\/\\]+)$/);
+  var companionMatch = String(photo.companion_path).toLowerCase().match(/(\.[^./\\]+)$/);
   var companionExt = companionMatch ? companionMatch[1] : '';
   return !!rawExtensions[primaryExt] && (companionExt === '.jpg' || companionExt === '.jpeg');
 };
@@ -1335,7 +1335,7 @@ var VireoToneGL = (function() {
     if (key !== texKey) {
       gl.bindTexture(gl.TEXTURE_2D, tex);
       // Drain any prior error so getError() below reflects only this upload.
-      while (gl.getError() !== gl.NO_ERROR) {}
+      while (gl.getError() !== gl.NO_ERROR) { /* Drain the GL error queue before uploading. */ }
       try {
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
       } catch (e) {

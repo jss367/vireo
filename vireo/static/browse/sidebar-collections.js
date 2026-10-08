@@ -411,8 +411,8 @@ async function filterByCollection(id, options) {
   // Track which collection is currently loaded so post-membership refresh
   // can pull fresh rules/photo_ids without waiting for a user reopen.
   openedCollectionId = id;
-  var rules = [];
-  var visual = null;
+  var rules;
+  var visual;
   try { rules = JSON.parse(collectionMeta.rules || '[]'); } catch (e) { rules = []; }
   try {
     visual = collectionMeta.visual_json ? JSON.parse(collectionMeta.visual_json) : null;

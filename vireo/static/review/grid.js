@@ -193,7 +193,7 @@ function renderPredictionCard(pred) {
       return p.photo_id === pred.photo_id && p.model !== pred.model;
     });
     if (others.length > 0) {
-      var parts = [];
+      parts = [];
       others.forEach(function(o) {
         var oPct = Math.round(o.confidence * 100);
         var oColor = o.species === pred.species ? 'var(--accent)' : 'var(--warning)';

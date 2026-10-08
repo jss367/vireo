@@ -565,7 +565,7 @@ async function confirmBatchCollection() {
   var newName = document.getElementById('batchCollectionNewName').value.trim();
   var ids = getActiveSelection();
   var collectionId = _batchCollectionSelectedId;
-  var collectionName = '';
+  var collectionName;
 
   if (newName) {
     // Create a new static collection

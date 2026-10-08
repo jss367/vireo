@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM"],
+    "allowJs": true,
+    "checkJs": true,
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noEmit": true,
+    "types": []
+  },
+  "files": [
+    "types/frontend.d.ts",
+    "vireo/static/browse/panel-requests.js",
+    "vireo/static/browse/selection-panel-state.js",
+    "vireo/static/browse/selection-panel-events.js",
+    "tests/frontend/type-contracts.ts"
+  ]
+}

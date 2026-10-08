@@ -1,11 +1,13 @@
 /* Browse panel request ownership. Each lane keeps its cache and active request
    private; an older response must never render or clear a newer request's key.
    Load before the panel controllers. This does not cancel server-side work. */
-(function(global) {
+(function(/** @type {Window} */ global) {
   'use strict';
 
+  /** @returns {PanelRequestLane} */
   function createLane() {
     var owner = {};
+    /** @type {string | undefined} */
     var cachedKey;
 
     function observe() {

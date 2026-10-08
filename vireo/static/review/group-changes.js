@@ -213,8 +213,8 @@ function bindBurstGroupKeyboard() {
       e.preventDefault(); return;
     }
     if (e.key === 'ArrowRight') {
-      var items = grmState.items.filter(function(it) { return !grmState.removed.has(it.id); });
-      var idx = items.findIndex(function(it) { return it.photo_id === grmState.selected; });
+      items = grmState.items.filter(function(it) { return !grmState.removed.has(it.id); });
+      idx = items.findIndex(function(it) { return it.photo_id === grmState.selected; });
       if (idx < items.length - 1) { grmSelect(items[idx + 1].photo_id, 'single'); }
       e.preventDefault(); return;
     }

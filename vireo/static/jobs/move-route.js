@@ -14,7 +14,7 @@ var DATE_FOLDER_ROWS = 8;
 function pathUnderRoot(path, root) {
   if (!path) return '';
   if (root && path.indexOf(root) === 0) {
-    var rest = path.slice(root.length).replace(/^[\/\\]+/, '');
+    var rest = path.slice(root.length).replace(/^[/\\]+/, '');
     if (rest) return rest;
   }
   return path;

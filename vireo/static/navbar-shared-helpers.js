@@ -593,7 +593,7 @@ async function getExternalEditors() {
   if (_externalEditorsCache !== null) return _externalEditorsCache;
   if (_externalEditorsLoading) return _externalEditorsLoading;
   _externalEditorsLoading = (async function() {
-    var arr = [];
+    var arr;
     try {
       var cfg = await safeFetch('/api/config', {}, { toast: false });
       arr = Array.isArray(cfg.external_editors) ? cfg.external_editors : [];
@@ -800,7 +800,7 @@ function formatDuration(seconds) {
     return m + 'm ' + s + 's';
   }
   var h = Math.floor(seconds / 3600);
-  var m = Math.floor((seconds % 3600) / 60);
+  m = Math.floor((seconds % 3600) / 60);
   return h + 'h ' + m + 'm';
 }
 

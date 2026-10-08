@@ -140,7 +140,7 @@ function normalizeRemoteSubpath(raw) {
 
 function importIsAbsolutePath(p) {
   if (!p) return false;
-  return p.charAt(0) === '/' || /^[A-Za-z]:[\\\/]/.test(p) || /^\\\\/.test(p);
+  return p.charAt(0) === '/' || /^[A-Za-z]:[\\/]/.test(p) || /^\\\\/.test(p);
 }
 
 function rsyncDestSpec(user, host, path) {

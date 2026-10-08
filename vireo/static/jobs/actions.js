@@ -139,7 +139,7 @@ function bindDetailPaneActions() {
     }
     var cancelBtn = e.target.closest('[data-cancel-job]');
     if (cancelBtn) {
-      var jobId = cancelBtn.getAttribute('data-cancel-job');
+      jobId = cancelBtn.getAttribute('data-cancel-job');
       // Optimistic UI: flip the button to a disabled "Cancelling…" pill
       // immediately so the click feels live. The server cancel just sets
       // a flag; the running stage may take seconds to actually exit. Track

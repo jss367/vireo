@@ -217,7 +217,7 @@ function loadPipelineReviewTuningDefaults() {
         GROUPING_DEFAULTS = defaults.grouping;
       } catch(e) {
         console.warn('Could not load pipeline config:', e);
-        var defaults = VireoPipelineConfig.buildSliderDefaults();
+        defaults = VireoPipelineConfig.buildSliderDefaults();
         SCORING_DEFAULTS = defaults.scoring;
         GROUPING_DEFAULTS = defaults.grouping;
       }

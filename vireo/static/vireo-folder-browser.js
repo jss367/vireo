@@ -189,7 +189,7 @@
     var syntheticRoot = opts && opts.syntheticRoot;
     var parent = '';
     if (data.path && data.path.indexOf('\\') !== -1) {
-      parent = data.path.replace(/[\\\/]?[^\\\/]+[\\\/]?$/, '') || data.path;
+      parent = data.path.replace(/[\\/]?[^\\/]+[\\/]?$/, '') || data.path;
       if (/^[A-Za-z]:$/.test(parent)) parent += '\\';
     } else if (data.path) {
       parent = data.path.substring(0, data.path.lastIndexOf('/')) || '/';

@@ -106,6 +106,42 @@ and API-response contract checks, and Rust formatting, linting, and unit tests
 when applicable. Nightly and release workflows run the complete Playwright
 suite before release artifacts are built.
 
+### Frontend checks
+
+With Node.js 24, run these commands from the repository root:
+
+```bash
+npm ci
+npm run check:frontend
+```
+
+Both pull-request and main workflows run this command. The pull-request `test`
+gate requires the frontend job to pass. The individual commands are
+`lint:frontend`, `typecheck:frontend`, and `test:frontend-checks`.
+
+ESLint checks first-party JavaScript under `vireo/static`, excluding vendor and
+minified files. Classic scripts still share page globals and expose inline-handler
+functions, so `no-undef` and `no-unused-vars` are enabled only for the three Browse
+controllers listed in `eslint.config.mjs`. Other recommended correctness rules
+apply across the static scripts; intentionally empty catch blocks are allowed.
+Inline template scripts continue to use the existing rendered-script parsing and
+browser tests.
+
+TypeScript checks those controllers' JavaScript with `checkJs`, strict types,
+DOM types, and no output files. `types/frontend.d.ts` describes their public state,
+selection data, and legacy action dependencies. It checks implementation and
+call contracts; it does not validate server responses at runtime or check the
+implementation of legacy actions outside the selected files.
+
+When encapsulating another controller, add it to the strict ESLint list and
+`tsconfig.frontend.json`, describe its dependencies with narrow JSDoc or declaration
+types, and add meaningful negative cases to `tests/frontend/type-contracts.ts`.
+Avoid `any` or blanket suppression to make a controller pass. The expected type
+errors and ESLint regression tests ensure the checks continue rejecting invalid
+code as configuration changes.
+
+### Performance budgets
+
 The large-library benchmark enforces these 100,000-photo pull-request budgets:
 
 - Application startup: 5 seconds
