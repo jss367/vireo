@@ -148,6 +148,30 @@ seams, corners, image boundaries, alpha preservation, local weights, and source
 immutability. A work-count regression guards overlap cost without relying on
 wall-clock timing in CI.
 
+## Preview worker measurements
+
+The [schema 2 worker report](performance/raw-preview-workers.json) records the
+24 MP and 46 MP corpus on an Apple M3 Max, using four numeric threads and five
+samples per scenario. It was recorded from clean revision `51023c555` after the
+test runs finished. Every request used the supervised child-process path and
+passed the linear-source and output-dimension checks.
+
+| Source | Preview | Cache | Median | p95 | Peak server and child memory |
+| --- | --- | --- | ---: | ---: | ---: |
+| 24 MP | Quick | Cold | 1.32 s | 1.62 s | 1,209 MiB |
+| 24 MP | Quick | Warm | 143 ms | 153 ms | 1,138 MiB |
+| 24 MP | Native | Cold | 6.63 s | 6.88 s | 2,467 MiB |
+| 24 MP | Native | Warm | 5.62 s | 5.70 s | 2,509 MiB |
+| 46 MP | Quick | Cold | 2.26 s | 2.64 s | 1,946 MiB |
+| 46 MP | Quick | Warm | 142 ms | 157 ms | 1,407 MiB |
+| 46 MP | Native | Cold | 12.55 s | 12.84 s | 3,639 MiB |
+| 46 MP | Native | Warm | 10.60 s | 10.86 s | 3,694 MiB |
+
+This is a new reference under the process-worker protocol, not a speedup claim
+against the historical reports. It measures sequential requests with one active
+render child; simultaneous renders can consume more memory. The report includes
+the command, complete source revision, CPU and library versions for repeat runs.
+
 ## Stalled preview recovery
 
 The editor gives an image request 60 seconds from dispatch. Reusing a request
