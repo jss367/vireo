@@ -16,18 +16,14 @@ function updateSelectionPanel(ids) {
     var wasVisible = !panel.classList.contains('hidden');
     panel.classList.add('hidden');
     Vireo.browse.panelRequests.keywords.invalidate();
-    selectionKeywordMissingById = {};
-    selectionKeywordPresentById = {};
-    selectionKeywordNameById = {};
+    Vireo.browse.selectionPanel.keywords.reset();
     var list = document.getElementById('selectionKeywordSuggestions');
     if (list) list.innerHTML = '';
     // Same teardown for the prediction rows — invalidation drops any
     // in-flight selection response so it can't paint into the panel the user
     // has just collapsed back to a single photo.
     Vireo.browse.panelRequests.predictions.invalidate();
-    selectionPredictionAcceptableById = {};
-    selectionPredictionSpeciesByIdx = {};
-    selectionPredictionPhotoIdsByIdx = {};
+    Vireo.browse.selectionPanel.predictions.reset();
     var predList = document.getElementById('selectionPredictions');
     if (predList) predList.innerHTML = '';
     renderSelectionWildlifeState([]);
@@ -65,9 +61,7 @@ function updateSelectionPanel(ids) {
   renderBatchInspector(ids, { preserveExifSuggestion: true });
   if (ids.length > 1000) {
     Vireo.browse.panelRequests.keywords.invalidate();
-    selectionKeywordMissingById = {};
-    selectionKeywordPresentById = {};
-    selectionKeywordNameById = {};
+    Vireo.browse.selectionPanel.keywords.reset();
     var list = document.getElementById('selectionKeywordSuggestions');
     if (list) {
       list.innerHTML = '<div class="selection-empty">Keyword suggestions are available for selections of 1,000 photos or fewer.</div>';
@@ -75,9 +69,7 @@ function updateSelectionPanel(ids) {
     // Say the cap out loud here too, rather than leaving an empty
     // Predictions box that reads as "nothing predicted".
     Vireo.browse.panelRequests.predictions.invalidate();
-    selectionPredictionAcceptableById = {};
-    selectionPredictionSpeciesByIdx = {};
-    selectionPredictionPhotoIdsByIdx = {};
+    Vireo.browse.selectionPanel.predictions.reset();
     var predList = document.getElementById('selectionPredictions');
     if (predList) {
       predList.innerHTML = '<div class="selection-empty">Predictions are available for selections of 1,000 photos or fewer.</div>';
@@ -227,6 +219,7 @@ async function loadSelectionKeywordSuggestions(ids) {
   if (ids.length > 1000) return;
   var request = Vireo.browse.panelRequests.keywords.begin(selectionIdsKey(ids));
   if (!request) return;
+  Vireo.browse.selectionPanel.keywords.reset();
   var list = document.getElementById('selectionKeywordSuggestions');
   if (list) list.innerHTML = '<div class="selection-empty">Checking selected keywords...</div>';
 
@@ -249,17 +242,13 @@ function renderSelectionKeywordSuggestions(keywords, selectedCount) {
   var list = document.getElementById('selectionKeywordSuggestions');
   if (!list) return;
   if (!keywords.length) {
-    selectionKeywordMissingById = {};
-    selectionKeywordPresentById = {};
-    selectionKeywordNameById = {};
+    Vireo.browse.selectionPanel.keywords.reset();
     list.innerHTML = '<div class="selection-empty">No keywords on selected photos.</div>';
     return;
   }
 
   var html = '';
-  selectionKeywordMissingById = {};
-  selectionKeywordPresentById = {};
-  selectionKeywordNameById = {};
+  Vireo.browse.selectionPanel.keywords.replace(keywords);
   var groupDefinitions = [
     { type: 'taxonomy', label: 'Species' },
     { type: 'location', label: 'Locations' },
@@ -276,15 +265,16 @@ function renderSelectionKeywordSuggestions(keywords, selectedCount) {
   function renderKeywordRow(k) {
     var missing = k.missing_count || 0;
     var count = k.count || 0;
-    selectionKeywordMissingById[String(k.id)] = k.missing_photo_ids || [];
-    selectionKeywordPresentById[String(k.id)] = k.present_photo_ids || [];
-    selectionKeywordNameById[String(k.id)] = k.name;
     var actions = '';
     if (missing > 0) {
-      actions += '<button class="selection-keyword-add" onclick="applySelectionKeyword(' + k.id + ')" title="Add this keyword to the selected photos missing it">Add to ' + missing + '</button>';
+      actions += '<button class="selection-keyword-add" data-selection-action="keyword-add"' +
+        ' data-keyword-id="' + Number(k.id) +
+        '" title="Add this keyword to the selected photos missing it">Add to ' + missing + '</button>';
     }
     if (count > 0) {
-      actions += '<button class="selection-keyword-remove" onclick="removeSelectionKeyword(' + k.id + ')" title="Remove this keyword from selected photos that have it">Remove from ' + count + '</button>';
+      actions += '<button class="selection-keyword-remove" data-selection-action="keyword-remove"' +
+        ' data-keyword-id="' + Number(k.id) +
+        '" title="Remove this keyword from selected photos that have it">Remove from ' + count + '</button>';
     }
     return '<div class="selection-keyword-row">' +
       '<div style="min-width:0;">' +
@@ -364,10 +354,10 @@ async function renderSelectionWildlifeState(ids) {
   status.textContent = statusText;
   var html = '';
   if (includedCount > 0) {
-    html += '<button class="selection-keyword-remove" onclick="setSelectionWildlifeExcluded(true)">Exclude ' + includedCount + '</button>';
+    html += '<button class="selection-keyword-remove" data-selection-action="wildlife-exclude">Exclude ' + includedCount + '</button>';
   }
   if (excludedCount > 0) {
-    html += '<button class="selection-keyword-add" onclick="setSelectionWildlifeExcluded(false)">Include ' + excludedCount + '</button>';
+    html += '<button class="selection-keyword-add" data-selection-action="wildlife-include">Include ' + excludedCount + '</button>';
   }
   actions.innerHTML = html;
 }
@@ -409,7 +399,8 @@ async function setSelectionWildlifeExcluded(excluded) {
 }
 
 async function applySelectionKeyword(keywordId) {
-  var ids = selectionKeywordMissingById[String(keywordId)] || [];
+  var row = Vireo.browse.selectionPanel.keywords.get(keywordId);
+  var ids = row ? row.missingPhotoIds : [];
   if (!ids.length) return;
   try {
     await safeFetch('/api/batch/keyword', {
@@ -429,9 +420,10 @@ async function applySelectionKeyword(keywordId) {
 }
 
 async function removeSelectionKeyword(keywordId) {
-  var ids = selectionKeywordPresentById[String(keywordId)] || [];
+  var row = Vireo.browse.selectionPanel.keywords.get(keywordId);
+  var ids = row ? row.presentPhotoIds : [];
   if (!ids.length) return;
-  var removedName = selectionKeywordNameById[String(keywordId)] || null;
+  var removedName = row.name || null;
   try {
     await safeFetch('/api/batch/keyword-remove', {
       method: 'POST',

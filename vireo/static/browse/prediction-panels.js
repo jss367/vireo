@@ -851,6 +851,7 @@ async function loadSelectionPredictions(ids) {
   if (ids.length > 1000) return;
   var request = Vireo.browse.panelRequests.predictions.begin(selectionIdsKey(ids));
   if (!request) return;
+  Vireo.browse.selectionPanel.predictions.reset();
   list.innerHTML = '<div class="selection-empty">Checking predictions...</div>';
   try {
     var data = await safeFetch('/api/selection/prediction-suggestions', {
@@ -870,13 +871,9 @@ async function loadSelectionPredictions(ids) {
 }
 
 function toggleSelectionPredictions() {
-  selectionPredictionsExpanded = !selectionPredictionsExpanded;
-  if (_selectionPredictionData) {
-    renderSelectionPredictions(
-      _selectionPredictionData.predictions,
-      _selectionPredictionData.selectedCount,
-      _selectionPredictionData.meta,
-    );
+  var data = Vireo.browse.selectionPanel.predictions.toggle();
+  if (data) {
+    renderSelectionPredictions(data.predictions, data.selectedCount, data.meta);
   }
 }
 
@@ -884,12 +881,8 @@ function renderSelectionPredictions(predictions, selectedCount, meta) {
   var list = document.getElementById('selectionPredictions');
   if (!list) return;
   meta = meta || {};
-  _selectionPredictionData = {
-    predictions: predictions, selectedCount: selectedCount, meta: meta,
-  };
-  selectionPredictionAcceptableById = {};
-  selectionPredictionSpeciesByIdx = {};
-  selectionPredictionPhotoIdsByIdx = {};
+  Vireo.browse.selectionPanel.predictions.reset();
+  Vireo.browse.selectionPanel.predictions.remember(predictions, selectedCount, meta);
   // The floor is the user's own setting, so hidden rows get counted out loud
   // rather than vanishing into an empty-looking panel.
   var hidden = meta.below_threshold_count || 0;
@@ -913,9 +906,10 @@ function renderSelectionPredictions(predictions, selectedCount, meta) {
 
   // Sorted strongest-first by the endpoint, so the collapse keeps the species
   // most worth acting on and names the rest.
-  var shown = selectionPredictionsExpanded
+  var shown = Vireo.browse.selectionPanel.predictions.isExpanded()
     ? predictions
     : predictions.slice(0, PREDICTION_COLLAPSE_AT);
+  Vireo.browse.selectionPanel.predictions.replaceRows(shown);
   var collapsed = predictions.length - shown.length;
 
   var html = '';
@@ -930,14 +924,9 @@ function renderSelectionPredictions(predictions, selectedCount, meta) {
     var acceptablePhotoCount = (typeof p.acceptable_photo_count === 'number')
       ? p.acceptable_photo_count
       : acceptable.length;
-    selectionPredictionAcceptableById[idx] = acceptable;
-    // The species the button will apply, sent back with the Accept so the
-    // server can refuse rows whose consensus has drifted from what the panel
-    // rendered (another tab ungrouping the burst, per-vote edits shifting
-    // the winner). See _species_drifted_prediction_ids in app.py.
-    selectionPredictionSpeciesByIdx[idx] = p.species;
+    // The private row store retains the species and distinct photo ids for
+    // actions, independently of the prediction ids eligible for acceptance.
     var predictedPhotos = p.predicted_photo_ids || [];
-    selectionPredictionPhotoIdsByIdx[idx] = predictedPhotos;
 
     var rowMeta = 'Predicted on ' + p.predicted_count + ' of ' + selectedCount;
     if (p.keyworded_count) rowMeta += ', already keyworded on ' + p.keyworded_count;
@@ -960,16 +949,18 @@ function renderSelectionPredictions(predictions, selectedCount, meta) {
       : 'Add this species to all ' + selectedCount +
         ' selected photos, including those without this prediction. ' +
         'Existing keywords are kept; conflicts still need review.';
-    actions += '<button class="prediction-accept prediction-accept-all" onclick="acceptSelectionPrediction(' + idx +
-      ', true, this)" title="' + allTitle + '">Accept on all ' + selectedCount + '</button>';
+    actions += '<button class="prediction-accept prediction-accept-all"' +
+      ' data-selection-action="prediction-accept-all" data-prediction-row="' + idx +
+      '" title="' + allTitle + '">Accept on all ' + selectedCount + '</button>';
     // The narrower accept is only a second *action* when it would touch
     // fewer photos. When every selected photo already predicts this species
     // unambiguously, the two buttons submit the same work and land the same
     // undo entry, so the second one is a decision the user has to stop and
     // make for no difference in outcome.
     if (acceptablePhotoCount && acceptablePhotoCount !== selectedCount) {
-      actions += '<button class="prediction-accept prediction-accept-subset" onclick="acceptSelectionPrediction(' + idx +
-        ')" title="Accept this species only on the ' + acceptablePhotoCount +
+      actions += '<button class="prediction-accept prediction-accept-subset"' +
+        ' data-selection-action="prediction-accept" data-prediction-row="' + idx +
+        '" title="Accept this species only on the ' + acceptablePhotoCount +
         ' selected photos that predict it and are unambiguous">Accept on ' +
         acceptablePhotoCount + '</button>';
     }
@@ -981,8 +972,8 @@ function renderSelectionPredictions(predictions, selectedCount, meta) {
     // usually "accept the OTHER species on all 70", and narrowing to 2 would
     // repaint this panel for 2 photos and take that button away.
     if (predictedPhotos.length) {
-      actions += '<button class="prediction-show" onclick="showSelectionPredictionPhotos(' + idx +
-        ', this)" title="Open the ' + predictedPhotos.length +
+      actions += '<button class="prediction-show" data-selection-action="prediction-show"' +
+        ' data-prediction-row="' + idx + '" title="Open the ' + predictedPhotos.length +
         ' photo' + (predictedPhotos.length === 1 ? '' : 's') +
         ' predicting this species in the lightbox. Your selection of ' + selectedCount +
         ' stays as it is.">Show ' + predictedPhotos.length + ' photo' +
@@ -994,8 +985,8 @@ function renderSelectionPredictions(predictions, selectedCount, meta) {
         ' review — alternatives or a conflict with existing keywords';
       var firstAmbiguousPhoto = ambiguousPhotos[0];
       if (!acceptablePhotoCount && firstAmbiguousPhoto != null) {
-        actions += '<button class="prediction-review-link" onclick="openPredictionInReview(' +
-          firstAmbiguousPhoto + ')">Open in Review</button>';
+        actions += '<button class="prediction-review-link" data-selection-action="prediction-review"' +
+          ' data-prediction-row="' + idx + '">Open in Review</button>';
       }
     } else if (!acceptablePhotoCount) {
       why = 'Already keyworded on every photo that predicts it';
@@ -1024,10 +1015,10 @@ function renderSelectionPredictions(predictions, selectedCount, meta) {
     '</div>';
   });
   if (collapsed > 0) {
-    html += '<button class="prediction-toggle" onclick="toggleSelectionPredictions()">Show ' +
+    html += '<button class="prediction-toggle" data-selection-action="prediction-toggle">Show ' +
       collapsed + ' more predicted species</button>';
-  } else if (selectionPredictionsExpanded && predictions.length > PREDICTION_COLLAPSE_AT) {
-    html += '<button class="prediction-toggle" onclick="toggleSelectionPredictions()">Show fewer</button>';
+  } else if (Vireo.browse.selectionPanel.predictions.isExpanded() && predictions.length > PREDICTION_COLLAPSE_AT) {
+    html += '<button class="prediction-toggle" data-selection-action="prediction-toggle">Show fewer</button>';
   }
   list.innerHTML = html + hiddenNote;
 }
@@ -1036,7 +1027,8 @@ function renderSelectionPredictions(predictions, selectedCount, meta) {
 // user can judge the detection before accepting anything. Deliberately
 // read-only: nothing here changes the selection, the grid, or any keyword.
 async function showSelectionPredictionPhotos(idx, button) {
-  var ids = (selectionPredictionPhotoIdsByIdx[idx] || []).slice();
+  var row = Vireo.browse.selectionPanel.predictions.getRow(idx);
+  var ids = row ? row.photoIds : [];
   if (!ids.length) return;
   // Both the selection and the latest Show click must still own this result.
   var panelIsCurrent = Vireo.browse.panelRequests.predictions.observe();
@@ -1083,9 +1075,11 @@ async function showSelectionPredictionPhotos(idx, button) {
 }
 
 async function acceptSelectionPrediction(idx, onAll, button) {
-  var ids = selectionPredictionAcceptableById[idx] || [];
+  var row = Vireo.browse.selectionPanel.predictions.getRow(idx);
+  if (!row) return;
+  var ids = row.acceptableIds;
   if (!onAll && !ids.length) return;
-  var expectedSpecies = selectionPredictionSpeciesByIdx[idx];
+  var expectedSpecies = row.species;
   var selection = getActiveSelection();
   if (!expectedSpecies || !selection.length) return;
   // Restore whatever label the button was rendered with rather than a

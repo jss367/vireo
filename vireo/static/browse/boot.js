@@ -17,6 +17,7 @@
 // re-fetch. Initialize here so the pre-await snapshot reads the same ``0``
 // the rest of the script sees (Codex review r3686317674).
 var folderHealthRefreshSeq = 0;
+Vireo.browse.selectionPanel.bindActions();
 VireoViewPreferences.restoreAll(document.querySelector('.browse-view-controls'));
 updateThumbSize(document.getElementById('thumbSizeSlider').value);
 bootstrapBrowse();

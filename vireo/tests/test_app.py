@@ -22374,12 +22374,11 @@ def test_selection_predictions_accept_on_all_renders_and_submits_full_selection(
         _PANEL_DOM_STUB.replace("id === 'detailPredictions'", "id === 'selectionPredictions'"),
         _browse_escape_helpers(),
         _browse_js_function_body(html, "function formatPredictionConfidence("),
+        "var window = globalThis;",
+        (Path(__file__).parent.parent / "static/browse/selection-panel-state.js").read_text(encoding="utf-8"),
         _browse_js_function_body(html, "function renderSelectionPredictions("),
         _browse_js_function_body(html, "async function acceptSelectionPrediction("),
         """
-var selectionPredictionsExpanded = false;
-var selectionPredictionAcceptableById = {};
-var selectionPredictionSpeciesByIdx = {};
 var requests = [], refreshes = [];
 function getActiveSelection() { return [11, 12, 13]; }
 async function safeFetch(url, opts) {
@@ -22401,7 +22400,7 @@ var predictions = Array.from({length: 6}, function(_, idx) {
 (async function() {
   renderSelectionPredictions(predictions, 3, {});
   var collapsedHTML = __list.innerHTML;
-  selectionPredictionsExpanded = true;
+  Vireo.browse.selectionPanel.predictions.toggle();
   renderSelectionPredictions(predictions, 3, {});
   var button = {disabled: false, textContent: 'Accept on all 3'};
   await acceptSelectionPrediction(0, true, button);
@@ -22415,6 +22414,8 @@ var predictions = Array.from({length: 6}, function(_, idx) {
 """,
     ])
     result = _run_node(source, [])
+    assert "onclick=" not in result["collapsedHTML"]
+    assert "onclick=" not in result["expandedHTML"]
     assert result["collapsedHTML"].count(">Accept on all 3</button>") == 5
     assert result["expandedHTML"].count(">Accept on all 3</button>") == 6
     assert result["requests"][0]["body"] == {
@@ -22461,13 +22462,12 @@ def test_selection_prediction_accept_on_all_leads_and_names_its_count(app_and_db
         ),
         _browse_escape_helpers(),
         _browse_js_function_body(html, "function formatPredictionConfidence("),
+        "var window = globalThis;",
+        (Path(__file__).parent.parent / "static/browse/selection-panel-state.js").read_text(encoding="utf-8"),
         _browse_js_function_body(html, "function renderSelectionPredictions("),
         _browse_js_function_body(html, "async function acceptSelectionPrediction("),
         """
-var selectionPredictionsExpanded = true;
-var selectionPredictionAcceptableById = {};
-var selectionPredictionSpeciesByIdx = {};
-var selectionPredictionPhotoIdsByIdx = {};
+Vireo.browse.selectionPanel.predictions.toggle();
 var requests = [];
 var selection = [];
 for (var i = 1; i <= 15; i++) selection.push(i);
@@ -22519,7 +22519,7 @@ var predictions = [
     assert rows[0].index("Accept on all 15") < rows[0].index("Accept on 14")
     assert rows[1].index("Accept on all 15") < rows[1].index("Accept on 2")
     # Primary vs secondary chrome, not just order.
-    assert rows[0].count("prediction-accept-all") == 1
+    assert rows[0].count('class="prediction-accept prediction-accept-all"') == 1
     assert rows[0].count("prediction-accept-subset") == 1
 
     # Predicted on all 15 of 15: the subset accept would submit the exact
@@ -22557,14 +22557,12 @@ def test_selection_prediction_show_button_opens_only_that_species_photos(app_and
         _PANEL_DOM_STUB.replace("id === 'detailPredictions'", "id === 'selectionPredictions'"),
         _browse_escape_helpers(),
         _browse_js_function_body(html, "function formatPredictionConfidence("),
-        _browse_js_function_body(html, "function renderSelectionPredictions("),
         "var window = globalThis;",
+        (Path(__file__).parent.parent / "static/browse/selection-panel-state.js").read_text(encoding="utf-8"),
+        _browse_js_function_body(html, "function renderSelectionPredictions("),
         (Path(__file__).parent.parent / "static/browse/panel-requests.js").read_text(encoding="utf-8"),
         _browse_js_function_body(html, "async function showSelectionPredictionPhotos("),
         """
-var selectionPredictionsExpanded = false;
-var selectionPredictionAcceptableById = {};
-var selectionPredictionSpeciesByIdx = {};
 
 var requests = [], opened = [], toasts = [], dropped = [];
 async function safeFetch(url, opts) {
@@ -22658,14 +22656,12 @@ def test_selection_prediction_show_button_drops_stale_interleaved_fetch(app_and_
         _PANEL_DOM_STUB.replace("id === 'detailPredictions'", "id === 'selectionPredictions'"),
         _browse_escape_helpers(),
         _browse_js_function_body(html, "function formatPredictionConfidence("),
-        _browse_js_function_body(html, "function renderSelectionPredictions("),
         "var window = globalThis;",
+        (Path(__file__).parent.parent / "static/browse/selection-panel-state.js").read_text(encoding="utf-8"),
+        _browse_js_function_body(html, "function renderSelectionPredictions("),
         (Path(__file__).parent.parent / "static/browse/panel-requests.js").read_text(encoding="utf-8"),
         _browse_js_function_body(html, "async function showSelectionPredictionPhotos("),
         """
-var selectionPredictionsExpanded = false;
-var selectionPredictionAcceptableById = {};
-var selectionPredictionSpeciesByIdx = {};
 
 var opened = [], toasts = [];
 // Slow-first-then-fast: the row-0 fetch queues its resolver behind the
