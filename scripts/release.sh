@@ -62,7 +62,17 @@ if $PUBLISH; then
     fi
     echo "==> Syncing main before release checks..."
     git fetch origin main
+    PRE_SYNC_HEAD=$(git rev-parse HEAD)
     git merge --ff-only origin/main
+    # Bash loaded this script and sync_version.py before the merge updated
+    # them on disk. Re-exec once when the sync advanced HEAD so the staging
+    # list, gates, and publish logic that run below are the fetched versions,
+    # not the pre-sync ones the shell started with.
+    if [[ "$PRE_SYNC_HEAD" != "$(git rev-parse HEAD)" && -z "${VIREO_RELEASE_REEXECED:-}" ]]; then
+        echo "==> Release scripts advanced during sync; re-executing..."
+        export VIREO_RELEASE_REEXECED=1
+        exec bash "$0" "$@"
+    fi
 fi
 
 # --- Read current version from pyproject.toml ---

@@ -370,6 +370,38 @@ def test_release_atomic_push_rejects_remote_race_and_keeps_tested_source(release
     assert _git(remote, "rev-parse", "main") == _git(repo, "rev-parse", "HEAD")
 
 
+def test_release_runs_the_fetched_script_after_sync_advances_main(release_repo):
+    """A sync that updates release.sh must not leave the pre-fetch script running.
+
+    The merge updates files on disk, but Bash keeps executing the contents it
+    loaded before fetch. If release.sh changed its staging list or its gates,
+    those changes would silently never run — the tagged commit would be a
+    mixture of fetched manifest edits and stale script logic.
+    """
+    repo, _, writer, gates, _ = release_repo
+    # Add a marker write inside the sync block of the remote release.sh. The
+    # local checkout still carries the unmarked copy, so the marker appears
+    # in the gates log only when the fetched script is the one executing by
+    # the time control reaches that line.
+    original = (writer / "scripts" / "release.sh").read_text()
+    marker = 'echo "fetched-release-sh" >> "$GATES_LOG"\n'
+    patched = original.replace(
+        'echo "==> Syncing version..."\n',
+        marker + 'echo "==> Syncing version..."\n',
+        1,
+    )
+    assert patched != original
+    (writer / "scripts" / "release.sh").write_text(patched)
+    _git(writer, "add", "scripts/release.sh")
+    _git(writer, "commit", "-m", "Update release script")
+    _git(writer, "push", "origin", "main")
+
+    result = _run_release(release_repo)
+
+    assert result.returncode == 0, result.stderr
+    assert "fetched-release-sh" in gates.read_text()
+
+
 def test_release_does_not_tag_or_push_when_version_commit_fails(release_repo):
     repo, remote, _, _, _ = release_repo
     remote_before = _git(remote, "show-ref")
