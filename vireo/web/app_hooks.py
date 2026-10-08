@@ -49,7 +49,7 @@ RESERVATION_EXEMPT_ENDPOINTS = frozenset({
     "system.api_shutdown", "system.api_v1_shutdown",
     "jobs.api_job_cancel", "jobs.api_job_pause", "jobs.api_job_resume",
     "jobs.api_jobs_cancel_queued",
-    "move_cleanup.source_cleanup",
+    "move_cleanup.source_cleanup", "media.api_cancel_edit_preview",
 }) | frozenset({
     # Reads that use POST only because their body (a rule tree or an id
     # list) is too big for a query string. Browse issues them on every

@@ -44,6 +44,7 @@ from services.gps_locations import BulkGpsLocations
 from services.missing_originals import MissingOriginals
 from services.photo_deletion import PhotoDeletion
 from services.pipeline_launch import PipelineChain
+from services.preview_workers import PreviewWorkers
 from services.render_cache import RenderCache
 from services.visual_scope import (
     VisualScope,
@@ -82,7 +83,7 @@ from web.local_folder import create_local_folder_blueprint
 from web.local_workspace import create_local_workspace_blueprint
 from web.location_edits import LocationErrors
 from web.locations import create_locations_blueprint
-from web.media import create_media_blueprint
+from web.media import create_media_blueprint, render_edit_preview_job
 from web.misses import create_misses_blueprint
 from web.models import create_models_blueprint
 from web.move_cleanup import create_move_cleanup_blueprint
@@ -1584,6 +1585,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     # Render/preview cache invalidation (services.render_cache).
     render_cache = RenderCache(app.config)
+    app._preview_workers = PreviewWorkers(render_edit_preview_job)
 
     # Batch delete and the post-delete cache sweep (services.photo_deletion).
     # The filesystem helpers are wrapped in lambdas so they are looked up on
@@ -1808,6 +1810,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             app.config,
             invalid_preview_cache_paths=render_cache.invalid_preview_cache_paths,
             clear_preview_cache_invalid=render_cache.clear_preview_cache_invalid,
+            render_edit_preview=app._preview_workers.render,
+            cancel_edit_preview=app._preview_workers.cancel,
         )
     )
     # The prepare-full-resolution job calls the /original and /preview views

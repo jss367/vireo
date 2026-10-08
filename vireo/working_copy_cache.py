@@ -60,10 +60,25 @@ _deferred_retry_pending = False
 
 
 @contextmanager
-def working_copy_publication_guard():
-    """Serialize canonical publication with quota scan/delete passes."""
-    with _eviction_lock:
+def working_copy_publication_guard(*, cancelled=None):
+    """Serialize canonical publication with quota scan/delete passes.
+
+    Preview supervisors can abandon a queued source lease on cancellation;
+    ordinary publishers retain the existing blocking, reentrant behavior.
+    """
+    if cancelled is None:
+        with _eviction_lock:
+            yield
+        return
+    while not _eviction_lock.acquire(timeout=0.05):
+        if cancelled():
+            raise InterruptedError('Preview source lease cancelled')
+    try:
+        if cancelled():
+            raise InterruptedError('Preview source lease cancelled')
         yield
+    finally:
+        _eviction_lock.release()
 
 
 # Working copies carry no access record of their own, so quota eviction

@@ -265,6 +265,8 @@ def app_and_db(tmp_path, monkeypatch):
         Image.new('RGB', (100, 100)).save(os.path.join(thumb_dir, f"{pid}.jpg"))
 
     app = create_app(db_path=db_path, thumb_cache_dir=thumb_dir, api_token="test-token-123")
+    # Source/fallback tests monkeypatch the renderer in this interpreter.
+    app.config["EDIT_PREVIEW_IN_PROCESS"] = True
     yield app, db
     # Windows CI runners can stretch _persist_job's SQLite retries past a
     # tight teardown budget when a worker enters its finally block just as
@@ -320,6 +322,9 @@ def client_with_photo(tmp_path, monkeypatch):
     )
 
     app = create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir), api_token="test-token-123")
+    # These tests patch source selection/decoding in the parent interpreter.
+    # Process-worker integration tests explicitly turn this seam off.
+    app.config["EDIT_PREVIEW_IN_PROCESS"] = True
     yield app, db, pid
     # Match app_and_db's more generous teardown budget so slow Windows CI
     # runners don't flag a legitimately-completing worker as a leak.
