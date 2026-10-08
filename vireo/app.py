@@ -1585,7 +1585,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     # Render/preview cache invalidation (services.render_cache).
     render_cache = RenderCache(app.config)
-    app._preview_workers = PreviewWorkers(render_edit_preview_job)
+    app._preview_workers = PreviewWorkers(
+        render_edit_preview_job, threads=app.config.get('EDIT_PREVIEW_THREADS', 2),
+    )
 
     # Batch delete and the post-delete cache sweep (services.photo_deletion).
     # The filesystem helpers are wrapped in lambdas so they are looked up on

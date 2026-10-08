@@ -23,6 +23,13 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 _POOLS = weakref.WeakSet()
 
+# BLAS/OpenMP runtimes read these only at import time, and the child imports
+# the handler module (and its NumPy chain) during spawn bootstrap before any
+# code we author runs. Setting them in the parent's os.environ around
+# ``Process.start()`` is the only point where the child can inherit them.
+_BLAS_THREADS_ENV = ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS')
+_SPAWN_LOCK = threading.Lock()
+
 
 def _shutdown():
     for pool in list(_POOLS):
@@ -46,8 +53,6 @@ def _worker(connection, handler):
             payload_path, output_path = connection.recv()
             try:
                 payload = json.loads(Path(payload_path).read_text())
-                for name in ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS'):
-                    os.environ[name] = str(payload.get('threads', 2))
                 result = handler(payload, output_path)
             except Exception:
                 log.exception('Preview worker failed')
@@ -73,13 +78,14 @@ class _Job:
 
 
 class PreviewWorkers:
-    def __init__(self, handler, *, workers=2, pending=8, timeout=45, idle_timeout=60, sessions=1024):
+    def __init__(self, handler, *, workers=2, pending=8, timeout=45, idle_timeout=60, sessions=1024, threads=2):
         self.handler = handler
         self.workers = workers
         self.pending_limit = pending
         self.timeout = timeout
         self.idle_timeout = idle_timeout
         self.session_limit = sessions
+        self.threads = threads
         self._condition = threading.Condition()
         self._latest = OrderedDict()
         self._jobs = {}
@@ -161,6 +167,26 @@ class PreviewWorkers:
                 self._condition.notify_all()
         return job.result
 
+    def _spawn_bounded(self, process):
+        # Spawn copies ``os.environ`` into the child before any Python-level
+        # code runs there, and the child imports the handler (and its NumPy
+        # chain) during bootstrap, so BLAS/OMP read these variables at that
+        # point. The parent lock serializes concurrent spawns past the brief
+        # os.environ mutation; the restore keeps the parent's own BLAS
+        # settings unchanged.
+        with _SPAWN_LOCK:
+            preserved = {name: os.environ.get(name) for name in _BLAS_THREADS_ENV}
+            try:
+                for name in _BLAS_THREADS_ENV:
+                    os.environ[name] = str(self.threads)
+                process.start()
+            finally:
+                for name, value in preserved.items():
+                    if value is None:
+                        os.environ.pop(name, None)
+                    else:
+                        os.environ[name] = value
+
     @staticmethod
     def _stop(process, connection):
         if connection is not None:
@@ -219,7 +245,7 @@ class PreviewWorkers:
                             if process is None:
                                 connection, child = self._context.Pipe()
                                 process = self._context.Process(target=_worker, args=(child, self.handler), daemon=True)
-                                process.start()
+                                self._spawn_bounded(process)
                                 child.close()
                             Path(payload_path).write_text(json.dumps(job.payload))
                             connection.send((payload_path, output_path))
