@@ -7,8 +7,8 @@
 #   ./scripts/release.sh 0.5.0 --publish      # explicit version
 #
 # With --publish, the script bumps the version, commits, tags, and pushes.
-# CI (build-release.yml) then builds macOS ARM64, macOS Intel, Windows, and
-# Linux, and creates a draft GitHub Release with all artifacts.
+# CI (build-release.yml) then builds the supported platforms and publishes a
+# GitHub Release with all artifacts after the release gates pass.
 #
 # Without --publish, a local build is done for testing on the current machine.
 #
@@ -206,7 +206,7 @@ if $PUBLISH; then
         exit 1
     fi
     echo ""
-    echo "Tag pushed. CI will build all platforms and create a draft release."
+    echo "Tag pushed. CI will test, build, and publish the release."
     echo "Monitor: https://github.com/jss367/vireo/actions"
     echo "Release: https://github.com/jss367/vireo/releases/tag/v$NEW_VERSION"
 else
@@ -214,5 +214,5 @@ else
     echo "  git push"
     echo "  git tag v$NEW_VERSION && git push origin v$NEW_VERSION"
     echo ""
-    echo "CI will build all platforms and create a draft release."
+    echo "CI will test, build, and publish the release."
 fi
