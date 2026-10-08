@@ -1,7 +1,11 @@
 /* ---------- Themes ---------- */
 
+/* Each theme sets color-scheme so the browser draws its own controls
+   (scrollbars, <select> menus, date pickers, checkboxes) to match. */
+
 /* Vireo Dark — matches the teal/navy logo */
 :root[data-theme="vireo-dark"] {
+  color-scheme: dark;
   --bg-primary: #0A1F2E;
   --bg-secondary: #0E2A3D;
   --bg-tertiary: #14374E;
@@ -33,6 +37,7 @@
 
 /* Vireo Light — clean, airy complement to the dark theme */
 :root[data-theme="vireo-light"] {
+  color-scheme: light;
   --bg-primary: #F0F6F6;
   --bg-secondary: #FAFFFE;
   --bg-tertiary: #E4EDED;
@@ -64,6 +69,7 @@
 
 /* Classic Dark (original teal/navy) */
 :root[data-theme="classic-dark"] {
+  color-scheme: dark;
   --bg-primary: #1a1a2e;
   --bg-secondary: #16213e;
   --bg-tertiary: #0f3460;
@@ -95,6 +101,7 @@
 
 /* Vireo Gold (default) — warm yellow/grey palette matching the logo */
 :root, :root[data-theme="vireo-gold"] {
+  color-scheme: light;
   --bg-primary: #FDFAF0;
   --bg-secondary: #FFFEF8;
   --bg-tertiary: #F5F0E0;
@@ -126,6 +133,7 @@
 
 /* High Contrast */
 :root[data-theme="high-contrast"] {
+  color-scheme: dark;
   --bg-primary: #000000;
   --bg-secondary: #111111;
   --bg-tertiary: #222222;
