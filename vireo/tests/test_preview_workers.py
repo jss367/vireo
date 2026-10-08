@@ -156,6 +156,28 @@ def test_cancel_abandons_blocked_working_copy_guard(pool):
         assert pool.render({'value': 'latest'}, 'a', 3)[1] == b'latest'
 
 
+def test_free_worker_serves_third_tab_queued_behind_a_stalled_worker(tmp_path):
+    pool = PreviewWorkers(render_probe, workers=2, timeout=10)
+    first_marker, second_marker = tmp_path / 'first', tmp_path / 'second'
+    try:
+        with ThreadPoolExecutor(3) as threads:
+            first = threads.submit(pool.render, {'hang': True, 'started': str(first_marker)}, 'a', 1)
+            wait_until(first_marker.exists)
+            second = threads.submit(pool.render, {'hang': True, 'started': str(second_marker)}, 'b', 1)
+            wait_until(second_marker.exists)
+            third = threads.submit(pool.render, {'value': 'third'}, 'c', 1)
+            wait_until(lambda: len(pool._queue) == 1)
+            assert pool._queue[0].slot == pool._affinity['a']
+            pool.cancel('b', 2)
+            assert second.result()[0] == 409
+            assert third.result()[1] == b'third'
+            assert not first.done()
+            pool.cancel('a', 2)
+            assert first.result()[0] == 409
+    finally:
+        pool.close()
+
+
 @pytest.mark.parametrize('session, sequence', [('x', '1'), ('a'*32, '-1'), ('a'*32, 'True'), ('a'*32, '1'*16)])
 def test_bad_request_identity_is_rejected(session, sequence):
     with pytest.raises(ValueError):

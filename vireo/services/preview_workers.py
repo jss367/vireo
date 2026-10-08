@@ -178,6 +178,14 @@ class PreviewWorkers:
 
     def _serve(self, index):
         process = connection = None
+
+        def eligible(job):
+            # Preserve warm cache affinity when its worker is available, but
+            # let a free worker help tabs queued behind someone else's render.
+            # Replacements wait for their own old worker to be reaped first.
+            preferred = self._active[job.slot]
+            return job.slot == index or (preferred is not None and preferred.session != job.session)
+
         try:
             with tempfile.TemporaryDirectory(prefix='vireo-preview-') as directory:
                 payload_path = str(Path(directory) / 'request.json')
@@ -185,14 +193,15 @@ class PreviewWorkers:
                 while True:
                     with self._condition:
                         self._condition.wait_for(
-                            lambda: self._closed or any(item.slot == index for item in self._queue),
+                            lambda: self._closed or any(eligible(item) for item in self._queue),
                             timeout=self.idle_timeout,
                         )
                         if self._closed:
                             return
-                        job = next((item for item in self._queue if item.slot == index), None)
+                        job = next((item for item in self._queue if eligible(item)), None)
                         if job is not None:
                             self._queue.remove(job)
+                            job.slot = self._affinity[job.session] = index
                             self._active[index] = job
                     if job is None:
                         self._stop(process, connection)
