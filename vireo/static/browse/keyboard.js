@@ -204,5 +204,5 @@ async function moveBrowseSelection(delta, e) {
 
 function scrollToCard(idx) {
   var cards = document.querySelectorAll('.grid-card');
-  if (cards[idx]) cards[idx].scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  if (cards[idx]) cards[idx].scrollIntoView({ block: 'nearest', behavior: preferredScrollBehavior() });
 }

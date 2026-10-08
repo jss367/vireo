@@ -549,7 +549,7 @@ async function _runPhotoDeepLink(photoId) {
 
     // Scroll to and highlight the target photo
     if (el) {
-      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      el.scrollIntoView({ behavior: preferredScrollBehavior(), block: 'center' });
       el.style.outline = '3px solid var(--accent)';
       el.style.outlineOffset = '2px';
       setTimeout(function() {

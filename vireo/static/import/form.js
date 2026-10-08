@@ -247,7 +247,7 @@ function showError(msg, target) {
   el.style.display = msg ? 'block' : 'none';
   if (msg && target) {
     const focusTarget = target.focus ? target : null;
-    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    target.scrollIntoView({ behavior: preferredScrollBehavior(), block: 'center' });
     if (focusTarget) focusTarget.focus({ preventScroll: true });
   }
 }

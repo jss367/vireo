@@ -1816,8 +1816,7 @@ function setFocused(cat, idx) {
   var el = document.querySelector(sel);
   if (el) {
     el.classList.add('focused');
-    var reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    el.scrollIntoView({ block: 'nearest', behavior: reducedMotion ? 'auto' : 'smooth' });
+    el.scrollIntoView({ block: 'nearest', behavior: preferredScrollBehavior() });
   }
 }
 
