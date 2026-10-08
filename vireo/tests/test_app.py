@@ -22189,7 +22189,7 @@ def test_browse_sidebar_panels_refresh_on_undo_and_redo(app_and_db):
     # changed here, only the state its rows are computed from.
     assert "loadDetail(" in body
     assert "loadSelectionKeywordSuggestions(" in body
-    key_at = body.find("selectionKeywordKey = ''")
+    key_at = body.find("Vireo.browse.panelRequests.keywords.invalidate()")
     assert key_at != -1 and key_at < body.find(
         "loadSelectionKeywordSuggestions("
     ), "stale selection key would make the keyword refresh a no-op"
@@ -22558,13 +22558,14 @@ def test_selection_prediction_show_button_opens_only_that_species_photos(app_and
         _browse_escape_helpers(),
         _browse_js_function_body(html, "function formatPredictionConfidence("),
         _browse_js_function_body(html, "function renderSelectionPredictions("),
+        "var window = globalThis;",
+        (Path(__file__).parent.parent / "static/browse/panel-requests.js").read_text(encoding="utf-8"),
         _browse_js_function_body(html, "async function showSelectionPredictionPhotos("),
         """
 var selectionPredictionsExpanded = false;
 var selectionPredictionAcceptableById = {};
 var selectionPredictionSpeciesByIdx = {};
-var selectionPredictionSeq = 7;
-var selectionPredictionShowSeq = 0;
+
 var requests = [], opened = [], toasts = [], dropped = [];
 async function safeFetch(url, opts) {
   var body = JSON.parse(opts.body);
@@ -22658,13 +22659,14 @@ def test_selection_prediction_show_button_drops_stale_interleaved_fetch(app_and_
         _browse_escape_helpers(),
         _browse_js_function_body(html, "function formatPredictionConfidence("),
         _browse_js_function_body(html, "function renderSelectionPredictions("),
+        "var window = globalThis;",
+        (Path(__file__).parent.parent / "static/browse/panel-requests.js").read_text(encoding="utf-8"),
         _browse_js_function_body(html, "async function showSelectionPredictionPhotos("),
         """
 var selectionPredictionsExpanded = false;
 var selectionPredictionAcceptableById = {};
 var selectionPredictionSpeciesByIdx = {};
-var selectionPredictionSeq = 3;
-var selectionPredictionShowSeq = 0;
+
 var opened = [], toasts = [];
 // Slow-first-then-fast: the row-0 fetch queues its resolver behind the
 // row-1 fetch by holding a promise until row 1 has already resolved.

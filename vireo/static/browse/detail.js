@@ -27,6 +27,7 @@ async function loadDetail(id) {
   // stays A, so both the sync class removal below and the post-await
   // renderDetail(A) would overwrite the batch inspector the Cmd-click just set up.
   if (selectedPhotos.size > 1) return;
+  Vireo.browse.panelRequests.detailPredictions.invalidate();
   document.getElementById('summaryPanel').classList.add('hidden');
   var detail = document.getElementById('detailContent');
   // Loading a single photo's detail always exits batch mode.

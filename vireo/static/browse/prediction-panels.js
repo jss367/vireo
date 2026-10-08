@@ -223,16 +223,16 @@ function asciiCaseFoldKey(name) {
 async function loadDetailPredictions(photoId) {
   var list = document.getElementById('detailPredictions');
   if (!list) return;
-  var seq = ++detailPredictionSeq;
+  var request = Vireo.browse.panelRequests.detailPredictions.begin();
   list.innerHTML = '<div class="selection-empty">Loading predictions...</div>';
   try {
     var data = await safeFetch(
       '/api/predictions?photo_ids=' + encodeURIComponent(photoId), {}, { toast: false },
     );
-    if (seq !== detailPredictionSeq || window._detailPhotoId !== photoId) return;
+    if (!request.isCurrent() || window._detailPhotoId !== photoId) return;
     renderDetailPredictions(data, photoId);
   } catch(e) {
-    if (seq === detailPredictionSeq) {
+    if (request.fail() && window._detailPhotoId === photoId) {
       list.innerHTML = '<div class="selection-empty">Could not load predictions.</div>';
     }
   }
@@ -544,7 +544,7 @@ function refreshPredictionPanels(opts) {
   // Drop the cache key first: `loadSelectionPredictions` early-returns when
   // the key matches, and the selection itself has not changed here — only the
   // state its rows are computed from.
-  selectionPredictionKey = '';
+  Vireo.browse.panelRequests.predictions.invalidate();
   var selection = getActiveSelection();
   if (selection.length > 1) loadSelectionPredictions(selection);
   // Only one of the two panels is on screen at a time: a multi-selection
@@ -581,7 +581,7 @@ function refreshBrowseSidebarPanels() {
   // unchanged selection key — which is exactly this case, since the selection
   // did not move, only the state behind it.
   if (selection.length > 1) {
-    selectionKeywordKey = '';
+    Vireo.browse.panelRequests.keywords.invalidate();
     loadSelectionKeywordSuggestions(selection);
   } else if (reloadingDetail) {
     loadDetail(window._detailPhotoId);
@@ -657,7 +657,7 @@ async function _afterPredictionMutation(photoIds, opts) {
     && opts.photoId != null
     && window._detailPhotoId === opts.photoId
   );
-  selectionKeywordKey = '';
+  Vireo.browse.panelRequests.keywords.invalidate();
   // Refreshes the grid's keyword state AND, through it, both prediction
   // panels: the accept changed the photos' species keywords, so the surviving
   // rows' ambiguity and keyworded counts have both moved. `skipDetail` keeps
@@ -848,10 +848,9 @@ async function refreshPredictionConfidenceBadges(photoIds) {
 async function loadSelectionPredictions(ids) {
   var list = document.getElementById('selectionPredictions');
   if (!list) return;
-  var key = selectionIdsKey(ids);
-  if (key === selectionPredictionKey) return;
-  selectionPredictionKey = key;
-  var seq = ++selectionPredictionSeq;
+  if (ids.length > 1000) return;
+  var request = Vireo.browse.panelRequests.predictions.begin(selectionIdsKey(ids));
+  if (!request) return;
   list.innerHTML = '<div class="selection-empty">Checking predictions...</div>';
   try {
     var data = await safeFetch('/api/selection/prediction-suggestions', {
@@ -859,16 +858,12 @@ async function loadSelectionPredictions(ids) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({photo_ids: ids}),
     }, { toast: false });
-    if (seq !== selectionPredictionSeq) return;
+    if (!request.isCurrent()) return;
     renderSelectionPredictions(
       data.predictions || [], data.selected_count || ids.length, data,
     );
   } catch(e) {
-    if (seq === selectionPredictionSeq) {
-      // Drop the cache key: it was stored before the request ran, so leaving
-      // it set would make the next call for this same selection early-return
-      // and strand the panel on the error text until the selection changes.
-      selectionPredictionKey = '';
+    if (request.fail()) {
       list.innerHTML = '<div class="selection-empty">Could not load predictions.</div>';
     }
   }
@@ -1043,13 +1038,9 @@ function renderSelectionPredictions(predictions, selectedCount, meta) {
 async function showSelectionPredictionPhotos(idx, button) {
   var ids = (selectionPredictionPhotoIdsByIdx[idx] || []).slice();
   if (!ids.length) return;
-  // Two pins, because two things can go stale under this fetch. The panel
-  // seq drops responses for a selection the user has already moved off of;
-  // the show seq drops responses for a Show click the user has already
-  // moved off of — a slow fetch on row A must not paint over a faster
-  // fetch on row B that the user clicked afterwards.
-  var seq = selectionPredictionSeq;
-  var showSeq = ++selectionPredictionShowSeq;
+  // Both the selection and the latest Show click must still own this result.
+  var panelIsCurrent = Vireo.browse.panelRequests.predictions.observe();
+  var request = Vireo.browse.panelRequests.predictionPhotos.begin();
   var label = button ? button.textContent : '';
   if (button) {
     button.disabled = true;
@@ -1065,6 +1056,7 @@ async function showSelectionPredictionPhotos(idx, button) {
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({photo_ids: ids.slice(offset, offset + 500)}),
       });
+      if (!panelIsCurrent() || !request.isCurrent()) return;
       fetched = fetched.concat(data.photos || []);
     }
   } catch (e) {
@@ -1075,8 +1067,7 @@ async function showSelectionPredictionPhotos(idx, button) {
       button.textContent = label;
     }
   }
-  if (seq !== selectionPredictionSeq) return;
-  if (showSeq !== selectionPredictionShowSeq) return;
+  if (!panelIsCurrent() || !request.isCurrent()) return;
   if (!fetched.length) {
     showToast('Could not open those photos — they are no longer in this workspace.', 'warning');
     return;

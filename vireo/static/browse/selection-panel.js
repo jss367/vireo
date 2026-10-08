@@ -15,21 +15,19 @@ function updateSelectionPanel(ids) {
     _batchToggleMixed('colorMixed', false);
     var wasVisible = !panel.classList.contains('hidden');
     panel.classList.add('hidden');
-    selectionKeywordKey = '';
+    Vireo.browse.panelRequests.keywords.invalidate();
     selectionKeywordMissingById = {};
     selectionKeywordPresentById = {};
     selectionKeywordNameById = {};
-    selectionKeywordRequestSeq++;
     var list = document.getElementById('selectionKeywordSuggestions');
     if (list) list.innerHTML = '';
-    // Same teardown for the prediction rows — bumping the sequence drops any
+    // Same teardown for the prediction rows — invalidation drops any
     // in-flight selection response so it can't paint into the panel the user
     // has just collapsed back to a single photo.
-    selectionPredictionKey = '';
+    Vireo.browse.panelRequests.predictions.invalidate();
     selectionPredictionAcceptableById = {};
     selectionPredictionSpeciesByIdx = {};
     selectionPredictionPhotoIdsByIdx = {};
-    selectionPredictionSeq++;
     var predList = document.getElementById('selectionPredictions');
     if (predList) predList.innerHTML = '';
     renderSelectionWildlifeState([]);
@@ -45,6 +43,7 @@ function updateSelectionPanel(ids) {
     return;
   }
 
+  Vireo.browse.panelRequests.detailPredictions.invalidate();
   var detail = document.getElementById('detailContent');
   var summary = document.getElementById('summaryPanel');
   if (summary) summary.classList.add('hidden');
@@ -65,19 +64,17 @@ function updateSelectionPanel(ids) {
   // designed way to apply one suggestion to many photos.
   renderBatchInspector(ids, { preserveExifSuggestion: true });
   if (ids.length > 1000) {
-    selectionKeywordKey = selectionIdsKey(ids);
+    Vireo.browse.panelRequests.keywords.invalidate();
     selectionKeywordMissingById = {};
     selectionKeywordPresentById = {};
     selectionKeywordNameById = {};
-    selectionKeywordRequestSeq++;
     var list = document.getElementById('selectionKeywordSuggestions');
     if (list) {
       list.innerHTML = '<div class="selection-empty">Keyword suggestions are available for selections of 1,000 photos or fewer.</div>';
     }
     // Say the cap out loud here too, rather than leaving an empty
     // Predictions box that reads as "nothing predicted".
-    selectionPredictionKey = selectionIdsKey(ids);
-    selectionPredictionSeq++;
+    Vireo.browse.panelRequests.predictions.invalidate();
     selectionPredictionAcceptableById = {};
     selectionPredictionSpeciesByIdx = {};
     selectionPredictionPhotoIdsByIdx = {};
@@ -227,10 +224,9 @@ function findBrowsePhoto(id) {
 }
 
 async function loadSelectionKeywordSuggestions(ids) {
-  var key = selectionIdsKey(ids);
-  if (key === selectionKeywordKey) return;
-  selectionKeywordKey = key;
-  var seq = ++selectionKeywordRequestSeq;
+  if (ids.length > 1000) return;
+  var request = Vireo.browse.panelRequests.keywords.begin(selectionIdsKey(ids));
+  if (!request) return;
   var list = document.getElementById('selectionKeywordSuggestions');
   if (list) list.innerHTML = '<div class="selection-empty">Checking selected keywords...</div>';
 
@@ -240,10 +236,10 @@ async function loadSelectionKeywordSuggestions(ids) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({photo_ids: ids}),
     }, { toast: false });
-    if (seq !== selectionKeywordRequestSeq) return;
+    if (!request.isCurrent()) return;
     renderSelectionKeywordSuggestions(data.keywords || [], data.selected_count || ids.length);
   } catch(e) {
-    if (seq === selectionKeywordRequestSeq && list) {
+    if (request.fail() && list) {
       list.innerHTML = '<div class="selection-empty">Could not load keyword suggestions.</div>';
     }
   }
@@ -309,14 +305,12 @@ function renderSelectionKeywordSuggestions(keywords, selectedCount) {
   list.innerHTML = html;
 }
 
-var selectionWildlifeRequestSeq = 0;
-
 async function renderSelectionWildlifeState(ids) {
   var status = document.getElementById('selectionWildlifeStatus');
   var actions = document.getElementById('selectionWildlifeActions');
   if (!status || !actions) return;
   if (!ids || !ids.length) {
-    selectionWildlifeRequestSeq++;
+    Vireo.browse.panelRequests.wildlife.invalidate();
     status.textContent = '';
     actions.innerHTML = '';
     return;
@@ -325,7 +319,7 @@ async function renderSelectionWildlifeState(ids) {
   // "Select all matching" can include off-page photos that are absent from
   // ``photos``, and filtering client-side would omit them from the counts
   // and hide batch controls that should still be available.
-  var seq = ++selectionWildlifeRequestSeq;
+  var request = Vireo.browse.panelRequests.wildlife.begin();
   var data;
   try {
     data = await safeFetch('/api/selection/wildlife-state', {
@@ -334,13 +328,13 @@ async function renderSelectionWildlifeState(ids) {
       body: JSON.stringify({photo_ids: ids}),
     }, { toast: false });
   } catch (e) {
-    if (seq === selectionWildlifeRequestSeq) {
+    if (request.fail()) {
       status.textContent = '';
       actions.innerHTML = '';
     }
     return;
   }
-  if (seq !== selectionWildlifeRequestSeq) return;
+  if (!request.isCurrent()) return;
   var includedCount = (data && data.included_count) || 0;
   var excludedCount = (data && data.excluded_count) || 0;
   var selectedCount = (data && data.selected_count) || 0;
@@ -425,7 +419,7 @@ async function applySelectionKeyword(keywordId) {
     });
   } catch(e) { return; }
   await _refreshBrowseKeywordState(ids);
-  selectionKeywordKey = '';
+  Vireo.browse.panelRequests.keywords.invalidate();
   loadSelectionKeywordSuggestions(getActiveSelection());
   loadKeywords();
   scheduleCollectionCountsRefresh();
@@ -447,7 +441,7 @@ async function removeSelectionKeyword(keywordId) {
   } catch(e) { return; }
   await _refreshBrowseKeywordState(ids);
   _clearRepresentativeStateAfterKeywordRemoval(ids, removedName);
-  selectionKeywordKey = '';
+  Vireo.browse.panelRequests.keywords.invalidate();
   loadSelectionKeywordSuggestions(getActiveSelection());
   loadKeywords();
   scheduleCollectionCountsRefresh();

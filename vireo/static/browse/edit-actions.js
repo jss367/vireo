@@ -367,7 +367,7 @@ async function addKeyword(keyword) {
       loadDetail(selectedPhotoId);
     }
     if (useBatch && selectionIdsKey(getActiveSelection()) === batchSelectionKey) {
-      selectionKeywordKey = '';
+      Vireo.browse.panelRequests.keywords.invalidate();
       loadSelectionKeywordSuggestions(ids);
     }
     loadKeywords();

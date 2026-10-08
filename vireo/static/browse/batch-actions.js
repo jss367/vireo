@@ -356,7 +356,7 @@ async function confirmBatchKeyword() {
   // refresh were in flight. Loading the pre-await ``ids`` here would win the
   // sequence race and leave the panel's Add/Remove buttons bound to photos
   // that are no longer selected.
-  selectionKeywordKey = '';
+  Vireo.browse.panelRequests.keywords.invalidate();
   loadSelectionKeywordSuggestions(getActiveSelection());
   loadKeywords();
   scheduleCollectionCountsRefresh();

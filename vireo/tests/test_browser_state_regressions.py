@@ -33,6 +33,15 @@ def test_lightbox_session_lifecycle(node):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_browse_panel_request_ownership(node):
+    root = Path(__file__).resolve().parents[2]
+    result = subprocess.run(
+        [node, "--test", str(Path(__file__).with_name("browse_panel_requests.cjs"))],
+        cwd=root, capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 @pytest.mark.parametrize("route", ["/browse", "/pipeline", "/pipeline/review", "/settings", "/import", "/jobs"])
 def test_rendered_page_scripts_parse(app_and_db, node, route, tmp_path):
     app, _ = app_and_db
