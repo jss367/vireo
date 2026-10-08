@@ -526,6 +526,29 @@ def test_point_color_samples_the_displayed_native_resolution(live_server, page, 
     }""")
     page.mouse.click(position['x'], position['y'])
     expect(page.locator('#pointColorStatus')).to_contain_text('Color sampled')
+    assert page.evaluate("new URL(sampledRender.url).searchParams.has('preview_session')") is False
+    assert page.evaluate("new URL(sampledRender.url).searchParams.has('preview_seq')") is False
     assert page.evaluate('sampledRender.width') == 2600
     assert page.evaluate("new URL(sampledRender.url).searchParams.get('size')") == '2600'
     assert page.evaluate('pointColorSamples()[0].sample') == page.evaluate('clickedColorSample')
+
+
+@pytest.mark.parametrize('change', ['recipe', 'photo'])
+def test_pending_color_sample_ignores_changed_editor(live_server, page, color_photo, change):
+    page.goto(f"{live_server['url']}/edit/{color_photo}")
+    _wait_color_preview(page)
+    page.evaluate("""() => {
+      _loadImage = url => new Promise(resolve => {
+        window.pendingSampleUrl = url;
+        window.releaseColorSample = () => resolve(document.getElementById('editorImg'));
+      });
+    }""")
+    page.locator('#pointColorPick').click()
+    page.locator('#editorImg').click(force=True)
+    expect(page.locator('#pointColorStatus')).to_have_text('Sampling color…')
+    assert page.evaluate("new URL(pendingSampleUrl).searchParams.has('preview_session')") is False
+    assert page.evaluate("new URL(pendingSampleUrl).searchParams.has('preview_seq')") is False
+    assert page.evaluate("new URL(document.getElementById('editorImg').src).searchParams.has('preview_session')") is True
+    page.evaluate("change => { if (change === 'recipe') setAdjustment('exposure', 0.4); else editorState.photoId += 1; }", change)
+    page.evaluate('async () => { releaseColorSample(); await Promise.resolve(); }')
+    assert page.evaluate('pointColorSamples()') == []

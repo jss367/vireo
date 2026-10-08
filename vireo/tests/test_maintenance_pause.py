@@ -1,12 +1,35 @@
 """Pause integration at real per-photo and database transaction boundaries."""
 import json
 import os
+import sys
 import threading
 import time
+import traceback
 
 import pytest
 from PIL import Image
 from wait import wait_for_job_via_client
+
+
+@pytest.fixture(autouse=True)
+def _isolate_platform_sleep_inhibitor(monkeypatch):
+    # These tests exercise work/transaction pause boundaries. OS inhibitor
+    # startup precedes that work and has its own five-second Windows budget.
+    # Its lifecycle is covered separately by test_jobs_power/test_power.
+    import power
+
+    monkeypatch.setattr(power, "start_platform_inhibitor", lambda reason: None)
+
+
+def _wait_for_boundary(entered, runner, job_id):
+    if entered.wait(5):
+        return
+    frames = sys._current_frames()
+    stacks = []
+    for thread in threading.enumerate():
+        if thread.name.startswith("vireo-") and thread.ident in frames:
+            stacks.append(thread.name + "\n" + "".join(traceback.format_stack(frames[thread.ident])))
+    pytest.fail(f"Worker did not reach pause boundary: {runner.get(job_id)}\n" + "\n".join(stacks))
 
 
 def _wait_status(runner, job_id, status):
@@ -60,7 +83,7 @@ def test_move_pause_reconciles_folder_counts(client_with_photo, monkeypatch, tmp
         "photo_ids": [first, second], "destination": str(destination),
     }).get_json()["job_id"]
     try:
-        assert entered.wait(5)
+        _wait_for_boundary(entered, runner, job_id)
         assert runner.pause_job(job_id)
         release.set()
         _wait_status(runner, job_id, "paused")
@@ -122,7 +145,7 @@ def test_culling_pauses_during_metadata_loading(client_with_photo, monkeypatch, 
     runner = app._job_runner
     job_id = client.post("/api/jobs/cull", json={}).get_json()["job_id"]
     try:
-        assert entered.wait(5)
+        _wait_for_boundary(entered, runner, job_id)
         assert runner.pause_job(job_id)
         release.set()
         _wait_status(runner, job_id, "paused")
@@ -170,7 +193,7 @@ def test_lightroom_import_pauses_during_catalog_read(client_with_photo, monkeypa
         "catalogs": [str(catalog_path)],
     }).get_json()["job_id"]
     try:
-        assert entered.wait(5)
+        _wait_for_boundary(entered, runner, job_id)
         assert runner.pause_job(job_id)
         release.set()
         _wait_status(runner, job_id, "paused")
@@ -216,7 +239,7 @@ def test_previews_pause_before_eviction(client_with_photo, monkeypatch, action):
     runner = app._job_runner
     job_id = client.post("/api/jobs/previews", json={"photo_ids": [photo_id]}).get_json()["job_id"]
     try:
-        assert entered.wait(5)
+        _wait_for_boundary(entered, runner, job_id)
         assert runner.pause_job(job_id)
         release.set()
         _wait_status(runner, job_id, "paused")
@@ -270,7 +293,7 @@ def test_full_import_pauses_between_phases(client_with_photo, monkeypatch, phase
     assert response.status_code == 200, response.get_json()
     job_id = response.get_json()["job_id"]
     try:
-        assert entered.wait(5)
+        _wait_for_boundary(entered, runner, job_id)
         assert runner.pause_job(job_id)
         release.set()
         _wait_status(runner, job_id, "paused")
@@ -319,7 +342,7 @@ def test_card_scan_pauses_during_discovery(app_and_db, monkeypatch, tmp_path, ac
     }).get_json()["job_id"]
     manifest = card_cleanup.manifest_path(app.config["CARD_CLEANUP_DIR"], job_id)
     try:
-        assert entered.wait(5)
+        _wait_for_boundary(entered, runner, job_id)
         assert runner.pause_job(job_id)
         release.set()
         _wait_status(runner, job_id, "paused")
@@ -381,7 +404,7 @@ def test_staging_verification_pauses_during_enumeration(
         "path": root,
     }).get_json()["job_id"]
     try:
-        assert entered.wait(5)
+        _wait_for_boundary(entered, runner, job_id)
         assert runner.pause_job(job_id)
         release.set()
         _wait_status(runner, job_id, "paused")
@@ -430,7 +453,7 @@ def test_culling_pauses_before_publishing_final_result(client_with_photo, monkey
     runner = app._job_runner
     job_id = client.post("/api/jobs/cull", json={}).get_json()["job_id"]
     try:
-        assert entered.wait(5)
+        _wait_for_boundary(entered, runner, job_id)
         assert runner.pause_job(job_id)
         release.set()
         _wait_status(runner, job_id, "paused")
@@ -474,7 +497,7 @@ def test_cache_pause_finishes_current_photo_and_preserves_progress(
         f"/api/jobs/{endpoint}", json={"photo_ids": [first, second]},
     ).get_json()["job_id"]
     try:
-        assert entered.wait(5)
+        _wait_for_boundary(entered, runner, job_id)
         response = client.post(f"/api/jobs/{job_id}/pause")
         assert response.status_code == 200
         assert runner.get(job_id)["status"] == "pausing"
@@ -528,7 +551,7 @@ def test_hash_verification_commits_before_pause(
     monkeypatch.setattr(scanner, "compute_file_hash", hash_file)
     job_id = client.post("/api/jobs/verify-hashes").get_json()["job_id"]
     try:
-        assert entered.wait(5)
+        _wait_for_boundary(entered, runner, job_id)
         assert client.post(f"/api/jobs/{job_id}/pause").status_code == 200
         release.set()
         _wait_status(runner, job_id, "paused")
@@ -603,7 +626,7 @@ def test_final_file_write_pauses_after_completion(
     assert response.status_code == 200, response.get_json()
     job_id = response.get_json()["job_id"]
     try:
-        assert entered.wait(5)
+        _wait_for_boundary(entered, runner, job_id)
         assert runner.pause_job(job_id)
         assert runner.get(job_id)["status"] == "pausing"
         release.set()
@@ -672,7 +695,7 @@ def test_previews_pause_after_final_photo_defers_eviction(
     assert response.status_code == 200, response.get_json()
     job_id = response.get_json()["job_id"]
     try:
-        assert entered.wait(5)
+        _wait_for_boundary(entered, runner, job_id)
         assert runner.pause_job(job_id)
         assert runner.get(job_id)["status"] == "pausing"
         release.set()
@@ -722,7 +745,7 @@ def test_callback_checkpoint_retains_state_and_unwinds_on_cancel(app_and_db, act
 
     job_id = ctx.start_job("test-checkpoint", work, pausable=True)
     try:
-        assert entered.wait(5)
+        _wait_for_boundary(entered, runner, job_id)
         assert runner.pause_job(job_id)
         release.set()
         _wait_status(runner, job_id, "paused")
@@ -807,7 +830,7 @@ def test_sharpness_auto_flags_observe_pause_and_cancel(
     assert response.status_code == 200
     job_id = response.get_json()["job_id"]
     try:
-        assert entered.wait(5)
+        _wait_for_boundary(entered, runner, job_id)
         assert client.post(f"/api/jobs/{job_id}/pause").status_code == 200
         assert runner.get(job_id)["status"] == "pausing"
         release.set()
@@ -864,7 +887,7 @@ def test_export_observes_pause_after_metadata_finishes(
     assert response.status_code == 200
     job_id = response.get_json()["job_id"]
     try:
-        assert entered.wait(5)
+        _wait_for_boundary(entered, runner, job_id)
         assert client.post(f"/api/jobs/{job_id}/pause").status_code == 200
         assert runner.get(job_id)["status"] == "pausing"
         release.set()
@@ -905,7 +928,7 @@ def test_ingest_can_pause_during_discovery(app_and_db, monkeypatch, tmp_path):
         "source": str(source), "destination": str(tmp_path / "archive"),
     }).get_json()["job_id"]
     try:
-        assert entered.wait(5)
+        _wait_for_boundary(entered, runner, job_id)
         assert runner.pause_job(job_id)
         release.set()
         _wait_status(runner, job_id, "paused")
@@ -957,7 +980,7 @@ def test_ingest_pauses_between_metadata_batches(
         "skip_duplicates": skip_duplicates,
     }).get_json()["job_id"]
     try:
-        assert entered.wait(5)
+        _wait_for_boundary(entered, runner, job_id)
         assert runner.pause_job(job_id)
         release.set()
         _wait_status(runner, job_id, "paused")
@@ -1090,7 +1113,7 @@ def test_import_photos_checkpoints_before_after_import_chain(
     assert resp.status_code == 200, resp.get_json()
     job_id = resp.get_json()["job_id"]
     try:
-        assert entered.wait(5)
+        _wait_for_boundary(entered, runner, job_id)
         assert runner.pause_job(job_id)
         release.set()
         _wait_status(runner, job_id, "paused")
@@ -1151,7 +1174,7 @@ def test_import_handoff_rejects_late_parent_pause(request, monkeypatch, tmp_path
     assert response.status_code == 200, response.get_json()
     job_id = response.get_json()["job_id"]
     try:
-        assert entered.wait(5)
+        _wait_for_boundary(entered, runner, job_id)
         assert not children
         assert client.post(f"/api/jobs/{job_id}/pause").status_code == 409
         assert client.post(f"/api/jobs/{job_id}/cancel").status_code == 404
