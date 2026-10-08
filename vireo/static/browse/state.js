@@ -108,22 +108,10 @@ function setBrowseTotals(data) {
     ? Number(data.underlying_total) || 0
     : totalPhotos;
 }
-var selectionKeywordRequestSeq = 0;
-var selectionKeywordKey = '';
 var selectionKeywordMissingById = {};
 var selectionKeywordPresentById = {};
 var selectionKeywordNameById = {};
-// Prediction panels. Each panel owns one sequence counter and one cache key,
-// mirroring the keyword panel above — a fast selection change must be able to
-// drop a stale response rather than paint the previous selection's rows.
-var detailPredictionSeq = 0;
-var selectionPredictionSeq = 0;
-// "Show N photos" fires an out-of-band fetch that outlives the panel repaint
-// counter (which only bumps when the selection changes). Without a dedicated
-// generation, two Show clicks back-to-back on different rows both pass the
-// selection-seq guard, and a slower earlier fetch can paint its lightbox
-// over the later click's.
-var selectionPredictionShowSeq = 0;
+// Panel request ownership lives in Vireo.browse.panelRequests.
 // A photo can carry dozens of low-confidence guesses, and most users never set
 // a confidence floor. Show the strongest few and collapse the tail behind a
 // counted "show all" rather than either flooding the panel or inventing a
@@ -133,7 +121,6 @@ var detailPredictionsExpanded = false;
 var selectionPredictionsExpanded = false;
 var _detailPredictionData = null;
 var _selectionPredictionData = null;
-var selectionPredictionKey = '';
 var selectionPredictionAcceptableById = {};
 // Parallel to selectionPredictionAcceptableById, so the accept call can pass
 // the species the button named — the server refuses a row whose current
