@@ -401,7 +401,7 @@ def test_photo_location_leaves_chunk_and_dedupe(db, fid):
     statements = _trace(db)
     leaves = db._get_photo_location_leaves(ids)
     assert list(leaves) == [pid]
-    assert tuple(leaves[pid]) == (pid, kid, "Park", None)
+    assert tuple(leaves[pid]) == (pid, kid, "Park", None, None, None, None)
     assert len(_selects(statements, "ROW_NUMBER()")) == 2
 
 
@@ -682,9 +682,9 @@ def test_get_keyword_place_row_reads_place_fields_of_any_type(db):
     leaf = _kw(db, "Paris", parent_id=root, lat=48.8, lng=2.3, place_id="pid-paris")
     general = _kw(db, "Bird", kw_type="general")
     assert tuple(db.get_keyword_place_row(leaf)) == (
-        leaf, "Paris", "pid-paris", 48.8, 2.3, root,
+        leaf, "Paris", "pid-paris", 48.8, 2.3, root, "location",
     )
-    assert tuple(db.get_keyword_place_row(root)) == (root, "France", None, None, None, None)
+    assert tuple(db.get_keyword_place_row(root)) == (root, "France", None, None, None, None, "location")
     assert db.get_keyword_place_row(general)["name"] == "Bird"
     assert db.get_keyword_place_row(987_654) is None
 
@@ -699,7 +699,7 @@ def test_get_photo_location_leaf_reads_a_linked_location_keyword(db, fid):
     _link(db, located, _kw(db, "Bird", kw_type="general"))
     _link(db, general_only, _kw(db, "Heron", kw_type="general"))
     assert tuple(db.get_photo_location_leaf(located)) == (
-        leaf, "Paris", "pid-paris", 48.8, 2.3, root,
+        leaf, "Paris", "pid-paris", 48.8, 2.3, root, "location",
     )
     assert db.get_photo_location_leaf(general_only) is None
     assert db.get_photo_location_leaf(bare) is None
@@ -994,6 +994,7 @@ _DELEGATING_LOCATION_METHODS = (
     "get_geolocated_photos",
     "get_assigned_photo_location",
     "_get_photo_location_leaves",
+    "get_photo_location_keywords",
     "get_photo_location_paths",
     "get_first_linked_location_keywords",
     "has_pending_location_change",

@@ -218,8 +218,9 @@ class LocationRepository:
         for chunk in self._chunks(list(dict.fromkeys(photo_ids))):
             placeholders = ",".join("?" for _ in chunk)
             rows = self.conn.execute(
-                f"""SELECT photo_id, id, name, parent_id FROM (
+                f"""SELECT photo_id, id, name, parent_id, place_id, latitude, longitude FROM (
                         SELECT pk.photo_id, k.id, k.name, k.parent_id,
+                               k.place_id, k.latitude, k.longitude,
                                ROW_NUMBER() OVER (
                                  PARTITION BY pk.photo_id
                                  ORDER BY (k.latitude IS NULL OR k.longitude IS NULL) ASC,
@@ -241,8 +242,8 @@ class LocationRepository:
     def get_first_linked_leaves(self, photo_ids):
         """``{photo_id: row}``: each photo's first-linked location keyword.
 
-        "First" is the lowest ``photo_keywords`` rowid, the single-photo
-        ``serialize_photo_location``'s ``LIMIT 1`` choice. Rows carry the
+        "First" is the lowest ``photo_keywords`` rowid. Detail and sync
+        callers use :meth:`get_photo_leaves` instead. Rows carry the
         photo id and the keyword's ``id``, ``name``, ``place_id``,
         ``latitude``, ``longitude`` and ``parent_id``. Reads 400 photos per
         statement; photos with no location keyword are absent.
@@ -660,28 +661,19 @@ class LocationRepository:
 
     def keyword_place_row(self, keyword_id):
         """Row (``id``, ``name``, ``place_id``, ``latitude``, ``longitude``,
-        ``parent_id``) of one keyword of any type, or None."""
+        ``parent_id``, ``type``) of one keyword of any type, or None."""
         return self.conn.execute(
-            "SELECT id, name, place_id, latitude, longitude, parent_id "
+            "SELECT id, name, place_id, latitude, longitude, parent_id, type "
             "FROM keywords WHERE id = ?",
             (keyword_id,),
         ).fetchone()
 
     def photo_location_leaf(self, photo_id):
-        """One ``type='location'`` keyword row linked to ``photo_id``, or None.
-
-        Columns as :meth:`keyword_place_row`. ``LIMIT 1`` with no ORDER BY:
-        which row a photo with several location links gets is SQLite's
-        choice.
-        """
-        return self.conn.execute(
-            "SELECT k.id, k.name, k.place_id, k.latitude, k.longitude, k.parent_id "
-            "FROM photo_keywords pk "
-            "JOIN keywords k ON k.id = pk.keyword_id "
-            "WHERE pk.photo_id = ? AND k.type = 'location' "
-            "LIMIT 1",
-            (photo_id,),
-        ).fetchone()
+        """The exported location leaf, with :meth:`keyword_place_row` columns."""
+        leaf = self.get_photo_leaves([photo_id]).get(photo_id)
+        if leaf is None:
+            return None
+        return self.keyword_place_row(leaf["id"])
 
     def located_keywords_in_workspace(self):
         """Location keywords with coordinates tagged on active-workspace photos.

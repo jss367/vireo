@@ -276,8 +276,8 @@ def create_collections_blueprint(get_db, json_error):
             except ValueError as e:
                 return json_error(str(e), 400)
             updates["visual_json"] = json.dumps(visual) if visual else None
-        if updates:
-            db.update_collection(collection_id, **updates)
+        if updates and not db.update_collection(collection_id, **updates):
+            return json_error("collection not found", 404)
         return jsonify({"ok": True})
 
     @blueprint.route("/api/collections/<int:collection_id>/add-photos", methods=["POST"])

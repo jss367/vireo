@@ -140,7 +140,9 @@ def create_keywords_blueprint(get_db, json_error):
         dupes = db.get_keyword_duplicate_groups(ws)
         results = []
         for d in dupes:
-            ids = list(set(int(x) for x in d["ids"].split(",")))
+            # Cleanup keeps the earliest variant; set iteration order must
+            # not choose a different spelling for the suggested survivor.
+            ids = sorted({int(x) for x in d["ids"].split(",")})
             # Count photos per variant within this workspace
             variants = []
             for kid in ids:
@@ -366,6 +368,8 @@ def create_keywords_blueprint(get_db, json_error):
         db = get_db()
         # Queue sidecar removals for all affected workspaces
         kw_row = db.get_keyword_row(keyword_id)
+        if kw_row is None:
+            return json_error("keyword not found", 404)
         if kw_row:
             affected = db.get_photo_workspaces_with_keyword(keyword_id)
             for row in affected:
