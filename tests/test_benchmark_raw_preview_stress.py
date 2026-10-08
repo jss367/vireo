@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.benchmark_raw_preview_stress import metric, validate_outcomes
+from scripts.benchmark_raw_preview_stress import aggregate_results, metric, validate_outcomes
 
 
 def test_empty_cancellation_measurements_are_not_zero_latency():
@@ -27,6 +27,21 @@ def test_stress_requires_latest_request_to_complete():
     validate_outcomes([old, latest], [latest])
     with pytest.raises(RuntimeError, match='Latest'):
         validate_outcomes([old], [old])
+
+
+def test_aggregate_pools_samples_instead_of_averaging_percentiles():
+    base = {'scenario': 'rapid-edits', 'requests': 2, 'completed': 1, 'superseded': 1,
+            'reaped_workers_observed': 0, 'peak_rss_mib': 100,
+            **{key: metric([]) for key in ('cancellation_ack', 'worker_reap', 'navigation_cancel',
+                                           'latest_preview', 'native_refinement')}}
+    first = {**base, 'latest_preview': metric([1, 2, 3])}
+    second = {**base, 'latest_preview': metric([100]), 'peak_rss_mib': 200}
+    row = aggregate_results([first, second])[0]
+    assert row['latest_preview']['p50_ms'] == 2.5
+    assert row['latest_preview']['p95_ms'] == 100
+    assert row['worker_reap']['p50_ms'] is None
+    assert row['requests'] == 4
+    assert row['peak_rss_mib'] == 200
 
 
 def test_stress_runs_real_raw_workers_and_omits_private_paths(tmp_path):
@@ -49,6 +64,7 @@ def test_stress_runs_real_raw_workers_and_omits_private_paths(tmp_path):
     assert data['environment']['threads'] == 1
     assert data['provenance']['command'][1] == 'scripts/benchmark_raw_preview_stress.py'
     assert len(data['results']) == 4
+    assert len(data['summary']) == 4
     for row in data['results']:
         assert row['completed'] + row['superseded'] == row['requests']
         assert row['latest_preview']['p50_ms'] > 0

@@ -52,6 +52,22 @@ def validate_outcomes(requests, latest):
             raise RuntimeError(f"Latest request {request['id']} did not render")
 
 
+def aggregate_results(results):
+    """Pool timing samples by scenario and retain the largest observed RSS."""
+    summary = []
+    for scenario in dict.fromkeys(row['scenario'] for row in results):
+        trials = [row for row in results if row['scenario'] == scenario]
+        summary.append({
+            'scenario': scenario, 'trials': len(trials),
+            **{key: sum(row[key] for row in trials)
+               for key in ('requests', 'completed', 'superseded', 'reaped_workers_observed')},
+            **{key: metric([value for row in trials for value in row[key]['samples_ms']])
+               for key in ('cancellation_ack', 'worker_reap', 'navigation_cancel', 'latest_preview', 'native_refinement')},
+            'peak_rss_mib': max(row['peak_rss_mib'] for row in trials),
+        })
+    return summary
+
+
 def run_trial(spec):
     """Run one cold-start scenario in a fresh server and child-process pool."""
     sys.path.insert(0, str(ROOT / 'vireo'))
@@ -286,6 +302,7 @@ def main():
             if result.returncode:
                 raise RuntimeError(result.stderr or result.stdout)
             report['results'].append({**json.loads(result.stdout), 'sample': sample + 1})
+    report['summary'] = aggregate_results(report['results'])
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + '\n')
     print(f'Report written to {args.output}')
