@@ -670,10 +670,17 @@ class LocationRepository:
 
     def photo_location_leaf(self, photo_id):
         """The exported location leaf, with :meth:`keyword_place_row` columns."""
-        leaf = self.get_photo_leaves([photo_id]).get(photo_id)
-        if leaf is None:
-            return None
-        return self.keyword_place_row(leaf["id"])
+        # Select the same leaf as get_photo_leaves, with its complete row in
+        # one snapshot. A second lookup could lose a concurrently merged or
+        # deleted keyword after selecting it.
+        return self.conn.execute(
+            "SELECT k.id, k.name, k.place_id, k.latitude, k.longitude, k.parent_id, k.type "
+            "FROM photo_keywords pk JOIN keywords k ON k.id = pk.keyword_id "
+            "WHERE pk.photo_id = ? AND k.type = 'location' "
+            "ORDER BY (k.latitude IS NULL OR k.longitude IS NULL) ASC, "
+            "(k.parent_id IS NULL) ASC, k.id DESC LIMIT 1",
+            (photo_id,),
+        ).fetchone()
 
     def located_keywords_in_workspace(self):
         """Location keywords with coordinates tagged on active-workspace photos.

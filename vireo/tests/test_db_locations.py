@@ -1087,3 +1087,62 @@ def test_repository_builds_without_an_active_workspace(db):
     assert repo.chunk_size == _SQLITE_PARAM_CHUNK_SIZE
     with pytest.raises(RuntimeError):
         repo.workspace_id_fn()
+
+
+@pytest.mark.parametrize('operation', ['delete', 'merge'])
+def test_location_leaf_remains_coherent_during_keyword_change(db, fid, monkeypatch, operation):
+    pid = _photo(db, fid, 'location-race.jpg')
+    remaining = _kw(db, 'Remaining', lat=1, lng=2)
+    selected = _kw(db, 'Selected', lat=3, lng=4)
+    _link(db, pid, remaining)
+    _link(db, pid, selected)
+    repository = db._location_repository()
+    connection = repository.conn
+    changed = []
+    writer = Database(db._db_path)
+
+    def mutate_after_read():
+        if changed:
+            return
+        if operation == 'delete':
+            writer.delete_keyword(selected)
+        else:
+            writer._merge_keyword_into(selected, remaining)
+            writer.commit()
+        changed.append(True)
+
+    class Cursor:
+        def __init__(self, cursor):
+            self.cursor = cursor
+
+        def fetchall(self):
+            rows = self.cursor.fetchall()
+            mutate_after_read()
+            return rows
+
+        def fetchone(self):
+            row = self.cursor.fetchone()
+            mutate_after_read()
+            return row
+
+    class Connection:
+        def execute(self, *args, **kwargs):
+            return Cursor(connection.execute(*args, **kwargs))
+
+    repository.conn = Connection()
+    monkeypatch.setattr(db, '_location_repository', lambda: repository)
+    try:
+        # A real competing connection changes the chosen keyword immediately
+        # after the SELECT returns. The result must retain that coherent row,
+        # rather than doing a second lookup that loses the location entirely.
+        row = db.get_photo_location_leaf(pid)
+        assert changed == [True]
+        assert row is not None
+        assert (row['id'], row['name'], row['latitude'], row['longitude'], row['type']) == (
+            selected, 'Selected', 3, 4, 'location',
+        )
+        repository.conn = connection
+        assert db.get_photo_location_leaf(pid)['id'] == remaining
+    finally:
+        repository.conn = connection
+        writer.close()
