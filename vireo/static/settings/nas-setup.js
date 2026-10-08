@@ -564,5 +564,5 @@ async function nwSave() {
   }
   closeNasWizard();
   var listEl = document.getElementById('cfgRemoteTargetsList');
-  if (listEl) listEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  if (listEl) listEl.scrollIntoView({ behavior: preferredScrollBehavior(), block: 'center' });
 }

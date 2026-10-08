@@ -765,6 +765,16 @@ async function developPhotos(photoIds) {
   }
 }
 
+/* ---------- Reduced motion ---------- */
+// The CSS `scroll-behavior: auto` override in vireo-base.css does not reach
+// an explicit `behavior: 'smooth'` passed to scrollIntoView/scrollTo, so
+// scripted scrolls ask here instead.
+function preferredScrollBehavior() {
+  return window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    ? 'auto'
+    : 'smooth';
+}
+
 /* ---------- Safe EventSource ---------- */
 // A dropped stream toasts "Connection lost" unless the caller passes
 // quietError: true because its onError shows a more specific message.

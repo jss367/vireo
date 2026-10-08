@@ -159,3 +159,26 @@ def test_misses_grid_does_not_draw_detection_boxes(live_server, page):
     card.wait_for(state="visible", timeout=3000)
 
     assert card.locator(".miss-bbox").count() == 0
+
+
+def test_misses_keyboard_focus_honors_live_motion_preference(live_server, page):
+    pid = live_server['data']['photos'][0]
+    _seed_miss(live_server['db'], pid)
+    page.goto(f"{live_server['url']}/misses")
+    card = page.locator(f"[data-testid='miss-card-no_subject-{pid}']")
+    card.wait_for(state='visible')
+    page.evaluate('''() => {
+      window.focusScrollCalls = [];
+      const original = Element.prototype.scrollIntoView;
+      Element.prototype.scrollIntoView = function(options) {
+        if (this.classList.contains('miss-card')) focusScrollCalls.push(options);
+        return original.call(this, options);
+      };
+    }''')
+    # Re-evaluate the preference on each focus change; do not cache it at load.
+    for preference, behavior in [('no-preference', 'smooth'), ('reduce', 'auto'), ('no-preference', 'smooth')]:
+        page.emulate_media(reduced_motion=preference)
+        page.evaluate('setFocused(null, -1)')
+        page.keyboard.press('j')
+        assert card.evaluate("el => el.classList.contains('focused')")
+        assert page.evaluate('focusScrollCalls.at(-1)') == {'block': 'nearest', 'behavior': behavior}

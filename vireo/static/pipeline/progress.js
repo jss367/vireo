@@ -285,5 +285,5 @@ function _showPipelineError(messages) {
   if (!banner || !text) return;
   text.textContent = messages.join('\n');
   banner.style.display = '';
-  banner.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+  banner.scrollIntoView({behavior: preferredScrollBehavior(), block: 'nearest'});
 }

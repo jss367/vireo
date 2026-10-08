@@ -371,7 +371,7 @@ async function retryFailedImport() {
     document.getElementById('progressCard').style.display = '';
     document.getElementById('resultCard').style.display = 'none';
     document.getElementById('progressCard').scrollIntoView({
-      behavior: 'smooth', block: 'center',
+      behavior: preferredScrollBehavior(), block: 'center',
     });
     watchJob(activeJobId);
   } catch (e) {

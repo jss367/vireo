@@ -187,5 +187,5 @@ function useStagingAsImportSource(result) {
     hideDestStructure();
   }
   scheduleImportPreview();
-  document.getElementById('sourceCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  document.getElementById('sourceCard').scrollIntoView({ behavior: preferredScrollBehavior(), block: 'start' });
 }
