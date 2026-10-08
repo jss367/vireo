@@ -190,6 +190,7 @@ def walk_parent_chain(db, leaf_parent_id):
     Returns a list of ``{"id": int, "name": str}`` dicts in broadest →
     narrowest order, EXCLUDING the leaf itself. Pass the leaf's
     ``parent_id`` (i.e. the *first* parent), not the leaf's own id.
+    Stops at the first non-location keyword, matching the exported hierarchy.
 
     Depth cap of 10 — chains are bounded ~5 in practice, but guard
     against pathological/malformed cycles (link_keyword_to_place
@@ -201,7 +202,7 @@ def walk_parent_chain(db, leaf_parent_id):
         if current_parent_id is None:
             break
         row = db.get_keyword_place_row(current_parent_id)
-        if row is None:
+        if row is None or row["type"] != "location":
             break
         parents.append({"id": row["id"], "name": row["name"]})
         current_parent_id = row["parent_id"]

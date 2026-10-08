@@ -600,11 +600,11 @@ def create_browse_blueprint(
         # Resolve "already carries this species" against linked taxa, not
         # spelling, so a hierarchical Birds|Verdin tag counts as keyworded.
         # Look up existing rows only — asking here must not create keywords.
-        kid_by_key = {}
+        kids_by_key = {}
         for row in db.get_species_keyword_identity_rows():
             source = {"taxon_id": row["source_id"], "scientific_name": row["scientific_name"]} if row["source_id"] else None
             identity = resolver.resolve(row["name"], row["scientific_name"], source)
-            kid_by_key.setdefault(identity.key, row["id"])
+            kids_by_key.setdefault(identity.key, []).append(row["id"])
 
         results = []
         # A bucket-level suppression used to sit here: when the threshold was
@@ -628,11 +628,12 @@ def create_browse_blueprint(
         # instead of quoting one species' score beside another's name.
         for key, entry in by_key.items():
             predicted_ids = sorted(entry["rows_by_photo"], key=lambda p: order[p])
-            kid = kid_by_key.get(key)
-            keyworded = (
-                db.get_photos_with_equivalent_species(predicted_ids, kid)
-                if kid is not None else set()
-            )
+            # Legacy duplicates can resolve to one species while having
+            # different local taxon links. Count every matching keyword,
+            # rather than letting the arbitrary first row hide the others.
+            keyworded = set()
+            for kid in kids_by_key.get(key, []):
+                keyworded.update(db.get_photos_with_equivalent_species(predicted_ids, kid))
             missing_ids = [p for p in predicted_ids if p not in keyworded]
             # A pending prediction on an already-keyworded photo still has to
             # go somewhere: dropping it would leave Review holding the same

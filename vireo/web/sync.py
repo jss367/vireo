@@ -1024,9 +1024,9 @@ def create_sync_blueprint(get_db, json_error, get_runner):
         if not photo_ids:
             return {}
 
-        # Keep the first linked location, matching the single-photo helper's
-        # LIMIT 1 behavior without relying on a window-function result shape.
-        leaves = db.get_first_linked_location_keywords(photo_ids)
+        # The detail panel, review and exported GPS/hierarchy must all choose
+        # the same leaf when a photo has several linked locations.
+        leaves = db.get_photo_location_keywords(photo_ids)
 
         chain_cache = {}
         result = {}
@@ -1244,26 +1244,36 @@ def create_sync_blueprint(get_db, json_error, get_runner):
         change_ids = body.get("change_ids", [])
         if not change_ids:
             return json_error("change_ids required")
+        if not isinstance(change_ids, list) or any(
+            isinstance(cid, bool) or not isinstance(cid, int) or not 0 < cid < 2**63
+            for cid in change_ids
+        ):
+            return json_error("change_ids must contain valid integer ids")
+        # An id repeated across chunks still names just one discarded row.
+        change_ids = list(dict.fromkeys(change_ids))
 
-        # Look up changes before deleting so we can record what was discarded.
-        # The read is chunked below SQLite's bound-parameter limit, just as
-        # clear_pending does for the subsequent delete.
-        changes = db.get_pending_changes_by_ids(change_ids)
+        try:
+            # SQLite reuses pending row ids. Hold the writer lock from the
+            # history lookup through deletion so an id cannot change owners
+            # between those steps, including across chunks and workspaces.
+            db.begin_immediate()
+            changes = db.get_pending_changes_by_ids(change_ids)
+            db.clear_pending(
+                change_ids, clear_equivalent_flat_removals=True, _commit=False,
+            )
+            if changes:
+                items = _discard_history_items(db, changes)
+                db.record_edit(
+                    'discard', f'Discarded {len(changes)} pending changes',
+                    '', items, is_batch=len(changes) > 1, _commit=False,
+                )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
 
-        db.clear_pending(
-            change_ids, clear_equivalent_flat_removals=True,
-        )
-
-        # Record discard in history (not undoable)
         if changes:
-            items = _discard_history_items(db, changes)
-            db.record_edit('discard',
-                           f'Discarded {len(changes)} pending changes',
-                           '', items, is_batch=len(changes) > 1)
-
-        # Report what was actually deleted: clear_pending only removes rows
-        # that exist in the active workspace, which is exactly the set the
-        # SELECT above found.
+            db._prune_edit_history()
         log.info("Discarded %d pending changes", len(changes))
         return jsonify({"ok": True, "discarded": len(changes)})
 

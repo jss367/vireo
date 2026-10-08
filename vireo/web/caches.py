@@ -340,6 +340,15 @@ def create_caches_blueprint(get_db, json_error, db_path, config):
                             ("unflag", unflag)):
             if not isinstance(value, list):
                 return json_error(f"{name} must be a list")
+            if any(
+                isinstance(pid, bool) or not isinstance(pid, int) or not 0 < pid < 2**63
+                for pid in value
+            ):
+                return json_error(f"{name} must contain valid integer photo ids")
+
+        keepers = list(dict.fromkeys(keepers))
+        rejects = list(dict.fromkeys(rejects))
+        unflag = list(dict.fromkeys(unflag))
 
         # A photo listed in more than one action would otherwise land on
         # whichever mutation ran last (or whichever kept its old flag), so
@@ -357,52 +366,40 @@ def create_caches_blueprint(get_db, json_error, db_path, config):
                     f"Photo {pid} listed in both {a} and {b}", 400
                 )
 
-        # Pre-validate all photo IDs against workspace before any mutations
-        for pid in keepers + rejects + unflag:
-            if not db._photo_in_workspace(pid):
-                return json_error(f"Photo {pid} is not in the active workspace", 403)
-
-        # Capture old flags before mutation
-        old_flags = {}
-        for pid in keepers + rejects + unflag:
-            old = db.get_photo(pid)
-            if old:
-                old_flags[pid] = old["flag"] or "none"
-
-        # Clearing a flag that is already "none" would write a no-op history
-        # entry, so only the photos that actually carry a flag are cleared.
-        cleared = [pid for pid in unflag if old_flags.get(pid, "none") != "none"]
-
         try:
-            for pid in keepers:
-                db.update_photo_flag(pid, "flagged")
-            for pid in rejects:
-                db.update_photo_flag(pid, "rejected")
-            for pid in cleared:
-                db.update_photo_flag(pid, "none")
-        except ValueError as e:
-            return json_error(str(e), 403)
+            # Flags, sidecar intents and undo history are one durable edit.
+            # Lock before reading old values so history also describes the
+            # flags this request actually replaced.
+            db.begin_immediate()
+            old_flags = {}
+            for pid in keepers + rejects + unflag:
+                db._verify_photo_in_workspace(pid)
+                old_flags[pid] = db.get_photo(pid)["flag"] or "none"
 
-        # Record flag history
-        flag_items = []
-        for pid in keepers:
-            if pid in old_flags:
-                flag_items.append({'photo_id': pid, 'old_value': old_flags[pid], 'new_value': 'flagged'})
-        for pid in rejects:
-            if pid in old_flags:
-                flag_items.append({'photo_id': pid, 'old_value': old_flags[pid], 'new_value': 'rejected'})
-        for pid in cleared:
-            flag_items.append({'photo_id': pid, 'old_value': old_flags[pid], 'new_value': 'none'})
-        if flag_items:
-            for item in flag_items:
-                db.queue_flag_change_if_enabled(
-                    item["photo_id"], item["new_value"], _commit=False
-                )
+            # Clearing an already-clear flag is a no-op.
+            cleared = [pid for pid in unflag if old_flags[pid] != "none"]
+            flag_items = []
+            for photo_ids, flag in ((keepers, "flagged"), (rejects, "rejected"), (cleared, "none")):
+                for pid in photo_ids:
+                    db.update_photo_flag(pid, flag, _commit=False)
+                    db.queue_flag_change_if_enabled(pid, flag, _commit=False)
+                    flag_items.append({"photo_id": pid, "old_value": old_flags[pid], "new_value": flag})
+
+            if flag_items:
+                summary = f'Culling: flagged {len(keepers)}, rejected {len(rejects)}'
+                if cleared:
+                    summary += f', cleared {len(cleared)}'
+                db.record_edit('flag', summary, 'culling_apply', flag_items, is_batch=True, _commit=False)
             db.commit()
-            summary = f'Culling: flagged {len(keepers)}, rejected {len(rejects)}'
-            if cleared:
-                summary += f', cleared {len(cleared)}'
-            db.record_edit('flag', summary, 'culling_apply', flag_items, is_batch=True)
+        except ValueError as e:
+            db.rollback()
+            return json_error(str(e), 403)
+        except Exception:
+            db.rollback()
+            raise
+
+        if flag_items:
+            db._prune_edit_history()
 
         log.info(
             "Culling applied: %d keepers, %d rejects, %d cleared",

@@ -1127,7 +1127,7 @@ def test_sync_facade_signatures_unchanged():
     )
     assert sig["clear_pending"] == (
         "(self, change_ids, *, clear_equivalent_flat_removals=False, "
-        "expected_tokens=None)"
+        "expected_tokens=None, _commit=True)"
     )
     assert sig["clear_pending_by_token"] == (
         "(self, change_tokens, *, clear_equivalent_flat_removals=False)"

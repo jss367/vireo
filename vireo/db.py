@@ -4652,6 +4652,14 @@ class Database:
         """Choose the effective exported location row for each photo."""
         return self._location_repository().get_photo_leaves(photo_ids)
 
+    def get_photo_location_keywords(self, photo_ids):
+        """Exported location leaves with names, coordinates and parent ids.
+
+        Uses the same choice as sidecar location paths and assigned GPS;
+        photos with no linked location keyword are absent.
+        """
+        return self._location_repository().get_photo_leaves(photo_ids)
+
     def get_photo_location_keyword_ids(self, photo_ids):
         """Return the keyword IDs owning each photo's exported location."""
         return {pid: row["id"] for pid, row in self._get_photo_location_leaves(photo_ids).items()}
@@ -4682,9 +4690,9 @@ class Database:
     def get_first_linked_location_keywords(self, photo_ids):
         """``{photo_id: row}``: each photo's first-linked location keyword.
 
-        "First" is the lowest ``photo_keywords`` rowid (the single-photo
-        location summary's choice), not the effective leaf
-        :meth:`get_photo_location_paths` picks. Rows carry ``photo_id``,
+        "First" is the lowest ``photo_keywords`` rowid, not the effective
+        leaf :meth:`get_photo_location_paths` picks. Detail and sync callers
+        use :meth:`get_photo_location_keywords` instead. Rows carry ``photo_id``,
         ``id``, ``name``, ``place_id``, ``latitude``, ``longitude`` and
         ``parent_id``; photos with no location keyword are absent.
         """
@@ -6363,12 +6371,12 @@ class Database:
 
     def get_keyword_place_row(self, keyword_id):
         """Row (``id``, ``name``, ``place_id``, ``latitude``, ``longitude``,
-        ``parent_id``) of one keyword of any type, or None when the id is unknown."""
+        ``parent_id``, ``type``) of one keyword of any type, or None when the id is unknown."""
         return self._location_repository().keyword_place_row(keyword_id)
 
     def get_photo_location_leaf(self, photo_id):
         """A ``type='location'`` keyword row linked to ``photo_id`` (columns as
-        ``get_keyword_place_row``), or None. Unordered ``LIMIT 1``."""
+        ``get_keyword_place_row``), or None. Matches the exported location."""
         return self._location_repository().photo_location_leaf(photo_id)
 
     def get_located_keywords_in_workspace(self):
@@ -9431,9 +9439,12 @@ class Database:
 
     def clear_pending(
         self, change_ids, *, clear_equivalent_flat_removals=False,
-        expected_tokens=None,
+        expected_tokens=None, _commit=True,
     ):
         """Delete pending changes by id.
+
+        ``_commit=False`` leaves the delete and any equivalent flat removals
+        in the caller's transaction, allowing an atomic discard/history edit.
 
         When ``clear_equivalent_flat_removals`` is true, a successfully
         applied flat keyword removal also clears equivalent rows from sibling
@@ -9466,7 +9477,8 @@ class Database:
         )
         if synced_changes:
             self.clear_equivalent_flat_removals(synced_changes, _commit=False)
-        repo.commit()
+        if _commit:
+            repo.commit()
 
     def clear_pending_by_token(
         self, change_tokens, *, clear_equivalent_flat_removals=False,
@@ -10334,9 +10346,10 @@ class Database:
                           visual_json=_UNSET):
         """Set the given columns of a workspace collection, and commit.
 
-        Only the arguments passed are written; with none passed nothing runs.
+        Returns whether a row was updated. Only the arguments passed are
+        written; with none passed nothing runs and returns None.
         """
-        self._collection_repository().update(
+        return self._collection_repository().update(
             collection_id, name=name, rules_json=rules_json, visual_json=visual_json,
         )
 

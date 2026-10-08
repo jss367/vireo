@@ -265,6 +265,8 @@ def create_photos_blueprint(
 
         db = get_db()
         ws_id = db.active_workspace_id
+        if ws_id is None:
+            return json_error("No active workspace", 400)
         deleted = 0
         skipped = 0
         folder_online_cache = {}
@@ -360,6 +362,8 @@ def create_photos_blueprint(
 
         db = get_db()
         ws_id = db.active_workspace_id
+        if ws_id is None:
+            return json_error("No active workspace", 400)
         confirmed_ids = []
         restored_ids = []
         folder_offline_ids = []

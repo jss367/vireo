@@ -156,7 +156,8 @@ class CollectionRepository:
 
         Only the arguments passed are written, in the order ``name``,
         ``rules``, ``visual_json``; with none passed nothing runs. An id
-        outside the active workspace matches no row.
+        outside the active workspace matches no row. Returns whether a row
+        was updated, so callers can detect a concurrent deletion.
         """
         updates = []
         params = []
@@ -172,12 +173,13 @@ class CollectionRepository:
         if not updates:
             return
         params.extend([collection_id, self.workspace_id])
-        self.conn.execute(
+        cur = self.conn.execute(
             f"UPDATE collections SET {', '.join(updates)} "
             "WHERE id = ? AND workspace_id = ?",
             params,
         )
         self.conn.commit()
+        return cur.rowcount > 0
 
     def delete(self, collection_id):
         """Delete a collection."""
