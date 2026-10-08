@@ -2251,6 +2251,43 @@ def test_multiselect_offers_partial_keyword_fill(live_server, page):
     assert restored_with_keyword == original_with_keyword
 
 
+def test_selection_panel_delegation_survives_refresh_and_keyboard_activation(live_server, page):
+    """One listener handles replaced keyword buttons and native keyboard clicks."""
+    writes = []
+    def capture_write(request):
+        if request.url.endswith(("/api/batch/keyword", "/api/batch/keyword-remove")):
+            writes.append(request.url)
+
+    page.on("request", capture_write)
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.wait_for(state="visible")
+    page.evaluate("""
+      photos.forEach(p => selectedPhotos.add(p.id));
+      renderGrid();
+      updateBatchBar();
+      Vireo.browse.selectionPanel.bindActions();
+      Vireo.browse.selectionPanel.bindActions();
+    """)
+    row = page.locator(".selection-keyword-row", has_text="Red-tailed Hawk")
+    add = row.locator("button", has_text="Add to 4")
+    expect(add).to_be_visible()
+    assert add.get_attribute("onclick") is None
+    add.focus()
+    page.keyboard.press("Enter")
+
+    # The server refresh replaces this row's children. The same listener
+    # must handle the new Remove button without binding it separately.
+    remove = row.locator("button", has_text="Remove from 5")
+    expect(remove).to_be_visible()
+    assert remove.get_attribute("onclick") is None
+    remove.focus()
+    page.keyboard.press("Space")
+    expect(row).to_have_count(0)
+    assert len(writes) == 2
+    assert writes[0].endswith("/api/batch/keyword")
+    assert writes[1].endswith("/api/batch/keyword-remove")
+
+
 def test_multiselect_shows_and_removes_keyword_shared_by_all_photos(live_server, page):
     """A keyword shared by the selection remains visible and removable."""
     db = live_server["db"]

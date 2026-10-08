@@ -31,3 +31,24 @@ rendering; they do not cancel writes or server-side work.
 
 Request races are tested against the actual controllers in
 `vireo/tests/browse_panel_requests.cjs`, run by pytest's browser state tests.
+
+## Selection-panel state and actions
+
+`selection-panel-state.js` owns the keyword and prediction row snapshots in
+`Vireo.browse.selectionPanel`. Keyword ids and prediction row indexes resolve
+through this store; photo-id arrays are copied and frozen. Starting a new
+suggestion request, leaving batch mode, or exceeding the selection cap clears
+the old rows immediately. Prediction resets also retire the payload used by
+Show more, while keeping the user's expanded/collapsed viewing preference.
+
+`selection-panel-events.js` binds one delegated click listener to
+`#selectionPanel` through `bindActions()`, called from `boot.js` before
+bootstrap. Rendered buttons carry `data-selection-action` and a keyword id or
+prediction row index. Species names and photo-id arrays stay in the store.
+The listener ignores disabled buttons, detached elements and missing rows.
+Rebinding is safe and does not install a second listener.
+
+`selection-panel.js` renders keyword and wildlife controls and applies their
+changes; `prediction-panels.js` renders prediction controls and performs their
+actions. Existing grid selection and single-photo detail state still live in
+`state.js`; these are separate from the batch panel's row snapshots.

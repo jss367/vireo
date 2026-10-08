@@ -108,9 +108,6 @@ function setBrowseTotals(data) {
     ? Number(data.underlying_total) || 0
     : totalPhotos;
 }
-var selectionKeywordMissingById = {};
-var selectionKeywordPresentById = {};
-var selectionKeywordNameById = {};
 // Panel request ownership lives in Vireo.browse.panelRequests.
 // A photo can carry dozens of low-confidence guesses, and most users never set
 // a confidence floor. Show the strongest few and collapse the tail behind a
@@ -118,25 +115,10 @@ var selectionKeywordNameById = {};
 // threshold the user's settings don't specify.
 var PREDICTION_COLLAPSE_AT = 5;
 var detailPredictionsExpanded = false;
-var selectionPredictionsExpanded = false;
 var _detailPredictionData = null;
-var _selectionPredictionData = null;
-var selectionPredictionAcceptableById = {};
-// Parallel to selectionPredictionAcceptableById, so the accept call can pass
-// the species the button named — the server refuses a row whose current
-// consensus has drifted from what the panel rendered (see
-// _species_drifted_prediction_ids in app.py).
-var selectionPredictionSpeciesByIdx = {};
-// Also parallel: the photos the row's "Predicted on N of M" counts, so the
-// Show button can open exactly that set in the lightbox. Kept in the side
-// table rather than re-derived from the accept ids because those exclude the
-// ambiguous photos — and the ambiguous ones are precisely the photos a user
-// clicks Show to look at.
-var selectionPredictionPhotoIdsByIdx = {};
 // The single-photo panel's rendered rows, in render order, so its buttons can
-// carry a bare index instead of the row's data. The selection panel has kept
-// its ids and species in a side table since it shipped
-// (selectionPredictionAcceptableById above); the detail panel now matches it,
+// carry a bare index instead of the row's data. The selection panel uses
+// Vireo.browse.selectionPanel for its row snapshots; the detail panel matches it,
 // for a reason worth stating: it used to interpolate the species straight
 // into an inline handler attribute —
 // `onclick='acceptDetailPredictions([12],44,"Say\'s Phoebe")'` — and the

@@ -30,13 +30,12 @@ function setup() {
     }),
     showToast() {},
     selectionIdsKey: ids => ids.slice().sort((a, b) => a - b).join(','),
-    selectionPredictionPhotoIdsByIdx: {},
     _batchToggleMixed() {},
     browseSelectionStackNote: () => '',
     openLightbox: (...args) => opened.push(args),
   });
   ctx.window = ctx;
-  for (const file of ['panel-requests.js', 'selection-panel.js', 'prediction-panels.js']) {
+  for (const file of ['panel-requests.js', 'selection-panel-state.js', 'selection-panel.js', 'prediction-panels.js']) {
     vm.runInContext(fs.readFileSync('vireo/static/browse/' + file, 'utf8'), ctx);
   }
   // Rendering is independent of network ownership; record which responses
@@ -161,7 +160,9 @@ test('an observation is invalidated even before the first request', () => {
 
 test('Show photos stops batching when its selection is replaced', async () => {
   const {ctx, lanes, pending, opened} = setup();
-  ctx.selectionPredictionPhotoIdsByIdx[0] = Array.from({length: 600}, (_, i) => i + 1);
+  ctx.Vireo.browse.selectionPanel.predictions.replaceRows([
+    {predicted_photo_ids: Array.from({length: 600}, (_, i) => i + 1)},
+  ]);
   const button = {disabled: false, textContent: 'Show 600 photos'};
   const showing = ctx.showSelectionPredictionPhotos(0, button);
   lanes.predictions.invalidate();
@@ -175,7 +176,9 @@ test('Show photos stops batching when its selection is replaced', async () => {
 
 test('only the latest Show click opens the lightbox', async () => {
   const {ctx, pending, opened} = setup();
-  ctx.selectionPredictionPhotoIdsByIdx = {0: [1, 2], 1: [3, 4]};
+  ctx.Vireo.browse.selectionPanel.predictions.replaceRows([
+    {predicted_photo_ids: [1, 2]}, {predicted_photo_ids: [3, 4]},
+  ]);
   const old = ctx.showSelectionPredictionPhotos(0);
   const fresh = ctx.showSelectionPredictionPhotos(1);
   pending[1].resolve({photos: [{id: 3}, {id: 4}]});
@@ -209,4 +212,127 @@ test('clearing wildlife state prevents a late response from restoring batch cont
   await old;
   assert.equal(elements.get('selectionWildlifeStatus').textContent, '');
   assert.equal(elements.get('selectionWildlifeActions').innerHTML, '');
+});
+
+test('retiring panel rows prevents keyword writes, prediction acceptance, and stale toggles', async () => {
+  const {ctx, pending, rendered} = setup();
+  const state = ctx.Vireo.browse.selectionPanel;
+  state.keywords.replace([{id: 7, name: "Cooper's Hawk", missing_photo_ids: [1], present_photo_ids: [2]}]);
+  state.predictions.remember([{species: "Say's Phoebe"}], 2, {});
+  state.predictions.replaceRows([{species: "Say's Phoebe", acceptable_prediction_ids: [100]}]);
+  state.keywords.reset();
+  state.predictions.reset();
+  await ctx.applySelectionKeyword(7);
+  await ctx.removeSelectionKeyword(7);
+  await ctx.acceptSelectionPrediction(0, true);
+  ctx.toggleSelectionPredictions();
+  assert.deepEqual(pending, []);
+  assert.deepEqual(rendered, []);
+});
+
+test('row actions retain a snapshot even when the source arrays change', () => {
+  const {ctx} = setup();
+  const state = ctx.Vireo.browse.selectionPanel;
+  const keyword = {id: 7, missing_photo_ids: [1], present_photo_ids: [2]};
+  const prediction = {species: "Say's Phoebe", acceptable_prediction_ids: [100], predicted_photo_ids: [1, 2]};
+  state.keywords.replace([keyword]);
+  state.predictions.replaceRows([prediction]);
+  keyword.missing_photo_ids.push(3);
+  prediction.acceptable_prediction_ids.push(101);
+  prediction.predicted_photo_ids.length = 0;
+  assert.deepEqual(Array.from(state.keywords.get(7).missingPhotoIds), [1]);
+  const row = state.predictions.getRow(0);
+  assert.deepEqual(Array.from(row.acceptableIds), [100]);
+  assert.deepEqual(Array.from(row.photoIds), [1, 2]);
+  assert.throws(() => row.acceptableIds.push(102), TypeError);
+});
+
+test('loading a different selection immediately retires the old actionable rows', async () => {
+  const {ctx, pending} = setup();
+  const state = ctx.Vireo.browse.selectionPanel;
+  state.keywords.replace([{id: 7, missing_photo_ids: [1]}]);
+  state.predictions.replaceRows([{species: "Say's Phoebe", acceptable_prediction_ids: [100]}]);
+  const keywords = ctx.loadSelectionKeywordSuggestions([3, 4]);
+  const predictions = ctx.loadSelectionPredictions([3, 4]);
+  assert.equal(state.keywords.get(7), undefined);
+  assert.equal(state.predictions.getRow(0), undefined);
+  pending[0].resolve({keywords: []});
+  pending[1].resolve({predictions: []});
+  await Promise.all([keywords, predictions]);
+});
+
+function setupActions() {
+  const listeners = [];
+  const calls = [];
+  const panel = {
+    addEventListener: (name, handler) => listeners.push(handler),
+    contains: button => button.inPanel,
+  };
+  const ctx = vm.createContext({document: {getElementById: () => panel}});
+  ctx.window = ctx;
+  for (const file of ['selection-panel-state.js', 'selection-panel-events.js']) {
+    vm.runInContext(fs.readFileSync('vireo/static/browse/' + file, 'utf8'), ctx);
+  }
+  for (const name of ['openBatchDevelopmentEditor', 'pasteEditSettingsToSelection',
+    'setSelectionWildlifeExcluded', 'applySelectionKeyword', 'removeSelectionKeyword',
+    'toggleSelectionPredictions', 'acceptSelectionPrediction', 'showSelectionPredictionPhotos',
+    'openPredictionInReview']) {
+    ctx[name] = (...args) => calls.push([name, ...args]);
+  }
+  const state = ctx.Vireo.browse.selectionPanel;
+  state.predictions.replaceRows([{species: "Say's Phoebe", ambiguous_photo_ids: [12]}]);
+  state.bindActions();
+  function click(action, attrs = {}, options = {}) {
+    const attributes = {'data-selection-action': action, ...attrs};
+    const button = {
+      inPanel: true, disabled: false, ...options,
+      getAttribute: name => Object.hasOwn(attributes, name) ? attributes[name] : null,
+    };
+    // The click target can be a nested icon rather than the button itself.
+    const event = {target: {closest: () => button}};
+    listeners.forEach(handler => handler(event));
+    return button;
+  }
+  return {state, listeners, calls, click};
+}
+
+test('delegated actions bind once and preserve each button argument', () => {
+  const {state, listeners, calls, click} = setupActions();
+  state.bindActions();
+  assert.equal(listeners.length, 1);
+  click('edit');
+  click('paste');
+  click('wildlife-exclude');
+  click('wildlife-include');
+  click('keyword-add', {'data-keyword-id': '7'});
+  click('keyword-remove', {'data-keyword-id': '7'});
+  click('prediction-toggle');
+  const subset = click('prediction-accept', {'data-prediction-row': '0'});
+  const all = click('prediction-accept-all', {'data-prediction-row': '0'});
+  const show = click('prediction-show', {'data-prediction-row': '0'});
+  click('prediction-review', {'data-prediction-row': '0'});
+  assert.deepEqual(calls, [
+    ['openBatchDevelopmentEditor'], ['pasteEditSettingsToSelection'],
+    ['setSelectionWildlifeExcluded', true], ['setSelectionWildlifeExcluded', false],
+    ['applySelectionKeyword', 7], ['removeSelectionKeyword', 7], ['toggleSelectionPredictions'],
+    ['acceptSelectionPrediction', 0, false, subset],
+    ['acceptSelectionPrediction', 0, true, all],
+    ['showSelectionPredictionPhotos', 0, show], ['openPredictionInReview', 12],
+  ]);
+});
+
+test('delegated actions ignore disabled, detached, invalid, and retired rows', () => {
+  const {state, calls, click} = setupActions();
+  click('edit', {}, {disabled: true});
+  click('paste', {}, {inPanel: false});
+  for (const key of ['', '-1', '1.5', 'not-a-number']) {
+    click('keyword-add', {'data-keyword-id': key});
+    click('prediction-accept-all', {'data-prediction-row': key});
+  }
+  click('prediction-accept-all');
+  click('prediction-accept-all', {'data-prediction-row': '2'});
+  state.predictions.reset();
+  click('prediction-show', {'data-prediction-row': '0'});
+  click('prediction-review', {'data-prediction-row': '0'});
+  assert.deepEqual(calls, []);
 });

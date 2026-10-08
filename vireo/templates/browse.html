@@ -2298,12 +2298,12 @@ body.sidebar-resizing {
     <div class="selection-panel hidden" id="selectionPanel">
       <div class="selection-heading" id="selectionCount">0 photos selected</div>
       <div class="detail-section">
-        <button class="selection-action-btn" id="batchDevelopBtn" type="button" onclick="openBatchDevelopmentEditor()">Edit Selected Photos…</button>
+        <button class="selection-action-btn" id="batchDevelopBtn" type="button" data-selection-action="edit">Edit Selected Photos…</button>
         <div class="selection-action-hint">Adjust the selection together or apply a saved preset.</div>
       </div>
       <div class="detail-section" id="pasteEditSection" hidden>
         <div class="detail-section-title">Development Settings</div>
-        <button class="selection-action-btn" id="pasteEditBtn" type="button" onclick="pasteEditSettingsToSelection()">Paste Development Settings</button>
+        <button class="selection-action-btn" id="pasteEditBtn" type="button" data-selection-action="paste">Paste Development Settings</button>
         <div class="selection-action-hint" id="pasteEditHint"></div>
       </div>
       <div class="detail-section">
@@ -2593,6 +2593,7 @@ body.sidebar-resizing {
    deep link) that reaches every other file. #}
 <script src="/static/browse/state.js"></script>
 <script src="/static/browse/panel-requests.js"></script>
+<script src="/static/browse/selection-panel-state.js"></script>
 <script src="/static/browse/keyword-autocomplete.js"></script>
 <script src="/static/browse/config.js"></script>
 <script src="/static/browse/cards.js"></script>
@@ -2613,6 +2614,7 @@ body.sidebar-resizing {
 <script src="/static/browse/best-batch.js"></script>
 <script src="/static/browse/selection-panel.js"></script>
 <script src="/static/browse/prediction-panels.js"></script>
+<script src="/static/browse/selection-panel-events.js"></script>
 <script src="/static/browse/batch-actions.js"></script>
 <script src="/static/browse/detail.js"></script>
 <script src="/static/browse/edit-actions.js"></script>
