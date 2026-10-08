@@ -151,6 +151,9 @@ def run_worker(spec):
         app = create_app(db_path, thumb_cache_dir=str(root / 'thumbnails'))
         app.config['TESTING'] = True
         app.config['EDIT_PREVIEW_THREADS'] = spec['threads']
+        # create_app already built the pool with the default thread count, so
+        # also update its BLAS/OpenMP spawn setting before any render runs.
+        app._preview_workers.threads = spec['threads']
         app.config['EDIT_PREVIEW_CLEAR_SOURCE_CACHE'] = spec['cache'] == 'cold'
         app.config['COMPUTATION_CACHE_DIR'] = str(root / 'computation-cache')
         client = app.test_client()
