@@ -79,6 +79,14 @@ def environment(threads, machine_label):
         dependencies[requirement.name] = installed
         if not requirement.specifier.contains(installed):
             raise ValueError(f'Benchmark requires {specification}; installed {installed}')
+    # A shadow at the same upstream version shares cv2.__version__, so verify no
+    # other OpenCV distribution is installed before trusting the version compare.
+    for shadow in ('opencv-python', 'opencv-contrib-python', 'opencv-contrib-python-headless'):
+        try:
+            importlib.metadata.version(shadow)
+        except importlib.metadata.PackageNotFoundError:
+            continue
+        raise ValueError(f'{shadow} shadows opencv-python-headless; use an isolated environment')
     opencv_distribution = importlib.metadata.version('opencv-python-headless')
     if cv2.__version__.split('.')[:3] != opencv_distribution.split('.')[:3]:
         raise ValueError('Imported OpenCV differs from opencv-python-headless; use an isolated environment')

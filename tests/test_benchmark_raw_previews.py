@@ -113,3 +113,14 @@ def test_environment_rejects_a_shadowing_opencv_install(monkeypatch):
     monkeypatch.setattr(cv2, '__version__', '0.0.0')
     with pytest.raises(ValueError, match='Imported OpenCV differs'):
         environment(2, 'test')
+
+
+@pytest.mark.parametrize('shadow', ['opencv-python', 'opencv-contrib-python', 'opencv-contrib-python-headless'])
+def test_environment_rejects_a_shadow_opencv_distribution_at_matching_version(monkeypatch, shadow):
+    import importlib.metadata
+
+    original = importlib.metadata.version
+    monkeypatch.setattr(importlib.metadata, 'version',
+                        lambda name: original('opencv-python-headless') if name == shadow else original(name))
+    with pytest.raises(ValueError, match=f'{shadow} shadows opencv-python-headless'):
+        environment(2, 'test')
