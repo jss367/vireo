@@ -158,6 +158,30 @@ function previewStatusText(img) {
 // Keep one render in flight and one replaceable request. Dragging never builds
 // an unbounded server queue, and obsolete pixels never replace the visible photo.
 var editorPreviewQueue = {active: null, pending: null};
+// A fresh random id per page keeps two tabs on the same photo independent.
+var editorPreviewSession = Array.from(crypto.getRandomValues(new Uint8Array(16)), function(value) {
+  return value.toString(16).padStart(2, '0');
+}).join('');
+var editorPreviewServerSequence = 0;
+
+function cancelServerPreview() {
+  safeFetch('/api/edit-preview/cancel', {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, keepalive: true,
+    body: JSON.stringify({session: editorPreviewSession, sequence: ++editorPreviewServerSequence}),
+  }, {toast: false}).catch(function() { /* the next render also fences older work */ });
+}
+
+function detachEditorPreview(notifyServer) {
+  var active = editorPreviewQueue.active;
+  if (!active) return;
+  editorPreviewQueue.active = null;
+  clearTimeout(active.timeout);
+  active.image.onload = active.image.onerror = null;
+  active.image.removeAttribute('src');
+  if (notifyServer) cancelServerPreview();
+}
+
+window.addEventListener('pagehide', function() { cancelEditorPreview({abortActive: true}); });
 var EDITOR_INTERACTIVE_SIZE = 1024;
 var EDITOR_PREVIEW_INTERVAL = 60;
 var EDITOR_REFINE_DELAY = 300;
@@ -181,16 +205,7 @@ function cancelEditorPreview(options) {
   editorState.previewRefineTimer = null;
   editorPreviewQueue.pending = null;
   hidePreviewRetry();
-  if (options && options.abortActive && editorPreviewQueue.active) {
-    // Navigation must not wait on a slow render of the previous photo. Keep
-    // coalescing ordinary edits, but release the slot when the photo changes.
-    var active = editorPreviewQueue.active;
-    var image = active.image;
-    editorPreviewQueue.active = null;
-    clearTimeout(active.timeout);
-    image.onload = image.onerror = null;
-    image.removeAttribute('src');
-  }
+  if (options && options.abortActive) detachEditorPreview(true);
 }
 
 function presentEditorPreview(request, image) {
@@ -204,6 +219,7 @@ function presentEditorPreview(request, image) {
     });
     old.replaceWith(image);
   }
+  image.dataset.previewUrl = request.url;
   var status = previewStatusText(image);
   if (request.interactive) status = 'Quick preview — detail will refine when editing pauses';
   document.getElementById('previewStatus').textContent = status;
@@ -238,7 +254,7 @@ function pumpEditorPreview() {
     // An obsolete event must not clear the next photo's active request.
     if (editorPreviewQueue.active !== request) return;
     editorPreviewQueue.active = null;
-    if (timedOut) image.removeAttribute('src');
+    if (timedOut) { image.removeAttribute('src'); cancelServerPreview(); }
     if (request.seq === editorState.previewSeq && !editorState.loading) {
       if (ok) presentEditorPreview(request, image);
       else {
@@ -260,7 +276,9 @@ function pumpEditorPreview() {
   // Bound the lifetime of the actual request, even if newer input reuses it.
   // A timeout releases the slot for the latest queued edit, with no retry loop.
   request.timeout = setTimeout(function() { finish(false, true); }, EDITOR_PREVIEW_TIMEOUT);
-  image.src = request.url;
+  request.serverSequence = ++editorPreviewServerSequence;
+  image.src = request.url + '&preview_session=' + editorPreviewSession +
+    '&preview_seq=' + request.serverSequence;
 }
 
 function updatePreview(options) {
@@ -284,11 +302,12 @@ function updatePreview(options) {
     started: options.started || performance.now(),
   };
   var img = document.getElementById('editorImg');
-  if (img.getAttribute('src') === url && img.complete && img.naturalWidth) {
+  if ((img.dataset.previewUrl || img.getAttribute('src')) === url && img.complete && img.naturalWidth) {
     // Reusing the displayed result also supersedes any slower in-flight tier.
     // Keep the timers: reusing a quick preview must still allow refinement.
     editorState.previewSeq++;
     editorPreviewQueue.pending = null;
+    detachEditorPreview(true);
     presentEditorPreview(request, img);
     return;
   }
@@ -300,6 +319,11 @@ function updatePreview(options) {
     editorPreviewQueue.pending = null;
   } else {
     editorPreviewQueue.pending = request;
+    // Preserve a quick tier for the same input while refinement queues. A
+    // genuinely newer edit replaces both the browser request and server work.
+    if (editorPreviewQueue.active && editorPreviewQueue.active.seq !== request.seq) {
+      detachEditorPreview(false);
+    }
     pumpEditorPreview();
   }
 }

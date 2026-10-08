@@ -197,6 +197,7 @@ class StartupTasks:
         Returns whether the job runner shut down within ``job_timeout``.
         """
         app = self._app
+        app._preview_workers.close()
         try:
             jobs_stopped = app._job_runner.shutdown(timeout=job_timeout)
         except Exception:

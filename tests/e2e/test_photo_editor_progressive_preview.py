@@ -86,7 +86,7 @@ def test_continuous_input_delivers_intermediate_frames(page, live_server, previe
     assert json.loads(query(page.locator('#editorImg').get_attribute('src'))['recipe'][0])['adjustments']['exposure'] == 1.2
 
 
-def test_slow_request_is_coalesced_and_never_displays_old_recipe(page, live_server, preview_photo):
+def test_slow_request_is_superseded_and_never_displays_old_recipe(page, live_server, preview_photo):
     open_photo(page, live_server, preview_photo)
     original = page.locator('#editorImg').get_attribute('src')
     held = []
@@ -97,12 +97,15 @@ def test_slow_request_is_coalesced_and_never_displays_old_recipe(page, live_serv
     assert len(held) == 1
     page.evaluate("for (let i=1;i<=20;i++) setAdjustment('exposure', i/10)")
     page.wait_for_timeout(400)
-    assert len(held) == 1  # one active request, latest pending only
+    assert len(held) == 2  # obsolete request detached; only latest input dispatched
     fill(held.pop(0))
     page.wait_for_timeout(100)
     assert page.locator('#editorImg').get_attribute('src') == original
     assert len(held) == 1
     assert json.loads(query(held[0].request.url)['recipe'][0])['adjustments']['exposure'] == 2
+    fill(held.pop(0))
+    page.wait_for_timeout(100)
+    assert len(held) == 1
     fill(held.pop(0))
     page.wait_for_function('editorPreviewQueue.active === null')
     assert json.loads(query(page.locator('#editorImg').get_attribute('src'))['recipe'][0])['adjustments']['exposure'] == 2
@@ -134,7 +137,7 @@ def test_stalled_preview_releases_slot_for_latest_edit(page, live_server, previe
     page.wait_for_function('''value => editorPreviewQueue.active && editorPreviewQueue.active.size > 1024 &&
       JSON.parse(new URL(editorPreviewQueue.active.url, location.href).searchParams.get('recipe'))
         .adjustments.exposure === value''', arg=latest_exposure)
-    assert len(held) == 2
+    assert len(held) == (2 if latest_exposure == 0.5 else 3)
     assert page.locator('#editorImg').get_attribute('src') == original
     expect(page.locator('#previewStatus')).to_contain_text('Refining preview')
     page.evaluate('window.obsoletePreviewCallback()')
@@ -142,7 +145,8 @@ def test_stalled_preview_releases_slot_for_latest_edit(page, live_server, previe
     page.wait_for_function('editorPreviewQueue.active === null')
     assert json.loads(query(page.locator('#editorImg').get_attribute('src'))['recipe'][0])['adjustments']['exposure'] == latest_exposure
     expect(page.locator('#previewRetryBtn')).to_be_hidden()
-    held.pop().abort()
+    for route in held:
+        route.abort()
 
 
 def test_stalled_preview_offers_manual_retry_without_retry_loop(page, live_server, preview_photo):
@@ -254,6 +258,40 @@ def test_slow_quick_preview_still_displays_before_queued_refinement(page, live_s
     fill(held.pop(0))
     page.wait_for_function('editorPreviewQueue.active === null')
     assert int(query(page.locator('#editorImg').get_attribute('src'))['size'][0]) > 1024
+
+
+def test_tabs_use_independent_sessions_and_navigation_fences_old_requests(page, live_server, preview_photo):
+    open_photo(page, live_server, preview_photo)
+    second = page.context.new_page()
+    try:
+        open_photo(second, live_server, preview_photo)
+        first_session = query(page.locator('#editorImg').get_attribute('src'))['preview_session'][0]
+        second_session = query(second.locator('#editorImg').get_attribute('src'))['preview_session'][0]
+        assert first_session != second_session
+        held = []
+        cancelled = []
+        page.route('**/edit-preview?*', lambda route: held.append(route))
+        page.on('request', lambda request: cancelled.append(request.post_data_json)
+                if request.url.endswith('/api/edit-preview/cancel') else None)
+        page.evaluate("setAdjustment('exposure', 0.5)")
+        page.wait_for_function('editorPreviewQueue.active !== null')
+        page.wait_for_timeout(100)
+        previous_sequence = int(query(held[0].request.url)['preview_seq'][0])
+        other = live_server['data']['photos'][0]
+        page.evaluate('(id) => { loadPhoto(id); }', other)
+        page.wait_for_function('id => editorState.photoId === id && !editorState.loading', arg=other)
+        assert cancelled[-1]['session'] == first_session
+        assert cancelled[-1]['sequence'] > previous_sequence
+        page.wait_for_timeout(100)
+        current_sequence = int(query(held[-1].request.url)['preview_seq'][0])
+        assert current_sequence > cancelled[-1]['sequence']
+        # A real request in the other tab still completes on its own session.
+        second.evaluate("setAdjustment('exposure', 0.7)")
+        second.wait_for_function('editorImageMatchesZoomRecipe(document.getElementById("editorImg"))')
+        for route in held:
+            route.abort()
+    finally:
+        second.close()
 
 
 @pytest.mark.parametrize('event', ['onload', 'onerror'])

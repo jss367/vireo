@@ -2730,6 +2730,56 @@ def _load_active_mask(db, photo_id):
     return None
 
 
+def render_edit_preview_job(payload, output_path):
+    """Child-process entry: all decode/render work, without constructing Flask."""
+    import config as cfg
+    import cv2
+    from db import Database
+    from float_image import FloatImage
+    from image_edits import RecipeError
+
+    cfg.CONFIG_PATH = payload['config_path']
+    cv2.setNumThreads(payload.get('threads', 2))
+    if payload.get('clear_source_cache'):
+        import image_loader
+        with image_loader._linear_cache_lock:
+            image_loader._linear_cache.clear()
+    with Database(payload['db_path'], initialize_schema=False) as db:
+        edit = _EditPreviewRequest(
+            db, payload['photo_id'], payload['photo'], payload['folder'],
+            payload['vireo_dir'], payload['recipe'], payload['display_recipe'],
+            payload['size'], payload['apply_crop'],
+        )
+        source = edit.load()
+        if source is None:
+            return 500, 'Could not load image', ''
+        source_kind = 'linear' if isinstance(source, FloatImage) and source.encoding == 'linear' else 'srgb'
+        rendered = None
+        try:
+            rendered = edit.render(source)
+            rendered.save(output_path, format='JPEG', quality=payload['quality'])
+        except RecipeError as error:
+            return 400, str(error), ''
+        finally:
+            if rendered is not None and rendered is not source:
+                rendered.close()
+            source.close()
+    return 200, '', source_kind
+
+
+@contextlib.contextmanager
+def _edit_preview_source_guard(photo, folder, cancelled):
+    # The eviction guard is process-local. Keep ownership in the parent when
+    # the working copy is the only source; the child must not race its eviction.
+    working_copy = photo['working_copy_path']
+    if working_copy:
+        with working_copy_publication_guard(cancelled=cancelled.is_set):
+            if not os.path.exists(os.path.join(folder['path'], photo['filename'])):
+                yield
+                return
+    yield
+
+
 def create_media_blueprint(
     get_db,
     json_error,
@@ -2738,6 +2788,8 @@ def create_media_blueprint(
     *,
     invalid_preview_cache_paths,
     clear_preview_cache_invalid,
+    render_edit_preview,
+    cancel_edit_preview,
 ):
     """Build the image- and mask-serving blueprint.
 
@@ -3735,6 +3787,20 @@ def create_media_blueprint(
         Image.fromarray(rgba, "RGBA").save(buf, format="PNG")
         return Response(buf.getvalue(), mimetype="image/png")
 
+    @blueprint.route('/api/edit-preview/cancel', methods=['POST'])
+    def api_cancel_edit_preview():
+        from services.preview_workers import parse_request
+
+        body = request.get_json(silent=True) or {}
+        if not isinstance(body, dict):
+            return json_error('Expected a preview session and sequence')
+        try:
+            session, sequence = parse_request(body.get('session'), str(body.get('sequence', '')))
+        except ValueError as error:
+            return json_error(str(error))
+        cancel_edit_preview(session, sequence)
+        return '', 204
+
     @blueprint.route("/photos/<int:photo_id>/edit-preview")
     def serve_photo_edit_preview(photo_id):
         """Serve a preview for an in-progress or committed edit recipe.
@@ -3781,6 +3847,37 @@ def create_media_blueprint(
             folder_row = db.get_folder(photo["folder_id"])
             if not folder_row:
                 return "Not found", 404
+            if not config.get('EDIT_PREVIEW_IN_PROCESS', False):
+                import uuid
+
+                from services.preview_workers import parse_request
+
+                try:
+                    session, sequence = parse_request(
+                        request.args.get('preview_session', uuid.uuid4().hex),
+                        request.args.get('preview_seq', '0'),
+                    )
+                except ValueError as error:
+                    return str(error), 400
+                payload = {
+                    'db_path': db_path, 'config_path': str(cfg.CONFIG_PATH),
+                    'photo_id': photo_id, 'photo': dict(photo), 'folder': dict(folder_row),
+                    'vireo_dir': vireo_dir, 'recipe': recipe, 'display_recipe': display_recipe,
+                    'size': size, 'apply_crop': apply_crop,
+                    'quality': cfg.load().get('preview_quality', 90),
+                    'clear_source_cache': config.get('EDIT_PREVIEW_CLEAR_SOURCE_CACHE', False),
+                    'threads': config.get('EDIT_PREVIEW_THREADS', 2),
+                }
+                status, body, source_kind = render_edit_preview(
+                    payload, session, sequence,
+                    guard=lambda cancelled: _edit_preview_source_guard(photo, folder_row, cancelled),
+                )
+                response = Response(body, status=status, mimetype='image/jpeg' if status == 200 else 'text/plain')
+                response.headers['Cache-Control'] = 'no-store'
+                if source_kind:
+                    response.headers['X-Vireo-Preview-Source'] = source_kind
+                return response
+            # Explicit in-process test seam for source/fallback monkeypatches.
             edit = _EditPreviewRequest(
                 db,
                 photo_id,

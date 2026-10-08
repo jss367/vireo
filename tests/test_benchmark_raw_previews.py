@@ -8,11 +8,11 @@ from pathlib import Path
 
 import pytest
 
-from scripts.benchmark_raw_previews import compare_reports, summarize
+from scripts.benchmark_raw_previews import SCHEMA, compare_reports, provenance, summarize
 
 
 def report():
-    return {'schema': 1, 'environment': {'machine_label': 'test'}, 'samples': 5,
+    return {'schema': SCHEMA, 'environment': {'machine_label': 'test'}, 'samples': 5,
             'results': [{'scenario': 'camera/native/warm', 'sha256': 'abc',
                          'requested_size': 6000, 'source_dimensions': [6000, 4000],
                          'p50_ms': 100, 'p95_ms': 200, 'peak_rss_mib': 400}]}
@@ -31,11 +31,11 @@ def test_compare_flags_latency_and_memory_regressions_but_tolerates_noise():
     assert len(compare_reports(current, old)) == 3
 
 
-@pytest.mark.parametrize('change', ['environment', 'samples', 'sha256', 'scenario', 'requested_size'])
+@pytest.mark.parametrize('change', ['schema', 'environment', 'samples', 'sha256', 'scenario', 'requested_size'])
 def test_compare_rejects_incomparable_runs(change):
     old = report()
     current = copy.deepcopy(old)
-    target = current if change in ('environment', 'samples') else current['results'][0]
+    target = current if change in ('schema', 'environment', 'samples') else current['results'][0]
     target[change] = 'different'
     with pytest.raises(ValueError, match='Baseline'):
         compare_reports(current, old)
@@ -57,6 +57,11 @@ def test_benchmark_runs_real_raw_endpoint_in_isolated_process(tmp_path):
     ], capture_output=True, text=True, timeout=90)
     assert result.returncode == 0, result.stderr
     data = json.loads(output.read_text())
+    assert data['schema'] == SCHEMA == 2
+    assert data['environment']['cpu_model']
+    assert data['environment']['accelerator_mode'] == 'cpu'
+    assert data['provenance']['source_revision']
+    assert data['provenance']['command_paths_redacted'] is True
     assert len(data['results']) == 2
     for row in data['results']:
         assert row['output_dimensions'] == [512, 64]
@@ -82,3 +87,11 @@ def test_benchmark_refuses_an_eight_bit_preview_source(tmp_path):
     ], capture_output=True, text=True, timeout=90)
     assert result.returncode != 0
     assert 'fell back to an 8-bit source' in result.stderr
+
+
+def test_provenance_records_command_without_local_file_paths():
+    record = provenance(['--manifest=/private/photos/corpus.json', '--output', '/private/results.json',
+                         '--machine-label', 'benchmark-host', '--samples', '5'])
+    assert '/private' not in json.dumps(record)
+    assert record['command'][-4:] == ['--machine-label', 'benchmark-host', '--samples', '5']
+    assert isinstance(record['working_tree_dirty'], bool)

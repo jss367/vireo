@@ -56,14 +56,22 @@ Keep these lifecycle boundaries intact when changing this code:
 
 Preview requests use a 1,024-pixel quick tier during input, throttled to 60 ms,
 and the zoom-appropriate tier after 300 ms without input. Both use the normal
-server renderer. One request runs at a time; only the latest pending request
-is retained. A decoded image is moved into the page only if its input revision
+server renderer. One request per tab runs at a time; newer input supersedes the
+active request, while refinement for the same input waits for its quick tier.
+Only the latest pending request is retained. A decoded image is moved into the page only if its input revision
 is still current. Photo navigation invalidates timers and pending results.
 `editorState.previewTimings` retains at most 100 input-to-display samples in
 memory, with size and tier but no photo identifiers or recipes.
 Each dispatched image has a 60-second deadline. Timeout detaches the image and
 releases the slot for the latest pending edit. A current failure offers Retry
 preview without an automatic retry loop; navigation clears the old timer.
+Each page has a random preview session and a separate transport sequence. Every
+GET includes both, and navigation/page exit/timeouts send a cancellation sequence
+that also rejects older GETs arriving late. The server supervises at most two
+render children and eight pending requests per app instance, with a 45-second
+deadline. Superseded or stalled workers are killed and replaced; healthy workers
+retain caches. `data-preview-url` holds the recipe URL without transport identity
+so the browser can still reuse an already displayed result.
 
 Brush coordinates are mapped back through crop, straighten, flips and rotation
 into the EXIF-oriented source. The server paints a new content-addressed mask;
@@ -100,4 +108,4 @@ short strips while keeping the working tile budget bounded. Pointwise edits
 retain contiguous row tiles, and images within the budget run in one pass.
 See [RAW preview benchmarks](../../../docs/raw-preview-benchmarks.md) for the
 real-camera corpus runner, memory measurements, regression comparisons, and
-the limits of browser cancellation.
+server cancellation and its limits.

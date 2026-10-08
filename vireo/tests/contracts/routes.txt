@@ -252,6 +252,7 @@ POST         /api/duplicates/apply
 POST         /api/duplicates/bulk-resolve
 POST         /api/duplicates/delete-loser-files
 POST         /api/duplicates/scan
+POST         /api/edit-preview/cancel
 POST         /api/encounters/species
 POST         /api/export/presets
 POST         /api/files/reveal

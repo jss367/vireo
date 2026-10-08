@@ -38,12 +38,16 @@ libraries use at most four threads; scenarios run sequentially.
 - **Cold** clears Vireo's decoded-source cache before each sample. It does not
   flush the OS disk cache. This is not a cold-disk or network-storage benchmark.
 - **Warm** primes the same-size source once before timing changing recipes.
-- **Latency** is handler time through encoded JPEG completion. It excludes
-  browser image decoding, network transfer, scheduling and display. The browser
+- **Latency** is handler time through encoded JPEG completion, including worker
+  dispatch and initial process startup. It excludes browser image decoding,
+  network transfer, browser scheduling and display. The browser
   suite separately measures input-to-display latency on a synthetic JPEG.
-- **Memory** is peak resident memory of the server worker, sampled every 10 ms
-  during measured requests. It includes retained caches and interpreter memory,
-  excludes the parent/browser, and may miss peaks shorter than the interval.
+- **Memory** is the sum of resident memory in the scenario's server process and
+  its descendants, sampled every 10 ms during measured requests. It includes
+  retained caches, interpreter memory and the render child. Shared pages may be
+  counted more than once. It excludes the benchmark driver/browser and may miss
+  peaks shorter than the interval. Scenarios send requests sequentially, so only
+  one of the app's two available render workers is needed.
 - **Percentiles** use the median and nearest-rank p95. With five samples, p95
   is the slowest sample; use more samples for a steadier tail estimate.
 
@@ -65,6 +69,15 @@ confirm a regression on an otherwise idle machine before changing a baseline.
 The local camera corpus is not uploaded to CI. CI runs the small real-LibRaw
 smoke test and tests the comparison logic. Changes to this measurement protocol
 must increment the report schema version.
+
+Schema 2 reports include the executed command (with manifest/output/baseline paths
+redacted), Git revision, dirty-tree flag, CPU model, CPU accelerator mode and
+numeric-library versions. Commit code before recording a reference report so the
+revision identifies the measured implementation. Source revisions are provenance,
+not comparison constraints, because before/after runs must use different code.
+The worker-process and aggregate-memory protocol differs from schema 1; the
+historical reports below remain useful records but cannot be passed directly as
+baselines to the current runner.
 
 ## Initial camera measurements
 
@@ -135,6 +148,30 @@ seams, corners, image boundaries, alpha preservation, local weights, and source
 immutability. A work-count regression guards overlap cost without relying on
 wall-clock timing in CI.
 
+## Preview worker measurements
+
+The [schema 2 worker report](performance/raw-preview-workers.json) records the
+24 MP and 46 MP corpus on an Apple M3 Max, using four numeric threads and five
+samples per scenario. It was recorded from clean revision `51023c555` after the
+test runs finished. Every request used the supervised child-process path and
+passed the linear-source and output-dimension checks.
+
+| Source | Preview | Cache | Median | p95 | Peak server and child memory |
+| --- | --- | --- | ---: | ---: | ---: |
+| 24 MP | Quick | Cold | 1.32 s | 1.62 s | 1,209 MiB |
+| 24 MP | Quick | Warm | 143 ms | 153 ms | 1,138 MiB |
+| 24 MP | Native | Cold | 6.63 s | 6.88 s | 2,467 MiB |
+| 24 MP | Native | Warm | 5.62 s | 5.70 s | 2,509 MiB |
+| 46 MP | Quick | Cold | 2.26 s | 2.64 s | 1,946 MiB |
+| 46 MP | Quick | Warm | 142 ms | 157 ms | 1,407 MiB |
+| 46 MP | Native | Cold | 12.55 s | 12.84 s | 3,639 MiB |
+| 46 MP | Native | Warm | 10.60 s | 10.86 s | 3,694 MiB |
+
+This is a new reference under the process-worker protocol, not a speedup claim
+against the historical reports. It measures sequential requests with one active
+render child; simultaneous renders can consume more memory. The report includes
+the command, complete source revision, CPU and library versions for repeat runs.
+
 ## Stalled preview recovery
 
 The editor gives an image request 60 seconds from dispatch. Reusing a request
@@ -145,10 +182,28 @@ the footer offers **Retry preview**; editing also schedules a new request.
 There is no automatic retry loop. Navigation clears the old timer, and late
 load/error events cannot replace the new preview or release its queue slot.
 
-This bounds the browser's wait, not server computation. The current renderer
-calls LibRaw's synchronous native decoder and has no safe interrupt hook for
-an in-progress decode. Disconnecting an image request does not stop that work.
-Concurrent misses for the same source and size already share a decode; a hung
-decode can therefore also block a retry. Safely terminating native work would
-require supervised worker processes and coordinated cache ownership. That is
-separate from this browser recovery change; no server cancellation is claimed.
+The server runs editor previews in at most two spawned child processes per app
+instance, with up to eight queued requests and a 45-second deadline including
+queue time. Overload returns 503, timeout returns 504, and superseded work returns
+409. A random session per editor page and increasing request sequence make the
+latest edit replace earlier work while keeping tabs independent. Photo navigation,
+page exit and browser timeout send an explicit cancellation; a subsequent render
+also rejects older arrivals. Cancellation sequences are retained for up to 1,024
+sessions, evicting the oldest idle sessions when needed. Requests from clients
+without session parameters still use the bounded workers.
+
+Superseded or stalled child processes are terminated and reaped before replacement,
+so a stuck native decoder cannot block the same tab's retry indefinitely. Healthy
+workers retain decoded-source caches and prefer the same tab; idle workers exit
+after 60 seconds to release memory. Killing a worker also discards its cache, so
+the next edit may need a cold decode. These are concurrency and lifetime limits,
+not a fixed memory cap; two large native renders can still use substantial RAM.
+
+Only control messages cross the process pipe. Request metadata and encoded output
+use private temporary files that are cleaned after use. The parent holds the
+working-copy eviction guard while an offline source is rendered, and waiting for
+that guard is cancellable. Source selection, RAW precision, fallback, crop and
+local-mask rendering use the existing renderer. The parent still performs source
+metadata checks; this does not promise to interrupt an operating-system filesystem
+call that blocks there. A dropped connection alone cannot cancel older clients'
+work, but the server deadline still applies.

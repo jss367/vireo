@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SCHEMA = 1
+SCHEMA = 2
 VIEWS = {'quick': 1024, 'fit': 2048, 'native': None}
 
 
@@ -57,15 +57,45 @@ def compare_reports(current, baseline):
 
 
 def environment(threads, machine_label):
+    import cv2
     import numpy
     import PIL
     import rawpy
+    import scipy
 
+    cpu = platform.processor() or platform.machine()
+    if platform.system() == 'Darwin':
+        detected = subprocess.run(['sysctl', '-n', 'machdep.cpu.brand_string'], capture_output=True, text=True, check=False)
+        cpu = detected.stdout.strip() or cpu
     return {'machine_label': machine_label, 'system': platform.system(),
             'machine': platform.machine(), 'cpu_count': os.cpu_count(),
             'python': platform.python_version(), 'threads': threads,
             'rawpy': rawpy.__version__, 'libraw': list(rawpy.libraw_version),
-            'numpy': numpy.__version__, 'pillow': PIL.__version__}
+            'numpy': numpy.__version__, 'pillow': PIL.__version__,
+            'scipy': scipy.__version__, 'opencv': cv2.__version__,
+            'cpu_model': cpu, 'accelerator_mode': 'cpu', 'preview_worker_limit': 2}
+
+
+def provenance(argv):
+    """Record build identity and a reproducible command without local paths."""
+    revision = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=ROOT, capture_output=True, text=True, check=False)
+    dirty = subprocess.run(['git', 'status', '--porcelain'], cwd=ROOT, capture_output=True, text=True, check=False)
+    command = ['python', 'scripts/benchmark_raw_previews.py']
+    redact = None
+    for argument in argv:
+        flag, separator, _ = argument.partition('=')
+        if separator and flag in ('--manifest', '--output', '--baseline'):
+            command.append(flag + '=<local ' + flag[2:] + '>')
+        elif redact:
+            command.append('<local ' + redact + '>')
+            redact = None
+        else:
+            command.append(argument)
+            if argument in ('--manifest', '--output', '--baseline'):
+                redact = argument[2:]
+    return {'source_revision': revision.stdout.strip() or None,
+            'working_tree_dirty': bool(dirty.stdout.strip()) or dirty.returncode != 0,
+            'command': command, 'command_paths_redacted': True}
 
 
 def corpus_entries(manifest):
@@ -100,24 +130,9 @@ def run_worker(spec):
     os.environ['VIREO_DISABLE_STARTUP_BACKFILL_TIMERS'] = '1'
     os.environ['VIREO_DISABLE_BROWSER_AUTH'] = '1'
     import config as cfg
-    import image_loader
     from app import create_app
     from db import Database
-    from float_image import FloatImage
-    from web import media
 
-    # Fail instead of reporting a fast embedded-JPEG fallback as RAW editing.
-    original_load = media._EditPreviewRequest.load
-
-    def checked_load(request):
-        image = original_load(request)
-        if not isinstance(image, FloatImage):
-            if image is not None:
-                image.close()
-            raise RuntimeError('RAW decode failed or fell back to an 8-bit source')
-        return image
-
-    media._EditPreviewRequest.load = checked_load
     with tempfile.TemporaryDirectory(prefix='vireo-raw-benchmark-') as directory:
         root = Path(directory)
         cfg.CONFIG_PATH = str(root / 'config.json')
@@ -135,6 +150,11 @@ def run_worker(spec):
             )
         app = create_app(db_path, thumb_cache_dir=str(root / 'thumbnails'))
         app.config['TESTING'] = True
+        app.config['EDIT_PREVIEW_THREADS'] = spec['threads']
+        # create_app already built the pool with the default thread count, so
+        # also update its BLAS/OpenMP spawn setting before any render runs.
+        app._preview_workers.threads = spec['threads']
+        app.config['EDIT_PREVIEW_CLEAR_SOURCE_CACHE'] = spec['cache'] == 'cold'
         app.config['COMPUTATION_CACHE_DIR'] = str(root / 'computation-cache')
         client = app.test_client()
 
@@ -147,6 +167,8 @@ def run_worker(spec):
             elapsed = (time.perf_counter() - start) * 1000
             if response.status_code != 200:
                 raise RuntimeError(f'Preview returned {response.status_code}')
+            if response.headers.get('X-Vireo-Preview-Source') != 'linear':
+                raise RuntimeError('RAW decode failed or fell back to an 8-bit source')
             with Image.open(io.BytesIO(response.data)) as image:
                 dimensions = list(image.size)
                 if max(dimensions) != min(spec['requested_size'], max(spec['source_dimensions'])):
@@ -155,30 +177,35 @@ def run_worker(spec):
             return elapsed, dimensions
 
         process = psutil.Process()
-        peak = [process.memory_info().rss]
+        def tree_rss():
+            total = process.memory_info().rss
+            for child in process.children(recursive=True):
+                try:
+                    total += child.memory_info().rss
+                except psutil.NoSuchProcess:
+                    continue
+            return total
+
+        peak = [tree_rss()]
         stop = threading.Event()
 
         def sample_memory():
             while not stop.wait(.01):
-                peak[0] = max(peak[0], process.memory_info().rss)
+                peak[0] = max(peak[0], tree_rss())
 
         try:
             if spec['cache'] == 'warm':
                 render(0)
             gc.collect()
-            peak[0] = process.memory_info().rss
+            peak[0] = tree_rss()
             sampler = threading.Thread(target=sample_memory, daemon=True)
             sampler.start()
             values = []
             try:
                 for index in range(spec['samples']):
-                    if spec['cache'] == 'cold':
-                        with image_loader._linear_cache_lock:
-                            image_loader._linear_cache.clear()
-                        gc.collect()
                     elapsed, dimensions = render(index + 1)
                     values.append(elapsed)
-                    peak[0] = max(peak[0], process.memory_info().rss)
+                    peak[0] = max(peak[0], tree_rss())
             finally:
                 stop.set()
                 sampler.join()
@@ -210,7 +237,7 @@ def main():
     if args.samples < 1 or not 1 <= args.threads <= 4:
         parser.error('--samples must be positive; --threads must be between 1 and 4')
     report = {'schema': SCHEMA, 'environment': environment(args.threads, args.machine_label),
-              'samples': args.samples, 'results': []}
+              'samples': args.samples, 'provenance': provenance(sys.argv[1:]), 'results': []}
     child_env = dict(os.environ, OMP_NUM_THREADS=str(args.threads),
                      OPENBLAS_NUM_THREADS=str(args.threads), MKL_NUM_THREADS=str(args.threads))
     for entry in corpus_entries(args.manifest):
