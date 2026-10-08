@@ -1005,12 +1005,17 @@ def test_save_as_collection_and_reopen(live_server, page, width, legacy_layout_c
         "Object.values(collectionsById).find(c => c.name === 'Soaring hawks').id"
     )
     page.evaluate(f"filterByCollection({cid})")
-    page.wait_for_selector(".vf-chip.visual", timeout=8000)
+    # Narrow panes can move the restored chip behind the overflow button.
+    # Check that it exists, then open Filters to inspect the full expression.
+    page.wait_for_selector(".vf-chip.visual", state="attached", timeout=8000)
     chips = page.evaluate("document.querySelector('.vf-chips').textContent")
     assert "a soaring hawk" in chips
     # Quick-search group round-trips too (the hawk text clause).
     assert "hawk" in chips
     assert page.evaluate("VireoFilter.getVisual().prompt") == "a soaring hawk"
+    page.click(".vf-filters-btn")
+    expect(page.locator(".vf-visual-row")).to_be_visible()
+    expect(page.locator(".vf-visual-row")).to_contain_text("a soaring hawk")
 
 
 @pytest.mark.parametrize("width", [1440, 1000])
