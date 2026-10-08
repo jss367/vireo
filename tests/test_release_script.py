@@ -436,6 +436,32 @@ def test_release_reexec_skips_sync_so_bash_matches_the_script_on_disk(release_re
     assert "==> Already synced before re-exec; skipping second sync." in result.stdout
 
 
+def test_release_reexec_resolves_script_path_before_changing_directories(release_repo, tmp_path):
+    """Re-exec after sync must survive invocation by a path relative to an outside CWD.
+
+    `cd "$(dirname "$0")/.."` in the script moves to the repo root, but $0 is
+    still spelled relative to the caller's original directory. Without
+    resolving the script path first, `exec bash "$0"` would then look for
+    `checkout/scripts/release.sh` beneath the repo root and abort the release.
+    """
+    repo, _, writer, _, env = release_repo
+    # Advance origin so the first process re-execs after fast-forward.
+    _git(writer, "commit", "--allow-empty", "-m", "Advance before release")
+    _git(writer, "push", "origin", "main")
+    # Invoke via a path that is only valid relative to tmp_path, not to the
+    # repo root the script cds into.
+    rel_script = Path(repo.name) / "scripts" / "release.sh"
+
+    result = subprocess.run(
+        ["bash", str(rel_script), "patch", "--publish"], cwd=tmp_path,
+        env=env, capture_output=True, text=True, timeout=15,
+    )
+
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert "==> Release scripts advanced during sync; re-executing..." in result.stdout
+    assert "Tag pushed." in result.stdout
+
+
 def test_release_does_not_tag_or_push_when_version_commit_fails(release_repo):
     repo, remote, _, _, _ = release_repo
     remote_before = _git(remote, "show-ref")

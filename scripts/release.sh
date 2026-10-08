@@ -19,6 +19,11 @@
 #   APPLE_TEAM_ID           - 10-character Team ID
 
 set -euo pipefail
+# Resolve $0 to an absolute path before the cd changes the working directory.
+# The re-exec below runs after the cd, so $0's spelling relative to the caller
+# would resolve against the wrong directory when the script is invoked by a
+# relative path from outside the repo (e.g. `vireo/scripts/release.sh ...`).
+SCRIPT_ABS_PATH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 cd "$(dirname "$0")/.."
 
 # Keep the Mac from idle-sleeping until this script exits. The E2E suite takes
@@ -81,7 +86,7 @@ if $PUBLISH; then
         if [[ "$PRE_SYNC_HEAD" != "$(git rev-parse HEAD)" ]]; then
             echo "==> Release scripts advanced during sync; re-executing..."
             export VIREO_RELEASE_REEXECED=1
-            exec bash "$0" "$@"
+            exec bash "$SCRIPT_ABS_PATH" "$@"
         fi
     else
         # The pre-exec process already fetched and fast-forwarded. Fetching
