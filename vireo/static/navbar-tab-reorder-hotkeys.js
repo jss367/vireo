@@ -361,9 +361,9 @@
       // Merge defaults with user overrides
       for (var key in NAV_DEFAULTS) navShortcuts[key] = NAV_DEFAULTS[key];
       if (shortcuts.navigation) {
-        for (var key in shortcuts.navigation) navShortcuts[key] = shortcuts.navigation[key];
+        for (key in shortcuts.navigation) navShortcuts[key] = shortcuts.navigation[key];
       }
-      for (var key in navShortcuts) {
+      for (key in navShortcuts) {
         navShortcuts[key] = navigationShortcutOrEmpty(navShortcuts[key], shortcuts);
       }
       // Store for other scripts to access

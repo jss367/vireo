@@ -45,7 +45,7 @@ async function bootstrapBrowse() {
   var bootstrapSucceeded = false;
   // Declared out here so the finally-region guard below can read it even
   // if /api/browse/init throws before the assignment inside the try.
-  var healthChangedDuringInit = false;
+  var healthChangedDuringInit;
   // Snapshot the health-refresh generation before any await so we can
   // detect a concurrent refresh from BOTH the try's success path and
   // its catch. If a vireo:folder-health-changed event fires while

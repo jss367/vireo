@@ -2544,7 +2544,7 @@
         // (Codex review r3627816534).
         if (urlParams.has('filters')) {
           const handoffRaw = urlParams.get('filters');
-          let payload = null;
+          let payload;
           try { payload = JSON.parse(handoffRaw); }
           catch (e) { payload = null; }
           if (payload && payload.root && Array.isArray(payload.root.rules)) {

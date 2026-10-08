@@ -7,8 +7,8 @@ async function loadPipelineModels() {
     html += '<tr style="border-bottom:1px solid var(--border-primary);font-size:11px;color:var(--text-dim);">';
     html += '<td style="padding:6px 8px;">Model</td><td>Role</td><td>Status</td><td>Size</td><td></td></tr>';
     data.models.forEach(function(m) {
-      var statusColor = 'var(--text-dim)';
-      var statusText = m.status;
+      var statusColor;
+      var statusText;
       if (m.status === 'downloaded') { statusColor = 'var(--accent)'; statusText = 'Downloaded'; }
       else if (m.status === 'corrupt' || m.status === 'incomplete') { statusColor = 'var(--danger)'; statusText = m.status.charAt(0).toUpperCase() + m.status.slice(1); }
       else if (m.status === 'repo cached') { statusColor = 'var(--warning)'; statusText = 'Repo only'; }
@@ -139,10 +139,10 @@ async function loadModels() {
         var missingList = missingOptional.map(escapeHtml).join(', ');
         html += '<div style="font-size:11px;color:var(--warning);margin-bottom:6px;">Files are present but SHA256 could not be checked against HuggingFace' + reason + ', and optional files are not installed: ' + missingList + '. Click Repair to fetch them and re-verify — Retry verification alone only re-checks hashes and cannot download the optional artifacts.</div>';
       } else if (state === 'unverified') {
-        var reason = m.verify_skipped_reason ? ' (' + escapeHtml(m.verify_skipped_reason) + ')' : '';
+        reason = m.verify_skipped_reason ? ' (' + escapeHtml(m.verify_skipped_reason) + ')' : '';
         html += '<div style="font-size:11px;color:var(--warning);margin-bottom:6px;">Files are present but SHA256 could not be checked against HuggingFace' + reason + '. The model should work; click Retry verification once the network is reachable.</div>';
       } else if (hasMissingOptional) {
-        var missingList = missingOptional.map(escapeHtml).join(', ');
+        missingList = missingOptional.map(escapeHtml).join(', ');
         // Be specific about what Repair can actually do for each artifact.
         // label_descriptions.json has a second source (the upstream model
         // config), so Repair fixes it now even when our ONNX repo doesn't

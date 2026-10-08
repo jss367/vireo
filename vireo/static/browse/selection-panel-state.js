@@ -1,13 +1,17 @@
 /* Selection-panel row data stays private. Markup carries identifiers only;
    actions read immutable snapshots of the rows currently on screen. */
-(function(global) {
+(function(/** @type {Window} */ global) {
   'use strict';
 
+  /** @type {Map<number, KeywordPanelRow>} */
   var keywords = new Map();
+  /** @type {PredictionPanelRow[]} */
   var predictionRows = [];
+  /** @type {PredictionPanelData | null} */
   var predictionData = null;
   var expanded = false;
 
+  /** @param {number[] | undefined} values */
   function ids(values) {
     return Object.freeze((values || []).slice());
   }

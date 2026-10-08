@@ -4,9 +4,17 @@
   "license": "MIT",
   "version": "0.63.1",
   "scripts": {
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "lint:frontend": "eslint vireo/static",
+    "typecheck:frontend": "tsc --project tsconfig.frontend.json",
+    "test:frontend-checks": "node --test tests/frontend/checks.test.mjs",
+    "check:frontend": "npm run lint:frontend && npm run typecheck:frontend && npm run test:frontend-checks"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2"
+    "@eslint/js": "^10.0.1",
+    "@tauri-apps/cli": "^2",
+    "eslint": "^10.12.0",
+    "globals": "^17.13.0",
+    "typescript": "^7.0.2"
   }
 }

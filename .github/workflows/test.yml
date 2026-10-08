@@ -231,7 +231,7 @@ jobs:
   # require, independent of which jobs run above. This job collapses every
   # required validation into one stable ``test`` check.
   test:
-    needs: [unit, lint, e2e-smoke, rust, performance]
+    needs: [unit, lint, frontend, e2e-smoke, rust, performance]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -243,6 +243,7 @@ jobs:
           for check in \
             'unit=${{ needs.unit.result }}' \
             'lint=${{ needs.lint.result }}' \
+            'frontend=${{ needs.frontend.result }}' \
             'e2e-smoke=${{ needs.e2e-smoke.result }}' \
             'rust=${{ needs.rust.result }}' \
             'performance=${{ needs.performance.result }}'; do
@@ -253,6 +254,22 @@ jobs:
             echo "One or more required validation jobs did not succeed."
             exit 1
           fi
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Install frontend check tools
+        run: npm ci
+      - name: Lint JavaScript and check frontend types
+        run: npm run check:frontend
 
   lint:
     runs-on: ubuntu-latest

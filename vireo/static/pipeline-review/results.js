@@ -251,7 +251,7 @@ function renderResults() {
 function renderPhotoCard(p, encIdx, burstIdx, speciesConflict) {
   var label = (p.label || '').toLowerCase();
   var manualLabel = '';
-  var visibleLabel = '';
+  var visibleLabel;
   var visibleLabelClass = label;
   var hasQuality = hasQualityScore(p);
   var q = hasQuality ? Number(p.quality_composite) : null;

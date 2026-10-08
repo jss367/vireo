@@ -268,7 +268,11 @@ function setupActions() {
     addEventListener: (name, handler) => listeners.push(handler),
     contains: button => button.inPanel,
   };
-  const ctx = vm.createContext({document: {getElementById: () => panel}});
+  class Element {}
+  class HTMLButtonElement extends Element {}
+  const ctx = vm.createContext({
+    document: {getElementById: () => panel}, Element, HTMLButtonElement,
+  });
   ctx.window = ctx;
   for (const file of ['selection-panel-state.js', 'selection-panel-events.js']) {
     vm.runInContext(fs.readFileSync('vireo/static/browse/' + file, 'utf8'), ctx);
@@ -284,16 +288,17 @@ function setupActions() {
   state.bindActions();
   function click(action, attrs = {}, options = {}) {
     const attributes = {'data-selection-action': action, ...attrs};
-    const button = {
+    const button = Object.assign(new HTMLButtonElement(), {
       inPanel: true, disabled: false, ...options,
       getAttribute: name => Object.hasOwn(attributes, name) ? attributes[name] : null,
-    };
+    });
     // The click target can be a nested icon rather than the button itself.
-    const event = {target: {closest: () => button}};
+    const target = Object.assign(new Element(), {closest: () => button});
+    const event = {target};
     listeners.forEach(handler => handler(event));
     return button;
   }
-  return {state, listeners, calls, click};
+  return {state, listeners, calls, click, Element};
 }
 
 test('delegated actions bind once and preserve each button argument', () => {
@@ -334,5 +339,15 @@ test('delegated actions ignore disabled, detached, invalid, and retired rows', (
   state.predictions.reset();
   click('prediction-show', {'data-prediction-row': '0'});
   click('prediction-review', {'data-prediction-row': '0'});
+  assert.deepEqual(calls, []);
+});
+
+test('delegated actions ignore non-element targets and non-button matches', () => {
+  const {listeners, calls, Element} = setupActions();
+  const nonButton = Object.assign(new Element(), {closest: () => new Element()});
+  const emptyMatch = Object.assign(new Element(), {closest: () => null});
+  for (const target of [null, {}, nonButton, emptyMatch]) {
+    for (const listener of listeners) listener({target});
+  }
   assert.deepEqual(calls, []);
 });

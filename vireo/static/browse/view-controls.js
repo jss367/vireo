@@ -134,7 +134,7 @@ function updateScrollPosition() {
       break;
     }
   }
-  for (var i = cards.length - 1; i >= 0; i--) {
+  for (i = cards.length - 1; i >= 0; i--) {
     if (cards[i].offsetTop < scrollTop + viewHeight) {
       last = i + 1;
       break;

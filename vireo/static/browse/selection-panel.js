@@ -40,8 +40,8 @@ function updateSelectionPanel(ids) {
   }
 
   Vireo.browse.panelRequests.detailPredictions.invalidate();
-  var detail = document.getElementById('detailContent');
-  var summary = document.getElementById('summaryPanel');
+  detail = document.getElementById('detailContent');
+  summary = document.getElementById('summaryPanel');
   if (summary) summary.classList.add('hidden');
   // Reuse the detail panel as a batch inspector for the whole selection:
   // Rating/Flag/Color/Location act on all selected photos, single-photo-only
@@ -62,7 +62,7 @@ function updateSelectionPanel(ids) {
   if (ids.length > 1000) {
     Vireo.browse.panelRequests.keywords.invalidate();
     Vireo.browse.selectionPanel.keywords.reset();
-    var list = document.getElementById('selectionKeywordSuggestions');
+    list = document.getElementById('selectionKeywordSuggestions');
     if (list) {
       list.innerHTML = '<div class="selection-empty">Keyword suggestions are available for selections of 1,000 photos or fewer.</div>';
     }
@@ -70,7 +70,7 @@ function updateSelectionPanel(ids) {
     // Predictions box that reads as "nothing predicted".
     Vireo.browse.panelRequests.predictions.invalidate();
     Vireo.browse.selectionPanel.predictions.reset();
-    var predList = document.getElementById('selectionPredictions');
+    predList = document.getElementById('selectionPredictions');
     if (predList) {
       predList.innerHTML = '<div class="selection-empty">Predictions are available for selections of 1,000 photos or fewer.</div>';
     }
