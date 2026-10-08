@@ -65,7 +65,28 @@ if $PUBLISH; then
         echo "ERROR: Commit or stash changes before publishing a release." >&2
         exit 1
     fi
-    if [[ -z "${VIREO_RELEASE_REEXECED:-}" ]]; then
+    # Trust the re-exec marker only when it names the HEAD this invocation
+    # is sitting on. The pre-exec process sets it to the post-sync SHA; a
+    # value inherited from the operator's shell (`VIREO_RELEASE_REEXECED=1`,
+    # or any SHA that is not the current HEAD) would otherwise skip the
+    # fetch, the local-ahead rejection, and the fast-forward — a clean
+    # local main carrying unreviewed commits could then pass the gates and
+    # be atomic-pushed to origin.
+    INHERITED_REEXEC="${VIREO_RELEASE_REEXECED:-}"
+    if [[ -n "$INHERITED_REEXEC" && "$INHERITED_REEXEC" == "$(git rev-parse HEAD)" ]]; then
+        # The pre-exec process already fetched and fast-forwarded to this
+        # HEAD. Fetching again here would update release.sh and
+        # sync_version.py on disk if origin/main advanced a second time,
+        # but the one-shot re-exec guard would then leave Bash on the
+        # previous version while the atomic push read the newer one. A
+        # second remote advance before the push is caught by its
+        # non-fast-forward rejection, not by syncing again.
+        echo "==> Already synced before re-exec; skipping second sync."
+    else
+        if [[ -n "$INHERITED_REEXEC" ]]; then
+            echo "==> Ignoring inherited VIREO_RELEASE_REEXECED marker (does not match current HEAD); running full sync."
+            unset VIREO_RELEASE_REEXECED
+        fi
         echo "==> Syncing main before release checks..."
         git fetch origin main
         # Reject local commits that are not on origin/main. `git merge
@@ -83,19 +104,12 @@ if $PUBLISH; then
         # updated them on disk. Re-exec once when the sync advanced HEAD so
         # the staging list, gates, and publish logic that run below are the
         # fetched versions, not the pre-sync ones the shell started with.
-        if [[ "$PRE_SYNC_HEAD" != "$(git rev-parse HEAD)" ]]; then
+        POST_SYNC_HEAD=$(git rev-parse HEAD)
+        if [[ "$PRE_SYNC_HEAD" != "$POST_SYNC_HEAD" ]]; then
             echo "==> Release scripts advanced during sync; re-executing..."
-            export VIREO_RELEASE_REEXECED=1
+            export VIREO_RELEASE_REEXECED="$POST_SYNC_HEAD"
             exec bash "$SCRIPT_ABS_PATH" "$@"
         fi
-    else
-        # The pre-exec process already fetched and fast-forwarded. Fetching
-        # again here would update release.sh and sync_version.py on disk if
-        # origin/main advanced a second time, but the one-shot re-exec guard
-        # would then leave Bash on the previous version while the atomic
-        # push read the newer one. A second remote advance before the push
-        # is caught by its non-fast-forward rejection, not by syncing again.
-        echo "==> Already synced before re-exec; skipping second sync."
     fi
 fi
 

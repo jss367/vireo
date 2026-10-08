@@ -436,6 +436,34 @@ def test_release_reexec_skips_sync_so_bash_matches_the_script_on_disk(release_re
     assert "==> Already synced before re-exec; skipping second sync." in result.stdout
 
 
+def test_release_ignores_inherited_reexec_marker_and_runs_full_sync(release_repo):
+    """An inherited VIREO_RELEASE_REEXECED must not bypass the sync gates.
+
+    If the operator's shell has VIREO_RELEASE_REEXECED set for any reason
+    (a stale export from a previous aborted release, a wrapper that sets it
+    deliberately, etc.), the script must not treat it as proof that this
+    invocation already fetched and fast-forwarded. Otherwise a clean local
+    main carrying unreviewed commits would pass the remaining gates and be
+    atomic-pushed to origin. The script trusts the marker only when it names
+    the current HEAD — the post-sync SHA its own pre-exec process wrote.
+    """
+    repo, remote, writer, gates, _ = release_repo
+    # Clean local main is strictly ahead of origin. Without the marker check
+    # this would bypass the local-ahead rejection entirely.
+    _git(repo, "commit", "--allow-empty", "-m", "Unreviewed local work")
+    remote_before = _git(remote, "show-ref")
+
+    result = _run_release(release_repo, VIREO_RELEASE_REEXECED="1")
+
+    assert result.returncode != 0
+    assert "Local main has commits that are not on origin/main" in result.stderr
+    assert "Ignoring inherited VIREO_RELEASE_REEXECED marker" in result.stdout
+    assert "Already synced before re-exec" not in result.stdout
+    assert not gates.exists()
+    assert _git(remote, "show-ref") == remote_before
+    assert "Tag pushed." not in result.stdout
+
+
 def test_release_reexec_resolves_script_path_before_changing_directories(release_repo, tmp_path):
     """Re-exec after sync must survive invocation by a path relative to an outside CWD.
 
