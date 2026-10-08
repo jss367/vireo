@@ -7,8 +7,8 @@
 #   ./scripts/release.sh 0.5.0 --publish      # explicit version
 #
 # With --publish, the script bumps the version, commits, tags, and pushes.
-# CI (build-release.yml) then builds macOS ARM64, macOS Intel, Windows, and
-# Linux, and creates a draft GitHub Release with all artifacts.
+# CI (build-release.yml) then builds the supported platforms and publishes a
+# GitHub Release with all artifacts after the release gates pass.
 #
 # Without --publish, a local build is done for testing on the current machine.
 #
@@ -19,6 +19,11 @@
 #   APPLE_TEAM_ID           - 10-character Team ID
 
 set -euo pipefail
+# Resolve $0 to an absolute path before the cd changes the working directory.
+# The re-exec below runs after the cd, so $0's spelling relative to the caller
+# would resolve against the wrong directory when the script is invoked by a
+# relative path from outside the repo (e.g. `vireo/scripts/release.sh ...`).
+SCRIPT_ABS_PATH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 cd "$(dirname "$0")/.."
 
 # Keep the Mac from idle-sleeping until this script exits. The E2E suite takes
@@ -49,6 +54,65 @@ if [[ "${2:-}" == "--publish" ]]; then
     PUBLISH=true
 fi
 
+# Publishing targets main explicitly. Synchronize before changing manifests or
+# running the long test gate; never merge untested remote changes after it.
+if $PUBLISH; then
+    if [[ "$(git branch --show-current)" != "main" ]]; then
+        echo "ERROR: Publish releases from main." >&2
+        exit 1
+    fi
+    if [[ -n "$(git status --porcelain)" ]]; then
+        echo "ERROR: Commit or stash changes before publishing a release." >&2
+        exit 1
+    fi
+    # Trust the re-exec marker only when it names the HEAD this invocation
+    # is sitting on. The pre-exec process sets it to the post-sync SHA; a
+    # value inherited from the operator's shell (`VIREO_RELEASE_REEXECED=1`,
+    # or any SHA that is not the current HEAD) would otherwise skip the
+    # fetch, the local-ahead rejection, and the fast-forward — a clean
+    # local main carrying unreviewed commits could then pass the gates and
+    # be atomic-pushed to origin.
+    INHERITED_REEXEC="${VIREO_RELEASE_REEXECED:-}"
+    if [[ -n "$INHERITED_REEXEC" && "$INHERITED_REEXEC" == "$(git rev-parse HEAD)" ]]; then
+        # The pre-exec process already fetched and fast-forwarded to this
+        # HEAD. Fetching again here would update release.sh and
+        # sync_version.py on disk if origin/main advanced a second time,
+        # but the one-shot re-exec guard would then leave Bash on the
+        # previous version while the atomic push read the newer one. A
+        # second remote advance before the push is caught by its
+        # non-fast-forward rejection, not by syncing again.
+        echo "==> Already synced before re-exec; skipping second sync."
+    else
+        if [[ -n "$INHERITED_REEXEC" ]]; then
+            echo "==> Ignoring inherited VIREO_RELEASE_REEXECED marker (does not match current HEAD); running full sync."
+            unset VIREO_RELEASE_REEXECED
+        fi
+        echo "==> Syncing main before release checks..."
+        git fetch origin main
+        # Reject local commits that are not on origin/main. `git merge
+        # --ff-only origin/main` reports "Already up to date" when HEAD is
+        # strictly ahead, so the atomic push below would publish every
+        # unreviewed local commit along with the release bump. Require
+        # origin/main to be the one adding commits.
+        if [[ -n "$(git rev-list origin/main..HEAD)" ]]; then
+            echo "ERROR: Local main has commits that are not on origin/main. Push them through a PR before releasing." >&2
+            exit 1
+        fi
+        PRE_SYNC_HEAD=$(git rev-parse HEAD)
+        git merge --ff-only origin/main
+        # Bash loaded this script and sync_version.py before the merge
+        # updated them on disk. Re-exec once when the sync advanced HEAD so
+        # the staging list, gates, and publish logic that run below are the
+        # fetched versions, not the pre-sync ones the shell started with.
+        POST_SYNC_HEAD=$(git rev-parse HEAD)
+        if [[ "$PRE_SYNC_HEAD" != "$POST_SYNC_HEAD" ]]; then
+            echo "==> Release scripts advanced during sync; re-executing..."
+            export VIREO_RELEASE_REEXECED="$POST_SYNC_HEAD"
+            exec bash "$SCRIPT_ABS_PATH" "$@"
+        fi
+    fi
+fi
+
 # --- Read current version from pyproject.toml ---
 CURRENT=$(grep -m1 '^version' pyproject.toml | sed 's/version = "\(.*\)"/\1/')
 echo "Current version: $CURRENT"
@@ -63,6 +127,18 @@ case "$BUMP" in
 esac
 echo "New version:     $NEW_VERSION"
 echo ""
+
+if $PUBLISH; then
+    if git show-ref --verify --quiet "refs/tags/v$NEW_VERSION"; then
+        echo "ERROR: Local tag v$NEW_VERSION already exists; recover the existing release instead of rerunning the version bump." >&2
+        exit 1
+    fi
+    REMOTE_TAG=$(git ls-remote origin "refs/tags/v$NEW_VERSION")
+    if [[ -n "$REMOTE_TAG" ]]; then
+        echo "ERROR: Remote tag v$NEW_VERSION already exists." >&2
+        exit 1
+    fi
+fi
 
 # --- Sync version across all manifests ---
 echo "==> Syncing version..."
@@ -161,20 +237,24 @@ fi
 # --- Commit version bump ---
 echo "==> Committing version bump..."
 git add pyproject.toml package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock
-git commit -m "release: v$NEW_VERSION" || true
+git commit -m "release: v$NEW_VERSION"
 echo ""
 
 # --- Tag and publish ---
 if $PUBLISH; then
     echo "==> Tagging v$NEW_VERSION..."
     git tag "v$NEW_VERSION"
-    # Separate commands so `set -e` aborts on a failed `git push`. Inside an
-    # `&&` chain, `set -e` is suppressed for the LHS, so a rejected main push
-    # would silently fall through and the script would still print success.
-    git push
-    git push origin "v$NEW_VERSION"
+    # Publish both refs or neither. Main can advance during the test gate; a
+    # rejection must not publish a tag or change the source that passed tests.
+    if ! git push --atomic origin HEAD:refs/heads/main "refs/tags/v$NEW_VERSION"; then
+        echo "ERROR: Release push failed. The local release commit and tag v$NEW_VERSION are retained." >&2
+        echo "Do not rerun the version bump or force-push. Inspect origin/main and the remote tag first." >&2
+        echo "If main advanced, merge origin/main into main without rebasing or moving the tag to preserve the tested release source." >&2
+        echo "Then retry: git push --atomic origin HEAD:refs/heads/main refs/tags/v$NEW_VERSION" >&2
+        exit 1
+    fi
     echo ""
-    echo "Tag pushed. CI will build all platforms and create a draft release."
+    echo "Tag pushed. CI will test, build, and publish the release."
     echo "Monitor: https://github.com/jss367/vireo/actions"
     echo "Release: https://github.com/jss367/vireo/releases/tag/v$NEW_VERSION"
 else
@@ -182,5 +262,5 @@ else
     echo "  git push"
     echo "  git tag v$NEW_VERSION && git push origin v$NEW_VERSION"
     echo ""
-    echo "CI will build all platforms and create a draft release."
+    echo "CI will test, build, and publish the release."
 fi

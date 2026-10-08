@@ -13,6 +13,7 @@ protection it describes had been silently lost.
 """
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -59,7 +60,7 @@ def test_release_prepares_inherited_file_limit_before_changing_versions(
     result = subprocess.run(
         [
             "bash", "-c",
-            'set -e; ulimit -S -n "$1"; ulimit -H -n "$2"; exec bash "$3" patch --publish',
+            'set -e; ulimit -S -n "$1"; ulimit -H -n "$2"; exec bash "$3" patch',
             "release-test", str(soft_limit), str(hard_limit), str(release),
         ],
         env={**os.environ, "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"]},
@@ -203,3 +204,299 @@ def test_release_e2e_reruns_flakes_like_the_ci_release_gate():
     lines = _code_lines()
     e2e = lines[_sole_index(lines, r"^\s*python -m pytest tests/e2e/")]
     assert "--reruns 2" in e2e
+
+
+def _git(repo, *args):
+    return subprocess.run(
+        ["git", "-C", str(repo), *args], check=True,
+        capture_output=True, text=True, timeout=10,
+    ).stdout.strip()
+
+
+@pytest.fixture
+def release_repo(tmp_path):
+    """Real Git refs and pushes, with inexpensive stand-ins for build gates."""
+    if sys.platform == "win32":
+        pytest.skip("POSIX release script")
+    remote = tmp_path / "remote.git"
+    repo = tmp_path / "checkout"
+    repo.mkdir()
+    _git(tmp_path, "init", "--bare", str(remote))
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.name", "Release test")
+    _git(repo, "config", "user.email", "release@example.test")
+    _git(repo, "config", "commit.gpgsign", "false")
+    _git(repo, "config", "tag.gpgsign", "false")
+    _git(repo, "config", "core.hooksPath", "/dev/null")
+    scripts = repo / "scripts"
+    scripts.mkdir()
+    shutil.copyfile(RELEASE_SH, scripts / "release.sh")
+    shutil.copyfile(REPO_ROOT / "scripts/sync_version.py", scripts / "sync_version.py")
+    (repo / "src-tauri").mkdir()
+    (repo / "pyproject.toml").write_text('[project]\nversion = "1.2.3"\n')
+    for path in ["package.json", "src-tauri/tauri.conf.json"]:
+        (repo / path).write_text('{"version": "1.2.3"}\n')
+    for path in ["src-tauri/Cargo.toml", "src-tauri/Cargo.lock"]:
+        (repo / path).write_text('[package]\nname = "vireo"\nversion = "1.2.3"\n')
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "Initial source")
+    _git(repo, "remote", "add", "origin", str(remote))
+    _git(repo, "push", "-u", "origin", "main")
+
+    writer = tmp_path / "writer"
+    _git(tmp_path, "clone", "--branch", "main", str(remote), str(writer))
+    _git(writer, "config", "user.name", "Concurrent writer")
+    _git(writer, "config", "user.email", "writer@example.test")
+    _git(writer, "config", "commit.gpgsign", "false")
+    _git(writer, "config", "tag.gpgsign", "false")
+    _git(writer, "config", "core.hooksPath", "/dev/null")
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    gates = tmp_path / "gates.log"
+    stubs = {
+        "caffeinate": "#!/bin/bash\nexit 0\n",
+        "cargo": (
+            '#!/bin/bash\necho "cargo $*" >> "$GATES_LOG"\n'
+            'if [[ "$1" == "update" ]]; then cp Cargo.toml Cargo.lock; fi\n'
+        ),
+        "python": (
+            '#!/bin/bash\n'
+            'if [[ "$1" == "-m" && "$2" == "pytest" ]]; then\n'
+            '    echo "pytest" >> "$GATES_LOG"\n'
+            '    if [[ "${ADVANCE_REMOTE:-}" == "1" ]]; then\n'
+            '        git -C "$REMOTE_WRITER" commit --allow-empty -m "Remote advanced during tests"\n'
+            '        git -C "$REMOTE_WRITER" push origin main\n'
+            '    fi\n'
+            '    if [[ "${FAIL_COMMIT:-}" == "1" ]]; then\n'
+            '        git config user.useConfigOnly true\n'
+            '        git config user.name ""\n'
+            '        git config user.email ""\n'
+            '    fi\n'
+            '    exit 0\n'
+            'fi\n'
+            f'exec {shlex.quote(sys.executable)} "$@"\n'
+        ),
+    }
+    for name, source in stubs.items():
+        path = bin_dir / name
+        path.write_text(source)
+        path.chmod(0o755)
+
+    env = {
+        **os.environ,
+        "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+        "GATES_LOG": str(gates),
+        "REMOTE_WRITER": str(writer),
+    }
+    return repo, remote, writer, gates, env
+
+
+def _run_release(fixture, version="patch", **overrides):
+    repo, _, _, _, env = fixture
+    return subprocess.run(
+        ["bash", "scripts/release.sh", version, "--publish"], cwd=repo,
+        env={**env, **overrides}, capture_output=True, text=True, timeout=15,
+    )
+
+
+def test_release_syncs_remote_source_before_testing_and_publishes_both_refs(release_repo):
+    repo, remote, writer, gates, _ = release_repo
+    (writer / "new-source.txt").write_text("Merged before the release\n")
+    _git(writer, "add", ".")
+    _git(writer, "commit", "-m", "New source before release")
+    _git(writer, "push", "origin", "main")
+
+    result = _run_release(release_repo)
+
+    assert result.returncode == 0, result.stderr
+    assert (repo / "new-source.txt").is_file()
+    assert gates.read_text().splitlines() == ["cargo update --workspace", "cargo check --locked", "pytest"]
+    assert _git(remote, "rev-parse", "main") == _git(repo, "rev-parse", "HEAD")
+    assert _git(remote, "rev-parse", "v1.2.4") == _git(repo, "rev-parse", "HEAD")
+    assert "Tag pushed." in result.stdout
+
+
+@pytest.mark.parametrize(
+    "condition",
+    ["dirty", "staged", "branch", "diverged", "local-ahead", "local-tag", "remote-tag"],
+)
+def test_release_preflight_rejects_unsafe_state_before_version_writes(release_repo, condition):
+    repo, remote, writer, gates, _ = release_repo
+    if condition == "dirty":
+        (repo / "untracked.txt").write_text("Work in progress\n")
+    elif condition == "staged":
+        (repo / "package.json").write_text('{"version": "1.2.3", "changed": true}\n')
+        _git(repo, "add", "package.json")
+    elif condition == "branch":
+        _git(repo, "checkout", "-b", "feature")
+    elif condition == "diverged":
+        _git(repo, "commit", "--allow-empty", "-m", "Local work")
+        _git(writer, "commit", "--allow-empty", "-m", "Remote work")
+        _git(writer, "push", "origin", "main")
+    elif condition == "local-ahead":
+        # Strictly ahead of origin/main — `git merge --ff-only origin/main`
+        # succeeds with "Already up to date", so without an explicit reject
+        # the atomic push would publish this unreviewed commit along with
+        # the release bump.
+        _git(repo, "commit", "--allow-empty", "-m", "Unreviewed local work")
+    elif condition == "local-tag":
+        _git(repo, "tag", "v1.2.4")
+    else:
+        _git(writer, "tag", "v1.2.4")
+        _git(writer, "push", "origin", "v1.2.4")
+    version_before = (repo / "pyproject.toml").read_text()
+    remote_before = _git(remote, "show-ref")
+
+    result = _run_release(release_repo)
+
+    assert result.returncode != 0
+    assert (repo / "pyproject.toml").read_text() == version_before
+    assert not gates.exists()
+    assert _git(remote, "show-ref") == remote_before
+    assert "Tag pushed." not in result.stdout
+
+
+def test_release_atomic_push_rejects_remote_race_and_keeps_tested_source(release_repo):
+    repo, remote, writer, _, _ = release_repo
+
+    result = _run_release(release_repo, ADVANCE_REMOTE="1")
+
+    assert result.returncode != 0
+    assert "local release commit and tag v1.2.4 are retained" in result.stderr
+    assert "Do not rerun the version bump or force-push" in result.stderr
+    assert "Tag pushed." not in result.stdout
+    assert _git(remote, "rev-parse", "main") == _git(writer, "rev-parse", "HEAD")
+    assert _git(remote, "tag", "--list") == ""
+    tested_commit = _git(repo, "rev-parse", "HEAD")
+    assert _git(repo, "rev-parse", "v1.2.4") == tested_commit
+
+    # The printed recovery preserves the tested tag while reconciling main.
+    _git(repo, "fetch", "origin", "main")
+    _git(repo, "merge", "--no-edit", "origin/main")
+    _git(repo, "push", "--atomic", "origin", "HEAD:refs/heads/main", "refs/tags/v1.2.4")
+    assert _git(remote, "rev-parse", "v1.2.4") == tested_commit
+    assert _git(remote, "rev-parse", "main") == _git(repo, "rev-parse", "HEAD")
+
+
+def test_release_runs_the_fetched_script_after_sync_advances_main(release_repo):
+    """A sync that updates release.sh must not leave the pre-fetch script running.
+
+    The merge updates files on disk, but Bash keeps executing the contents it
+    loaded before fetch. If release.sh changed its staging list or its gates,
+    those changes would silently never run — the tagged commit would be a
+    mixture of fetched manifest edits and stale script logic.
+    """
+    repo, _, writer, gates, _ = release_repo
+    # Add a marker write inside the sync block of the remote release.sh. The
+    # local checkout still carries the unmarked copy, so the marker appears
+    # in the gates log only when the fetched script is the one executing by
+    # the time control reaches that line.
+    original = (writer / "scripts" / "release.sh").read_text()
+    marker = 'echo "fetched-release-sh" >> "$GATES_LOG"\n'
+    patched = original.replace(
+        'echo "==> Syncing version..."\n',
+        marker + 'echo "==> Syncing version..."\n',
+        1,
+    )
+    assert patched != original
+    (writer / "scripts" / "release.sh").write_text(patched)
+    _git(writer, "add", "scripts/release.sh")
+    _git(writer, "commit", "-m", "Update release script")
+    _git(writer, "push", "origin", "main")
+
+    result = _run_release(release_repo)
+
+    assert result.returncode == 0, result.stderr
+    assert "fetched-release-sh" in gates.read_text()
+
+
+def test_release_reexec_skips_sync_so_bash_matches_the_script_on_disk(release_repo):
+    """After re-exec, the re-executed process must not fetch and merge again.
+
+    If the re-executed process ran its own sync, a second origin-main advance
+    between re-exec and that fetch would update release.sh and sync_version.py
+    on disk again, but the one-shot `VIREO_RELEASE_REEXECED` guard would
+    suppress another re-exec — Bash would keep running the first fetched
+    version while the atomic push read the newer one. The sync therefore only
+    runs in the first process; a later remote advance is caught by the atomic
+    push's non-fast-forward rejection.
+    """
+    repo, _, writer, _, _ = release_repo
+    # Advance origin so the first process re-execs after fast-forward.
+    _git(writer, "commit", "--allow-empty", "-m", "Advance before release")
+    _git(writer, "push", "origin", "main")
+
+    result = _run_release(release_repo)
+
+    assert result.returncode == 0, result.stderr
+    sync_banners = result.stdout.count("==> Syncing main before release checks...")
+    assert sync_banners == 1, result.stdout
+    assert "==> Release scripts advanced during sync; re-executing..." in result.stdout
+    assert "==> Already synced before re-exec; skipping second sync." in result.stdout
+
+
+def test_release_ignores_inherited_reexec_marker_and_runs_full_sync(release_repo):
+    """An inherited VIREO_RELEASE_REEXECED must not bypass the sync gates.
+
+    If the operator's shell has VIREO_RELEASE_REEXECED set for any reason
+    (a stale export from a previous aborted release, a wrapper that sets it
+    deliberately, etc.), the script must not treat it as proof that this
+    invocation already fetched and fast-forwarded. Otherwise a clean local
+    main carrying unreviewed commits would pass the remaining gates and be
+    atomic-pushed to origin. The script trusts the marker only when it names
+    the current HEAD — the post-sync SHA its own pre-exec process wrote.
+    """
+    repo, remote, writer, gates, _ = release_repo
+    # Clean local main is strictly ahead of origin. Without the marker check
+    # this would bypass the local-ahead rejection entirely.
+    _git(repo, "commit", "--allow-empty", "-m", "Unreviewed local work")
+    remote_before = _git(remote, "show-ref")
+
+    result = _run_release(release_repo, VIREO_RELEASE_REEXECED="1")
+
+    assert result.returncode != 0
+    assert "Local main has commits that are not on origin/main" in result.stderr
+    assert "Ignoring inherited VIREO_RELEASE_REEXECED marker" in result.stdout
+    assert "Already synced before re-exec" not in result.stdout
+    assert not gates.exists()
+    assert _git(remote, "show-ref") == remote_before
+    assert "Tag pushed." not in result.stdout
+
+
+def test_release_reexec_resolves_script_path_before_changing_directories(release_repo, tmp_path):
+    """Re-exec after sync must survive invocation by a path relative to an outside CWD.
+
+    `cd "$(dirname "$0")/.."` in the script moves to the repo root, but $0 is
+    still spelled relative to the caller's original directory. Without
+    resolving the script path first, `exec bash "$0"` would then look for
+    `checkout/scripts/release.sh` beneath the repo root and abort the release.
+    """
+    repo, _, writer, _, env = release_repo
+    # Advance origin so the first process re-execs after fast-forward.
+    _git(writer, "commit", "--allow-empty", "-m", "Advance before release")
+    _git(writer, "push", "origin", "main")
+    # Invoke via a path that is only valid relative to tmp_path, not to the
+    # repo root the script cds into.
+    rel_script = Path(repo.name) / "scripts" / "release.sh"
+
+    result = subprocess.run(
+        ["bash", str(rel_script), "patch", "--publish"], cwd=tmp_path,
+        env=env, capture_output=True, text=True, timeout=15,
+    )
+
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert "==> Release scripts advanced during sync; re-executing..." in result.stdout
+    assert "Tag pushed." in result.stdout
+
+
+def test_release_does_not_tag_or_push_when_version_commit_fails(release_repo):
+    repo, remote, _, _, _ = release_repo
+    remote_before = _git(remote, "show-ref")
+
+    result = _run_release(release_repo, FAIL_COMMIT="1")
+
+    assert result.returncode != 0
+    assert _git(repo, "tag", "--list") == ""
+    assert _git(remote, "show-ref") == remote_before
+    assert "Tag pushed." not in result.stdout
