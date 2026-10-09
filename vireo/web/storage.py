@@ -41,8 +41,8 @@ def create_storage_blueprint(get_db, json_error, db_path, config):
         min_detector_conf = db.min_detector_confidence_across_workspaces(
             cfg.load()
         )
-        variants = db.mask_variants_summary()
-        stale = db.find_stale_masks(detector_confidence=min_detector_conf)
+        variants = db.masks_features.variants_summary()
+        stale = db.masks_features.find_stale(detector_confidence=min_detector_conf)
         return {
             "variants": variants,
             "total_bytes": sum(v["bytes"] for v in variants),
@@ -350,7 +350,7 @@ def create_storage_blueprint(get_db, json_error, db_path, config):
             return json_error("variant required")
         db = get_db()
         try:
-            n = db.delete_masks_for_variant(variant)
+            n = db.masks_features.delete_for_variant(variant)
         except ValueError as e:
             return json_error(str(e), 400)
         log.info("Deleted %d masks for variant %s", n, variant)
@@ -360,7 +360,7 @@ def create_storage_blueprint(get_db, json_error, db_path, config):
     def api_storage_masks_delete_inactive():
         """Delete all non-active variant masks across all photos."""
         db = get_db()
-        n = db.delete_inactive_masks()
+        n = db.masks_features.delete_inactive()
         log.info("Deleted %d inactive-variant masks", n)
         return jsonify({"ok": True, "deleted": n})
 

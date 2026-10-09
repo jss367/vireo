@@ -608,13 +608,15 @@ def test_clear_detections_for_one_model(db):
 
 
 def test_get_existing_detection_photo_ids_delegates(db, monkeypatch):
+    from repositories.model_runs import ModelRunsRepository
+
     calls = []
 
-    def fake(detector_model):
+    def fake(self, detector_model):
         calls.append(detector_model)
         return {1, 2}
 
-    monkeypatch.setattr(db, "get_detector_run_photo_ids", fake)
+    monkeypatch.setattr(ModelRunsRepository, "get_detector_run_photo_ids", fake)
     assert db.get_existing_detection_photo_ids() == {1, 2}
     assert db.get_existing_detection_photo_ids("other") == {1, 2}
     assert calls == ["megadetector-v6", "other"]
@@ -1070,7 +1072,7 @@ def test_production_code_uses_facade_for_coordinated_detection_work():
 def test_existing_detection_photo_ids_composes_through_the_facade():
     attrs = _self_attrs(Database.get_existing_detection_photo_ids)
     assert "conn" not in attrs
-    assert "get_detector_run_photo_ids" in attrs
+    assert "model_runs" in attrs
 
 
 def test_pin_check_stays_on_the_facade():

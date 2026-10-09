@@ -188,7 +188,7 @@ def test_keep_is_remembered_but_coordinate_changes_require_review(discrepancy_ca
     assert len(discrepancy_preview(client)) == 2
     assert len(discrepancy_preview(client, include_reviewed=True)) == 3
     assert db.pending_changes.list_all() == []
-    assert len(db.get_edit_history()) == 1
+    assert len(db.edit_history.list_recent()) == 1
     assert db.undo_last_edit() is None
     db.conn.execute('UPDATE keywords SET latitude=32.85 WHERE id=?', (keyword,))
     db.conn.commit()
@@ -205,7 +205,7 @@ def test_discrepancy_reviews_respect_history_limit(discrepancy_catalog, action):
     for photo in photos:
         assert resolve(client, [photo], action).status_code == 200
 
-    history = db.get_edit_history()
+    history = db.edit_history.list_recent()
     assert len(history) == 2
     assert {row['photo_id'] for row in db.conn.execute('SELECT photo_id FROM edit_history_items')} == {
         photo['id'] for photo in photos[-2:]

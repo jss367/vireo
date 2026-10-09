@@ -2801,10 +2801,10 @@ def test_extract_masks_route_writes_photo_masks_row(
         "subject_clip_low": 0.01, "subject_y_median": 100.0, "bg_separation": 50.0,
         "phash_crop": "deadbeef", "noise_estimate": 5.0,
     }
-    mask_row = db.get_photo_mask(pid, "sam2-small")
+    mask_row = db.masks_features.get_mask(pid, "sam2-small")
     for field, value in expected_quality.items():
         assert mask_row[field] == value
-    db.upsert_photo_mask(pid, "sam2-large", row["path"], "MegaDetector", 10, 20, 100, 200,
+    db.masks_features.upsert_mask(pid, "sam2-large", row["path"], "MegaDetector", 10, 20, 100, 200,
                          noise_estimate=999)
     db.set_active_mask_variant(pid, "sam2-large")
     db.set_active_mask_variant(pid, "sam2-small")

@@ -4596,12 +4596,12 @@ def test_clear_detections_also_clears_detector_runs(tmp_path):
     db.save_detections(pids[0], [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
     ], detector_model="megadetector-v6")
-    db.record_detector_run(pids[0], "megadetector-v6", box_count=1)
-    assert pids[0] in db.get_detector_run_photo_ids("megadetector-v6")
+    db.model_runs.record_detector_run(pids[0], "megadetector-v6", box_count=1)
+    assert pids[0] in db.model_runs.get_detector_run_photo_ids("megadetector-v6")
 
     db.detections.clear(pids[0])
 
-    assert pids[0] not in db.get_detector_run_photo_ids("megadetector-v6"), (
+    assert pids[0] not in db.model_runs.get_detector_run_photo_ids("megadetector-v6"), (
         "clear_detections left a stale run key — _detect_subjects would "
         "skip this photo on the next non-reclassify pass."
     )
@@ -4621,8 +4621,8 @@ def test_clear_predictions_scopes_by_fingerprint(tmp_path):
                       model="bioclip-2", labels_fingerprint="fp-a")
     db.add_prediction(det_id, species="Sparrow", confidence=0.85,
                       model="bioclip-2", labels_fingerprint="fp-b")
-    db.record_classifier_run(det_id, "bioclip-2", "fp-a", prediction_count=1)
-    db.record_classifier_run(det_id, "bioclip-2", "fp-b", prediction_count=1)
+    db.model_runs.record_classifier_run(det_id, "bioclip-2", "fp-a", prediction_count=1)
+    db.model_runs.record_classifier_run(det_id, "bioclip-2", "fp-b", prediction_count=1)
 
     db.clear_predictions(model="bioclip-2", labels_fingerprint="fp-a")
 
@@ -4631,7 +4631,7 @@ def test_clear_predictions_scopes_by_fingerprint(tmp_path):
     ).fetchall()}
     assert remaining == {"Sparrow"}, "fp-b row must be untouched"
 
-    run_keys = db.get_classifier_run_keys(det_id)
+    run_keys = db.model_runs.get_classifier_run_keys(det_id)
     assert ("bioclip-2", "fp-a") not in run_keys, \
         "fp-a classifier_runs key must be cleared or next pass will skip"
     assert ("bioclip-2", "fp-b") in run_keys, "fp-b run key must be preserved"
@@ -4651,8 +4651,8 @@ def test_clear_predictions_no_model_clears_classifier_runs(tmp_path):
                       model="bioclip-2", labels_fingerprint="fp-a")
     db.add_prediction(det_id, species="Sparrow", confidence=0.85,
                       model="other-model", labels_fingerprint="fp-b")
-    db.record_classifier_run(det_id, "bioclip-2", "fp-a", prediction_count=1)
-    db.record_classifier_run(det_id, "other-model", "fp-b", prediction_count=1)
+    db.model_runs.record_classifier_run(det_id, "bioclip-2", "fp-a", prediction_count=1)
+    db.model_runs.record_classifier_run(det_id, "other-model", "fp-b", prediction_count=1)
 
     db.clear_predictions()
 
@@ -4662,7 +4662,7 @@ def test_clear_predictions_no_model_clears_classifier_runs(tmp_path):
     ).fetchone()[0]
     assert remaining == 0, "All predictions for the detection must be deleted"
 
-    run_keys = db.get_classifier_run_keys(det_id)
+    run_keys = db.model_runs.get_classifier_run_keys(det_id)
     assert run_keys == set(), (
         "All classifier_runs entries for the detection must be cleared so "
         "the next non-reclassify pass actually re-runs inference"
@@ -4684,8 +4684,8 @@ def test_clear_predictions_clears_match_scores_when_preserving_run_keys(tmp_path
     ], detector_model="MDV6")[0]
     db.add_prediction(det_id, species="Robin", confidence=0.9,
                       model="bioclip-2", labels_fingerprint="fp-a")
-    db.record_classifier_run(det_id, "bioclip-2", "fp-a", prediction_count=1)
-    db.record_classifier_match_score(
+    db.model_runs.record_classifier_run(det_id, "bioclip-2", "fp-a", prediction_count=1)
+    db.model_runs.record_classifier_match_score(
         det_id, "bioclip-2", "fp-a",
         max_match_score=0.87, top_species="Robin", label_count=1200,
         score_kind="cosine",
@@ -4712,7 +4712,7 @@ def test_clear_predictions_clears_match_scores_when_preserving_run_keys(tmp_path
     )
     # The run key itself must survive — that is the whole point of
     # clear_run_keys=False.
-    assert ("bioclip-2", "fp-a") in db.get_classifier_run_keys(det_id)
+    assert ("bioclip-2", "fp-a") in db.model_runs.get_classifier_run_keys(det_id)
 
 
 def test_clear_predictions_match_scores_respect_fingerprint_scope(tmp_path):
@@ -4725,12 +4725,12 @@ def test_clear_predictions_match_scores_respect_fingerprint_scope(tmp_path):
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9,
          "category": "animal"}
     ], detector_model="MDV6")[0]
-    db.record_classifier_match_score(
+    db.model_runs.record_classifier_match_score(
         det_id, "bioclip-2", "fp-a",
         max_match_score=0.30, top_species="Robin", label_count=100,
         score_kind="cosine",
     )
-    db.record_classifier_match_score(
+    db.model_runs.record_classifier_match_score(
         det_id, "bioclip-2", "fp-b",
         max_match_score=0.71, top_species="Sparrow", label_count=800,
         score_kind="cosine",
@@ -5171,11 +5171,11 @@ def test_get_and_upsert_photo_embedding(tmp_path):
     """Stores and retrieves a photo embedding keyed on model."""
     db, pids = _make_workspace_with_photos(tmp_path, [{}])
 
-    assert db.get_photo_embedding(pids[0], "BioCLIP") is None
+    assert db.masks_features.get_embedding(pids[0], "BioCLIP") is None
 
     db.upsert_photo_embedding(pids[0], "BioCLIP", b'\x01\x02\x03\x04')
 
-    result = db.get_photo_embedding(pids[0], "BioCLIP")
+    result = db.masks_features.get_embedding(pids[0], "BioCLIP")
     assert result == b'\x01\x02\x03\x04'
 
 
@@ -5186,7 +5186,7 @@ def test_upsert_photo_embedding_replaces_same_model(tmp_path):
     db.upsert_photo_embedding(pids[0], "BioCLIP", b'\x01\x02')
     db.upsert_photo_embedding(pids[0], "BioCLIP", b'\x03\x04')
 
-    assert db.get_photo_embedding(pids[0], "BioCLIP") == b'\x03\x04'
+    assert db.masks_features.get_embedding(pids[0], "BioCLIP") == b'\x03\x04'
 
 
 def test_photo_embeddings_per_model_isolation(tmp_path):
@@ -5196,8 +5196,8 @@ def test_photo_embeddings_per_model_isolation(tmp_path):
     db.upsert_photo_embedding(pids[0], "BioCLIP", b'\x01')
     db.upsert_photo_embedding(pids[0], "BioCLIP-2", b'\x02')
 
-    assert db.get_photo_embedding(pids[0], "BioCLIP") == b'\x01'
-    assert db.get_photo_embedding(pids[0], "BioCLIP-2") == b'\x02'
+    assert db.masks_features.get_embedding(pids[0], "BioCLIP") == b'\x01'
+    assert db.masks_features.get_embedding(pids[0], "BioCLIP-2") == b'\x02'
 
 
 def test_photo_embeddings_variant_isolation(tmp_path):
@@ -5207,8 +5207,8 @@ def test_photo_embeddings_variant_isolation(tmp_path):
     db.upsert_photo_embedding(pids[0], "BioCLIP", b'\xaa', variant='v1')
     db.upsert_photo_embedding(pids[0], "BioCLIP", b'\xbb', variant='v2')
 
-    assert db.get_photo_embedding(pids[0], "BioCLIP", variant='v1') == b'\xaa'
-    assert db.get_photo_embedding(pids[0], "BioCLIP", variant='v2') == b'\xbb'
+    assert db.masks_features.get_embedding(pids[0], "BioCLIP", variant='v1') == b'\xaa'
+    assert db.masks_features.get_embedding(pids[0], "BioCLIP", variant='v2') == b'\xbb'
 
 
 def test_update_prediction_group_info(tmp_path):
@@ -6144,7 +6144,7 @@ def test_get_photos_with_embedding_filters_by_model(tmp_path):
     db.upsert_photo_embedding(pids[1], "BioCLIP-2", emb2)
     # pids[2] has no embedding
 
-    results = db.get_photos_with_embedding("BioCLIP")
+    results = db.masks_features.photos_with_embedding("BioCLIP")
     assert len(results) == 1
     assert results[0][0] == pids[0]
     assert results[0][1] == emb1
@@ -6171,11 +6171,11 @@ def test_get_photos_with_embedding_excludes_other_workspaces(tmp_path):
     db.upsert_photo_embedding(pid_b, "BioCLIP", emb)
 
     db.set_active_workspace(ws_a)
-    results_a = db.get_photos_with_embedding("BioCLIP")
+    results_a = db.masks_features.photos_with_embedding("BioCLIP")
     assert [r[0] for r in results_a] == [pid_a]
 
     db.set_active_workspace(ws_b)
-    results_b = db.get_photos_with_embedding("BioCLIP")
+    results_b = db.masks_features.photos_with_embedding("BioCLIP")
     assert [r[0] for r in results_b] == [pid_b]
 
 
@@ -6208,7 +6208,7 @@ def test_record_edit_single(tmp_path):
         items=[{'photo_id': pid, 'old_value': '0', 'new_value': '5'}],
     )
 
-    history = db.get_edit_history()
+    history = db.edit_history.list_recent()
     assert len(history) == 1
     assert history[0]['action_type'] == 'rating'
     assert history[0]['description'] == 'Set rating to 5'
@@ -6232,7 +6232,7 @@ def test_record_edit_batch(tmp_path):
         is_batch=True,
     )
 
-    history = db.get_edit_history()
+    history = db.edit_history.list_recent()
     assert len(history) == 1
     assert history[0]['is_batch'] == 1
     assert history[0]['item_count'] == 2
@@ -6248,7 +6248,7 @@ def test_get_edit_history_order(tmp_path):
     db.record_edit('rating', 'Second edit', '2',
                    [{'photo_id': pid, 'old_value': '1', 'new_value': '2'}])
 
-    history = db.get_edit_history()
+    history = db.edit_history.list_recent()
     assert history[0]['description'] == 'Second edit'
     assert history[1]['description'] == 'First edit'
 
@@ -6262,8 +6262,8 @@ def test_get_edit_history_pagination(tmp_path):
         db.record_edit('rating', f'Edit {i}', str(i),
                        [{'photo_id': pid, 'old_value': str(i), 'new_value': str(i+1)}])
 
-    page1 = db.get_edit_history(limit=2, offset=0)
-    page2 = db.get_edit_history(limit=2, offset=2)
+    page1 = db.edit_history.list_recent(limit=2, offset=0)
+    page2 = db.edit_history.list_recent(limit=2, offset=2)
     assert len(page1) == 2
     assert len(page2) == 2
     assert page1[0]['description'] == 'Edit 4'
@@ -6284,7 +6284,7 @@ def test_undo_last_edit_rating(tmp_path):
     assert result is not None
     assert result['description'] == 'Set rating to 5'
     assert db.get_photo(pid)['rating'] == original_rating
-    assert len(db.get_edit_history()) == 0
+    assert len(db.edit_history.list_recent()) == 0
 
 
 def test_undo_last_edit_flag(tmp_path):
@@ -6404,7 +6404,7 @@ def test_update_photo_eye_fields_roundtrip(tmp_path):
         file_size=1000,
         file_mtime=1.0,
     )
-    db.update_photo_pipeline_features(
+    db.masks_features.update_pipeline_features(
         pid,
         eye_x=123.4,
         eye_y=56.7,
@@ -6432,11 +6432,11 @@ def test_update_photo_eye_fields_accept_null(tmp_path):
         file_mtime=1.0,
     )
     # First set some values
-    db.update_photo_pipeline_features(
+    db.masks_features.update_pipeline_features(
         pid, eye_x=1.0, eye_y=2.0, eye_conf=0.5, eye_tenengrad=9.0
     )
     # Then clear them
-    db.update_photo_pipeline_features(
+    db.masks_features.update_pipeline_features(
         pid, eye_x=None, eye_y=None, eye_conf=None, eye_tenengrad=None
     )
     row = db.conn.execute(
@@ -6474,7 +6474,7 @@ def test_list_photos_for_eye_keypoint_stage_prefers_routable_prediction(tmp_path
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8}, "confidence": 0.95}],
         detector_model="MegaDetector",
     )
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         photo_id=pid, variant="test", path=str(tmp_path / "mask.png"),
         detector_model="MegaDetector",
         prompt_x=0.1, prompt_y=0.1, prompt_w=0.8, prompt_h=0.8,
@@ -6534,7 +6534,7 @@ def test_list_photos_for_eye_keypoint_stage_keeps_confidence_order_when_routable
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8}, "confidence": 0.95}],
         detector_model="MegaDetector",
     )
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         photo_id=pid, variant="test", path=str(tmp_path / "mask.png"),
         detector_model="MegaDetector",
         prompt_x=0.1, prompt_y=0.1, prompt_w=0.8, prompt_h=0.8,
@@ -6579,7 +6579,7 @@ def test_list_photos_for_eye_keypoint_stage_filters_to_active_fingerprint(tmp_pa
     det_id = db.save_detections(pid, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.95}
     ], detector_model="MegaDetector")[0]
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         photo_id=pid, variant="test", path=str(tmp_path / "mask.png"),
         detector_model="MegaDetector",
         prompt_x=0, prompt_y=0, prompt_w=1, prompt_h=1,
@@ -6638,7 +6638,7 @@ def test_list_photos_for_eye_keypoint_stage_scopes_to_photo_ids(tmp_path):
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8}, "confidence": 0.9}],
             detector_model="MegaDetector",
         )
-        db.upsert_photo_mask(
+        db.masks_features.upsert_mask(
             photo_id=pid, variant="test",
             path=str(tmp_path / "mask.png"),
             detector_model="MegaDetector",
@@ -8406,7 +8406,7 @@ def test_get_existing_detection_photo_ids(tmp_path):
     db.save_detections(pid1, [
         {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"},
     ], detector_model="megadetector-v6")
-    db.record_detector_run(pid1, "megadetector-v6", box_count=1)
+    db.model_runs.record_detector_run(pid1, "megadetector-v6", box_count=1)
     result = db.get_existing_detection_photo_ids()
     assert pid1 in result
     assert pid2 not in result
@@ -8435,20 +8435,20 @@ def test_get_detector_run_photo_ids_excludes_torn_state(tmp_path):
         {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9,
          "category": "animal"},
     ], detector_model="megadetector-v6")
-    db.record_detector_run(torn, "megadetector-v6", box_count=1)
+    db.model_runs.record_detector_run(torn, "megadetector-v6", box_count=1)
     db.detections.clear(torn)
 
     # Legit empty scene: run recorded with box_count=0, no detections.
-    db.record_detector_run(empty, "megadetector-v6", box_count=0)
+    db.model_runs.record_detector_run(empty, "megadetector-v6", box_count=0)
 
     # Consistent: run recorded and detection rows present.
     db.save_detections(ok, [
         {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9,
          "category": "animal"},
     ], detector_model="megadetector-v6")
-    db.record_detector_run(ok, "megadetector-v6", box_count=1)
+    db.model_runs.record_detector_run(ok, "megadetector-v6", box_count=1)
 
-    result = db.get_detector_run_photo_ids("megadetector-v6")
+    result = db.model_runs.get_detector_run_photo_ids("megadetector-v6")
     assert torn not in result, "torn state must be re-detected, not skipped"
     assert empty in result, "legit empty scenes must stay cached"
     assert ok in result, "consistent cached runs must stay cached"
@@ -8592,7 +8592,7 @@ def test_write_detection_batch_records_empty_scene(tmp_path):
     ).fetchone()
     assert run is not None
     assert run["box_count"] == 0
-    assert photo_id in db.get_detector_run_photo_ids("megadetector-v6")
+    assert photo_id in db.model_runs.get_detector_run_photo_ids("megadetector-v6")
 
 
 def test_write_detection_batch_ids_are_stable_for_same_content(tmp_path):
@@ -8795,7 +8795,7 @@ def test_runtime_change_preserves_output_reviewed_in_any_workspace(tmp_path):
         (photo_id, "megadetector-v6"),
     ).fetchone()
     assert run["runtime_fingerprint"] == "runtime-a"
-    assert photo_id in db.get_detector_run_photo_ids(
+    assert photo_id in db.model_runs.get_detector_run_photo_ids(
         "megadetector-v6", runtime_fingerprint="runtime-b",
     ), "a pinned older runtime should suppress redundant inference"
 
@@ -9067,7 +9067,7 @@ def test_pairing_redirects_classifier_runs_so_cache_gate_still_hits(tmp_path):
     # The classifier_runs row must now point at the rehashed detection id —
     # otherwise the non-reclassify gate would treat the paired photo as
     # unclassified and rerun the classifier needlessly.
-    keys = db.get_classifier_run_keys(expected_new_id)
+    keys = db.model_runs.get_classifier_run_keys(expected_new_id)
     assert ("bioclip", "fp-x") in keys, (
         f"classifier_runs must follow rehash; new id keys: {keys}"
     )
@@ -9097,20 +9097,20 @@ def test_get_classifier_run_key_gate_splits_accepted_and_rejected(tmp_path):
     # Three rows on the same detection, varying only in
     # runtime_fingerprint. One matches the expected runtime, one is the
     # legacy sentinel (grandfathered), one is stale.
-    db.record_classifier_run(
+    db.model_runs.record_classifier_run(
         det_id, "bioclip", "fp-fresh", prediction_count=1,
         runtime_fingerprint="rt-current",
     )
-    db.record_classifier_run(
+    db.model_runs.record_classifier_run(
         det_id, "bioclip", "fp-legacy", prediction_count=1,
         runtime_fingerprint="legacy",
     )
-    db.record_classifier_run(
+    db.model_runs.record_classifier_run(
         det_id, "bioclip", "fp-stale", prediction_count=1,
         runtime_fingerprint="rt-old",
     )
 
-    accepted, rejected = db.get_classifier_run_key_gate(
+    accepted, rejected = db.model_runs.get_classifier_run_key_gate(
         det_id, "rt-current",
     )
     assert accepted == {("bioclip", "fp-fresh"), ("bioclip", "fp-legacy")}
@@ -9121,7 +9121,7 @@ def test_get_classifier_run_key_gate_splits_accepted_and_rejected(tmp_path):
 
     # None argument short-circuits: the reclassify path bypasses the gate
     # entirely, so returning two empty sets is the safe no-op.
-    accepted_none, rejected_none = db.get_classifier_run_key_gate(
+    accepted_none, rejected_none = db.model_runs.get_classifier_run_key_gate(
         det_id, None,
     )
     assert accepted_none == set() and rejected_none == set()
@@ -9141,7 +9141,7 @@ def test_get_classifier_run_key_gate_honors_individual_review_override(tmp_path)
          "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")[0]
 
-    db.record_classifier_run(
+    db.model_runs.record_classifier_run(
         det_id, "bioclip", "fp-reviewed", prediction_count=1,
         runtime_fingerprint="rt-old",
     )
@@ -9159,7 +9159,7 @@ def test_get_classifier_run_key_gate_honors_individual_review_override(tmp_path)
         pred_id, ws_id, "accepted", individual="Robin the First",
     )
 
-    accepted, rejected = db.get_classifier_run_key_gate(
+    accepted, rejected = db.model_runs.get_classifier_run_key_gate(
         det_id, "rt-current",
     )
     assert accepted == {("bioclip", "fp-reviewed")}, (
@@ -15775,7 +15775,7 @@ def test_update_photo_embeddings_stores_variant(tmp_path):
     pid = db.add_photo(fid, "a.jpg", ".jpg", 100, 1.0)
 
     blob = np.ones(1024, dtype=np.float32).tobytes()
-    db.update_photo_embeddings(
+    db.masks_features.update_embeddings(
         pid,
         dino_subject_embedding=blob,
         dino_global_embedding=blob,
@@ -15795,13 +15795,13 @@ def test_update_photo_embeddings_rewrite_updates_variant(tmp_path):
     fid = db.add_folder(str(tmp_path), name="photos")
     pid = db.add_photo(fid, "a.jpg", ".jpg", 100, 1.0)
 
-    db.update_photo_embeddings(
+    db.masks_features.update_embeddings(
         pid,
         dino_subject_embedding=np.ones(768, dtype=np.float32).tobytes(),
         dino_global_embedding=np.ones(768, dtype=np.float32).tobytes(),
         variant="vit-b14",
     )
-    db.update_photo_embeddings(
+    db.masks_features.update_embeddings(
         pid,
         dino_subject_embedding=np.ones(1024, dtype=np.float32).tobytes(),
         dino_global_embedding=np.ones(1024, dtype=np.float32).tobytes(),
@@ -15943,13 +15943,13 @@ def test_record_detector_run_and_lookup(tmp_path):
     )
 
     # Initially: no runs recorded
-    assert db.get_detector_run_photo_ids("megadetector-v6") == set()
+    assert db.model_runs.get_detector_run_photo_ids("megadetector-v6") == set()
 
-    db.record_detector_run(photo_id, "megadetector-v6", box_count=0)
-    assert db.get_detector_run_photo_ids("megadetector-v6") == {photo_id}
+    db.model_runs.record_detector_run(photo_id, "megadetector-v6", box_count=0)
+    assert db.model_runs.get_detector_run_photo_ids("megadetector-v6") == {photo_id}
 
     # Re-recording is idempotent / updates box_count
-    db.record_detector_run(photo_id, "megadetector-v6", box_count=3)
+    db.model_runs.record_detector_run(photo_id, "megadetector-v6", box_count=3)
     row = db.conn.execute(
         "SELECT box_count FROM detector_runs WHERE photo_id=? AND detector_model=?",
         (photo_id, "megadetector-v6"),
@@ -15980,10 +15980,10 @@ def test_detector_run_is_not_workspace_scoped(tmp_path):
         {"box": {"x": 0.4, "y": 0.4, "w": 0.2, "h": 0.2}, "confidence": 0.8,
          "category": "animal"},
     ], detector_model="megadetector-v6")
-    db.record_detector_run(photo_id, "megadetector-v6", box_count=2)
+    db.model_runs.record_detector_run(photo_id, "megadetector-v6", box_count=2)
 
     db._active_workspace_id = ws_b
-    assert photo_id in db.get_detector_run_photo_ids("megadetector-v6")
+    assert photo_id in db.model_runs.get_detector_run_photo_ids("megadetector-v6")
 
 
 def test_record_classifier_run_and_lookup(tmp_path):
@@ -16004,10 +16004,10 @@ def test_record_classifier_run_and_lookup(tmp_path):
     )
     det_id = det_ids[0]
 
-    assert db.get_classifier_run_keys(det_id) == set()
+    assert db.model_runs.get_classifier_run_keys(det_id) == set()
 
-    db.record_classifier_run(det_id, "bioclip-2", "abc123", prediction_count=5)
-    assert db.get_classifier_run_keys(det_id) == {("bioclip-2", "abc123")}
+    db.model_runs.record_classifier_run(det_id, "bioclip-2", "abc123", prediction_count=5)
+    assert db.model_runs.get_classifier_run_keys(det_id) == {("bioclip-2", "abc123")}
 
 
 def test_upsert_labels_fingerprint(tmp_path):
@@ -16015,7 +16015,7 @@ def test_upsert_labels_fingerprint(tmp_path):
 
     from db import Database
     db = Database(str(tmp_path / "test.db"))
-    db.upsert_labels_fingerprint(
+    db.model_runs.upsert_labels_fingerprint(
         fingerprint="abc123",
         display_name="California birds",
         sources=["/labels/ca-birds.txt"],
@@ -16029,7 +16029,7 @@ def test_upsert_labels_fingerprint(tmp_path):
     assert row["label_count"] == 423
 
     # Upsert is idempotent
-    db.upsert_labels_fingerprint("abc123", "California birds (v2)",
+    db.model_runs.upsert_labels_fingerprint("abc123", "California birds (v2)",
                                   ["/labels/ca-birds-v2.txt"], 500)
     row = db.conn.execute(
         "SELECT display_name, label_count FROM labels_fingerprints WHERE fingerprint=?",
@@ -21832,7 +21832,7 @@ def _add_one_detection(db, photo_id, detector_model="test-det", conf=0.9):
 
 def _record_usable_classifier_run(db, detection_id, model, fingerprint):
     """Record the run key plus the prediction runtime requires for a hit."""
-    db.record_classifier_run(
+    db.model_runs.record_classifier_run(
         detection_id, model, fingerprint, prediction_count=1,
     )
     db.add_prediction(
@@ -22061,7 +22061,7 @@ def test_get_classifier_run_cache_hits_requires_usable_prediction(tmp_path):
         file_size=1, file_mtime=1.0, timestamp=None, width=1, height=1,
     )
     detection_id = _add_one_detection(db, photo_id)
-    db.record_classifier_run(
+    db.model_runs.record_classifier_run(
         detection_id, "BioCLIP-2.5", "fp-a", prediction_count=1,
     )
 
@@ -22134,7 +22134,7 @@ def test_get_classifier_run_cache_hits_rejects_obsolete_runtime_fingerprint(
     legacy_det = _det_with_rt(p_legacy, "rt-current")
     current_det = _det_with_rt(p_current, "rt-current")
 
-    db.record_classifier_run(
+    db.model_runs.record_classifier_run(
         stale_det, "BioCLIP-2.5", "fp-a", prediction_count=1,
         runtime_fingerprint="cls-old",
     )
@@ -22142,7 +22142,7 @@ def test_get_classifier_run_cache_hits_rejects_obsolete_runtime_fingerprint(
         stale_det, species="Robin", confidence=0.9,
         model="BioCLIP-2.5", labels_fingerprint="fp-a",
     )
-    db.record_classifier_run(
+    db.model_runs.record_classifier_run(
         legacy_det, "BioCLIP-2.5", "fp-a", prediction_count=1,
         runtime_fingerprint="legacy",
     )
@@ -22150,7 +22150,7 @@ def test_get_classifier_run_cache_hits_rejects_obsolete_runtime_fingerprint(
         legacy_det, species="Robin", confidence=0.9,
         model="BioCLIP-2.5", labels_fingerprint="fp-a",
     )
-    db.record_classifier_run(
+    db.model_runs.record_classifier_run(
         current_det, "BioCLIP-2.5", "fp-a", prediction_count=1,
         runtime_fingerprint="cls-current",
     )
@@ -22301,7 +22301,7 @@ def test_get_classifier_run_cache_hits_includes_noise_full_image_anchor(
     noise_anchor = _add_one_detection(
         db, p_noise, detector_model="full-image", conf=0,
     )
-    db.record_detector_run(p_noise, "megadetector-v6", box_count=1)
+    db.model_runs.record_detector_run(p_noise, "megadetector-v6", box_count=1)
     _record_usable_classifier_run(db, noise_anchor, "BioCLIP-2.5", "fp-a")
 
     db.conn.execute(
@@ -22314,7 +22314,7 @@ def test_get_classifier_run_cache_hits_includes_noise_full_image_anchor(
     person_anchor = _add_one_detection(
         db, p_person, detector_model="full-image", conf=0,
     )
-    db.record_detector_run(p_person, "megadetector-v6", box_count=1)
+    db.model_runs.record_detector_run(p_person, "megadetector-v6", box_count=1)
     _record_usable_classifier_run(db, person_anchor, "BioCLIP-2.5", "fp-a")
 
     # _detect_batch does not write a MegaDetector run row when inference
@@ -22874,7 +22874,7 @@ def test_upsert_photo_mask_inserts_and_replaces(tmp_path):
         "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
     )
 
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         photo_id=1, variant="sam2-small", path="/m/1.sam2-small.png",
         detector_model="megadetector-v6",
         prompt_x=10, prompt_y=20, prompt_w=100, prompt_h=200,
@@ -22888,7 +22888,7 @@ def test_upsert_photo_mask_inserts_and_replaces(tmp_path):
     assert row["prompt_x"] == 10
 
     # Re-upsert with new prompt — row replaced
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         photo_id=1, variant="sam2-small", path="/m/1.sam2-small.png",
         detector_model="megadetector-v6",
         prompt_x=11, prompt_y=20, prompt_w=100, prompt_h=200,
@@ -22914,13 +22914,13 @@ def test_get_photo_mask_returns_row_or_none(tmp_path):
     db.conn.execute(
         "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
     )
-    assert db.get_photo_mask(1, "sam2-small") is None
+    assert db.masks_features.get_mask(1, "sam2-small") is None
 
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         photo_id=1, variant="sam2-small", path="/p", detector_model="md",
         prompt_x=1, prompt_y=2, prompt_w=3, prompt_h=4,
     )
-    m = db.get_photo_mask(1, "sam2-small")
+    m = db.masks_features.get_mask(1, "sam2-small")
     assert m["path"] == "/p"
     assert m["detector_model"] == "md"
     assert m["prompt_x"] == 1
@@ -22933,15 +22933,15 @@ def test_list_masks_for_photo(tmp_path):
     db.conn.execute(
         "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
     )
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         photo_id=1, variant="sam2-small", path="/a",
         detector_model="md", prompt_x=1, prompt_y=2, prompt_w=3, prompt_h=4,
     )
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         photo_id=1, variant="sam2-large", path="/b",
         detector_model="md", prompt_x=1, prompt_y=2, prompt_w=3, prompt_h=4,
     )
-    variants = sorted(m["variant"] for m in db.list_masks_for_photo(1))
+    variants = sorted(m["variant"] for m in db.masks_features.list_masks_for_photo(1))
     assert variants == ["sam2-large", "sam2-small"]
 
 
@@ -22952,7 +22952,7 @@ def test_set_active_mask_variant_denormalizes(tmp_path):
     db.conn.execute(
         "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
     )
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         photo_id=1, variant="sam2-large", path="/m/1.sam2-large.png",
         detector_model="md", prompt_x=1, prompt_y=2, prompt_w=3, prompt_h=4,
         subject_size=12345, subject_tenengrad=2.0,
@@ -23001,7 +23001,7 @@ def test_set_active_mask_variant_rejects_orphaned_mask_after_reclassify(
     db.conn.execute(
         "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
     )
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         photo_id=1, variant="sam2-large", path="/m/1.sam2-large.png",
         detector_model="megadetector-v6",
         prompt_x=0.1, prompt_y=0.1, prompt_w=0.5, prompt_h=0.5,
@@ -23042,7 +23042,7 @@ def test_set_active_mask_variant_allows_weak_detection_below_floor(
     db.conn.execute(
         "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
     )
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         photo_id=1, variant="sam2-large", path="/m/1.sam2-large.png",
         detector_model="megadetector-v6",
         prompt_x=0.1, prompt_y=0.1, prompt_w=0.5, prompt_h=0.5,
@@ -23086,7 +23086,7 @@ def test_set_active_mask_variant_allows_migration_without_detections(
     db.conn.execute(
         "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
     )
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         photo_id=1, variant="sam2-large", path="/m/1.sam2-large.png",
         detector_model="md", prompt_x=1, prompt_y=2, prompt_w=3, prompt_h=4,
     )
@@ -23117,7 +23117,7 @@ def test_set_active_mask_variant_rejects_orphaned_zero_detection_reclassify(
     db.conn.execute(
         "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
     )
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         photo_id=1, variant="sam2-large", path="/m/1.sam2-large.png",
         detector_model="megadetector-v6",
         prompt_x=0.1, prompt_y=0.1, prompt_w=0.5, prompt_h=0.5,
@@ -23155,16 +23155,16 @@ def test_delete_masks_for_variant_removes_files_and_rows(tmp_path):
     p1.write_bytes(b"x")
     p2 = masks_dir / "2.sam2-small.png"
     p2.write_bytes(b"y")
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         1, "sam2-small", str(p1),
         detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
     )
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         2, "sam2-small", str(p2),
         detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
     )
 
-    deleted = db.delete_masks_for_variant("sam2-small")
+    deleted = db.masks_features.delete_for_variant("sam2-small")
     assert deleted == 2
     assert not p1.exists() and not p2.exists()
     assert db.conn.execute(
@@ -23184,13 +23184,13 @@ def test_delete_masks_for_variant_refuses_active(tmp_path):
     masks_dir.mkdir()
     p = masks_dir / "1.sam2-small.png"
     p.write_bytes(b"x")
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         1, "sam2-small", str(p),
         detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
     )
     db.set_active_mask_variant(1, "sam2-small")
     with pytest.raises(ValueError):
-        db.delete_masks_for_variant("sam2-small")
+        db.masks_features.delete_for_variant("sam2-small")
 
 
 def test_delete_inactive_masks(tmp_path):
@@ -23206,20 +23206,20 @@ def test_delete_inactive_masks(tmp_path):
     pa.write_bytes(b"a")
     pb = masks_dir / "1.sam2-large.png"
     pb.write_bytes(b"b")
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         1, "sam2-small", str(pa),
         detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
     )
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         1, "sam2-large", str(pb),
         detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
     )
     db.set_active_mask_variant(1, "sam2-large")
-    n = db.delete_inactive_masks()
+    n = db.masks_features.delete_inactive()
     assert n == 1
     assert not pa.exists()
     assert pb.exists()
-    remaining = {m["variant"] for m in db.list_masks_for_photo(1)}
+    remaining = {m["variant"] for m in db.masks_features.list_masks_for_photo(1)}
     assert remaining == {"sam2-large"}
 
 
@@ -23239,15 +23239,15 @@ def test_delete_inactive_masks_skips_photos_with_no_active(tmp_path):
     masks_dir.mkdir()
     p = masks_dir / "1.sam2-small.png"
     p.write_bytes(b"x")
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         1, "sam2-small", str(p),
         detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
     )
     # Note: NO set_active_mask_variant call — leaves active NULL.
-    n = db.delete_inactive_masks()
+    n = db.masks_features.delete_inactive()
     assert n == 0
     assert p.exists()
-    assert {m["variant"] for m in db.list_masks_for_photo(1)} == {"sam2-small"}
+    assert {m["variant"] for m in db.masks_features.list_masks_for_photo(1)} == {"sam2-small"}
 
 
 def test_find_stale_masks(tmp_path):
@@ -23263,20 +23263,20 @@ def test_find_stale_masks(tmp_path):
         "VALUES (1, 'megadetector-v6', 10, 20, 100, 200, 0.9, 'animal')"
     )
     # Mask was made from the same prompt → not stale
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         1, "sam2-small", "/p",
         detector_model="megadetector-v6",
         prompt_x=10, prompt_y=20, prompt_w=100, prompt_h=200,
     )
-    assert db.find_stale_masks() == []
+    assert db.masks_features.find_stale() == []
 
     # Insert a mask whose prompt no longer matches the current detection
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         1, "sam2-large", "/q",
         detector_model="megadetector-v6",
         prompt_x=99, prompt_y=20, prompt_w=100, prompt_h=200,
     )
-    stale = db.find_stale_masks()
+    stale = db.masks_features.find_stale()
     assert {(s["photo_id"], s["variant"]) for s in stale} == {(1, "sam2-large")}
 
 
@@ -23308,12 +23308,12 @@ def test_find_stale_masks_compares_against_primary_detection_only(tmp_path):
         "box_w, box_h, detector_confidence, category) "
         "VALUES (1, 'megadetector-v6', 10, 20, 100, 200, 0.30, 'animal')"
     )
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         1, "sam2-small", "/p",
         detector_model="megadetector-v6",
         prompt_x=10, prompt_y=20, prompt_w=100, prompt_h=200,
     )
-    stale = db.find_stale_masks()
+    stale = db.masks_features.find_stale()
     assert {(s["photo_id"], s["variant"]) for s in stale} == {
         (1, "sam2-small")
     }, (
@@ -23321,12 +23321,12 @@ def test_find_stale_masks_compares_against_primary_detection_only(tmp_path):
     )
 
     # Sanity: the mask for the current primary's prompt is still fresh.
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         1, "sam2-large", "/q",
         detector_model="megadetector-v6",
         prompt_x=200, prompt_y=200, prompt_w=50, prompt_h=50,
     )
-    stale = db.find_stale_masks()
+    stale = db.masks_features.find_stale()
     assert {(s["photo_id"], s["variant"]) for s in stale} == {
         (1, "sam2-small")
     }
@@ -23353,22 +23353,22 @@ def test_find_stale_masks_preserves_real_precision_bbox(tmp_path):
         "VALUES (1, 'megadetector-v6', 0.123, 0.456, 0.300, 0.400, 0.9, 'animal')"
     )
     # Mask was made from the same REAL prompt → not stale.
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         1, "sam2-small", "/p",
         detector_model="megadetector-v6",
         prompt_x=0.123, prompt_y=0.456, prompt_w=0.300, prompt_h=0.400,
     )
-    assert db.find_stale_masks() == []
+    assert db.masks_features.find_stale() == []
 
     # Mask whose prompt matches what the prior int() truncation would
     # have written. The actual detection has moved (any normalized
     # value), so this mask must be stale.
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         1, "sam2-large", "/q",
         detector_model="megadetector-v6",
         prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
     )
-    stale = db.find_stale_masks()
+    stale = db.masks_features.find_stale()
     assert {(s["photo_id"], s["variant"]) for s in stale} == {
         (1, "sam2-large")
     }
@@ -23394,7 +23394,7 @@ def test_find_stale_masks_applies_detector_confidence_floor(tmp_path):
         "box_w, box_h, detector_confidence, category) "
         "VALUES (1, 'megadetector-v6', 0.10, 0.20, 0.30, 0.40, 0.15, 'animal')"
     )
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         1, "sam2-small", "/p",
         detector_model="megadetector-v6",
         prompt_x=0.10, prompt_y=0.20, prompt_w=0.30, prompt_h=0.40,
@@ -23408,7 +23408,7 @@ def test_find_stale_masks_applies_detector_confidence_floor(tmp_path):
         "box_w, box_h, detector_confidence, category) "
         "VALUES (2, 'megadetector-v6', 0.50, 0.50, 0.20, 0.20, 0.90, 'animal')"
     )
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         2, "sam2-small", "/q",
         detector_model="megadetector-v6",
         prompt_x=0.50, prompt_y=0.50, prompt_w=0.20, prompt_h=0.20,
@@ -23417,13 +23417,13 @@ def test_find_stale_masks_applies_detector_confidence_floor(tmp_path):
     # No floor: photo 1's mask matches its (low-confidence) detection,
     # so neither mask is stale. Preserves prior behavior for callers
     # that don't pass a threshold.
-    assert db.find_stale_masks() == []
+    assert db.masks_features.find_stale() == []
 
     # Floor at 0.5: photo 1's only detection (0.15) is invisible, so
     # there's no primary detection for the mask to match against and
     # the mask is stale. Photo 2's mask matches its 0.90 detection and
     # stays fresh.
-    stale = db.find_stale_masks(detector_confidence=0.5)
+    stale = db.masks_features.find_stale(detector_confidence=0.5)
     assert {(s["photo_id"], s["variant"]) for s in stale} == {
         (1, "sam2-small")
     }
@@ -23454,16 +23454,16 @@ def test_find_stale_masks_floor_drops_below_threshold_match(tmp_path):
         "box_w, box_h, detector_confidence, category) "
         "VALUES (1, 'megadetector-v6', 0.20, 0.20, 0.10, 0.10, 0.30, 'animal')"
     )
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         1, "sam2-small", "/p",
         detector_model="megadetector-v6",
         prompt_x=0.10, prompt_y=0.10, prompt_w=0.10, prompt_h=0.10,
     )
     # Without floor: the 0.40 box is the primary, its prompt equals
     # the cached one → fresh.
-    assert db.find_stale_masks() == []
+    assert db.masks_features.find_stale() == []
     # With floor 0.5: nothing visible, cached mask is stale.
-    stale = db.find_stale_masks(detector_confidence=0.5)
+    stale = db.masks_features.find_stale(detector_confidence=0.5)
     assert {(s["photo_id"], s["variant"]) for s in stale} == {
         (1, "sam2-small")
     }
@@ -23490,7 +23490,7 @@ def test_delete_stale_masks_honors_detector_confidence(tmp_path):
     masks_dir.mkdir()
     p = masks_dir / "1.sam2-small.png"
     p.write_bytes(b"x")
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         1, "sam2-small", str(p),
         detector_model="megadetector-v6",
         prompt_x=0.10, prompt_y=0.10, prompt_w=0.10, prompt_h=0.10,
@@ -23581,12 +23581,12 @@ def test_delete_stale_masks(tmp_path):
     fresh.write_bytes(b"f")
     stale_path = masks_dir / "1.sam2-large.png"
     stale_path.write_bytes(b"s")
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         1, "sam2-small", str(fresh),
         detector_model="megadetector-v6",
         prompt_x=10, prompt_y=20, prompt_w=100, prompt_h=200,
     )
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         1, "sam2-large", str(stale_path),
         detector_model="megadetector-v6",
         prompt_x=99, prompt_y=20, prompt_w=100, prompt_h=200,
@@ -23595,7 +23595,7 @@ def test_delete_stale_masks(tmp_path):
     assert deleted == 1
     assert fresh.exists()
     assert not stale_path.exists()
-    assert {m["variant"] for m in db.list_masks_for_photo(1)} == {"sam2-small"}
+    assert {m["variant"] for m in db.masks_features.list_masks_for_photo(1)} == {"sam2-small"}
 
 
 def test_find_stale_masks_breaks_primary_ties_deterministically(tmp_path):
@@ -23628,24 +23628,24 @@ def test_find_stale_masks_breaks_primary_ties_deterministically(tmp_path):
 
     # Mask matching the LATER tied row (the one extraction does NOT
     # pick) must be stale: extraction would not regenerate from it.
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         1, "sam2-small", "/p",
         detector_model="megadetector-v6",
         prompt_x=0.20, prompt_y=0.20, prompt_w=0.20, prompt_h=0.20,
     )
-    stale = db.find_stale_masks()
+    stale = db.masks_features.find_stale()
     assert {(s["photo_id"], s["variant"]) for s in stale} == {
         (1, "sam2-small")
     }
 
     # Mask matching the FIRST tied row (the deterministic primary) is
     # fresh.
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         1, "sam2-large", "/q",
         detector_model="megadetector-v6",
         prompt_x=0.10, prompt_y=0.10, prompt_w=0.10, prompt_h=0.10,
     )
-    stale = db.find_stale_masks()
+    stale = db.masks_features.find_stale()
     assert {(s["photo_id"], s["variant"]) for s in stale} == {
         (1, "sam2-small")
     }
@@ -23671,27 +23671,27 @@ def test_delete_masks_refuses_paths_outside_masks_dir(tmp_path):
     # File outside the masks directory — must be untouched.
     outside = tmp_path / "evil.png"
     outside.write_bytes(b"important")
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         1, "sam2-small", str(outside),
         detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
     )
 
-    db.delete_masks_for_variant("sam2-small")
+    db.masks_features.delete_for_variant("sam2-small")
     assert outside.exists(), "file outside masks dir was deleted"
 
     # Same protection on delete_inactive_masks.
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         1, "sam2-small", str(outside),
         detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
     )
     inside = masks_dir / "1.sam2-large.png"
     inside.write_bytes(b"in")
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         1, "sam2-large", str(inside),
         detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
     )
     db.set_active_mask_variant(1, "sam2-large")
-    db.delete_inactive_masks()
+    db.masks_features.delete_inactive()
     assert outside.exists(), "delete_inactive_masks unlinked outside path"
     # Active variant inside masks dir is preserved.
     assert inside.exists()
@@ -23705,7 +23705,7 @@ def test_delete_masks_refuses_paths_outside_masks_dir(tmp_path):
     )
     stale_outside = tmp_path / "stale.png"
     stale_outside.write_bytes(b"stale")
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         1, "sam2-small", str(stale_outside),
         detector_model="md", prompt_x=1, prompt_y=1, prompt_w=1, prompt_h=1,
     )
@@ -23732,13 +23732,13 @@ def test_mask_variants_summary(tmp_path):
     ]:
         p = md / f"{pid}.{var}.png"
         p.write_bytes(b"x" * size)
-        db.upsert_photo_mask(
+        db.masks_features.upsert_mask(
             pid, var, str(p),
             detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
         )
     db.set_active_mask_variant(1, "sam2-large")
 
-    summary = {s["variant"]: s for s in db.mask_variants_summary()}
+    summary = {s["variant"]: s for s in db.masks_features.variants_summary()}
     assert summary["sam2-small"]["count"] == 2
     assert summary["sam2-small"]["bytes"] == 300
     assert summary["sam2-large"]["count"] == 1
@@ -23768,27 +23768,27 @@ def test_mask_variant_coverage_is_workspace_scoped(tmp_path):
     p3 = db.add_photo(folder_id=f_out, filename="c.jpg", extension=".jpg",
                       file_size=1, file_mtime=1.0)
 
-    db.upsert_photo_mask(p1, "sam2-small", "/p/a.small.png",
+    db.masks_features.upsert_mask(p1, "sam2-small", "/p/a.small.png",
         detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0)
-    db.upsert_photo_mask(p1, "sam2-large", "/p/a.large.png",
+    db.masks_features.upsert_mask(p1, "sam2-large", "/p/a.large.png",
         detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0)
-    db.upsert_photo_mask(p2, "sam2-small", "/p/b.small.png",
+    db.masks_features.upsert_mask(p2, "sam2-small", "/p/b.small.png",
         detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0)
     # p3 lives outside ws_in — its sam2-large row must NOT be counted.
-    db.upsert_photo_mask(p3, "sam2-large", "/p/c.large.png",
+    db.masks_features.upsert_mask(p3, "sam2-large", "/p/c.large.png",
         detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0)
 
     db.set_active_mask_variant(p1, "sam2-large")
 
     db.set_active_workspace(ws_in)
-    cov = {c["variant"]: c for c in db.mask_variant_coverage()}
+    cov = {c["variant"]: c for c in db.masks_features.variant_coverage()}
     assert cov["sam2-small"]["count"] == 2
     assert cov["sam2-small"]["active_count"] == 0
     assert cov["sam2-large"]["count"] == 1  # p3 excluded
     assert cov["sam2-large"]["active_count"] == 1
 
     db.set_active_workspace(ws_out)
-    cov_out = {c["variant"]: c for c in db.mask_variant_coverage()}
+    cov_out = {c["variant"]: c for c in db.masks_features.variant_coverage()}
     assert cov_out["sam2-large"]["count"] == 1
     assert "sam2-small" not in cov_out
 
@@ -23829,7 +23829,7 @@ def test_update_photo_pipeline_features_stamps_eye_kp_fingerprint(tmp_path):
         "INSERT INTO photos(id, folder_id, filename) VALUES (1, 1, 'a.jpg')"
     )
     db.conn.commit()
-    db.update_photo_pipeline_features(
+    db.masks_features.update_pipeline_features(
         1, eye_x=0.5, eye_y=0.5, eye_conf=0.9, eye_tenengrad=12.0,
         eye_kp_fingerprint=EYE_KP_FINGERPRINT_VERSION,
     )
@@ -23849,7 +23849,7 @@ def test_update_photo_pipeline_features_skips_eye_kp_fingerprint_when_unset(tmp_
         "VALUES (1, 1, 'a.jpg', 'preexisting')"
     )
     db.conn.commit()
-    db.update_photo_pipeline_features(1, eye_x=0.5, eye_y=0.5)
+    db.masks_features.update_pipeline_features(1, eye_x=0.5, eye_y=0.5)
     fp = db.conn.execute(
         "SELECT eye_kp_fingerprint FROM photos WHERE id=1"
     ).fetchone()[0]
@@ -24109,7 +24109,7 @@ def test_eye_keypoint_stage_chunks_large_photo_id_scope(tmp_path):
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8}, "confidence": 0.9}],
             detector_model="MegaDetector",
         )
-        db.upsert_photo_mask(
+        db.masks_features.upsert_mask(
             photo_id=pid, variant="test",
             path=str(tmp_path / "mask.png"),
             detector_model="MegaDetector",

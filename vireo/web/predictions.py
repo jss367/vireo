@@ -292,10 +292,10 @@ def create_predictions_blueprint(
             effective_cfg = db.get_effective_config(cfg.load())
             response["match_states"] = {
                 str(pid): match_confidence.summarize_photo(
-                    db.get_match_scores_for_photo(pid),
+                    db.model_runs.get_match_scores_for_photo(pid),
                     effective_cfg,
                     unscored_current_runs=(
-                        db.get_unscored_current_prediction_runs(pid)
+                        db.model_runs.get_unscored_current_prediction_runs(pid)
                     ),
                 )
                 for pid in explicit_photo_ids

@@ -96,7 +96,7 @@ def seed_e2e_data(db, thumb_dir):
             model="BioCLIP-2",
             labels_fingerprint=TOL_SENTINEL,
         )
-        db.record_classifier_run(
+        db.model_runs.record_classifier_run(
             detection_id=det_ids[0],
             classifier_model="BioCLIP-2",
             labels_fingerprint=TOL_SENTINEL,

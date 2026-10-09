@@ -66,10 +66,10 @@ def test_complete_review_replaces_species_preserves_other_tags_and_queues_xmp(wr
     assert ('keyword_remove', 'Spotted Redshank') in pending
     stored_name = db.conn.execute('SELECT name FROM keywords WHERE source_taxon_id=102').fetchone()[0]
     assert ('keyword_add', stored_name) in pending
-    assert len(db.get_edit_history()) == 2
+    assert len(db.edit_history.list_recent()) == 2
     with connect(queue) as conn:
         assert sync_review_tags(conn, pid)['status'] == 'applied'
-    assert len(db.get_edit_history()) == 2
+    assert len(db.edit_history.list_recent()) == 2
     # Each change uses existing undo handlers.
     assert db.undo_last_edit()
     assert db.undo_last_edit()
@@ -127,7 +127,7 @@ def test_retry_after_library_commit_does_not_repeat_or_overwrite_later_edits(wri
     with connect(queue) as conn:
         assert sync_review_tags(conn, pid)['status'] == 'applied'
     assert keywords(db, pid) == preserved
-    assert len(db.get_edit_history()) == 2
+    assert len(db.edit_history.list_recent()) == 2
 
 
 @pytest.mark.parametrize('change', ['identity', 'hash_cleared', 'workspace'])

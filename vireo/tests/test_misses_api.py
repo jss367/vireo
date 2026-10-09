@@ -650,7 +650,7 @@ def test_api_bulk_reject_records_edit_history(client, db_with_misses):
     assert r.status_code == 200
     assert r.get_json()["rejected"] == 1
 
-    history = db.get_edit_history(limit=5, offset=0)
+    history = db.edit_history.list_recent(limit=5, offset=0)
     assert history, "bulk reject did not record an edit_history entry"
     entry = history[0]
     assert entry["action_type"] == "flag"
@@ -707,7 +707,7 @@ def test_api_bulk_reject_no_matches_skips_edit_history(client, db_with_misses):
     """If nothing matches (empty category), no edit_history entry is written —
     avoids cluttering the undo log with no-op rows."""
     _, db, _ = db_with_misses
-    before = len(db.get_edit_history(limit=50, offset=0))
+    before = len(db.edit_history.list_recent(limit=50, offset=0))
     r = client.post(
         "/api/misses/reject",
         data=json.dumps({"category": "clipped",
@@ -716,7 +716,7 @@ def test_api_bulk_reject_no_matches_skips_edit_history(client, db_with_misses):
     )
     assert r.status_code == 200
     assert r.get_json()["rejected"] == 0
-    after = len(db.get_edit_history(limit=50, offset=0))
+    after = len(db.edit_history.list_recent(limit=50, offset=0))
     assert before == after
 
 

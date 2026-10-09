@@ -2716,8 +2716,8 @@ def _load_active_mask(db, photo_id):
     from PIL import Image
 
     for _attempt in range(3):
-        variant = db.get_active_mask_variant(photo_id)
-        mask_row = db.get_photo_mask(photo_id, variant) if variant else None
+        variant = db.masks_features.active_variant(photo_id)
+        mask_row = db.masks_features.get_mask(photo_id, variant) if variant else None
         if not mask_row or not mask_row.get("path"):
             return None
         try:
@@ -3029,10 +3029,10 @@ def create_media_blueprint(
         pid = int(m.group(1))
         db = get_db()
         real = os.path.realpath(mask_path)
-        for mask in db.list_masks_for_photo(pid):
+        for mask in db.masks_features.list_masks_for_photo(pid):
             if mask["path"] and os.path.realpath(mask["path"]) == real:
                 return True
-        mask_path = db.get_photo_mask_path(pid)
+        mask_path = db.masks_features.photo_mask_path(pid)
         return bool(mask_path and os.path.realpath(mask_path) == real)
 
     def _read_mask_bytes(mask_path):
@@ -3087,9 +3087,9 @@ def create_media_blueprint(
             # lookup but before open. Re-resolve after that narrow race; do
             # not block this HTTP request on full model regeneration.
             for _attempt in range(3):
-                active = db.get_active_mask_variant(pid)
+                active = db.masks_features.active_variant(pid)
                 if active:
-                    mask = db.get_photo_mask(pid, active)
+                    mask = db.masks_features.get_mask(pid, active)
                     if mask and mask.get("path"):
                         masks_dir_real = os.path.realpath(masks_dir)
                         abs_path = os.path.realpath(mask["path"])
@@ -3130,7 +3130,7 @@ def create_media_blueprint(
             db = get_db()
             if db.get_photo(pid, verify_workspace=True) is None:
                 return "", 404
-            mask = db.get_photo_mask(pid, variant)
+            mask = db.masks_features.get_mask(pid, variant)
             if mask is None or not mask.get("path"):
                 return "", 404
             masks_dir = os.path.realpath(
@@ -3158,8 +3158,8 @@ def create_media_blueprint(
         db = get_db()
         if db.get_photo(pid, verify_workspace=True) is None:
             return photo_not_found_error()
-        masks = db.list_masks_for_photo(pid)
-        active = db.get_active_mask_variant(pid)
+        masks = db.masks_features.list_masks_for_photo(pid)
+        active = db.masks_features.active_variant(pid)
         return jsonify({
             "photo_id": pid,
             "active": active,

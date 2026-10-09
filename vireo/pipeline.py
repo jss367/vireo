@@ -637,7 +637,7 @@ class _FeatureLoad:
         # photos imported after the last classify run). Treating those as
         # "subject_absent" would conflate "unknown" with "detector confirmed
         # empty" and create false asymmetric cuts in compute_s_enc.
-        self.detected_photo_ids = self.db.get_detector_run_photo_ids(
+        self.detected_photo_ids = self.db.model_runs.get_detector_run_photo_ids(
             "megadetector-v6",
         )
 
@@ -2398,7 +2398,7 @@ def _process_photo_for_eye(db, row, folders, *, C, T, k_window):
         # the photo out of future runs even after the user lowers the gate
         # or adds the missing model — a functional regression. Those photos
         # remain on the to-do list and are cheaply re-skipped on each run.
-        db.update_photo_pipeline_features(
+        db.masks_features.update_pipeline_features(
             row["id"],
             eye_x=None,
             eye_y=None,
@@ -2540,7 +2540,7 @@ def _process_photo_for_eye(db, row, folders, *, C, T, k_window):
         # the un-oriented sensor tag so the math goes wrong on orientation
         # 6/8; (b) this matches the detection-box storage convention
         # (box_x/box_y are also normalized 0-1).
-        db.update_photo_pipeline_features(
+        db.masks_features.update_pipeline_features(
             row["id"],
             eye_x=best["x"] / float(iw),
             eye_y=best["y"] / float(ih),

@@ -310,7 +310,7 @@ def test_reports_persist_per_detection_and_cascade(tmp_path):
         for x in (0.1, 0.6)
     ], detector_model="megadetector-v6")
     for index, det in enumerate(db.get_detections(photo)):
-        db.save_subject_raw_analysis(det["id"], {"recipe": ra.RECIPE, "exposure_ev": index})
+        db.masks_features.save_subject_raw_analysis(det["id"], {"recipe": ra.RECIPE, "exposure_ev": index})
     rows = db.conn.execute("SELECT report_json FROM subject_raw_analysis").fetchall()
     assert sorted(json.loads(row[0])["exposure_ev"] for row in rows) == [0, 1]
     db.conn.execute("DELETE FROM detections WHERE photo_id=?", (photo,))
@@ -342,7 +342,7 @@ def test_reinference_replaces_candidates_preserving_surviving_reviews(tmp_path, 
     db.add_prediction(detection, "Stale species", 0.99, "model", labels_fingerprint="labels")
     db.add_prediction(detection, "Other labels", 0.7, "model", labels_fingerprint="other-labels")
     db.add_prediction(detection, "Other model", 0.7, "other-model", labels_fingerprint="labels")
-    db.record_classifier_run(detection, "model", "labels", prediction_count=2)
+    db.model_runs.record_classifier_run(detection, "model", "labels", prediction_count=2)
     item = {
         "detection_id": detection, "prediction": "Robin", "confidence": 0.9,
         "taxonomy": {"genus": "Turdus", "scientific_name": "Turdus migratorius"},
@@ -435,17 +435,17 @@ def test_normal_cache_gate_rejects_reviewed_raw_recipe(tmp_path, status):
         "confidence": 0.9, "category": "animal",
     }], detector_model="megadetector-v6")[0]
     db.add_prediction(detection, "Robin", 0.9, "model", status=status)
-    db.record_classifier_run(detection, "model", "legacy", 1,
+    db.model_runs.record_classifier_run(detection, "model", "legacy", 1,
                              runtime_fingerprint="raw-runtime", input_recipe=ra.RECIPE)
     from classify_job import _all_photos_cache_satisfied
 
     assert not _all_photos_cache_satisfied(db, [photo], classifier_model="model", labels_fingerprint="legacy")
-    assert db.get_classifier_run_keys(detection) == set()
-    assert db.get_classifier_run_keys(detection, "normal-runtime") == set()
-    assert db.get_classifier_run_key_gate(detection, "normal-runtime") == (set(), {("model", "legacy")})
+    assert db.model_runs.get_classifier_run_keys(detection) == set()
+    assert db.model_runs.get_classifier_run_keys(detection, "normal-runtime") == set()
+    assert db.model_runs.get_classifier_run_key_gate(detection, "normal-runtime") == (set(), {("model", "legacy")})
     assert db.get_classifier_run_cache_hits([photo], "model", "legacy") == set()
     # Normal runtime changes keep the existing manual-review exception.
-    db.record_classifier_run(detection, "model", "legacy", 1, runtime_fingerprint="normal-runtime")
-    assert db.get_classifier_run_key_gate(detection, "new-normal-runtime") == ({("model", "legacy")}, set())
+    db.model_runs.record_classifier_run(detection, "model", "legacy", 1, runtime_fingerprint="normal-runtime")
+    assert db.model_runs.get_classifier_run_key_gate(detection, "new-normal-runtime") == ({("model", "legacy")}, set())
     assert db.get_classifier_run_cache_hits([photo], "model", "legacy") == {photo}
     db.close()

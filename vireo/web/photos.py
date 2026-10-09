@@ -1431,7 +1431,7 @@ def create_photos_blueprint(
             })
 
         # Load embeddings for current model
-        emb_pairs = db.get_photos_with_embedding(
+        emb_pairs = db.masks_features.photos_with_embedding(
             model_name, photo_ids=candidate_photo_ids
         )
         if not emb_pairs:
@@ -1527,7 +1527,7 @@ def create_photos_blueprint(
         if active_model.get("model_type", "bioclip") == "timm":
             return json_error("Active classifier does not produce embeddings")
 
-        source_blob = db.get_photo_embedding(photo_id, model_name)
+        source_blob = db.masks_features.get_embedding(photo_id, model_name)
         if not source_blob:
             return json_error(
                 f"No {model_name} embedding for this photo — "
@@ -1539,7 +1539,7 @@ def create_photos_blueprint(
         # source photo before stacking.
         rows = [
             (pid, blob)
-            for pid, blob in db.get_photos_with_embedding(model_name)
+            for pid, blob in db.masks_features.photos_with_embedding(model_name)
             if pid != photo_id
         ]
 

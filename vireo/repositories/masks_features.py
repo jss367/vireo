@@ -5,63 +5,88 @@ feature columns on ``photos`` are catalog-wide: a mask or an embedding is a
 pure function of the photo and the model that produced it. The selectors
 that the pipeline page and stages read (variant coverage, the SAM rerun
 warning, the mask and eye-keypoint stage queues, stored embeddings) are
-scoped to the active workspace through ``self.workspace_id``, which the
-façade resolves with ``Database._ws_id()`` when it builds the repository.
+scoped to the active workspace through ``self.workspace_id``, which resolves
+``workspace_id_fn`` (``Database._ws_id``) when read: each of them reads it
+before running any SQL, so with no workspace active they raise
+``RuntimeError`` having touched nothing. Building the repository never
+resolves it, and the photo- and variant-keyed methods never read it.
 
-``Database`` keeps everything that is not SQL: the workspace detector floor
-(``get_effective_config``), the photo-scope clause (``_scope_clause``), the
-workspace guard on embedding writes, and the masks-directory containment
-check (``_safe_remove_mask_file``), which the cleanup deletes receive as the
-``remove_file`` callback so file removal keeps its place between the reads
-and the ``DELETE``.
+Callers reach it as ``db.masks_features`` (a fresh repository per access,
+see ``Database.masks_features``); there are no forwarding wrappers on
+``Database``. It keeps everything that is not SQL: the workspace detector
+floor (``get_effective_config``), the photo-scope clause (``_scope_clause``),
+the workspace guard on embedding writes, and the masks-directory containment
+check (``_safe_remove_mask_file``), which the cleanup deletes receive as
+``remove_file`` so file removal keeps its place between the reads and the
+``DELETE``.
 """
 
 import json
 import os
+import sqlite3
 import time
+from collections.abc import Callable, Iterable, Sequence
+from typing import Any
 
 from repositories import UNSET
 
 
 class MasksFeaturesRepository:
-    def __init__(self, conn, workspace_id, *, commit_with_retry):
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        workspace_id_fn: Callable[[], int],
+        *,
+        commit_with_retry: Callable[[sqlite3.Connection], None],
+        remove_file: Callable[[str], None],
+    ) -> None:
         self.conn = conn
-        self.workspace_id = workspace_id
+        self.workspace_id_fn = workspace_id_fn
         # ``db.commit_with_retry``, passed in so repositories import no
         # ``db`` code and a monkeypatch of the module function still applies.
         self.commit_with_retry = commit_with_retry
+        # ``Database._safe_remove_mask_file``: deletes a mask file only inside
+        # the masks directory.
+        self.remove_file = remove_file
+
+    @property
+    def workspace_id(self) -> int:
+        """The active workspace id, resolved at each read (raises if none)."""
+        return self.workspace_id_fn()
 
     # -- mask rows -----------------------------------------------------------
 
-    def get_mask(self, photo_id, variant):
+    def get_mask(self, photo_id: int, variant: str) -> dict[str, Any] | None:
+        """The ``photo_masks`` row for ``(photo_id, variant)`` as a dict, or None."""
         row = self.conn.execute(
             "SELECT * FROM photo_masks WHERE photo_id=? AND variant=?",
             (photo_id, variant),
         ).fetchone()
         return dict(row) if row else None
 
-    def list_masks_for_photo(self, photo_id):
+    def list_masks_for_photo(self, photo_id: int) -> list[dict[str, Any]]:
+        """Every ``photo_masks`` row of one photo as dicts, newest first."""
         rows = self.conn.execute(
             "SELECT * FROM photo_masks WHERE photo_id=? ORDER BY created_at DESC",
             (photo_id,),
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def active_variant(self, photo_id):
+    def active_variant(self, photo_id: int) -> str | None:
         """The photo's ``active_mask_variant``, or None (unset or unknown id)."""
         row = self.conn.execute(
             "SELECT active_mask_variant FROM photos WHERE id=?", (photo_id,)
         ).fetchone()
         return row["active_mask_variant"] if row else None
 
-    def photo_mask_path(self, photo_id):
+    def photo_mask_path(self, photo_id: int) -> str | None:
         """The photo's denormalized ``mask_path``, or None (unset or unknown id)."""
         row = self.conn.execute(
             "SELECT mask_path FROM photos WHERE id = ?", (photo_id,)
         ).fetchone()
         return row["mask_path"] if row else None
 
-    def photo_mask_state(self, photo_id):
+    def photo_mask_state(self, photo_id: int) -> sqlite3.Row | None:
         """Row (``active_mask_variant``, ``dino_embedding_variant``,
         ``quality_input_recipe``) of the photo's mask-derived state, or None.
 
@@ -76,8 +101,10 @@ class MasksFeaturesRepository:
             (photo_id,),
         ).fetchone()
 
-    def set_active_variant(self, photo_id, variant, min_conf, _commit=True, *,
-                           weak_rescue_min_conf=None):
+    def set_active_variant(
+        self, photo_id: int, variant: str, min_conf: float, _commit: bool = True, *,
+        weak_rescue_min_conf: float | None = None,
+    ) -> None:
         """Activate ``variant`` for ``photo_id`` against the ``min_conf`` floor.
 
         ``min_conf`` is the active workspace's ``detector_confidence``,
@@ -148,11 +175,13 @@ class MasksFeaturesRepository:
 
     # -- storage cleanup -----------------------------------------------------
 
-    def delete_for_variant(self, variant, remove_file):
-        """Delete all photo_masks rows + files for a variant.
-        Refuses if the variant is active for any photo (caller must
-        switch active first). ``remove_file`` is the façade's contained
-        file delete."""
+    def delete_for_variant(self, variant: str) -> int:
+        """Delete all photo_masks rows + files for a variant and commit.
+
+        Refuses (``ValueError``) if the variant is active for any photo
+        (caller must switch active first). Files go through ``remove_file``,
+        the façade's contained delete. Returns the number of rows deleted.
+        """
         active_count = self.conn.execute(
             "SELECT COUNT(*) FROM photos WHERE active_mask_variant=?",
             (variant,),
@@ -166,16 +195,22 @@ class MasksFeaturesRepository:
             "SELECT path FROM photo_masks WHERE variant=?", (variant,),
         ).fetchall()
         for r in rows:
-            remove_file(r["path"])
+            self.remove_file(r["path"])
         self.conn.execute("DELETE FROM photo_masks WHERE variant=?", (variant,))
         self.commit_with_retry(self.conn)
         return len(rows)
 
-    def delete_inactive(self, remove_file):
+    def delete_inactive(self) -> int:
         """Delete all photo_masks rows + files except the active variant
-        per photo. Returns the number of rows deleted.
+        per photo, and commit. Returns the number of rows deleted.
 
-        Photos whose ``active_mask_variant IS NULL`` are skipped entirely.
+        Photos whose ``active_mask_variant IS NULL`` are skipped entirely
+        (we never delete the only mask we know about). The user must
+        promote a variant to active first via the pipeline page; the
+        sentinel migration variant ``'unknown'`` is set as active for
+        legacy photos, so this is only the partial-state case where a
+        prior pipeline run wrote ``photo_masks`` but crashed before
+        ``set_active_mask_variant`` ran.
         """
         rows = self.conn.execute(
             "SELECT pm.photo_id, pm.variant, pm.path FROM photo_masks pm "
@@ -184,7 +219,7 @@ class MasksFeaturesRepository:
             "  AND p.active_mask_variant != pm.variant"
         ).fetchall()
         for r in rows:
-            remove_file(r["path"])
+            self.remove_file(r["path"])
             self.conn.execute(
                 "DELETE FROM photo_masks WHERE photo_id=? AND variant=?",
                 (r["photo_id"], r["variant"]),
@@ -192,8 +227,15 @@ class MasksFeaturesRepository:
         self.commit_with_retry(self.conn)
         return len(rows)
 
-    def find_stale(self, detector_confidence=None):
-        """Return masks whose prompts differ from the selected primary."""
+    def find_stale(self, detector_confidence: float | None = None) -> list[dict[str, Any]]:
+        """Return masks whose prompts differ from the selected primary.
+
+        Selection uses the same manual-choice, quality, confidence, and ID
+        ordering as extraction. When supplied, ``detector_confidence`` hides
+        boxes below the workspace floor before selection. A mask matching a
+        secondary or now-hidden detection is stale even if its row remains
+        cached for later reuse.
+        """
         from subjects import primary_order_sql
         if detector_confidence is None:
             conf_pred = ""
@@ -229,9 +271,9 @@ class MasksFeaturesRepository:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def delete_stale(self, stale, remove_file):
-        """Remove rows + files for the ``stale`` masks (the façade's
-        ``find_stale_masks`` result), skipping active variants."""
+    def delete_stale(self, stale: Iterable[dict[str, Any]]) -> int:
+        """Remove rows + files for the ``stale`` masks (a ``find_stale``
+        result), skipping active variants, and commit. Returns the count."""
         deleted = 0
         for s in stale:
             is_active = self.conn.execute(
@@ -240,7 +282,7 @@ class MasksFeaturesRepository:
             ).fetchone()
             if is_active:
                 continue
-            remove_file(s["path"])
+            self.remove_file(s["path"])
             self.conn.execute(
                 "DELETE FROM photo_masks WHERE photo_id=? AND variant=?",
                 (s["photo_id"], s["variant"]),
@@ -251,8 +293,19 @@ class MasksFeaturesRepository:
 
     # -- coverage and summaries ----------------------------------------------
 
-    def variant_coverage(self):
-        """Per-variant photo coverage in the bound workspace."""
+    def variant_coverage(self) -> list[dict[str, Any]]:
+        """Per-variant photo coverage in the **active workspace**.
+
+        photo_masks rows are global (a single mask file is shared across
+        workspaces), but the pipeline page wants workspace-scoped numbers
+        so a user with a small workspace doesn't see counts dominated by
+        photos they can't see. For each variant present in photo_masks,
+        return the count of distinct workspace photos that have a row for
+        that variant, plus the count of those that also have it active.
+
+        Returns: list of dicts {variant, count, active_count} ordered by
+        variant name. Variants with zero workspace photos are omitted.
+        """
         ws = self.workspace_id
         rows = self.conn.execute(
             """
@@ -278,13 +331,13 @@ class MasksFeaturesRepository:
 
     def sam_variant_rerun_warning(
         self,
-        sam2_variant,
-        min_conf,
-        scope_sql,
-        scope_params,
-        selected_max_ratio=0.25,
-        alternate_min_ratio=0.80,
-    ):
+        sam2_variant: str,
+        min_conf: float,
+        scope_sql: str,
+        scope_params: Sequence[Any],
+        selected_max_ratio: float = 0.25,
+        alternate_min_ratio: float = 0.80,
+    ) -> dict[str, Any] | None:
         """Warn when selected SAM coverage is poor but another variant is high.
 
         ``min_conf`` is the detector floor and ``scope_sql`` /
@@ -360,7 +413,7 @@ class MasksFeaturesRepository:
             ),
         }
 
-    def variants_summary(self):
+    def variants_summary(self) -> list[dict[str, Any]]:
         """Per-variant summary: count, total bytes (best-effort, sums
         on-disk file sizes), and active_count.
 
@@ -398,8 +451,8 @@ class MasksFeaturesRepository:
             })
         return out
 
-    def workspace_photo_ids_with_variant(self, variant):
-        """Ids of the bound workspace's photos that have a ``variant`` mask row."""
+    def workspace_photo_ids_with_variant(self, variant: str) -> list[int]:
+        """Ids of the active workspace's photos that have a ``variant`` mask row."""
         rows = self.conn.execute(
             """
             SELECT pm.photo_id
@@ -412,7 +465,7 @@ class MasksFeaturesRepository:
         ).fetchall()
         return [r["photo_id"] for r in rows]
 
-    def pipeline_feature_row(self, photo_id):
+    def pipeline_feature_row(self, photo_id: int) -> sqlite3.Row | None:
         """One photo's pipeline-feature columns (any workspace), or None.
 
         ``id``, ``filename``, ``timestamp``, ``width``, ``height``,
@@ -432,15 +485,21 @@ class MasksFeaturesRepository:
     # -- writers -------------------------------------------------------------
 
     def upsert_mask(
-        self, photo_id, variant, path,
-        detector_model, prompt_x, prompt_y, prompt_w, prompt_h,
-        subject_size=None, subject_tenengrad=None,
-        bg_tenengrad=None, crop_complete=None, _commit=True,
-        quality_input_recipe=None,
-        subject_clip_high=None, subject_clip_low=None, subject_y_median=None,
-        bg_separation=None, phash_crop=None, noise_estimate=None,
-    ):
-        """Insert or replace a mask row for (photo_id, variant)."""
+        self, photo_id: int, variant: str, path: str,
+        detector_model: str | None, prompt_x: float | None, prompt_y: float | None,
+        prompt_w: float | None, prompt_h: float | None,
+        subject_size: float | None = None, subject_tenengrad: float | None = None,
+        bg_tenengrad: float | None = None, crop_complete: float | None = None, _commit: bool = True,
+        quality_input_recipe: str | None = None,
+        subject_clip_high: float | None = None, subject_clip_low: float | None = None,
+        subject_y_median: float | None = None,
+        bg_separation: float | None = None, phash_crop: str | None = None, noise_estimate: float | None = None,
+    ) -> None:
+        """Insert or replace a mask row for (photo_id, variant).
+
+        ``_commit=False`` lets a caller include the row in a larger atomic
+        per-photo persistence transaction.
+        """
         self.conn.execute(
             """
             INSERT INTO photo_masks (
@@ -478,7 +537,7 @@ class MasksFeaturesRepository:
         if _commit:
             self.commit_with_retry(self.conn)
 
-    def save_subject_raw_analysis(self, detection_id, report, _commit=True):
+    def save_subject_raw_analysis(self, detection_id: int, report: dict[str, Any], _commit: bool = True) -> None:
         """Keep original and corrected measurements together for each detection."""
         self.conn.execute(
             "INSERT INTO subject_raw_analysis(detection_id, recipe, report_json, created_at) "
@@ -491,28 +550,31 @@ class MasksFeaturesRepository:
 
     def update_pipeline_features(
         self,
-        photo_id,
-        mask_path=UNSET,
-        subject_tenengrad=UNSET,
-        bg_tenengrad=UNSET,
-        crop_complete=UNSET,
-        bg_separation=UNSET,
-        subject_clip_high=UNSET,
-        subject_clip_low=UNSET,
-        subject_y_median=UNSET,
-        phash_crop=UNSET,
-        noise_estimate=UNSET,
-        eye_x=UNSET,
-        eye_y=UNSET,
-        eye_conf=UNSET,
-        eye_tenengrad=UNSET,
-        eye_kp_fingerprint=UNSET,
-        quality_input_recipe=UNSET,
-        _commit=True,
-    ):
+        photo_id: int,
+        mask_path: Any = UNSET,
+        subject_tenengrad: Any = UNSET,
+        bg_tenengrad: Any = UNSET,
+        crop_complete: Any = UNSET,
+        bg_separation: Any = UNSET,
+        subject_clip_high: Any = UNSET,
+        subject_clip_low: Any = UNSET,
+        subject_y_median: Any = UNSET,
+        phash_crop: Any = UNSET,
+        noise_estimate: Any = UNSET,
+        eye_x: Any = UNSET,
+        eye_y: Any = UNSET,
+        eye_conf: Any = UNSET,
+        eye_tenengrad: Any = UNSET,
+        eye_kp_fingerprint: Any = UNSET,
+        quality_input_recipe: Any = UNSET,
+        _commit: bool = True,
+    ) -> None:
         """Update pipeline feature columns for a photo.
 
-        Only updates columns whose values are explicitly provided (not UNSET).
+        Only updates columns whose values are explicitly provided (not
+        ``UNSET``; an explicit ``None`` clears the column). ``_commit=False``
+        lets a caller include the update in a larger atomic per-photo
+        persistence transaction.
         """
         cols = {
             "mask_path": mask_path,
@@ -546,8 +608,8 @@ class MasksFeaturesRepository:
 
     # -- stage selectors -----------------------------------------------------
 
-    def workspace_mask_candidate_detections(self, min_conf):
-        """Every real detection of the bound workspace's photos, primary first.
+    def workspace_mask_candidate_detections(self, min_conf: float) -> list[sqlite3.Row]:
+        """Every real detection of the active workspace's photos, primary first.
 
         Rows (``id``, ``folder_id``, ``filename``, ``detector_model``, the
         box and ``detector_confidence``) for each non-``full-image``
@@ -573,8 +635,8 @@ class MasksFeaturesRepository:
             (self.workspace_id, min_conf),
         ).fetchall()
 
-    def photos_missing_masks(self, folder_ids, min_conf):
-        """Photos in the bound workspace with detections but no mask yet.
+    def photos_missing_masks(self, folder_ids: Sequence[int] | None, min_conf: float) -> list[dict[str, Any]]:
+        """Photos in the active workspace with detections but no mask yet.
 
         ``min_conf`` is the workspace detector floor, resolved by the façade.
         """
@@ -636,9 +698,10 @@ class MasksFeaturesRepository:
         return result
 
     def list_photos_for_eye_keypoint_stage(
-        self, min_conf, extra_where, scope_params, *, eye_kp_fingerprint_version,
-    ):
-        """Photos in the bound workspace eligible for the eye-keypoint stage.
+        self, min_conf: float, extra_where: str, scope_params: Sequence[Any], *,
+        eye_kp_fingerprint_version: str,
+    ) -> list[dict[str, Any]]:
+        """Photos in the active workspace eligible for the eye-keypoint stage.
 
         ``min_conf`` (detector floor), ``extra_where`` / ``scope_params``
         (photo scope) and ``eye_kp_fingerprint_version`` (the pipeline's
@@ -755,10 +818,18 @@ class MasksFeaturesRepository:
     # -- embeddings ----------------------------------------------------------
 
     def update_embeddings(
-        self, photo_id, dino_subject_embedding=None, dino_global_embedding=None,
-        variant=None, _commit=True,
-    ):
-        """Store DINOv2 embedding BLOBs (and their variant) on the photo row."""
+        self, photo_id: int, dino_subject_embedding: bytes | None = None,
+        dino_global_embedding: bytes | None = None,
+        variant: str | None = None, _commit: bool = True,
+    ) -> None:
+        """Store DINOv2 embedding BLOBs (and their variant) on the photo row.
+
+        ``variant`` names the DINOv2 variant that produced the embeddings
+        (e.g. "vit-b14"), so the pipeline can detect stale embeddings after a
+        variant switch and drop them instead of feeding mismatched-dim vectors
+        to cosine similarity. ``_commit=False`` only when the caller owns a
+        larger transaction and will commit it.
+        """
         self.conn.execute(
             "UPDATE photos SET dino_subject_embedding=?, dino_global_embedding=?, "
             "dino_embedding_variant=? WHERE id=?",
@@ -767,7 +838,7 @@ class MasksFeaturesRepository:
         if _commit:
             self.commit_with_retry(self.conn)
 
-    def get_embedding(self, photo_id, model, variant=''):
+    def get_embedding(self, photo_id: int, model: str, variant: str = '') -> bytes | None:
         """Return the embedding blob for (photo_id, model, variant), or None."""
         row = self.conn.execute(
             "SELECT embedding FROM photo_embeddings "
@@ -776,7 +847,7 @@ class MasksFeaturesRepository:
         ).fetchone()
         return row["embedding"] if row else None
 
-    def upsert_embedding(self, photo_id, model, embedding_bytes, variant=''):
+    def upsert_embedding(self, photo_id: int, model: str, embedding_bytes: bytes, variant: str = '') -> None:
         """Store an embedding blob for (photo_id, model, variant) and commit."""
         self.conn.execute(
             """INSERT INTO photo_embeddings (photo_id, model, variant, embedding)
@@ -789,9 +860,10 @@ class MasksFeaturesRepository:
         self.conn.commit()
 
     def photos_with_embedding(
-        self, model, variant='', photo_ids=None, include_offline_folders=False,
-    ):
-        """Return (photo_id, embedding_blob) pairs in the bound workspace
+        self, model: str, variant: str = '', photo_ids: Sequence[int] | None = None,
+        include_offline_folders: bool = False,
+    ) -> list[tuple[int, bytes]]:
+        """Return (photo_id, embedding_blob) pairs in the active workspace
         with a stored embedding for ``(model, variant)``.
 
         Pass ``photo_ids`` to restrict the result to a subset.

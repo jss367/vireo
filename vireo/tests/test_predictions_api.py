@@ -1266,7 +1266,7 @@ def test_group_apply_writes_every_side_effect_in_one_transaction(
         PhotoReviewRepository, "_verify_photo", detached_for_b,
     )
 
-    history_before = len(db.get_edit_history(limit=100))
+    history_before = len(db.edit_history.list_recent(limit=100))
     resp = client.post('/api/predictions/group/apply', json={
         'picks': [photo_a, photo_b],
         'rejects': [],
@@ -1283,7 +1283,7 @@ def test_group_apply_writes_every_side_effect_in_one_transaction(
     assert not [
         c for c in db.pending_changes.list_all() if c['photo_id'] == photo_a
     ]
-    assert len(db.get_edit_history(limit=100)) == history_before
+    assert len(db.edit_history.list_recent(limit=100)) == history_before
     # Not even the keyword row: ``add_keyword`` runs inside the same
     # transaction, so a refused burst leaves no orphan species behind.
     assert db.conn.execute(

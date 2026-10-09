@@ -156,7 +156,7 @@ def create_folders_blueprint(
         # also recognizing read-only inheritance from a recursive root. This
         # prevents callers from using hidden folder IDs to enumerate workspace
         # names without mutating the membership table during a GET.
-        folder_workspaces = db.get_folder_workspaces(folder_id)
+        folder_workspaces = db.workspace_folders.list_workspaces_for_folder(folder_id)
         if not any(
             workspace["id"] == db.active_workspace_id
             for workspace in folder_workspaces
@@ -349,7 +349,7 @@ def create_folders_blueprint(
         # no claim on — otherwise a stale UI or crafted request could pollute
         # this workspace with scan output from an unrelated folder, and
         # add_folder's auto-link would silently attach it.
-        if not db.workspace_has_direct_folder_link(ctx.workspace_id, folder_id):
+        if not db.workspace_folders.has_direct_link(ctx.workspace_id, folder_id):
             return json_error("folder not found", 404)
         root = folder["path"]
         from image_loader import is_excluded_scan_path

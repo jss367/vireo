@@ -27,7 +27,7 @@ def _setup_db(tmp_path):
             fid, f"photo{i}.jpg", ".jpg", 1000, 1.0,
             timestamp=ts.isoformat(), width=4000, height=3000,
         )
-        db.update_photo_pipeline_features(
+        db.masks_features.update_pipeline_features(
             pid,
             mask_path=f"/masks/{pid}.png",
             subject_tenengrad=100 + i * 80,
@@ -39,7 +39,7 @@ def _setup_db(tmp_path):
             subject_y_median=120.0,
             phash_crop=f"{pid:016x}",
         )
-        db.update_photo_embeddings(
+        db.masks_features.update_embeddings(
             pid,
             dino_subject_embedding=embedding_to_blob(emb),
             dino_global_embedding=embedding_to_blob(emb),

@@ -1789,8 +1789,8 @@ def test_staging_in_another_workspace_preserves_removed_folders(tmp_path, remove
 
         stage_folder(db, child_id, vireo_dir)
         assert {f["id"] for f in db.get_workspace_folders(parent_ws)} == expected
-        assert {w["id"] for w in db.get_folder_workspaces(descendant_id)} == {child_ws, observer_ws}
-        assert {w["id"] for w in db.get_folder_workspaces(late_id)} == {child_ws, observer_ws}
+        assert {w["id"] for w in db.workspace_folders.list_workspaces_for_folder(descendant_id)} == {child_ws, observer_ws}
+        assert {w["id"] for w in db.workspace_folders.list_workspaces_for_folder(late_id)} == {child_ws, observer_ws}
         assert observer_ws in affected_workspace_ids(db, child_id)
         assert {f["id"] for f in db.get_workspace_folders(observer_ws)} == {
             parent_id, child_id, descendant_id, late_id,
@@ -1802,7 +1802,7 @@ def test_staging_in_another_workspace_preserves_removed_folders(tmp_path, remove
             parent_id=descendant_id, workspace_root=False,
         )
         assert {f["id"] for f in db.get_workspace_folders(parent_ws)} == expected
-        assert parent_ws not in {w["id"] for w in db.get_folder_workspaces(local_new_id)}
+        assert parent_ws not in {w["id"] for w in db.workspace_folders.list_workspaces_for_folder(local_new_id)}
 
         discard_folder(db, child_id, vireo_dir)
         assert {f["id"] for f in db.get_workspace_folders(parent_ws)} == expected

@@ -871,7 +871,7 @@ def test_api_best_batch_flags_records_single_undoable_edit(app_and_db):
     db.photo_review.set_flag(reject_id, "flagged")
 
     client = app.test_client()
-    pre_history = db.get_edit_history()
+    pre_history = db.edit_history.list_recent()
     resp = client.post(
         "/api/batch/best-batch-flags",
         json={
@@ -894,7 +894,7 @@ def test_api_best_batch_flags_records_single_undoable_edit(app_and_db):
         reject_id: "rejected",
         keep_reject_id: "rejected",
     }
-    post_history = db.get_edit_history()
+    post_history = db.edit_history.list_recent()
     assert len(post_history) == len(pre_history) + 1
     assert post_history[0]["action_type"] == "flag"
     assert post_history[0]["new_value"] == "best_batch_apply"
@@ -1341,7 +1341,7 @@ def test_pipeline_selection_results_uses_full_review_payload(app_and_db):
     ordered_ids = [by_name["bird3.jpg"], by_name["bird1.jpg"]]
 
     for idx, pid in enumerate(ordered_ids):
-        db.update_photo_pipeline_features(
+        db.masks_features.update_pipeline_features(
             pid,
             mask_path=f"/masks/{pid}.png",
             subject_tenengrad=250 + idx * 25,
@@ -4029,7 +4029,7 @@ def test_bulk_apply_records_single_undoable_batch(app_and_db):
         json={"recipe": {"rotation": 90}, "photo_ids": ids},
     )
     recipe_entries = [
-        h for h in db.get_edit_history() if h["action_type"] == "edit_recipe"
+        h for h in db.edit_history.list_recent() if h["action_type"] == "edit_recipe"
     ]
     assert len(recipe_entries) == 1
     assert recipe_entries[0]["is_batch"] == 1
@@ -9642,7 +9642,7 @@ def test_post_photo_location_records_edit(app_and_db, monkeypatch):
     photo = db.get_photos()[0]
     pid = photo["id"]
 
-    pre_history = db.get_edit_history()
+    pre_history = db.edit_history.list_recent()
     pre_count = len(pre_history)
 
     client = app.test_client()
@@ -9652,7 +9652,7 @@ def test_post_photo_location_records_edit(app_and_db, monkeypatch):
     )
     assert resp.status_code == 200, resp.get_json()
 
-    post_history = db.get_edit_history()
+    post_history = db.edit_history.list_recent()
     assert len(post_history) == pre_count + 1
     # Most recent first.
     entry = post_history[0]
@@ -9701,7 +9701,7 @@ def test_batch_photo_location_sets_all_selected_photos(app_and_db, monkeypatch):
         ).fetchone()
         assert queued["value"] == "effective"
 
-    entry = db.get_edit_history()[0]
+    entry = db.edit_history.list_recent()[0]
     assert entry["action_type"] == "location_set"
     assert entry["item_count"] == len(photo_ids)
 
@@ -9787,7 +9787,7 @@ def test_batch_photo_location_text_sets_all_selected_photos(app_and_db):
         ).fetchone()
         assert dict(row) == {"name": "the meadow", "place_id": None}
 
-    entry = db.get_edit_history()[0]
+    entry = db.edit_history.list_recent()[0]
     assert entry["action_type"] == "location_set"
     assert entry["item_count"] == len(photo_ids)
 
@@ -9829,14 +9829,14 @@ def test_delete_photo_location_records_edit(app_and_db):
     pid = photo["id"]
     db.set_photo_location(pid, leaf_id)
 
-    pre_history = db.get_edit_history()
+    pre_history = db.edit_history.list_recent()
     pre_count = len(pre_history)
 
     client = app.test_client()
     resp = client.delete(f"/api/photos/{pid}/location")
     assert resp.status_code == 200
 
-    post_history = db.get_edit_history()
+    post_history = db.edit_history.list_recent()
     assert len(post_history) == pre_count + 1
     entry = post_history[0]
     assert entry["action_type"] == "location_clear"
@@ -9966,7 +9966,7 @@ def test_post_photo_location_text_records_edit(app_and_db):
     photo = db.get_photos()[0]
     pid = photo["id"]
 
-    pre_history = db.get_edit_history()
+    pre_history = db.edit_history.list_recent()
     pre_count = len(pre_history)
 
     client = app.test_client()
@@ -9976,7 +9976,7 @@ def test_post_photo_location_text_records_edit(app_and_db):
     )
     assert resp.status_code == 200, resp.get_json()
 
-    post_history = db.get_edit_history()
+    post_history = db.edit_history.list_recent()
     assert len(post_history) == pre_count + 1
     entry = post_history[0]
     assert entry["action_type"] == "location_set"
@@ -11078,7 +11078,7 @@ def test_post_keyword_link_place_records_edit(app_and_db, monkeypatch):
 
     kw_id = db.get_or_create_text_location("Central Park")
 
-    pre_history = db.get_edit_history()
+    pre_history = db.edit_history.list_recent()
     pre_count = len(pre_history)
 
     client = app.test_client()
@@ -11088,7 +11088,7 @@ def test_post_keyword_link_place_records_edit(app_and_db, monkeypatch):
     )
     assert resp.status_code == 200, resp.get_json()
 
-    post_history = db.get_edit_history()
+    post_history = db.edit_history.list_recent()
     assert len(post_history) == pre_count + 1
     entry = post_history[0]
     assert entry["action_type"] == "location_link"
@@ -11109,7 +11109,7 @@ def _seed_mask(db, masks_dir, pid, variant, body=b"PNGBYTES"):
     path = _os.path.join(masks_dir, f"{pid}.{variant}.png")
     with open(path, "wb") as fh:
         fh.write(body)
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         photo_id=pid, variant=variant, path=path,
         detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
     )
@@ -11191,7 +11191,7 @@ def test_api_serve_mask_404_when_file_missing(app_and_db):
     """DB row exists but file missing → 404."""
     app, db = app_and_db
     pid = db.get_photos()[0]["id"]
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         photo_id=pid, variant="sam2-small", path="/nope/missing.png",
         detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
     )
@@ -11234,7 +11234,7 @@ def test_api_serve_mask_uses_stored_db_path_for_legacy_filename(app_and_db):
     legacy_path = _os.path.join(masks_dir, f"{pid}.png")
     with open(legacy_path, "wb") as fh:
         fh.write(b"LEGACYPNG")
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         photo_id=pid, variant="unknown", path=legacy_path,
         detector_model="unknown",
         prompt_x=-1, prompt_y=-1, prompt_w=-1, prompt_h=-1,
@@ -11296,7 +11296,7 @@ def test_legacy_serve_mask_retries_after_predecessor_cleanup(
         nonlocal raced
         if not raced and _os.fspath(path) == old_path and args[:1] == ("rb",):
             raced = True
-            db.upsert_photo_mask(
+            db.masks_features.upsert_mask(
                 photo_id=pid,
                 variant="sam2-small",
                 path=new_path,
@@ -11339,7 +11339,7 @@ def test_legacy_serve_mask_direct_file_served_when_db_backed(app_and_db):
     mask_file = _os.path.join(masks_dir, f"{pid}.png")
     with open(mask_file, "wb") as fh:
         fh.write(b"LEGACYDIRECT")
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         photo_id=pid, variant="legacy", path=mask_file,
         detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
     )
@@ -11393,7 +11393,7 @@ def test_api_serve_mask_rejects_path_outside_masks_dir(app_and_db, tmp_path):
     pid = db.get_photos()[0]["id"]
     outside = tmp_path / "outside.png"
     outside.write_bytes(b"SECRET")
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         photo_id=pid, variant="sam2-small", path=str(outside),
         detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0,
     )
@@ -11626,7 +11626,7 @@ def _register_active_mask(db, photo_id, mask_dir, width=800, height=600):
     arr = np.zeros((height, width), dtype=np.uint8)
     arr[:, : width // 2] = 255
     PILImage.fromarray(arr, "L").save(path, "PNG")
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         photo_id, "sam2-small", path, "megadetector-v6",
         0.0, 0.0, 0.5, 1.0,
     )
@@ -11707,7 +11707,7 @@ def test_local_mask_snapshot_retries_predecessor_cleanup(
         nonlocal raced
         if not raced:
             raced = True
-            db.upsert_photo_mask(
+            db.masks_features.upsert_mask(
                 photo_id,
                 "sam2-small",
                 new_path,
@@ -12173,7 +12173,7 @@ def test_bulk_apply_resnapshots_local_per_target(client_with_photo):
     arr = np.zeros((600, 800), dtype=np.uint8)
     arr[:300, :] = 255
     PILImage.fromarray(arr, "L").save(path2, "PNG")
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         pid2, "sam2-small", path2, "megadetector-v6", 0.0, 0.0, 1.0, 0.5,
     )
     db.set_active_mask_variant(pid2, "sam2-small")
@@ -13889,7 +13889,7 @@ def test_embedding_fetch_chunks_over_999_ids(app_and_db):
     vec = np.array([0.5, 0.5], dtype=np.float32).tobytes()
     for pid in rows:
         db.upsert_photo_embedding(pid, "test-clip", vec)
-    pairs = db.get_photos_with_embedding("test-clip", photo_ids=ids)
+    pairs = db.masks_features.photos_with_embedding("test-clip", photo_ids=ids)
     assert len(pairs) == 1200
 
 
@@ -14847,6 +14847,7 @@ def test_partial_global_paste_does_not_require_or_rebind_local_mask(client_with_
 
 def test_active_mask_retries_replaced_generation(client_with_photo, monkeypatch, tmp_path):
     from PIL import Image
+    from repositories.masks_features import MasksFeaturesRepository
     from web.media import _load_active_mask
 
     _, db, photo_id = client_with_photo
@@ -14854,7 +14855,7 @@ def test_active_mask_retries_replaced_generation(client_with_photo, monkeypatch,
     replacement = tmp_path / "replacement.png"
     Image.new("L", (7, 5), 123).save(replacement)
     paths = iter([tmp_path / "deleted-generation.png", replacement])
-    monkeypatch.setattr(db, "get_photo_mask", lambda *_: {"path": str(next(paths))})
+    monkeypatch.setattr(MasksFeaturesRepository, "get_mask", lambda self, *_: {"path": str(next(paths))})
     mask = _load_active_mask(db, photo_id)
     assert mask.size == (7, 5)
     assert mask.getpixel((0, 0)) == 123
