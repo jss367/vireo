@@ -12,13 +12,19 @@ from wait import wait_for_job_via_client
 
 
 @pytest.fixture(autouse=True)
-def _isolate_platform_sleep_inhibitor(monkeypatch):
+def _isolate_unrelated_job_startup(monkeypatch):
     # These tests exercise work/transaction pause boundaries. OS inhibitor
     # startup precedes that work and has its own five-second Windows budget.
     # Its lifecycle is covered separately by test_jobs_power/test_power.
     import power
+    from jobs import JobRunner
 
     monkeypatch.setattr(power, "start_platform_inhibitor", lambda reason: None)
+    # The per-photo boundary clock must not include a separate history
+    # connection's startup commit/fsync. Running rows, checkpoints and final
+    # persistence have dedicated integration coverage in test_jobs.py.
+    # Keep all work, checkpoint and completion database writes real here.
+    monkeypatch.setattr(JobRunner, "_record_job_started", lambda self, job: None)
 
 
 def _wait_for_boundary(entered, runner, job_id):
