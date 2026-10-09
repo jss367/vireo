@@ -292,7 +292,7 @@ def test_batch_slider_uses_chunked_reads_and_constant_commits(app_and_db):
     assert db.get_photo_edit_recipe(ids[0])['adjustments']['exposure'] == 1.3
     assert db.get_photo_edit_recipe(ids[-1])['adjustments']['exposure'] == .3
     assert db.get_photo_edit_recipe(hidden_id) is None
-    pending = [row for row in db.get_pending_changes() if row['change_type'] == 'edit_recipe']
+    pending = [row for row in db.pending_changes.list_all() if row['change_type'] == 'edit_recipe']
     assert len(pending) == len(ids)
     assert len([row for row in db.get_edit_history() if row['action_type'] == 'edit_recipe']) == 1
     assert client.post('/api/undo').status_code == 200
@@ -324,7 +324,7 @@ def test_batch_write_failure_rolls_back_recipes_sync_and_history(app_and_db, mon
     assert response.status_code == 500
     assert len(calls) == 2
     assert all(db.get_photo_edit_recipe(pid) is None for pid in ids)
-    assert not [row for row in db.get_pending_changes() if row['change_type'] == 'edit_recipe']
+    assert not [row for row in db.pending_changes.list_all() if row['change_type'] == 'edit_recipe']
     assert not [row for row in db.get_edit_history() if row['action_type'] == 'edit_recipe']
 
 

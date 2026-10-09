@@ -662,7 +662,7 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None, create_missing_side
     Returns:
         dict with synced, failed, failures counts
     """
-    changes = db.get_pending_changes()
+    changes = db.pending_changes.list_all()
     if change_ids is not None:
         changes = _select_changes(changes, change_ids)
     changes = db.claim_pending_changes_for_sync(changes)
@@ -804,7 +804,7 @@ class _XmpSyncRun:
     def load_location_paths(self):
         # Names, unlike coordinates, come out of one batched query: a shoot
         # shares a place, and a 38,000-photo backfill cannot afford a chain walk
-        # per photo. No workspace check here -- ``get_pending_changes`` is already
+        # per photo. No workspace check here -- ``pending_changes.list_all`` is already
         # workspace-scoped, and the sidecar path these names are written to was
         # resolved under the same membership and sync-only rules above.
         if self.sync_location_keywords:
@@ -1081,8 +1081,8 @@ def sync_from_xmp(db, photo_ids):
             xmp_keywords, sidecar_hierarchies = drop_stale_vireo_location_keywords(
                 db, photo_id, xmp_path, xmp_keywords, sidecar_hierarchies,
             )
-            pending_removals = db.get_pending_keyword_removal_keys(photo_id)
-            pending_hierarchical_removals = db.get_pending_keyword_removal_keys(
+            pending_removals = db.pending_changes.keyword_removal_keys(photo_id)
+            pending_hierarchical_removals = db.pending_changes.keyword_removal_keys(
                 photo_id, hierarchical=True,
             )
             # Chained, not re-read: the alias filter runs on the hierarchy

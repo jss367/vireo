@@ -350,7 +350,7 @@ def test_job_sync_accepts_selected_change_ids(app_and_db):
     client = app.test_client()
     pid = db.get_photos()[0]["id"]
     db.queue_change(pid, "rating", "4")
-    change_id = db.get_pending_changes()[0]["id"]
+    change_id = db.pending_changes.list_all()[0]["id"]
 
     resp = client.post("/api/jobs/sync", json={"change_ids": [change_id]})
 

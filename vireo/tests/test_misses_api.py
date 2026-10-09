@@ -699,7 +699,7 @@ def test_api_bulk_reject_undo_restores_original_null_flag(client, db_with_misses
         c["photo_id"] == pid
         and c["change_type"] == "flag"
         and c["value"] == "none"
-        for c in db.get_pending_changes()
+        for c in db.pending_changes.list_all()
     )
 
 

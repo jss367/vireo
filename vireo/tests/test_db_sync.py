@@ -1,16 +1,17 @@
 """Behavior pins for the sync domain of ``Database`` (the pending XMP queue).
 
-The tests exercise the pending-change methods only through the ``Database``
-façade, so they hold whether the SQL lives in ``db.py`` or in
-``repositories/sync.py``. They pin queue dedupe rules, keyword-name
-normalization, commit boundaries and the ``_commit=False`` nested-transaction
-seams, workspace scoping, lazy active-workspace resolution, chunking, the
-cancel-captured-keyword inverse, token-vs-id clearing, flat-removal
-equivalence across workspaces, the staged sync scope counts, and that
-composition (``queue_change``, ``_pending_keyword_sidecar_alias``,
-``clear_equivalent_flat_removals``, ``get_effective_config``) still routes
-through the façade so monkeypatches take effect. The structural test at
-the end keeps the SQL in ``SyncRepository``.
+The reads and simple writes are exercised through the ``db.pending_changes``
+accessor, the coordinated queue work (``queue_change``, the claim, the
+removals, the clears and the flag queueing) through its ``Database`` methods.
+They pin queue dedupe rules, keyword-name normalization, commit boundaries
+and the ``_commit=False`` nested-transaction seams, workspace scoping, lazy
+active-workspace resolution, chunking, the cancel-captured-keyword inverse,
+token-vs-id clearing, flat-removal equivalence across workspaces, the staged
+sync scope counts, and that composition still reaches its patch targets:
+``queue_change`` and ``get_effective_config`` on the façade,
+``keyword_sidecar_alias`` and ``clear_equivalent_flat_removals`` on
+``SyncRepository``. The structural tests at the end keep the SQL in
+``SyncRepository`` and pin the accessor.
 """
 
 import ast
@@ -23,6 +24,7 @@ import uuid
 
 import pytest
 from db import Database
+from repositories.sync import SyncRepository
 
 
 def _visible_rows(db):
@@ -88,7 +90,7 @@ def lib(db):
 # -- count / get --------------------------------------------------------------
 
 
-def test_count_and_get_pending_changes_scoped_and_ordered(lib):
+def test_count_and_list_all_scoped_and_ordered(lib):
     db, ws, other = lib["db"], lib["ws"], lib["other"]
     _insert(db, lib["b"], "rating", "3", ws)
     _insert(db, lib["a"], "rating", "2", other)
@@ -98,8 +100,8 @@ def test_count_and_get_pending_changes_scoped_and_ordered(lib):
         "WHERE change_type = 'flag'"
     )
     db.conn.commit()
-    assert db.count_pending_changes() == 2
-    rows = db.get_pending_changes()
+    assert db.pending_changes.count() == 2
+    rows = db.pending_changes.list_all()
     assert isinstance(rows, list)
     assert isinstance(rows[0], sqlite3.Row)
     assert [r["change_type"] for r in rows] == ["flag", "rating"]
@@ -110,13 +112,13 @@ def test_count_and_get_pending_changes_scoped_and_ordered(lib):
     }
 
 
-def test_count_and_get_require_active_workspace(lib):
+def test_count_and_list_all_require_active_workspace(lib):
     db = lib["db"]
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError, match="No active workspace"):
-        db.count_pending_changes()
+        db.pending_changes.count()
     with pytest.raises(RuntimeError, match="No active workspace"):
-        db.get_pending_changes()
+        db.pending_changes.list_all()
 
 
 # -- queue_change ---------------------------------------------------------------
@@ -283,7 +285,7 @@ def test_claim_marks_rows_and_returns_in_caller_order(lib):
     db.queue_change(lib["b"], "flag", "flagged")
     legacy = _insert(db, lib["c"], "rating", "2", ws, token=None)
     foreign = _insert(db, lib["a"], "rating", "5", other, token="t-foreign")
-    rows = db.get_pending_changes()
+    rows = db.pending_changes.list_all()
     changes = list(reversed(rows)) + [
         {"id": foreign, "change_token": "t-foreign"},
     ]
@@ -299,18 +301,18 @@ def test_claim_marks_rows_and_returns_in_caller_order(lib):
 def test_claim_skips_replaced_or_cancelled_rows(lib):
     db = lib["db"]
     db.queue_change(lib["a"], "flag", "flagged")
-    row = db.get_pending_changes()[0]
+    row = db.pending_changes.list_all()[0]
     stale = {"id": row["id"], "change_token": "not-the-token"}
     gone = {"id": row["id"] + 100, "change_token": None}
     assert db.claim_pending_changes_for_sync([stale, gone]) == []
-    assert db.get_pending_changes()[0]["sync_started"] == 0
+    assert db.pending_changes.list_all()[0]["sync_started"] == 0
 
 
 def test_claim_chunks_by_400(lib):
     db, ws = lib["db"], lib["ws"]
     for i in range(401):
         _insert(db, lib["a"], "title", str(i), ws, token=f"t{i}")
-    rows = db.get_pending_changes()
+    rows = db.pending_changes.list_all()
     statements = _trace(db)
     claimed = db.claim_pending_changes_for_sync(rows)
     db.conn.set_trace_callback(None)
@@ -321,54 +323,54 @@ def test_claim_chunks_by_400(lib):
 def test_claim_requires_active_workspace(lib):
     db = lib["db"]
     db.queue_change(lib["a"], "flag", "flagged")
-    rows = db.get_pending_changes()
+    rows = db.pending_changes.list_all()
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError, match="No active workspace"):
         db.claim_pending_changes_for_sync(rows)
 
 
-# -- get_pending_keyword_removal_keys ---------------------------------------------
+# -- keyword_removal_keys ---------------------------------------------------------
 
 
-def test_pending_keyword_removal_keys(lib):
+def test_keyword_removal_keys(lib):
     db, ws, other = lib["db"], lib["ws"], lib["other"]
     _insert(db, lib["a"], "keyword_remove", "Robin", ws)
     _insert(db, lib["a"], "keyword_remove_flat", "WREN", other)
     _insert(db, lib["a"], "keyword_add", "Jay", ws)
     _insert(db, lib["a"], "keyword_remove", '""', ws)
     _insert(db, lib["b"], "keyword_remove", "Finch", ws)
-    assert db.get_pending_keyword_removal_keys(lib["a"]) == {"robin", "wren"}
-    assert db.get_pending_keyword_removal_keys(
+    assert db.pending_changes.keyword_removal_keys(lib["a"]) == {"robin", "wren"}
+    assert db.pending_changes.keyword_removal_keys(
         lib["a"], hierarchical=True
     ) == {"robin"}
-    assert db.get_pending_keyword_removal_keys(lib["c"]) == set()
+    assert db.pending_changes.keyword_removal_keys(lib["c"]) == set()
     # Reads across workspaces, so no active workspace is needed.
     db.set_active_workspace(None)
-    assert db.get_pending_keyword_removal_keys(lib["a"]) == {"robin", "wren"}
+    assert db.pending_changes.keyword_removal_keys(lib["a"]) == {"robin", "wren"}
 
 
-# -- _pending_keyword_sidecar_alias -------------------------------------------------
+# -- keyword_sidecar_alias ----------------------------------------------------------
 
 
 def test_sidecar_alias_same_stem_shares_sidecar(lib):
     db, ws = lib["db"], lib["ws"]
-    assert db._pending_keyword_sidecar_alias(lib["a"], ws, "Robin") is False
+    assert db.pending_changes.keyword_sidecar_alias(lib["a"], ws, "Robin") is False
     _insert(db, lib["b"], "keyword_add", "Robin", ws)
     # Different stem -> different sidecar.
-    assert db._pending_keyword_sidecar_alias(lib["a"], ws, "Robin") is False
+    assert db.pending_changes.keyword_sidecar_alias(lib["a"], ws, "Robin") is False
     _insert(db, lib["a_raw"], "keyword_add", "ROBIN", ws)
     # a.jpg and a.cr2 share a.xmp; value matches case-insensitively.
-    assert db._pending_keyword_sidecar_alias(lib["a"], ws, "Robin") is True
+    assert db.pending_changes.keyword_sidecar_alias(lib["a"], ws, "Robin") is True
     # Other workspace or non-keyword rows are ignored.
-    assert db._pending_keyword_sidecar_alias(lib["a"], lib["other"], "Robin") is False
+    assert db.pending_changes.keyword_sidecar_alias(lib["a"], lib["other"], "Robin") is False
     _insert(db, lib["a_raw"], "title", "Jay", ws)
-    assert db._pending_keyword_sidecar_alias(lib["a"], ws, "Jay") is False
+    assert db.pending_changes.keyword_sidecar_alias(lib["a"], ws, "Jay") is False
 
 
 def test_sidecar_alias_missing_own_photo(lib):
     db, ws = lib["db"], lib["ws"]
     _insert(db, lib["b"], "keyword_add", "Robin", ws)
-    assert db._pending_keyword_sidecar_alias(999999, ws, "Robin") is False
+    assert db.pending_changes.keyword_sidecar_alias(999999, ws, "Robin") is False
 
 
 # Windows' ``os.path.normcase`` folds case, so there "Dir" and "dir" are one
@@ -392,11 +394,11 @@ def test_sidecar_alias_case_variant_requires_samefile(db, tmp_path):
     _insert(db, pl, "keyword_add", "Robin", ws)
     # Neither sidecar exists: samefile raises OSError, suppressed -> False
     # (unless the platform folds case, when the paths are simply equal).
-    assert db._pending_keyword_sidecar_alias(pu, ws, "Robin") is _NORMCASE_FOLDS_CASE
+    assert db.pending_changes.keyword_sidecar_alias(pu, ws, "Robin") is _NORMCASE_FOLDS_CASE
     (upper / "a.xmp").write_text("x")
     if not (lower / "a.xmp").exists():
         os.link(upper / "a.xmp", lower / "a.xmp")
-    assert db._pending_keyword_sidecar_alias(pu, ws, "Robin") is True
+    assert db.pending_changes.keyword_sidecar_alias(pu, ws, "Robin") is True
 
 
 def test_sidecar_alias_case_variant_distinct_files(db, tmp_path):
@@ -409,7 +411,7 @@ def test_sidecar_alias_case_variant_distinct_files(db, tmp_path):
     px = db.add_photo(fx, "z.jpg", ".jpg", 1, 1.0)
     _insert(db, pl, "keyword_add", "Robin", ws)
     _insert(db, px, "keyword_add", "Robin", ws)
-    assert db._pending_keyword_sidecar_alias(pu, ws, "Robin") is _NORMCASE_FOLDS_CASE
+    assert db.pending_changes.keyword_sidecar_alias(pu, ws, "Robin") is _NORMCASE_FOLDS_CASE
 
 
 # -- remove_pending_changes ------------------------------------------------------------
@@ -482,12 +484,16 @@ def test_remove_aliased_keyword_queues_inverse(lib):
 
 
 def test_remove_routes_composition_through_facade(lib, monkeypatch):
+    """The inverse is queued through ``Database.queue_change`` (a patch target
+    the keyword-provenance flows share); the alias check runs on the
+    repository, where a class-level patch reaches it."""
     db, ws, other = lib["db"], lib["ws"], lib["other"]
     _insert(db, lib["a"], "keyword_add", "Robin", other)
     queued, alias_calls = [], []
     real_queue = db.queue_change
 
-    def alias(photo_id, workspace_id, value):
+    def alias(repo, photo_id, workspace_id, value):
+        assert repo.conn is db.conn
         alias_calls.append((photo_id, workspace_id, value))
         return True
 
@@ -495,7 +501,7 @@ def test_remove_routes_composition_through_facade(lib, monkeypatch):
         queued.append((args, kwargs))
         return real_queue(*args, **kwargs)
 
-    monkeypatch.setattr(db, "_pending_keyword_sidecar_alias", alias)
+    monkeypatch.setattr(SyncRepository, "keyword_sidecar_alias", alias)
     monkeypatch.setattr(db, "queue_change", recorder)
     assert db.remove_pending_changes(lib["a"], workspace_id=other) == 1
     assert alias_calls == [(lib["a"], other, "Robin")]
@@ -607,13 +613,14 @@ def test_clear_pending_equivalent_flat_removals_by_id(lib, monkeypatch):
     _insert(db, lib["a"], "keyword_remove", "Robin", other)
     _insert(db, lib["b"], "keyword_remove_flat", "Robin", other)
     calls = []
-    real = db.clear_equivalent_flat_removals
+    real = SyncRepository.clear_equivalent_flat_removals
 
-    def recorder(changes, _commit=True):
+    def recorder(repo, changes, _commit=True):
+        assert repo.conn is db.conn
         calls.append(([tuple(c) for c in changes], _commit))
-        return real(changes, _commit=_commit)
+        return real(repo, changes, _commit=_commit)
 
-    monkeypatch.setattr(db, "clear_equivalent_flat_removals", recorder)
+    monkeypatch.setattr(SyncRepository, "clear_equivalent_flat_removals", recorder)
     db.clear_pending([flat, add], clear_equivalent_flat_removals=True)
     assert calls == [([(lib["a"], "keyword_remove_flat", "Robin")], False)]
     assert not db.conn.in_transaction
@@ -623,26 +630,26 @@ def test_clear_pending_equivalent_flat_removals_by_id(lib, monkeypatch):
     ]
 
 
-def test_get_flat_keyword_removals_spans_workspaces_case_insensitively(lib):
+def test_flat_keyword_removals_spans_workspaces_case_insensitively(lib):
     db, ws, other = lib["db"], lib["ws"], lib["other"]
     _insert(db, lib["a"], "keyword_remove_flat", "Robin", ws)
     _insert(db, lib["a"], "keyword_remove_flat", "ROBIN", other)
     _insert(db, lib["a"], "keyword_remove", "Robin", ws)      # not flat
     _insert(db, lib["a"], "keyword_remove_flat", "Jay", ws)   # other keyword
     _insert(db, lib["b"], "keyword_remove_flat", "Robin", ws)  # other photo
-    removals = db.get_flat_keyword_removals(lib["a"], "robin")
+    removals = db.pending_changes.flat_keyword_removals(lib["a"], "robin")
     assert sorted((r["workspace_id"], r["value"]) for r in removals) == sorted(
         [(ws, "Robin"), (other, "ROBIN")]
     )
     assert all(isinstance(r, dict) for r in removals)
-    assert db.get_flat_keyword_removals(lib["c"], "Robin") == []
+    assert db.pending_changes.flat_keyword_removals(lib["c"], "Robin") == []
 
 
 def test_clear_pending_flat_flag_without_flat_rows_skips_helper(lib, monkeypatch):
     db, ws = lib["db"], lib["ws"]
     add = _insert(db, lib["a"], "keyword_add", "Jay", ws)
     monkeypatch.setattr(
-        db, "clear_equivalent_flat_removals",
+        SyncRepository, "clear_equivalent_flat_removals",
         lambda *a, **k: pytest.fail("helper should not run"),
     )
     db.clear_pending([add], clear_equivalent_flat_removals=True)
@@ -714,13 +721,14 @@ def test_clear_pending_by_token_flat_removals_and_chunks(lib, monkeypatch):
         _insert(db, lib["b"], "title", str(i), ws, token=f"t{i}")
     _insert(db, lib["a"], "keyword_remove_flat", "ROBIN", other, token="o")
     calls = []
-    real = db.clear_equivalent_flat_removals
+    real = SyncRepository.clear_equivalent_flat_removals
 
-    def recorder(changes, _commit=True):
+    def recorder(repo, changes, _commit=True):
+        assert repo.conn is db.conn
         calls.append(([tuple(c) for c in changes], _commit))
-        return real(changes, _commit=_commit)
+        return real(repo, changes, _commit=_commit)
 
-    monkeypatch.setattr(db, "clear_equivalent_flat_removals", recorder)
+    monkeypatch.setattr(SyncRepository, "clear_equivalent_flat_removals", recorder)
     statements = _trace(db)
     db.clear_pending_by_token(
         [f"t{i}" for i in range(801)], clear_equivalent_flat_removals=True,
@@ -734,7 +742,7 @@ def test_clear_pending_by_token_flat_removals_and_chunks(lib, monkeypatch):
     assert _visible_rows(db) == []
 
 
-# -- clear_equivalent_flat_removals ------------------------------------------------------
+# -- pending_changes.clear_equivalent_flat_removals --------------------------------------
 
 
 def test_clear_equivalent_flat_removals(lib):
@@ -746,11 +754,11 @@ def test_clear_equivalent_flat_removals(lib):
         {"photo_id": lib["a"], "change_type": "keyword_remove_flat", "value": "Robin"},
         {"photo_id": lib["b"], "change_type": "keyword_add", "value": "Robin"},
     ]
-    db.clear_equivalent_flat_removals(changes, _commit=False)
+    db.pending_changes.clear_equivalent_flat_removals(changes, _commit=False)
     assert db.conn.in_transaction
     assert len(_visible_rows(db)) == 3
     db.conn.commit()
-    db.clear_equivalent_flat_removals(changes)
+    db.pending_changes.clear_equivalent_flat_removals(changes)
     assert not db.conn.in_transaction
     assert _visible_rows(db) == [
         (lib["a"], "keyword_remove", "Robin", other, 0),
@@ -763,10 +771,10 @@ def test_clear_equivalent_flat_removals_no_flat_changes(lib):
     db = lib["db"]
     db.set_active_workspace(None)
     statements = _trace(db)
-    db.clear_equivalent_flat_removals([
+    db.pending_changes.clear_equivalent_flat_removals([
         {"photo_id": lib["a"], "change_type": "keyword_add", "value": "x"},
     ])
-    db.clear_equivalent_flat_removals([], _commit=False)
+    db.pending_changes.clear_equivalent_flat_removals([], _commit=False)
     db.conn.set_trace_callback(None)
     assert not any("DELETE" in s for s in statements)
 
@@ -901,7 +909,7 @@ def test_queue_flag_change_requires_workspace(lib, flag_config):
         db.queue_flag_change_if_enabled(lib["a"], "flagged")
 
 
-# -- staged_sync_scope / staged_sync_scope_by_photos -------------------------------------
+# -- staged_scope / staged_scope_by_photos -----------------------------------------------
 
 
 @pytest.fixture
@@ -916,23 +924,23 @@ def staged(lib):
     return {**lib, **ids}
 
 
-def test_staged_sync_scope_by_folder(staged):
+def test_staged_scope_by_folder(staged):
     db, s = staged["db"], staged
-    changes, here, elsewhere, overlap = db.staged_sync_scope([s["f1"], s["f2"]])
+    changes, here, elsewhere, overlap = db.pending_changes.staged_scope([s["f1"], s["f2"]])
     assert sorted(changes, key=lambda c: c[1]) == [
         ("ta", s["a_here"], s["a"]),
         (("id", s["c_here"]), s["c_here"], s["c"]),
     ]
     assert (here, elsewhere, overlap) == (2, 1, 1)
-    assert db.staged_sync_scope([s["f2"]]) == (
+    assert db.pending_changes.staged_scope([s["f2"]]) == (
         [(("id", s["c_here"]), s["c_here"], s["c"])], 1, 0, 0,
     )
-    assert db.staged_sync_scope([]) == ([], 0, 0, 0)
+    assert db.pending_changes.staged_scope([]) == ([], 0, 0, 0)
 
 
-def test_staged_sync_scope_by_photos(staged):
+def test_staged_scope_by_photos(staged):
     db, s = staged["db"], staged
-    changes, here, elsewhere, overlap = db.staged_sync_scope_by_photos(
+    changes, here, elsewhere, overlap = db.pending_changes.staged_scope_by_photos(
         [s["a"], s["b"], s["c"]]
     )
     assert sorted(changes, key=lambda c: c[1]) == [
@@ -940,30 +948,30 @@ def test_staged_sync_scope_by_photos(staged):
         (("id", s["c_here"]), s["c_here"], s["c"]),
     ]
     assert (here, elsewhere, overlap) == (2, 1, 1)
-    assert db.staged_sync_scope_by_photos([s["b"]]) == ([], 0, 1, 0)
-    assert db.staged_sync_scope_by_photos([]) == ([], 0, 0, 0)
+    assert db.pending_changes.staged_scope_by_photos([s["b"]]) == ([], 0, 1, 0)
+    assert db.pending_changes.staged_scope_by_photos([]) == ([], 0, 0, 0)
 
 
-def test_staged_sync_scope_resolves_workspace_lazily(staged):
+def test_staged_scope_resolves_workspace_lazily(staged):
     db, s = staged["db"], staged
     db.set_active_workspace(None)
     # No rows matched -> the active workspace is never consulted.
-    assert db.staged_sync_scope([999999]) == ([], 0, 0, 0)
-    assert db.staged_sync_scope_by_photos([999999]) == ([], 0, 0, 0)
-    assert db.staged_sync_scope_by_photos([]) == ([], 0, 0, 0)
+    assert db.pending_changes.staged_scope([999999]) == ([], 0, 0, 0)
+    assert db.pending_changes.staged_scope_by_photos([999999]) == ([], 0, 0, 0)
+    assert db.pending_changes.staged_scope_by_photos([]) == ([], 0, 0, 0)
     with pytest.raises(RuntimeError, match="No active workspace"):
-        db.staged_sync_scope([s["f1"]])
+        db.pending_changes.staged_scope([s["f1"]])
     with pytest.raises(RuntimeError, match="No active workspace"):
-        db.staged_sync_scope_by_photos([s["a"]])
+        db.pending_changes.staged_scope_by_photos([s["a"]])
 
 
-def test_staged_sync_scope_chunks(staged):
+def test_staged_scope_chunks(staged):
     db, s = staged["db"], staged
     statements = _trace(db)
     folder_ids = [s["f1"]] + list(range(100_000, 100_800))
     photo_ids = [s["a"]] + list(range(100_000, 100_800))
-    by_folder = db.staged_sync_scope(folder_ids)
-    by_photo = db.staged_sync_scope_by_photos(photo_ids)
+    by_folder = db.pending_changes.staged_scope(folder_ids)
+    by_photo = db.pending_changes.staged_scope_by_photos(photo_ids)
     db.conn.set_trace_callback(None)
     assert sum(1 for s_ in statements if "FROM pending_changes" in s_) == 4
     assert by_folder[1:] == (1, 1, 1)
@@ -973,7 +981,7 @@ def test_staged_sync_scope_chunks(staged):
 # -- review, status and discard reads -------------------------------------------
 
 
-def test_get_pending_changes_for_review_joins_photo_and_folder(lib):
+def test_list_for_review_joins_photo_and_folder(lib):
     db, ws, other = lib["db"], lib["ws"], lib["other"]
     late = _insert(db, lib["c"], "rating", "3", ws)
     early = _insert(db, lib["a"], "flag", "flagged", ws)
@@ -983,46 +991,46 @@ def test_get_pending_changes_for_review_joins_photo_and_folder(lib):
         (early,),
     )
     db.conn.commit()
-    rows = db.get_pending_changes_for_review(ws)
+    rows = db.pending_changes.list_for_review(ws)
     assert [r["id"] for r in rows] == [early, late]
     assert [(r["filename"], r["folder_path"]) for r in rows] == [
         ("a.jpg", "/lib/one"), ("c.jpg", "/lib/two"),
     ]
     assert rows[0]["folder_id"] == lib["f1"]
     assert rows[0]["change_type"] == "flag"
-    assert [r["id"] for r in db.get_pending_changes_for_review(other)] != []
-    assert db.get_pending_changes_for_review(987_654) == []
+    assert [r["id"] for r in db.pending_changes.list_for_review(other)] != []
+    assert db.pending_changes.list_for_review(987_654) == []
 
 
-def test_get_pending_changes_for_review_keeps_rows_without_a_folder(lib):
+def test_list_for_review_keeps_rows_without_a_folder(lib):
     db, ws = lib["db"], lib["ws"]
     cid = _insert(db, lib["a"], "rating", "2", ws)
     db.conn.execute("PRAGMA foreign_keys = OFF")
     db.conn.execute("UPDATE photos SET folder_id = 987654 WHERE id = ?", (lib["a"],))
     db.conn.commit()
     db.conn.execute("PRAGMA foreign_keys = ON")
-    rows = db.get_pending_changes_for_review(ws)
+    rows = db.pending_changes.list_for_review(ws)
     assert [(r["id"], r["folder_path"]) for r in rows] == [(cid, None)]
 
 
-def test_get_pending_change_counts(lib):
+def test_status_counts(lib):
     db, ws, other = lib["db"], lib["ws"], lib["other"]
-    assert [tuple(r) for r in db.get_pending_change_counts()] == [(None, 0, 0)]
+    assert [tuple(r) for r in db.pending_changes.status_counts()] == [(None, 0, 0)]
     _insert(db, lib["a"], "rating", "2", ws)
     _insert(db, lib["a"], "flag", "flagged", ws)
     _insert(db, lib["b"], "rating", "1", ws)
     _insert(db, lib["c"], "rating", "1", other)
-    rows = db.get_pending_change_counts()
+    rows = db.pending_changes.status_counts()
     assert tuple(rows[0]) == (None, 3, 2)
     assert {r["change_type"]: r["changes"] for r in rows[1:]} == {
         "flag": 1, "rating": 2,
     }
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError, match="No active workspace"):
-        db.get_pending_change_counts()
+        db.pending_changes.status_counts()
 
 
-def test_count_photos_with_queued_location_change(lib):
+def test_count_queued_location_photos(lib):
     db, ws, other = lib["db"], lib["ws"], lib["other"]
     place = db.add_keyword("Pond", kw_type="location")
     plain = db.add_keyword("Heron")
@@ -1034,18 +1042,18 @@ def test_count_photos_with_queued_location_change(lib):
     _insert(db, lib["b"], "location", "x", ws)
     _insert(db, lib["c"], "location", "x", other)
     _insert(db, lib["c"], "rating", "2", ws)
-    assert db.count_photos_with_queued_location_change() == 1
+    assert db.pending_changes.count_queued_location_photos() == 1
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError, match="No active workspace"):
-        db.count_photos_with_queued_location_change()
+        db.pending_changes.count_queued_location_photos()
 
 
-def test_get_pending_changes_by_ids_scopes_and_chunks(lib):
+def test_get_by_ids_scopes_and_chunks(lib):
     db, ws, other = lib["db"], lib["ws"], lib["other"]
     mine = _insert(db, lib["a"], "rating", "2", ws)
     theirs = _insert(db, lib["b"], "rating", "1", other)
     statements = _trace(db)
-    rows = db.get_pending_changes_by_ids(
+    rows = db.pending_changes.get_by_ids(
         [mine, theirs] + list(range(100_000, 100_800))
     )
     db.conn.set_trace_callback(None)
@@ -1054,12 +1062,12 @@ def test_get_pending_changes_by_ids_scopes_and_chunks(lib):
     assert len([s for s in statements if "FROM pending_changes" in s]) == 2
 
 
-def test_delete_workspace_pending_changes_returns_rows_uncommitted(lib):
+def test_delete_workspace_returns_rows_uncommitted(lib):
     db, ws, other = lib["db"], lib["ws"], lib["other"]
     a = _insert(db, lib["a"], "rating", "2", ws)
     b = _insert(db, lib["b"], "flag", "flagged", ws)
     _insert(db, lib["c"], "rating", "1", other)
-    rows = db.delete_workspace_pending_changes(ws)
+    rows = db.pending_changes.delete_workspace(ws)
     assert sorted(r["id"] for r in rows) == [a, b]
     assert set(rows[0].keys()) >= {"id", "photo_id", "change_type", "value"}
     assert db.conn.in_transaction
@@ -1072,41 +1080,65 @@ def test_delete_workspace_pending_changes_returns_rows_uncommitted(lib):
 # -- structure ----------------------------------------------------------------------------
 
 
+# Coordinated queue work that stays on ``Database``: each adds a guard or
+# composes more than one repository call, and ``queue_change`` is bound by
+# name into the keyword-provenance and location repositories (and patched on
+# ``db`` by their tests), so it keeps its façade name.
 _DELEGATING_SYNC_METHODS = (
-    "count_pending_changes",
-    "staged_sync_scope_by_photos",
-    "staged_sync_scope",
     "queue_change",
-    "get_pending_changes",
     "claim_pending_changes_for_sync",
-    "get_pending_keyword_removal_keys",
-    "_pending_keyword_sidecar_alias",
     "remove_pending_changes",
     "remove_pending_change_token",
     "clear_pending",
     "clear_pending_by_token",
-    "clear_equivalent_flat_removals",
-    "get_flat_keyword_removals",
     "queue_flag_change_if_enabled",
+)
+
+# The forwarding wrappers ``db.pending_changes`` replaced.
+_REMOVED_SYNC_WRAPPERS = (
+    "count_pending_changes",
+    "staged_sync_scope_by_photos",
+    "staged_sync_scope",
+    "get_pending_changes",
     "get_pending_changes_for_review",
     "get_pending_change_counts",
     "count_photos_with_queued_location_change",
     "get_pending_changes_by_ids",
     "delete_workspace_pending_changes",
+    "get_pending_keyword_removal_keys",
+    "_pending_keyword_sidecar_alias",
+    "get_flat_keyword_removals",
+    "clear_equivalent_flat_removals",
+)
+
+# Repository methods behind a coordinated ``Database`` method. Production code
+# calls the ``Database`` method instead, so its guard, its composition and
+# the patch target on ``queue_change`` are not bypassed.
+_FACADE_ONLY_REPOSITORY_METHODS = (
+    "queue",
+    "claim_for_sync",
+    "remove_token",
+    "delete_matching",
+    "mark_sync_started",
+    "delete_by_ids",
+    "delete_by_tokens",
 )
 
 
-@pytest.mark.parametrize("name", _DELEGATING_SYNC_METHODS)
-def test_sync_method_delegates_to_repository(name):
-    source = textwrap.dedent(inspect.getsource(getattr(Database, name)))
-    fn = ast.parse(source).body[0]
-    attrs = {
+def _self_attrs(fn):
+    source = textwrap.dedent(inspect.getsource(fn))
+    return {
         node.attr
-        for node in ast.walk(fn)
+        for node in ast.walk(ast.parse(source))
         if isinstance(node, ast.Attribute)
         and isinstance(node.value, ast.Name)
         and node.value.id == "self"
     }
+
+
+@pytest.mark.parametrize("name", _DELEGATING_SYNC_METHODS)
+def test_sync_method_delegates_to_repository(name):
+    attrs = _self_attrs(getattr(Database, name))
     assert "conn" not in attrs, (
         f"Database.{name} touches self.conn; move the SQL to SyncRepository"
     )
@@ -1132,10 +1164,106 @@ def test_sync_facade_signatures_unchanged():
     assert sig["clear_pending_by_token"] == (
         "(self, change_tokens, *, clear_equivalent_flat_removals=False)"
     )
-    assert sig["clear_equivalent_flat_removals"] == "(self, changes, _commit=True)"
     assert sig["queue_flag_change_if_enabled"] == (
         "(self, photo_id, flag, workspace_id=None, _commit=True)"
     )
-    assert sig["get_pending_keyword_removal_keys"] == (
-        "(self, photo_id, hierarchical=False)"
+
+
+def test_migrated_repository_signatures_match_the_old_wrappers():
+    """Callers moved off the wrappers keep passing the same arguments."""
+    def params(fn):
+        return [(p.name, p.default) for p in inspect.signature(fn).parameters.values()]
+
+    empty = inspect.Parameter.empty
+    assert params(SyncRepository.clear_equivalent_flat_removals) == [
+        ("self", empty), ("changes", empty), ("_commit", True),
+    ]
+    assert params(SyncRepository.keyword_removal_keys) == [
+        ("self", empty), ("photo_id", empty), ("hierarchical", False),
+    ]
+
+
+def test_pending_changes_is_a_fresh_repository_on_the_connection_per_access(db):
+    """``db.pending_changes`` builds a new repository each time, never a cached one.
+
+    A cached repository could outlive the connection; a fresh one is built
+    exactly as a forwarding wrapper called at that moment built it.
+    """
+    first, second = db.pending_changes, db.pending_changes
+    assert isinstance(first, SyncRepository)
+    assert first is not second
+    assert first.conn is db.conn
+
+
+def test_pending_changes_reads_the_workspace_active_at_each_call(lib):
+    """Switching workspaces between two calls reads the new workspace.
+
+    The repository holds ``Database._ws_id`` as a resolver rather than an id,
+    so a switch is seen at the next read, as it was through the wrappers.
+    """
+    db, ws, other = lib["db"], lib["ws"], lib["other"]
+    _insert(db, lib["a"], "rating", "2", ws)
+    _insert(db, lib["b"], "rating", "1", other)
+    _insert(db, lib["c"], "rating", "3", other)
+    assert db.pending_changes.count() == 1
+    db.set_active_workspace(other)
+    assert db.pending_changes.count() == 2
+    assert {r["workspace_id"] for r in db.pending_changes.list_all()} == {other}
+    db.set_active_workspace(ws)
+    assert [r["photo_id"] for r in db.pending_changes.list_all()] == [lib["a"]]
+
+
+def test_pending_changes_without_workspace_raises_where_it_always_did(lib):
+    """Building the repository never resolves the workspace; each read does."""
+    db, ws = lib["db"], lib["ws"]
+    _insert(db, lib["a"], "keyword_remove", "Robin", ws)
+    db.set_active_workspace(None)
+    repo = db.pending_changes  # no workspace lookup yet
+    with pytest.raises(RuntimeError, match="No active workspace"):
+        repo.count()
+    with pytest.raises(RuntimeError, match="No active workspace"):
+        db.pending_changes.status_counts()
+    with pytest.raises(RuntimeError, match="No active workspace"):
+        db.pending_changes.get_by_ids([1])
+    # Workspace-free reads, explicit-workspace methods and reads that match
+    # no row never consult it.
+    assert db.pending_changes.keyword_removal_keys(lib["a"]) == {"robin"}
+    assert [r["value"] for r in db.pending_changes.list_for_review(ws)] == ["Robin"]
+    assert db.pending_changes.staged_scope([]) == ([], 0, 0, 0)
+    assert db.pending_changes.get_by_ids([]) == []
+
+
+def test_sync_has_no_forwarding_wrappers_on_database():
+    """The domain is reached through ``db.pending_changes``; Database keeps no aliases."""
+    for name in _REMOVED_SYNC_WRAPPERS:
+        assert not hasattr(Database, name), (
+            f"Database.{name} came back; call db.pending_changes"
+        )
+    accessor = Database.__dict__["pending_changes"]
+    assert isinstance(accessor, property)
+    attrs = _self_attrs(accessor.fget)
+    assert "_sync_repository" in attrs
+    assert "conn" not in attrs
+
+
+def test_production_code_uses_facade_for_coordinated_queue_writes():
+    """Nothing outside the data layer reaches past a kept ``Database`` method."""
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    pattern = re.compile(
+        r"\.pending_changes\.(" + "|".join(_FACADE_ONLY_REPOSITORY_METHODS) + r")\("
+    )
+    offenders = []
+    for path in sorted(root.rglob("*.py")):
+        rel = path.relative_to(root)
+        if rel.parts[0] in ("tests", "repositories") or rel.name == "db.py":
+            continue
+        text = path.read_text(encoding="utf-8")
+        offenders += [f"{rel}: {m.group(0)}" for m in pattern.finditer(text)]
+    assert offenders == [], (
+        "Call the Database method instead (db.queue_change, "
+        "db.claim_pending_changes_for_sync, db.remove_pending_changes, "
+        f"db.clear_pending, ...): {offenders}"
     )

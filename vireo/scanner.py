@@ -408,8 +408,8 @@ def _import_embedded_keywords_for_photo(db, photo_id, file_meta, *,
 
 def _import_keyword_lists(db, photo_id, flat_keywords, hier_keywords):
     """Tag a photo with imported flat and hierarchical keywords (additive)."""
-    pending_flat_removals = db.get_pending_keyword_removal_keys(photo_id)
-    pending_hierarchical_removals = db.get_pending_keyword_removal_keys(
+    pending_flat_removals = db.pending_changes.keyword_removal_keys(photo_id)
+    pending_hierarchical_removals = db.pending_changes.keyword_removal_keys(
         photo_id, hierarchical=True,
     )
     flat_keywords, hier_keywords = filter_removed_import_aliases(

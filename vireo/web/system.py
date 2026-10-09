@@ -585,7 +585,7 @@ def create_system_blueprint(
                 "missing_folder_count": len(db.get_missing_folders()),
                 "folder_count": db.count_folders(),
                 "keyword_count": db.count_keywords_in_workspace(),
-                "pending_changes": db.count_pending_changes(),
+                "pending_changes": db.pending_changes.count(),
                 "db_size": db_size,
                 "thumb_cache_size": thumb_size,
             }

@@ -790,8 +790,8 @@ class _StagedTreeMerge:
                        # them to the cascade.
                        "preserved_edit_count": 0,
                        # Active-workspace identities (``change_token`` or
-                       # ``("id", id)``, matching ``staged_sync_scope``) of the
-                       # off-staging remap subset -- the archive-side survivor
+                       # ``("id", id)``, matching ``SyncRepository.staged_scope``)
+                       # of the off-staging remap subset -- the archive-side survivor
                        # on a real collision. The caller's residual re-read is
                        # scoped by the captured staged ids, so only this subset
                        # is invisible to it and has to be added separately. The

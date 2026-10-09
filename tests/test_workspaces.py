@@ -516,25 +516,25 @@ def test_get_pending_changes_scoped(db_with_workspace):
     db.queue_change(photo_id, "keyword_add", "Robin")
     ws2 = db.create_workspace("Other")
     db.set_active_workspace(ws2)
-    assert len(db.get_pending_changes()) == 0
+    assert len(db.pending_changes.list_all()) == 0
     db.set_active_workspace(ws_id)
-    assert len(db.get_pending_changes()) == 1
+    assert len(db.pending_changes.list_all()) == 1
 
 
 def test_count_pending_changes_scoped(db_with_workspace):
     db, ws_id, _, photo_id = db_with_workspace
     db.queue_change(photo_id, "keyword_add", "Robin")
-    assert db.count_pending_changes() == 1
+    assert db.pending_changes.count() == 1
     ws2 = db.create_workspace("Other")
     db.set_active_workspace(ws2)
-    assert db.count_pending_changes() == 0
+    assert db.pending_changes.count() == 0
 
 
 def test_queue_change_dedup_within_workspace(db_with_workspace):
     db, ws_id, _, photo_id = db_with_workspace
     db.queue_change(photo_id, "keyword_add", "Robin")
     db.queue_change(photo_id, "keyword_add", "Robin")
-    assert db.count_pending_changes() == 1
+    assert db.pending_changes.count() == 1
 
 
 def test_cascade_delete_removes_pending_changes(db_with_workspace):
@@ -2047,9 +2047,9 @@ def test_move_folders_moves_pending_changes(db_with_workspace):
 
     # Pending changes moved to ws2
     db.set_active_workspace(ws2)
-    assert len(db.get_pending_changes()) == 1
+    assert len(db.pending_changes.list_all()) == 1
     db.set_active_workspace(ws1)
-    assert len(db.get_pending_changes()) == 0
+    assert len(db.pending_changes.list_all()) == 0
 
 
 def test_move_folders_bumps_source_pending_changes_version(db_with_workspace):

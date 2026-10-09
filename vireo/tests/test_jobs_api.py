@@ -5759,7 +5759,7 @@ def test_pending_archive_sync_first_writes_sidecars_before_the_transfer(app_and_
     sidecars = list((tmp_path / "NAS" / "trip").rglob("*.xmp"))
     assert len(sidecars) == 1, sidecars
     assert "Osprey" in sidecars[0].read_text()
-    assert db.count_pending_changes() == 0
+    assert db.pending_changes.count() == 0
 
 
 def test_pending_archive_sync_first_writes_when_staging_unlinked_from_workspace(
@@ -5814,7 +5814,7 @@ def test_pending_archive_sync_first_writes_when_staging_unlinked_from_workspace(
     sidecars = list((tmp_path / "NAS" / "trip").rglob("*.xmp"))
     assert len(sidecars) == 1, sidecars
     assert "Osprey" in sidecars[0].read_text()
-    assert db.count_pending_changes() == 0
+    assert db.pending_changes.count() == 0
 
 
 def test_pending_archive_sync_first_writes_a_rating_only_sidecar(app_and_db, tmp_path, monkeypatch):
@@ -5842,7 +5842,7 @@ def test_pending_archive_sync_first_writes_a_rating_only_sidecar(app_and_db, tmp
     sidecars = list((tmp_path / "NAS" / "trip").rglob("*.xmp"))
     assert len(sidecars) == 1, sidecars
     assert re.search(r'Rating="(\d+)"', sidecars[0].read_text()).group(1) == "3"
-    assert db.count_pending_changes() == 0
+    assert db.pending_changes.count() == 0
 
 
 def test_pending_archive_send_leaves_sidecars_alone_without_sync_first(app_and_db, tmp_path, monkeypatch):
@@ -5863,7 +5863,7 @@ def test_pending_archive_send_leaves_sidecars_alone_without_sync_first(app_and_d
     assert "metadata_synced" not in sent["result"]
     assert not list((tmp_path / "NAS" / "trip").rglob("*.xmp"))
     # Still queued, so it can be synced later over the mount.
-    assert db.count_pending_changes() == 1
+    assert db.pending_changes.count() == 1
 
 
 def test_pending_archive_sync_drains_edits_queued_while_it_runs(app_and_db, tmp_path, monkeypatch):
@@ -5899,7 +5899,7 @@ def test_pending_archive_sync_drains_edits_queued_while_it_runs(app_and_db, tmp_
     sidecars = sorted((tmp_path / "NAS" / "trip").rglob("*.xmp"))
     assert len(sidecars) == 2, sidecars
     assert "Kestrel" in "".join(s.read_text() for s in sidecars)
-    assert db.count_pending_changes() == 0
+    assert db.pending_changes.count() == 0
     assert sent["result"]["metadata_queued_during_transfer"] == 0
 
 
@@ -5942,7 +5942,7 @@ def test_pending_archive_says_so_when_the_residual_recheck_fails(app_and_db, tmp
     to make -- while the edits sit in the queue unmentioned.
     """
     import move
-    from db import Database
+    from repositories.sync import SyncRepository
 
     app, db = app_and_db
     imported = _import_for_review(app, db, tmp_path, monkeypatch)
@@ -5957,7 +5957,7 @@ def test_pending_archive_says_so_when_the_residual_recheck_fails(app_and_db, tmp
         raise sqlite3.OperationalError("database is locked")
 
     monkeypatch.setattr(
-        Database, "staged_sync_scope_by_photos", recheck_explodes)
+        SyncRepository, "staged_scope_by_photos", recheck_explodes)
     sent = wait_for_job_via_client(client, client.post(
         f"/api/import/pending-archives/{archive_id}/send",
         json={"sync_first": True}).get_json()["job_id"])
@@ -5992,7 +5992,7 @@ def test_pending_archive_sends_when_a_workspace_declines_to_write_flags(app_and_
     assert sent["status"] == "completed", sent
     assert (tmp_path / "NAS" / "trip" / "keep.jpg").exists()
     # Still queued -- and not miscounted as an edit that missed the transfer.
-    assert db.count_pending_changes() == 1
+    assert db.pending_changes.count() == 1
     assert sent["result"]["metadata_queued_during_transfer"] == 0
 
 
@@ -6117,13 +6117,13 @@ def test_pending_archive_sync_first_waits_for_a_running_xmp_sync(app_and_db, tmp
     assert started.status_code == 200, started.get_json()
     try:
         time.sleep(1)
-        assert db.count_pending_changes() == 1, "sync ran while the lock was held"
+        assert db.pending_changes.count() == 1, "sync ran while the lock was held"
         assert not (tmp_path / "NAS").exists(), "transfer ran ahead of its sync"
     finally:
         app._sync_job_lock.release()
     sent = wait_for_job_via_client(client, started.get_json()["job_id"])
     assert sent["status"] == "completed", sent
-    assert db.count_pending_changes() == 0
+    assert db.pending_changes.count() == 0
 
 
 def test_pending_archive_sync_first_cancellable_while_waiting_for_lock(app_and_db, tmp_path, monkeypatch):
@@ -6157,7 +6157,7 @@ def test_pending_archive_sync_first_cancellable_while_waiting_for_lock(app_and_d
                 break
             time.sleep(0.05)
         assert job["status"] in ("cancelled", "failed"), job
-        assert db.count_pending_changes() == 1
+        assert db.pending_changes.count() == 1
         assert not (tmp_path / "NAS").exists()
     finally:
         app._sync_job_lock.release()
@@ -13128,7 +13128,7 @@ def test_pending_archive_sync_repairs_keyword_cancelled_during_publish(app_and_d
     sidecars = list((tmp_path / "NAS" / "trip").rglob("*.xmp"))
     assert len(sidecars) == 1
     assert "Osprey" not in xmp.read_keywords(sidecars[0])
-    assert db.count_pending_changes() == 0
+    assert db.pending_changes.count() == 0
     assert sent["result"]["metadata_queued_during_transfer"] == 0
 
 
