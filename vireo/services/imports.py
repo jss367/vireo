@@ -562,10 +562,7 @@ class ImportService:
                 keyword_id = thread_db.add_keyword(
                     requested_name, kw_type="general", _commit=False,
                 )
-                stored = thread_db.conn.execute(
-                    "SELECT name, parent_id, type FROM keywords WHERE id = ?",
-                    (keyword_id,),
-                ).fetchone()
+                stored = thread_db.keywords.import_tag_row(keyword_id)
                 keyword_name = (
                     stored["name"] if stored and stored["name"]
                     else requested_name
@@ -574,11 +571,7 @@ class ImportService:
                 for photo_id in photo_ids:
                     if cancel_requested(pause_safe=False):
                         break
-                    exists = thread_db.conn.execute(
-                        "SELECT 1 FROM photo_keywords "
-                        "WHERE photo_id = ? AND keyword_id = ?",
-                        (photo_id, keyword_id),
-                    ).fetchone()
+                    exists = thread_db.keywords.association_row(photo_id, keyword_id)
                     if exists is not None:
                         continue
                     thread_db.tag_photo(
@@ -593,7 +586,7 @@ class ImportService:
                         "new_value": str(keyword_id),
                     })
                 if cancel_requested(pause_safe=False):
-                    thread_db.conn.rollback()
+                    thread_db.rollback()
                     summary["skipped"] = "import cancelled"
                     break
                 if items:
@@ -603,10 +596,10 @@ class ImportService:
                         f"{len(items)} photos",
                         str(keyword_id), items, is_batch=True, _commit=False,
                     )
-                thread_db.conn.commit()
+                thread_db.commit()
                 tagged_photo_ids.update(item["photo_id"] for item in items)
             except Exception as exc:
-                thread_db.conn.rollback()
+                thread_db.rollback()
                 log.exception("Failed to add import tag %r", requested_name)
                 summary["errors"].append(
                     f'Could not add tag "{requested_name}": {exc}'
@@ -686,13 +679,13 @@ class ImportService:
                                 "from_exif", location_items,
                                 is_batch=True, _commit=False,
                             )
-                    thread_db.conn.commit()
+                    thread_db.commit()
                     if cancel_requested():
                         cancelled_during_gps = True
                     if cancelled_during_gps:
                         break
                 except Exception as exc:
-                    thread_db.conn.rollback()
+                    thread_db.rollback()
                     log.exception("Failed to add GPS locations during import")
                     summary["errors"].append(
                         f"Could not add GPS locations: {exc}"
@@ -705,7 +698,7 @@ class ImportService:
                 summary["skipped"] = "import cancelled"
         elif location_from_gps:
             summary["skipped"] = "import cancelled"
-        thread_db.conn.close()
+        thread_db.close()
 
     def _prepare_import_workspace(self, db, body):
         """Return the workspace id an import should write to.
@@ -914,16 +907,7 @@ class ImportService:
         # that and mirrors the sibling helper in import_job.
         for start in range(0, len(cleaned), 500):
             chunk = cleaned[start:start + 500]
-            placeholders = ",".join("?" for _ in chunk)
-            rows = db.conn.execute(
-                f"""SELECT p.id AS id,
-                           f.path AS folder_path,
-                           p.filename AS filename
-                    FROM photos p
-                    JOIN folders f ON f.id = p.folder_id
-                    WHERE p.id IN ({placeholders})""",
-                list(chunk),
-            ).fetchall()
+            rows = db.photo_visibility.fingerprint_rows(chunk)
             for row in rows:
                 folder_path = row["folder_path"] or ""
                 filename = row["filename"] or ""
@@ -1018,11 +1002,7 @@ class ImportService:
             parent_type = parent.get("type")
             parent_status = parent.get("status")
         else:
-            row = db.conn.execute(
-                "SELECT type, status, workspace_id, config, result "
-                "FROM job_history WHERE id = ?",
-                (parent_id,),
-            ).fetchone()
+            row = db.job_history.parent_import_row(parent_id)
             if row is None:
                 return None, None, None, None, None, ImportFailure(
                     "parent_import_job_id not found — the original import "
@@ -1175,13 +1155,7 @@ class ImportService:
         for job in self.get_runner().list_jobs():
             if (job.get("config") or {}).get("chained_from") == parent_id:
                 return True
-        return db.conn.execute(
-            "SELECT 1 FROM job_history "
-            "WHERE json_extract(config, '$.chained_from') = ? "
-            "  AND COALESCE(json_extract(result, '$.never_started'), 0) = 0 "
-            "LIMIT 1",
-            (parent_id,),
-        ).fetchone() is not None
+        return db.job_history.chained_job_row(parent_id) is not None
 
     def _recover_relocated_descendant_landings(
         self, db, takeover, allowed_fingerprints=None,
@@ -1267,23 +1241,10 @@ class ImportService:
             and job.get("status") in ("completed", "failed", "cancelled")
             and job.get("workspace_id") == workspace_id
         ]
-        runner_seeds = "".join(" UNION SELECT ?" for _ in terminal_imports)
         rows = [
-            dict(row) for row in db.conn.execute(
-                "WITH RECURSIVE lineage(id) AS ("
-                " SELECT id FROM job_history WHERE type='import' AND workspace_id IS ?"
-                " AND (id IN (?, ?) OR json_extract(config, '$.root_import_job_id') = ?"
-                " OR json_extract(config, '$.parent_import_job_id') = ?)"
-                + runner_seeds +
-                " UNION SELECT child.id FROM job_history child JOIN lineage"
-                " ON json_extract(child.config, '$.parent_import_job_id') = lineage.id"
-                " WHERE child.type='import' AND child.workspace_id IS ?"
-                ") SELECT id, type, status, started_at, config, result FROM job_history"
-                " WHERE id IN (SELECT id FROM lineage)"
-                " AND status IN ('completed', 'failed', 'cancelled')",
-                (workspace_id, root, parent_id, root, parent_id,
-                 *(job["id"] for job in terminal_imports), workspace_id),
-            ).fetchall()
+            dict(row) for row in db.job_history.terminal_import_lineage(
+                workspace_id, root, parent_id, [job["id"] for job in terminal_imports],
+            )
         ]
 
         by_id = {row["id"]: row for row in rows}
@@ -1299,12 +1260,7 @@ class ImportService:
             for row in by_id.values()
         } - {None}
         if process_ids:
-            placeholders = ",".join("?" for _ in process_ids)
-            for row in db.conn.execute(
-                f"SELECT id, type, status, started_at, config, result FROM job_history "
-                f"WHERE type='pipeline' AND workspace_id IS ? AND id IN ({placeholders})",
-                (workspace_id, *process_ids),
-            ).fetchall():
+            for row in db.job_history.pipeline_resume_rows(workspace_id, list(process_ids)):
                 by_id[row["id"]] = dict(row)
             for job in runner.list_jobs() if runner is not None else []:
                 if job.get("id") in process_ids and job.get("workspace_id") == workspace_id:

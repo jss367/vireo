@@ -934,9 +934,7 @@ class _ImportPhotosRequest:
         )
         self.pending_archive_id = pending_archive_id
         if pending_archive_id:
-            completed = self.db.conn.execute(
-                "SELECT 1 FROM pending_archives WHERE id = ? AND state = 'complete'", (pending_archive_id,),
-            ).fetchone()
+            completed = self.db.pending_archives.completed_row(pending_archive_id)
             if completed:
                 return ImportFailure("These photos have already been sent to NAS. Start a new import instead of retrying.")
         return None
@@ -1343,11 +1341,8 @@ class _ImportPhotosJob:
         )
         if pending_archive_id:
             if thread_db is not None:
-                thread_db.conn.execute(
-                    "UPDATE pending_archives SET collection_id = COALESCE(?, collection_id) WHERE id = ?",
-                    (col_id, pending_archive_id),
-                )
-                thread_db.conn.commit()
+                thread_db.pending_archives.attach_collection(col_id, pending_archive_id)
+                thread_db.commit()
             result["nas_transfer_deferred"] = True
             result["pending_archive_id"] = pending_archive_id
         # Recovery-retry imports may carry forward files earlier
@@ -1460,11 +1455,7 @@ class _ImportPhotosJob:
         folder_rows = []
         for i in range(0, len(chain_scope), 500):
             chunk = chain_scope[i:i + 500]
-            ph = ",".join("?" * len(chunk))
-            folder_rows.extend(thread_db.conn.execute(
-                "SELECT DISTINCT f.id, f.path FROM photos p "
-                "JOIN folders f ON f.id = p.folder_id "
-                f"WHERE p.id IN ({ph})", chunk).fetchall())
+            folder_rows.extend(thread_db.photo_visibility.folder_rows_for_photos(chunk))
         root = move_target_snapshot["local_archive_root"]
         moves, move_skips = minimal_move_set(
             root, [(r["id"], r["path"]) for r in folder_rows])

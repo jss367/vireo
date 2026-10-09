@@ -63,6 +63,7 @@ caller owns the transaction, and no method here commits unless the
 """
 
 import sqlite3
+from collections.abc import Sequence
 
 from keyword_identity import identity_sql
 from keyword_normalization import keyword_match_key, normalize_keyword_display
@@ -2281,3 +2282,26 @@ class KeywordRepository:
     def commit(self):
         """Commit the connection's open transaction."""
         self.conn.commit()
+
+    def location_photo_rows(self, chunk: Sequence[int]) -> list[sqlite3.Row]:
+        placeholders = ",".join("?" for _ in chunk)
+        return self.conn.execute(
+            "SELECT DISTINCT pk.photo_id "
+            "FROM photo_keywords pk "
+            "JOIN keywords k ON k.id = pk.keyword_id "
+            f"WHERE k.type = 'location' AND pk.photo_id IN ({placeholders})",
+            chunk,
+        ).fetchall()
+
+    def import_tag_row(self, keyword_id: int) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT name, parent_id, type FROM keywords WHERE id = ?",
+            (keyword_id,),
+        ).fetchone()
+
+    def association_row(self, photo_id: int, keyword_id: int) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT 1 FROM photo_keywords "
+            "WHERE photo_id = ? AND keyword_id = ?",
+            (photo_id, keyword_id),
+        ).fetchone()

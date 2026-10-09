@@ -92,10 +92,7 @@ def resolve_folder_id(db, folder_id):
         folder_id = int(folder_id)
     except (TypeError, ValueError):
         raise ValueError("folder_id must be an integer") from None
-    linked = db.conn.execute(
-        "SELECT 1 FROM workspace_visible_folders WHERE workspace_id = ? AND folder_id = ?",
-        (db.active_workspace_id, folder_id),
-    ).fetchone()
+    linked = db.workspace_folders.visible_ids(db.active_workspace_id, [folder_id])
     if not linked:
         raise LookupError("folder not found")
     return folder_id

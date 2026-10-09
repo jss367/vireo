@@ -261,3 +261,26 @@ class CachesRepository:
         return self.conn.execute(
             "SELECT COUNT(*) AS c FROM offline_originals WHERE status='cached'"
         ).fetchone()["c"]
+
+    def clear_preview_invalidation(self, photo_id: int, size: int | str) -> None:
+        self.conn.execute(
+            "DELETE FROM preview_cache_invalidations WHERE photo_id=? AND size=?",
+            (photo_id, size),
+        )
+
+    def clear_thumbnail_path(self, pid: int) -> None:
+        self.conn.execute(
+            "UPDATE photos SET thumb_path = NULL WHERE id = ?", (pid,),
+        )
+
+    def delete_preview_rows(self, removed_preview_rows: Sequence[tuple[int, int]]) -> None:
+        self.conn.executemany(
+            "DELETE FROM preview_cache WHERE photo_id = ? AND size = ?",
+            removed_preview_rows,
+        )
+
+    def preview_sizes(self, pid: int) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT size FROM preview_cache WHERE photo_id = ?",
+            (pid,),
+        ).fetchall()

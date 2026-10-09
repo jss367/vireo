@@ -29,6 +29,7 @@ id lists, ``create_default_collections_for_all_workspaces``) stay on
 import json
 import math
 import re
+import sqlite3
 
 from keyword_identity import identity_sql
 from repositories import UNSET
@@ -1639,6 +1640,20 @@ class CollectionRepository:
                     (name, json.dumps(rules), ws_id),
                 )
         self.conn.commit()
+
+    def visual_source_row(self, collection_id: int) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT id, visual_json FROM collections "
+            "WHERE id = ? AND workspace_id = ?",
+            (collection_id, self.workspace_id),
+        ).fetchone()
+
+    def visual_scope_row(self, collection_id: int) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT id, name, rules, visual_json FROM collections "
+            "WHERE id = ? AND workspace_id = ?",
+            (collection_id, self.workspace_id),
+        ).fetchone()
 
 
 _SQLITE_NUMERIC_TEXT_RE = re.compile(

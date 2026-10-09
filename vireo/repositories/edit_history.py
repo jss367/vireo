@@ -689,3 +689,26 @@ class EditHistoryRepository:
             (ws, ws, max_entries),
         )
         self.conn.commit()
+
+    def store_grouping_payload(self, edit_id: int, payload: str) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO edit_history_payloads (edit_id, payload) VALUES (?, ?)",
+            (edit_id, payload),
+        )
+
+    def convert_to_grouping(self, edit_id: int, value: str) -> None:
+        self.conn.execute(
+            "UPDATE edit_history SET action_type = 'pipeline_grouping', new_value = ? WHERE id = ?",
+            (value, edit_id),
+        )
+
+    def delete_grouping_payload(self, edit_id: int) -> None:
+        self.conn.execute(
+            "DELETE FROM edit_history_payloads WHERE edit_id = ?", (edit_id,),
+        )
+
+    def grouping_payload(self, edit_id: int) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT payload FROM edit_history_payloads WHERE edit_id = ?",
+            (edit_id,),
+        ).fetchone()

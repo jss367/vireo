@@ -383,3 +383,10 @@ class WorkspaceRepository:
             values[index:index + self.chunk_size]
             for index in range(0, len(values), self.chunk_size)
         )
+
+    def summaries_for_ids(self, workspace_ids: Sequence[int]) -> list[sqlite3.Row]:
+        placeholders = ",".join("?" for _ in workspace_ids)
+        return self.conn.execute(
+            f"SELECT id, name FROM workspaces WHERE id IN ({placeholders})",
+            tuple(workspace_ids),
+        ).fetchall()

@@ -157,10 +157,7 @@ class FolderMoves:
             # ``folders`` row out from under the pending transition —
             # missing-local recovery on the next status. Refuse until the
             # transition finishes.
-            row = guard_db.conn.execute(
-                "SELECT workspace_id FROM workspace_folders WHERE folder_id = ?",
-                (folder_id,),
-            ).fetchall()
+            row = guard_db.workspace_folders.direct_workspaces_for_folder(folder_id)
             for ws_row in row:
                 pending = self.pending_local_workspace_transition(
                     int(ws_row["workspace_id"]), db=guard_db)
@@ -521,9 +518,7 @@ class FolderMoves:
             raise RuntimeError(guard)
         effective_cfg = thread_db.get_effective_config(cfg.load())
         if target.get("transport") == "mounted":
-            folder = thread_db.conn.execute(
-                "SELECT path FROM folders WHERE id = ?", (folder_id,),
-            ).fetchone()
+            folder = thread_db.get_folder(folder_id)
             if not folder:
                 raise RuntimeError("folder no longer exists")
             destination = os.path.join(mount_path, *posixpath.dirname(subpath).split("/"))
@@ -556,9 +551,7 @@ class FolderMoves:
         # ("2026/trip/trip").
         remote = move_mod.build_remote_move_spec(
             target, posixpath.dirname(subpath), rsync_bin, ssh_bin)
-        folder = thread_db.conn.execute(
-            "SELECT path, name FROM folders WHERE id = ?", (folder_id,)
-        ).fetchone()
+        folder = thread_db.get_folder(folder_id)
         if not folder:
             raise RuntimeError("folder no longer exists")
         landing_name = folder["name"] \

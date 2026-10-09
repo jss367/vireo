@@ -882,3 +882,59 @@ class WorkspaceFolderRepository:
             values[index:index + self.chunk_size]
             for index in range(0, len(values), self.chunk_size)
         )
+
+    def direct_workspaces_for_folder(self, folder_id: int) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT workspace_id FROM workspace_folders WHERE folder_id = ?",
+            (folder_id,),
+        ).fetchall()
+
+    def materialize_local_copy_links(self, pairs: Sequence[tuple[int, int]]) -> None:
+        self.conn.executemany(
+            """INSERT OR IGNORE INTO workspace_folders
+               (workspace_id, folder_id, is_root)
+               SELECT ?, ?, 0 WHERE NOT EXISTS (
+                   SELECT 1 FROM workspace_removed_folders
+                   WHERE workspace_id = ? AND folder_id = ?
+               )""",
+            [(ws_id, folder_id, ws_id, folder_id) for ws_id, folder_id in pairs],
+        )
+
+    def all_linked_paths(self) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            """SELECT wf.workspace_id, f.path
+               FROM workspace_folders wf
+               JOIN folders f ON f.id = wf.folder_id"""
+        ).fetchall()
+
+    def distinct_linked_paths(self) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            """SELECT DISTINCT wf.workspace_id, f.path
+               FROM workspace_folders wf
+               JOIN folders f ON f.id = wf.folder_id"""
+        ).fetchall()
+
+    def nearest_visible_ancestor(self, folder_id: int, workspace_id: int) -> sqlite3.Row | None:
+        return self.conn.execute(
+            """WITH RECURSIVE anc(id, parent_id, depth) AS (
+                 SELECT id, parent_id, 0 FROM folders WHERE id = ?
+                 UNION ALL
+                 SELECT f.id, f.parent_id, anc.depth + 1
+                 FROM folders f
+                 JOIN anc ON f.id = anc.parent_id
+               )
+               SELECT anc.id AS id
+               FROM anc
+               JOIN folders af ON af.id = anc.id
+               JOIN workspace_folders wf
+                 ON wf.folder_id = anc.id AND wf.workspace_id = ?
+               WHERE anc.depth > 0 AND af.status IN ('ok', 'partial')
+               ORDER BY anc.depth ASC
+               LIMIT 1""",
+            (int(folder_id), int(workspace_id)),
+        ).fetchone()
+
+    def all_linked_workspace_ids(self) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT DISTINCT workspace_id FROM workspace_folders"
+        ).fetchall()

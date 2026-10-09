@@ -37,7 +37,7 @@ def queue_edit_recipe_sync(db, photo_id, recipe_json, *, _commit=True):
         workspace_id=db.require_workspace_id(), _commit=False,
     )
     if _commit:
-        db.conn.commit()
+        db.commit()
 
 
 class RenderCache:
@@ -61,12 +61,9 @@ class RenderCache:
     @staticmethod
     def clear_preview_cache_invalid(db, photo_id, size, *, commit=True):
         preview_cache.ensure_preview_cache_invalidations_table(db)
-        db.conn.execute(
-            "DELETE FROM preview_cache_invalidations WHERE photo_id=? AND size=?",
-            (photo_id, size),
-        )
+        db.caches.clear_preview_invalidation(photo_id, size)
         if commit:
-            db.conn.commit()
+            db.commit()
 
     def invalidate_photo_render_cache(self, db, photo_ids):
         """Drop cached rendered derivatives after an edit recipe changes."""
@@ -117,15 +114,10 @@ class RenderCache:
                         exc_info=True,
                     )
             if clear_thumb_path:
-                db.conn.execute(
-                    "UPDATE photos SET thumb_path = NULL WHERE id = ?", (pid,),
-                )
+                db.caches.clear_thumbnail_path(pid)
             tracked_sizes = set()
             removed_preview_rows = []
-            for row in db.conn.execute(
-                "SELECT size FROM preview_cache WHERE photo_id = ?",
-                (pid,),
-            ).fetchall():
+            for row in db.caches.preview_sizes(pid):
                 size_value = row["size"]
                 tracked_sizes.add(str(size_value))
                 path = os.path.join(preview_dir, f"{pid}_{size_value}.jpg")
@@ -174,10 +166,7 @@ class RenderCache:
             except FileNotFoundError:
                 pass
             if removed_preview_rows:
-                db.conn.executemany(
-                    "DELETE FROM preview_cache WHERE photo_id = ? AND size = ?",
-                    removed_preview_rows,
-                )
+                db.caches.delete_preview_rows(removed_preview_rows)
             original_paths = [
                 os.path.join(originals_dir, f"{pid}.jpg"),
                 *Path(originals_dir).glob(f"{pid}_*.jpg"),
@@ -202,4 +191,4 @@ class RenderCache:
                         "Failed to remove stale external edit cache %s",
                         path, exc_info=True,
                     )
-        db.conn.commit()
+        db.commit()

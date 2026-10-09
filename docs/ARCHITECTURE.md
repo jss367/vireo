@@ -41,7 +41,9 @@ that information for interactive use.
   rather than implement those operations itself. Services never import from
   `vireo/web/`; a definition both layers need (job-type constants, value
   parsers) lives in the service or another neutral module and the web layer
-  imports it from there.
+  imports it from there. Every service catalog query and write goes through
+  a domain API; no service touches `Database.conn`. Services retain their
+  filesystem coordination and public `Database` transaction boundaries.
 - Routes that launch a background job use `@background_job` from
   `vireo/web/background_jobs.py`. The view receives a `JobLaunch` (runner,
   active workspace id, worker-thread database factory) and returns
@@ -86,6 +88,10 @@ that information for interactive use.
   module's `commit_with_retry`, so a caller that owns a transaction never
   needs `db.conn` for it. `db.set_progress_handler()` is the connection's
   progress-handler call, which installs the search-lane interrupt.
+- Workspace-local copy persistence lives in `repositories/local_workspaces.py`;
+  folder-local copies and their shared catalog path updates live in
+  `repositories/local_folders.py`. These local-copy writes never commit,
+  so services keep staging, activation and restoration atomic.
 - Schema changes are ordered migrations in `vireo/schema.py`. They execute once
   at startup, use a transaction, advance `PRAGMA user_version`, and validate
   before committing. Request connections must use the initialized schema. The

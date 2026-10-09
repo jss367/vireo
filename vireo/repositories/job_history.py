@@ -16,6 +16,7 @@ Callers reach it as ``db.job_history`` (a fresh repository per access, see
 """
 
 import sqlite3
+from collections.abc import Sequence
 
 
 class JobHistoryRepository:
@@ -56,3 +57,46 @@ class JobHistoryRepository:
             "UPDATE job_history SET result = ? WHERE id = ?", (result_json, job_id),
         )
         self.conn.commit()
+
+    def parent_import_row(self, parent_id: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT type, status, workspace_id, config, result "
+            "FROM job_history WHERE id = ?",
+            (parent_id,),
+        ).fetchone()
+
+    def chained_job_row(self, parent_id: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT 1 FROM job_history "
+            "WHERE json_extract(config, '$.chained_from') = ? "
+            "  AND COALESCE(json_extract(result, '$.never_started'), 0) = 0 "
+            "LIMIT 1",
+            (parent_id,),
+        ).fetchone()
+
+    def pipeline_resume_rows(self, workspace_id: int | None, process_ids: Sequence[str]) -> list[sqlite3.Row]:
+        placeholders = ",".join("?" for _ in process_ids)
+        return self.conn.execute(
+            f"SELECT id, type, status, started_at, config, result FROM job_history "
+            f"WHERE type='pipeline' AND workspace_id IS ? AND id IN ({placeholders})",
+            (workspace_id, *process_ids),
+        ).fetchall()
+
+    def terminal_import_lineage(self, workspace_id: int | None, root: str, parent_id: str, runner_ids: Sequence[str]) -> list[sqlite3.Row]:
+        """Terminal import ancestry, including runner jobs not yet persisted."""
+        runner_seeds = "".join(" UNION SELECT ?" for _ in runner_ids)
+        return self.conn.execute(
+            "WITH RECURSIVE lineage(id) AS ("
+            " SELECT id FROM job_history WHERE type='import' AND workspace_id IS ?"
+            " AND (id IN (?, ?) OR json_extract(config, '$.root_import_job_id') = ?"
+            " OR json_extract(config, '$.parent_import_job_id') = ?)"
+            + runner_seeds +
+            " UNION SELECT child.id FROM job_history child JOIN lineage"
+            " ON json_extract(child.config, '$.parent_import_job_id') = lineage.id"
+            " WHERE child.type='import' AND child.workspace_id IS ?"
+            ") SELECT id, type, status, started_at, config, result FROM job_history"
+            " WHERE id IN (SELECT id FROM lineage)"
+            " AND status IN ('completed', 'failed', 'cancelled')",
+            (workspace_id, root, parent_id, root, parent_id,
+             *runner_ids, workspace_id),
+        ).fetchall()

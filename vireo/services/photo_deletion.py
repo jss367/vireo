@@ -218,7 +218,7 @@ class _BatchDeleteRun:
         # before the DELETE would let us delete a row that no longer
         # matches the identity we verified.
         if revalidating:
-            db.conn.execute("BEGIN IMMEDIATE")
+            db.begin_immediate()
         try:
             if revalidating:
                 ids_to_delete = self._revalidated_ids(
@@ -243,9 +243,9 @@ class _BatchDeleteRun:
                         "Preparing database changes; nothing is committed yet."
                     ),
                 )
-            db.conn.commit()
+            db.commit()
         except Exception:
-            db.conn.rollback()
+            db.rollback()
             raise
         result["skipped_ids"] = skipped_ids
 
@@ -264,7 +264,6 @@ class _BatchDeleteRun:
         """
         verified_ids = []
         for chunk in self._deletion._chunked(ids):
-            placeholders = ",".join("?" for _ in chunk)
             current = {
                 row["id"]: (
                     row["folder_id"],
@@ -272,14 +271,7 @@ class _BatchDeleteRun:
                     row["folder_path"],
                     row["companion_path"],
                 )
-                for row in self.db.conn.execute(
-                    f"SELECT p.id, p.folder_id, p.filename, "
-                    f"p.companion_path, f.path AS folder_path "
-                    f"FROM photos p "
-                    f"JOIN folders f ON f.id = p.folder_id "
-                    f"WHERE p.id IN ({placeholders})",
-                    list(chunk),
-                )
+                for row in self.db.photo_visibility.deletion_identity_rows(chunk)
             }
             for photo_id in chunk:
                 expected = revalidate_identity.get(photo_id)

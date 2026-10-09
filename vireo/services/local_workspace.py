@@ -337,10 +337,7 @@ def _load_sync_recovery(vireo_dir: str, workspace_id: int) -> set | None:
 
 def local_state(db, workspace_id: int) -> dict | None:
     """Return the workspace's local-workspace state row, or None."""
-    row = db.conn.execute(
-        "SELECT workspace_id, state, created_at, activated_at FROM local_workspaces WHERE workspace_id=?",
-        (workspace_id,),
-    ).fetchone()
+    row = db.local_workspaces.get_state(workspace_id)
     return dict(row) if row else None
 
 
@@ -356,26 +353,14 @@ def folder_has_local_workspace(db, folder_id: int) -> tuple[bool, int | None]:
     point at, so a later sync/discard would be unable to restore the catalog.
     Returns the workspace_id so callers can name it in the refusal message.
     """
-    row = db.conn.execute(
-        """SELECT lwf.workspace_id
-           FROM local_workspace_folders lwf
-           JOIN local_workspaces lw ON lw.workspace_id = lwf.workspace_id
-           WHERE lwf.folder_id = ?
-           LIMIT 1""",
-        (folder_id,),
-    ).fetchone()
+    row = db.local_workspaces.workspace_for_folder(folder_id)
     if row is None:
         return False, None
     return True, int(row["workspace_id"])
 
 
 def _db_mappings(db, workspace_id: int) -> list[dict]:
-    rows = db.conn.execute(
-        """SELECT folder_id, source_path, local_path, original_status, is_root, root_index
-           FROM local_workspace_folders WHERE workspace_id=?
-           ORDER BY is_root DESC, root_index, folder_id""",
-        (workspace_id,),
-    ).fetchall()
+    rows = db.local_workspaces.mappings(workspace_id)
     return [dict(row) for row in rows]
 
 
@@ -857,10 +842,7 @@ def _copy_entry(source: str, destination: str, st, source_root: str, cancel_chec
 
 
 def _other_local_source_roots(db, workspace_id: int) -> list[str]:
-    rows = db.conn.execute(
-        "SELECT source_path FROM local_workspace_folders WHERE workspace_id != ? AND is_root = 1",
-        (workspace_id,),
-    ).fetchall()
+    rows = db.local_workspaces.other_source_roots(workspace_id)
     return [row["source_path"] for row in rows]
 
 
@@ -882,17 +864,7 @@ def _root_records(db, workspace_id: int, local_base: Path) -> tuple[list[dict], 
             if _is_within(other, path):
                 raise LocalWorkspaceError("Workspace roots overlap; remove the nested root before working locally")
 
-    shared = db.conn.execute(
-        """SELECT f.path
-           FROM workspace_folders current_wf
-           JOIN workspace_visible_folders other_wf
-             ON other_wf.folder_id = current_wf.folder_id
-            AND other_wf.workspace_id != current_wf.workspace_id
-           JOIN folders f ON f.id = current_wf.folder_id
-           WHERE current_wf.workspace_id = ?
-           LIMIT 1""",
-        (workspace_id,),
-    ).fetchone()
+    shared = db.local_workspaces.shared_folder_path(workspace_id)
     if shared:
         raise LocalWorkspaceError(
             f"Folder is also used by another workspace: {shared['path']}. "
@@ -906,13 +878,7 @@ def _root_records(db, workspace_id: int, local_base: Path) -> tuple[list[dict], 
     # the exact-ID links above. Another active local workspace's catalog rows
     # point at its managed copy, so its claim on the original source roots
     # comes from local_workspace_folders.
-    other_roots = db.conn.execute(
-        """SELECT f.path
-           FROM workspace_folders wf
-           JOIN folders f ON f.id = wf.folder_id
-           WHERE wf.workspace_id != ? AND wf.is_root = 1""",
-        (workspace_id,),
-    ).fetchall()
+    other_roots = db.local_workspaces.other_workspace_root_paths(workspace_id)
     other_root_paths = {row["path"] for row in other_roots}
     other_root_paths.update(_other_local_source_roots(db, workspace_id))
     for folder in folders:
@@ -963,8 +929,8 @@ def _root_records(db, workspace_id: int, local_base: Path) -> tuple[list[dict], 
 
 
 def _delete_state_rows(db, workspace_id: int) -> None:
-    db.conn.execute("DELETE FROM local_workspace_folders WHERE workspace_id=?", (workspace_id,))
-    db.conn.execute("DELETE FROM local_workspaces WHERE workspace_id=?", (workspace_id,))
+    db.local_workspaces.delete_mappings(workspace_id)
+    db.local_workspaces.delete_state(workspace_id)
 
 
 def stage_workspace(db, workspace_id: int, vireo_dir: str, *, progress=None, cancel_check=None, begin_commit=None) -> dict:
@@ -987,31 +953,15 @@ def stage_workspace(db, workspace_id: int, vireo_dir: str, *, progress=None, can
             # Record the claim (state + folder mapping) before any copying so
             # concurrent stages and the delete-workspace guard see it, and a
             # crash during the copy resolves to a cleanable 'staging' row.
-            db.conn.execute("BEGIN IMMEDIATE")
+            db.begin_immediate()
             try:
-                db.conn.execute(
-                    "INSERT INTO local_workspaces (workspace_id, state, created_at) VALUES (?, 'staging', ?)",
-                    (workspace_id, time.time()),
-                )
+                db.local_workspaces.create_staging(workspace_id, time.time())
                 root_ids = {root["folder_id"]: index for index, root in enumerate(roots)}
                 for folder in folders:
-                    db.conn.execute(
-                        """INSERT INTO local_workspace_folders
-                           (workspace_id, folder_id, source_path, local_path, original_status, is_root, root_index)
-                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                        (
-                            workspace_id,
-                            folder["folder_id"],
-                            folder["source_path"],
-                            folder["local_path"],
-                            folder["status"],
-                            1 if folder["folder_id"] in root_ids else 0,
-                            root_ids.get(folder["folder_id"]),
-                        ),
-                    )
-                db.conn.commit()
+                    db.local_workspaces.add_mapping(workspace_id, folder, root_ids)
+                db.commit()
             except BaseException:
-                db.conn.rollback()
+                db.rollback()
                 raise
 
         copied = 0
@@ -1058,22 +1008,16 @@ def stage_workspace(db, workspace_id: int, vireo_dir: str, *, progress=None, can
                 raise LocalWorkspaceCancelled("Local workspace transfer cancelled")
 
             _write_manifest(manifest_path(vireo_dir, workspace_id), manifest)
-            db.conn.execute("BEGIN IMMEDIATE")
+            db.begin_immediate()
             try:
                 for folder in folders:
-                    db.conn.execute(
-                        "UPDATE folders SET path=? WHERE id=? AND path=?",
-                        (folder["local_path"], folder["folder_id"], folder["source_path"]),
-                    )
-                    if db.conn.execute("SELECT changes()").fetchone()[0] != 1:
+                    db.local_folders.rebase_folder_if_unchanged(folder)
+                    if db.local_folders.last_change_count() != 1:
                         raise LocalWorkspaceError(f"Catalog folder changed while staging: {folder['source_path']}")
-                db.conn.execute(
-                    "UPDATE local_workspaces SET state='active', activated_at=? WHERE workspace_id=?",
-                    (time.time(), workspace_id),
-                )
-                db.conn.commit()
+                db.local_workspaces.activate(workspace_id, time.time())
+                db.commit()
             except BaseException:
-                db.conn.rollback()
+                db.rollback()
                 raise
             db.invalidate_new_images_cache_for_workspace(workspace_id)
 
@@ -1091,7 +1035,7 @@ def stage_workspace(db, workspace_id: int, vireo_dir: str, *, progress=None, can
             if current and current.get("state") == "staging":
                 _remove_workspace_dir(vireo_dir, workspace_id)
                 _delete_state_rows(db, workspace_id)
-                db.conn.commit()
+                db.commit()
             raise
 
 
@@ -1377,16 +1321,13 @@ def _restore_catalog(db, workspace_id: int) -> None:
     mapped_ids = {m["folder_id"] for m in mappings}
     local_roots = [m for m in mappings if m["is_root"]]
 
-    db.conn.execute("BEGIN IMMEDIATE")
+    db.begin_immediate()
     try:
         # Self-heal: another row occupying a restore target (e.g. an import
         # or scan re-created the source path while staged) is merged into
         # the staged row instead of wedging both sync and discard.
         for mapping in mappings:
-            conflict = db.conn.execute(
-                "SELECT id FROM folders WHERE path=? AND id != ?",
-                (mapping["source_path"], mapping["folder_id"]),
-            ).fetchone()
+            conflict = db.local_folders.path_conflict(mapping["source_path"], mapping["folder_id"])
             if conflict and conflict["id"] not in mapped_ids:
                 # ``commit=False`` keeps the whole restore in the BEGIN
                 # IMMEDIATE opened above; a failure below still rolls back
@@ -1397,21 +1338,15 @@ def _restore_catalog(db, workspace_id: int) -> None:
                 )
 
         for mapping in mappings:
-            db.conn.execute(
-                "UPDATE folders SET path=? WHERE id=?",
-                (f"__vireo_local_restore__/{workspace_id}/{mapping['folder_id']}", mapping["folder_id"]),
-            )
+            db.local_folders.set_catalog_path(f"__vireo_local_restore__/{workspace_id}/{mapping['folder_id']}", mapping["folder_id"])
         for mapping in mappings:
-            db.conn.execute(
-                "UPDATE folders SET path=?, status=? WHERE id=?",
-                (mapping["source_path"], mapping["original_status"], mapping["folder_id"]),
-            )
+            db.local_folders.restore_catalog_folder(mapping)
 
         # Stray rows created under the managed local tree mid-session (e.g. a
         # scan of the local copy materialized a subfolder) rebase to the
         # matching source location; a row already there absorbs them.
         relinked = list(mapped_ids)
-        rows = db.conn.execute("SELECT id, path, status FROM folders").fetchall()
+        rows = db.local_folders.catalog_rows()
         for row in rows:
             if row["id"] in mapped_ids:
                 continue
@@ -1422,20 +1357,18 @@ def _restore_catalog(db, workspace_id: int) -> None:
             target = os.path.normpath(
                 os.path.join(root["source_path"], _relative(row["path"], root["local_path"]))
             )
-            existing = db.conn.execute(
-                "SELECT id FROM folders WHERE path=? AND id != ?", (target, row["id"])
-            ).fetchone()
+            existing = db.local_folders.path_conflict(target, row["id"])
             if existing:
                 db._merge_into_existing(row["id"], existing["id"], target, commit=False)
             else:
-                db.conn.execute("UPDATE folders SET path=? WHERE id=?", (target, row["id"]))
+                db.local_folders.set_catalog_path(target, row["id"])
                 relinked.append(row["id"])
 
         db._relink_parents_by_path(relinked)
         _delete_state_rows(db, workspace_id)
-        db.conn.commit()
+        db.commit()
     except BaseException:
-        db.conn.rollback()
+        db.rollback()
         raise
     db.invalidate_new_images_cache_for_workspace(workspace_id)
 
@@ -1624,10 +1557,8 @@ def sync_back(
         # original (now smaller) one.
         if not resuming:
             _write_sync_recovery(vireo_dir, workspace_id, deleted)
-            db.conn.execute(
-                "UPDATE local_workspaces SET state='syncing' WHERE workspace_id=?", (workspace_id,)
-            )
-            db.conn.commit()
+            db.local_workspaces.mark_syncing(workspace_id)
+            db.commit()
         elif fresh_confirmation:
             _write_sync_recovery(vireo_dir, workspace_id, deleted)
 
@@ -1707,7 +1638,7 @@ def discard_local(db, workspace_id: int, vireo_dir: str, *, acknowledge_publishe
         if state == "staging":
             _remove_workspace_dir(vireo_dir, workspace_id)
             _delete_state_rows(db, workspace_id)
-            db.conn.commit()
+            db.commit()
             return {"ok": True, "discarded": True}
         if state == "syncing" and not acknowledge_published:
             raise LocalWorkspaceError(

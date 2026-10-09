@@ -144,11 +144,7 @@ def coerce_collection_id(raw):
 
 def collection_row(db, collection_id):
     """Return the (workspace-scoped) collection row or None."""
-    return db.conn.execute(
-        "SELECT id, name, rules, visual_json FROM collections "
-        "WHERE id = ? AND workspace_id = ?",
-        (collection_id, db.require_workspace_id()),
-    ).fetchone()
+    return db.collections.visual_scope_row(collection_id)
 
 
 def collection_rules_state(db, rules_json):

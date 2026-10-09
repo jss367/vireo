@@ -56,3 +56,14 @@ class PendingArchiveRepository:
             (state, error, archive_id),
         )
         self.conn.commit()
+
+    def attach_collection(self, col_id: int | None, pending_archive_id: str) -> None:
+        self.conn.execute(
+            "UPDATE pending_archives SET collection_id = COALESCE(?, collection_id) WHERE id = ?",
+            (col_id, pending_archive_id),
+        )
+
+    def completed_row(self, pending_archive_id: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT 1 FROM pending_archives WHERE id = ? AND state = 'complete'", (pending_archive_id,),
+        ).fetchone()
