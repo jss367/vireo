@@ -3347,7 +3347,7 @@ def test_pairing_transfers_edit_recipe_from_companion(tmp_path):
         "UPDATE photos SET thumb_path = ? WHERE id = ?",
         ("thumbnails/raw.jpg", raw_id),
     )
-    db.preview_cache_insert(raw_id, 800, 1234)
+    db.caches.preview_insert(raw_id, 800, 1234)
 
     _pair_raw_jpeg_companions(db)
 
@@ -3360,7 +3360,7 @@ def test_pairing_transfers_edit_recipe_from_companion(tmp_path):
         "version": 1,
     }
     assert photo["thumb_path"] is None
-    assert db.preview_cache_get(photo["id"], 800) is None
+    assert db.caches.preview_get(photo["id"], 800) is None
     history_item = db.conn.execute(
         "SELECT photo_id FROM edit_history_items",
     ).fetchone()
@@ -6384,8 +6384,8 @@ def test_rescan_invalidates_preview_cache_rows_when_file_content_changes(tmp_pat
     display_file = originals_dir / f"{photo_id}.display.jpg"
     Image.new("RGB", (800, 600), color=(255, 0, 0)).save(display_file, "JPEG")
     file_bytes = preview_file.stat().st_size
-    db.preview_cache_insert(photo_id, 1920, file_bytes)
-    assert db.preview_cache_total_bytes() == file_bytes
+    db.caches.preview_insert(photo_id, 1920, file_bytes)
+    assert db.caches.preview_total_bytes() == file_bytes
 
     # Replace source pixels → new file_hash → invalidation should fire.
     time.sleep(0.05)
@@ -6394,12 +6394,12 @@ def test_rescan_invalidates_preview_cache_rows_when_file_content_changes(tmp_pat
 
     assert not preview_file.exists(), "preview file should be deleted"
     assert not display_file.exists(), "RAW display cache should be deleted"
-    assert db.preview_cache_get(photo_id, 1920) is None, (
+    assert db.caches.preview_get(photo_id, 1920) is None, (
         "preview_cache row must be deleted alongside the file; "
-        "leaving it inflates preview_cache_total_bytes and triggers "
+        "leaving it inflates caches.preview_total_bytes and triggers "
         "unnecessary eviction of valid previews."
     )
-    assert db.preview_cache_total_bytes() == 0
+    assert db.caches.preview_total_bytes() == 0
 
 
 def test_rescan_keeps_preview_cache_row_when_file_unlink_fails(tmp_path, monkeypatch):
@@ -6429,7 +6429,7 @@ def test_rescan_keeps_preview_cache_row_when_file_unlink_fails(tmp_path, monkeyp
     preview_file = preview_dir / f"{photo_id}_1920.jpg"
     Image.new("RGB", (1920, 1440), color=(255, 0, 0)).save(str(preview_file), "JPEG")
     file_bytes = preview_file.stat().st_size
-    db.preview_cache_insert(photo_id, 1920, file_bytes)
+    db.caches.preview_insert(photo_id, 1920, file_bytes)
 
     # Simulate the preview file being un-removable (locked, ACL, etc.).
     real_remove = os.remove
@@ -6448,7 +6448,7 @@ def test_rescan_keeps_preview_cache_row_when_file_unlink_fails(tmp_path, monkeyp
     scan(root, db, incremental=True, vireo_dir=str(vireo_dir))
 
     assert preview_file.exists(), "sanity: stuck preview file should remain"
-    assert db.preview_cache_get(photo_id, 1920) is not None, (
+    assert db.caches.preview_get(photo_id, 1920) is not None, (
         "When preview unlink fails, the cache row must stay so quota "
         "accounting keeps the leaked bytes visible and the serve path "
         "does not lazy-adopt stale content."
@@ -6482,7 +6482,7 @@ def test_rescan_sweeps_untracked_preview_files(tmp_path):
     # Seed an *untracked* preview (file exists, no preview_cache row).
     untracked = preview_dir / f"{photo_id}_800.jpg"
     Image.new("RGB", (800, 600), color=(255, 0, 0)).save(str(untracked), "JPEG")
-    assert db.preview_cache_get(photo_id, 800) is None
+    assert db.caches.preview_get(photo_id, 800) is None
 
     time.sleep(0.05)
     Image.new("RGB", (800, 600), color=(0, 0, 255)).save(img_path, "JPEG")

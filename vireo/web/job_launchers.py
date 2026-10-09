@@ -103,7 +103,7 @@ def _paired_jpeg_preview_exists(preview_dir, photo, size, db):
     source_path = os.path.join(folder["path"], photo["companion_path"])
     if not os.path.isfile(source_path):
         # Match the renderer's live-source-first, offline-companion fallback.
-        cached = db.offline_original_get(photo["id"])
+        cached = db.caches.offline_original_get(photo["id"])
         source_path = cached["companion_path"] if cached else None
         if not source_path:
             return False
@@ -829,7 +829,7 @@ def create_job_launchers_blueprint(
                 if os.path.exists(cache_path):
                     cache_row = None
                     try:
-                        cache_row = thread_db.preview_cache_get(photo["id"], max_size)
+                        cache_row = thread_db.caches.preview_get(photo["id"], max_size)
                     except sqlite3.Error:
                         # Treated as untracked: an edited photo's preview is
                         # then re-rendered rather than trusted.
@@ -855,7 +855,7 @@ def create_job_launchers_blueprint(
                         # Best-effort: photo may be deleted mid-job (FK error).
                         try:
                             if cache_row is None:
-                                thread_db.preview_cache_insert(
+                                thread_db.caches.preview_insert(
                                     photo["id"],
                                     max_size,
                                     os.path.getsize(cache_path),
@@ -1424,7 +1424,7 @@ def create_job_launchers_blueprint(
                                                 f"{photo_id}_{size}.jpg",
                                             )
                                             if not (
-                                                thread_db.preview_cache_get(
+                                                thread_db.caches.preview_get(
                                                     photo_id, size,
                                                 )
                                                 and os.path.exists(cache_file)
@@ -1478,7 +1478,7 @@ def create_job_launchers_blueprint(
 
                                 skipped_deleted += 1
                                 if attempted:
-                                    thread_db.offline_original_delete(
+                                    thread_db.caches.offline_original_delete(
                                         photo_id, _commit=False,
                                     )
                                     if current_photo is None:
@@ -1542,7 +1542,7 @@ def create_job_launchers_blueprint(
                                 preview_dir, f"{photo_id}_{size}.jpg",
                             )
                             if not (
-                                thread_db.preview_cache_get(photo_id, size)
+                                thread_db.caches.preview_get(photo_id, size)
                                 and os.path.exists(cache_file)
                             ):
                                 missing_size = size

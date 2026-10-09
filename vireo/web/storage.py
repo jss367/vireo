@@ -97,8 +97,8 @@ def create_storage_blueprint(get_db, json_error, db_path, config):
         emb = _dir_stats(EMB_CACHE_DIR)
         models_size = _dir_size_recursive(DEFAULT_MODELS_DIR)
         db = get_db()
-        offline_size = db.offline_original_total_bytes()
-        offline_count = db.offline_original_cached_count()
+        offline_size = db.caches.offline_original_total_bytes()
+        offline_count = db.caches.offline_original_cached_count()
         masks = _storage_masks_data(db)
         masks_size = masks["total_bytes"]
         storage_root = os.path.dirname(config["THUMB_CACHE_DIR"])
@@ -481,7 +481,7 @@ def create_storage_blueprint(get_db, json_error, db_path, config):
             # Keep preview_cache table in sync with the filesystem so
             # Settings "Current usage" and eviction don't see phantoms.
             db = get_db()
-            db.preview_cache_clear_all()
+            db.caches.preview_clear_all()
             return jsonify({"ok": True})
         elif cache_type == "thumbnails":
             thumb_dir = config["THUMB_CACHE_DIR"]
@@ -617,11 +617,11 @@ def create_storage_blueprint(get_db, json_error, db_path, config):
                 os.remove(fp)
                 deleted += 1
                 if is_paired:
-                    db.paired_preview_cache_delete(safe)
+                    db.caches.paired_preview_delete(safe)
                 elif cache_type == "previews":
                     m = sized_pat.match(safe)
                     if m:
-                        db.preview_cache_delete(int(m.group(1)), int(m.group(2)))
+                        db.caches.preview_delete(int(m.group(1)), int(m.group(2)))
                         preview_rows_removed += 1
                 elif cache_type == "thumbnails":
                     m = thumb_pat.match(safe)

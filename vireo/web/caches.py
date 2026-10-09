@@ -189,7 +189,7 @@ def create_caches_blueprint(get_db, json_error, db_path, config):
         photo_count = db.count_catalog_photos()
         if not photo_count:
             return 0
-        avg = db.preview_cache_average_bytes()
+        avg = db.caches.preview_average_bytes()
         avg_bytes = avg if avg else 500 * 1024
         recommended_bytes = photo_count * avg_bytes
         return max(1, int(recommended_bytes / 1024 / 1024) + 1)
@@ -199,8 +199,8 @@ def create_caches_blueprint(get_db, json_error, db_path, config):
         """Return counts and totals for both preview cache families, plus quota."""
         import config as cfg
         db = get_db()
-        count = db.preview_cache_entry_count()
-        total = db.preview_cache_total_bytes()
+        count = db.caches.preview_entry_count()
+        total = db.caches.preview_total_bytes()
         quota_mb = cfg.load().get("preview_cache_max_mb", 20480)
         return jsonify({
             "count": count,
@@ -226,8 +226,8 @@ def create_caches_blueprint(get_db, json_error, db_path, config):
         vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
         preview_dir = os.path.join(vireo_dir, "previews")
 
-        tracked = db.preview_cache_entry_count()
-        paired_rows = db.paired_preview_cache_oldest_first()
+        tracked = db.caches.preview_entry_count()
+        paired_rows = db.caches.paired_preview_oldest_first()
 
         # Matches {id}.jpg (legacy /full cache) and {id}_{size}.jpg (current).
         pattern = re.compile(r"^(\d+)(?:_(\d+))?\.jpg$")
@@ -247,9 +247,9 @@ def create_caches_blueprint(get_db, json_error, db_path, config):
                         failed_tracked.append((int(m.group(1)), int(m.group(2))))
 
         # Drop every ordinary row except the ones whose file couldn't be
-        # unlinked. Uncommitted here: preview_cache_delete_entries below
+        # unlinked. Uncommitted here: caches.preview_delete_entries below
         # commits it with the paired rows.
-        db.preview_cache_delete_all_except(failed_tracked)
+        db.caches.preview_delete_all_except(failed_tracked)
 
         # Paired previews live under their own source-state filenames, but
         # the Clear Preview Cache control covers the shared disk budget.
@@ -268,13 +268,13 @@ def create_caches_blueprint(get_db, json_error, db_path, config):
                     pass
                 except OSError:
                     failed_paired.add(name)
-        db.preview_cache_delete_entries(
+        db.caches.preview_delete_entries(
             [],
             [row["filename"] for row in paired_rows
              if row["filename"] not in failed_paired],
         )
 
-        remaining = db.preview_cache_entry_count()
+        remaining = db.caches.preview_entry_count()
         cleared = tracked - remaining
 
         return jsonify({

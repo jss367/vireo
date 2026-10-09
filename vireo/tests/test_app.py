@@ -368,7 +368,7 @@ def test_offline_cache_job_copies_original_and_xmp(client_with_photo):
     job = wait_for_job_via_client(client, resp.get_json()["job_id"])
     assert job["status"] == "completed"
 
-    row = db.offline_original_get(pid)
+    row = db.caches.offline_original_get(pid)
     assert row is not None
     assert row["status"] == "cached"
     vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
@@ -395,7 +395,7 @@ def test_offline_cache_picks_up_uppercase_xmp_sidecar(client_with_photo):
     job = wait_for_job_via_client(client, resp.get_json()["job_id"])
     assert job["status"] == "completed"
 
-    row = db.offline_original_get(pid)
+    row = db.caches.offline_original_get(pid)
     assert row is not None
     assert row["status"] == "cached"
     assert row["xmp_path"], "expected uppercase .XMP sidecar to be cached"
@@ -436,7 +436,7 @@ def test_offline_cache_refreshes_and_removes_xmp_sidecar(client_with_photo):
     job = wait_for_job_via_client(client, resp.get_json()["job_id"])
     assert job["status"] == "completed"
 
-    row = db.offline_original_get(pid)
+    row = db.caches.offline_original_get(pid)
     vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
     cached_xmp = os.path.join(vireo_dir, row["xmp_path"])
     cached_companion = os.path.join(vireo_dir, row["companion_path"])
@@ -455,7 +455,7 @@ def test_offline_cache_refreshes_and_removes_xmp_sidecar(client_with_photo):
     assert resp.status_code == 200
     job = wait_for_job_via_client(client, resp.get_json()["job_id"])
     assert job["status"] == "completed"
-    row = db.offline_original_get(pid)
+    row = db.caches.offline_original_get(pid)
     cached_xmp = os.path.join(vireo_dir, row["xmp_path"])
     cached_companion = os.path.join(vireo_dir, row["companion_path"])
     assert open(cached_xmp, encoding="utf-8").read() == "version 2"
@@ -467,7 +467,7 @@ def test_offline_cache_refreshes_and_removes_xmp_sidecar(client_with_photo):
     assert resp.status_code == 200
     job = wait_for_job_via_client(client, resp.get_json()["job_id"])
     assert job["status"] == "completed"
-    row = db.offline_original_get(pid)
+    row = db.caches.offline_original_get(pid)
     assert row["xmp_path"] is None
     assert row["companion_path"] is None
     assert not os.path.exists(cached_xmp)
@@ -533,7 +533,7 @@ def test_original_route_uses_offline_cache_despite_recent_raw_failure_marker(
     offline_resp = client.get(f"/photos/{pid}/original")
 
     assert offline_resp.status_code == 200
-    row = db.offline_original_get(pid)
+    row = db.caches.offline_original_get(pid)
     assert row is not None and row["bytes"] > 0
     vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
     with open(os.path.join(vireo_dir, row["original_path"]), "rb") as f:
@@ -550,7 +550,7 @@ def test_offline_cache_rerun_preserves_cache_when_source_missing(client_with_pho
     job = wait_for_job_via_client(client, resp.get_json()["job_id"])
     assert job["status"] == "completed"
 
-    row = db.offline_original_get(pid)
+    row = db.caches.offline_original_get(pid)
     assert row is not None and row["status"] == "cached"
     cached_original_path = row["original_path"]
     cached_bytes = row["bytes"]
@@ -572,7 +572,7 @@ def test_offline_cache_rerun_preserves_cache_when_source_missing(client_with_pho
     assert job["result"]["skipped"] == 1
     assert job["result"]["failed"] == 0
 
-    row = db.offline_original_get(pid)
+    row = db.caches.offline_original_get(pid)
     assert row["status"] == "cached"
     assert row["original_path"] == cached_original_path
     assert row["bytes"] == cached_bytes
@@ -631,7 +631,7 @@ def test_offline_cache_files_removed_when_photo_deleted(client_with_photo):
     job = wait_for_job_via_client(client, resp.get_json()["job_id"])
     assert job["status"] == "completed"
 
-    row = db.offline_original_get(pid)
+    row = db.caches.offline_original_get(pid)
     vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
     cached_original = os.path.join(vireo_dir, row["original_path"])
     cached_xmp = os.path.join(vireo_dir, row["xmp_path"])
@@ -642,7 +642,7 @@ def test_offline_cache_files_removed_when_photo_deleted(client_with_photo):
     resp = client.post("/api/audit/remove-orphans", json={"photo_ids": [pid]})
     assert resp.status_code == 200
 
-    assert db.offline_original_get(pid) is None
+    assert db.caches.offline_original_get(pid) is None
     assert not os.path.exists(cached_original)
     assert not os.path.exists(cached_xmp)
 
@@ -12812,7 +12812,7 @@ def test_api_folder_delete_removes_preview_files(app_and_db, tmp_path):
             f.write(b"\xff\xd8\xff\xd9")  # minimal JPEG SOI/EOI
         with open(legacy, "wb") as f:
             f.write(b"\xff\xd8\xff\xd9")
-        db.preview_cache_insert(pid, 1920, 4)
+        db.caches.preview_insert(pid, 1920, 4)
         created.extend([sized, legacy])
 
     client = app.test_client()

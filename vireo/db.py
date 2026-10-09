@@ -19,6 +19,7 @@ from new_images import get_shared_cache
 from repositories import UNSET as _UNSET  # sentinel for "not provided" vs explicit None
 
 if TYPE_CHECKING:
+    from repositories.caches import CachesRepository
     from repositories.job_history import JobHistoryRepository
     from repositories.local_folders import LocalFolderRepository
     from repositories.pending_archives import PendingArchiveRepository
@@ -5096,7 +5097,7 @@ class Database:
         return {"deleted": len(all_ids), "ids": all_ids, "files": files}
 
     # ------------------------------------------------------------------
-    # preview_cache LRU
+    # caches: preview_cache LRU and offline originals (db.caches)
     # ------------------------------------------------------------------
     def _caches_repository(self):
         """Build the preview/offline-original cache repository on this connection.
@@ -5113,117 +5114,18 @@ class Database:
             commit_with_retry=commit_with_retry,
         )
 
-    def preview_cache_insert(self, photo_id, size, bytes_):
-        """Insert or replace a preview_cache entry. last_access_at = now()."""
-        self._caches_repository().preview_insert(photo_id, size, bytes_)
+    @property
+    def caches(self) -> CachesRepository:
+        """The preview-cache and offline-original domain: ``db.caches.preview_get(...)``.
 
-    def preview_cache_touch(self, photo_id, size):
-        """Update last_access_at for an existing entry. No-op if missing."""
-        self._caches_repository().preview_touch(photo_id, size)
-
-    def preview_cache_delete(self, photo_id, size):
-        """Delete a preview_cache entry (caller removes the file)."""
-        self._caches_repository().preview_delete(photo_id, size)
-
-    def preview_cache_entry_count(self):
-        """Number of tracked ordinary plus paired preview entries."""
-        return self._caches_repository().preview_entry_count()
-
-    def preview_cache_average_bytes(self):
-        """Mean size of the non-empty ordinary and paired preview entries, or None."""
-        return self._caches_repository().preview_average_bytes()
-
-    def preview_cache_delete_all_except(self, keep_keys):
-        """Delete every ordinary preview entry except the ``(photo_id, size)``
-        pairs in ``keep_keys``. Does not commit."""
-        self._caches_repository().preview_delete_all_except(keep_keys)
-
-    def preview_cache_total_bytes(self):
-        """Return total bytes tracked across ordinary and paired previews."""
-        return self._caches_repository().preview_total_bytes()
-
-    def preview_cache_oldest_first(self):
-        """Return all rows ordered by last_access_at ascending (oldest first)."""
-        return self._caches_repository().preview_oldest_first()
-
-    def preview_cache_get(self, photo_id, size):
-        """Return the row for (photo_id, size), or None."""
-        return self._caches_repository().preview_get(photo_id, size)
-
-    def is_preview_cache_invalid(self, photo_id, size):
-        """True when ``(photo_id, size)``'s on-disk preview must not be adopted.
-
-        The caller creates ``preview_cache_invalidations`` first
-        (``preview_cache.ensure_preview_cache_invalidations_table``).
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_caches_repository``, exactly as a forwarding
+        wrapper called at that moment would, so the connection and the
+        module's ``execute_with_retry`` / ``commit_with_retry`` (which tests
+        patch) are resolved per use. Do not hold the returned repository
+        across a patch of those helpers or a connection swap.
         """
-        return self._caches_repository().preview_invalidated(photo_id, size)
-
-    def paired_preview_cache_insert(self, photo_id, filename, bytes_):
-        """Register a source-keyed preview in the publisher's transaction."""
-        self._caches_repository().paired_preview_insert(photo_id, filename, bytes_)
-
-    def paired_preview_cache_get(self, filename):
-        return self._caches_repository().paired_preview_get(filename)
-
-    def paired_preview_cache_touch(self, filename):
-        self._caches_repository().paired_preview_touch(filename)
-
-    def paired_preview_cache_oldest_first(self):
-        return self._caches_repository().paired_preview_oldest_first()
-
-    def paired_preview_cache_delete(self, filename):
-        """Delete one paired preview entry (caller removes the file)."""
-        self._caches_repository().paired_preview_delete(filename)
-
-    def preview_cache_delete_entries(self, preview_keys, paired_filenames):
-        """Delete ordinary entries by (photo_id, size) and paired ones by filename."""
-        self._caches_repository().preview_delete_entries(preview_keys, paired_filenames)
-
-    def preview_cache_clear_all(self):
-        """Delete every ordinary and paired preview entry (caller removes the files)."""
-        self._caches_repository().preview_clear_all()
-
-    # ------------------------------------------------------------------
-    # offline original cache
-    # ------------------------------------------------------------------
-    def offline_original_upsert(
-        self,
-        photo_id,
-        original_path,
-        xmp_path,
-        companion_path,
-        bytes_,
-        source_size,
-        source_mtime,
-        cached_at,
-        status,
-        error=None,
-    ):
-        self._caches_repository().offline_original_upsert(
-            photo_id,
-            original_path,
-            xmp_path,
-            companion_path,
-            bytes_,
-            source_size,
-            source_mtime,
-            cached_at,
-            status,
-            error,
-        )
-
-    def offline_original_get(self, photo_id):
-        return self._caches_repository().offline_original_get(photo_id)
-
-    def offline_original_delete(self, photo_id, _commit=True):
-        self._caches_repository().offline_original_delete(photo_id, _commit=_commit)
-
-    def offline_original_total_bytes(self):
-        return self._caches_repository().offline_original_total_bytes()
-
-    def offline_original_cached_count(self):
-        """Number of offline originals with ``status='cached'``."""
-        return self._caches_repository().offline_original_cached_count()
+        return self._caches_repository()
 
     def update_photo_sharpness(self, photo_id, sharpness):
         """Set photo sharpness score."""

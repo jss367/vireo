@@ -482,8 +482,8 @@ def test_cache_pause_finishes_current_photo_and_preserves_progress(
         paused = _wait_status(runner, job_id, "paused")
         assert paused["progress"]["current"] == 1
         assert calls == [first]
-        assert db.offline_original_get(first) is not None
-        assert db.offline_original_get(second) is None
+        assert db.caches.offline_original_get(first) is not None
+        assert db.caches.offline_original_get(second) is None
         # Pausing must release the writer, so unrelated catalog work can run.
         db.conn.execute("UPDATE photos SET rating=3 WHERE id=?", (first,))
         db.conn.commit()
@@ -492,7 +492,7 @@ def test_cache_pause_finishes_current_photo_and_preserves_progress(
         if action == "resume":
             assert finished["status"] == "completed", finished
             assert calls == [first, second]
-            assert db.offline_original_get(second) is not None
+            assert db.caches.offline_original_get(second) is not None
         else:
             assert finished["status"] == "cancelled", finished
             assert calls == [first]
