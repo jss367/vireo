@@ -62,7 +62,7 @@ def test_session_cache_lock_wait_honors_bound_cancel_probe():
             time.sleep(0.01)
         assert ledger.snapshot()["waiters"] == 1
         cancelled.set()
-        assert finished.wait(timeout=synchronization_timeout(1.0))
+        assert finished.wait(timeout=1.0)
         thread.join(timeout=synchronization_timeout(1.0))
         assert not thread.is_alive()
         assert outcome == ["cancelled"]
@@ -625,12 +625,13 @@ def test_acquire_inference_resources_wakes_on_bound_cancel_check():
         cancelled_flag.set()
         # The ledger uses a bounded 200ms poll so the waiter observes the
         # flag on the next tick; no need to release the holder.
-        assert finished.wait(timeout=synchronization_timeout(1.0)), "waiter never observed cancel"
+        assert finished.wait(timeout=1.0), "waiter never observed cancel"
         thread.join(timeout=synchronization_timeout(1.0))
         assert not thread.is_alive()
         assert outcome == ["cancelled"]
     finally:
         holder.release()
+        thread.join(timeout=synchronization_timeout(1.0))
         resource_ledger._set_resource_ledger_for_tests(previous)
 
 
@@ -663,12 +664,13 @@ def test_gpu_inference_wait_wakes_on_bound_cancel_check():
         thread.start()
         time.sleep(0.05)
         cancelled_flag.set()
-        assert finished.wait(timeout=synchronization_timeout(1.0)), "GPU waiter never observed cancel"
+        assert finished.wait(timeout=1.0), "GPU waiter never observed cancel"
         thread.join(timeout=synchronization_timeout(1.0))
         assert not thread.is_alive()
         assert outcome == ["cancelled"]
     finally:
         holder.__exit__(None, None, None)
+        thread.join(timeout=synchronization_timeout(1.0))
 
 
 def test_gpu_inference_contention_records_live_and_completed_owner_timing():
@@ -998,7 +1000,8 @@ def test_workspace_regroup_lock_does_not_block_other_workspaces():
         with acquire_workspace_regroup(1):
             held.append("first-in")
             first_holding.set()
-            let_first_go.wait(timeout=synchronization_timeout(2.0))
+            # The holder's safety wait must outlast the observer's join.
+            let_first_go.wait(timeout=2 * synchronization_timeout(1.0))
             held.append("first-out")
 
     def second():
@@ -1008,13 +1011,18 @@ def test_workspace_regroup_lock_does_not_block_other_workspaces():
     t1 = threading.Thread(target=first)
     t2 = threading.Thread(target=second)
     t1.start()
-    assert first_holding.wait(timeout=synchronization_timeout(1.0))
-    t2.start()
-    t2.join(timeout=synchronization_timeout(1.0))
-    assert not t2.is_alive(), "second thread should not be blocked by a different workspace"
-    assert "second-in" in held, "different workspace must not be blocked"
-    let_first_go.set()
-    t1.join(timeout=synchronization_timeout(2.0))
+    try:
+        assert first_holding.wait(timeout=synchronization_timeout(1.0))
+        t2.start()
+        t2.join(timeout=synchronization_timeout(1.0))
+        assert not t2.is_alive(), "second thread should not be blocked by a different workspace"
+        assert "second-in" in held, "different workspace must not be blocked"
+        assert "first-out" not in held, "first lock released before checking independence"
+    finally:
+        let_first_go.set()
+        t1.join(timeout=synchronization_timeout(2.0))
+        if t2.ident is not None:
+            t2.join(timeout=synchronization_timeout(1.0))
     assert not t1.is_alive(), "first thread did not finish"
 
 
