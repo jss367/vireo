@@ -5243,7 +5243,8 @@ def test_scan_worker_wait_uses_bound_cancel_probe_without_explicit_callback(
             time.sleep(0.01)
         assert ledger.snapshot()["waiters"] == 1
         cancelled.set()
-        assert finished.wait(timeout=synchronization_timeout(1.0))
+        # Preserve the cancellation deadline while the resource stays held.
+        assert finished.wait(timeout=1.0)
         thread.join(timeout=synchronization_timeout(1.0))
         assert not thread.is_alive()
         assert outcome == ["cancelled"]

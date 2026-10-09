@@ -454,7 +454,8 @@ def test_waiter_cancel_check_unblocks_while_producer_still_loading():
     time.sleep(0.05)  # let waiter enter its poll loop
 
     cancel_waiter.set()
-    tw.join(timeout=synchronization_timeout(2.0))
+    # Cancellation must unwind promptly while the producer is still loading.
+    tw.join(timeout=2.0)
     assert not tw.is_alive(), "waiter did not unwind after cancel"
     assert len(waiter_error) == 1
 
