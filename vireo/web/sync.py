@@ -417,6 +417,26 @@ def _sync_preview_presentation(
             metadata, "Not in XMP",
         )
         if change_type == "keyword_add":
+            # The writer preserves exact entries and canonicalizes every
+            # equivalent spelling before adding. Inspect all matches: an
+            # exact entry plus a variant still needs a spelling cleanup.
+            matching = sorted(
+                keyword for keyword in metadata.get("keywords", set())
+                if keyword_match_key(keyword) == keyword_match_key(value)
+            )
+            if matching:
+                unchanged = matching == [value]
+                return {
+                    "field": "Keyword",
+                    "action": "unchanged" if unchanged else "updated",
+                    "before": "; ".join(matching),
+                    "after": value,
+                    "after_detail": (
+                        "This keyword is already in XMP"
+                        if unchanged
+                        else "Sync replaces equivalent keyword spellings with this spelling"
+                    ),
+                }
             return {
                 "field": "Keyword",
                 "action": "added",

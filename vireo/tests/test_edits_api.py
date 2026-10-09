@@ -1246,6 +1246,66 @@ def test_sync_preview_does_not_promise_removal_from_unreadable_xmp(
     }
 
 
+@pytest.mark.parametrize("existing, action, before", [
+    (None, "added", "No XMP sidecar"),
+    ({"Raptor"}, "added", "Not in XMP"),
+    ({"Western meadowlark"}, "unchanged", "Western meadowlark"),
+    ({"western meadowlark"}, "updated", "western meadowlark"),
+    (
+        {"Western meadowlark", "western meadowlark"},
+        "updated", "Western meadowlark; western meadowlark",
+    ),
+    (
+        {"‘Western meadowlark", "western meadowlark"},
+        "updated", "western meadowlark; ‘Western meadowlark",
+    ),
+])
+def test_sync_preview_keyword_add_matches_actual_sidecar_change(
+    client_with_photo, existing, action, before,
+):
+    """An existing keyword is unchanged; spelling variants are rewritten."""
+    from pathlib import Path
+
+    from sync import sync_to_xmp
+    from xmp import read_sync_preview_metadata, write_sidecar
+
+    app, db, photo_id = client_with_photo
+    photo = db.get_photo(photo_id)
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],),
+    ).fetchone()["path"]
+    sidecar = Path(folder) / "test.xmp"
+    hierarchy = {"Birds|Western meadowlark"}
+    if existing is not None:
+        write_sidecar(sidecar, flat_keywords=existing, hierarchical_keywords=hierarchy)
+    original_bytes = sidecar.read_bytes() if sidecar.exists() else None
+    db.queue_change(photo_id, "keyword_add", "Western meadowlark")
+
+    response = app.test_client().get("/api/sync/preview")
+
+    assert response.status_code == 200
+    presentation = response.get_json()["photos"][0]["changes"][0]["presentation"]
+    assert presentation["field"] == "Keyword"
+    assert presentation["action"] == action
+    assert presentation["before"] == before
+    assert presentation["after"] == "Western meadowlark"
+    if action == "unchanged":
+        assert presentation["after_detail"] == "This keyword is already in XMP"
+
+    result = sync_to_xmp(db)
+
+    assert result["synced"] == 1
+    assert result["failed"] == 0
+    assert not db.pending_changes.list_all()
+    metadata = read_sync_preview_metadata(sidecar)
+    assert metadata["keywords"] == (existing or set()) - {
+        "western meadowlark", "‘Western meadowlark",
+    } | {"Western meadowlark"}
+    assert metadata["hierarchical_keywords"] == (hierarchy if existing is not None else set())
+    if action == "unchanged":
+        assert sidecar.read_bytes() == original_bytes
+
+
 def test_sync_preview_treats_absent_keyword_removal_as_unchanged(
     client_with_photo,
 ):
