@@ -240,18 +240,35 @@ and stale-display behavior; this benchmark adds actual camera timing and memory.
 ### Recorded contention results
 
 The [stress report](performance/raw-preview-stress.json) uses the same two cameras
-and clean revision `cd86a0a43`, with the production two threads per worker and three
-trials per scenario. It ran after the sequential benchmark, with no other tests or
-benchmarks from this task running concurrently. All 12 trials passed: 135 requests,
-108 superseded responses, and 15 observed worker reaps. Timings below pool the
+on an Apple M3 Max and clean revision `cd86a0a43`, with the production two threads
+per worker and three trials per scenario. It ran after the sequential benchmark,
+with no other tests or benchmarks from this task running concurrently. All 12
+trials passed: 135 requests and 108 superseded responses. Timings below pool the
 individual observations across each scenario's three trials.
 
-| Scenario | Cancellation ack p95 | Worker reap p95 | Latest quick median / p95 | Peak aggregate RSS |
+The attribution logic in effect at `cd86a0a43` picked the maximum exposure
+across markers on a reaped PID. A later-dispatched higher-exposure request
+could complete on a PID before an earlier-dispatched one started on that PID,
+and the equality check in the post-processing loop then dropped the earlier
+request's actual reap. The fix in `cbb7b33` picks the latest-started exposure
+per PID instead, covered by a deterministic unit test. The report was not
+rerun on a different machine; its `reaped_workers_observed` counts and the
+whole `worker_reap` object (in both the per-trial `results` rows and the
+pooled `summary` rows) are therefore historical and unvalidated under the
+corrected attribution logic — do not cite them as current performance. The
+report's `caveats.pre_fix_worker_reap_attribution` section names every
+affected field and lists the independently unaffected ones. The Worker reap
+column below is kept as a historical record of the recorded values, not as a
+current measurement.
+
+| Scenario | Cancellation ack p95 | Worker reap p95 (historical/unvalidated) | Latest quick median / p95 | Peak aggregate RSS |
 | --- | ---: | ---: | ---: | ---: |
-| 24 MP rapid edits | 19.23 ms | 42.96 ms | 1.70 / 1.73 s | 1,148 MiB |
-| 46 MP rapid edits | 17.43 ms | 44.23 ms | 2.65 / 2.67 s | 1,673 MiB |
-| Photo navigation | 15.58 ms | 28.98 ms | 1.67 / 1.72 s | 1,135 MiB |
-| Three tabs | 22.56 ms | 44.83 ms | 1.88 / 4.07 s | 7,065 MiB |
+| 24 MP rapid edits | 19.23 ms | 42.96 ms † | 1.70 / 1.73 s | 1,148 MiB |
+| 46 MP rapid edits | 17.43 ms | 44.23 ms † | 2.65 / 2.67 s | 1,673 MiB |
+| Photo navigation | 15.58 ms | 28.98 ms † | 1.67 / 1.72 s | 1,135 MiB |
+| Three tabs | 22.56 ms | 44.83 ms † | 1.88 / 4.07 s | 7,065 MiB |
+
+† Recorded under the pre-fix attribution logic; see the caveat above.
 
 The three tabs use the 24 MP, 46 MP and 24 MP photos, respectively. Native
 refinements in that scenario had a 12.57-second median and 19.09-second p95,
@@ -259,7 +276,9 @@ including queue time. Cancellation acknowledgement is fast, but completing the
 latest preview still needs worker startup and a fresh RAW decode after a worker
 is discarded. The three-tab case also shows that two bounded workers can consume
 about 6.9 GiB together. These are observed costs on a shared machine, not fixed
-latency or memory guarantees.
+latency or memory guarantees. The cancellation acknowledgement, latest preview,
+native refinement and peak-RSS columns are independent of the attribution fix
+and continue to describe the recorded run.
 
 ## Stalled preview recovery
 

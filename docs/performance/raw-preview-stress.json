@@ -56,6 +56,41 @@
     ],
     "command_paths_redacted": true
   },
+  "caveats": {
+    "pre_fix_worker_reap_attribution": {
+      "summary": "Recorded under cd86a0a43, before the worker-reap attribution fix in cbb7b33. The attribution logic in effect at the recorded revision chose max(exposures) for each reaped PID; a later-dispatched higher-exposure request that completed on a PID before an earlier-dispatched request started on that PID could be credited with the reap, and the earlier request's actual reap could be dropped. The fields below are therefore historical and unvalidated under the corrected attribution logic. Do not cite them as current performance. Other measurements in this report are independently unaffected and the recorded revision and environment are preserved as the original historical record.",
+      "fixed_in_revision": "cbb7b33a23d0a12fb6b8e285bdf5b1ed3ae35882",
+      "affected_fields": [
+        "results[].reaped_workers_observed",
+        "results[].worker_reap.samples_ms",
+        "results[].worker_reap.p50_ms",
+        "results[].worker_reap.p95_ms",
+        "summary[].reaped_workers_observed",
+        "summary[].worker_reap.samples_ms",
+        "summary[].worker_reap.p50_ms",
+        "summary[].worker_reap.p95_ms"
+      ],
+      "unaffected_fields": [
+        "results[].requests",
+        "results[].completed",
+        "results[].superseded",
+        "results[].cancellation_ack",
+        "results[].navigation_cancel",
+        "results[].latest_preview",
+        "results[].native_refinement",
+        "results[].peak_rss_mib",
+        "results[].elapsed_ms",
+        "summary[].requests",
+        "summary[].completed",
+        "summary[].superseded",
+        "summary[].cancellation_ack",
+        "summary[].navigation_cancel",
+        "summary[].latest_preview",
+        "summary[].native_refinement",
+        "summary[].peak_rss_mib"
+      ]
+    }
+  },
   "protocol": {
     "samples": 3,
     "edits": 6,
