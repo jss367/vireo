@@ -532,7 +532,7 @@ def test_species_confirmation_restores_cache_on_commit_failure(
         before['encounters'][0]['species_confirmed'] = True
     save_results_raw(before, os.path.dirname(db._db_path), db._ws_id())
     keywords_before = {pid: db.get_photo_keywords(pid) for pid in ids}
-    history_before = db.get_edit_history()
+    history_before = db.edit_history.list_recent()
     pending_before = [dict(row) for row in db.conn.execute('SELECT * FROM pending_changes')]
     original_init = Database.__init__
 
@@ -558,7 +558,7 @@ def test_species_confirmation_restores_cache_on_commit_failure(
         response = client.post('/api/encounters/species', json=payload)
         assert response.status_code == 500
     assert _load(db) == before
-    assert db.get_edit_history() == history_before
+    assert db.edit_history.list_recent() == history_before
     assert {pid: db.get_photo_keywords(pid) for pid in ids} == keywords_before
     assert [dict(row) for row in db.conn.execute('SELECT * FROM pending_changes')] == pending_before
     assert client.post('/api/encounters/species', json=payload).status_code == 200

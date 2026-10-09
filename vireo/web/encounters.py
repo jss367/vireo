@@ -971,7 +971,7 @@ class _SpeciesConfirmation:
         ):
             # Labels and confirmation counts are part of the same user
             # action even when no burst moves to another encounter.
-            photo_edit = self.db.get_edit_action_and_new_value(self.photo_edit_id)
+            photo_edit = self.db.edit_history.action_and_new_value(self.photo_edit_id)
             change = {
                 "before": before_cached["encounters"],
                 "after": cached["encounters"],

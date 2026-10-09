@@ -360,7 +360,7 @@ class _ClassifyPlan:
             detector_runtime = megadetector_runtime_fingerprint()
         except (OSError, ValueError):
             detector_runtime = None
-        self.current_detector_photo_ids = db.get_detector_run_photo_ids(
+        self.current_detector_photo_ids = db.model_runs.get_detector_run_photo_ids(
             "megadetector-v6",
             runtime_fingerprint=detector_runtime,
         )

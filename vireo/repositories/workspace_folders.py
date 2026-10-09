@@ -12,30 +12,45 @@ staged descendant session the ``folders.path`` walk can't see. Every method
 takes the workspace id explicitly, so the repository is not bound to the
 active workspace.
 
-``Database`` keeps the composition: subtree discovery
-(``_folder_subtree_ids_by_path``, ``_local_source_descendant_ids``), the
-removal-set lookup that decides which descendants to link, workspace
-existence checks, and the new-images cache invalidation all run in the
-façade wrappers, so monkeypatches of those ``Database`` methods still apply.
+Callers reach the single-statement reads and writes as
+``db.workspace_folders`` (a fresh repository per access, see
+``Database.workspace_folders``). ``Database`` keeps the composition: subtree
+discovery (``_folder_subtree_ids_by_path``, ``_local_source_descendant_ids``),
+the removal-set lookup that decides which descendants to link, workspace
+existence checks, and the new-images cache invalidation all run in the façade
+methods, so monkeypatches of those ``Database`` methods still apply. It also
+keeps the reads that default to the active workspace
+(``_photo_in_workspace``, ``get_workspace_visible_folder_ids``) and the
+merge's ``root_ancestor_exists`` / ``root_descendant_exists`` callbacks.
 """
+
+import sqlite3
+from collections.abc import Callable, Iterable, Sequence
 
 from repositories.collections import COMPANION_EXTENSION_SQL
 
 
 class WorkspaceFolderRepository:
-    def __init__(self, conn, *, path_for_subtree_match, chunk_size=800):
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        path_for_subtree_match: Callable[[str], str],
+        chunk_size: int = 800,
+    ) -> None:
         self.conn = conn
         # ``db._path_for_subtree_match``: folds ``\\`` to ``/`` and strips
         # trailing slashes, passed in so repositories import no ``db`` code.
         self.path_for_subtree_match = path_for_subtree_match
         self.chunk_size = chunk_size
 
-    def commit(self):
+    def commit(self) -> None:
+        """Commit the connection's open transaction."""
         self.conn.commit()
 
     # -- photo visibility ----------------------------------------------------
 
-    def photo_in_workspace(self, photo_id, workspace_id):
+    def photo_in_workspace(self, photo_id: int, workspace_id: int) -> bool:
         """True if the photo's folder is linked to ``workspace_id``."""
         row = self.conn.execute(
             """SELECT 1 FROM photos p
@@ -47,8 +62,10 @@ class WorkspaceFolderRepository:
 
     # -- linking -------------------------------------------------------------
 
-    def add_no_commit(self, workspace_id, folder_id, folder_ids, *,
-                      is_root=True, restore_removed=False):
+    def add_no_commit(
+        self, workspace_id: int, folder_id: int, folder_ids: Iterable[int], *,
+        is_root: bool = True, restore_removed: bool = False,
+    ) -> None:
         """Link ``folder_ids`` (``folder_id``'s subtree) without committing."""
         self.conn.executemany(
             """INSERT OR IGNORE INTO workspace_folders
@@ -70,7 +87,7 @@ class WorkspaceFolderRepository:
                     [folder_id, workspace_id] + chunk,
                 )
 
-    def add_exact(self, workspace_id, folder_id, *, is_root=False):
+    def add_exact(self, workspace_id: int, folder_id: int, *, is_root: bool = False) -> None:
         """Link exactly one folder, without its descendants, and commit."""
         self.conn.execute(
             """INSERT OR IGNORE INTO workspace_folders
@@ -85,7 +102,7 @@ class WorkspaceFolderRepository:
             )
         self.conn.commit()
 
-    def mark_roots(self, workspace_id, folder_ids):
+    def mark_roots(self, workspace_id: int, folder_ids: Iterable[int] | None) -> None:
         """Mark specific linked folders as user-facing roots."""
         if not folder_ids:
             return
@@ -101,7 +118,8 @@ class WorkspaceFolderRepository:
 
     # -- removals ------------------------------------------------------------
 
-    def removed_ids(self, workspace_id):
+    def removed_ids(self, workspace_id: int) -> set[int]:
+        """Ids of the folders explicitly removed from the workspace."""
         return {
             row["folder_id"] for row in self.conn.execute(
                 "SELECT folder_id FROM workspace_removed_folders WHERE workspace_id = ?",
@@ -109,7 +127,7 @@ class WorkspaceFolderRepository:
             )
         }
 
-    def removal_root_ids(self, folder_ids):
+    def removal_root_ids(self, folder_ids: Iterable[int]) -> set[int]:
         """Find topmost surviving paths without walking every subtree again."""
         paths = []
         for chunk in self._chunks(folder_ids):
@@ -134,7 +152,10 @@ class WorkspaceFolderRepository:
                 root_paths.add(path)
         return roots
 
-    def remember_removals(self, workspace_id, folder_ids, roots, *, recursive=False):
+    def remember_removals(
+        self, workspace_id: int, folder_ids: Sequence[int], roots: Iterable[int], *,
+        recursive: bool = False,
+    ) -> None:
         """Record removals in the caller's unlink/delete transaction."""
         # Keep exact descendant records so importing just one folder does
         # not restore its children. Only topmost surviving folders need a
@@ -148,7 +169,7 @@ class WorkspaceFolderRepository:
             [(workspace_id, fid in roots, fid, recursive) for fid in folder_ids],
         )
 
-    def remove(self, workspace_id, folder_id):
+    def remove(self, workspace_id: int, folder_id: int) -> None:
         """Unlink a single folder and commit."""
         self.conn.execute(
             "DELETE FROM workspace_photos WHERE workspace_id = ? AND photo_id IN "
@@ -160,7 +181,7 @@ class WorkspaceFolderRepository:
         )
         self.conn.commit()
 
-    def local_session_folder_ids(self, root_folder_id):
+    def local_session_folder_ids(self, root_folder_id: int) -> list[int]:
         """Ids of every folder in the local session rooted at ``root_folder_id``.
 
         Read from ``local_folder_mappings``, whose rows keep a staged
@@ -173,7 +194,7 @@ class WorkspaceFolderRepository:
         ).fetchall()
         return [int(row["folder_id"]) for row in rows]
 
-    def unlink_exact_no_commit(self, workspace_id, folder_ids):
+    def unlink_exact_no_commit(self, workspace_id: int, folder_ids: Iterable[int]) -> None:
         """Delete exactly these ``workspace_folders`` rows, without committing.
 
         No subtree walk and no ``workspace_photos`` cleanup; one statement
@@ -185,8 +206,9 @@ class WorkspaceFolderRepository:
                 (workspace_id, folder_id),
             )
 
-    def transfer_exact_no_commit(self, source_workspace_id, target_workspace_id,
-                                 folder_ids):
+    def transfer_exact_no_commit(
+        self, source_workspace_id: int, target_workspace_id: int, folder_ids: Iterable[int],
+    ) -> None:
         """Move exactly these folder links to another workspace, without committing.
 
         For each folder in turn, its ``source_workspace_id`` row is deleted
@@ -205,7 +227,7 @@ class WorkspaceFolderRepository:
                 (target_workspace_id, folder_id),
             )
 
-    def remove_tree(self, workspace_id, folder_ids):
+    def remove_tree(self, workspace_id: int, folder_ids: Sequence[int]) -> None:
         """Unlink ``folder_ids`` (a folder's subtree) and commit."""
         for chunk in self._chunks(folder_ids):
             placeholders = ",".join("?" for _ in chunk)
@@ -222,7 +244,7 @@ class WorkspaceFolderRepository:
 
     # -- descendant materialization --------------------------------------------
 
-    def unlinked_descendant_ids(self, workspace_id):
+    def unlinked_descendant_ids(self, workspace_id: int) -> set[int]:
         """Known path descendants of linked folders that are not linked yet."""
         rows = self.conn.execute(
             """SELECT DISTINCT child.id
@@ -244,7 +266,7 @@ class WorkspaceFolderRepository:
         ).fetchall()
         return {r["id"] for r in rows}
 
-    def linked_paths(self, workspace_id):
+    def linked_paths(self, workspace_id: int) -> list[str]:
         """``folders.path`` of every folder linked to the workspace."""
         root_rows = self.conn.execute(
             """SELECT f.path FROM workspace_folders wf
@@ -254,7 +276,7 @@ class WorkspaceFolderRepository:
         ).fetchall()
         return [root_row["path"] for root_row in root_rows]
 
-    def linked_ids(self, workspace_id):
+    def linked_ids(self, workspace_id: int) -> set[int]:
         return {
             r["folder_id"]
             for r in self.conn.execute(
@@ -263,7 +285,7 @@ class WorkspaceFolderRepository:
             ).fetchall()
         }
 
-    def link_descendants(self, workspace_id, candidate_ids):
+    def link_descendants(self, workspace_id: int, candidate_ids: Iterable[int]) -> None:
         """Link discovered descendants as non-roots and commit."""
         # Recheck in the INSERT: a Remove request may have committed after
         # the discovery snapshot. In that case the stale reader must not
@@ -281,7 +303,7 @@ class WorkspaceFolderRepository:
 
     # -- reads -------------------------------------------------------------------
 
-    def list_folders(self, workspace_id):
+    def list_folders(self, workspace_id: int) -> list[sqlite3.Row]:
         """Return the folder rows linked to the workspace, ordered by path."""
         return self.conn.execute(
             """SELECT f.* FROM folders f
@@ -291,8 +313,14 @@ class WorkspaceFolderRepository:
             (workspace_id,),
         ).fetchall()
 
-    def list_workspaces_for_folder(self, folder_id):
-        """Return every workspace in which ``folder_id`` is visible."""
+    def list_workspaces_for_folder(self, folder_id: int) -> list[sqlite3.Row]:
+        """Return every workspace in which ``folder_id`` is visible.
+
+        Include direct links plus read-only inheritance from recursive roots.
+        Do not materialize the inferred descendant row: some import and repair
+        paths create deliberately restricted exact non-root links that must not
+        expand merely because the user inspected a folder's memberships.
+        """
         return self.conn.execute(
             """WITH folder_links AS (SELECT w.id, w.name,
                       MAX(CASE
@@ -341,7 +369,7 @@ class WorkspaceFolderRepository:
             (folder_id, folder_id),
         ).fetchall()
 
-    def has_folder_link(self, workspace_id, folder_id):
+    def has_folder_link(self, workspace_id: int, folder_id: int) -> bool:
         """True iff ``workspace_id`` has a real or inherited folder link.
 
         A real folder link is a ``workspace_folders`` row for the exact
@@ -391,7 +419,7 @@ class WorkspaceFolderRepository:
         ).fetchone()
         return row is not None
 
-    def has_direct_link(self, workspace_id, folder_id):
+    def has_direct_link(self, workspace_id: int | None, folder_id: int) -> bool:
         """True iff ``workspace_folders`` has a row for exactly this folder.
 
         No inheritance from a recursive root and no photo-only grants: only
@@ -404,7 +432,7 @@ class WorkspaceFolderRepository:
         ).fetchone()
         return row is not None
 
-    def visible_ids(self, workspace_id, folder_ids):
+    def visible_ids(self, workspace_id: int | None, folder_ids: Iterable[int]) -> set[int]:
         """The subset of ``folder_ids`` the workspace sees, as a set.
 
         Reads the ``workspace_visible_folders`` view (real links plus
@@ -421,7 +449,7 @@ class WorkspaceFolderRepository:
             visible.update(r["folder_id"] for r in rows)
         return visible
 
-    def root_ids(self, workspace_id):
+    def root_ids(self, workspace_id: int) -> list[int]:
         """Return the ids of the workspace's user-facing roots, by path."""
         rows = self.conn.execute(
             """SELECT f.id
@@ -433,7 +461,7 @@ class WorkspaceFolderRepository:
         ).fetchall()
         return [int(row["id"]) for row in rows]
 
-    def roots(self, workspace_id):
+    def roots(self, workspace_id: int) -> list[sqlite3.Row]:
         """Return real scan/storage roots with their visible photo count.
 
         Photo-only grants make a folder browsable, but never authorize
@@ -469,7 +497,7 @@ class WorkspaceFolderRepository:
             (workspace_id,),
         ).fetchall()
 
-    def audit_root_paths(self, workspace_id):
+    def audit_root_paths(self, workspace_id: int) -> list[str]:
         """Return paths of the workspace's audit scan roots.
 
         An audit root is a ``workspace_folders`` row whose nearest linked
@@ -510,7 +538,7 @@ class WorkspaceFolderRepository:
         ).fetchall()
         return [row["path"] for row in rows]
 
-    def extensions(self, workspace_id):
+    def extensions(self, workspace_id: int) -> list[str]:
         """Distinct lowercased extensions of the workspace's visible photos.
 
         A RAW+JPEG pair contributes its companion's extension too, since the
@@ -532,7 +560,7 @@ class WorkspaceFolderRepository:
         ).fetchall()
         return [r["ext"] for r in rows]
 
-    def unlinked_folder_count(self, workspace_id, unique):
+    def unlinked_folder_count(self, workspace_id: int, unique: Sequence[str]) -> int:
         """Count paths in ``unique`` not linked to the workspace."""
         BATCH = 800
         linked = set()
@@ -553,7 +581,10 @@ class WorkspaceFolderRepository:
 
     # -- moving folders between workspaces ---------------------------------------
 
-    def move_folders(self, source_ws_id, target_ws_id, folder_ids, moved_folder_ids):
+    def move_folders(
+        self, source_ws_id: int, target_ws_id: int, folder_ids: Iterable[int],
+        moved_folder_ids: Sequence[int],
+    ) -> tuple[int, int, int]:
         """Move ``moved_folder_ids`` and their workspace-scoped rows, then commit.
 
         ``folder_ids`` are the user-selected folders (they become roots in
@@ -768,7 +799,7 @@ class WorkspaceFolderRepository:
 
     # -- merge helpers: root ancestry and pruning --------------------------------
 
-    def root_ancestor_exists(self, workspace_id, path):
+    def root_ancestor_exists(self, workspace_id: int, path: str) -> bool:
         """True if the workspace has a root equal to or above ``path``."""
         target = self.path_for_subtree_match(path)
         rows = self.conn.execute(
@@ -783,7 +814,7 @@ class WorkspaceFolderRepository:
                 return True
         return False
 
-    def root_descendant_exists(self, workspace_id, path):
+    def root_descendant_exists(self, workspace_id: int, path: str) -> bool:
         """True if the workspace has a strict root descendant of ``path``."""
         target = self.path_for_subtree_match(path)
         rows = self.conn.execute(
@@ -799,7 +830,7 @@ class WorkspaceFolderRepository:
                 return True
         return False
 
-    def prune_nonroot_links_outside_roots(self, workspace_id, path):
+    def prune_nonroot_links_outside_roots(self, workspace_id: int, path: str) -> list[int]:
         """Drop uncovered non-root links on ``path``'s ancestry or subtree.
 
         Commits only when something was pruned; returns the pruned ids.

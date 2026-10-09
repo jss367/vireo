@@ -1,13 +1,14 @@
 """Behavior pins for the workspace-folder membership domain of ``Database``.
 
-Every test goes through the ``Database`` façade (public methods and the
-private helpers other domains call), so the pins hold whether the SQL lives
-in ``db.py`` or in ``repositories/workspace_folders.py``. They cover linking
+The tests go through the ``Database`` façade (its coordinated methods and the
+private helpers other domains call) and the ``db.workspace_folders``
+accessor for single-statement reads and writes. They cover linking
 and unlinking folders (single, exact, subtree), removal records, descendant
 materialization, root marking and the root/extension queries, moving folders
 between workspaces, the merge helpers that inspect or prune root links, and
-the import-plan unlinked-folder count. The structural tests at the end keep
-the SQL in ``WorkspaceFolderRepository``.
+the import-plan unlinked-folder count. The structural tests at the end pin
+the accessor's shape, keep the old forwarding wrappers gone and keep the SQL
+in ``WorkspaceFolderRepository``.
 """
 
 import ast
@@ -17,6 +18,7 @@ import textwrap
 
 import pytest
 from db import Database
+from repositories.workspace_folders import WorkspaceFolderRepository
 
 
 class _RecordingCache:
@@ -244,24 +246,24 @@ def test_add_workspace_folder_exact_clears_removal_via_trigger(db, tree):
 def test_removed_workspace_folder_ids_returns_a_set_per_workspace(db, tree):
     ws, p, a, b, q = tree
     other = db.create_workspace("Other")
-    assert db._removed_workspace_folder_ids(ws) == set()
+    assert db.workspace_folders.removed_ids(ws) == set()
     db.add_workspace_folder(ws, p)
     db.add_workspace_folder(other, q)
     db.remove_workspace_folder_tree(ws, a)
     db.remove_workspace_folder(other, q)
-    removed = db._removed_workspace_folder_ids(ws)
+    removed = db.workspace_folders.removed_ids(ws)
     assert isinstance(removed, set)
     assert removed == {a, b}
-    assert db._removed_workspace_folder_ids(other) == {q}
+    assert db.workspace_folders.removed_ids(other) == {q}
 
 
 def test_folder_removal_root_ids_keeps_topmost_paths(db, tree):
     ws, p, a, b, q = tree
     sibling = _folder(db, "/pa")  # shares a string prefix, not a path prefix
-    assert db._folder_removal_root_ids([b, a, q, sibling]) == {a, q, sibling}
-    assert db._folder_removal_root_ids([a, p, b]) == {p}
-    assert db._folder_removal_root_ids([]) == set()
-    assert db._folder_removal_root_ids([999999]) == set()
+    assert db.workspace_folders.removal_root_ids([b, a, q, sibling]) == {a, q, sibling}
+    assert db.workspace_folders.removal_root_ids([a, p, b]) == {p}
+    assert db.workspace_folders.removal_root_ids([]) == set()
+    assert db.workspace_folders.removal_root_ids([999999]) == set()
 
 
 def test_folder_removal_root_ids_uses_local_source_paths(db, tree):
@@ -269,9 +271,9 @@ def test_folder_removal_root_ids_uses_local_source_paths(db, tree):
     staged = _folder(db, "/local-folders/1/b2")
     _map_local(db, staged, "/p/a/b2", "/local-folders/1/b2")
     windows = _folder(db, "C:\\photos\\x\\")
-    assert db._folder_removal_root_ids([staged, a]) == {a}
-    assert db._folder_removal_root_ids([staged]) == {staged}
-    assert db._folder_removal_root_ids([windows]) == {windows}
+    assert db.workspace_folders.removal_root_ids([staged, a]) == {a}
+    assert db.workspace_folders.removal_root_ids([staged]) == {staged}
+    assert db.workspace_folders.removal_root_ids([windows]) == {windows}
 
 
 def test_folder_removal_root_ids_chunks_large_id_lists(db):
@@ -285,7 +287,7 @@ def test_folder_removal_root_ids_chunks_large_id_lists(db):
     statements = []
     db.conn.set_trace_callback(statements.append)
     try:
-        roots = db._folder_removal_root_ids(ids)
+        roots = db.workspace_folders.removal_root_ids(ids)
     finally:
         db.conn.set_trace_callback(None)
     assert roots == {root}
@@ -417,13 +419,13 @@ def test_materialize_ignores_other_workspaces(db, tree):
     assert _links(db, ws) == {}
 
 
-# -- mark_workspace_folder_roots -------------------------------------------------
+# -- mark_roots -----------------------------------------------------------------
 
 
 def test_mark_workspace_folder_roots_promotes_linked_folders(db, tree):
     ws, p, a, b, q = tree
     db.add_workspace_folder(ws, p)
-    assert db.mark_workspace_folder_roots(ws, [a, b, q]) is None
+    assert db.workspace_folders.mark_roots(ws, [a, b, q]) is None
     assert _links(db, ws) == {p: 1, a: 1, b: 1}
     with _reader(db) as conn:
         assert _links(db, ws, conn) == {p: 1, a: 1, b: 1}
@@ -434,8 +436,8 @@ def test_mark_workspace_folder_roots_empty_is_a_noop(db, tree):
     statements = []
     db.conn.set_trace_callback(statements.append)
     try:
-        db.mark_workspace_folder_roots(ws, [])
-        db.mark_workspace_folder_roots(ws, None)
+        db.workspace_folders.mark_roots(ws, [])
+        db.workspace_folders.mark_roots(ws, None)
     finally:
         db.conn.set_trace_callback(None)
     assert statements == []
@@ -454,14 +456,14 @@ def test_mark_workspace_folder_roots_chunks(db, cache):
     statements = []
     db.conn.set_trace_callback(statements.append)
     try:
-        db.mark_workspace_folder_roots(ws, ids)
+        db.workspace_folders.mark_roots(ws, ids)
     finally:
         db.conn.set_trace_callback(None)
     assert len({s for s in statements if s.strip().startswith("UPDATE")}) == 2
     assert set(_links(db, ws).values()) == {1}
 
 
-# -- get_workspace_folders / get_folder_workspaces ------------------------------
+# -- get_workspace_folders / list_workspaces_for_folder -------------------------
 
 
 def test_get_workspace_folders_materializes_and_orders_by_path(db, tree):
@@ -488,7 +490,7 @@ def test_get_folder_workspaces_direct_inherited_and_removed(db, tree):
     db.add_workspace_folder_exact(zed, b)     # direct non-root
     db.add_workspace_folder_exact(alpha, b, is_root=True)
     _link_raw(db, pinned, p, 1)               # root without materialized b
-    rows = db.get_folder_workspaces(b)
+    rows = db.workspace_folders.list_workspaces_for_folder(b)
     assert [(r["id"], r["is_root"]) for r in rows] == [
         (pinned, 0), (alpha, 1), (ws, 0), (zed, 0),
     ]
@@ -496,16 +498,16 @@ def test_get_folder_workspaces_direct_inherited_and_removed(db, tree):
     # Inspecting memberships does not materialize the inherited link.
     assert b not in _links(db, pinned)
     db.remove_workspace_folder(pinned, b)
-    assert pinned not in {r["id"] for r in db.get_folder_workspaces(b)}
+    assert pinned not in {r["id"] for r in db.workspace_folders.list_workspaces_for_folder(b)}
 
 
 def test_get_folder_workspaces_non_root_links_do_not_cover_descendants(db, tree):
     ws, p, a, b, q = tree
     other = db.create_workspace("Other")
     _link_raw(db, other, p, 0)
-    assert db.get_folder_workspaces(b) == []
-    assert [r["id"] for r in db.get_folder_workspaces(p)] == [other]
-    assert db.get_folder_workspaces(999999) == []
+    assert db.workspace_folders.list_workspaces_for_folder(b) == []
+    assert [r["id"] for r in db.workspace_folders.list_workspaces_for_folder(p)] == [other]
+    assert db.workspace_folders.list_workspaces_for_folder(999999) == []
 
 
 def test_get_folder_workspaces_matches_local_source_and_backslash_roots(db):
@@ -516,9 +518,9 @@ def test_get_folder_workspaces_matches_local_source_and_backslash_roots(db):
     exact = _folder(db, "/local-folders/3/root")
     _map_local(db, exact, "D:\\shoot", "/local-folders/3/root")
     _link_raw(db, ws, root, 1)
-    assert [(r["id"], r["is_root"]) for r in db.get_folder_workspaces(staged)] == [(ws, 0)]
-    assert [r["id"] for r in db.get_folder_workspaces(exact)] == [ws]
-    assert [(r["id"], r["is_root"]) for r in db.get_folder_workspaces(root)] == [(ws, 1)]
+    assert [(r["id"], r["is_root"]) for r in db.workspace_folders.list_workspaces_for_folder(staged)] == [(ws, 0)]
+    assert [r["id"] for r in db.workspace_folders.list_workspaces_for_folder(exact)] == [ws]
+    assert [(r["id"], r["is_root"]) for r in db.workspace_folders.list_workspaces_for_folder(root)] == [(ws, 1)]
 
 
 # -- root queries ------------------------------------------------------------------
@@ -528,7 +530,7 @@ def test_get_workspace_root_folder_ids_defaults_to_active_workspace(db, tree):
     ws, p, a, b, q = tree
     db.add_workspace_folder(ws, q)
     db.add_workspace_folder(ws, p)
-    db.mark_workspace_folder_roots(ws, [b])
+    db.workspace_folders.mark_roots(ws, [b])
     assert db.get_workspace_root_folder_ids() == [p, b, q]
     assert all(isinstance(i, int) for i in db.get_workspace_root_folder_ids())
     assert db.get_workspace_root_folder_ids(db.create_workspace("Empty")) == []
@@ -1079,7 +1081,7 @@ def test_get_workspace_visible_folder_ids_chunks(db, tree, monkeypatch):
     assert len([s for s in statements if "FROM workspace_visible_folders" in s]) == 3
 
 
-# -- workspace_has_direct_folder_link -------------------------------------------
+# -- has_direct_link ------------------------------------------------------------
 
 
 def test_workspace_has_direct_folder_link_needs_the_folders_own_row(db, tree):
@@ -1091,12 +1093,12 @@ def test_workspace_has_direct_folder_link_needs_the_folders_own_row(db, tree):
     other = db.create_workspace("Direct-link other")
     _link_raw(db, other, q, 1)
     assert db.workspace_has_folder_link(a, ws)
-    assert db.workspace_has_direct_folder_link(ws, p)
-    assert db.workspace_has_direct_folder_link(ws, b)
-    assert not db.workspace_has_direct_folder_link(ws, a)
-    assert not db.workspace_has_direct_folder_link(ws, q)
-    assert db.workspace_has_direct_folder_link(other, q)
-    assert not db.workspace_has_direct_folder_link(ws, 999999)
+    assert db.workspace_folders.has_direct_link(ws, p)
+    assert db.workspace_folders.has_direct_link(ws, b)
+    assert not db.workspace_folders.has_direct_link(ws, a)
+    assert not db.workspace_folders.has_direct_link(ws, q)
+    assert db.workspace_folders.has_direct_link(other, q)
+    assert not db.workspace_folders.has_direct_link(ws, 999999)
 
 
 def test_workspace_has_direct_folder_link_takes_the_workspace_explicitly(db, tree):
@@ -1104,8 +1106,8 @@ def test_workspace_has_direct_folder_link_takes_the_workspace_explicitly(db, tre
     _link_raw(db, ws, p, 1)
     db.set_active_workspace(None)
     # No active-workspace fallback: a None workspace matches nothing.
-    assert db.workspace_has_direct_folder_link(ws, p)
-    assert not db.workspace_has_direct_folder_link(None, p)
+    assert db.workspace_folders.has_direct_link(ws, p)
+    assert not db.workspace_folders.has_direct_link(None, p)
 
 
 # -- local-session sweeps (exact rows, caller commits) -----------------------------
@@ -1129,9 +1131,9 @@ def test_get_local_session_folder_ids_reads_one_session(db, tree):
     ws, p, a, b, q = tree
     _map_session(db, a, [a, b])
     _map_session(db, q, [q])
-    assert sorted(db.get_local_session_folder_ids(a)) == [a, b]
-    assert db.get_local_session_folder_ids(q) == [q]
-    assert db.get_local_session_folder_ids(p) == []
+    assert sorted(db.workspace_folders.local_session_folder_ids(a)) == [a, b]
+    assert db.workspace_folders.local_session_folder_ids(q) == [q]
+    assert db.workspace_folders.local_session_folder_ids(p) == []
 
 
 def test_unlink_exact_workspace_folders_no_commit_deletes_only_those_rows(db, tree, cache):
@@ -1143,7 +1145,7 @@ def test_unlink_exact_workspace_folders_no_commit_deletes_only_those_rows(db, tr
         "INSERT INTO workspace_photos (workspace_id, photo_id) VALUES (?, ?)", (ws, pid),
     )
     db.conn.commit()
-    db.unlink_exact_workspace_folders_no_commit(ws, [a, b])
+    db.workspace_folders.unlink_exact_no_commit(ws, [a, b])
     assert _links(db, ws) == {p: 1, q: 1}
     assert db.in_transaction
     with _reader(db) as conn:
@@ -1166,7 +1168,7 @@ def test_transfer_exact_workspace_folders_no_commit_moves_links_as_non_roots(db,
     _link_raw(db, ws, b, 0)
     _link_raw(db, target, b, 1)  # already linked there: kept as it is
     cache.invalidated.clear()  # create_workspace's own invalidation
-    db.transfer_exact_workspace_folders_no_commit(ws, target, [a, b])
+    db.workspace_folders.transfer_exact_no_commit(ws, target, [a, b])
     assert db.in_transaction
     db.commit()
     with _reader(db) as conn:
@@ -1177,19 +1179,31 @@ def test_transfer_exact_workspace_folders_no_commit_moves_links_as_non_roots(db,
 
 # -- structure -------------------------------------------------------------------
 
+_REMOVED_WRAPPERS = (
+    "_removed_workspace_folder_ids",
+    "_folder_removal_root_ids",
+    "get_local_session_folder_ids",
+    "unlink_exact_workspace_folders_no_commit",
+    "transfer_exact_workspace_folders_no_commit",
+    "mark_workspace_folder_roots",
+    "get_folder_workspaces",
+    "workspace_has_direct_folder_link",
+)
+
+# Still on ``Database``. ``_photo_in_workspace`` and
+# ``get_workspace_visible_folder_ids`` resolve the active workspace for a
+# repository that takes it explicitly; ``_active_ws_root_ancestor_exists`` /
+# ``_active_ws_root_descendant_exists`` are bound into the merge as callbacks;
+# the rest coordinate subtree walks, removal records or cache invalidation.
 _MOVED_METHODS = [
     "_add_workspace_folder_no_commit",
     "add_workspace_folder",
     "add_workspace_folder_exact",
-    "_removed_workspace_folder_ids",
-    "_folder_removal_root_ids",
     "_remember_workspace_folder_removals",
     "remove_workspace_folder",
     "remove_workspace_folder_tree",
     "_materialize_workspace_descendants",
-    "mark_workspace_folder_roots",
     "get_workspace_folders",
-    "get_folder_workspaces",
     "get_workspace_root_folder_ids",
     "get_workspace_folder_roots",
     "get_workspace_extensions",
@@ -1200,12 +1214,6 @@ _MOVED_METHODS = [
     "workspace_unlinked_folder_count",
     "_photo_in_workspace",
     "get_workspace_visible_folder_ids",
-    "workspace_has_direct_folder_link",
-
-
-    "get_local_session_folder_ids",
-    "unlink_exact_workspace_folders_no_commit",
-    "transfer_exact_workspace_folders_no_commit",
 ]
 
 
@@ -1228,18 +1236,60 @@ def test_workspace_folder_method_delegates_to_repository(name):
     )
 
 
-def test_wrappers_keep_composition_on_the_facade(db, tree, monkeypatch):
-    """Sibling calls stay on ``Database`` so monkeypatches of them apply."""
+def test_removal_set_lookups_reach_a_repository_patch(db, tree, monkeypatch):
+    """Both façade callers read the removal set through ``removed_ids``.
+
+    A class-level patch of ``WorkspaceFolderRepository.removed_ids`` reaches
+    the scanner-style add and the descendant materialization alike.
+    """
     ws, p, a, b, q = tree
     calls = []
-    original = Database._removed_workspace_folder_ids
+    original = WorkspaceFolderRepository.removed_ids
 
     def spy(self, workspace_id):
         calls.append(workspace_id)
         return original(self, workspace_id)
 
-    monkeypatch.setattr(Database, "_removed_workspace_folder_ids", spy)
+    monkeypatch.setattr(WorkspaceFolderRepository, "removed_ids", spy)
     db.add_workspace_folder(ws, p, restore_removed=False)
     _folder(db, "/p/late", p)
     db.get_workspace_folders(ws)
     assert calls == [ws, ws]
+
+
+def test_workspace_folders_is_a_fresh_repository_on_the_connection_per_access(db):
+    """``db.workspace_folders`` builds a new repository each time, never a cached one."""
+    first, second = db.workspace_folders, db.workspace_folders
+    assert isinstance(first, WorkspaceFolderRepository)
+    assert first is not second
+    assert first.conn is db.conn
+
+
+def test_workspace_folder_accessor_takes_workspaces_explicitly(db, tree):
+    """Every accessor method names its workspace, so none needs one active."""
+    ws, p, a, b, q = tree
+    db.add_workspace_folder(ws, p)
+    db.set_active_workspace(None)
+    repo = db.workspace_folders
+    assert [r["id"] for r in repo.list_workspaces_for_folder(a)] == [ws]
+    assert repo.has_direct_link(ws, p)
+    assert repo.removed_ids(ws) == set()
+    assert repo.removal_root_ids([b, a]) == {a}
+
+
+def test_workspace_folders_has_no_forwarding_wrappers_on_database():
+    """The domain is reached through ``db.workspace_folders``; Database keeps no aliases."""
+    for name in _REMOVED_WRAPPERS:
+        assert not hasattr(Database, name), f"Database.{name} came back; call db.workspace_folders"
+    accessor = Database.__dict__["workspace_folders"]
+    assert isinstance(accessor, property)
+    source = textwrap.dedent(inspect.getsource(accessor.fget))
+    attrs = {
+        node.attr
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    }
+    assert "_workspace_folder_repository" in attrs
+    assert "conn" not in attrs

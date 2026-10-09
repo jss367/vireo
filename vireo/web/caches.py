@@ -291,7 +291,7 @@ def create_caches_blueprint(get_db, json_error, db_path, config):
         not depend on the active workspace.
         """
         db = get_db()
-        return jsonify(db.get_global_detection_stats())
+        return jsonify(db.model_runs.get_global_detection_stats())
 
     @blueprint.route("/api/culling/results")
     def api_culling_results():

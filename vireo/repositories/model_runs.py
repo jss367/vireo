@@ -13,11 +13,26 @@ diagnostics (``get_unscored_current_prediction_runs``,
 here; ``current_prediction_detector_confidences`` and
 ``classifier_runs_for_photo`` came from ``web/pipeline.py``, each serving the
 real-detection and full-image reads its two copies made.
+
+Callers reach it as ``db.model_runs`` (a fresh repository per access, see
+``Database.model_runs``). ``Database.detector_run_is_pinned`` is the one
+forwarding wrapper left, because the detection writes receive it as their
+``is_pinned`` callback.
 """
+
+import sqlite3
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from typing import Any
 
 
 class ModelRunsRepository:
-    def __init__(self, conn, *, auto_match_review_marker, commit_with_retry):
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        auto_match_review_marker: str,
+        commit_with_retry: Callable[[sqlite3.Connection], None],
+    ) -> None:
         self.conn = conn
         # ``prediction_review.individual`` value of reproducible auto-created
         # taxonomy-match reviews, which never pin a run.
@@ -28,13 +43,16 @@ class ModelRunsRepository:
 
     def record_detector_run(
         self,
-        photo_id,
-        detector_model,
-        box_count,
-        runtime_fingerprint="legacy",
-        input_fingerprint=None,
-    ):
-        """Upsert the detector_runs row for (photo, model) and commit."""
+        photo_id: int,
+        detector_model: str,
+        box_count: int,
+        runtime_fingerprint: str = "legacy",
+        input_fingerprint: str | None = None,
+    ) -> None:
+        """Record that ``detector_model`` was run on ``photo_id`` and commit.
+
+        Global across workspaces — the output is a pure function of (photo, model).
+        """
         self.conn.execute(
             """INSERT INTO detector_runs
                  (photo_id, detector_model, runtime_fingerprint,
@@ -50,8 +68,14 @@ class ModelRunsRepository:
         )
         self.conn.commit()
 
-    def get_global_detection_stats(self):
-        """Return catalog-wide detector-cache photo and model counts."""
+    def get_global_detection_stats(self) -> dict[str, int]:
+        """Return global (workspace-agnostic) detector-cache counts.
+
+        ``detector_runs`` is shared across workspaces by design — switching
+        workspaces or bumping a threshold never invalidates these rows —
+        so the settings page surfaces this as a single "N photos x M
+        models cached" figure.
+        """
         r = self.conn.execute(
             """SELECT COUNT(DISTINCT photo_id) AS photo_count,
                       COUNT(DISTINCT detector_model) AS model_count
@@ -60,7 +84,7 @@ class ModelRunsRepository:
         return {"photo_count": r["photo_count"] or 0,
                 "model_count": r["model_count"] or 0}
 
-    def detector_run_is_pinned(self, photo_id, detector_model):
+    def detector_run_is_pinned(self, photo_id: int, detector_model: str) -> bool:
         """Return whether a real manual review pins this detector output."""
         row = self.conn.execute(
             """SELECT 1
@@ -76,9 +100,20 @@ class ModelRunsRepository:
         return row is not None
 
     def get_detector_run_photo_ids(
-        self, detector_model, runtime_fingerprint=None,
-    ):
-        """Return photo ids with a consistent cached detector run."""
+        self, detector_model: str, runtime_fingerprint: str | None = None,
+    ) -> set[int]:
+        """Return the set of photo_ids with a consistent cached detector run.
+
+        Includes empty-scene photos (box_count=0) — which is the whole point:
+        without this, we'd re-run the model forever on photos with no animals.
+
+        Excludes torn states where ``detector_runs.box_count > 0`` but no matching
+        row exists in ``detections``. That shape happens when a reclassify pass
+        clears detections (via ``clear_detections``) and then the job fails
+        before writing fresh rows (model init error, etc.). Leaving such
+        photos in the skip set would strand them on full-image fallback
+        until the user manually forces another reclassify.
+        """
         params = [detector_model]
         runtime_clause = ""
         if runtime_fingerprint is not None:
@@ -116,15 +151,15 @@ class ModelRunsRepository:
 
     def record_classifier_run(
         self,
-        detection_id,
-        classifier_model,
-        labels_fingerprint,
-        prediction_count,
-        labels_fingerprint_full=None,
-        runtime_fingerprint="legacy",
-        input_fingerprint=None,
-        input_recipe=None,
-    ):
+        detection_id: int,
+        classifier_model: str,
+        labels_fingerprint: str,
+        prediction_count: int,
+        labels_fingerprint_full: str | None = None,
+        runtime_fingerprint: str = "legacy",
+        input_fingerprint: str | None = None,
+        input_recipe: str | None = None,
+    ) -> None:
         """Upsert the classifier_runs row and commit with retry."""
         self.conn.execute(
             """INSERT INTO classifier_runs
@@ -148,16 +183,26 @@ class ModelRunsRepository:
 
     def record_classifier_match_score(
         self,
-        detection_id,
-        classifier_model,
-        labels_fingerprint,
-        max_match_score,
-        match_margin=None,
-        top_species=None,
-        label_count=None,
-        score_kind=None,
-    ):
-        """Upsert the classifier_match_scores row and commit with retry."""
+        detection_id: int,
+        classifier_model: str,
+        labels_fingerprint: str,
+        max_match_score: float,
+        match_margin: float | None = None,
+        top_species: str | None = None,
+        label_count: int | None = None,
+        score_kind: str | None = None,
+    ) -> None:
+        """Record how well the best label in a list actually matched; commit with retry.
+
+        Written for every completed run, including runs that produced no
+        prediction at all — unlike ``record_classifier_run``, whose zero-count
+        rows are suppressed because that table gates re-classification. A run
+        that matched nothing is the most informative case here, so suppressing
+        it would defeat the purpose.
+
+        ``max_match_score`` must be the best score over the entire label list,
+        not merely over the predictions that cleared the confidence threshold.
+        """
         self.conn.execute(
             """INSERT INTO classifier_match_scores
                  (detection_id, classifier_model, labels_fingerprint,
@@ -178,9 +223,17 @@ class ModelRunsRepository:
         self.commit_with_retry(self.conn)
 
     def has_classifier_match_score(
-        self, detection_id, classifier_model, labels_fingerprint,
-    ):
-        """True when classifier_match_scores records this exact run."""
+        self, detection_id: int, classifier_model: str, labels_fingerprint: str,
+    ) -> bool:
+        """True when ``classifier_match_scores`` records this exact run.
+
+        A completed classifier run whose every label fell under the
+        confidence floor writes a match-score row but no prediction rows —
+        that outcome ("nothing in your list fits") is exactly what the
+        feature exists to record, and the per-detection cache gate in
+        ``classify_job._classify_photos`` uses this to honor it instead of
+        re-running the model on a stored no-match.
+        """
         return self.conn.execute(
             """SELECT 1 FROM classifier_match_scores
                WHERE detection_id = ?
@@ -190,8 +243,27 @@ class ModelRunsRepository:
             (detection_id, classifier_model, labels_fingerprint),
         ).fetchone() is not None
 
-    def get_unscored_current_prediction_runs(self, photo_id):
-        """Return current-fingerprint runs with predictions but no score."""
+    def get_unscored_current_prediction_runs(self, photo_id: int) -> list[dict[str, Any]]:
+        """Return ``(detection_id, classifier_model)`` pairs displayed without a score.
+
+        A migrated catalog carries predictions from models that ran before
+        ``classifier_match_scores`` existed: those predictions still surface in
+        the panel because ``get_predictions`` pins to their (still latest)
+        ``labels_fingerprint``, but the score table is empty for them. The
+        blanket "no label in this list matches" verdict must not be applied
+        over those rows — the legacy model was never judged.
+
+        Returns one entry per current-fingerprint ``(detection, model)`` pair
+        that has at least one prediction row on the photo but no row in
+        ``classifier_match_scores`` under the same fingerprint (as dicts that also
+        carry ``detector_model`` and ``labels_fingerprint``). Callers hand these
+        to ``match_confidence.summarize_photo`` so the photo-level rollup can
+        degrade to ``uncalibrated`` rather than declaring every displayed
+        prediction unlisted.
+
+        Not workspace-scoped — ``photo_id`` is assumed already verified by the
+        caller, as the existing per-photo routes do before reaching here.
+        """
         rows = self.conn.execute(
             """SELECT DISTINCT pr.detection_id AS detection_id,
                       pr.classifier_model AS classifier_model,
@@ -217,8 +289,32 @@ class ModelRunsRepository:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def get_match_scores_for_photo(self, photo_id):
-        """Return every match-score row on one photo, stamped is_current."""
+    def get_match_scores_for_photo(self, photo_id: int) -> list[dict[str, Any]]:
+        """Return match-score rows for every detection on one photo.
+
+        Rows are returned for all detections regardless of detector threshold:
+        the caller decides what to show, and a detection hidden by the current
+        threshold is often exactly the one a user is asking about.
+
+        Every run is returned, including ones superseded by a later
+        re-classification against a different label list — the Pipeline
+        Inspector's per-run table deliberately shows the history. Each row is
+        stamped ``is_current`` so the user-facing verdict can be built from the
+        same label set as the predictions on screen: re-running a detection
+        against a second list leaves the first list's row in this table, and a
+        strong match from an abandoned list must not be allowed to certify the
+        weak list that replaced it.
+
+        ``is_current`` follows ``get_predictions``: the latest
+        ``labels_fingerprint`` per ``(detection_id, classifier_model)`` as the
+        predictions table orders it. A run that produced no prediction at all
+        has no row to pin against — and that run is the single most important
+        one here — so it falls back to the most recent match-score row for the
+        same pair.
+
+        Not workspace-scoped — ``photo_id`` is assumed already verified by the
+        caller, as the existing per-photo routes do before reaching here.
+        """
         rows = self.conn.execute(
             """SELECT cms.*, d.detector_confidence, d.detector_model,
                       CASE WHEN cms.labels_fingerprint = COALESCE(
@@ -242,7 +338,7 @@ class ModelRunsRepository:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def current_prediction_detector_confidences(self, photo_id, *, full_image):
+    def current_prediction_detector_confidences(self, photo_id: int, *, full_image: bool) -> list[sqlite3.Row]:
         """Rows (``id``, ``detector_confidence``) of a photo's current-label-set predictions.
 
         Current means the latest ``labels_fingerprint`` per (detection,
@@ -267,7 +363,7 @@ class ModelRunsRepository:
             (photo_id,),
         ).fetchall()
 
-    def classifier_runs_for_photo(self, photo_id, *, full_image):
+    def classifier_runs_for_photo(self, photo_id: int, *, full_image: bool) -> list[sqlite3.Row]:
         """Rows (``prediction_count``, ``detector_confidence``) of a photo's classifier runs.
 
         ``full_image`` picks the runs on the full-image pseudo-detection;
@@ -283,7 +379,9 @@ class ModelRunsRepository:
             (photo_id,),
         ).fetchall()
 
-    def get_classifier_run_keys(self, detection_id, runtime_fingerprint=None):
+    def get_classifier_run_keys(
+        self, detection_id: int, runtime_fingerprint: str | None = None,
+    ) -> set[tuple[str, str]]:
         """Return the (model, fingerprint) keys the runtime gate honors."""
         params = [detection_id]
         runtime_clause = ""
@@ -311,8 +409,34 @@ class ModelRunsRepository:
         ).fetchall()
         return {(r["classifier_model"], r["labels_fingerprint"]) for r in rows}
 
-    def get_classifier_run_key_gate(self, detection_id, runtime_fingerprint):
-        """Return (accepted, rejected) classifier-run key sets."""
+    def get_classifier_run_key_gate(
+        self, detection_id: int, runtime_fingerprint: str | None,
+    ) -> tuple[set[tuple[str, str]], set[tuple[str, str]]]:
+        """Return ``(accepted, rejected)`` classifier-run key sets for a detection.
+
+        These gates serve normal-image runs. A RAW recipe always requires
+        fresh normal inference, even when a manual decision pins its species.
+
+        ``accepted`` mirrors what ``get_classifier_run_keys(detection_id,
+        runtime_fingerprint=runtime_fingerprint)`` returns — keys whose row
+        the runtime cache gate would honor for this detection.
+
+        ``rejected`` are keys that DO have a classifier_runs row for the
+        detection but whose row would be filtered out by the fingerprint
+        rule (fingerprint mismatch, not ``'legacy'``, and no per-
+        prediction ``prediction_review`` override marks them as still
+        valid). The pipeline uses this set to reconcile the cache-hit
+        preflight — ``count_classifier_runs`` counts every existing row
+        regardless of runtime_fingerprint, so a photo whose only row is
+        rejected here would otherwise sit in ``cached_est`` yet never
+        register as a cache hit or as a fall-through miss, leaving
+        ``_classification_eta_progress`` believing a phantom future cache
+        hit is still coming.
+
+        ``runtime_fingerprint`` must be provided; passing ``None`` would
+        make every row look mismatched, which is not a useful signal
+        (that's the reclassify path, where the gate is bypassed anyway).
+        """
         if runtime_fingerprint is None:
             return set(), set()
         rows = self.conn.execute(
@@ -347,17 +471,17 @@ class ModelRunsRepository:
 
     def get_classifier_run_cache_hits(
         self,
-        photo_ids,
-        classifier_model,
-        labels_fingerprint,
+        photo_ids: Sequence[int],
+        classifier_model: str,
+        labels_fingerprint: str,
         *,
-        min_conf,
-        contextual_weak_photo_ids=None,
-        weak_confidence=None,
-        fresh_detections_by_photo=None,
-        fresh_processed_photo_ids=None,
-        expected_classifier_runtime_by_detector_runtime=None,
-    ):
+        min_conf: float,
+        contextual_weak_photo_ids: Iterable[int] | None = None,
+        weak_confidence: float | None = None,
+        fresh_detections_by_photo: Mapping[int, Sequence[Mapping[str, Any]]] | None = None,
+        fresh_processed_photo_ids: Iterable[int] | None = None,
+        expected_classifier_runtime_by_detector_runtime: Mapping[str, str | None] | None = None,
+    ) -> set[int]:
         """Return the photo ids the classify preflight counts as cached."""
         query = _CacheHitQuery(
             self.conn,
@@ -385,14 +509,14 @@ class ModelRunsRepository:
 
     def get_unclassifiable_photos(
         self,
-        photo_ids,
+        photo_ids: Sequence[int],
         *,
-        min_conf,
-        contextual_weak_photo_ids=None,
-        weak_confidence=None,
-        fresh_detections_by_photo=None,
-        fresh_processed_photo_ids=None,
-    ):
+        min_conf: float,
+        contextual_weak_photo_ids: Iterable[int] | None = None,
+        weak_confidence: float | None = None,
+        fresh_detections_by_photo: Mapping[int, Sequence[Mapping[str, Any]]] | None = None,
+        fresh_processed_photo_ids: Iterable[int] | None = None,
+    ) -> set[int]:
         """Return photo ids the classify runtime skips without inference."""
         weak_photo_ids = set(contextual_weak_photo_ids or ())
         weak_conf = (
@@ -532,8 +656,15 @@ class ModelRunsRepository:
                 )
         return unclassifiable
 
-    def get_labels_fingerprints(self):
-        """Return all labels_fingerprints rows with decoded sources."""
+    def get_labels_fingerprints(self) -> list[dict[str, Any]]:
+        """Return all rows from the labels_fingerprints sidecar, sources decoded.
+
+        Each row records the (fingerprint, sources, label_count) triple a
+        classify run wrote — single-file runs list one source, merged-set
+        runs list several. Used by the inventory endpoint to identify
+        merged fingerprints that are still current (sources on disk and
+        unchanged) so they don't get marked stale.
+        """
         import json
         rows = self.conn.execute(
             "SELECT fingerprint, full_fingerprint, display_name, "
@@ -557,12 +688,12 @@ class ModelRunsRepository:
 
     def upsert_labels_fingerprint(
         self,
-        fingerprint,
-        display_name,
-        sources,
-        label_count,
-        full_fingerprint=None,
-    ):
+        fingerprint: str,
+        display_name: str | None,
+        sources: Sequence[str] | None,
+        label_count: int | None,
+        full_fingerprint: str | None = None,
+    ) -> None:
         """Upsert a labels_fingerprints row and commit."""
         import json
         # COALESCE full_fingerprint so a later call recording the same

@@ -1,10 +1,11 @@
 """Behavior pins for the edit-history domain of ``Database``.
 
-The behavior tests exercise undo/redo history only through ``Database``
-(public methods plus the private replay helpers, which stay on the façade),
-so they hold regardless of whether the SQL lives in ``db.py`` or in
-``repositories/edit_history.py``; the structural tests at the end keep it
-in the repository. They cover recording and listing history rows, the
+The behavior tests exercise undo/redo history through ``Database`` (recording,
+undo, redo and the private replay helpers, which stay on the façade) and the
+``db.edit_history`` accessor (the listings, cursor reads and id-keyed
+lookups); the structural tests at the end pin the accessor's shape, keep the
+old forwarding wrappers gone and keep the SQL in
+``repositories/edit_history.py``. They cover recording and listing history rows, the
 undo/redo cursor (non-undoable skipping, ordering, commit boundaries),
 stale cache-linked retirement, the prediction-status replay, the
 relabel-curation restore/re-apply, history pruning, and the pure old-value
@@ -20,6 +21,7 @@ import textwrap
 
 import pytest
 from db import Database
+from repositories.edit_history import EditHistoryRepository
 from repositories.photo_labels import PhotoLabelRepository
 from repositories.photo_review import PhotoReviewRepository
 
@@ -160,7 +162,7 @@ def test_record_edit_requires_active_workspace(db, pids):
         _rating_edit(db, pids[0], 0, 1)
 
 
-# -- get_edit_history -----------------------------------------------------
+# -- list_recent ----------------------------------------------------------
 
 
 def test_get_edit_history_filters_orders_counts_and_pages(db, pids):
@@ -174,21 +176,21 @@ def test_get_edit_history_filters_orders_counts_and_pages(db, pids):
     _raw_edit(db, "rating", "3", undone=1, created_at="2024-01-03 00:00:00")
     _raw_edit(db, "rating", "4", workspace_id=other)
 
-    history = db.get_edit_history()
+    history = db.edit_history.list_recent()
     assert isinstance(history, list)
     assert all(isinstance(e, dict) for e in history)
     assert [e["id"] for e in history] == [c, b, a]
     assert [e["item_count"] for e in history] == [1, 0, 2]
     assert history[0]["new_value"] == "2"
 
-    assert [e["id"] for e in db.get_edit_history(limit=1, offset=1)] == [b]
-    assert db.get_edit_history(limit=5, offset=3) == []
+    assert [e["id"] for e in db.edit_history.list_recent(limit=1, offset=1)] == [b]
+    assert db.edit_history.list_recent(limit=5, offset=3) == []
 
 
 def test_get_edit_history_hides_grouping_payload(db, pids):
     _raw_edit(db, "pipeline_grouping", json.dumps({"photo_edit": None}))
     _raw_edit(db, "species_confirm_cache", '{"x": 1}')
-    history = db.get_edit_history()
+    history = db.edit_history.list_recent()
     by_type = {e["action_type"]: e["new_value"] for e in history}
     assert by_type == {"pipeline_grouping": None, "species_confirm_cache": '{"x": 1}'}
 
@@ -196,10 +198,10 @@ def test_get_edit_history_hides_grouping_payload(db, pids):
 def test_get_edit_history_requires_active_workspace(db):
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError):
-        db.get_edit_history()
+        db.edit_history.list_recent()
 
 
-# -- get_photo_edit_recipe_history ------------------------------------------
+# -- recipe_history_for_photo ---------------------------------------------
 
 
 def test_photo_edit_recipe_history_filters_orders_and_limits(db, pids):
@@ -216,7 +218,7 @@ def test_photo_edit_recipe_history_filters_orders_and_limits(db, pids):
     _raw_edit(db, "edit_recipe", created_at="2024-01-03 00:00:00", items=[(pids[1], "", "y")])
     _raw_edit(db, "edit_recipe", workspace_id=other, items=[(pids[0], "", "z")])
 
-    rows = db.get_photo_edit_recipe_history(pids[0], 50)
+    rows = db.edit_history.recipe_history_for_photo(pids[0], 50)
     assert [tuple(r.keys()) for r in rows] == [
         ("id", "description", "created_at", "undone", "old_value", "new_value")
     ] * 3
@@ -228,13 +230,13 @@ def test_photo_edit_recipe_history_filters_orders_and_limits(db, pids):
         "id": c, "description": "c", "created_at": "2024-01-02 00:00:00",
         "undone": 0, "old_value": '{"exposure": 2}', "new_value": None,
     }
-    assert [r["id"] for r in db.get_photo_edit_recipe_history(pids[0], 2)] == [c, b]
+    assert [r["id"] for r in db.edit_history.recipe_history_for_photo(pids[0], 2)] == [c, b]
 
 
 def test_photo_edit_recipe_history_requires_active_workspace(db, pids):
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError):
-        db.get_photo_edit_recipe_history(pids[0], 50)
+        db.edit_history.recipe_history_for_photo(pids[0], 50)
 
 
 # -- undo / redo cursor ---------------------------------------------------
@@ -399,12 +401,12 @@ def test_keyword_add_undo_redo_replays_prediction_and_curation(db, pids, monkeyp
     _set_status(db, p["a_top"], "rejected")
     curation_calls = []
     monkeypatch.setattr(
-        db, "_restore_relabel_curation",
-        lambda *a: curation_calls.append(("restore",) + a),
+        EditHistoryRepository, "restore_relabel_curation",
+        lambda self, *a: curation_calls.append(("restore",) + a),
     )
     monkeypatch.setattr(
-        db, "_reapply_relabel_curation",
-        lambda *a: curation_calls.append(("reapply",) + a),
+        EditHistoryRepository, "reapply_relabel_curation",
+        lambda self, *a: curation_calls.append(("reapply",) + a),
     )
     curation = {"hl_prev": ["Old"]}
     old_value = json.dumps({
@@ -569,13 +571,13 @@ def test_stale_cache_entry_without_photo_half_is_deleted(
 
 def test_retire_stale_grouping_entry_on_missing_row_is_noop(db):
     keep = _raw_edit(db, "rating", "1")
-    db._retire_stale_grouping_entry(keep + 100)
+    db.edit_history.retire_stale_grouping_entry(keep + 100)
     assert [r["id"] for r in _history_rows(db)] == [keep]
 
 
 def test_retire_stale_grouping_entry_does_not_commit(db):
     edit_id = _raw_edit(db, "pipeline_grouping", json.dumps({"photo_edit": None}))
-    db._retire_stale_grouping_entry(edit_id)
+    db.edit_history.retire_stale_grouping_entry(edit_id)
     assert db.conn.in_transaction
     assert len(_history_rows(db, "id = ?", (edit_id,))) == 1
     db.conn.rollback()
@@ -586,8 +588,8 @@ def test_retire_stale_grouping_entry_does_not_commit(db):
 
 def test_keyword_name_and_prediction_scope(db, pids):
     kid = db.add_keyword("Heron")
-    assert db._keyword_name(kid) == "Heron"
-    assert db._keyword_name(kid + 1000) is None
+    assert db.edit_history.keyword_name(kid) == "Heron"
+    assert db.edit_history.keyword_name(kid + 1000) is None
 
     preds = _predictions(db, pids[0])
     assert db._prediction_scope(preds["a_top"]) == (preds["det"], "m1", "fpA")
@@ -874,8 +876,8 @@ def _curation_state(db, ws):
 @pytest.mark.parametrize("curation", [None, {}])
 def test_restore_and_reapply_curation_noop_without_payload(db, pids, curation):
     ws = db._active_workspace_id
-    db._restore_relabel_curation(ws, pids[0], "New", curation)
-    db._reapply_relabel_curation(ws, pids[0], "New", curation)
+    db.edit_history.restore_relabel_curation(ws, pids[0], "New", curation)
+    db.edit_history.reapply_relabel_curation(ws, pids[0], "New", curation)
     assert _curation_state(db, ws) == ([], [], [])
     assert not db.conn.in_transaction
 
@@ -899,7 +901,7 @@ def test_restore_relabel_curation_highlights(db, pids):
         {"species": "Old6", "rank": None, "dst_existed": True},
     ]}
 
-    db._restore_relabel_curation(ws, p0, "New", curation)
+    db.edit_history.restore_relabel_curation(ws, p0, "New", curation)
 
     # No commit of its own: the undo caller commits.
     assert db.conn.in_transaction
@@ -920,7 +922,7 @@ def test_restore_relabel_curation_keeps_preexisting_destination(db, pids):
     ws = db._active_workspace_id
     _hl(db, ws, "New", pids[0], 1)
     db.conn.commit()
-    db._restore_relabel_curation(
+    db.edit_history.restore_relabel_curation(
         ws, pids[0], "New",
         {"hl_prev": [{"species": "Old", "rank": 2, "dst_existed": True}]},
     )
@@ -965,7 +967,7 @@ def test_restore_relabel_curation_preferences_and_reps(db, pids, monkeypatch):
         ],
     }
 
-    db._restore_relabel_curation(ws, p0, "New", curation)
+    db.edit_history.restore_relabel_curation(ws, p0, "New", curation)
     db.conn.commit()
 
     _, pref, rep = _curation_state(db, ws)
@@ -1002,7 +1004,7 @@ def test_reapply_relabel_curation_highlights(db, pids):
         "Missing",
     ]}
 
-    db._reapply_relabel_curation(ws, p0, "New", curation)
+    db.edit_history.reapply_relabel_curation(ws, p0, "New", curation)
     assert db.conn.in_transaction
     db.conn.commit()
     hl, _, _ = _curation_state(db, ws)
@@ -1045,7 +1047,7 @@ def test_reapply_relabel_curation_preferences_and_reps(db, pids, monkeypatch):
         ],
     }
 
-    db._reapply_relabel_curation(ws, p0, "New", curation)
+    db.edit_history.reapply_relabel_curation(ws, p0, "New", curation)
     db.conn.commit()
 
     _, pref, rep = _curation_state(db, ws)
@@ -1213,9 +1215,9 @@ def test_edit_prediction_ids(db, meta, fallback, ids):
 
 
 def test_undo_and_redo_summaries_skip_non_undoable_and_other_workspaces(db, pids):
-    assert db.get_next_undo_summary() is None
-    assert db.count_undoable_edits() == 0
-    assert db.get_next_redo_summary() is None
+    assert db.edit_history.latest_undoable() is None
+    assert db.edit_history.count_undoable() == 0
+    assert db.edit_history.oldest_redoable() is None
     other = db.create_workspace("Other")
     old = _raw_edit(db, "rating", description="old", created_at="2020-01-01 00:00:00")
     new = _raw_edit(db, "flag", description="new", created_at="2020-01-02 00:00:00")
@@ -1228,39 +1230,82 @@ def test_undo_and_redo_summaries_skip_non_undoable_and_other_workspaces(db, pids
                              created_at="2020-01-05 00:00:00")
     _raw_edit(db, "location_set", description="skip-redo", undone=1,
               created_at="2020-01-01 00:00:00")
-    assert tuple(db.get_next_undo_summary()) == (new, "new")
-    assert db.count_undoable_edits() == 2
-    assert tuple(db.get_next_redo_summary()) == (early_undone, "undone-early")
+    assert tuple(db.edit_history.latest_undoable()) == (new, "new")
+    assert db.edit_history.count_undoable() == 2
+    assert tuple(db.edit_history.oldest_redoable()) == (early_undone, "undone-early")
     assert old != new
 
 
 def test_undo_summary_breaks_created_at_ties_by_id(db, pids):
     first = _raw_edit(db, "rating", description="a", created_at="2020-01-01 00:00:00")
     second = _raw_edit(db, "rating", description="b", created_at="2020-01-01 00:00:00")
-    assert db.get_next_undo_summary()["id"] == second
+    assert db.edit_history.latest_undoable()["id"] == second
     db.conn.execute("UPDATE edit_history SET undone = 1")
     db.conn.commit()
-    assert db.get_next_redo_summary()["id"] == first
+    assert db.edit_history.oldest_redoable()["id"] == first
 
 
-def test_undo_and_redo_summaries_require_a_workspace(db, pids):
+def test_workspace_reads_raise_before_any_sql_without_a_workspace(db, pids):
+    """The history listings and cursor reads need a workspace, where the wrappers did.
+
+    The workspace is resolved lazily, so reaching ``db.edit_history`` with
+    none active is fine; each workspace read raises ``RuntimeError`` before
+    touching a table, as the wrapper's eagerly scoped repository did.
+    """
     db.set_active_workspace(None)
-    for read in (db.get_next_undo_summary, db.count_undoable_edits,
-                 db.get_next_redo_summary):
-        with pytest.raises(RuntimeError, match="No active workspace"):
-            read()
+    history = db.edit_history
+    statements = []
+    db.conn.set_trace_callback(statements.append)
+    try:
+        for read in (
+            history.latest_undoable, history.count_undoable, history.oldest_redoable,
+            history.list_recent, lambda: history.recipe_history_for_photo(pids[0], 5),
+            history.next_undo, history.next_redo,
+        ):
+            with pytest.raises(RuntimeError, match="No active workspace"):
+                read()
+    finally:
+        db.conn.set_trace_callback(None)
+    assert statements == []
+
+
+def test_id_keyed_reads_need_no_workspace(db, pids):
+    edit = _raw_edit(db, "keyword_add", items=[(pids[0], "", "1")])
+    kid = db.add_keyword("Heron")
+    db.set_active_workspace(None)
+    history = db.edit_history
+    assert history.action_and_new_value(edit)["action_type"] == "keyword_add"
+    assert history.item_photo_ids(edit) == [pids[0]]
+    assert history.has_changed_items(edit) is True
+    assert history.keyword_name(kid) == "Heron"
+
+
+def test_workspace_reads_follow_the_workspace_active_at_the_call(db, pids):
+    """A fresh repository per access, and each read uses the current workspace."""
+    home = db._ws_id()
+    mine = _raw_edit(db, "rating", "mine")
+    other = db.create_workspace("Other")
+    db.set_active_workspace(other)
+    theirs = _raw_edit(db, "rating", "theirs")
+    assert db.edit_history.latest_undoable()["id"] == theirs
+    db.set_active_workspace(home)
+    assert db.edit_history.latest_undoable()["id"] == mine
+    # Even a repository held across the switch reads the workspace per call.
+    history = db.edit_history
+    db.set_active_workspace(other)
+    assert [e["id"] for e in history.list_recent()] == [theirs]
 
 
 def test_get_edit_item_photo_ids_keeps_order_and_repeats(db, pids):
     edit = _raw_edit(db, "keyword_add", items=[
         (pids[1], "", "1"), (pids[0], "", "1"), (pids[1], "", "2"),
     ])
-    assert db.get_edit_item_photo_ids(edit) == [pids[1], pids[0], pids[1]]
-    assert sorted(db.get_edit_item_photo_ids(edit, distinct=True)) == sorted(pids[:2])
-    assert db.get_edit_item_photo_ids(987_654) == []
+    assert db.edit_history.item_photo_ids(edit) == [pids[1], pids[0], pids[1]]
+    assert sorted(db.edit_history.item_photo_ids(edit, distinct=True)) == sorted(pids[:2])
+    assert db.edit_history.item_photo_ids(987_654) == []
     # Item reads are id-keyed: no active workspace needed.
     db.set_active_workspace(None)
-    assert len(db.get_edit_item_photo_ids(edit)) == 3
+    assert len(db.edit_history.item_photo_ids(edit)) == 3
 
 
 def test_edit_has_changed_items(db, pids):
@@ -1269,43 +1314,45 @@ def test_edit_has_changed_items(db, pids):
         (pids[0], "none", "none"), (pids[1], "none", "flagged"),
     ])
     null_old = _raw_edit(db, "flag", items=[(pids[2], None, "flagged")])
-    assert db.edit_has_changed_items(same) is False
-    assert db.edit_has_changed_items(changed) is True
+    assert db.edit_history.has_changed_items(same) is False
+    assert db.edit_history.has_changed_items(changed) is True
     # ``NULL != value`` is NULL in SQL, so a NULL old value never counts.
-    assert db.edit_has_changed_items(null_old) is False
+    assert db.edit_history.has_changed_items(null_old) is False
     db.set_active_workspace(None)
-    assert db.edit_has_changed_items(changed) is True
+    assert db.edit_history.has_changed_items(changed) is True
 
 
 def test_get_edit_action_and_new_value_reads_any_workspace(db, pids):
     edit_id = _rating_edit(db, pids[0], 0, 4)
     other = db.create_workspace("Other")
     foreign = _raw_edit(db, "pipeline_grouping", "{}", workspace_id=other)
-    assert dict(db.get_edit_action_and_new_value(edit_id)) == {
+    assert dict(db.edit_history.action_and_new_value(edit_id)) == {
         "action_type": "rating", "new_value": "4",
     }
     # Id-keyed: an entry in another workspace, and no active workspace needed.
     db.set_active_workspace(None)
-    assert tuple(db.get_edit_action_and_new_value(foreign)) == (
+    assert tuple(db.edit_history.action_and_new_value(foreign)) == (
         "pipeline_grouping", "{}",
     )
-    assert db.get_edit_action_and_new_value(987_654) is None
+    assert db.edit_history.action_and_new_value(987_654) is None
 
 
 # -- structure ------------------------------------------------------------
 
-_DELEGATING = (
-    "record_edit", "get_edit_history", "get_photo_edit_recipe_history",
-    "undo_last_edit", "redo_last_undo",
-    "_retire_stale_grouping_entry", "_keyword_name", "_prediction_scope",
-    "_undo_keyword_add", "_undo_prediction_accept_statuses",
-    "_redo_prediction_accept_statuses", "_restore_relabel_curation",
-    "_reapply_relabel_curation", "_prune_edit_history",
-    "get_next_undo_summary", "count_undoable_edits", "get_next_redo_summary",
+_REMOVED_WRAPPERS = (
+    "get_edit_action_and_new_value", "get_edit_history",
+    "get_photo_edit_recipe_history", "get_next_undo_summary",
+    "count_undoable_edits", "get_next_redo_summary",
     "get_edit_item_photo_ids", "edit_has_changed_items",
+    "_retire_stale_grouping_entry", "_keyword_name",
+    "_restore_relabel_curation", "_reapply_relabel_curation",
+)
 
-
-    "get_edit_action_and_new_value",
+_DELEGATING = (
+    "record_edit", "undo_last_edit", "redo_last_undo", "_prediction_scope",
+    "_undo_keyword_add", "_redo_keyword_add", "_undo_species_replace",
+    "_redo_species_replace", "_undo_prediction_accept_statuses",
+    "_redo_prediction_accept_statuses", "_prune_edit_history",
 )
 
 _DOMAIN = _DELEGATING + (
@@ -1313,8 +1360,7 @@ _DOMAIN = _DELEGATING + (
     "_edit_set_wildlife_excluded", "_edit_set_color_label",
     "_edit_set_edit_recipe", "_undo_rating", "_redo_rating",
     "_flip_pending_keyword_change", "_retag_for_edit", "_untag_for_edit",
-    "_undo_keyword_remove", "_redo_keyword_remove", "_redo_keyword_add",
-    "_undo_species_replace", "_redo_species_replace", "_edit_old_value_meta",
+    "_undo_keyword_remove", "_redo_keyword_remove", "_edit_old_value_meta",
     "_edit_prediction_ids", "_edit_prediction_id",
     "_restore_edit_prediction_status", "_reject_edit_prediction",
 )
@@ -1350,8 +1396,9 @@ def test_edit_history_method_has_no_sql(name):
 
 @pytest.mark.parametrize("name,callback", [
     ("_undo_prediction_accept_statuses", "_prediction_scope"),
-    ("_restore_relabel_curation", "_restore_species_representative"),
-    ("_reapply_relabel_curation", "_restore_species_representative"),
+    # The relabel-curation restores get it from the factory.
+    ("_edit_history_repository", "_restore_species_representative"),
+    ("_edit_history_repository", "_ws_id"),
 ])
 def test_mid_statement_facade_calls_are_passed_as_bound_callbacks(name, callback):
     """The repository calls these façade methods mid-loop; pass them bound."""
@@ -1392,13 +1439,61 @@ def test_edit_history_facade_signatures_are_unchanged():
         ("new_value", empty), ("items", empty), ("is_batch", False),
         ("_commit", True),
     ]
-    assert params("get_edit_history") == [
-        ("self", empty), ("limit", 50), ("offset", 0),
-    ]
     assert params("undo_last_edit") == [("self", empty)]
     assert params("redo_last_undo") == [("self", empty)]
-    assert params("_restore_relabel_curation") == [
+    assert params("_prune_edit_history") == [("self", empty)]
+
+
+def test_accessor_methods_keep_the_removed_wrappers_signatures():
+    """Callers moved from the wrappers to these without changing arguments."""
+    def params(name):
+        return [
+            (p.name, p.default)
+            for p in inspect.signature(getattr(EditHistoryRepository, name)).parameters.values()
+        ]
+
+    empty = inspect.Parameter.empty
+    assert params("list_recent") == [("self", empty), ("limit", 50), ("offset", 0)]
+    assert params("restore_relabel_curation") == [
         ("self", empty), ("workspace_id", empty), ("photo_id", empty),
         ("new_species", empty), ("curation", empty),
     ]
-    assert params("_prune_edit_history") == [("self", empty)]
+    assert params("reapply_relabel_curation") == params("restore_relabel_curation")
+    for name in ("latest_undoable", "count_undoable", "oldest_redoable", "next_undo", "next_redo"):
+        assert params(name) == [("self", empty)]
+
+
+def test_edit_history_is_a_fresh_repository_on_the_connection_per_access(db):
+    """``db.edit_history`` builds a new repository each time, never a cached one.
+
+    The workspace is passed as ``Database._ws_id`` itself, uncalled, so
+    building the repository resolves nothing; ``_NON_UNDOABLE`` and the
+    representative-restore callback are read at access time.
+    """
+    first, second = db.edit_history, db.edit_history
+    assert isinstance(first, EditHistoryRepository)
+    assert first is not second
+    assert first.conn is db.conn
+    assert first.workspace_id_fn == db._ws_id
+    assert first.non_undoable is Database._NON_UNDOABLE
+    assert first.restore_species_representative == db._restore_species_representative
+    db._NON_UNDOABLE = ("rating",)
+    assert db.edit_history.non_undoable == ("rating",)
+
+
+def test_edit_history_has_no_forwarding_wrappers_on_database():
+    """The domain is reached through ``db.edit_history``; Database keeps no aliases."""
+    for name in _REMOVED_WRAPPERS:
+        assert not hasattr(Database, name), f"Database.{name} came back; call db.edit_history"
+    accessor = Database.__dict__["edit_history"]
+    assert isinstance(accessor, property)
+    source = textwrap.dedent(inspect.getsource(accessor.fget))
+    attrs = {
+        node.attr
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    }
+    assert "_edit_history_repository" in attrs
+    assert "conn" not in attrs

@@ -110,9 +110,9 @@ def test_stale_masks_follow_selected_subject(db, subject_photo):
     det = db.get_detections(photo_id)[0]
     db.conn.execute("""INSERT INTO photo_masks(photo_id,variant,path,created_at,detector_model,prompt_x,prompt_y,prompt_w,prompt_h)
         VALUES (?,'test','mask.png',1,?,?,?,?,?)""", (photo_id,det["detector_model"],*(det["box_" + k] for k in "xywh")))
-    assert db.find_stale_masks() == []
+    assert db.masks_features.find_stale() == []
     select_primary(db, photo_id, ids[0])
-    assert len(db.find_stale_masks()) == 1
+    assert len(db.masks_features.find_stale()) == 1
     assert db.count_extract_stale("test") == 0
 
 
@@ -229,7 +229,7 @@ def test_activate_mask_survives_floor_change_without_state_sync(db, subject_phot
     # A re-extraction under the new floor would rewrite the mask row with
     # the new primary's prompt; activating that mask must not raise even
     # though the cached state still points at the previous subject.
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         photo_id=photo_id, variant='test', path='mask.png',
         detector_model=det_lo['detector_model'],
         prompt_x=det_lo['box_x'], prompt_y=det_lo['box_y'],
@@ -314,7 +314,7 @@ def test_eye_stage_survives_floor_change_without_state_sync(db, subject_photo):
     # stage must resolve the primary at the current floor.
     det_lo = next(d for d in db.get_detections(photo_id, min_conf=0.8)
                   if d['id'] == ids[0])
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         photo_id=photo_id, variant='test', path='mask.png',
         detector_model=det_lo['detector_model'],
         prompt_x=det_lo['box_x'], prompt_y=det_lo['box_y'],
@@ -414,7 +414,7 @@ def test_detectorless_cached_run_clears_ineligible_primary(db, subject_photo, mo
     photo = dict(db.conn.execute("SELECT * FROM photos WHERE id=?", (photo_id,)).fetchone())
     classify_job._detect_batch([photo], {photo["folder_id"]: str(path.parent)},
         None, {"id": 1}, False, db, det_conf_threshold=.2,
-        already_detected_ids=db.get_detector_run_photo_ids("megadetector-v6") if known_run else set())
+        already_detected_ids=db.model_runs.get_detector_run_photo_ids("megadetector-v6") if known_run else set())
     row = db.conn.execute("SELECT * FROM photos WHERE id=?", (photo_id,)).fetchone()
     for column in ("mask_path", "eye_x", "dino_subject_embedding", "quality_score"):
         assert row[column] is None

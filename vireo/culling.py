@@ -150,7 +150,7 @@ def analyze_for_culling(
         ).fetchone()
         cm = predictions.get(pid, {}).get("classifier_model")
         if cm:
-            emb_blob = db.get_photo_embedding(pid, cm)
+            emb_blob = db.masks_features.get_embedding(pid, cm)
             if emb_blob:
                 embeddings[pid] = np.frombuffer(emb_blob, dtype=np.float32)
         q = row["quality_score"] or 0 if row else 0

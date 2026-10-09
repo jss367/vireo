@@ -444,7 +444,7 @@ class _ClassifyPass:
         if img is not None and self.raw_session is not None and detection is not None:
             report = img.info.get("_vireo_raw_analysis")
             if report is not None:
-                self.thread_db.save_subject_raw_analysis(detection["id"], report)
+                self.thread_db.masks_features.save_subject_raw_analysis(detection["id"], report)
         return img, folder_path, image_path
 
     def _should_stop(self):
@@ -1061,7 +1061,7 @@ class _ClassifyPass:
         # on runs where the detector fingerprint has rolled since the
         # prior classifier pass (Codex #1468 P2).
         if expected_classifier_runtime is not None:
-            run_keys, rejected_keys = thread_db.get_classifier_run_key_gate(
+            run_keys, rejected_keys = thread_db.model_runs.get_classifier_run_key_gate(
                 detection["id"],
                 expected_classifier_runtime,
             )
@@ -1070,7 +1070,7 @@ class _ClassifyPass:
             # isn't wired up (legacy path); fall back to the unfiltered
             # gate. Nothing to reconcile because the preflight and the
             # gate then agree on which rows count.
-            run_keys = thread_db.get_classifier_run_keys(detection["id"])
+            run_keys = thread_db.model_runs.get_classifier_run_keys(detection["id"])
             rejected_keys = set()
 
         run_key = (spec.model_name, spec.fp)
@@ -1097,7 +1097,7 @@ class _ClassifyPass:
             # outcome with a fresh inference (Codex P2 on a1be510). The
             # preflight already counted this photo as cached because the
             # classifier-run key exists, so no overcount to reconcile.
-            if thread_db.has_classifier_match_score(
+            if thread_db.model_runs.has_classifier_match_score(
                 detection["id"], spec.model_name, spec.fp,
             ):
                 self._count_cache_hit(spec, photo)
@@ -1164,12 +1164,12 @@ class _ClassifyPass:
             # there the photo-level row unambiguously belongs to it, so
             # legacy data (classified before per-detection variants were
             # written) still refines correctly.
-            emb_blob = self.thread_db.get_photo_embedding(
+            emb_blob = self.thread_db.masks_features.get_embedding(
                 photo["id"], spec.model_name,
                 variant=f"det:{detection['id']}",
             )
             if not emb_blob and n_detections == 1:
-                emb_blob = self.thread_db.get_photo_embedding(
+                emb_blob = self.thread_db.masks_features.get_embedding(
                     photo["id"], spec.model_name,
                 )
             if emb_blob:

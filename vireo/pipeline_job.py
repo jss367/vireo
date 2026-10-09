@@ -550,7 +550,7 @@ def _preflight_mask_outcomes(
         if not dets:
             continue
         primary = dets[0]
-        existing = thread_db.get_photo_mask(photo_id, sam2_variant)
+        existing = thread_db.masks_features.get_mask(photo_id, sam2_variant)
         if existing is None or not existing["path"]:
             at_risk.add(photo_id)
             continue

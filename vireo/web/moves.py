@@ -92,7 +92,7 @@ def create_moves_blueprint(get_db, json_error):
             # Date moves act on the physical subtree, including detached
             # descendants. Validate the linked root, then preview that exact
             # planner scope rather than filtering it through Browse membership.
-            if not db.workspace_has_direct_folder_link(db.active_workspace_id, folder_id):
+            if not db.workspace_folders.has_direct_link(db.active_workspace_id, folder_id):
                 return json_error("folder not found", 404)
             from move import folder_date_move_photo_ids
 

@@ -392,9 +392,9 @@ def test_associated_workspaces_include_only_exact_photo_grant_folder(app_and_db,
     child, _ = _photo(db, tmp_path / 'folder' / 'child', 'hidden.jpg')
     db.photo_visibility.grant(b, [photo])
     db.conn.commit()
-    associated = {r['id']: r for r in db.get_folder_workspaces(folder)}
+    associated = {r['id']: r for r in db.workspace_folders.list_workspaces_for_folder(folder)}
     assert b in associated and not associated[b]['is_root']
-    assert b not in {r['id'] for r in db.get_folder_workspaces(child)}
+    assert b not in {r['id'] for r in db.workspace_folders.list_workspaces_for_folder(child)}
     client = app.test_client()
     assert client.post(f'/api/workspaces/{b}/activate').status_code == 200
     response = client.get(f'/api/folders/{folder}/workspaces')
@@ -506,7 +506,7 @@ def test_folder_relocate_requires_real_folder_link_not_photo_grant(app_and_db, t
     # ``get_folder_workspaces`` still reports the guest workspace -- the
     # listing endpoint keeps the read-only association -- but the mutation
     # route rejects the request.
-    assert guest in {row['id'] for row in db.get_folder_workspaces(folder)}
+    assert guest in {row['id'] for row in db.workspace_folders.list_workspaces_for_folder(folder)}
     assert not db.workspace_has_folder_link(folder, guest)
     response = client.post(
         f'/api/folders/{folder}/relocate', json={'path': str(new_location)},

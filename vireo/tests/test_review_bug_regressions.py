@@ -52,7 +52,7 @@ def test_selective_discard_blocks_row_replacement(app_and_db, monkeypatch):
     assert blocked == [True]
     assert response.get_json()["discarded"] == 1
     assert db.pending_changes.list_all() == []
-    assert db.get_edit_history()[0]["action_type"] == "discard"
+    assert db.edit_history.list_recent()[0]["action_type"] == "discard"
 
 
 def test_selective_discard_rolls_back_when_history_fails(app_and_db, monkeypatch):
@@ -70,7 +70,7 @@ def test_selective_discard_rolls_back_when_history_fails(app_and_db, monkeypatch
     response = app.test_client().post("/api/sync/discard", json={"change_ids": [change_id]})
     assert response.status_code == 500
     assert db.conn.execute("SELECT COUNT(*) FROM pending_changes").fetchone()[0] == 2
-    assert db.get_edit_history() == []
+    assert db.edit_history.list_recent() == []
 
 
 def test_selective_discard_counts_repeated_ids_once(app_and_db):
@@ -84,7 +84,7 @@ def test_selective_discard_counts_repeated_ids_once(app_and_db):
     )
     assert response.status_code == 200
     assert response.get_json()["discarded"] == 1
-    assert db.get_edit_history()[0]["item_count"] == 1
+    assert db.edit_history.list_recent()[0]["item_count"] == 1
 
 
 @pytest.mark.parametrize("value", [True, "1", {}, [], 2**63])
@@ -96,7 +96,7 @@ def test_sync_and_culling_reject_malformed_ids(app_and_db, endpoint, field, valu
     assert response.status_code == 400
     assert all(row["flag"] == "none" for row in db.get_photos())
     assert db.pending_changes.list_all() == []
-    assert db.get_edit_history() == []
+    assert db.edit_history.list_recent() == []
 
 
 def test_culling_repeated_ids_produce_one_history_item(app_and_db):
@@ -105,7 +105,7 @@ def test_culling_repeated_ids_produce_one_history_item(app_and_db):
     response = app.test_client().post("/api/culling/apply", json={"keepers": [pid, pid]})
     assert response.status_code == 200
     assert response.get_json()["keepers"] == 1
-    assert db.get_edit_history()[0]["item_count"] == 1
+    assert db.edit_history.list_recent()[0]["item_count"] == 1
 
 
 @pytest.mark.parametrize("failure", ["flag", "queue", "history"])
@@ -138,7 +138,7 @@ def test_culling_failure_rolls_back_flags_queue_and_history(app_and_db, monkeypa
     assert response.status_code == 500
     assert {pid: db.get_photo(pid)["flag"] for pid in pids} == before_flags
     assert [dict(row) for row in db.pending_changes.list_all()] == before_queue
-    assert db.get_edit_history() == []
+    assert db.edit_history.list_recent() == []
 
 
 def test_culling_flags_are_not_committed_before_queueing(app_and_db, monkeypatch):
@@ -162,7 +162,7 @@ def test_culling_flags_are_not_committed_before_queueing(app_and_db, monkeypatch
     assert observed == [before]
     assert db.get_photo(pid)["flag"] == "flagged"
     assert [(row["change_type"], row["value"]) for row in db.pending_changes.list_all()] == [("flag", "flagged")]
-    assert db.get_edit_history()[0]["item_count"] == 1
+    assert db.edit_history.list_recent()[0]["item_count"] == 1
 
 
 def test_location_detail_and_sync_preview_choose_exported_location(client_with_photo):

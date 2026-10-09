@@ -234,7 +234,7 @@ def summarize(assessments):
 def is_current_row(row):
     """Whether a match-score row belongs to the label list on screen.
 
-    ``Database.get_match_scores_for_photo`` stamps ``is_current`` by the same
+    ``db.model_runs.get_match_scores_for_photo`` stamps ``is_current`` by the same
     latest-fingerprint-per-(detection, model) rule ``get_predictions`` pins to,
     so a run against a label list the user has since replaced cannot vote on
     the verdict that qualifies the predictions currently displayed. The

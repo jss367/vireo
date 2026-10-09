@@ -1,8 +1,9 @@
 """Behavior pins for the masks/features domain of ``Database``.
 
-The tests exercise the SAM-mask, pipeline-feature and embedding methods only
-through the public ``Database`` façade, so they hold whether the SQL lives in
-``db.py`` or in ``repositories/masks_features.py``. They cover mask rows and
+The tests exercise the SAM-mask, pipeline-feature and embedding operations
+through the ``db.masks_features`` accessor and the coordinated ``Database``
+methods that stay on the façade; the structural tests at the end pin the
+accessor's shape and keep the old forwarding wrappers gone. They cover mask rows and
 variant activation, the storage-cleanup deletes and their masks-directory
 containment check, the per-variant coverage and rerun warning, the
 pipeline-feature and raw-analysis writers, the mask and eye-keypoint stage
@@ -21,6 +22,7 @@ import config as cfg
 import db as db_module
 import pytest
 from db import Database
+from repositories.masks_features import MasksFeaturesRepository
 
 BOX = (0.1, 0.2, 0.3, 0.4)
 OTHER_BOX = (0.5, 0.5, 0.2, 0.2)
@@ -69,7 +71,7 @@ def _det(db, photo_id, detector_model="megadetector-v6", conf=0.9, box=BOX,
 
 def _mask(db, photo_id, variant="sam2-small", path=None,
           detector_model="megadetector-v6", box=BOX, **features):
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         photo_id, variant, path or f"/nowhere/{photo_id}_{variant}.png",
         detector_model, *box, **features,
     )
@@ -126,9 +128,9 @@ def _commit_recorder(monkeypatch):
 
 def test_get_photo_mask_returns_dict_or_none(db):
     pid = _photo(db, "a.jpg")
-    assert db.get_photo_mask(pid, "sam2-small") is None
+    assert db.masks_features.get_mask(pid, "sam2-small") is None
     _mask(db, pid, subject_size=0.25)
-    row = db.get_photo_mask(pid, "sam2-small")
+    row = db.masks_features.get_mask(pid, "sam2-small")
     assert isinstance(row, dict)
     assert row["photo_id"] == pid
     assert row["variant"] == "sam2-small"
@@ -139,7 +141,7 @@ def test_get_photo_mask_returns_dict_or_none(db):
 
 def test_list_masks_for_photo_orders_newest_first(db):
     pid = _photo(db, "a.jpg")
-    assert db.list_masks_for_photo(pid) == []
+    assert db.masks_features.list_masks_for_photo(pid) == []
     _mask(db, pid, "old")
     _mask(db, pid, "new")
     db.conn.execute(
@@ -147,7 +149,7 @@ def test_list_masks_for_photo_orders_newest_first(db):
         "WHEN 'old' THEN 100 ELSE 200 END"
     )
     db.conn.commit()
-    rows = db.list_masks_for_photo(pid)
+    rows = db.masks_features.list_masks_for_photo(pid)
     assert [r["variant"] for r in rows] == ["new", "old"]
     assert all(isinstance(r, dict) for r in rows)
 
@@ -169,7 +171,7 @@ def test_upsert_photo_mask_inserts_replaces_and_commits(db, monkeypatch):
     assert row["noise_estimate"] == 0.7
 
     _mask(db, pid, path="/m/b.png", detector_model="other", box=OTHER_BOX)
-    rows = db.list_masks_for_photo(pid)
+    rows = db.masks_features.list_masks_for_photo(pid)
     assert len(rows) == 1
     assert rows[0]["path"] == "/m/b.png"
     assert rows[0]["detector_model"] == "other"
@@ -226,15 +228,15 @@ def test_set_active_mask_variant_denormalizes_and_commits(db, monkeypatch):
 
 def test_active_mask_variant_and_mask_path_reads(db):
     pid = _photo(db, "a.jpg")
-    assert db.get_active_mask_variant(pid) is None
-    assert db.get_photo_mask_path(pid) is None
-    assert db.get_active_mask_variant(99999) is None
-    assert db.get_photo_mask_path(99999) is None
+    assert db.masks_features.active_variant(pid) is None
+    assert db.masks_features.photo_mask_path(pid) is None
+    assert db.masks_features.active_variant(99999) is None
+    assert db.masks_features.photo_mask_path(99999) is None
     _det(db, pid)
     _mask(db, pid, path="/m/a.png")
     db.set_active_mask_variant(pid, "sam2-small")
-    assert db.get_active_mask_variant(pid) == "sam2-small"
-    assert db.get_photo_mask_path(pid) == "/m/a.png"
+    assert db.masks_features.active_variant(pid) == "sam2-small"
+    assert db.masks_features.photo_mask_path(pid) == "/m/a.png"
 
 
 def test_set_active_mask_variant_without_commit(db):
@@ -288,7 +290,7 @@ def test_set_active_mask_variant_accepts_pre_detection_migration_row(db):
 
 def test_set_active_mask_variant_rejects_when_only_detector_run_exists(db):
     pid = _photo(db, "a.jpg")
-    db.record_detector_run(pid, "megadetector-v6", 0)
+    db.model_runs.record_detector_run(pid, "megadetector-v6", 0)
     _mask(db, pid)
     with pytest.raises(ValueError, match="another subject"):
         db.set_active_mask_variant(pid, "sam2-small")
@@ -391,8 +393,8 @@ def test_delete_masks_for_variant_refuses_active_variant(db):
     _mask(db, pid)
     db.set_active_mask_variant(pid, "sam2-small")
     with pytest.raises(ValueError, match=r"Variant 'sam2-small' is active for 1 photo\(s\)"):
-        db.delete_masks_for_variant("sam2-small")
-    assert db.get_photo_mask(pid, "sam2-small") is not None
+        db.masks_features.delete_for_variant("sam2-small")
+    assert db.masks_features.get_mask(pid, "sam2-small") is not None
 
 
 def test_delete_masks_for_variant_removes_rows_and_contained_files(db, tmp_path, monkeypatch):
@@ -405,14 +407,14 @@ def test_delete_masks_for_variant_removes_rows_and_contained_files(db, tmp_path,
     _mask(db, b, "large", path=str(outside))
     _mask(db, c, "small")
     calls = _commit_recorder(monkeypatch)
-    assert db.delete_masks_for_variant("large") == 2
+    assert db.masks_features.delete_for_variant("large") == 2
     assert calls == [db.conn]
     assert not os.path.exists(fa)
     assert outside.exists()
     with _reader(db) as reader:
         variants = [r[0] for r in reader.execute("SELECT variant FROM photo_masks")]
     assert variants == ["small"]
-    assert db.delete_masks_for_variant("absent") == 0
+    assert db.masks_features.delete_for_variant("absent") == 0
 
 
 def test_delete_inactive_masks(db, monkeypatch):
@@ -427,7 +429,7 @@ def test_delete_inactive_masks(db, monkeypatch):
     _mask(db, b, "x")
     _mask(db, b, "y")
     calls = _commit_recorder(monkeypatch)
-    assert db.delete_inactive_masks() == 1
+    assert db.masks_features.delete_inactive() == 1
     assert calls == [db.conn]
     assert not os.path.exists(fa_old)
     assert os.path.exists(fa_new)
@@ -435,7 +437,7 @@ def test_delete_inactive_masks(db, monkeypatch):
         rows = sorted(tuple(r) for r in reader.execute(
             "SELECT photo_id, variant FROM photo_masks"))
     assert rows == [(a, "new"), (b, "x"), (b, "y")]
-    assert db.delete_inactive_masks() == 0
+    assert db.masks_features.delete_inactive() == 0
 
 
 def test_find_stale_masks(db):
@@ -451,7 +453,7 @@ def test_find_stale_masks(db):
     # Full-image rows never count as the primary.
     _det(db, c, detector_model="full-image", conf=1.0, box=BOX)
 
-    stale = db.find_stale_masks()
+    stale = db.masks_features.find_stale()
     keys = {(s["photo_id"], s["variant"]) for s in stale}
     assert keys == {(a, "secondary"), (c, "orphan")}
     assert set(stale[0]) == {
@@ -460,7 +462,7 @@ def test_find_stale_masks(db):
     }
     # A floor above b's only box hides it, so b's mask is stale too.
     keys = {(s["photo_id"], s["variant"])
-            for s in db.find_stale_masks(detector_confidence=0.5)}
+            for s in db.masks_features.find_stale(detector_confidence=0.5)}
     assert keys == {(a, "secondary"), (b, "weak"), (c, "orphan")}
 
 
@@ -474,13 +476,13 @@ def test_delete_stale_masks_skips_active_and_forwards_confidence(db, monkeypatch
     db.set_active_mask_variant(b, "legacy")  # no detections → allowed
 
     seen = []
-    real_find = Database.find_stale_masks
+    real_find = MasksFeaturesRepository.find_stale
 
     def spy(self, detector_confidence=None):
         seen.append(detector_confidence)
         return real_find(self, detector_confidence=detector_confidence)
 
-    monkeypatch.setattr(Database, "find_stale_masks", spy)
+    monkeypatch.setattr(MasksFeaturesRepository, "find_stale", spy)
     calls = _commit_recorder(monkeypatch)
     assert db.delete_stale_masks() == 0
     assert calls == [db.conn]  # commits even when nothing was deleted
@@ -506,13 +508,13 @@ def test_mask_variant_coverage_is_workspace_scoped(db):
     db.set_active_mask_variant(b, "small")
     _mask(db, foreign, "tiny")
     _mask(db, foreign, "small")
-    assert db.mask_variant_coverage() == [
+    assert db.masks_features.variant_coverage() == [
         {"variant": "large", "count": 1, "active_count": 0},
         {"variant": "small", "count": 2, "active_count": 1},
     ]
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError, match="No active workspace"):
-        db.mask_variant_coverage()
+        db.masks_features.variant_coverage()
 
 
 def test_get_workspace_photo_ids_with_mask_variant_is_workspace_scoped(db):
@@ -524,19 +526,19 @@ def test_get_workspace_photo_ids_with_mask_variant_is_workspace_scoped(db):
     _mask(db, b, "small")
     _mask(db, c, "small")
     _mask(db, foreign, "large")
-    assert sorted(db.get_workspace_photo_ids_with_mask_variant("large")) == [a, b]
-    assert db.get_workspace_photo_ids_with_mask_variant("tiny") == []
+    assert sorted(db.masks_features.workspace_photo_ids_with_variant("large")) == [a, b]
+    assert db.masks_features.workspace_photo_ids_with_variant("tiny") == []
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError, match="No active workspace"):
-        db.get_workspace_photo_ids_with_mask_variant("large")
+        db.masks_features.workspace_photo_ids_with_variant("large")
 
 
 def test_get_photo_pipeline_features_reads_the_feature_columns(db):
     foreign = _other_workspace_photo(db)
-    db.update_photo_pipeline_features(
+    db.masks_features.update_pipeline_features(
         foreign, subject_tenengrad=4.5, bg_tenengrad=1.5, subject_y_median=0.2,
     )
-    row = db.get_photo_pipeline_features(foreign)
+    row = db.masks_features.pipeline_feature_row(foreign)
     assert list(row.keys()) == [
         "id", "filename", "timestamp", "width", "height",
         "mask_path", "subject_tenengrad", "bg_tenengrad",
@@ -547,12 +549,12 @@ def test_get_photo_pipeline_features_reads_the_feature_columns(db):
     assert (row["id"], row["filename"]) == (foreign, "foreign.jpg")
     assert (row["subject_tenengrad"], row["bg_tenengrad"], row["subject_y_median"]) == (4.5, 1.5, 0.2)
     db.set_active_workspace(None)  # catalog-wide
-    assert db.get_photo_pipeline_features(foreign)["id"] == foreign
-    assert db.get_photo_pipeline_features(999999) is None
+    assert db.masks_features.pipeline_feature_row(foreign)["id"] == foreign
+    assert db.masks_features.pipeline_feature_row(999999) is None
 
 
 def test_mask_variant_coverage_empty(db):
-    assert db.mask_variant_coverage() == []
+    assert db.masks_features.variant_coverage() == []
 
 
 def test_mask_variants_summary_counts_bytes_across_catalog(db, monkeypatch):
@@ -564,7 +566,7 @@ def test_mask_variants_summary_counts_bytes_across_catalog(db, monkeypatch):
     _mask(db, b, "large", path="/does/not/exist.png")
     _mask(db, foreign, "small", path=_mask_file(db, "f.png"))
     db.set_active_mask_variant(foreign, "small")
-    assert db.mask_variants_summary() == [
+    assert db.masks_features.variants_summary() == [
         {"variant": "large", "count": 2, "active_count": 0, "bytes": 10},
         {"variant": "small", "count": 1, "active_count": 1, "bytes": 10},
     ]
@@ -573,11 +575,11 @@ def test_mask_variants_summary_counts_bytes_across_catalog(db, monkeypatch):
         raise OSError("gone")
 
     monkeypatch.setattr(os.path, "getsize", boom)
-    assert [s["bytes"] for s in db.mask_variants_summary()] == [0, 0]
+    assert [s["bytes"] for s in db.masks_features.variants_summary()] == [0, 0]
 
 
 def test_mask_variants_summary_empty(db):
-    assert db.mask_variants_summary() == []
+    assert db.masks_features.variants_summary() == []
 
 
 # -- sam_variant_rerun_warning -------------------------------------------------
@@ -593,7 +595,7 @@ def _sam_fixture(db, n_photos=4, selected=0, alternate=4, conf=0.9):
         if i < selected:
             _mask(db, pid, "sam2-small", path=f"/m/{pid}_s.png")
         if i < max(selected, alternate):
-            db.update_photo_pipeline_features(pid, mask_path=f"/m/{pid}.png")
+            db.masks_features.update_pipeline_features(pid, mask_path=f"/m/{pid}.png")
     return pids
 
 
@@ -666,7 +668,7 @@ def test_sam_variant_rerun_warning_ignores_unknown_and_empty_paths(db):
     for pid in pids:
         _det(db, pid)
         _mask(db, pid, "unknown")
-        db.update_photo_pipeline_features(pid, mask_path="/m/x.png")
+        db.masks_features.update_pipeline_features(pid, mask_path="/m/x.png")
     db.conn.execute("UPDATE photo_masks SET path='', variant='sam2-large' "
                     "WHERE photo_id=?", (pids[0],))
     db.conn.commit()
@@ -680,7 +682,7 @@ def test_save_subject_raw_analysis_upserts_and_commits(db, monkeypatch):
     pid = _photo(db, "a.jpg")
     det = _det(db, pid)
     calls = _commit_recorder(monkeypatch)
-    db.save_subject_raw_analysis(det, {"recipe": "r1", "ev": 1.5})
+    db.masks_features.save_subject_raw_analysis(det, {"recipe": "r1", "ev": 1.5})
     assert calls == [db.conn]
     with _reader(db) as reader:
         row = reader.execute("SELECT * FROM subject_raw_analysis").fetchone()
@@ -689,7 +691,7 @@ def test_save_subject_raw_analysis_upserts_and_commits(db, monkeypatch):
     assert json.loads(row["report_json"]) == {"recipe": "r1", "ev": 1.5}
     assert isinstance(row["created_at"], int)
 
-    db.save_subject_raw_analysis(det, {"recipe": "r2"}, _commit=False)
+    db.masks_features.save_subject_raw_analysis(det, {"recipe": "r2"}, _commit=False)
     assert db.conn.in_transaction
     db.conn.commit()
     rows = db.conn.execute("SELECT recipe FROM subject_raw_analysis").fetchall()
@@ -700,12 +702,12 @@ def test_save_subject_raw_analysis_rejects_nan(db):
     pid = _photo(db, "a.jpg")
     det = _det(db, pid)
     with pytest.raises(ValueError):
-        db.save_subject_raw_analysis(det, {"recipe": "r", "v": float("nan")})
+        db.masks_features.save_subject_raw_analysis(det, {"recipe": "r", "v": float("nan")})
 
 
 def test_update_photo_pipeline_features_writes_only_provided_columns(db, monkeypatch):
     pid = _photo(db, "a.jpg")
-    db.update_photo_pipeline_features(
+    db.masks_features.update_pipeline_features(
         pid, mask_path="/m/a.png", subject_tenengrad=1.0, bg_tenengrad=2.0,
         crop_complete=1.0, bg_separation=3.0, subject_clip_high=0.1,
         subject_clip_low=0.2, subject_y_median=0.3, phash_crop="ab",
@@ -726,7 +728,7 @@ def test_update_photo_pipeline_features_writes_only_provided_columns(db, monkeyp
 
     statements = []
     db.conn.set_trace_callback(statements.append)
-    db.update_photo_pipeline_features(pid, eye_x=None, noise_estimate=0.9)
+    db.masks_features.update_pipeline_features(pid, eye_x=None, noise_estimate=0.9)
     db.conn.set_trace_callback(None)
     updates = [s for s in statements if s.startswith("UPDATE photos")]
     assert updates == [f"UPDATE photos SET noise_estimate=0.9, eye_x=NULL WHERE id={pid}"]
@@ -741,7 +743,7 @@ def test_update_photo_pipeline_features_noop_without_columns(db, monkeypatch):
     calls = _commit_recorder(monkeypatch)
     statements = []
     db.conn.set_trace_callback(statements.append)
-    db.update_photo_pipeline_features(pid)
+    db.masks_features.update_pipeline_features(pid)
     db.conn.set_trace_callback(None)
     assert statements == []
     assert calls == []
@@ -750,11 +752,11 @@ def test_update_photo_pipeline_features_noop_without_columns(db, monkeypatch):
 def test_update_photo_pipeline_features_commit_flag(db, monkeypatch):
     pid = _photo(db, "a.jpg")
     calls = _commit_recorder(monkeypatch)
-    db.update_photo_pipeline_features(pid, mask_path="/m/a.png", _commit=False)
+    db.masks_features.update_pipeline_features(pid, mask_path="/m/a.png", _commit=False)
     assert calls == []
     assert db.conn.in_transaction
     db.conn.rollback()
-    db.update_photo_pipeline_features(pid, mask_path="/m/b.png")
+    db.masks_features.update_pipeline_features(pid, mask_path="/m/b.png")
     assert calls == [db.conn]
     with _reader(db) as reader:
         assert reader.execute(
@@ -772,7 +774,7 @@ def test_get_photos_missing_masks_whole_workspace(db):
     _det(db, a, conf=0.9, box=BOX)
     _det(db, b, conf=0.1)  # below the default 0.2 floor
     _det(db, c, conf=0.9)
-    db.update_photo_pipeline_features(c, mask_path="/m/c.png")
+    db.masks_features.update_pipeline_features(c, mask_path="/m/c.png")
     foreign = _other_workspace_photo(db)
     _det(db, foreign, conf=0.9)
 
@@ -803,7 +805,7 @@ def test_get_photos_missing_masks_folder_filter_stays_workspace_scoped(db):
     assert [r["id"] for r in db.get_photos_missing_masks(folder_ids=[])] == [a, b]
 
 
-# -- get_workspace_mask_candidate_detections ----------------------------------
+# -- workspace_mask_candidate_detections ----------------------------------------
 
 
 def test_workspace_mask_candidate_detections_rows_and_order(db):
@@ -815,11 +817,11 @@ def test_workspace_mask_candidate_detections_rows_and_order(db):
     _det(db, b, conf=0.1)  # below the floor the caller passes
     _det(db, c, conf=0.3)
     # Already masked photos stay: the job checks the cache per photo.
-    db.update_photo_pipeline_features(c, mask_path="/m/c.png")
+    db.masks_features.update_pipeline_features(c, mask_path="/m/c.png")
     foreign = _other_workspace_photo(db)
     _det(db, foreign, conf=0.9)
 
-    rows = db.get_workspace_mask_candidate_detections(0.2)
+    rows = db.masks_features.workspace_mask_candidate_detections(0.2)
     got = [(r["id"], r["detector_confidence"]) for r in rows]
     # Photo id first, then the primary ordering (confidence among animals).
     assert got == [(a, 0.9), (a, 0.5), (c, 0.3)]
@@ -830,21 +832,21 @@ def test_workspace_mask_candidate_detections_rows_and_order(db):
         "box_x": BOX[0], "box_y": BOX[1], "box_w": BOX[2], "box_h": BOX[3],
         "detector_confidence": 0.9,
     }
-    assert [r["id"] for r in db.get_workspace_mask_candidate_detections(0.6)] == [a]
+    assert [r["id"] for r in db.masks_features.workspace_mask_candidate_detections(0.6)] == [a]
 
 
 def test_workspace_mask_candidate_detections_needs_a_workspace(db):
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError):
-        db.get_workspace_mask_candidate_detections(0.2)
+        db.masks_features.workspace_mask_candidate_detections(0.2)
 
 
-# -- get_photo_mask_state -------------------------------------------------------
+# -- photo_mask_state -----------------------------------------------------------
 
 
 def test_get_photo_mask_state_reads_the_three_columns(db):
     pid = _photo(db, "a.jpg")
-    state = db.get_photo_mask_state(pid)
+    state = db.masks_features.photo_mask_state(pid)
     assert dict(state) == {
         "active_mask_variant": None,
         "dino_embedding_variant": None,
@@ -853,15 +855,15 @@ def test_get_photo_mask_state_reads_the_three_columns(db):
     _det(db, pid)
     _mask(db, pid, path="/m/a.png")
     db.set_active_mask_variant(pid, "sam2-small")
-    db.update_photo_embeddings(pid, dino_subject_embedding=b"s",
+    db.masks_features.update_embeddings(pid, dino_subject_embedding=b"s",
                                dino_global_embedding=b"g", variant="vit-b14")
-    db.update_photo_pipeline_features(pid, quality_input_recipe="r1")
-    assert dict(db.get_photo_mask_state(pid)) == {
+    db.masks_features.update_pipeline_features(pid, quality_input_recipe="r1")
+    assert dict(db.masks_features.photo_mask_state(pid)) == {
         "active_mask_variant": "sam2-small",
         "dino_embedding_variant": "vit-b14",
         "quality_input_recipe": "r1",
     }
-    assert db.get_photo_mask_state(99999) is None
+    assert db.masks_features.photo_mask_state(99999) is None
 
 
 # -- list_photos_for_eye_keypoint_stage ----------------------------------------
@@ -899,11 +901,11 @@ def test_list_photos_for_eye_keypoint_stage_filters(db):
     fid = _folder(db)
     ready, _ = _eye_ready(db, "ready.jpg", fid)
     stamped, _ = _eye_ready(db, "stamped.jpg", fid)
-    db.update_photo_pipeline_features(
+    db.masks_features.update_pipeline_features(
         stamped, eye_kp_fingerprint=pipeline.EYE_KP_FINGERPRINT_VERSION,
     )
     old_stamp, _ = _eye_ready(db, "old.jpg", fid)
-    db.update_photo_pipeline_features(old_stamp, eye_kp_fingerprint="v0")
+    db.masks_features.update_pipeline_features(old_stamp, eye_kp_fingerprint="v0")
     stale, _ = _eye_ready(db, "stale.jpg", fid)
     # A new, stronger detection makes the active mask's prompt stale.
     _det(db, stale, conf=0.99, box=OTHER_BOX)
@@ -964,14 +966,14 @@ def test_list_photos_for_eye_keypoint_stage_is_workspace_scoped(db):
 def test_update_photo_embeddings_stores_blobs_and_commits(db, monkeypatch):
     pid = _photo(db, "a.jpg")
     calls = _commit_recorder(monkeypatch)
-    db.update_photo_embeddings(pid, b"\x01\x02", b"\x03", variant="vit-b14")
+    db.masks_features.update_embeddings(pid, b"\x01\x02", b"\x03", variant="vit-b14")
     assert calls == [db.conn]
     with _reader(db) as reader:
         p = reader.execute("SELECT * FROM photos WHERE id=?", (pid,)).fetchone()
     assert (p["dino_subject_embedding"], p["dino_global_embedding"],
             p["dino_embedding_variant"]) == (b"\x01\x02", b"\x03", "vit-b14")
 
-    db.update_photo_embeddings(pid, _commit=False)
+    db.masks_features.update_embeddings(pid, _commit=False)
     assert calls == [db.conn]
     assert db.conn.in_transaction
     db.conn.commit()
@@ -982,7 +984,7 @@ def test_update_photo_embeddings_stores_blobs_and_commits(db, monkeypatch):
 
 def test_photo_embedding_roundtrip_and_upsert(db):
     pid = _photo(db, "a.jpg")
-    assert db.get_photo_embedding(pid, "bioclip") is None
+    assert db.masks_features.get_embedding(pid, "bioclip") is None
     db.upsert_photo_embedding(pid, "bioclip", b"one")
     assert not db.conn.in_transaction
     with _reader(db) as reader:
@@ -990,9 +992,9 @@ def test_photo_embedding_roundtrip_and_upsert(db):
             "SELECT embedding FROM photo_embeddings").fetchone()[0] == b"one"
     db.upsert_photo_embedding(pid, "bioclip", b"two")
     db.upsert_photo_embedding(pid, "bioclip", b"v2", variant="v2")
-    assert db.get_photo_embedding(pid, "bioclip") == b"two"
-    assert db.get_photo_embedding(pid, "bioclip", variant="v2") == b"v2"
-    assert db.get_photo_embedding(pid, "other") is None
+    assert db.masks_features.get_embedding(pid, "bioclip") == b"two"
+    assert db.masks_features.get_embedding(pid, "bioclip", variant="v2") == b"v2"
+    assert db.masks_features.get_embedding(pid, "other") is None
     assert db.conn.execute(
         "SELECT COUNT(*) FROM photo_embeddings").fetchone()[0] == 2
 
@@ -1004,9 +1006,9 @@ def test_upsert_photo_embedding_verify_workspace(db):
     db.upsert_photo_embedding(foreign, "m", b"x")
     with pytest.raises(ValueError, match=f"Photo {foreign} does not belong"):
         db.upsert_photo_embedding(foreign, "m", b"y", verify_workspace=True)
-    assert db.get_photo_embedding(foreign, "m") == b"x"
+    assert db.masks_features.get_embedding(foreign, "m") == b"x"
     db.upsert_photo_embedding(mine, "m", b"z", verify_workspace=True)
-    assert db.get_photo_embedding(mine, "m") == b"z"
+    assert db.masks_features.get_embedding(mine, "m") == b"z"
 
 
 def test_get_photos_with_embedding_scope_and_offline_folders(db):
@@ -1023,18 +1025,18 @@ def test_get_photos_with_embedding_scope_and_offline_folders(db):
     db.upsert_photo_embedding(a, "m", b"v", variant="v2")
     db.upsert_photo_embedding(a, "n", b"n")
 
-    assert sorted(db.get_photos_with_embedding("m")) == [
+    assert sorted(db.masks_features.photos_with_embedding("m")) == [
         (a, bytes([a])), (c, bytes([c]))]
-    assert sorted(db.get_photos_with_embedding(
+    assert sorted(db.masks_features.photos_with_embedding(
         "m", include_offline_folders=True)) == [
         (a, bytes([a])), (b, bytes([b])), (c, bytes([c]))]
-    assert db.get_photos_with_embedding("m", variant="v2") == [(a, b"v")]
-    assert db.get_photos_with_embedding("m", photo_ids=[c, foreign]) == [
+    assert db.masks_features.photos_with_embedding("m", variant="v2") == [(a, b"v")]
+    assert db.masks_features.photos_with_embedding("m", photo_ids=[c, foreign]) == [
         (c, bytes([c]))]
-    assert db.get_photos_with_embedding("m", photo_ids=[]) == []
+    assert db.masks_features.photos_with_embedding("m", photo_ids=[]) == []
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError):
-        db.get_photos_with_embedding("m", photo_ids=[])
+        db.masks_features.photos_with_embedding("m", photo_ids=[])
 
 
 def test_get_photos_with_embedding_chunks_photo_ids(db):
@@ -1044,40 +1046,148 @@ def test_get_photos_with_embedding_chunks_photo_ids(db):
     statements = []
     db.conn.set_trace_callback(statements.append)
     ids = list(range(100000, 101850)) + [a]
-    assert db.get_photos_with_embedding("m", photo_ids=ids) == [(a, b"x")]
+    assert db.masks_features.photos_with_embedding("m", photo_ids=ids) == [(a, b"x")]
     db.conn.set_trace_callback(None)
     selects = [s for s in statements if "FROM photo_embeddings" in s]
     assert len(selects) == 3  # 900 + 900 + 51
 
 
+# -- workspace scoping --------------------------------------------------------
+
+
+def _trace(db):
+    statements = []
+    db.conn.set_trace_callback(statements.append)
+    return statements
+
+
+def test_scoped_selectors_raise_before_any_sql_without_a_workspace(db):
+    """The workspace-scoped selectors need a workspace, exactly where the wrappers did.
+
+    The workspace is resolved lazily, so reaching ``db.masks_features`` with
+    none active is fine; each scoped call raises ``RuntimeError`` before
+    touching a table, as the wrapper's eagerly scoped repository did.
+    """
+    db.set_active_workspace(None)
+    repo = db.masks_features
+    statements = _trace(db)
+    try:
+        for call in (
+            repo.variant_coverage,
+            lambda: repo.workspace_photo_ids_with_variant("large"),
+            lambda: repo.workspace_mask_candidate_detections(0.2),
+            lambda: repo.photos_with_embedding("m"),
+            # The empty-ids early return still comes after the resolve.
+            lambda: repo.photos_with_embedding("m", photo_ids=[]),
+            lambda: repo.photos_missing_masks(None, 0.2),
+            lambda: repo.list_photos_for_eye_keypoint_stage(
+                0.2, "", [], eye_kp_fingerprint_version="v1",
+            ),
+            lambda: repo.sam_variant_rerun_warning("large", 0.2, "", []),
+        ):
+            with pytest.raises(RuntimeError, match="No active workspace"):
+                call()
+    finally:
+        db.conn.set_trace_callback(None)
+    assert statements == []
+
+
+def test_photo_keyed_operations_need_no_workspace(db):
+    pid = _photo(db, "a.jpg", _folder(db))
+    db.set_active_workspace(None)
+    repo = db.masks_features
+    repo.upsert_mask(pid, "sam2-small", "/m/a.png", "megadetector-v6", *BOX)
+    assert repo.get_mask(pid, "sam2-small")["path"] == "/m/a.png"
+    assert [m["variant"] for m in repo.list_masks_for_photo(pid)] == ["sam2-small"]
+    repo.update_pipeline_features(pid, mask_path="/m/a.png")
+    assert repo.photo_mask_path(pid) == "/m/a.png"
+    assert repo.pipeline_feature_row(pid)["mask_path"] == "/m/a.png"
+    repo.update_embeddings(pid, b"s", b"g", variant="vit-b14")
+    assert repo.get_embedding(pid, "m") is None
+    assert [s["variant"] for s in repo.variants_summary()] == ["sam2-small"]
+    assert len(repo.find_stale()) == 1  # no detection backs the mask
+
+
+@pytest.mark.parametrize("call", [
+    # ``min_conf`` given: this one reads the config before resolving, as it
+    # always did, but still raises before staging its large photo scope.
+    lambda db: db.sam_variant_rerun_warning("large", photo_ids=list(range(1, 2000)), min_conf=0.2),
+    lambda db: db.get_photos_missing_masks(),
+    lambda db: db.list_photos_for_eye_keypoint_stage(photo_ids=[]),
+], ids=["sam_variant_rerun_warning", "get_photos_missing_masks", "list_photos_for_eye_keypoint_stage"])
+def test_coordinated_selectors_raise_before_reading_config_or_scope(db, monkeypatch, call):
+    """The façade selectors still resolve the workspace first.
+
+    Before the lazy resolver they built an eagerly scoped repository before
+    staging the photo scope (and, except for the rerun warning, before
+    reading the detector floor), so with no workspace they raised first;
+    they still do. An empty eye-stage scope still raises instead of
+    returning ``[]``.
+    """
+    def no_config_read():
+        raise AssertionError("read the config before resolving the workspace")
+
+    db.set_active_workspace(None)
+    monkeypatch.setattr(cfg, "load", no_config_read)
+    statements = _trace(db)
+    try:
+        with pytest.raises(RuntimeError, match="No active workspace"):
+            call(db)
+    finally:
+        db.conn.set_trace_callback(None)
+    assert statements == []
+
+
+def test_scoped_selectors_read_the_workspace_active_at_the_call(db):
+    """A fresh repository per access, and each scoped call reads the current workspace."""
+    home = db._ws_id()
+    mine = _photo(db, "a.jpg", _folder(db))
+    foreign = _other_workspace_photo(db)
+    _mask(db, mine, "large")
+    _mask(db, foreign, "large")
+    assert db.masks_features.workspace_photo_ids_with_variant("large") == [mine]
+    other = next(w["id"] for w in db.workspaces.list_all() if w["id"] != home)
+    db.set_active_workspace(other)
+    assert db.masks_features.workspace_photo_ids_with_variant("large") == [foreign]
+    # Even a repository held across the switch reads the workspace per call.
+    repo = db.masks_features
+    db.set_active_workspace(home)
+    assert repo.workspace_photo_ids_with_variant("large") == [mine]
+
+
 # -- structure ----------------------------------------------------------------
 
-_DELEGATING_MASKS_FEATURES_METHODS = (
+_REMOVED_MASKS_FEATURES_WRAPPERS = (
     "get_photo_mask",
     "list_masks_for_photo",
     "get_workspace_photo_ids_with_mask_variant",
     "get_photo_pipeline_features",
-    "set_active_mask_variant",
     "get_active_mask_variant",
     "get_photo_mask_path",
     "get_photo_mask_state",
     "delete_masks_for_variant",
     "delete_inactive_masks",
     "find_stale_masks",
-    "delete_stale_masks",
     "mask_variant_coverage",
-    "sam_variant_rerun_warning",
     "mask_variants_summary",
     "upsert_photo_mask",
     "save_subject_raw_analysis",
     "update_photo_pipeline_features",
-    "get_photos_missing_masks",
     "get_workspace_mask_candidate_detections",
-    "list_photos_for_eye_keypoint_stage",
     "update_photo_embeddings",
     "get_photo_embedding",
-    "upsert_photo_embedding",
     "get_photos_with_embedding",
+)
+
+# Coordinated methods that stay on ``Database``: each reads the workspace
+# config, the photo scope or the workspace guard around its repository calls.
+_COORDINATED_MASKS_FEATURES_METHODS = (
+    "set_active_mask_variant",
+    "delete_stale_masks",
+    "sam_variant_rerun_warning",
+    "get_photos_missing_masks",
+    "list_photos_for_eye_keypoint_stage",
+    "upsert_photo_embedding",
 )
 
 
@@ -1093,8 +1203,44 @@ def _self_attrs(fn_obj):
     }
 
 
-@pytest.mark.parametrize("name", _DELEGATING_MASKS_FEATURES_METHODS)
-def test_masks_features_method_delegates_to_repository(name):
+def test_masks_features_is_a_fresh_repository_on_the_connection_per_access(db):
+    """``db.masks_features`` builds a new repository each time, never a cached one.
+
+    The workspace is passed as ``Database._ws_id`` itself, uncalled, so
+    building the repository resolves nothing; the cleanup deletes get the
+    façade's contained file delete, and ``commit_with_retry`` is the module
+    function as it is at access time.
+    """
+    first, second = db.masks_features, db.masks_features
+    assert isinstance(first, MasksFeaturesRepository)
+    assert first is not second
+    assert first.conn is db.conn
+    assert first.workspace_id_fn == db._ws_id
+    assert first.remove_file == db._safe_remove_mask_file
+    assert first.commit_with_retry is db_module.commit_with_retry
+
+
+def test_accessor_writes_reach_a_patched_commit_with_retry(db, monkeypatch):
+    pid = _photo(db, "a.jpg")
+    db.masks_features.get_mask(pid, "sam2-small")  # an access before the patch
+    calls = _commit_recorder(monkeypatch)
+    db.masks_features.update_pipeline_features(pid, mask_path="/m/a.png")
+    assert calls == [db.conn]
+
+
+def test_masks_features_has_no_forwarding_wrappers_on_database():
+    """The domain is reached through ``db.masks_features``; Database keeps no aliases."""
+    for name in _REMOVED_MASKS_FEATURES_WRAPPERS:
+        assert not hasattr(Database, name), f"Database.{name} came back; call db.masks_features"
+    accessor = Database.__dict__["masks_features"]
+    assert isinstance(accessor, property)
+    attrs = _self_attrs(accessor.fget)
+    assert "_masks_features_repository" in attrs
+    assert "conn" not in attrs
+
+
+@pytest.mark.parametrize("name", _COORDINATED_MASKS_FEATURES_METHODS)
+def test_coordinated_masks_features_method_delegates_to_repository(name):
     attrs = _self_attrs(getattr(Database, name))
     assert "conn" not in attrs, (
         f"Database.{name} touches self.conn; move the SQL to MasksFeaturesRepository"
@@ -1110,15 +1256,9 @@ def test_mask_file_helpers_hold_no_sql(name):
     assert "conn" not in _self_attrs(getattr(Database, name))
 
 
-@pytest.mark.parametrize("name", [
-    "delete_masks_for_variant", "delete_inactive_masks", "delete_stale_masks",
-])
-def test_cleanup_deletes_remove_files_through_the_facade(name):
-    assert "_safe_remove_mask_file" in _self_attrs(getattr(Database, name))
-
-
-def test_delete_stale_masks_composes_through_the_facade():
-    assert "find_stale_masks" in _self_attrs(Database.delete_stale_masks)
+def test_cleanup_deletes_remove_files_through_the_facade():
+    """Every cleanup delete gets ``_safe_remove_mask_file`` from the factory."""
+    assert "_safe_remove_mask_file" in _self_attrs(Database._masks_features_repository)
 
 
 @pytest.mark.parametrize("name", [

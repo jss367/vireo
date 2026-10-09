@@ -301,7 +301,7 @@ def test_photo_review_batches_skip_stale_ids_and_keep_requested_history_count(
     assert response.status_code == 200
     assert response.get_json() == {"ok": True, "updated": 1}
     assert db.get_photo(photo_id)["rating"] == 2
-    history = db.get_edit_history()
+    history = db.edit_history.list_recent()
     assert history[0]["description"] == "Set rating to 2 on 2 photos"
 
 
@@ -1497,7 +1497,7 @@ def test_edit_history_recorded_on_rating(app_and_db):
 
     client.post(f'/api/photos/{pid}/rating', json={'rating': 5})
 
-    history = db.get_edit_history()
+    history = db.edit_history.list_recent()
     assert len(history) == 1
     assert history[0]['action_type'] == 'rating'
     assert 'rating' in history[0]['description'].lower()
@@ -1512,7 +1512,7 @@ def test_edit_history_recorded_on_flag(app_and_db):
 
     client.post(f'/api/photos/{pid}/flag', json={'flag': 'flagged'})
 
-    history = db.get_edit_history()
+    history = db.edit_history.list_recent()
     assert len(history) == 1
     assert history[0]['action_type'] == 'flag'
 
@@ -1526,7 +1526,7 @@ def test_edit_history_recorded_on_keyword_add(app_and_db):
 
     client.post(f'/api/photos/{pid}/keywords', json={'name': 'Eagle'})
 
-    history = db.get_edit_history()
+    history = db.edit_history.list_recent()
     assert len(history) == 1
     assert history[0]['action_type'] == 'keyword_add'
 
@@ -1542,7 +1542,7 @@ def test_edit_history_recorded_on_keyword_remove(app_and_db):
 
     client.delete(f'/api/photos/{pid}/keywords/{kid}')
 
-    history = db.get_edit_history()
+    history = db.edit_history.list_recent()
     assert len(history) == 1
     assert history[0]['action_type'] == 'keyword_remove'
 
@@ -1556,7 +1556,7 @@ def test_edit_history_recorded_on_batch_rating(app_and_db):
 
     client.post('/api/batch/rating', json={'photo_ids': pids, 'rating': 4})
 
-    history = db.get_edit_history()
+    history = db.edit_history.list_recent()
     assert len(history) == 1
     assert history[0]['is_batch'] == 1
     assert history[0]['item_count'] == 2
@@ -1576,7 +1576,7 @@ def test_undo_api_uses_db(app_and_db):
     resp = client.post('/api/undo')
     assert resp.status_code == 200
     assert db.get_photo(pid)['rating'] == original_rating
-    assert len(db.get_edit_history()) == 0
+    assert len(db.edit_history.list_recent()) == 0
 
 
 def test_undo_status_uses_db(app_and_db):
@@ -1633,7 +1633,7 @@ def test_accept_prediction_records_history(app_and_db):
     resp = client.post(f'/api/predictions/{pred_id}/accept')
     assert resp.status_code == 200
 
-    history = db.get_edit_history()
+    history = db.edit_history.list_recent()
     assert len(history) == 1
     assert history[0]['action_type'] == 'prediction_accept'
     assert 'Blue Jay' in history[0]['description']
@@ -1694,7 +1694,7 @@ def test_reject_prediction_records_history(app_and_db):
     resp = client.post(f'/api/predictions/{pred_id}/reject')
     assert resp.status_code == 200
 
-    history = db.get_edit_history()
+    history = db.edit_history.list_recent()
     assert len(history) == 1
     assert history[0]['action_type'] == 'prediction_reject'
     assert 'House Sparrow' in history[0]['description']
@@ -1713,7 +1713,7 @@ def test_prediction_group_apply_records_history(app_and_db):
                              'species': 'Northern Cardinal'})
     assert resp.status_code == 200
 
-    history = db.get_edit_history()
+    history = db.edit_history.list_recent()
     action_types = {h['action_type'] for h in history}
     assert 'keyword_add' in action_types
     assert 'flag' in action_types
@@ -1731,7 +1731,7 @@ def test_culling_apply_records_history(app_and_db):
                        json={'keepers': [pids[0]], 'rejects': [pids[1], pids[2]]})
     assert resp.status_code == 200
 
-    history = db.get_edit_history()
+    history = db.edit_history.list_recent()
     assert len(history) == 1
     assert history[0]['action_type'] == 'flag'
     assert history[0]['is_batch'] == 1
@@ -1770,7 +1770,7 @@ def test_culling_apply_unflag_clears_previous_flag(app_and_db):
     assert resp.get_json()['cleared'] == 1
     assert (db.get_photo(pid)['flag'] or 'none') == 'none'
 
-    history = db.get_edit_history()
+    history = db.edit_history.list_recent()
     assert history[0]['action_type'] == 'flag'
     assert 'cleared 1' in history[0]['description']
 
@@ -1802,7 +1802,7 @@ def test_culling_apply_unflag_ignores_unflagged_photos(app_and_db):
                        json={'keepers': [], 'rejects': [], 'unflag': [pid]})
     assert resp.status_code == 200
     assert resp.get_json()['cleared'] == 0
-    assert db.get_edit_history() == []
+    assert db.edit_history.list_recent() == []
 
 
 def test_culling_apply_rejects_non_list_ids(app_and_db):
@@ -1852,7 +1852,7 @@ def test_culling_apply_rejects_overlapping_action_lists(app_and_db):
     # Nothing was mutated for any of the three requests.
     for pid in pids:
         assert (db.get_photo(pid)['flag'] or 'none') == 'none'
-    assert db.get_edit_history() == []
+    assert db.edit_history.list_recent() == []
 
 
 def test_encounter_species_records_history(app_and_db):
@@ -1866,7 +1866,7 @@ def test_encounter_species_records_history(app_and_db):
                        json={'species': 'Red-tailed Hawk', 'photo_ids': pids})
     assert resp.status_code == 200
 
-    history = db.get_edit_history()
+    history = db.edit_history.list_recent()
     assert len(history) == 1
     assert history[0]['action_type'] == 'keyword_add'
     assert 'Red-tailed Hawk' in history[0]['description']
@@ -1886,7 +1886,7 @@ def test_sync_discard_records_history(app_and_db):
     resp = client.post('/api/sync/discard', json={'change_ids': change_ids})
     assert resp.status_code == 200
 
-    history = db.get_edit_history()
+    history = db.edit_history.list_recent()
     assert len(history) == 1
     assert history[0]['action_type'] == 'discard'
     assert db.pending_changes.list_all() == []
@@ -1949,7 +1949,7 @@ def test_undo_skips_non_undoable_entries(app_and_db):
     client.post(f'/api/predictions/{preds[-1]["id"]}/reject')
 
     # History has 2 entries: prediction_reject (most recent) and rating
-    history = db.get_edit_history()
+    history = db.edit_history.list_recent()
     assert len(history) == 2
 
     # Undo should skip the prediction_reject and undo the rating
@@ -1958,7 +1958,7 @@ def test_undo_skips_non_undoable_entries(app_and_db):
     assert db.get_photo(pid)['rating'] == original_rating
 
     # prediction_reject entry still in history, rating entry removed
-    history = db.get_edit_history()
+    history = db.edit_history.list_recent()
     assert len(history) == 1
     assert history[0]['action_type'] == 'prediction_reject'
 
@@ -2160,7 +2160,7 @@ def test_multiple_sequential_undos(app_and_db):
     # Action 3: add keyword
     client.post(f'/api/photos/{pid}/keywords', json={'name': 'Finch'})
 
-    assert len(db.get_edit_history()) == 3
+    assert len(db.edit_history.list_recent()) == 3
 
     # Undo 3: keyword add reversed
     resp = client.post('/api/undo')
@@ -2199,7 +2199,7 @@ def test_history_pruning_respects_max(app_and_db):
     for r in range(5):
         client.post(f'/api/photos/{pid}/rating', json={'rating': r})
 
-    history = db.get_edit_history(limit=100)
+    history = db.edit_history.list_recent(limit=100)
     assert len(history) == 3
     # Most recent should be the last rating set
     assert history[0]['new_value'] == '4'
@@ -2217,14 +2217,14 @@ def test_history_isolated_between_workspaces(app_and_db):
 
     # Record an edit in the default workspace
     client.post(f'/api/photos/{pid}/rating', json={'rating': 5})
-    assert len(db.get_edit_history()) == 1
+    assert len(db.edit_history.list_recent()) == 1
 
     # Create and switch to a new workspace
     ws2 = db.create_workspace('Second')
     db.set_active_workspace(ws2)
 
     # New workspace has no history
-    assert len(db.get_edit_history()) == 0
+    assert len(db.edit_history.list_recent()) == 0
 
     # Undo in new workspace finds nothing
     result = db.undo_last_edit()
@@ -2233,7 +2233,7 @@ def test_history_isolated_between_workspaces(app_and_db):
     # Original workspace still has its history
     ws1 = db.conn.execute("SELECT id FROM workspaces WHERE name = 'Default'").fetchone()['id']
     db.set_active_workspace(ws1)
-    assert len(db.get_edit_history()) == 1
+    assert len(db.edit_history.list_recent()) == 1
 
 
 def test_set_edit_recipe_removes_regeneration_sidecar(app_and_db, tmp_path):

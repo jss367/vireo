@@ -203,14 +203,14 @@ class _DetectPass:
                 detector_runtime = None
             if detector_runtime is not None:
                 already_detected = set(
-                    thread_db.get_detector_run_photo_ids(
+                    thread_db.model_runs.get_detector_run_photo_ids(
                         "megadetector-v6",
                         runtime_fingerprint=detector_runtime,
                     )
                 )
             else:
                 already_detected = set(
-                    thread_db.get_detector_run_photo_ids("megadetector-v6")
+                    thread_db.model_runs.get_detector_run_photo_ids("megadetector-v6")
                 )
             pre_run_det_ids = {}
         self.already_detected = already_detected
@@ -249,7 +249,7 @@ class _DetectPass:
         run.job["_detector_runtime_fingerprint"] = self.detector_runtime
         if not run.params.reclassify and self.detector_runtime is not None:
             self.already_detected = set(
-                self.thread_db.get_detector_run_photo_ids(
+                self.thread_db.model_runs.get_detector_run_photo_ids(
                     "megadetector-v6",
                     runtime_fingerprint=self.detector_runtime,
                 )
@@ -558,7 +558,7 @@ class _DetectPass:
             or existing_run["runtime_fingerprint"]
             != full_runtime
         ):
-            thread_db.record_detector_run(
+            thread_db.model_runs.record_detector_run(
                 photo_id, "full-image", box_count=1,
                 runtime_fingerprint=full_runtime,
                 input_fingerprint=full_input,

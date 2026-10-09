@@ -4,6 +4,7 @@ import sqlite3
 
 import pytest
 from db import Database
+from repositories.workspace_folders import WorkspaceFolderRepository
 
 
 @pytest.fixture
@@ -41,7 +42,7 @@ def test_removed_shared_folders_stay_removed_after_refresh_and_restart(shared_tr
         db.get_workspace_folder_roots(workspace)
         db.check_folder_health()
         assert db.get_missing_folders() == []
-        assert {w["id"] for w in db.get_folder_workspaces(missing)} == {other}
+        assert {w["id"] for w in db.workspace_folders.list_workspaces_for_folder(missing)} == {other}
         assert {f["id"] for f in db.get_workspace_folders(other)} == {parent, missing, child}
         if _ == 0:
             db_path = db._db_path
@@ -67,7 +68,7 @@ def test_explicit_add_restores_removed_subtree(shared_tree):
     db.delete_folder(missing)
     db.add_workspace_folder(workspace, missing)
     assert {f["id"] for f in db.get_workspace_folders(workspace)} == {parent, missing, child}
-    assert {w["id"] for w in db.get_folder_workspaces(child)} == {workspace, other}
+    assert {w["id"] for w in db.workspace_folders.list_workspaces_for_folder(child)} == {workspace, other}
 
 
 def test_exact_import_restores_only_the_selected_folder(shared_tree):
@@ -107,7 +108,7 @@ def test_new_folders_under_removed_subtree_stay_hidden(shared_tree, operation):
     removed_path = db.get_folder(missing)["path"]
     new_folder = db.add_folder(removed_path + "/new", parent_id=missing, workspace_root=False)
     sibling = db.add_folder(removed_path + "-sibling", parent_id=parent, workspace_root=False)
-    assert {w["id"] for w in db.get_folder_workspaces(new_folder)} == {other}
+    assert {w["id"] for w in db.workspace_folders.list_workspaces_for_folder(new_folder)} == {other}
     assert {f["id"] for f in db.get_workspace_folders(workspace)} == {parent, sibling}
 
     # Registration during a parent rescan must use the same subtree rule.
@@ -127,7 +128,7 @@ def test_single_folder_unlink_does_not_remove_descendants(shared_tree):
     new_folder = db.add_folder(db.get_folder(missing)["path"] + "/new",
                                parent_id=missing, workspace_root=False)
     assert {f["id"] for f in db.get_workspace_folders(workspace)} == {parent, child, new_folder}
-    assert {w["id"] for w in db.get_folder_workspaces(child)} == {workspace, other}
+    assert {w["id"] for w in db.workspace_folders.list_workspaces_for_folder(child)} == {workspace, other}
 
 
 def test_refresh_after_large_subtree_removal_has_bounded_query_work(shared_tree):
@@ -165,7 +166,7 @@ def test_explicit_subfolder_root_can_override_removed_ancestor(shared_tree):
     new_folder = db.add_folder(db.get_folder(child)["path"] + "/new",
                                parent_id=child, workspace_root=False)
     assert {f["id"] for f in db.get_workspace_folders(workspace)} == {parent, child, new_folder}
-    assert {w["id"] for w in db.get_folder_workspaces(child)} == {workspace, other}
+    assert {w["id"] for w in db.workspace_folders.list_workspaces_for_folder(child)} == {workspace, other}
 
 
 def test_background_discovery_cannot_restore_a_concurrent_removal(shared_tree, monkeypatch):
@@ -174,18 +175,19 @@ def test_background_discovery_cannot_restore_a_concurrent_removal(shared_tree, m
     db.conn.execute("DELETE FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
                     (workspace, missing))
     db.conn.commit()
-    original = db._removed_workspace_folder_ids
+    original = WorkspaceFolderRepository.removed_ids
 
-    def remove_after_discovery_snapshot(workspace_id):
-        snapshot = original(workspace_id)
-        with Database(db._db_path, initialize_schema=False) as writer:
-            writer.set_active_workspace(workspace)
-            writer.delete_folder(missing)
+    def remove_after_discovery_snapshot(self, workspace_id):
+        snapshot = original(self, workspace_id)
+        if self.conn is db.conn:  # only the discovering reader races the writer
+            with Database(db._db_path, initialize_schema=False) as writer:
+                writer.set_active_workspace(workspace)
+                writer.delete_folder(missing)
         return snapshot
 
-    monkeypatch.setattr(db, "_removed_workspace_folder_ids", remove_after_discovery_snapshot)
+    monkeypatch.setattr(WorkspaceFolderRepository, "removed_ids", remove_after_discovery_snapshot)
     assert {f["id"] for f in db.get_workspace_folders(workspace)} == {parent}
-    assert {w["id"] for w in db.get_folder_workspaces(missing)} == {other}
+    assert {w["id"] for w in db.workspace_folders.list_workspaces_for_folder(missing)} == {other}
 
 
 def test_failed_delete_rolls_back_removal_records(shared_tree):
@@ -194,7 +196,7 @@ def test_failed_delete_rolls_back_removal_records(shared_tree):
                        BEGIN SELECT RAISE(ABORT, 'test unlink failure'); END""")
     with pytest.raises(sqlite3.IntegrityError, match="test unlink failure"):
         db.delete_folder(missing)
-    assert {w["id"] for w in db.get_folder_workspaces(missing)} == {workspace, other}
+    assert {w["id"] for w in db.workspace_folders.list_workspaces_for_folder(missing)} == {workspace, other}
     assert db.conn.execute("SELECT * FROM workspace_folder_removals").fetchall() == []
 
 
@@ -267,7 +269,7 @@ def test_missing_folder_delete_survives_background_polls(app_and_db, tmp_path):
     after = client.post("/api/folders/check-health").get_json()["missing"]
     assert missing not in {f["id"] for f in after}
     assert missing not in {f["id"] for f in client.get("/api/folders/missing").get_json()}
-    assert {w["id"] for w in db.get_folder_workspaces(missing)} == {other}
+    assert {w["id"] for w in db.workspace_folders.list_workspaces_for_folder(missing)} == {other}
 
     response = client.post(f"/api/workspaces/{workspace}/folders", json={"folder_id": missing})
     assert response.status_code == 200

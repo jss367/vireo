@@ -340,7 +340,7 @@ def create_workspace_blueprint(
                 # Link selected folders if provided
                 for folder_id in folder_ids:
                     db.add_workspace_folder(ws_id, folder_id)
-                db.mark_workspace_folder_roots(ws_id, folder_ids)
+                db.workspace_folders.mark_roots(ws_id, folder_ids)
                 ws = db.workspaces.get(ws_id)
             return jsonify(dict(ws))
         except Exception as e:
@@ -600,9 +600,9 @@ def create_workspace_blueprint(
                     )
             db.remove_workspace_folder_tree(ws_id, folder_id)
             for descendant_id in descendant_root_ids:
-                mapped_ids = db.get_local_session_folder_ids(descendant_id)
+                mapped_ids = db.workspace_folders.local_session_folder_ids(descendant_id)
                 db.photo_visibility.revoke_for_folders(ws_id, mapped_ids)
-                db.unlink_exact_workspace_folders_no_commit(ws_id, mapped_ids)
+                db.workspace_folders.unlink_exact_no_commit(ws_id, mapped_ids)
             if descendant_root_ids:
                 db.commit()
         # Unlinking a folder tree removes photos from the workspace's scope;
@@ -712,9 +712,9 @@ def create_workspace_blueprint(
                 swept = False
                 for descendant_ids in descendant_root_ids_by_folder.values():
                     for descendant_id in descendant_ids:
-                        mapped_ids = db.get_local_session_folder_ids(descendant_id)
+                        mapped_ids = db.workspace_folders.local_session_folder_ids(descendant_id)
                         db.photo_visibility.revoke_for_folders(ws_id, mapped_ids)
-                        db.transfer_exact_workspace_folders_no_commit(
+                        db.workspace_folders.transfer_exact_no_commit(
                             ws_id, target_ws_id, mapped_ids,
                         )
                         if mapped_ids:
@@ -1455,7 +1455,7 @@ def create_workspace_blueprint(
         # its sources still exist and re-merging them reproduces the same
         # fingerprint; otherwise the contents drifted and it's stale.
         current_fps = {ls["fingerprint"] for ls in label_sets} | {TOL_SENTINEL}
-        for row in db.get_labels_fingerprints():
+        for row in db.model_runs.get_labels_fingerprints():
             sources = row.get("sources") or []
             if len(sources) <= 1:
                 continue  # single-file already covered by label_sets

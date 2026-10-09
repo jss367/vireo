@@ -198,7 +198,7 @@ class _HighlightsRelabel:
             )
             # Snapshot the original rank so undo can restore each
             # highlighted photo at its original position instead of
-            # dumping it at MAX(rank)+1 (see _restore_relabel_curation).
+            # dumping it at MAX(rank)+1 (see EditHistoryRepository.restore_relabel_curation).
             self.hl_prev_by_pid.setdefault(row["photo_id"], []).append({
                 "species": old_species_name,
                 "rank": row["rank"],

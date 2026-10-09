@@ -3101,7 +3101,7 @@ def test_pipeline_classifies_full_image_when_detector_finds_nothing(
     assert pred[0]["species"] == "Full-image Robin"
     assert (
         "BioCLIP", pred[0]["labels_fingerprint"],
-    ) in check.get_classifier_run_keys(full[0]["id"])
+    ) in check.model_runs.get_classifier_run_keys(full[0]["id"])
 
     # Rerun: detector_run + full-image classifier_run should make this a
     # metadata/cache pass, not another model inference.
@@ -3240,7 +3240,7 @@ def test_pipeline_honors_measured_zero_candidate_run_in_combined_gate(
         (full_det_id,),
     )
     check.conn.commit()
-    check.record_classifier_match_score(
+    check.model_runs.record_classifier_match_score(
         full_det_id,
         run_key["classifier_model"],
         run_key["labels_fingerprint"],
@@ -4025,7 +4025,7 @@ def test_raw_reinference_replaces_stored_predictions(tmp_path, monkeypatch, spec
         "confidence": 0.9, "category": "animal",
     }], detector_model="megadetector-v6")[0]
     db.add_prediction(detection, "Robin", 0.2, "BioCLIP", status="accepted")
-    db.record_classifier_run(detection, "BioCLIP", "legacy", prediction_count=1)
+    db.model_runs.record_classifier_run(detection, "BioCLIP", "legacy", prediction_count=1)
     collection = db.add_collection("Test", json.dumps([{"field": "photo_ids", "value": [photo]}]))
     model = _setup_fake_downloaded_model(tmp_path, monkeypatch)
     monkeypatch.setattr(labels_fingerprint, "compute_fingerprint", lambda *a, **k: "legacy")
@@ -4353,7 +4353,7 @@ def test_detect_batch_skips_empty_photo_on_rerun(tmp_path, monkeypatch):
     # NOTHING — there are no detection rows, but detector_runs records the
     # scan so the next pipeline pass can skip re-invoking the detector.
     db.save_detections(photo_id, [], detector_model="megadetector-v6")
-    db.record_detector_run(photo_id, "megadetector-v6", box_count=0)
+    db.model_runs.record_detector_run(photo_id, "megadetector-v6", box_count=0)
 
     col_id = db.add_collection(
         "Test",
@@ -6062,7 +6062,7 @@ def test_extract_masks_stage_warns_when_all_detections_below_threshold(
     )
     # Mark the photo as already detected so the detect stage reuses the
     # cached row instead of re-running MegaDetector against the stub jpeg.
-    db.record_detector_run(photo_id, "megadetector-v6", box_count=1)
+    db.model_runs.record_detector_run(photo_id, "megadetector-v6", box_count=1)
 
     model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
@@ -6146,8 +6146,8 @@ def test_extract_masks_stage_warns_on_mixed_already_masked_and_subthreshold(
           "confidence": 0.9, "category": "animal"}],
         detector_model="megadetector-v6",
     )
-    db.record_detector_run(masked_id, "megadetector-v6", box_count=1)
-    db.update_photo_pipeline_features(
+    db.model_runs.record_detector_run(masked_id, "megadetector-v6", box_count=1)
+    db.masks_features.update_pipeline_features(
         masked_id, mask_path=str(tmp_path / "mask_a.png"),
     )
 
@@ -6160,7 +6160,7 @@ def test_extract_masks_stage_warns_on_mixed_already_masked_and_subthreshold(
           "confidence": 0.05, "category": "animal"}],
         detector_model="megadetector-v6",
     )
-    db.record_detector_run(lowconf_id, "megadetector-v6", box_count=1)
+    db.model_runs.record_detector_run(lowconf_id, "megadetector-v6", box_count=1)
 
     col_id = db.add_collection(
         "Test",
@@ -6246,7 +6246,7 @@ def test_extract_masks_with_only_subthreshold_detections_keeps_process_green(
           "confidence": 0.05, "category": "animal"}],
         detector_model="megadetector-v6",
     )
-    db.record_detector_run(lowconf_id, "megadetector-v6", box_count=1)
+    db.model_runs.record_detector_run(lowconf_id, "megadetector-v6", box_count=1)
     col_id = db.add_collection(
         "Test", json.dumps([{"field": "photo_ids", "value": [lowconf_id]}]),
     )
@@ -8585,7 +8585,6 @@ def _stub_extract_masks_heavy_ops(monkeypatch):
     import masking
     import numpy as np
     import quality
-    from db import Database
 
     state = {"proxy_calls": 0}
 
@@ -8620,12 +8619,14 @@ def _stub_extract_masks_heavy_ops(monkeypatch):
     )
     monkeypatch.setattr(dino_embed, "embedding_to_blob", lambda e: b"")
     monkeypatch.setattr(dino_embed, "ensure_dinov2_weights", lambda **k: None)
+    from repositories.masks_features import MasksFeaturesRepository
+
     monkeypatch.setattr(
-        Database, "update_photo_pipeline_features",
+        MasksFeaturesRepository, "update_pipeline_features",
         lambda self, *a, **k: None,
     )
     monkeypatch.setattr(
-        Database, "update_photo_embeddings",
+        MasksFeaturesRepository, "update_embeddings",
         lambda self, *a, **k: None,
     )
     return state
@@ -9148,7 +9149,7 @@ def test_extract_masks_offline_folder_still_counts_cached_masks(
     mask_file = str(mask_dir / f"{cached}.{sam2_variant}.png")
     from PIL import Image
     Image.new("L", (4, 4), 255).save(mask_file)
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         cached, sam2_variant, mask_file, "MegaDetector",
         0.1, 0.1, 0.5, 0.5,
     )
@@ -9532,8 +9533,9 @@ def test_extract_masks_rolls_back_failed_photo_before_continuing(
 ):
     """One failed persistence attempt must not poison the thread connection."""
     from db import Database
+    from repositories.masks_features import MasksFeaturesRepository
 
-    real_upsert = Database.upsert_photo_mask
+    real_upsert = MasksFeaturesRepository.upsert_mask
     attempts = 0
 
     def fail_first_upsert(self, *args, **kwargs):
@@ -9552,7 +9554,7 @@ def test_extract_masks_rolls_back_failed_photo_before_continuing(
             raise sqlite3.OperationalError("previous transaction still open")
         return real_upsert(self, *args, **kwargs)
 
-    monkeypatch.setattr(Database, "upsert_photo_mask", fail_first_upsert)
+    monkeypatch.setattr(MasksFeaturesRepository, "upsert_mask", fail_first_upsert)
     runner = FakeRunner()
     with pytest.raises(RuntimeError, match="1 of 2 photos failed"):
         _run_extract_masks_for_test(
@@ -9593,8 +9595,9 @@ def test_extract_masks_rolls_back_all_photo_writes_when_embeddings_fail(
 ):
     """Mask rows and derived fields commit atomically with embeddings."""
     from db import Database
+    from repositories.masks_features import MasksFeaturesRepository
 
-    real_update = Database.update_photo_embeddings
+    real_update = MasksFeaturesRepository.update_embeddings
     attempts = 0
 
     def fail_first_embedding_update(self, *args, **kwargs):
@@ -9605,7 +9608,7 @@ def test_extract_masks_rolls_back_all_photo_writes_when_embeddings_fail(
         return real_update(self, *args, **kwargs)
 
     monkeypatch.setattr(
-        Database, "update_photo_embeddings", fail_first_embedding_update,
+        MasksFeaturesRepository, "update_embeddings", fail_first_embedding_update,
     )
     runner = FakeRunner()
     with pytest.raises(RuntimeError, match="1 of 2 photos failed"):
@@ -10035,7 +10038,7 @@ def test_extract_masks_recomputes_when_active_variant_differs(
     ).fetchone()
     assert state["active_mask_variant"] == "sam2-large"
     # Both variant rows now cached on disk.
-    variants = {r["variant"] for r in db.list_masks_for_photo(pid)}
+    variants = {r["variant"] for r in db.masks_features.list_masks_for_photo(pid)}
     assert variants == {"sam2-small", "sam2-large"}
 
     # Run 3: back to small. The small row is cached (prompt+detector match,
@@ -10073,7 +10076,7 @@ def test_extract_masks_skips_sam_when_cached_with_same_prompt(
     assert len(calls_first) == 1, (
         f"first run should call generate_mask once; got {calls_first}"
     )
-    rows_first = db.list_masks_for_photo(pid)
+    rows_first = db.masks_features.list_masks_for_photo(pid)
     assert len(rows_first) == 1
     assert rows_first[0]["variant"] == "sam2-small"
     first_path = rows_first[0]["path"]
@@ -10144,7 +10147,7 @@ def test_extract_masks_skips_sam_when_cached_with_same_prompt(
     assert calls_second == [], (
         f"cache hit must skip generate_mask entirely; got {calls_second}"
     )
-    rows_after = db.list_masks_for_photo(pid)
+    rows_after = db.masks_features.list_masks_for_photo(pid)
     assert len(rows_after) == 1
     assert rows_after[0]["path"] == first_path
 
@@ -10168,7 +10171,7 @@ def test_extract_masks_skips_weight_download_when_all_cached(
         tmp_path, monkeypatch, "sam2-small", [spec],
     )
     pid = photo_ids[0]
-    rows = db.list_masks_for_photo(pid)
+    rows = db.masks_features.list_masks_for_photo(pid)
     assert rows and rows[0]["variant"] == "sam2-small"
     assert os.path.isfile(rows[0]["path"])
 
@@ -10259,7 +10262,7 @@ def test_extract_masks_runs_for_new_variant_keeps_old(tmp_path, monkeypatch):
     assert len(calls_first) == 1
     assert calls_first[0][0] == "sam2-small"
 
-    rows = db.list_masks_for_photo(pid)
+    rows = db.masks_features.list_masks_for_photo(pid)
     assert {r["variant"] for r in rows} == {"sam2-small"}
 
     # Switch the configured variant.  Re-run.
@@ -10324,7 +10327,7 @@ def test_extract_masks_runs_for_new_variant_keeps_old(tmp_path, monkeypatch):
         f"new variant must trigger generate_mask once for sam2-large; "
         f"got {calls_second}"
     )
-    rows = db.list_masks_for_photo(pid)
+    rows = db.masks_features.list_masks_for_photo(pid)
     assert {r["variant"] for r in rows} == {"sam2-small", "sam2-large"}, (
         f"expected both variants present after re-run; got {rows}"
     )
@@ -10347,7 +10350,7 @@ def test_extract_masks_re_runs_when_prompt_changed(tmp_path, monkeypatch):
     )
     pid = photo_ids[0]
     assert len(calls_first) == 1
-    rows = db.list_masks_for_photo(pid)
+    rows = db.masks_features.list_masks_for_photo(pid)
     assert len(rows) == 1
     assert (rows[0]["prompt_x"], rows[0]["prompt_w"]) == (10, 100)
 
@@ -10420,7 +10423,7 @@ def test_extract_masks_re_runs_when_prompt_changed(tmp_path, monkeypatch):
     assert len(calls_second) == 1, (
         f"prompt change must re-run generate_mask; got {calls_second}"
     )
-    rows_after = db.list_masks_for_photo(pid)
+    rows_after = db.masks_features.list_masks_for_photo(pid)
     assert len(rows_after) == 1, (
         f"row should be replaced (upsert), not duplicated; got {rows_after}"
     )
@@ -17916,7 +17919,7 @@ def test_extract_masks_preflight_skips_photos_that_already_have_a_mask(
     mask_file = str(mask_dir / f"{masked}.{sam2_variant}.png")
     from PIL import Image
     Image.new("L", (4, 4), 255).save(mask_file)
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         masked, sam2_variant, mask_file, "MegaDetector", 0.1, 0.1, 0.5, 0.5,
     )
     db.set_active_mask_variant(masked, sam2_variant)
@@ -17987,7 +17990,7 @@ def test_extract_masks_preflight_fully_cached_folder_does_not_fail_stage(
     for pid in photo_ids:
         mask_file = str(mask_dir / f"{pid}.{sam2_variant}.png")
         Image.new("L", (4, 4), 255).save(mask_file)
-        db.upsert_photo_mask(
+        db.masks_features.upsert_mask(
             pid, sam2_variant, mask_file, "MegaDetector", 0.1, 0.1, 0.5, 0.5,
         )
         db.set_active_mask_variant(pid, sam2_variant)
@@ -18254,7 +18257,7 @@ def _seed_cached_mask(db, tmp_path, photo_id, sam2_variant, dinov2_variant,
     os.makedirs(mask_dir, exist_ok=True)
     mask_file = str(mask_dir / f"{photo_id}.{sam2_variant}.png")
     Image.new("L", (4, 4), 255).save(mask_file)
-    db.upsert_photo_mask(photo_id, sam2_variant, mask_file, detector, *prompt)
+    db.masks_features.upsert_mask(photo_id, sam2_variant, mask_file, detector, *prompt)
     db.conn.execute(
         "UPDATE photos SET mask_path=?, active_mask_variant=?, "
         "dino_embedding_variant=? WHERE id=?",
