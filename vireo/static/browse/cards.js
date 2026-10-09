@@ -272,8 +272,9 @@ function renderPhotoCard(p, idx) {
       inatBadge +
       wildlifeBadge +
       representativeBadge +
-      pairBadge +
-      speciesBadgeHtml +
+      (pairBadge
+        ? '<div class="grid-card-bottom-overlay">' + speciesBadgeHtml + pairBadge + '</div>'
+        : speciesBadgeHtml) +
     '</div>' +
     '<div class="grid-card-info">' +
       renderCardInfo(p) +
