@@ -191,10 +191,12 @@ def test_find_matches_across_inline_markup(live_server, page):
     }""")
     page.keyboard.press("Control+F")
     field = page.locator("#pageFindInput")
-    for query in ("Click Scan", "files to find", "wildlife", "Line break"):
+    for query in ("Click Scan", "files to find", "wildlife"):
         field.fill(query)
         expect(page.locator("#pageFindStatus")).to_have_text("1 of 1")
         expect(page.locator("#findInlineText .page-find-mark.active")).to_have_count(2)
+    field.fill("Line break")
+    expect(page.locator("#pageFindStatus")).to_have_text("0 results")
     field.fill("separate blocks")
     expect(page.locator("#pageFindStatus")).to_have_text("0 results")
     field.fill("emptyboundary")

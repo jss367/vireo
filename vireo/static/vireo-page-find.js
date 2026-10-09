@@ -49,13 +49,13 @@
   }
 
   function visibleForFind(node, styles) {
-    var el = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+    var el = node.nodeType === 3 ? node.parentElement : node;
     if (!el) return false;
     if (el.closest('#pageFindPanel, script, style, noscript, textarea, input, select, [contenteditable], svg title, svg desc')) return false;
     for (var current = el; current; current = current.parentElement) {
       if (current.hidden || current.getAttribute('aria-hidden') === 'true') return false;
       if (current.tagName === 'DETAILS' && !current.open &&
-          (current !== el || node.nodeType === Node.TEXT_NODE)) {
+          (current !== el || node.nodeType === 3)) {
         var summary = current.querySelector(':scope > summary');
         if (!summary || !summary.contains(el)) return false;
       }
@@ -67,50 +67,31 @@
 
   function collectTextRuns() {
     var styles = new WeakMap();
-    var blocks = new WeakMap();
-    function textBlock(el) {
-      if (blocks.has(el)) return blocks.get(el);
-      var display = computedStyle(el, styles).display;
-      var block = el;
-      // Keep inline formatting together, but separate block content and
-      // independently positioned SVG labels.
-      if (el.parentElement && el.tagName.toLowerCase() !== 'text' &&
-          (display === 'inline' || display === 'contents')) {
-        block = textBlock(el.parentElement);
-      }
-      blocks.set(el, block);
-      return block;
-    }
-    var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT, {
-      acceptNode: function(node) {
-        if (!visibleForFind(node, styles)) return NodeFilter.FILTER_REJECT;
-        if (node.nodeType === Node.TEXT_NODE || node.tagName === 'BR') return NodeFilter.FILTER_ACCEPT;
-        var display = computedStyle(node, styles).display;
-        return node.tagName.toLowerCase() === 'text' || (display !== 'inline' && display !== 'contents')
-          ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
-      }
-    });
     var runs = [];
     var run = null;
-    while (walker.nextNode()) {
-      var node = walker.currentNode;
-      if (node.nodeType !== Node.TEXT_NODE && node.tagName !== 'BR') {
-        run = null;
-        continue;
-      }
-      var block = textBlock(node.parentElement);
-      if (!run || run.block !== block) {
-        run = {block: block, text: '', parts: []};
-        runs.push(run);
-      }
-      if (node.nodeType === Node.TEXT_NODE) {
+    function collect(node) {
+      if (node.nodeType === 3) {
+        if (!node.nodeValue) return;
+        if (!visibleForFind(node, styles)) { run = null; return; }
+        if (!run) {
+          run = {text: '', parts: []};
+          runs.push(run);
+        }
         run.parts.push({node: node, start: run.text.length, end: run.text.length + node.nodeValue.length});
         run.text += node.nodeValue;
-      } else {
-        // A line break separates words without creating a text-node offset.
-        run.text += '\n';
+        return;
       }
+      if (node.nodeType !== 1) return;
+      var display = computedStyle(node, styles).display;
+      // Inline formatting stays together. Blocks, line breaks, replaced
+      // controls/images, and independent SVG labels delimit text runs.
+      var boundary = (display !== 'inline' && display !== 'contents') ||
+        /^(BR|IMG|HR|INPUT|SELECT|TEXTAREA|IFRAME|VIDEO|AUDIO|CANVAS|TEXT|TEXTPATH)$/.test(node.tagName.toUpperCase());
+      if (boundary) run = null;
+      Array.prototype.forEach.call(node.childNodes, collect);
+      if (boundary) run = null;
     }
+    collect(document.body);
     return runs;
   }
 
