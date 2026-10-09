@@ -68,7 +68,7 @@ def queue_location_sync_if_enabled(db, photo_id, workspace_id=None, _commit=True
     if workspace_id is None:
         if not db._photo_in_workspace(photo_id):
             return
-    elif db.workspace_folders.photo_in_workspace(photo_id, workspace_id) is None:
+    elif not db.workspace_folders.photo_in_workspace(photo_id, workspace_id):
         return
     # Queue even when assigned-location writes are disabled so sync can
     # remove stale Vireo-authored GPS previously written while enabled.

@@ -3,6 +3,41 @@
 import sqlite3
 
 import pytest
+from services.pending_changes import queue_location_sync_if_enabled
+
+
+@pytest.mark.parametrize("commit", [False, True])
+def test_location_sync_rejects_photo_outside_explicit_workspace(db, tmp_path, commit):
+    folder = db.add_folder(str(tmp_path / "source"))
+    photo = db.add_photo(folder, "synthetic.jpg", ".jpg", 1, 1.0)
+    other_workspace = db.create_workspace("Other workspace")
+    db.queue_change(photo, "location", "existing", workspace_id=other_workspace)
+    before = [tuple(row) for row in db.conn.execute("SELECT * FROM pending_changes")]
+
+    queue_location_sync_if_enabled(db, photo, workspace_id=other_workspace, _commit=commit)
+
+    assert [tuple(row) for row in db.conn.execute("SELECT * FROM pending_changes")] == before
+
+
+@pytest.mark.parametrize("commit", [False, True])
+def test_location_sync_uses_explicit_workspace_and_preserves_commit_choice(db, tmp_path, commit):
+    workspace = db.active_workspace_id
+    folder = db.add_folder(str(tmp_path / "source"))
+    photo = db.add_photo(folder, "synthetic.jpg", ".jpg", 1, 1.0)
+    db.set_active_workspace(db.create_workspace("Other workspace"))
+
+    queue_location_sync_if_enabled(db, photo, workspace_id=workspace, _commit=commit)
+
+    query = "SELECT workspace_id, value FROM pending_changes WHERE photo_id=? AND change_type='location'"
+    assert [tuple(row) for row in db.conn.execute(query, (photo,))] == [(workspace, "effective")]
+    other = sqlite3.connect(db._db_path)
+    try:
+        assert other.execute(query, (photo,)).fetchall() == ([(workspace, "effective")] if commit else [])
+    finally:
+        other.close()
+    if not commit:
+        db.rollback()
+        assert db.conn.execute(query, (photo,)).fetchall() == []
 
 
 @pytest.mark.parametrize("name", ["local_workspaces", "keywords", "collections"])
