@@ -9135,7 +9135,7 @@ def test_unchanged_companion_recovers_embedded_keywords_without_churn(
     # must respect the durable suppression, without needing a pending queue.
     for keyword in cat.db.get_photo_keywords(cat.raw_id):
         cat.db.untag_photo(cat.raw_id, keyword["id"])
-    assert cat.db.get_pending_keyword_removal_keys(cat.raw_id) == set()
+    assert cat.db.pending_changes.keyword_removal_keys(cat.raw_id) == set()
     cat.scan(incremental=False)
     assert cat.db.get_photo_keywords(cat.raw_id) == []
     assert cat.merges == []

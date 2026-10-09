@@ -605,7 +605,7 @@ def _sync_preview_build_snapshot(db, ws_id):
     # the rows would risk stamping stale rows with a post-write version
     # and serving them from cache.
     fingerprint = _sync_preview_pending_fingerprint(db, ws_id)
-    changes = db.get_pending_changes_for_review(ws_id)
+    changes = db.pending_changes.list_for_review(ws_id)
 
     revision_hash = hashlib.sha256()
     change_type_counts = {}
@@ -1057,7 +1057,7 @@ def create_sync_blueprint(get_db, json_error, get_runner):
         db = get_db()
         # One statement keeps totals and per-type counts in the same snapshot,
         # without loading every queued row into Python on each progress poll.
-        counts = db.get_pending_change_counts()
+        counts = db.pending_changes.status_counts()
         return jsonify({
             "pending_count": counts[0]["changes"],
             "pending_photo_count": counts[0]["photos"],
@@ -1081,7 +1081,7 @@ def create_sync_blueprint(get_db, json_error, get_runner):
 
         effective_config = db.get_effective_config(cfg.load())
         photos = db.count_photos_with_location()
-        queued = db.count_photos_with_queued_location_change()
+        queued = db.pending_changes.count_queued_location_photos()
         return jsonify({
             "photos_with_location": photos,
             "already_queued": queued,
@@ -1219,8 +1219,8 @@ def create_sync_blueprint(get_db, json_error, get_runner):
                             "discarding all."
                         ),
                     )
-                changes = db.delete_workspace_pending_changes(ws_id)
-                db.clear_equivalent_flat_removals(changes, _commit=False)
+                changes = db.pending_changes.delete_workspace(ws_id)
+                db.pending_changes.clear_equivalent_flat_removals(changes, _commit=False)
                 if changes:
                     items = _discard_history_items(db, changes)
                     db.record_edit(
@@ -1257,7 +1257,7 @@ def create_sync_blueprint(get_db, json_error, get_runner):
             # history lookup through deletion so an id cannot change owners
             # between those steps, including across chunks and workspaces.
             db.begin_immediate()
-            changes = db.get_pending_changes_by_ids(change_ids)
+            changes = db.pending_changes.get_by_ids(change_ids)
             db.clear_pending(
                 change_ids, clear_equivalent_flat_removals=True, _commit=False,
             )

@@ -161,10 +161,10 @@ def _sync_staged_metadata(db, progress, sync_job_lock, folder_ids):
     # sync_flags_to_xmp off). Tracked so the drain stops instead of re-running
     # them forever, and so the residual count below does not report them as
     # edits that "missed the transfer" -- a different claim, and a false one.
-    # Keyed on row identity, never on the row id; see ``staged_sync_scope``.
+    # Keyed on row identity, never on the row id; see ``SyncRepository.staged_scope``.
     undeliverable = set()
     for _ in range(_MAX_SYNC_DRAIN_PASSES):
-        changes, _here, _elsewhere, _overlap = db.staged_sync_scope(folder_ids)
+        changes, _here, _elsewhere, _overlap = db.pending_changes.staged_scope(folder_ids)
         pending = [entry for entry in changes if entry[0] not in undeliverable]
         if not pending:
             break
@@ -193,7 +193,7 @@ def _sync_staged_metadata(db, progress, sync_job_lock, folder_ids):
                 + ". The local originals are untouched. Fix the sidecars and "
                 "try again, or use Send to NAS to transfer without syncing first."
             )
-        after, _here, _elsewhere, _overlap = db.staged_sync_scope(folder_ids)
+        after, _here, _elsewhere, _overlap = db.pending_changes.staged_scope(folder_ids)
         remaining = {key for key, _cid, _pid in after}
         # Counted as photos, not as per-pass tallies: one photo edited across
         # two passes is one sidecar, and the banner counts distinct photos too.
@@ -244,7 +244,7 @@ def _residual_staged_changes(db, photo_ids, undeliverable):
     queue. The caller says so in the summary.
     """
     try:
-        changes, _here, _elsewhere, _overlap = db.staged_sync_scope_by_photos(photo_ids)
+        changes, _here, _elsewhere, _overlap = db.pending_changes.staged_scope_by_photos(photo_ids)
         return sum(1 for key, _cid, _pid in changes if key not in undeliverable)
     except Exception:
         log.warning("Could not re-check the sync queue after a NAS transfer", exc_info=True)
@@ -1104,7 +1104,7 @@ def create_imports_blueprint(
             sending = any(j.get("type") == "send-to-nas"
                           and (j.get("config") or {}).get("pending_archive_id") == row["id"] for j in jobs)
             folder_ids = _folder_ids_under(ws_folders, row["staging_destination"])
-            _changes, here, elsewhere, overlap = db.staged_sync_scope(folder_ids)
+            _changes, here, elsewhere, overlap = db.pending_changes.staged_scope(folder_ids)
             items.append({
                 "id": row["id"], "destination": row["destination"],
                 "folder_ids": folder_ids,

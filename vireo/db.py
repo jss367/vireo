@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from repositories.job_history import JobHistoryRepository
     from repositories.local_folders import LocalFolderRepository
     from repositories.pending_archives import PendingArchiveRepository
+    from repositories.sync import SyncRepository
 
 log = logging.getLogger(__name__)
 
@@ -2922,7 +2923,7 @@ class Database:
         * ``preserved_off_staging_identities`` — active-workspace subset of
           the above whose survivor is NOT one of the staged photo ids the
           caller captured before the merge. Reported as a list of
-          ``staged_sync_scope`` identity keys (``change_token`` or
+          ``pending_changes.staged_scope`` identity keys (``change_token`` or
           ``("id", id)``) so the caller can filter out edits its pre-transfer
           drain already classified as undeliverable (a flag under
           ``sync_flags_to_xmp`` off) and NOT count them as "queued during
@@ -3586,57 +3587,6 @@ class Database:
         is unmounted (e.g. headline says 0 while charts list keywords).
         """
         return self._keyword_repository().count_in_workspace()
-
-    def count_pending_changes(self):
-        """Return pending changes count."""
-        return self._sync_repository().count()
-
-    def staged_sync_scope_by_photos(self, photo_ids):
-        """Photo-id scoped variant of :meth:`staged_sync_scope`.
-
-        Used by the post-transfer residual check for a NAS send: the
-        tracked-merge path in ``send_pending_archive`` reparents each staged
-        photo onto the destination folder id, so a folder-id-scoped re-read
-        would miss any edit queued during the copy and the completed job
-        would falsely claim no metadata missed the transfer. Photo ids
-        survive the reparent, so the caller captures them before the move
-        and passes them here. Return shape matches ``staged_sync_scope``.
-        """
-        return self._sync_repository().staged_scope_by_photos(photo_ids)
-
-    def staged_sync_scope(self, folder_ids):
-        """Return ``(changes, photos_here, photos_elsewhere, photos_here_with_sibling_edits)``.
-
-        ``changes`` is a list of ``(identity, change_id, photo_id)``, where
-        ``identity`` is the row's ``change_token`` -- a uuid assigned at
-        insert. Callers comparing one read against the next must key on it
-        rather than on the id: ``pending_changes.id`` is a bare rowid SQLite
-        re-issues to the next insert, so a change queued right after a sync
-        cleared one can arrive wearing the id that just left, and look to the
-        caller like a row it has already dealt with. The column is nullable
-        with no backfill, so rows predating it fall back to the id and keep
-        exactly the exposure they have always had.
-
-        ``change_ids`` and ``photos_here`` cover the active workspace only,
-        matching what ``sync.sync_to_xmp`` will actually write: the queue is
-        workspace-scoped by design and the ordinary sync job respects that.
-
-        ``photos_elsewhere`` counts photos whose only queued edits belong to
-        another workspace. The sidecar is global to the photo, so those edits
-        are real and this sync will not write them -- the banner has to say so
-        rather than let a number read as "everything is covered".
-
-        ``photos_here_with_sibling_edits`` counts photos in ``photos_here``
-        that *also* have queued edits in a sibling workspace. Those photos are
-        already promised by the "here" number, so they must not double-count
-        into ``photos_elsewhere`` (which would read as extra photos rather
-        than the same photo carrying two workspaces' edits). The overlap is
-        reported separately so the UI can still warn that the sibling's
-        changes on those photos will remain unwritten after the pre-transfer
-        sync -- the sidecar is shared and only the active workspace's edits
-        travel with it.
-        """
-        return self._sync_repository().staged_scope(folder_ids)
 
     # Coverage signals shown on the dashboard. Each entry is a (key, SQL
     # predicate) pair; the predicate references the ``photos`` alias ``p`` and
@@ -4713,7 +4663,7 @@ class Database:
         """Return whether a ``location`` change is queued for ``photo_id``.
 
         Reads across workspaces for the same reason
-        :meth:`get_pending_keyword_removal_keys` does: photo metadata is
+        ``pending_changes.keyword_removal_keys`` does: photo metadata is
         global even though the sync queue is presented per workspace. Import
         callers use it to decide whether a sidecar's Vireo-written location
         keywords are still current or describe a place the user has already
@@ -9299,6 +9249,28 @@ class Database:
             self.conn, self._ws_id, chunk_size=_SQLITE_PARAM_CHUNK_SIZE,
         )
 
+    @property
+    def pending_changes(self) -> SyncRepository:
+        """The pending XMP sync queue: ``db.pending_changes.list_all()`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_sync_repository``, exactly as a forwarding
+        wrapper called at that moment would. The repository holds
+        ``self._ws_id`` as a resolver, so the active workspace is still read
+        lazily at the point each method reads it (and raises there when none
+        is set). Do not hold the returned repository across
+        ``set_active_workspace``.
+
+        Coordinated queue work stays on ``Database``: ``queue_change`` (bound
+        by name into the keyword-provenance and location repositories, so a
+        patch of ``Database.queue_change`` reaches them), the claim and token
+        removal with their empty-input guards, ``remove_pending_changes``,
+        ``clear_pending``, ``clear_pending_by_token`` and
+        ``queue_flag_change_if_enabled``. Queue a change through
+        ``db.queue_change``, not ``db.pending_changes.queue``.
+        """
+        return self._sync_repository()
+
     def queue_change(self, photo_id, change_type, value, workspace_id=None, _commit=True):
         """Add a change to the sync queue, skipping redundant intents.
 
@@ -9315,40 +9287,6 @@ class Database:
             photo_id, change_type, value, workspace_id=workspace_id, _commit=_commit,
         )
 
-    def get_pending_changes(self):
-        """Return all pending changes ordered by creation time."""
-        return self._sync_repository().list_all()
-
-    def get_pending_changes_for_review(self, workspace_id):
-        """``workspace_id``'s pending changes, oldest first, each with the
-        photo's ``filename``, ``folder_id`` and ``folder_path``."""
-        return self._sync_repository().list_for_review(workspace_id)
-
-    def get_pending_change_counts(self):
-        """The active workspace's queue totals and per-type counts in one read.
-
-        The first row has ``change_type`` NULL, ``changes`` the queue length
-        and ``photos`` the distinct photo count; each later row is one
-        ``change_type`` with its ``changes`` count.
-        """
-        return self._sync_repository().status_counts()
-
-    def count_photos_with_queued_location_change(self):
-        """Photos in the active workspace's queue with a ``location`` change
-        that carry a location keyword."""
-        return self._sync_repository().count_queued_location_photos()
-
-    def get_pending_changes_by_ids(self, change_ids):
-        """The active workspace's pending rows among ``change_ids``."""
-        return self._sync_repository().get_by_ids(change_ids)
-
-    def delete_workspace_pending_changes(self, workspace_id):
-        """Delete every pending change in ``workspace_id`` and return the rows.
-
-        Does not commit; the caller owns the transaction.
-        """
-        return self._sync_repository().delete_workspace(workspace_id)
-
     def claim_pending_changes_for_sync(self, changes):
         """Mark selected edits as possibly written and return surviving rows.
 
@@ -9362,25 +9300,13 @@ class Database:
             return []
         return self._sync_repository().claim_for_sync(changes)
 
-    def get_pending_keyword_removal_keys(self, photo_id, hierarchical=False):
-        """Return normalized keyword keys awaiting removal for a photo.
-
-        Reads across workspaces because photo metadata is global even though
-        the sync queue is presented per workspace. ``keyword_remove_flat``
-        suppresses flat XMP re-imports only; callers processing hierarchical
-        entries request ``hierarchical=True`` and receive full removals only.
-        """
-        return self._sync_repository().keyword_removal_keys(
-            photo_id, hierarchical=hierarchical,
-        )
-
     def get_embedded_keyword_offered_keys(self, photo_id):
         """Normalized keys the scanner has imported from the image file itself.
 
-        The pending-removal filter above suppresses a value only until the
-        next XMP sync clears the queue entry, but Vireo never writes into
-        image files, so a later full scan or image rewrite re-reads the same
-        embedded value. The scanner records every embedded value it offers to
+        The pending-removal filter (``db.pending_changes.keyword_removal_keys``)
+        suppresses a value only until the next XMP sync clears the queue
+        entry, but Vireo never writes into image files, so a later full scan
+        or image rewrite re-reads the same embedded value. The scanner records every embedded value it offers to
         a photo here so ``_import_embedded_keywords_for_photo`` can filter
         them out on later passes -- a user removal is not silently undone when
         the queued removal has already been synced away.
@@ -9412,12 +9338,6 @@ class Database:
             losing_id, surviving_id,
         )
 
-    def _pending_keyword_sidecar_alias(self, photo_id, workspace_id, value):
-        """Return whether another queued keyword edit reaches this sidecar."""
-        return self._sync_repository().keyword_sidecar_alias(
-            photo_id, workspace_id, value,
-        )
-
     def remove_pending_changes(self, photo_id, change_type=None, value=None, workspace_id=None, _commit=True):
         """Delete matching pending changes, preserving captured keyword intents.
 
@@ -9440,7 +9360,7 @@ class Database:
         inverse = {"keyword_add": "keyword_remove", "keyword_remove": "keyword_add"}
         for row in removed:
             if row["change_type"] in inverse and (
-                row["sync_started"] or self._pending_keyword_sidecar_alias(photo_id, ws_id, row["value"])
+                row["sync_started"] or repo.keyword_sidecar_alias(photo_id, ws_id, row["value"])
             ):
                 kind = inverse[row["change_type"]]
                 self.queue_change(photo_id, kind, row["value"], workspace_id=ws_id, _commit=False)
@@ -9494,7 +9414,7 @@ class Database:
             expected_tokens=expected_tokens,
         )
         if synced_changes:
-            self.clear_equivalent_flat_removals(synced_changes, _commit=False)
+            repo.clear_equivalent_flat_removals(synced_changes, _commit=False)
         if _commit:
             repo.commit()
 
@@ -9522,20 +9442,8 @@ class Database:
             clear_equivalent_flat_removals=clear_equivalent_flat_removals,
         )
         if synced_changes:
-            self.clear_equivalent_flat_removals(synced_changes, _commit=False)
+            repo.clear_equivalent_flat_removals(synced_changes, _commit=False)
         repo.commit()
-
-    def get_flat_keyword_removals(self, photo_id, keyword_name):
-        """Queued ``keyword_remove_flat`` rows for a photo's keyword, in every workspace.
-
-        Matched case-insensitively; each row is a ``{"workspace_id",
-        "value"}`` dict.
-        """
-        return self._sync_repository().flat_keyword_removals(photo_id, keyword_name)
-
-    def clear_equivalent_flat_removals(self, changes, _commit=True):
-        """Clear shared-sidecar flat removals represented by ``changes``."""
-        self._sync_repository().clear_equivalent_flat_removals(changes, _commit=_commit)
 
     def queue_flag_change_if_enabled(self, photo_id, flag, workspace_id=None, _commit=True):
         """Queue a flag write when the active config opts into XMP flag sync."""

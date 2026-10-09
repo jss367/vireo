@@ -1984,7 +1984,7 @@ def test_encounter_species_confirm(app_and_db):
         assert len(species_tags) == 1
 
     # Verify pending changes queued
-    pending = db.get_pending_changes()
+    pending = db.pending_changes.list_all()
     kw_adds = [c for c in pending if c["change_type"] == "keyword_add"
                and c["value"] == "Blue Jay"]
     assert len(kw_adds) == len(photo_ids)
@@ -2029,7 +2029,7 @@ def test_encounter_species_confirm_reuses_hierarchical_taxon(app_and_db):
     assert species_by_photo[nested_photo].count("Verdin") == 1
     assert species_by_photo[untagged_photo].count("Verdin") == 1
     additions = [
-        row for row in db.get_pending_changes()
+        row for row in db.pending_changes.list_all()
         if row["change_type"] == "keyword_add" and row["value"] == "Verdin"
     ]
     assert [row["photo_id"] for row in additions] == [untagged_photo]
@@ -2090,7 +2090,7 @@ def test_encounter_species_rejects_invalid_photo_ids(app_and_db):
     # Verify nothing was written for the valid ID either
     tags = db.get_photo_keywords(valid_id)
     assert not any(t["name"] == "Robin" for t in tags)
-    pending = db.get_pending_changes()
+    pending = db.pending_changes.list_all()
     assert not any(c["value"] == "Robin" for c in pending)
 
 
@@ -2341,7 +2341,7 @@ def test_encounter_species_change_cancels_pending_add(app_and_db):
     # The Sparrow add had not synced, so it should be cancelled, not followed
     # by a keyword_remove (otherwise the sidecar would see a remove for a
     # keyword that was never written).
-    changes = [dict(c) for c in db.get_pending_changes()]
+    changes = [dict(c) for c in db.pending_changes.list_all()]
     values_by_type = {(c["change_type"], c["value"]) for c in changes}
     assert ("keyword_add", "Blue Jay") in values_by_type
     assert ("keyword_add", "Sparrow") not in values_by_type
@@ -2376,7 +2376,7 @@ def test_encounter_species_change_queues_remove_after_sync(app_and_db):
 
     # Now a keyword_remove:Sparrow must be queued so the XMP drops the
     # already-written Sparrow tag.
-    values_by_type = {(c["change_type"], c["value"]) for c in db.get_pending_changes()}
+    values_by_type = {(c["change_type"], c["value"]) for c in db.pending_changes.list_all()}
     assert ("keyword_remove", "Sparrow") in values_by_type
     assert ("keyword_add", "Blue Jay") in values_by_type
 
@@ -2415,7 +2415,7 @@ def test_burst_override_change_untags_previous(app_and_db):
         assert "Junco" in names
         assert "Sparrow" not in names
 
-    values = {(c["change_type"], c["value"]) for c in db.get_pending_changes()}
+    values = {(c["change_type"], c["value"]) for c in db.pending_changes.list_all()}
     assert ("keyword_remove", "Sparrow") in values
     assert ("keyword_add", "Junco") in values
 
@@ -2437,7 +2437,7 @@ def test_encounter_species_confirm_same_species_noop_on_keywords(app_and_db):
     assert resp.status_code == 200
     assert resp.get_json()["previous_species"] is None
 
-    values = {c["change_type"] for c in db.get_pending_changes()}
+    values = {c["change_type"] for c in db.pending_changes.list_all()}
     assert "keyword_remove" not in values
 
 
@@ -2490,7 +2490,7 @@ def test_encounter_species_replacement_undo_restores_previous(app_and_db):
 
     # Neither species was synced, so undo should cancel the pending swap
     # outright rather than queue a keyword_remove for a never-written tag.
-    values = {(c["change_type"], c["value"]) for c in db.get_pending_changes()}
+    values = {(c["change_type"], c["value"]) for c in db.pending_changes.list_all()}
     assert ("keyword_remove", "Blue Jay") not in values
     assert ("keyword_remove", "Sparrow") not in values
     # Original keyword_add:Sparrow is back in the queue because the replace
@@ -2524,7 +2524,7 @@ def test_encounter_species_replacement_undo_after_sync_queues_swap(app_and_db):
         assert "Sparrow" in names
         assert "Blue Jay" not in names
 
-    values = {(c["change_type"], c["value"]) for c in db.get_pending_changes()}
+    values = {(c["change_type"], c["value"]) for c in db.pending_changes.list_all()}
     assert ("keyword_remove", "Blue Jay") in values
     assert ("keyword_add", "Sparrow") in values
 
@@ -3047,7 +3047,7 @@ def test_encounter_species_rejects_photo_ids_not_in_burst(app_and_db):
     for pid in photo_ids:
         names = {k["name"] for k in db.get_photo_keywords(pid)}
         assert "Blue Jay" not in names
-    assert not db.get_pending_changes()
+    assert not db.pending_changes.list_all()
 
 
 def test_encounter_species_rejects_out_of_range_burst_index(app_and_db):
@@ -3075,7 +3075,7 @@ def test_encounter_species_rejects_out_of_range_burst_index(app_and_db):
     for pid in photo_ids[:1]:
         names = {k["name"] for k in db.get_photo_keywords(pid)}
         assert "Blue Jay" not in names
-    assert not db.get_pending_changes()
+    assert not db.pending_changes.list_all()
 
 
 def test_encounter_species_replacement_removes_hierarchical_previous(app_and_db):
@@ -3758,7 +3758,7 @@ def test_encounter_species_replacement_queues_stored_previous_name(app_and_db):
         json={"species": "Apapane", "photo_ids": photo_ids},
     )
     assert resp.status_code == 200
-    values = {(c["change_type"], c["value"]) for c in db.get_pending_changes()}
+    values = {(c["change_type"], c["value"]) for c in db.pending_changes.list_all()}
     assert ("keyword_add", "Apapane") in values
 
     # Seed the pipeline cache's confirmed_species with the LEGACY quoted
@@ -3772,7 +3772,7 @@ def test_encounter_species_replacement_queues_stored_previous_name(app_and_db):
     )
     assert resp.status_code == 200
 
-    values = {(c["change_type"], c["value"]) for c in db.get_pending_changes()}
+    values = {(c["change_type"], c["value"]) for c in db.pending_changes.list_all()}
     # The stale keyword_add for the normalized spelling must be cancelled by
     # a remove that targets the same normalized value — not the raw quoted
     # cache value. If the queue used the cache spelling, both would linger.
@@ -3803,7 +3803,7 @@ def test_encounter_species_replacement_queues_stored_case_previous_name(app_and_
         json={"species": "Saffron Finch", "photo_ids": photo_ids},
     )
     assert resp.status_code == 200
-    values = {(c["change_type"], c["value"]) for c in db.get_pending_changes()}
+    values = {(c["change_type"], c["value"]) for c in db.pending_changes.list_all()}
     assert ("keyword_add", "Saffron Finch") in values
 
     # Cache confirmed_species drifts to a case-variant spelling (upgraded
@@ -3816,7 +3816,7 @@ def test_encounter_species_replacement_queues_stored_case_previous_name(app_and_
     )
     assert resp.status_code == 200
 
-    values = {(c["change_type"], c["value"]) for c in db.get_pending_changes()}
+    values = {(c["change_type"], c["value"]) for c in db.pending_changes.list_all()}
     # The stale add must be cancelled by a remove that targets the same
     # stored spelling — not the lowercase cache value.
     assert ("keyword_add", "Saffron Finch") not in values
@@ -4357,7 +4357,7 @@ def test_replace_prediction_keywords_updates_grouped_photos(app_and_db):
     # The DB rows are gone, but sync_to_xmp only strips a sidecar keyword
     # when a matching keyword_remove pending change exists. Without one the
     # old species would silently linger in the XMP files.
-    changes = db.get_pending_changes()
+    changes = db.pending_changes.list_all()
     removed = {
         (c["photo_id"], c["value"])
         for c in changes
@@ -17476,13 +17476,13 @@ def test_sync_discard_reports_true_count(app_and_db):
     client = app.test_client()
     pid = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
     db.queue_change(pid, "keyword_add", "Test Bird")
-    change_id = db.get_pending_changes()[0]["id"]
+    change_id = db.pending_changes.list_all()[0]["id"]
 
     resp = client.post('/api/sync/discard',
                        json={"change_ids": [change_id, 999999]})
     assert resp.status_code == 200
     assert resp.get_json()["discarded"] == 1
-    assert db.get_pending_changes() == []
+    assert db.pending_changes.list_all() == []
 
 
 def test_sync_discard_records_exact_same_name_keyword(app_and_db):
@@ -17500,7 +17500,7 @@ def test_sync_discard_records_exact_same_name_keyword(app_and_db):
     db.tag_photo(pid, generated_id, source=None)
     db.tag_photo(pid, manual_id, source="manual")
     db.queue_change(pid, "keyword_add", "Wildlife")
-    change_id = db.get_pending_changes()[0]["id"]
+    change_id = db.pending_changes.list_all()[0]["id"]
 
     resp = client.post(
         "/api/sync/discard", json={"change_ids": [change_id]},
@@ -17536,7 +17536,7 @@ def test_sync_discard_chunks_large_change_sets(app_and_db):
         ],
     )
     db.conn.commit()
-    change_ids = [row["id"] for row in db.get_pending_changes()]
+    change_ids = [row["id"] for row in db.pending_changes.list_all()]
 
     resp = client.post(
         "/api/sync/discard", json={"change_ids": change_ids},
@@ -17544,7 +17544,7 @@ def test_sync_discard_chunks_large_change_sets(app_and_db):
 
     assert resp.status_code == 200
     assert resp.get_json()["discarded"] == total
-    assert db.get_pending_changes() == []
+    assert db.pending_changes.list_all() == []
 
 
 def test_sync_discard_clears_sibling_workspace_flat_removals(app_and_db):
@@ -19028,7 +19028,7 @@ def test_batch_accept_on_all_undo_redo_preserves_sidecar_changes(
 
     def pending_types():
         return [
-            row["change_type"] for row in db.get_pending_changes()
+            row["change_type"] for row in db.pending_changes.list_all()
             if row["photo_id"] == photo and row["value"] == "Bald Eagle"
         ]
 
@@ -19039,7 +19039,7 @@ def test_batch_accept_on_all_undo_redo_preserves_sidecar_changes(
     assert response.status_code == 200
     assert pending_types() == ([] if pending_removal else ["keyword_add"])
     if sync_after_accept:
-        db.clear_pending([row["id"] for row in db.get_pending_changes()])
+        db.clear_pending([row["id"] for row in db.pending_changes.list_all()])
     sidecar_has_keyword = pending_removal or sync_after_accept
     for _ in range(2):
         db.undo_last_edit()

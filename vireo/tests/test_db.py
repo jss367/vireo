@@ -662,7 +662,7 @@ def test_tag_and_untag_photo(tmp_path):
 
 
 def test_pending_changes_queue(tmp_path):
-    """queue_change adds entries, get_pending_changes reads them, clear_pending removes them."""
+    """queue_change adds entries, pending_changes.list_all reads them, clear_pending removes them."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
@@ -673,11 +673,11 @@ def test_pending_changes_queue(tmp_path):
     db.queue_change(pid, 'rating', '4')
     db.queue_change(pid, 'keyword_add', 'Cardinal')
 
-    changes = db.get_pending_changes()
+    changes = db.pending_changes.list_all()
     assert len(changes) == 2
 
     db.clear_pending([c['id'] for c in changes])
-    assert len(db.get_pending_changes()) == 0
+    assert len(db.pending_changes.list_all()) == 0
 
 
 def test_staged_sync_scope_by_photos_finds_reparented_changes(tmp_path):
@@ -688,7 +688,7 @@ def test_staged_sync_scope_by_photos_finds_reparented_changes(tmp_path):
     each staged photo onto the existing destination folder id. A folder-id
     scoped re-read would then miss any edit the user queued during the
     copy, so the completed job would falsely claim no metadata missed the
-    transfer. Photo ids survive the reparent -- ``staged_sync_scope_by_photos``
+    transfer. Photo ids survive the reparent -- ``pending_changes.staged_scope_by_photos``
     is called with the ids captured before the move so the count is honest.
     """
     from db import Database
@@ -718,10 +718,10 @@ def test_staged_sync_scope_by_photos_finds_reparented_changes(tmp_path):
 
     # A folder-id scan of the ORIGINAL staging folder now misses the edit
     # entirely -- this is the bug the photo-id variant fixes.
-    folder_scoped, _here, _else, _overlap = db.staged_sync_scope([staging])
+    folder_scoped, _here, _else, _overlap = db.pending_changes.staged_scope([staging])
     assert folder_scoped == []
 
-    changes, here, elsewhere, overlap = db.staged_sync_scope_by_photos(
+    changes, here, elsewhere, overlap = db.pending_changes.staged_scope_by_photos(
         staged_photo_ids,
     )
     assert len(changes) == 1
@@ -730,7 +730,7 @@ def test_staged_sync_scope_by_photos_finds_reparented_changes(tmp_path):
 
 
 def test_staged_sync_scope_by_photos_separates_sibling_workspaces(tmp_path):
-    """Same shape as staged_sync_scope: here/elsewhere/overlap counts match."""
+    """Same shape as staged_scope: here/elsewhere/overlap counts match."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws1 = db.ensure_default_workspace()
@@ -749,7 +749,7 @@ def test_staged_sync_scope_by_photos_separates_sibling_workspaces(tmp_path):
     db.queue_change(shared, "keyword_add", "Kestrel", workspace_id=ws2)
     db.queue_change(other_only, "keyword_add", "Egret", workspace_id=ws2)
 
-    changes, here, elsewhere, overlap = db.staged_sync_scope_by_photos(
+    changes, here, elsewhere, overlap = db.pending_changes.staged_scope_by_photos(
         [shared, other_only],
     )
     active_photos = {row[2] for row in changes}
@@ -763,7 +763,7 @@ def test_staged_sync_scope_by_photos_empty_input_is_a_no_op(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     db.set_active_workspace(db.ensure_default_workspace())
-    assert db.staged_sync_scope_by_photos([]) == ([], 0, 0, 0)
+    assert db.pending_changes.staged_scope_by_photos([]) == ([], 0, 0, 0)
 
 
 def test_clear_pending_by_expected_token_survives_rowid_reuse(tmp_path):
@@ -788,7 +788,7 @@ def test_clear_pending_by_expected_token_survives_rowid_reuse(tmp_path):
     )
 
     original_token = db.queue_change(pid, 'keyword_add', 'Osprey')
-    (original_row,) = db.get_pending_changes()
+    (original_row,) = db.pending_changes.list_all()
     original_id = original_row['id']
     assert original_row['change_token'] == original_token
 
@@ -800,7 +800,7 @@ def test_clear_pending_by_expected_token_survives_rowid_reuse(tmp_path):
         "DELETE FROM pending_changes WHERE id = ?", (original_id,),
     )
     replacement_token = db.queue_change(pid, 'keyword_add', 'Kestrel')
-    (replacement_row,) = db.get_pending_changes()
+    (replacement_row,) = db.pending_changes.list_all()
     assert replacement_row['id'] == original_id, (
         "test premise: SQLite must reissue the rowid to the replacement"
     )
@@ -810,14 +810,14 @@ def test_clear_pending_by_expected_token_survives_rowid_reuse(tmp_path):
     # The sync captured (id, token) for the original -- clearing by both
     # leaves the replacement in place.
     db.clear_pending([original_id], expected_tokens=[original_token])
-    remaining = db.get_pending_changes()
+    remaining = db.pending_changes.list_all()
     assert len(remaining) == 1
     assert remaining[0]['change_token'] == replacement_token
     assert remaining[0]['value'] == 'Kestrel'
 
     # Clearing with the replacement's own token drops it as expected.
     db.clear_pending([original_id], expected_tokens=[replacement_token])
-    assert db.get_pending_changes() == []
+    assert db.pending_changes.list_all() == []
 
 
 def test_clear_pending_legacy_null_token_still_clears_by_id(tmp_path):
@@ -843,16 +843,16 @@ def test_clear_pending_legacy_null_token_still_clears_by_id(tmp_path):
         (pid, ws_id),
     )
     db.conn.commit()
-    (legacy,) = db.get_pending_changes()
+    (legacy,) = db.pending_changes.list_all()
     tokened_token = db.queue_change(pid, 'keyword_add', 'Fresh')
     tokened_id = next(
-        row['id'] for row in db.get_pending_changes()
+        row['id'] for row in db.pending_changes.list_all()
         if row['change_token'] == tokened_token
     )
 
     db.clear_pending([legacy['id']], expected_tokens=[None])
 
-    remaining = db.get_pending_changes()
+    remaining = db.pending_changes.list_all()
     assert [row['id'] for row in remaining] == [tokened_id]
     assert remaining[0]['change_token'] == tokened_token
 
@@ -876,11 +876,11 @@ def test_clear_pending_chunks_large_change_sets(tmp_path):
         [(pid, f"change-{idx}", ws_id) for idx in range(total)],
     )
     db.conn.commit()
-    change_ids = [row["id"] for row in db.get_pending_changes()]
+    change_ids = [row["id"] for row in db.pending_changes.list_all()]
 
     db.clear_pending(change_ids)
 
-    assert len(db.get_pending_changes()) == 0
+    assert len(db.pending_changes.list_all()) == 0
 
 
 def test_get_photos_keyword_search(tmp_path):
@@ -7262,7 +7262,7 @@ def test_replace_prediction_records_affected_when_only_removals_occur(tmp_path):
     # And the keyword_remove pending change was actually queued.
     removed = {
         (c["photo_id"], c["value"])
-        for c in db.get_pending_changes()
+        for c in db.pending_changes.list_all()
         if c["change_type"] == "keyword_remove"
     }
     assert (pid, "Sparrow") in removed
@@ -7347,7 +7347,7 @@ def test_replace_prediction_migrates_curation_from_canonical_root_of_alias(tmp_p
     # canonical root spelling).
     removed = {
         (c["photo_id"], c["value"])
-        for c in db.get_pending_changes()
+        for c in db.pending_changes.list_all()
         if c["change_type"] == "keyword_remove"
     }
     assert (pid, "Desert Verdin") in removed
@@ -7628,7 +7628,7 @@ def test_replace_species_preserves_other_subject_on_multi_detection_photo(tmp_pa
     assert result["affected"][0]["old_species"] == ["Green-winged Teal"]
     removed = {
         (c["photo_id"], c["value"])
-        for c in db.get_pending_changes()
+        for c in db.pending_changes.list_all()
         if c["change_type"] == "keyword_remove"
     }
     assert (pid, "Green-winged Teal") in removed
@@ -7693,7 +7693,7 @@ def test_replace_species_ignores_stale_fingerprint_predictions_on_neighbour(tmp_
     assert "Green-winged Teal" in result["affected"][0]["old_species"]
     removed = {
         (c["photo_id"], c["value"])
-        for c in db.get_pending_changes()
+        for c in db.pending_changes.list_all()
         if c["change_type"] == "keyword_remove"
     }
     assert (pid, "Green-winged Teal") in removed
@@ -7757,7 +7757,7 @@ def test_replace_species_normalizes_protected_species_before_matching(tmp_path):
     assert result["affected"][0]["old_species"] == ["Green-winged Teal"]
     removed = {
         (c["photo_id"], c["value"])
-        for c in db.get_pending_changes()
+        for c in db.pending_changes.list_all()
         if c["change_type"] == "keyword_remove"
     }
     assert (pid, "Green-winged Teal") in removed
@@ -7817,7 +7817,7 @@ def test_replace_species_ignores_alternative_prediction_on_neighbour(tmp_path):
     assert "Green-winged Teal" in result["affected"][0]["old_species"]
     removed = {
         (c["photo_id"], c["value"])
-        for c in db.get_pending_changes()
+        for c in db.pending_changes.list_all()
         if c["change_type"] == "keyword_remove"
     }
     assert (pid, "Green-winged Teal") in removed
@@ -7876,7 +7876,7 @@ def test_replace_species_ignores_below_threshold_neighbour(tmp_path):
     assert "Green-winged Teal" in result["affected"][0]["old_species"]
     removed = {
         (c["photo_id"], c["value"])
-        for c in db.get_pending_changes()
+        for c in db.pending_changes.list_all()
         if c["change_type"] == "keyword_remove"
     }
     assert (pid, "Green-winged Teal") in removed
@@ -8102,7 +8102,7 @@ def test_replace_species_protects_taxonomy_ancestor_of_neighbour_prediction(
     assert "Green-winged Teal" in result["affected"][0]["old_species"]
     removed = {
         (c["photo_id"], c["value"])
-        for c in db.get_pending_changes()
+        for c in db.pending_changes.list_all()
         if c["change_type"] == "keyword_remove"
     }
     assert (pid, "Green-winged Teal") in removed
@@ -8152,7 +8152,7 @@ def test_accept_prediction_queues_normalized_species(tmp_path):
     assert result["species"] == "apapane"
     # Pending keyword_add uses the clean spelling — a later remove of the
     # stored keyword can then cancel the queued add.
-    pending = db.get_pending_changes()
+    pending = db.pending_changes.list_all()
     add_values = [
         c["value"] for c in pending if c["change_type"] == "keyword_add"
     ]
@@ -8259,7 +8259,7 @@ def test_accept_prediction_out_of_scope_row_mutates_nothing(tmp_path):
         "SELECT 1 FROM keywords WHERE name = 'Elk' COLLATE NOCASE"
     ).fetchone() is None
     assert result["keyword_id"] is None
-    assert db.get_pending_changes() == []
+    assert db.pending_changes.list_all() == []
 
 
 def test_accept_prediction_grouped_leaves_out_of_scope_entry_row_alone(tmp_path):
@@ -18348,7 +18348,7 @@ def test_retire_builtin_wildlife_deletes_only_generated_duplicate(tmp_path):
 def test_retire_builtin_wildlife_queues_removal_in_every_owning_workspace(tmp_path):
     """A folder shared across workspaces must have the cleanup queued in each.
 
-    ``get_pending_changes()`` and the sync panel are per-workspace, so queueing
+    ``pending_changes.list_all()`` and the sync panel are per-workspace, so queueing
     the removal in only one owning workspace hides it from the others; the
     migration marks itself complete and the stale ``Wildlife`` term stays in
     the sidecar for the unqueued workspaces indefinitely.
@@ -18642,10 +18642,10 @@ def test_pending_keyword_removal_keys_distinguish_flat_and_hierarchical(tmp_path
     db.queue_change(p1, "keyword_remove_flat", "Wildlife")
     db.queue_change(p1, "keyword_remove", "House Sparrow")
 
-    assert db.get_pending_keyword_removal_keys(p1) == {
+    assert db.pending_changes.keyword_removal_keys(p1) == {
         "wildlife", "house sparrow",
     }
-    assert db.get_pending_keyword_removal_keys(p1, hierarchical=True) == {
+    assert db.pending_changes.keyword_removal_keys(p1, hierarchical=True) == {
         "house sparrow",
     }
 
@@ -28726,7 +28726,7 @@ def test_queue_location_changes_for_tagged_photos_is_idempotent(tmp_path):
         "photos": 2, "queued": 2, "already_queued": 0,
     }
     queued = {
-        change["photo_id"] for change in db.get_pending_changes()
+        change["photo_id"] for change in db.pending_changes.list_all()
         if change["change_type"] == "location"
     }
     assert queued == {first, second}
@@ -28735,7 +28735,7 @@ def test_queue_location_changes_for_tagged_photos_is_idempotent(tmp_path):
     assert db.queue_location_changes_for_tagged_photos() == {
         "photos": 2, "queued": 0, "already_queued": 2,
     }
-    assert len(db.get_pending_changes()) == 2
+    assert len(db.pending_changes.list_all()) == 2
     db.close()
 
 

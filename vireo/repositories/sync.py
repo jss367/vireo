@@ -1,12 +1,19 @@
 """Persistence for the pending XMP sync queue (``pending_changes``).
 
+Callers reach it as ``db.pending_changes`` (a fresh repository per access,
+see ``Database.pending_changes``); the reads and the simple writes have no
+forwarding wrappers on ``Database``.
+
 ``Database`` owns the active-workspace state and the composition: it decides
-when cancelling a captured keyword queues its inverse (through
-``Database.queue_change`` and ``Database._pending_keyword_sidecar_alias``),
-when a clear also drops equivalent flat removals (through
-``Database.clear_equivalent_flat_removals``), and whether flag sync is on.
-Those calls stay on the façade so monkeypatches of ``Database`` methods keep
-taking effect. This repository owns the SQL.
+when cancelling a captured keyword queues its inverse (``remove_pending_changes``,
+which checks :meth:`keyword_sidecar_alias` on its own repository and queues
+through ``Database.queue_change``), when a clear also drops equivalent flat
+removals (``clear_pending`` and ``clear_pending_by_token``, through
+:meth:`clear_equivalent_flat_removals` on their repository), and whether
+flag sync is on. ``queue_change`` stays a ``Database`` method because the
+keyword-provenance and location repositories bind it from the façade by
+name, so a patch of ``Database.queue_change`` keeps reaching them; queue
+changes through it rather than :meth:`queue`. This repository owns the SQL.
 
 The active workspace is resolved lazily. Several of these methods only
 consult it once a row turns up (the staged sync scopes) or inside a
@@ -23,27 +30,44 @@ caller owns the transaction, and no method here commits unless the
 
 import contextlib
 import os
+import sqlite3
 import uuid
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
+from typing import Any
 
 from keyword_normalization import keyword_match_key, normalize_keyword_display
 
+# How a staged-scope read names a pending row: its ``change_token``, or
+# ``("id", id)`` for rows that predate the column.
+ChangeIdentity = str | tuple[str, int]
+# ``(identity, change_id, photo_id)`` for each active-workspace row, then the
+# ``photos_here``, ``photos_elsewhere`` and ``photos_here_with_sibling_edits``
+# counts.
+StagedScope = tuple[list[tuple[ChangeIdentity, int, int]], int, int, int]
+
 
 class SyncRepository:
-    def __init__(self, conn, resolve_workspace_id, *, chunk_size=800):
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        resolve_workspace_id: Callable[[], int],
+        *,
+        chunk_size: int = 800,
+    ) -> None:
         self.conn = conn
         self._resolve_workspace_id = resolve_workspace_id
         self.chunk_size = chunk_size
 
     @property
-    def workspace_id(self):
+    def workspace_id(self) -> int:
         """The active workspace id, resolved at each read (raises if none)."""
         return self._resolve_workspace_id()
 
-    def commit(self):
+    def commit(self) -> None:
         """Commit the connection's open transaction."""
         self.conn.commit()
 
-    def _chunks(self, values, size=None):
+    def _chunks(self, values: Iterable[Any], size: int | None = None) -> Iterator[list[Any]]:
         size = self.chunk_size if size is None else size
         values = list(values)
         return (
@@ -53,21 +77,21 @@ class SyncRepository:
 
     # -- reads ----------------------------------------------------------------
 
-    def count(self):
+    def count(self) -> int:
         """Return pending changes count."""
         return self.conn.execute(
             "SELECT COUNT(*) FROM pending_changes WHERE workspace_id = ?",
             (self.workspace_id,),
         ).fetchone()[0]
 
-    def list_all(self):
+    def list_all(self) -> list[sqlite3.Row]:
         """Return all pending changes ordered by creation time."""
         return self.conn.execute(
             "SELECT * FROM pending_changes WHERE workspace_id = ? ORDER BY created_at, id",
             (self.workspace_id,),
         ).fetchall()
 
-    def list_for_review(self, workspace_id):
+    def list_for_review(self, workspace_id: int) -> list[sqlite3.Row]:
         """``workspace_id``'s pending changes with each photo's filename and folder.
 
         Oldest first (``created_at``, then ``id``). Each row is the full
@@ -86,7 +110,7 @@ class SyncRepository:
             (workspace_id,),
         ).fetchall()
 
-    def status_counts(self):
+    def status_counts(self) -> list[sqlite3.Row]:
         """Totals and per-type counts of the queue, read in one statement.
 
         The first row has ``change_type`` NULL, ``changes`` the queue length
@@ -103,7 +127,7 @@ class SyncRepository:
             (self.workspace_id, self.workspace_id),
         ).fetchall()
 
-    def count_queued_location_photos(self):
+    def count_queued_location_photos(self) -> int:
         """Photos with a queued ``location`` change that carry a location keyword."""
         return self.conn.execute(
             """SELECT COUNT(DISTINCT pc.photo_id)
@@ -115,7 +139,7 @@ class SyncRepository:
             (self.workspace_id,),
         ).fetchone()[0]
 
-    def get_by_ids(self, change_ids):
+    def get_by_ids(self, change_ids: Iterable[int]) -> list[sqlite3.Row]:
         """The active workspace's pending rows among ``change_ids``, chunked."""
         changes = []
         for chunk in self._chunks(change_ids):
@@ -127,7 +151,7 @@ class SyncRepository:
             ).fetchall())
         return changes
 
-    def delete_workspace(self, workspace_id):
+    def delete_workspace(self, workspace_id: int) -> list[sqlite3.Row]:
         """Delete every pending change in ``workspace_id`` and return the rows.
 
         The rows are read before the delete. Does not commit: the discard
@@ -144,10 +168,16 @@ class SyncRepository:
         )
         return changes
 
-    def staged_scope_by_photos(self, photo_ids):
+    def staged_scope_by_photos(self, photo_ids: Collection[int]) -> StagedScope:
         """Photo-id scoped variant of :meth:`staged_scope`.
 
-        See ``Database.staged_sync_scope_by_photos``.
+        Used by the post-transfer residual check for a NAS send: the
+        tracked-merge path in ``send_pending_archive`` reparents each staged
+        photo onto the destination folder id, so a folder-id-scoped re-read
+        would miss any edit queued during the copy and the completed job
+        would falsely claim no metadata missed the transfer. Photo ids
+        survive the reparent, so the caller captures them before the move
+        and passes them here. Return shape matches :meth:`staged_scope`.
         """
         here_photos, here_changes, other_photos = set(), [], set()
         if not photo_ids:
@@ -173,10 +203,37 @@ class SyncRepository:
             len(other_photos & here_photos),
         )
 
-    def staged_scope(self, folder_ids):
+    def staged_scope(self, folder_ids: Iterable[int]) -> StagedScope:
         """Return ``(changes, photos_here, photos_elsewhere, photos_here_with_sibling_edits)``.
 
-        See ``Database.staged_sync_scope`` for what each count means.
+        ``changes`` is a list of ``(identity, change_id, photo_id)``, where
+        ``identity`` is the row's ``change_token`` -- a uuid assigned at
+        insert. Callers comparing one read against the next must key on it
+        rather than on the id: ``pending_changes.id`` is a bare rowid SQLite
+        re-issues to the next insert, so a change queued right after a sync
+        cleared one can arrive wearing the id that just left, and look to the
+        caller like a row it has already dealt with. The column is nullable
+        with no backfill, so rows predating it fall back to the id and keep
+        exactly the exposure they have always had.
+
+        ``change_ids`` and ``photos_here`` cover the active workspace only,
+        matching what ``sync.sync_to_xmp`` will actually write: the queue is
+        workspace-scoped by design and the ordinary sync job respects that.
+
+        ``photos_elsewhere`` counts photos whose only queued edits belong to
+        another workspace. The sidecar is global to the photo, so those edits
+        are real and this sync will not write them -- the banner has to say so
+        rather than let a number read as "everything is covered".
+
+        ``photos_here_with_sibling_edits`` counts photos in ``photos_here``
+        that *also* have queued edits in a sibling workspace. Those photos are
+        already promised by the "here" number, so they must not double-count
+        into ``photos_elsewhere`` (which would read as extra photos rather
+        than the same photo carrying two workspaces' edits). The overlap is
+        reported separately so the UI can still warn that the sibling's
+        changes on those photos will remain unwritten after the pre-transfer
+        sync -- the sidecar is shared and only the active workspace's edits
+        travel with it.
         """
         here_photos, here_changes, other_photos = set(), [], set()
         # The photo id rides along so a caller can tell which photos a pass
@@ -203,7 +260,7 @@ class SyncRepository:
             len(other_photos & here_photos),
         )
 
-    def keyword_removal_keys(self, photo_id, hierarchical=False):
+    def keyword_removal_keys(self, photo_id: int, hierarchical: bool = False) -> set[str]:
         """Return normalized keyword keys awaiting removal for a photo.
 
         Reads across workspaces because photo metadata is global even though
@@ -229,7 +286,7 @@ class SyncRepository:
             if (key := keyword_match_key(row["value"]))
         }
 
-    def keyword_sidecar_alias(self, photo_id, workspace_id, value):
+    def keyword_sidecar_alias(self, photo_id: int, workspace_id: int, value: str) -> bool:
         """Return whether another queued keyword edit reaches this sidecar."""
         needs_inverse = False
         # Resolve all candidate sidecars, as sync does: differing
@@ -270,7 +327,14 @@ class SyncRepository:
 
     # -- writes ---------------------------------------------------------------
 
-    def queue(self, photo_id, change_type, value, workspace_id=None, _commit=True):
+    def queue(
+        self,
+        photo_id: int,
+        change_type: str,
+        value: str,
+        workspace_id: int | None = None,
+        _commit: bool = True,
+    ) -> str | None:
         """Add a change to the sync queue, skipping redundant intents.
 
         See ``Database.queue_change``. Returns the inserted pending change
@@ -335,7 +399,7 @@ class SyncRepository:
             self.conn.commit()
         return change_token
 
-    def claim_for_sync(self, changes):
+    def claim_for_sync(self, changes: Sequence[Mapping[str, Any]]) -> list[sqlite3.Row]:
         """Mark selected edits as possibly written and return surviving rows.
 
         See ``Database.claim_pending_changes_for_sync``. Commits (or rolls
@@ -357,7 +421,7 @@ class SyncRepository:
         return [claimed[key] for c in changes
                 if (key := (c["id"], c["change_token"])) in claimed]
 
-    def flat_keyword_removals(self, photo_id, value):
+    def flat_keyword_removals(self, photo_id: int, value: str) -> list[dict[str, Any]]:
         """The queued ``keyword_remove_flat`` rows for one photo and keyword.
 
         Every workspace's, since the sidecar they target belongs to the photo,
@@ -371,7 +435,13 @@ class SyncRepository:
             (photo_id, value),
         )]
 
-    def delete_matching(self, photo_id, workspace_id, change_type=None, value=None):
+    def delete_matching(
+        self,
+        photo_id: int,
+        workspace_id: int,
+        change_type: str | None = None,
+        value: str | None = None,
+    ) -> list[sqlite3.Row]:
         """Delete a photo's pending changes in one workspace; return the rows.
 
         Does not commit: ``Database.remove_pending_changes`` queues any
@@ -391,7 +461,7 @@ class SyncRepository:
             params,
         ).fetchall()
 
-    def mark_sync_started(self, photo_id, workspace_id, change_type, value):
+    def mark_sync_started(self, photo_id: int, workspace_id: int, change_type: str, value: str) -> None:
         """Flag matching rows as possibly written. Does not commit."""
         self.conn.execute(
             "UPDATE pending_changes SET sync_started = 1 "
@@ -399,7 +469,7 @@ class SyncRepository:
             (photo_id, workspace_id, change_type, value),
         )
 
-    def remove_token(self, change_token):
+    def remove_token(self, change_token: str) -> int:
         """Delete a single pending change by immutable token. Returns rows removed."""
         cur = self.conn.execute(
             "DELETE FROM pending_changes WHERE change_token = ? AND workspace_id = ?",
@@ -409,9 +479,12 @@ class SyncRepository:
         return cur.rowcount
 
     def delete_by_ids(
-        self, change_ids, *, clear_equivalent_flat_removals=False,
-        expected_tokens=None,
-    ):
+        self,
+        change_ids: Sequence[int],
+        *,
+        clear_equivalent_flat_removals: bool = False,
+        expected_tokens: Sequence[str | None] | None = None,
+    ) -> list[sqlite3.Row]:
         """Delete pending changes by id (token-checked when tokens are given).
 
         See ``Database.clear_pending``. Returns the flat keyword removals
@@ -486,7 +559,9 @@ class SyncRepository:
                 )
         return synced_changes
 
-    def delete_by_tokens(self, change_tokens, *, clear_equivalent_flat_removals=False):
+    def delete_by_tokens(
+        self, change_tokens: Iterable[str], *, clear_equivalent_flat_removals: bool = False,
+    ) -> list[sqlite3.Row]:
         """Delete pending changes named by their immutable tokens.
 
         See ``Database.clear_pending_by_token``. Returns the flat keyword
@@ -512,8 +587,16 @@ class SyncRepository:
             )
         return synced_changes
 
-    def clear_equivalent_flat_removals(self, changes, _commit=True):
-        """Clear shared-sidecar flat removals represented by ``changes``."""
+    def clear_equivalent_flat_removals(
+        self, changes: Iterable[Mapping[str, Any]], _commit: bool = True,
+    ) -> None:
+        """Clear shared-sidecar flat removals represented by ``changes``.
+
+        Every ``keyword_remove_flat`` change in ``changes`` drops the queued
+        flat removals of the same photo and keyword (case-insensitively) in
+        every workspace, since they all target the photo's one sidecar.
+        Commits only when ``_commit`` is true.
+        """
         shared_flat_removals = {
             (change["photo_id"], change["value"])
             for change in changes

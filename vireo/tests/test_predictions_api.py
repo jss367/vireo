@@ -1281,7 +1281,7 @@ def test_group_apply_writes_every_side_effect_in_one_transaction(
     assert 'Azure Jay' not in {k['name'] for k in db.get_photo_keywords(photo_a)}
     assert db.get_review_status(pred_a, ws) == 'pending'
     assert not [
-        c for c in db.get_pending_changes() if c['photo_id'] == photo_a
+        c for c in db.pending_changes.list_all() if c['photo_id'] == photo_a
     ]
     assert len(db.get_edit_history(limit=100)) == history_before
     # Not even the keyword row: ``add_keyword`` runs inside the same

@@ -945,7 +945,7 @@ def test_api_set_flag_queues_xmp_when_enabled(app_and_db):
     resp = client.post(f'/api/photos/{target["id"]}/flag', json={"flag": "flagged"})
 
     assert resp.status_code == 200
-    changes = db.get_pending_changes()
+    changes = db.pending_changes.list_all()
     assert len(changes) == 1
     assert changes[0]["change_type"] == "flag"
     assert changes[0]["value"] == "flagged"
@@ -3993,7 +3993,7 @@ def test_edit_recipe_api_queues_xmp_sync(client_with_photo):
     )
 
     assert resp.status_code == 200
-    changes = db.get_pending_changes()
+    changes = db.pending_changes.list_all()
     assert len(changes) == 1
     assert changes[0]["photo_id"] == photo_id
     assert changes[0]["change_type"] == "edit_recipe"
@@ -4051,7 +4051,7 @@ def test_bulk_apply_queues_xmp_sync_per_photo(app_and_db):
         json={"recipe": {"straighten": 2.5}, "photo_ids": ids},
     )
     edit_changes = [
-        c for c in db.get_pending_changes() if c["change_type"] == "edit_recipe"
+        c for c in db.pending_changes.list_all() if c["change_type"] == "edit_recipe"
     ]
     assert sorted(c["photo_id"] for c in edit_changes) == sorted(ids)
 

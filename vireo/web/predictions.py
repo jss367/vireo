@@ -930,7 +930,7 @@ def create_predictions_blueprint(
                     continue
                 photo_id = item["photo_id"]
                 item_species = db.get_keyword_name(int(item["new_value"]))
-                flat_removals = db.get_flat_keyword_removals(photo_id, item_species)
+                flat_removals = db.pending_changes.flat_keyword_removals(photo_id, item_species)
                 # accept_prediction queues an add directly. Reconcile it
                 # with any pending removal before applying the shared helper.
                 db.remove_pending_changes(photo_id, "keyword_add", item_species, _commit=False)
