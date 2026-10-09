@@ -1062,6 +1062,7 @@ def test_photo_mask_lock_does_not_block_different_photo():
             held.append("first-in")
             first_holding.set()
             let_first_go.wait(timeout=synchronization_timeout(2.0))
+            held.append("first-out")
 
     def second():
         with acquire_photo_mask(2):
@@ -1075,6 +1076,7 @@ def test_photo_mask_lock_does_not_block_different_photo():
     t2.join(timeout=synchronization_timeout(1.0))
     assert not t2.is_alive(), "different photo must not be blocked"
     assert "second-in" in held
+    assert "first-out" not in held, "first lock released before checking independence"
     let_first_go.set()
     t1.join(timeout=synchronization_timeout(2.0))
 

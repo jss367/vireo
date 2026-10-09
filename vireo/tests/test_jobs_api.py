@@ -9609,7 +9609,7 @@ def test_concurrent_snapshot_imports_serialize_and_report_one_replay(
             first_scan_entered.set()
             # Without per-snapshot serialization, the second worker enters
             # and releases this wait while both captured pre-scan membership.
-            release_first_scan.wait(timeout=synchronization_timeout(1.0))
+            release_first_scan.wait(timeout=1.0)
         else:
             second_scan_entered.set()
             release_first_scan.set()
