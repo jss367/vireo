@@ -197,3 +197,161 @@ def test_duplicates_page_starting_new_scan_hides_banner(live_server, page):
 
     page.click("#scanBtn")
     expect(page.locator("#restoredBanner")).not_to_be_visible()
+
+
+def _seed_catalog_cleanup(db):
+    fid = db.add_folder("/photos/cleanup")
+    ids = [
+        db.add_photo(folder_id=fid, filename=name, extension=".jpg",
+                     file_size=1000, file_mtime=100.0, file_hash="HCLEANUP")
+        for name in ("kept.jpg", "extra.jpg")
+    ]
+    db.conn.execute("UPDATE photos SET flag='none' WHERE id=?", (ids[0],))
+    db.conn.execute("UPDATE photos SET flag='rejected' WHERE id=?", (ids[1],))
+    db.conn.commit()
+    return ids
+
+
+def test_cleanup_banner_opens_current_copies_without_a_saved_scan(live_server, page):
+    _seed_catalog_cleanup(live_server["db"])
+    page.goto(f"{live_server['url']}/browse")
+    expect(page.locator("#dupCleanupMsg")).to_contain_text("1 duplicate file copy could be cleaned up")
+    page.locator("#dupCleanupBanner a").click()
+
+    expect(page.locator("#catalogBanner")).to_be_visible()
+    expect(page.locator("#resolvedList")).to_be_visible()
+    expect(page.locator("#results")).to_contain_text("extra.jpg")
+    expect(page.locator("#emptyState")).not_to_be_visible()
+    expect(page.locator("#restoredBanner")).not_to_be_visible()
+    expect(page.locator("#trashAllBtn")).to_have_text("Move 1 extra copy to Trash")
+
+
+def test_cleanup_link_uses_current_catalog_instead_of_an_old_scan(live_server, page):
+    _seed_prior_scan(live_server["db"])
+    _seed_catalog_cleanup(live_server["db"])
+    page.goto(f"{live_server['url']}/duplicates?show=resolved")
+
+    expect(page.locator("#results")).to_contain_text("extra.jpg")
+    expect(page.locator("#results")).not_to_contain_text("HFAKE")
+    expect(page.locator("#restoredBanner")).not_to_be_visible()
+
+
+def test_normal_duplicates_page_also_finds_cleanup_without_history(live_server, page):
+    _seed_catalog_cleanup(live_server["db"])
+    page.goto(f"{live_server['url']}/duplicates")
+    expect(page.locator("#catalogBanner")).to_be_visible()
+    expect(page.locator("#resolvedList")).to_be_visible()
+    expect(page.locator("#emptyState")).not_to_be_visible()
+
+
+def test_duplicates_loading_does_not_ask_for_a_scan(live_server, page):
+    _seed_catalog_cleanup(live_server["db"])
+    pending = []
+    page.route("**/api/duplicates/cleanup", lambda route: pending.append(route))
+    page.goto(f"{live_server['url']}/duplicates?show=resolved", wait_until="domcontentloaded")
+
+    expect(page.locator("#initialLoading")).to_be_visible()
+    expect(page.locator("#emptyState")).not_to_be_visible()
+    expect(page.locator("#scanBtn")).to_be_disabled()
+    assert len(pending) == 1
+    pending[0].fulfill(response=pending[0].fetch())
+    expect(page.locator("#results")).to_contain_text("extra.jpg")
+    expect(page.locator("#initialLoading")).not_to_be_visible()
+    expect(page.locator("#scanBtn")).to_be_enabled()
+
+
+def test_cleanup_load_failure_is_retryable(live_server, page):
+    _seed_catalog_cleanup(live_server["db"])
+    attempts = []
+
+    def respond(route):
+        attempts.append(route)
+        if len(attempts) == 1:
+            route.fulfill(status=500, json={"error": "Temporary failure"})
+        else:
+            route.continue_()
+
+    page.route("**/api/duplicates/cleanup", respond)
+    page.goto(f"{live_server['url']}/duplicates?show=resolved")
+    expect(page.locator("#loadError")).to_contain_text("Could not load duplicate results")
+    expect(page.locator("#emptyState")).not_to_be_visible()
+    expect(page.locator("#initialLoading")).not_to_be_visible()
+    page.locator("#loadError button").click()
+    expect(page.locator("#results")).to_contain_text("extra.jpg")
+    expect(page.locator("#loadError")).not_to_be_visible()
+
+
+def test_cleanup_link_explains_when_copies_are_no_longer_pending(live_server, page):
+    page.goto(f"{live_server['url']}/duplicates?show=resolved")
+    expect(page.locator("#results")).to_contain_text("No rejected duplicate copies are pending cleanup")
+    expect(page.locator("#results")).not_to_contain_text("Your library is clean")
+    expect(page.locator("#emptyState")).not_to_be_visible()
+    expect(page.locator("#scanBtn")).to_be_enabled()
+
+
+def test_cleared_results_cannot_be_revived_by_a_late_response(live_server, page):
+    _seed_catalog_cleanup(live_server["db"])
+    pending = []
+    page.route("**/api/duplicates/cleanup", lambda route: pending.append(route))
+    page.goto(f"{live_server['url']}/duplicates?show=resolved", wait_until="domcontentloaded")
+    expect(page.locator("#initialLoading")).to_be_visible()
+    assert len(pending) == 1
+    response = pending[0].fetch()
+    page.evaluate("clearResults()")
+    pending[0].fulfill(response=response)
+    # Clearing the loading state also keeps the scan control usable.
+    page.wait_for_function("document.getElementById('scanBtn').disabled === false")
+    expect(page.locator("#emptyState")).to_be_visible()
+    expect(page.locator("#results")).to_be_empty()
+    expect(page.locator("#catalogBanner")).not_to_be_visible()
+
+
+def test_cleanup_refresh_drops_a_rejection_undone_elsewhere(live_server, page):
+    _, rejected = _seed_catalog_cleanup(live_server["db"])
+    page.goto(f"{live_server['url']}/duplicates?show=resolved")
+    expect(page.locator("#results")).to_contain_text("extra.jpg")
+    db = live_server["db"]
+    db.conn.execute("UPDATE photos SET flag='none' WHERE id=?", (rejected,))
+    db.conn.commit()
+    page.locator("#catalogBanner button").click()
+    expect(page.locator("#results")).to_contain_text("No rejected duplicate copies are pending cleanup")
+    expect(page.locator("#trashAllBtn")).to_have_count(0)
+
+
+def test_slow_thumbnails_do_not_block_cleanup_and_have_visible_states(live_server, page):
+    import io
+
+    from PIL import Image
+
+    _seed_catalog_cleanup(live_server["db"])
+    pending = []
+    page.route("**/thumbnails/duplicate/**", lambda route: pending.append(route))
+    page.goto(f"{live_server['url']}/duplicates?show=resolved", wait_until="domcontentloaded")
+    expect(page.locator("#results")).to_contain_text("extra.jpg")
+    expect(page.locator("#initialLoading")).not_to_be_visible()
+    expect(page.locator("#trashAllBtn")).to_be_enabled()
+    expect(page.locator(".thumb-wrap .thumb-placeholder").first).to_have_text("Loading thumbnail…")
+    image = io.BytesIO()
+    Image.new("RGB", (180, 135), color="green").save(image, format="JPEG")
+    assert len(pending) == 2
+    pending[0].fulfill(content_type="image/jpeg", body=image.getvalue())
+    expect(page.locator(".thumb-wrap.loaded")).to_have_count(1)
+    pending[1].abort()
+    expect(page.locator(".thumb-wrap:not(.loaded) .thumb-placeholder")).to_have_text("No thumbnail")
+
+
+def test_distant_duplicate_thumbnails_wait_until_scrolled_into_view(live_server, page):
+    _seed_catalog_cleanup(live_server["db"])
+    requests = []
+    page.on("request", lambda request: requests.append(request.url))
+    page.goto(f"{live_server['url']}/duplicates?show=resolved")
+    expect(page.locator("#catalogBanner")).to_be_visible()
+    page.evaluate("""() => {
+      document.getElementById('results').innerHTML = '<div style="height:20000px"></div>' +
+        renderCard({id: 999999, filename: 'distant.jpg'}, true, null, false);
+    }""")
+    distant = page.locator('img[alt="distant.jpg"]')
+    expect(distant).to_have_attribute("loading", "lazy")
+    assert not any("/thumbnails/duplicate/999999.jpg" in url for url in requests)
+    with page.expect_request("**/thumbnails/duplicate/999999.jpg"):
+        distant.scroll_into_view_if_needed()
