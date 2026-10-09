@@ -337,7 +337,7 @@ def create_duplicates_blueprint(
         ``{found: true, job_id, started_at, finished_at, result}``.
         """
         db = get_db()
-        row = db.get_last_completed_job("duplicate-scan")
+        row = db.job_history.last_completed_with_result("duplicate-scan")
         if row is None:
             return jsonify({"found": False})
         try:

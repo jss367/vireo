@@ -10,14 +10,19 @@ finished job. Job ids are globally unique and the restore reads are
 catalog-wide on purpose (a duplicate scan covers every photo), so nothing here
 is scoped to a workspace; callers that care compare the row's
 ``workspace_id`` themselves.
+
+Callers reach it as ``db.job_history`` (a fresh repository per access, see
+``Database.job_history``); there are no forwarding wrappers on ``Database``.
 """
+
+import sqlite3
 
 
 class JobHistoryRepository:
-    def __init__(self, conn):
+    def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
 
-    def last_completed_with_result(self, job_type):
+    def last_completed_with_result(self, job_type: str) -> sqlite3.Row | None:
         """Newest completed ``job_type`` row that stored a result, or None.
 
         The row carries ``id``, ``started_at``, ``finished_at`` and the raw
@@ -34,14 +39,19 @@ class JobHistoryRepository:
             (job_type,),
         ).fetchone()
 
-    def get(self, job_id):
+    def get(self, job_id: str) -> sqlite3.Row | None:
         """The full ``job_history`` row for ``job_id``, or None."""
         return self.conn.execute(
             "SELECT * FROM job_history WHERE id = ?", (job_id,)
         ).fetchone()
 
-    def set_result(self, job_id, result_json):
-        """Replace the stored ``result`` JSON of ``job_id`` and commit."""
+    def set_result(self, job_id: str, result_json: str) -> None:
+        """Replace the stored ``result`` JSON of ``job_id`` and commit.
+
+        The commit goes through the connection's own ``commit``, so it stays
+        a no-op while ``Database._commits_held`` holds commits (undo/redo
+        replay), like every other repository write.
+        """
         self.conn.execute(
             "UPDATE job_history SET result = ? WHERE id = ?", (result_json, job_id),
         )

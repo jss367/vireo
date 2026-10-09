@@ -37,7 +37,7 @@ def create_card_cleanup_blueprint(get_db, json_error, get_runner, db_path, confi
         """
         scan_job = runner.get(scan_job_id)
         if scan_job is None:
-            row = db.get_job_history_row(scan_job_id)
+            row = db.job_history.get(scan_job_id)
             scan_job = dict(row) if row is not None else None
         if scan_job is None or scan_job.get("type") != "card-cleanup-scan":
             return None, json_error("unknown scan job", status=404)

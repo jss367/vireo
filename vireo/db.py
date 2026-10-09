@@ -7,6 +7,7 @@ import os
 import sqlite3
 import time
 import unicodedata
+from typing import TYPE_CHECKING
 
 import dir_listing_cache
 from keyword_identity import resolve_import_alias
@@ -16,6 +17,9 @@ from keyword_normalization import (
 )
 from new_images import get_shared_cache
 from repositories import UNSET as _UNSET  # sentinel for "not provided" vs explicit None
+
+if TYPE_CHECKING:
+    from repositories.job_history import JobHistoryRepository
 
 log = logging.getLogger(__name__)
 
@@ -11409,20 +11413,17 @@ class Database:
 
         return JobHistoryRepository(self.conn)
 
-    def get_last_completed_job(self, job_type):
-        """Newest completed ``job_type`` job that stored a result, or None.
+    @property
+    def job_history(self) -> JobHistoryRepository:
+        """The job-history domain: ``db.job_history.get(job_id)`` and friends.
 
-        A row (``id``, ``started_at``, ``finished_at``, raw ``result`` JSON).
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_job_history_repository``, exactly as a forwarding
+        wrapper called at that moment would, so the connection and any
+        workspace scoping are resolved per use. Do not hold the returned
+        repository across ``set_active_workspace``.
         """
-        return self._job_history_repository().last_completed_with_result(job_type)
-
-    def get_job_history_row(self, job_id):
-        """The full ``job_history`` row for ``job_id`` (any workspace), or None."""
-        return self._job_history_repository().get(job_id)
-
-    def set_job_history_result(self, job_id, result_json):
-        """Replace a ``job_history`` row's ``result`` JSON and commit."""
-        self._job_history_repository().set_result(job_id, result_json)
+        return self._job_history_repository()
 
     # -- Pending NAS transfers --
 

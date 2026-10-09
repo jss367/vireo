@@ -271,3 +271,75 @@ def test_set_progress_handler_interrupts_and_clears(db):
         db.conn.execute("SELECT COUNT(*) FROM db_meta").fetchone()
     db.set_progress_handler(None, 0)
     assert db.conn.execute("SELECT 1").fetchone()[0] == 1
+
+
+# -- forwarding wrappers ---------------------------------------------------------
+
+# How many ``Database`` methods are pure forwarders: one statement that builds
+# a repository through ``self._<domain>_repository(...)`` and calls one method
+# on it. New persistence operations are reached through a domain accessor
+# (``db.job_history.get(...)``, a property that builds a fresh repository per
+# access) instead of another alias, so this count may only shrink: lower it
+# when you move a domain's callers onto its accessor and delete the wrappers,
+# never raise it. Methods that coordinate more than one call (``add_photo``
+# resolving duplicates after the insert, cross-domain composition) are not
+# forwarders and are not counted.
+FORWARDING_WRAPPER_LIMIT = 418
+
+
+def _is_forwarding_wrapper(fn):
+    body = [
+        stmt for stmt in fn.body
+        if not (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant)
+                and isinstance(stmt.value.value, str))
+    ]
+    if len(body) != 1 or not isinstance(body[0], (ast.Return, ast.Expr)):
+        return False
+    call = body[0].value
+    if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Attribute):
+        return False
+    factory = call.func.value
+    return (
+        isinstance(factory, ast.Call)
+        and isinstance(factory.func, ast.Attribute)
+        and isinstance(factory.func.value, ast.Name)
+        and factory.func.value.id == "self"
+        and factory.func.attr.startswith("_")
+        and factory.func.attr.endswith("_repository")
+    )
+
+
+def test_forwarding_wrappers_only_shrink():
+    wrappers = sorted(fn.name for fn in _database_methods() if _is_forwarding_wrapper(fn))
+    assert len(wrappers) <= FORWARDING_WRAPPER_LIMIT, (
+        f"{len(wrappers)} forwarding wrappers on Database, limit "
+        f"{FORWARDING_WRAPPER_LIMIT}. Reach the repository through its domain "
+        "accessor (a property such as Database.job_history) instead of adding "
+        "another one-line alias."
+    )
+    assert len(wrappers) >= FORWARDING_WRAPPER_LIMIT, (
+        f"Forwarding wrappers fell to {len(wrappers)}; lower "
+        "FORWARDING_WRAPPER_LIMIT in vireo/tests/test_db_facade_structure.py to "
+        "match so the migration sticks."
+    )
+
+
+def test_forwarding_wrapper_detector_matches_known_shapes():
+    """Pin the detector so the cap counts what it claims to count."""
+    def parse(src):
+        return ast.parse(src).body[0]
+
+    assert _is_forwarding_wrapper(parse(
+        'def f(self, x):\n    """Doc."""\n    return self._photos_repository().get(x)'
+    ))
+    assert _is_forwarding_wrapper(parse(
+        "def f(self, x):\n    self._folder_repository(scoped=False).delete(x)"
+    ))
+    # A domain accessor returns the repository itself; it is not a forwarder.
+    assert not _is_forwarding_wrapper(parse(
+        "def job_history(self):\n    return self._job_history_repository()"
+    ))
+    # Coordinated work (more than one statement) is not a forwarder either.
+    assert not _is_forwarding_wrapper(parse(
+        "def f(self, x):\n    pid = self._photos_repository().add(x)\n    self.resolve(pid)\n    return pid"
+    ))
