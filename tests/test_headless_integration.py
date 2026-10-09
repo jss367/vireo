@@ -20,6 +20,7 @@ import urllib.request
 from pathlib import Path
 
 import pytest
+from testing.waits import synchronization_timeout
 
 REPO = Path(__file__).resolve().parents[1]
 APP = REPO / "vireo" / "app.py"
@@ -32,6 +33,7 @@ pytestmark = pytest.mark.skipif(
 
 def _wait_for_runtime(runtime_path: Path, timeout: float = 60.0) -> dict:
     """Poll runtime.json until it exists and is readable."""
+    timeout = synchronization_timeout(timeout)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if runtime_path.exists():
@@ -50,6 +52,7 @@ def _wait_for_port(port: int, timeout: float = 60.0) -> None:
     that immediately POST after _wait_for_runtime can race the bind and
     get ECONNREFUSED. This guards against that race.
     """
+    timeout = synchronization_timeout(timeout)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
@@ -86,6 +89,7 @@ def _http_get(url: str, token: str, timeout: float = 2.0):
 
 
 def _wait_for_http_get(url: str, token: str, timeout: float = 60.0):
+    timeout = synchronization_timeout(timeout)
     deadline = time.monotonic() + timeout
     last_error = None
     while time.monotonic() < deadline:

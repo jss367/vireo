@@ -5,6 +5,7 @@ import os
 
 import pytest
 from move_cleanup import cleanup_source, finish_source, review_source
+from testing.waits import synchronization_timeout
 
 
 @pytest.fixture
@@ -290,7 +291,7 @@ def test_cleanup_refuses_job_running_in_another_workspace(cleanup_case, monkeypa
     review = client.get(URL).json
     other = db.create_workspace("Import workspace")
     release = threading.Event()
-    app._job_runner.start("scan", lambda job: release.wait(5), workspace_id=other)
+    app._job_runner.start("scan", lambda job: release.wait(synchronization_timeout(5)), workspace_id=other)
     monkeypatch.setattr("app._trash_paths", lambda paths: pytest.fail("Trash called during another workspace's scan"))
     try:
         response = client.post(URL, json={"confirm_trash": True, "review_token": review["review_token"]})
@@ -512,7 +513,7 @@ def test_cleanup_is_blocked_while_workspace_job_runs(cleanup_case, monkeypatch):
     app, _, _, _ = cleanup_case
     runner = app._job_runner
     release = threading.Event()
-    runner.start("scan", lambda job: release.wait(5), workspace_id=1)
+    runner.start("scan", lambda job: release.wait(synchronization_timeout(5)), workspace_id=1)
     try:
         response = app.test_client().get(URL)
         assert response.status_code == 409

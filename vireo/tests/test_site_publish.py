@@ -4,6 +4,7 @@ import threading
 
 import pytest
 from PIL import Image
+from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client
 
 
@@ -362,7 +363,7 @@ def test_export_jobs_stop_between_photos_when_cancelled(tmp_path, monkeypatch, j
         loaded.append(path)
         if len(loaded) == 1:
             started.set()
-            assert release.wait(10), "cancel request never arrived"
+            assert release.wait(synchronization_timeout(10)), "cancel request never arrived"
         return original_load(path, *args, **kwargs)
 
     monkeypatch.setattr(export, "load_image", controlled_load)
@@ -409,7 +410,7 @@ def test_publish_cancellation_is_coordinated_with_manifest_commit(
 
     def wait_for_cancel():
         reached.set()
-        assert release.wait(10), "cancel request never arrived"
+        assert release.wait(synchronization_timeout(10)), "cancel request never arrived"
 
     def controlled_begin(runner, job_id):
         if boundary == "before_commit":
@@ -471,7 +472,7 @@ def test_publish_handoff_honors_pending_pause(tmp_path, monkeypatch, action):
 
     def controlled_begin(runner, job_id):
         reached.set()
-        assert release.wait(10)
+        assert release.wait(synchronization_timeout(10))
         return original_begin(runner, job_id)
 
     monkeypatch.setattr(JobRunner, "begin_uncancellable", controlled_begin)
@@ -538,7 +539,7 @@ def test_republish_stages_files_until_commit(tmp_path, monkeypatch, phase, outco
         if reached.is_set():
             return
         reached.set()
-        assert release.wait(10), "publish was never released"
+        assert release.wait(synchronization_timeout(10)), "publish was never released"
         if outcome == "error":
             raise OSError("staging write failed")
 
@@ -757,7 +758,7 @@ def test_publish_waiting_for_same_destination_can_be_cancelled(tmp_path, monkeyp
         if len(calls) > 1:
             return True
         entered.set()
-        assert release.wait(5), 'commit was not released'
+        assert release.wait(synchronization_timeout(5)), 'commit was not released'
         return True
 
     monkeypatch.setattr(site_publish, '_commit_site_locked', held_commit)
@@ -765,12 +766,12 @@ def test_publish_waiting_for_same_destination_can_be_cancelled(tmp_path, monkeyp
         site_publish._commit_site(tmp_path, tmp_path / 'first', [])))
     first.start()
     try:
-        assert entered.wait(5), 'first commit never started'
+        assert entered.wait(synchronization_timeout(5)), 'first commit never started'
         destination = tmp_path.with_name(tmp_path.name.upper()) if case_alias else tmp_path
         assert not site_publish._commit_site(destination, tmp_path / 'second', [], lambda: True)
         assert calls == [tmp_path / 'first']
     finally:
         release.set()
-        first.join(5)
+        first.join(synchronization_timeout(5))
     assert not first.is_alive()
     assert results == [True]

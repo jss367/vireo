@@ -6,6 +6,7 @@ import threading
 import time
 
 import pytest
+from testing.waits import synchronization_timeout
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, os.path.dirname(__file__))
@@ -147,7 +148,7 @@ def test_concurrent_acquire_from_multiple_threads_only_loads_once():
     def slow_factory():
         load_calls.append(1)
         load_started.set()
-        release_load.wait(timeout=2.0)
+        release_load.wait(timeout=synchronization_timeout(2.0))
         return "loaded"
 
     values = []
@@ -159,13 +160,13 @@ def test_concurrent_acquire_from_multiple_threads_only_loads_once():
     t1 = threading.Thread(target=worker)
     t2 = threading.Thread(target=worker)
     t1.start()
-    assert load_started.wait(timeout=1.0)
+    assert load_started.wait(timeout=synchronization_timeout(1.0))
     # Second worker should now be queued waiting for the first load to finish.
     t2.start()
     time.sleep(0.05)
     release_load.set()
-    t1.join(timeout=2.0)
-    t2.join(timeout=2.0)
+    t1.join(timeout=synchronization_timeout(2.0))
+    t2.join(timeout=synchronization_timeout(2.0))
     assert not t1.is_alive(), "t1 did not terminate after join"
     assert not t2.is_alive(), "t2 did not terminate after join"
     assert load_calls == [1], "factory must run exactly once across threads"
@@ -212,7 +213,7 @@ def test_contended_cold_load_wait_records_owner_timing():
 
         def slow_factory():
             load_started.set()
-            release_load.wait(timeout=2.0)
+            release_load.wait(timeout=synchronization_timeout(2.0))
             return "loaded"
 
         producer_done = threading.Event()
@@ -242,7 +243,7 @@ def test_contended_cold_load_wait_records_owner_timing():
 
         tp = threading.Thread(target=producer)
         tp.start()
-        assert load_started.wait(timeout=1.0)
+        assert load_started.wait(timeout=synchronization_timeout(1.0))
 
         tw = threading.Thread(target=waiter)
         tw.start()
@@ -267,10 +268,10 @@ def test_contended_cold_load_wait_records_owner_timing():
         clock_value[0] += 0.25
         release_load.set()
 
-        assert producer_done.wait(timeout=2.0)
-        assert waiter_done.wait(timeout=2.0)
-        tp.join(timeout=1.0)
-        tw.join(timeout=1.0)
+        assert producer_done.wait(timeout=synchronization_timeout(2.0))
+        assert waiter_done.wait(timeout=synchronization_timeout(2.0))
+        tp.join(timeout=synchronization_timeout(1.0))
+        tw.join(timeout=synchronization_timeout(1.0))
         assert not tp.is_alive()
         assert not tw.is_alive()
 
@@ -367,7 +368,7 @@ def test_cancelled_load_waiter_retries_instead_of_inheriting_cancel(exc_class):
 
     def cancelled_factory():
         load_started.set()
-        release_cancel.wait(timeout=2.0)
+        release_cancel.wait(timeout=synchronization_timeout(2.0))
         raise exc_class("producer cancelled")
 
     def good_factory():
@@ -385,15 +386,15 @@ def test_cancelled_load_waiter_retries_instead_of_inheriting_cancel(exc_class):
 
     ta = threading.Thread(target=cancelled_loader)
     ta.start()
-    assert load_started.wait(timeout=1.0)
+    assert load_started.wait(timeout=synchronization_timeout(1.0))
 
     tb = threading.Thread(target=waiting_loader)
     tb.start()
     time.sleep(0.05)
 
     release_cancel.set()
-    ta.join(timeout=2.0)
-    tb.join(timeout=2.0)
+    ta.join(timeout=synchronization_timeout(2.0))
+    tb.join(timeout=synchronization_timeout(2.0))
 
     assert not ta.is_alive()
     assert not tb.is_alive()
@@ -424,7 +425,7 @@ def test_waiter_cancel_check_unblocks_while_producer_still_loading():
 
     def slow_factory():
         producer_started.set()
-        release_producer.wait(timeout=2.0)
+        release_producer.wait(timeout=synchronization_timeout(2.0))
         return "loaded"
 
     def producer():
@@ -446,14 +447,14 @@ def test_waiter_cancel_check_unblocks_while_producer_still_loading():
 
     tp = threading.Thread(target=producer)
     tp.start()
-    assert producer_started.wait(timeout=1.0)
+    assert producer_started.wait(timeout=synchronization_timeout(1.0))
 
     tw = threading.Thread(target=waiter)
     tw.start()
     time.sleep(0.05)  # let waiter enter its poll loop
 
     cancel_waiter.set()
-    tw.join(timeout=2.0)
+    tw.join(timeout=synchronization_timeout(2.0))
     assert not tw.is_alive(), "waiter did not unwind after cancel"
     assert len(waiter_error) == 1
 
@@ -461,7 +462,7 @@ def test_waiter_cancel_check_unblocks_while_producer_still_loading():
     # alone, and the shared load must finish for its own caller.
     assert tp.is_alive(), "producer must still be loading"
     release_producer.set()
-    tp.join(timeout=2.0)
+    tp.join(timeout=synchronization_timeout(2.0))
     assert not tp.is_alive()
     assert values == ["loaded"]
 
@@ -491,7 +492,7 @@ def test_failed_load_waiter_does_not_evict_recreated_entry():
         release_count[0] += 1
         if release_count[0] == 1:
             # First release is B's failed-load release. Wait for C.
-            assert c_installed.wait(timeout=2.0), "C never installed entry"
+            assert c_installed.wait(timeout=synchronization_timeout(2.0)), "C never installed entry"
         return original_release(*args, **kwargs)
 
     cache._release_entry = gated_release
@@ -501,7 +502,7 @@ def test_failed_load_waiter_does_not_evict_recreated_entry():
 
     def bad_factory():
         bad_started.set()
-        release_bad.wait(timeout=2.0)
+        release_bad.wait(timeout=synchronization_timeout(2.0))
         raise RuntimeError("boom")
 
     a_exc = []
@@ -529,7 +530,7 @@ def test_failed_load_waiter_does_not_evict_recreated_entry():
 
     ta = threading.Thread(target=thread_a)
     ta.start()
-    assert bad_started.wait(timeout=1.0)
+    assert bad_started.wait(timeout=synchronization_timeout(1.0))
 
     tb = threading.Thread(target=thread_b)
     tb.start()
@@ -539,7 +540,7 @@ def test_failed_load_waiter_does_not_evict_recreated_entry():
 
     # Let A's factory raise and abandon the entry.
     release_bad.set()
-    ta.join(timeout=2.0)
+    ta.join(timeout=synchronization_timeout(2.0))
     assert not ta.is_alive()
     assert len(a_exc) == 1
 
@@ -553,7 +554,7 @@ def test_failed_load_waiter_does_not_evict_recreated_entry():
     # Release B; with the bug it decrements new_entry.refcount; with the
     # fix it's a no-op because new_entry is not the entry B acquired.
     c_installed.set()
-    tb.join(timeout=2.0)
+    tb.join(timeout=synchronization_timeout(2.0))
     assert not tb.is_alive()
     assert len(b_exc) == 1
     assert not b_started.is_set()

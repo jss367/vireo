@@ -9,6 +9,7 @@ import time
 import pytest
 from services import search_lanes
 from services.search_lanes import SearchLanes
+from testing.waits import synchronization_timeout
 
 
 def test_newer_claim_supersedes_older_on_the_same_lane_only():
@@ -76,7 +77,7 @@ def test_newer_claim_interrupts_a_running_statement():
     worker.start()
     time.sleep(0.2)
     lanes.claim("page:grid", 2)
-    worker.join(timeout=10)
+    worker.join(timeout=synchronization_timeout(10))
     assert not worker.is_alive()
     assert search_lanes.is_superseded_interrupt(outcome["error"], superseded)
     assert outcome["seconds"] < 5

@@ -3,6 +3,7 @@ import contextlib
 import os
 
 from PIL import Image
+from testing.waits import synchronization_timeout
 
 
 def _make_jpeg(path, width, height):
@@ -25,6 +26,7 @@ def _wait_for_backfill_terminal(runner, timeout=60.0, poll=0.05):
     Distinguishes "job never appeared" from "job never completed" so
     failures point at the right cause.
     """
+    timeout = synchronization_timeout(timeout)
     import time
     deadline = time.time() + timeout
     last_seen = None
@@ -1094,6 +1096,7 @@ def _wait_for_backfill_status(runner, statuses, timeout=30.0, poll=0.02):
     (``pausing`` -> ``paused``) that ``_wait_for_backfill_terminal`` would
     poll straight past.
     """
+    timeout = synchronization_timeout(timeout)
     import time
     deadline = time.time() + timeout
     last_seen = None
@@ -1191,14 +1194,14 @@ def test_backfill_pause_parks_between_rows_and_resumes(
             first_call_started.set()
             # Hold row 1 inside the extractor so the test can request the
             # pause while the worker is past its checkpoint for this row.
-            assert release_first_call.wait(timeout=30), "test never released row 1"
+            assert release_first_call.wait(timeout=synchronization_timeout(30)), "test never released row 1"
         return real_extract(*args, **kwargs)
 
     monkeypatch.setattr(scanner, "extract_working_copy", gated_extract)
 
     _start_backfill(app)
 
-    assert first_call_started.wait(timeout=30), "backfill never started extracting"
+    assert first_call_started.wait(timeout=synchronization_timeout(30)), "backfill never started extracting"
     job_id = [
         j for j in app._job_runner.list_jobs()
         if j["type"] == "working_copy_backfill"
@@ -1274,14 +1277,14 @@ def test_backfill_skips_row_when_id_reused_during_pause(
             is_first = len(calls) == 1
         if is_first:
             first_call_started.set()
-            assert release_first_call.wait(timeout=30), "test never released row 1"
+            assert release_first_call.wait(timeout=synchronization_timeout(30)), "test never released row 1"
         return real_extract(*args, **kwargs)
 
     monkeypatch.setattr(scanner, "extract_working_copy", gated_extract)
 
     _start_backfill(app)
 
-    assert first_call_started.wait(timeout=30), "backfill never started extracting"
+    assert first_call_started.wait(timeout=synchronization_timeout(30)), "backfill never started extracting"
     job_id = [
         j for j in app._job_runner.list_jobs()
         if j["type"] == "working_copy_backfill"
@@ -1485,7 +1488,7 @@ def test_backfill_discards_orphan_when_id_reused_during_extraction(
         # Hold here so the test can delete the row and reinsert a
         # different file at the same reused id before the guarded
         # UPDATE runs — the exact window this fix closes.
-        assert release_extract.wait(timeout=30), (
+        assert release_extract.wait(timeout=synchronization_timeout(30)), (
             "test never released extraction"
         )
         return result
@@ -1494,7 +1497,7 @@ def test_backfill_discards_orphan_when_id_reused_during_extraction(
 
     _start_backfill(app)
 
-    assert extract_started.wait(timeout=30), "extraction never started"
+    assert extract_started.wait(timeout=synchronization_timeout(30)), "extraction never started"
 
     # Row was written; now swap the identity while the worker is parked
     # between the write and the guarded UPDATE. INTEGER PRIMARY KEY
@@ -2595,7 +2598,7 @@ def test_extract_update_rejects_companion_swap_during_decode(
         # Hold so the test can swap ``companion_path`` between the
         # atomic write and the identity-guarded UPDATE — the exact
         # window this guard was extended to cover.
-        assert release_extract.wait(timeout=30), (
+        assert release_extract.wait(timeout=synchronization_timeout(30)), (
             "test never released extraction"
         )
         return result
@@ -2603,7 +2606,7 @@ def test_extract_update_rejects_companion_swap_during_decode(
     monkeypatch.setattr(scanner, "extract_working_copy", gated_extract)
 
     _start_backfill(app)
-    assert extract_started.wait(timeout=30), "extraction never started"
+    assert extract_started.wait(timeout=synchronization_timeout(30)), "extraction never started"
 
     from db import Database
     db_path = app.config["DB_PATH"]
@@ -2661,7 +2664,7 @@ def test_extract_update_rejects_folder_relocation_during_decode(
     def gated_extract(*args, **kwargs):
         result = real_extract(*args, **kwargs)
         extract_started.set()
-        assert release_extract.wait(timeout=30), (
+        assert release_extract.wait(timeout=synchronization_timeout(30)), (
             "test never released extraction"
         )
         return result
@@ -2669,7 +2672,7 @@ def test_extract_update_rejects_folder_relocation_during_decode(
     monkeypatch.setattr(scanner, "extract_working_copy", gated_extract)
 
     _start_backfill(app)
-    assert extract_started.wait(timeout=30), "extraction never started"
+    assert extract_started.wait(timeout=synchronization_timeout(30)), "extraction never started"
 
     from db import Database
     db_path = app.config["DB_PATH"]
@@ -2730,7 +2733,7 @@ def test_orphan_cleanup_preserves_replacement_publishers_bytes(
     def gated_extract(*args, **kwargs):
         result = real_extract(*args, **kwargs)
         extract_started.set()
-        assert release_extract.wait(timeout=30), (
+        assert release_extract.wait(timeout=synchronization_timeout(30)), (
             "test never released extraction"
         )
         return result
@@ -2738,7 +2741,7 @@ def test_orphan_cleanup_preserves_replacement_publishers_bytes(
     monkeypatch.setattr(scanner, "extract_working_copy", gated_extract)
 
     _start_backfill(app)
-    assert extract_started.wait(timeout=30), "extraction never started"
+    assert extract_started.wait(timeout=synchronization_timeout(30)), "extraction never started"
 
     from db import Database
     db_path = app.config["DB_PATH"]
@@ -2915,7 +2918,7 @@ def test_orphan_cleanup_preserves_racing_publisher_uncommitted_bytes(
         # Hold BEFORE the scanner's guard reacquire so the test can
         # simulate a racing publisher atomically replacing ``wc_abs``
         # in the exact window this fix closes.
-        assert release_after_race.wait(timeout=30), (
+        assert release_after_race.wait(timeout=synchronization_timeout(30)), (
             "test never released post-extract"
         )
         return result
@@ -2923,7 +2926,7 @@ def test_orphan_cleanup_preserves_racing_publisher_uncommitted_bytes(
     monkeypatch.setattr(scanner, "extract_working_copy", gated_extract)
 
     _start_backfill(app)
-    assert extract_returned.wait(timeout=30), "extraction never returned"
+    assert extract_returned.wait(timeout=synchronization_timeout(30)), "extraction never returned"
 
     from db import Database
     db_path = app.config["DB_PATH"]
@@ -4598,7 +4601,7 @@ def test_success_update_rejects_stale_overwrite_before_commit(
     def gated_extract(*args, **kwargs):
         result = real_extract(*args, **kwargs)
         extract_returned.set()
-        assert release_after_race.wait(timeout=30), (
+        assert release_after_race.wait(timeout=synchronization_timeout(30)), (
             "test never released post-extract"
         )
         return result
@@ -4606,7 +4609,7 @@ def test_success_update_rejects_stale_overwrite_before_commit(
     monkeypatch.setattr(scanner, "extract_working_copy", gated_extract)
 
     _start_backfill(app)
-    assert extract_returned.wait(timeout=30), "extraction never returned"
+    assert extract_returned.wait(timeout=synchronization_timeout(30)), "extraction never returned"
 
     # Atomically replace ``wc_abs`` with a stale extractor's bytes.
     # The row identity is UNCHANGED — this is not the id-reuse case
@@ -4692,7 +4695,7 @@ def test_orphan_cleanup_unlinks_stale_bytes_over_replacement_row(
     def gated_extract(*args, **kwargs):
         result = real_extract(*args, **kwargs)
         extract_returned.set()
-        assert release_after_race.wait(timeout=30), (
+        assert release_after_race.wait(timeout=synchronization_timeout(30)), (
             "test never released post-extract"
         )
         return result
@@ -4700,7 +4703,7 @@ def test_orphan_cleanup_unlinks_stale_bytes_over_replacement_row(
     monkeypatch.setattr(scanner, "extract_working_copy", gated_extract)
 
     _start_backfill(app)
-    assert extract_returned.wait(timeout=30), "extraction never returned"
+    assert extract_returned.wait(timeout=synchronization_timeout(30)), "extraction never returned"
 
     # Simulate: id reuse (Row_B replaces Row_A) AND Row_B has
     # already committed its ``working_copy_path=wc_rel``. The bytes

@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pytest
+from testing.waits import synchronization_timeout
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -122,12 +123,12 @@ def test_equal_key_callers_compute_once_and_waiter_rereads_disk(tmp_path):
         with calls_lock:
             calls += 1
         producer_started.set()
-        assert release_producer.wait(2)
+        assert release_producer.wait(synchronization_timeout(2))
         return _payload()
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         first = pool.submit(cache.get_or_compute, identity, compute)
-        assert producer_started.wait(2)
+        assert producer_started.wait(synchronization_timeout(2))
         second = pool.submit(cache.get_or_compute, identity, compute)
         release_producer.set()
         first_value, _ = first.result(timeout=2)
@@ -192,7 +193,7 @@ def test_producer_cancellation_wakes_waiter_and_waiter_takes_over(tmp_path):
 
     def cancelled_compute():
         producer_started.set()
-        assert cancel_producer.wait(2)
+        assert cancel_producer.wait(synchronization_timeout(2))
         raise ClassificationCancelled("cancelled")
 
     def healthy_compute():
@@ -203,7 +204,7 @@ def test_producer_cancellation_wakes_waiter_and_waiter_takes_over(tmp_path):
         producer = pool.submit(
             cache.get_or_compute, identity, cancelled_compute
         )
-        assert producer_started.wait(2)
+        assert producer_started.wait(synchronization_timeout(2))
         waiter = pool.submit(cache.get_or_compute, identity, healthy_compute)
         cancel_producer.set()
         with pytest.raises(ClassificationCancelled):
@@ -223,12 +224,12 @@ def test_cancelled_waiter_does_not_cancel_shared_producer(tmp_path):
 
     def compute():
         producer_started.set()
-        assert release_producer.wait(2)
+        assert release_producer.wait(synchronization_timeout(2))
         return _payload()
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         producer = pool.submit(cache.get_or_compute, identity, compute)
-        assert producer_started.wait(2)
+        assert producer_started.wait(synchronization_timeout(2))
         waiter = pool.submit(
             cache.get_or_compute,
             identity,
@@ -292,7 +293,7 @@ def test_healed_producer_handoff_skips_waiter_embedding_dim(tmp_path):
 
     def self_healing_compute():
         producer_started.set()
-        assert release_producer.wait(2)
+        assert release_producer.wait(synchronization_timeout(2))
         # Producer publishes a wider payload than the waiter's pre-heal
         # image encoder expects (e.g. text encoder was healed to a 768-wide
         # revision while the waiter still holds a 512-wide image session).
@@ -305,7 +306,7 @@ def test_healed_producer_handoff_skips_waiter_embedding_dim(tmp_path):
             self_healing_compute,
             identity_after=lambda: healed_identity,
         )
-        assert producer_started.wait(2)
+        assert producer_started.wait(synchronization_timeout(2))
         # Waiter joins on the pre-heal identity and carries the pre-heal
         # image-encoder width. If we validated the healed payload against
         # this stale dim we would raise and unlink the valid payload.
@@ -348,7 +349,7 @@ def test_cancel_triggered_retry_still_enforces_embedding_dim(tmp_path):
 
     def cancelled_compute():
         producer_started.set()
-        assert cancel_producer.wait(2)
+        assert cancel_producer.wait(synchronization_timeout(2))
         raise ClassificationCancelled("cancelled")
 
     def wrong_dim_compute():
@@ -360,7 +361,7 @@ def test_cancel_triggered_retry_still_enforces_embedding_dim(tmp_path):
         producer = pool.submit(
             cache.get_or_compute, identity, cancelled_compute,
         )
-        assert producer_started.wait(2)
+        assert producer_started.wait(synchronization_timeout(2))
         waiter = pool.submit(
             cache.get_or_compute,
             identity,
@@ -684,7 +685,7 @@ def test_producer_pause_wakes_waiter_and_waiter_takes_over(tmp_path):
 
     def paused_compute():
         producer_started.set()
-        assert pause_producer.wait(2)
+        assert pause_producer.wait(synchronization_timeout(2))
         cache.checkpoint_for(identity).save(_rows(1))
         raise ClassifierLoadPaused("classifier load paused")
 
@@ -696,7 +697,7 @@ def test_producer_pause_wakes_waiter_and_waiter_takes_over(tmp_path):
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         producer = pool.submit(cache.get_or_compute, identity, paused_compute)
-        assert producer_started.wait(2)
+        assert producer_started.wait(synchronization_timeout(2))
         waiter = pool.submit(cache.get_or_compute, identity, healthy_compute)
         pause_producer.set()
         with pytest.raises(ClassifierLoadPaused):

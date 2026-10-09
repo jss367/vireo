@@ -2,6 +2,7 @@ import os
 import sys
 
 import pytest
+from testing.waits import synchronization_timeout
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -1192,7 +1193,7 @@ def test_extract_appimage_once_serializes_concurrent_calls(tmp_path, monkeypatch
         # concurrent caller has time to enter _extract_appimage_once. Without
         # the per-binary lock, that second caller would rmtree the extract_dir
         # while this thread's fake_run is still writing into it.
-        assert allow_finish.wait(timeout=5.0), "test lock never released"
+        assert allow_finish.wait(timeout=synchronization_timeout(5.0)), "test lock never released"
         root = os.path.join(kwargs["cwd"], "squashfs-root")
         os.makedirs(root, exist_ok=True)
         apprun = os.path.join(root, "AppRun")
@@ -1211,14 +1212,14 @@ def test_extract_appimage_once_serializes_concurrent_calls(tmp_path, monkeypatch
     t1 = threading.Thread(target=worker, args=("a",))
     t2 = threading.Thread(target=worker, args=("b",))
     t1.start()
-    assert subprocess_started.wait(timeout=5.0), "first extraction never started"
+    assert subprocess_started.wait(timeout=synchronization_timeout(5.0)), "first extraction never started"
     t2.start()
     # Give the second thread a moment to reach the lock — if the lock is
     # missing, it will race ahead and rmtree the extract_dir the first
     # thread is still populating.
     allow_finish.set()
-    t1.join(timeout=5.0)
-    t2.join(timeout=5.0)
+    t1.join(timeout=synchronization_timeout(5.0))
+    t2.join(timeout=synchronization_timeout(5.0))
 
     assert not t1.is_alive() and not t2.is_alive()
     assert call_count == 1, "extraction subprocess must run exactly once"

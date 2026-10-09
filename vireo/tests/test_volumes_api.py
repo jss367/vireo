@@ -9,6 +9,8 @@ import threading
 import time
 from unittest.mock import MagicMock, patch
 
+from testing.waits import synchronization_timeout
+
 
 def test_volumes_macos_scans_volumes_dir(app_and_db):
     app, _ = app_and_db
@@ -116,7 +118,7 @@ def test_volumes_windows_serializes_set_error_mode(app_and_db):
             # this much longer than the assertion sleep so slow test hosts do
             # not release thread 1 by timeout before the check runs.
             inside_critical.set()
-            release.wait(timeout=30.0)
+            release.wait(timeout=synchronization_timeout(30.0))
         # Real SetErrorMode returns the previous mode. With the lock,
         # the only previous mode any caller observes is BASE_MODE.
         return BASE_MODE
@@ -146,7 +148,7 @@ def test_volumes_windows_serializes_set_error_mode(app_and_db):
         # Wait until thread 1 is inside the protected section before
         # starting thread 2 — without the lock this is the interleaving
         # window where thread 2 would observe thread 1's temporary mode.
-        assert inside_critical.wait(timeout=2.0)
+        assert inside_critical.wait(timeout=synchronization_timeout(2.0))
         t2.start()
         # Give thread 2 a real chance to reach the critical section, then
         # assert no second save has happened *before* releasing thread 1.
@@ -164,8 +166,8 @@ def test_volumes_windows_serializes_set_error_mode(app_and_db):
             f"the critical section is not serialized: {before_release!r}"
         )
         release.set()
-        t1.join(timeout=2.0)
-        t2.join(timeout=2.0)
+        t1.join(timeout=synchronization_timeout(2.0))
+        t2.join(timeout=synchronization_timeout(2.0))
 
     assert results == [200, 200]
     # Four calls total: two save-restore pairs. With the lock, the calls

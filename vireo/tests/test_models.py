@@ -11,6 +11,7 @@ import os
 import sys
 
 import pytest
+from testing.waits import synchronization_timeout
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -3896,7 +3897,7 @@ def test_concurrent_label_description_heals_publish_whole_json(
         t.join(timeout=30)
         assert not t.is_alive()
     stop.set()
-    reader.join(timeout=5)
+    reader.join(timeout=synchronization_timeout(5))
 
     # Neither writer may fail because the other took its staging file.
     assert results == [True, True], f"a concurrent heal failed: {results}"

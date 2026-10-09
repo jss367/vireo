@@ -10,6 +10,7 @@ import threading
 import time
 
 from PIL import Image
+from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client
 
 
@@ -160,7 +161,7 @@ def test_scan_job_cancel_is_forwarded_to_scanner(app_and_db, tmp_path, monkeypat
     resp = client.post("/api/jobs/scan", json={"roots": [root_a, root_b]})
     assert resp.status_code == 200, resp.get_json()
     job_id = resp.get_json()["job_id"]
-    assert scan_started.wait(timeout=2.0), "scan job did not start"
+    assert scan_started.wait(timeout=synchronization_timeout(2.0)), "scan job did not start"
 
     cancel_resp = client.post(f"/api/jobs/{job_id}/cancel")
     assert cancel_resp.status_code == 200, cancel_resp.get_json()

@@ -8,6 +8,7 @@ import sys
 import threading
 
 import pytest
+from testing.waits import synchronization_timeout
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -7258,7 +7259,7 @@ def test_pipeline_snapshot_resolution_failure_does_not_hang(tmp_path, monkeypatc
 
     t = threading.Thread(target=run, daemon=True)
     t.start()
-    t.join(60)
+    t.join(synchronization_timeout(60))
     assert not t.is_alive(), "pipeline hung waiting on collection_ready"
     assert "[collection] Fatal" in str(outcome.get("error"))
 
@@ -12461,7 +12462,7 @@ def test_thumbnail_setup_failure_does_not_deadlock_scanner(tmp_path, monkeypatch
 
     worker = threading.Thread(target=_run, daemon=True)
     worker.start()
-    assert done.wait(60), (
+    assert done.wait(synchronization_timeout(60)), (
         "run_pipeline_job did not terminate — the scanner is deadlocked on "
         "scan_to_thumb.put() after the thumbnail consumer died"
     )

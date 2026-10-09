@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
+from testing.waits import synchronization_timeout
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -480,7 +481,7 @@ def test_missing_label_descriptions_spawns_async_heal(tmp_path):
 
     heal_gate = __import__("threading").Event()
     def _fake_ensure(dir_arg, model_str, progress_callback=None):
-        heal_gate.wait(timeout=5)
+        heal_gate.wait(timeout=synchronization_timeout(5))
         assert dir_arg == str(model_dir)
         with open(os.path.join(dir_arg, "label_descriptions.json"), "w") as f:
             json.dump({"Sturnus vulgaris": "European Starling, Bird"}, f)
@@ -1024,7 +1025,7 @@ def test_classifier_never_reads_a_repair_it_just_spawned(tmp_path):
     def _slow_create_session(*args, **kwargs):
         # Session init is where the real race lives: the heal lands while
         # the classifier is still constructing.
-        heal_done.wait(timeout=5)
+        heal_done.wait(timeout=synchronization_timeout(5))
         return fake_session
 
     model_str = "hf-hub:timm/eva02_large_patch14_clip_336.merged2b_ft_inat21"

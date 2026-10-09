@@ -9,6 +9,7 @@ import sys
 
 import numpy as np
 import pytest
+from testing.waits import synchronization_timeout
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -890,7 +891,7 @@ def test_ensure_weights_atomic_and_serialized(tmp_path, monkeypatch):
         # probe the final path. With atomic replace + lock it must either
         # not exist, or be the full 4096 bytes — never anything in between.
         nonlocal observed_partial
-        download_started.wait(timeout=2.0)
+        download_started.wait(timeout=synchronization_timeout(2.0))
         for _ in range(100):
             if dest_path.is_file():
                 size = dest_path.stat().st_size

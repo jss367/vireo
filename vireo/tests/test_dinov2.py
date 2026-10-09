@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
+from testing.waits import synchronization_timeout
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -162,7 +163,7 @@ def test_concurrent_first_load_creates_only_one_session(tmp_path):
     results = []
 
     def worker():
-        start_gate.wait(timeout=2.0)
+        start_gate.wait(timeout=synchronization_timeout(2.0))
         results.append(dino_embed._get_dinov2_session("vit-b14"))
 
     # Apply patches once on the main thread, not from inside each worker.
@@ -180,8 +181,8 @@ def test_concurrent_first_load_creates_only_one_session(tmp_path):
         t1.start()
         t2.start()
         start_gate.set()
-        t1.join(timeout=3.0)
-        t2.join(timeout=3.0)
+        t1.join(timeout=synchronization_timeout(3.0))
+        t2.join(timeout=synchronization_timeout(3.0))
 
     assert not t1.is_alive(), "first thread did not finish"
     assert not t2.is_alive(), "second thread did not finish"

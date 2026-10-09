@@ -2,6 +2,8 @@ import os
 import sys
 import time
 
+from testing.waits import synchronization_timeout
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
@@ -151,7 +153,7 @@ def test_api_new_images_returns_pending_when_walk_is_slow(app_and_db, monkeypatc
         started.set()
         # Block until the test releases us, so the kickoff thread is still
         # in flight when the request returns.
-        release.wait(timeout=5)
+        release.wait(timeout=synchronization_timeout(5))
         return real_count(*args, **kwargs)
 
     monkeypatch.setattr(new_images_module, "count_new_images_for_workspace", slow_count)
@@ -171,7 +173,7 @@ def test_api_new_images_returns_pending_when_walk_is_slow(app_and_db, monkeypatc
         # on loaded CI runners it can still be inside Database.__init__ when
         # the endpoint's 500ms wait times out and returns pending. Give the
         # worker a bounded moment to actually reach slow_count.
-        assert started.wait(timeout=2.0)
+        assert started.wait(timeout=synchronization_timeout(2.0))
     finally:
         # Let the background thread finish before pytest tears down tmp_path,
         # otherwise it walks a deleted directory tree.
@@ -192,7 +194,7 @@ def test_api_new_images_defers_walk_during_folder_move(app_and_db, query):
     release = threading.Event()
     move_id = app._job_runner.start(
         "move-folder",
-        lambda _job: release.wait(timeout=5),
+        lambda _job: release.wait(timeout=synchronization_timeout(5)),
         workspace_id=ws_id,
     )
     client = app.test_client()
@@ -396,7 +398,7 @@ def test_api_new_images_records_job_and_history_on_cache_cold(app_and_db, monkey
 
     def slow_count(*args, **kwargs):
         started.set()
-        release.wait(timeout=5)
+        release.wait(timeout=synchronization_timeout(5))
         return real_count(*args, **kwargs)
 
     monkeypatch.setattr(
@@ -717,7 +719,7 @@ def test_post_snapshot_reuses_walk_across_polls(app_and_db, monkeypatch):
         with lock:
             call_count["n"] += 1
         started.set()
-        release.wait(timeout=5)
+        release.wait(timeout=synchronization_timeout(5))
         return real_count(*args, **kwargs)
 
     monkeypatch.setattr(
@@ -729,7 +731,7 @@ def test_post_snapshot_reuses_walk_across_polls(app_and_db, monkeypatch):
             # First POST kicks off the walk; walk is blocked in-flight.
             first = client.post("/api/workspaces/active/new-images/snapshot")
             assert first.status_code == 202
-            assert started.wait(timeout=2.0)
+            assert started.wait(timeout=synchronization_timeout(2.0))
             calls_after_first = call_count["n"]
 
             # A poll arriving before the walk finishes must coalesce, not
@@ -779,7 +781,7 @@ def test_post_snapshot_coalesces_onto_inflight_navbar_walk(
 
     def inflight_navbar_compute():
         walk_started.set()
-        walk_release.wait(timeout=5)
+        walk_release.wait(timeout=synchronization_timeout(5))
         return {
             "new_count": 1,
             "per_root": [{"folder_id": 1, "path": str(folder), "new_count": 1}],
@@ -793,7 +795,7 @@ def test_post_snapshot_coalesces_onto_inflight_navbar_walk(
 
     cache = get_shared_cache()
     cache.kickoff_compute(db._db_path, ws_id, inflight_navbar_compute)
-    assert walk_started.wait(timeout=2), "navbar walk never started"
+    assert walk_started.wait(timeout=synchronization_timeout(2)), "navbar walk never started"
     monkeypatch.setattr(
         new_images_module, "count_new_images_for_workspace",
         unexpected_second_walk,
@@ -841,7 +843,7 @@ def test_post_snapshot_surfaces_async_error_without_retry_loop(
     def slow_boom(*args, **kwargs):
         call_count["n"] += 1
         started.set()
-        release.wait(timeout=5)
+        release.wait(timeout=synchronization_timeout(5))
         raise RuntimeError("disk unreachable")
 
     monkeypatch.setattr(
@@ -852,7 +854,7 @@ def test_post_snapshot_surfaces_async_error_without_retry_loop(
         with app.test_client() as client:
             first = client.post("/api/workspaces/active/new-images/snapshot")
             assert first.status_code == 202
-            assert started.wait(timeout=2.0)
+            assert started.wait(timeout=synchronization_timeout(2.0))
             assert call_count["n"] == 1
 
             release.set()
@@ -951,7 +953,7 @@ def test_post_snapshot_returns_pending_when_cache_is_incomplete(app_and_db, monk
 
     def slow_count(*args, **kwargs):
         started.set()
-        release.wait(timeout=5)
+        release.wait(timeout=synchronization_timeout(5))
         return real_count(*args, **kwargs)
 
     monkeypatch.setattr(
@@ -968,7 +970,7 @@ def test_post_snapshot_returns_pending_when_cache_is_incomplete(app_and_db, monk
             # show real numbers instead of an opaque spinner.
             assert "files_checked" in body
             assert "new_count_so_far" in body
-            assert started.wait(timeout=2.0)
+            assert started.wait(timeout=synchronization_timeout(2.0))
     finally:
         release.set()
 
@@ -994,7 +996,7 @@ def test_post_snapshot_202_reports_live_walk_progress(app_and_db, monkeypatch):
             "POST-spawned walks must wire the transparency progress callback"
         )
         progress_callback(1234, 56)
-        release.wait(timeout=5)
+        release.wait(timeout=synchronization_timeout(5))
         return {
             "new_count": 1,
             "per_root": [],
@@ -1045,7 +1047,7 @@ def test_post_snapshot_registers_job_when_walk_needed(
 
     def slow_count(*args, **kwargs):
         started.set()
-        release.wait(timeout=5)
+        release.wait(timeout=synchronization_timeout(5))
         return real_count(*args, **kwargs)
 
     monkeypatch.setattr(
@@ -1056,7 +1058,7 @@ def test_post_snapshot_registers_job_when_walk_needed(
         with app.test_client() as client:
             resp = client.post("/api/workspaces/active/new-images/snapshot")
             assert resp.status_code == 202
-            assert started.wait(timeout=2.0)
+            assert started.wait(timeout=synchronization_timeout(2.0))
             deadline = time.monotonic() + 2.0
             walk_jobs = []
             while time.monotonic() < deadline:
@@ -1393,7 +1395,7 @@ def test_api_new_images_polls_do_not_wait_on_an_inflight_walk(app_and_db, monkey
 
     def slow_walk(*args, **kwargs):
         started.set()
-        release.wait(10)
+        release.wait(synchronization_timeout(10))
         return {
             "new_count": 1, "per_root": [], "sample": [str(root / "IMG.JPG")],
             "sample_complete": True, "unreachable_roots": [],
@@ -1404,7 +1406,7 @@ def test_api_new_images_polls_do_not_wait_on_an_inflight_walk(app_and_db, monkey
     try:
         first = client.get("/api/workspaces/active/new-images").get_json()
         assert first.get("pending") is True
-        assert started.wait(2)
+        assert started.wait(synchronization_timeout(2))
 
         t0 = time.monotonic()
         second = client.get("/api/workspaces/active/new-images").get_json()
@@ -1631,7 +1633,7 @@ def test_recheck_forgets_a_wedged_root_walk(app_and_db, monkeypatch):
     monkeypatch.setattr(new_images_module, "_FORGOTTEN_STALLED_WALKS", set())
 
     release = threading.Event()
-    wedged = threading.Thread(target=lambda: release.wait(10), daemon=True)
+    wedged = threading.Thread(target=lambda: release.wait(synchronization_timeout(10)), daemon=True)
     wedged.start()
     stalled[root] = wedged
     paths.add(root)
@@ -1644,7 +1646,7 @@ def test_recheck_forgets_a_wedged_root_walk(app_and_db, monkeypatch):
         assert wedged in new_images_module._FORGOTTEN_STALLED_WALKS
     finally:
         release.set()
-        wedged.join(5)
+        wedged.join(synchronization_timeout(5))
 
 
 @pytest.mark.parametrize("job_type", [
@@ -1659,7 +1661,7 @@ def test_automatic_discovery_defers_to_processing_then_recovers(app_and_db, job_
     _touch_image(str(root / "IMG.JPG"))
     db.add_folder(str(root))
     release = threading.Event()
-    job_id = app._job_runner.start(job_type, lambda _: release.wait(5), workspace_id=ws_id)
+    job_id = app._job_runner.start(job_type, lambda _: release.wait(synchronization_timeout(5)), workspace_id=ws_id)
     client = app.test_client()
     try:
         response = client.get("/api/workspaces/active/new-images").get_json()
@@ -1691,7 +1693,7 @@ def test_manual_recheck_bypasses_foreground_job_deferral(app_and_db, snapshot):
     db.add_folder(str(root))
     release = threading.Event()
     job_id = app._job_runner.start(
-        "pipeline", lambda _: release.wait(5), workspace_id=ws_id,
+        "pipeline", lambda _: release.wait(synchronization_timeout(5)), workspace_id=ws_id,
     )
     client = app.test_client()
     try:

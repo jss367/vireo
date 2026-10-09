@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from page_scripts import page_with_scripts
+from testing.waits import synchronization_timeout
 
 
 def test_api_photos_default(app_and_db):
@@ -2079,7 +2080,7 @@ def test_concurrent_preview_cache_misses_decode_once(
         with count_lock:
             call_count += 1
         started.set()
-        assert release.wait(5), "test did not release preview producer"
+        assert release.wait(synchronization_timeout(5)), "test did not release preview producer"
         return Image.new("RGB", (1920, 1280), (60, 100, 140))
 
     monkeypatch.setattr(image_loader, "load_image", blocking_load)
@@ -2091,7 +2092,7 @@ def test_concurrent_preview_cache_misses_decode_once(
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         first = pool.submit(request_preview)
-        assert started.wait(5), "preview producer did not start"
+        assert started.wait(synchronization_timeout(5)), "preview producer did not start"
         with app.test_client() as speculative_client:
             speculative = speculative_client.get(
                 f"/photos/{photo_id}/preview?size=1920&prefetch=1",
@@ -2152,7 +2153,7 @@ def test_failed_preview_flight_wakes_waiter_and_next_request_retries(
             current = call_count
         if current == 1:
             started.set()
-            assert release.wait(5), "test did not release failed producer"
+            assert release.wait(synchronization_timeout(5)), "test did not release failed producer"
             return None
         return Image.new("RGB", (1920, 1280), (20, 40, 60))
 
@@ -2166,7 +2167,7 @@ def test_failed_preview_flight_wakes_waiter_and_next_request_retries(
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         first = pool.submit(request_status)
-        assert started.wait(5), "failed preview producer did not start"
+        assert started.wait(synchronization_timeout(5)), "failed preview producer did not start"
         second = pool.submit(request_status)
         time.sleep(0.1)
         release.set()
@@ -2538,7 +2539,7 @@ def test_concurrent_original_cache_misses_extract_once(
         with calls_lock:
             calls += 1
         producer_started.set()
-        assert release_producer.wait(timeout=5)
+        assert release_producer.wait(timeout=synchronization_timeout(5))
         Image.new("RGB", (800, 600), (180, 180, 180)).save(output, "JPEG")
         return True
 
@@ -2551,7 +2552,7 @@ def test_concurrent_original_cache_misses_extract_once(
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         first = executor.submit(request_original)
-        assert producer_started.wait(timeout=5)
+        assert producer_started.wait(timeout=synchronization_timeout(5))
         second = executor.submit(request_original)
         time.sleep(0.1)
         assert calls == 1
@@ -2612,7 +2613,7 @@ def test_concurrent_noncacheable_original_waiters_use_private_renditions(
             call_number = calls
         if call_number == 1:
             producer_started.set()
-            assert release_producer.wait(timeout=5)
+            assert release_producer.wait(timeout=synchronization_timeout(5))
         Image.new("RGB", (800, 600), color=(90, 120, 150)).save(
             output, "JPEG",
         )
@@ -2655,7 +2656,7 @@ def test_concurrent_noncacheable_original_waiters_use_private_renditions(
 
     with ThreadPoolExecutor(max_workers=3) as executor:
         first = executor.submit(request_original)
-        assert producer_started.wait(timeout=5)
+        assert producer_started.wait(timeout=synchronization_timeout(5))
         second = executor.submit(request_original)
         third = executor.submit(request_original)
         time.sleep(0.1)
@@ -2719,7 +2720,7 @@ def test_failed_original_flight_releases_waiters_and_allows_retry(
             current = calls
         if current == 1:
             producer_started.set()
-            assert release_producer.wait(timeout=5)
+            assert release_producer.wait(timeout=synchronization_timeout(5))
             raise RuntimeError("simulated extraction crash")
         Image.new("RGB", (800, 600), "orange").save(output, "JPEG")
         return True
@@ -2732,7 +2733,7 @@ def test_failed_original_flight_releases_waiters_and_allows_retry(
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         first = executor.submit(request_original)
-        assert producer_started.wait(timeout=5)
+        assert producer_started.wait(timeout=synchronization_timeout(5))
         second = executor.submit(request_original)
         time.sleep(0.1)
         release_producer.set()
@@ -5849,7 +5850,7 @@ def test_paired_raw_original_shares_decode_across_warmup_and_visible(
         with count_lock:
             call_count += 1
         started.set()
-        assert release.wait(5), "test did not release paired RAW producer"
+        assert release.wait(synchronization_timeout(5)), "test did not release paired RAW producer"
         return Image.new("RGB", (800, 600), (180, 70, 30))
 
     monkeypatch.setattr(image_loader, "load_image", blocking_load)
@@ -5863,7 +5864,7 @@ def test_paired_raw_original_shares_decode_across_warmup_and_visible(
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         warmup = pool.submit(fetch, "&prefetch=1")
-        assert started.wait(5), "paired RAW producer did not start"
+        assert started.wait(synchronization_timeout(5)), "paired RAW producer did not start"
         visible = pool.submit(fetch, "")
         time.sleep(0.1)
         assert call_count == 1
@@ -7543,7 +7544,7 @@ def test_interactive_preview_joins_background_warmer(
         with calls_lock:
             calls += 1
         producer_started.set()
-        assert release_producer.wait(timeout=5)
+        assert release_producer.wait(timeout=synchronization_timeout(5))
         return Image.new("RGB", (800, 600), "purple")
 
     monkeypatch.setattr(image_loader, "load_image", blocking_load_image)
@@ -7553,7 +7554,7 @@ def test_interactive_preview_joins_background_warmer(
     )
     assert response.status_code == 200
     job_id = response.get_json()["job_id"]
-    assert producer_started.wait(timeout=5)
+    assert producer_started.wait(timeout=synchronization_timeout(5))
 
     def request_visible_preview():
         with app.test_client() as request_client:

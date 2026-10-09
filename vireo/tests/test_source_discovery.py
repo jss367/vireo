@@ -8,6 +8,7 @@ from pathlib import Path
 import source_discovery
 from image_loader import ScanCancelled
 from PIL import Image
+from testing.waits import synchronization_timeout
 
 
 def _parse(frames):
@@ -107,10 +108,10 @@ def test_closing_the_stream_cancels_running_walkers(monkeypatch):
     parsed = _parse(frames)
     assert parsed[0]["type"] == "policy"
     assert parsed[1]["type"] == "folder_started"
-    assert walker_started.wait(timeout=5)
+    assert walker_started.wait(timeout=synchronization_timeout(5))
 
     gen.close()
-    assert walker_exited.wait(timeout=5), "walker kept running after close"
+    assert walker_exited.wait(timeout=synchronization_timeout(5)), "walker kept running after close"
 
 
 def test_volume_lane_is_shared_across_preview_streams(monkeypatch):
@@ -123,7 +124,7 @@ def test_volume_lane_is_shared_across_preview_streams(monkeypatch):
     def fake_discover(folder, **_kwargs):
         if folder == "/slow/first":
             first_started.set()
-            release_first.wait(timeout=5)
+            release_first.wait(timeout=synchronization_timeout(5))
             first_exited.set()
             raise ScanCancelled("cancelled after filesystem call returned")
         second_started.set()
@@ -139,7 +140,7 @@ def test_volume_lane_is_shared_across_preview_streams(monkeypatch):
     next(first)  # policy
     next(first)  # folder_started
     next(first)  # starts worker, then heartbeat
-    assert first_started.wait(timeout=5)
+    assert first_started.wait(timeout=synchronization_timeout(5))
 
     next(second)  # policy
     assert next(second).startswith(": ping")
@@ -151,7 +152,7 @@ def test_volume_lane_is_shared_across_preview_streams(monkeypatch):
     assert not second_started.is_set()
 
     release_first.set()
-    assert first_exited.wait(timeout=5)
+    assert first_exited.wait(timeout=synchronization_timeout(5))
     started = next(second)
     assert json.loads(started[len("data: "):])["type"] == "folder_started"
     list(second)

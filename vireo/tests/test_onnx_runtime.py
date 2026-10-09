@@ -1,6 +1,7 @@
 """Tests for ONNX Runtime utility module."""
 import numpy as np
 import pytest
+from testing.waits import synchronization_timeout
 
 
 def test_get_providers_returns_list():
@@ -237,7 +238,7 @@ def test_create_session_waits_for_full_inference_budget(tmp_path):
     thread.start()
     try:
         # Construction should be blocked waiting on CPU permits.
-        assert ready_to_construct.wait(timeout=1.0)
+        assert ready_to_construct.wait(timeout=synchronization_timeout(1.0))
         thread.join(timeout=0.5)
         assert thread.is_alive(), (
             "create_session must wait until the full inference budget "
@@ -248,7 +249,7 @@ def test_create_session_waits_for_full_inference_budget(tmp_path):
         # Release the reservation; construction now completes with the
         # full 8-permit grant.
         holder.release()
-        thread.join(timeout=5.0)
+        thread.join(timeout=synchronization_timeout(5.0))
         assert not thread.is_alive()
     finally:
         # Belt-and-braces: if anything went wrong above, don't leave the
@@ -256,7 +257,7 @@ def test_create_session_waits_for_full_inference_budget(tmp_path):
         with contextlib.suppress(Exception):
             holder.release()
         if thread.is_alive():
-            thread.join(timeout=5.0)
+            thread.join(timeout=synchronization_timeout(5.0))
         resource_ledger._set_resource_ledger_for_tests(previous)
 
     assert result.get("error") is None

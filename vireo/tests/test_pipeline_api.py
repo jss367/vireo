@@ -10,6 +10,7 @@ from unittest.mock import patch
 import pytest
 from app import create_app
 from PIL import Image
+from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client
 
 
@@ -2904,6 +2905,7 @@ def test_destination_preview_multiple_managed_archives(setup, tmp_path):
 
 def _wait_for_job(client, job_id, timeout=30.0):
     """Poll the job-status endpoint until the job completes or fails."""
+    timeout = synchronization_timeout(timeout)
     deadline = time.time() + timeout
     while time.time() < deadline:
         resp = client.get(f"/api/jobs/{job_id}")
@@ -3113,7 +3115,7 @@ def test_pipeline_endpoint_forwards_missing_originals_invalidator(
             })
             assert resp.status_code == 200, resp.get_json()
 
-        assert called.wait(timeout=5.0), (
+        assert called.wait(timeout=synchronization_timeout(5.0)), (
             "run_pipeline_job spy was not invoked"
         )
         # The handler must forward a callable (the create_app closure's

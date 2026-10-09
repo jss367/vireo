@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
+from testing.waits import synchronization_timeout
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -12634,14 +12635,14 @@ def test_local_import_cancel_interrupts_stuck_twin_hash(tmp_path):
     worker = threading.Thread(target=_run, daemon=True)
     worker.start()
     try:
-        worker.join(timeout=15.0)
+        worker.join(timeout=synchronization_timeout(15.0))
         assert not worker.is_alive(), (
             "Stop did not interrupt the destination hash read blocked on "
             "the dead-mount twin"
         )
     finally:
         _release_fifo(twin)
-        worker.join(timeout=5.0)
+        worker.join(timeout=synchronization_timeout(5.0))
 
     result = result_box["result"]
     assert result["cancelled"] is True
@@ -12706,14 +12707,14 @@ def test_remote_import_cancel_interrupts_stuck_twin_hash(
     worker = threading.Thread(target=_run, daemon=True)
     worker.start()
     try:
-        worker.join(timeout=15.0)
+        worker.join(timeout=synchronization_timeout(15.0))
         assert not worker.is_alive(), (
             "Stop did not interrupt the destination hash read blocked on "
             "the dead-mount twin"
         )
     finally:
         _release_fifo(twin)
-        worker.join(timeout=5.0)
+        worker.join(timeout=synchronization_timeout(5.0))
 
     result = result_box["result"]
     assert result["cancelled"] is True
@@ -12844,7 +12845,7 @@ def test_remote_import_cancel_interrupts_stuck_collision_hash(
     worker = threading.Thread(target=_run, daemon=True)
     worker.start()
     try:
-        worker.join(timeout=15.0)
+        worker.join(timeout=synchronization_timeout(15.0))
         assert not worker.is_alive(), (
             "Stop did not interrupt the collision hash read blocked on "
             "the dead-mount candidate"
@@ -12852,7 +12853,7 @@ def test_remote_import_cancel_interrupts_stuck_collision_hash(
     finally:
         _release_fifo(collision)
         _release_fifo(next_collision)
-        worker.join(timeout=5.0)
+        worker.join(timeout=synchronization_timeout(5.0))
 
     result = result_box["result"]
     assert result["cancelled"] is True
@@ -12947,11 +12948,11 @@ def test_remote_import_cancel_skips_post_loop_mount_probe(
     worker = threading.Thread(target=_run, daemon=True)
     worker.start()
     try:
-        worker.join(timeout=15.0)
+        worker.join(timeout=synchronization_timeout(15.0))
         assert not worker.is_alive()
     finally:
         _release_fifo(twin)
-        worker.join(timeout=5.0)
+        worker.join(timeout=synchronization_timeout(5.0))
 
     result = result_box["result"]
     assert result["cancelled"] is True
@@ -13023,11 +13024,11 @@ def test_local_import_cancel_skips_post_loop_mount_probe(
     worker = threading.Thread(target=_run, daemon=True)
     worker.start()
     try:
-        worker.join(timeout=15.0)
+        worker.join(timeout=synchronization_timeout(15.0))
         assert not worker.is_alive()
     finally:
         _release_fifo(twin)
-        worker.join(timeout=5.0)
+        worker.join(timeout=synchronization_timeout(5.0))
 
     result = result_box["result"]
     assert result["cancelled"] is True
@@ -13428,14 +13429,14 @@ def test_local_import_dest_read_cancel_skips_catalog_scan(
     worker = threading.Thread(target=_run, daemon=True)
     worker.start()
     try:
-        worker.join(timeout=15.0)
+        worker.join(timeout=synchronization_timeout(15.0))
         assert not worker.is_alive(), (
             "Stop did not interrupt the destination hash read blocked on "
             "the dead-mount twin"
         )
     finally:
         _release_fifo(fifo)
-        worker.join(timeout=5.0)
+        worker.join(timeout=synchronization_timeout(5.0))
 
     result = result_box["result"]
     assert result["cancelled"] is True
@@ -13550,14 +13551,14 @@ def test_remote_import_dest_read_cancel_skips_catalog_scan(
     worker = threading.Thread(target=_run, daemon=True)
     worker.start()
     try:
-        worker.join(timeout=15.0)
+        worker.join(timeout=synchronization_timeout(15.0))
         assert not worker.is_alive(), (
             "Stop did not interrupt the destination hash read blocked on "
             "the dead-mount twin"
         )
     finally:
         _release_fifo(fifo)
-        worker.join(timeout=5.0)
+        worker.join(timeout=synchronization_timeout(5.0))
 
     result = result_box["result"]
     assert result["cancelled"] is True
@@ -13676,14 +13677,14 @@ def test_local_import_dest_read_cancel_skips_catalog_scan_adoption_path(
     worker = threading.Thread(target=_run, daemon=True)
     worker.start()
     try:
-        worker.join(timeout=15.0)
+        worker.join(timeout=synchronization_timeout(15.0))
         assert not worker.is_alive(), (
             "Stop did not interrupt the destination hash read blocked on "
             "the dead-mount twin"
         )
     finally:
         _release_fifo(fifo)
-        worker.join(timeout=5.0)
+        worker.join(timeout=synchronization_timeout(5.0))
 
     result = result_box["result"]
     assert result["cancelled"] is True
@@ -13807,14 +13808,14 @@ def test_remote_import_dest_read_cancel_skips_catalog_scan_fresh_transfer(
     worker = threading.Thread(target=_run, daemon=True)
     worker.start()
     try:
-        worker.join(timeout=15.0)
+        worker.join(timeout=synchronization_timeout(15.0))
         assert not worker.is_alive(), (
             "Stop did not interrupt the destination hash read blocked on "
             "the dead-mount twin"
         )
     finally:
         _release_fifo(fifo)
-        worker.join(timeout=5.0)
+        worker.join(timeout=synchronization_timeout(5.0))
 
     result = result_box["result"]
     assert result["cancelled"] is True

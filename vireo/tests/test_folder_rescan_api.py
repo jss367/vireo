@@ -11,6 +11,8 @@ schema produced by `JobRunner.start()`.
 
 import time
 
+from testing.waits import synchronization_timeout
+
 
 def _wait_for_job_listed(runner, job_id, timeout=2.0):
     """Wait until `list_jobs()` reports the given job id.
@@ -19,6 +21,7 @@ def _wait_for_job_listed(runner, job_id, timeout=2.0):
     should return immediately in practice; the poll loop is just a safety
     net against scheduler jitter on slow CI.
     """
+    timeout = synchronization_timeout(timeout)
     deadline = time.time() + timeout
     while time.time() < deadline:
         jobs = runner.list_jobs()

@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
+from testing.waits import synchronization_timeout
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -307,19 +308,19 @@ def test_text_session_cache_wait_honors_cancellation(monkeypatch):
     thread = threading.Thread(target=lookup)
     thread.start()
     try:
-        assert contending.wait(timeout=2.0), (
+        assert contending.wait(timeout=synchronization_timeout(2.0)), (
             "worker never polled cancel_check while contending on the "
             "cache lock — either it never entered the guard or it "
             "acquired the lock without blocking"
         )
         cancelled.set()
-        assert finished.wait(timeout=1.0)
-        thread.join(timeout=1.0)
+        assert finished.wait(timeout=synchronization_timeout(1.0))
+        thread.join(timeout=synchronization_timeout(1.0))
         assert not thread.is_alive()
         assert outcome == ["cancelled"]
     finally:
         text_encoder._session_cache_lock.release()
-        thread.join(timeout=1.0)
+        thread.join(timeout=synchronization_timeout(1.0))
 
 
 def test_unknown_model_raises(monkeypatch):

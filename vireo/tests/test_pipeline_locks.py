@@ -5,6 +5,7 @@ import threading
 import time
 
 import pytest
+from testing.waits import synchronization_timeout
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, os.path.dirname(__file__))
@@ -61,14 +62,14 @@ def test_session_cache_lock_wait_honors_bound_cancel_probe():
             time.sleep(0.01)
         assert ledger.snapshot()["waiters"] == 1
         cancelled.set()
-        assert finished.wait(timeout=1.0)
-        thread.join(timeout=1.0)
+        assert finished.wait(timeout=synchronization_timeout(1.0))
+        thread.join(timeout=synchronization_timeout(1.0))
         assert not thread.is_alive()
         assert outcome == ["cancelled"]
         assert ledger.owner_timing("model-job")["wait_count"] == 1
     finally:
         lock.release()
-        thread.join(timeout=1.0)
+        thread.join(timeout=synchronization_timeout(1.0))
         resource_ledger._set_resource_ledger_for_tests(previous)
 
 
@@ -127,7 +128,7 @@ def test_session_cache_lock_acquire_race_with_cancel_releases_and_raises():
         lock.release()
         holder_released = True
 
-        thread.join(timeout=2.0)
+        thread.join(timeout=synchronization_timeout(2.0))
         assert not thread.is_alive(), (
             "waiter did not finish — check the timed-acquire loop"
         )
@@ -143,7 +144,7 @@ def test_session_cache_lock_acquire_race_with_cancel_releases_and_raises():
     finally:
         if not holder_released:
             lock.release()
-        thread.join(timeout=1.0)
+        thread.join(timeout=synchronization_timeout(1.0))
         resource_ledger._set_resource_ledger_for_tests(previous)
 
 
@@ -233,7 +234,7 @@ def test_session_cache_lock_releases_on_post_acquire_probe_raise():
             lock_b.release()
             holder_released = True
 
-            thread.join(timeout=3.0)
+            thread.join(timeout=synchronization_timeout(3.0))
             assert not thread.is_alive(), "waiter did not finish"
             assert outcome == ["boom"], (
                 f"Expected the probe's RuntimeError to propagate; got "
@@ -246,7 +247,7 @@ def test_session_cache_lock_releases_on_post_acquire_probe_raise():
         finally:
             if not holder_released:
                 lock_b.release()
-            thread.join(timeout=1.0)
+            thread.join(timeout=synchronization_timeout(1.0))
     finally:
         resource_ledger._set_resource_ledger_for_tests(previous)
 
@@ -272,7 +273,7 @@ def test_session_cache_lock_post_acquire_uses_pure_cancel_probe():
         # Simulate ``_pause_checkpoint`` parking on pause — would block
         # here if called from inside the post-acquire recheck. Test
         # times out if the recheck picks up the pause-aware probe.
-        pause_gate.wait(timeout=2.0)
+        pause_gate.wait(timeout=synchronization_timeout(2.0))
         return False
 
     def pure_cancel_probe():
@@ -305,12 +306,12 @@ def test_session_cache_lock_post_acquire_uses_pure_cancel_probe():
     thread = threading.Thread(target=runner)
     thread.start()
     try:
-        assert finished.wait(timeout=1.0), (
+        assert finished.wait(timeout=synchronization_timeout(1.0)), (
             "acquire_session_cache_lock did not return; the post-acquire "
             "recheck may still be using the pause-aware probe and blocking "
             "on ``wait_if_paused`` while the session lock is held."
         )
-        thread.join(timeout=1.0)
+        thread.join(timeout=synchronization_timeout(1.0))
         assert outcome == ["acquired"]
         # The post-acquire recheck must have consulted the pure probe.
         assert pure_probe_calls["n"] >= 1, (
@@ -488,7 +489,7 @@ def test_compound_context_releases_cpu_before_parking_on_gpu_wait():
         try:
             with acquire_inference_resources(sess):
                 inside_lease.set()
-                release_body.wait(timeout=5.0)
+                release_body.wait(timeout=synchronization_timeout(5.0))
         finally:
             exited.set()
 
@@ -531,7 +532,7 @@ def test_compound_context_releases_cpu_before_parking_on_gpu_wait():
         holder.__exit__(None, None, None)
         holder_released = True
 
-        assert inside_lease.wait(timeout=3.0), (
+        assert inside_lease.wait(timeout=synchronization_timeout(3.0)), (
             "waiter never acquired both resources after semaphore released"
         )
         # Once inside, both must be held: GPU semaphore taken, CPU allocated.
@@ -541,8 +542,8 @@ def test_compound_context_releases_cpu_before_parking_on_gpu_wait():
         assert snapshot_inside["lanes"]["cpu_ml"]["allocated"] == 1
 
         release_body.set()
-        assert exited.wait(timeout=2.0)
-        thread.join(timeout=2.0)
+        assert exited.wait(timeout=synchronization_timeout(2.0))
+        thread.join(timeout=synchronization_timeout(2.0))
         assert not thread.is_alive()
 
         # Full release on exit.
@@ -553,7 +554,7 @@ def test_compound_context_releases_cpu_before_parking_on_gpu_wait():
         release_body.set()
         if not holder_released:
             holder.__exit__(None, None, None)
-        thread.join(timeout=1.0)
+        thread.join(timeout=synchronization_timeout(1.0))
         resource_ledger._set_resource_ledger_for_tests(previous)
 
 
@@ -624,8 +625,8 @@ def test_acquire_inference_resources_wakes_on_bound_cancel_check():
         cancelled_flag.set()
         # The ledger uses a bounded 200ms poll so the waiter observes the
         # flag on the next tick; no need to release the holder.
-        assert finished.wait(timeout=1.0), "waiter never observed cancel"
-        thread.join(timeout=1.0)
+        assert finished.wait(timeout=synchronization_timeout(1.0)), "waiter never observed cancel"
+        thread.join(timeout=synchronization_timeout(1.0))
         assert not thread.is_alive()
         assert outcome == ["cancelled"]
     finally:
@@ -662,8 +663,8 @@ def test_gpu_inference_wait_wakes_on_bound_cancel_check():
         thread.start()
         time.sleep(0.05)
         cancelled_flag.set()
-        assert finished.wait(timeout=1.0), "GPU waiter never observed cancel"
-        thread.join(timeout=1.0)
+        assert finished.wait(timeout=synchronization_timeout(1.0)), "GPU waiter never observed cancel"
+        thread.join(timeout=synchronization_timeout(1.0))
         assert not thread.is_alive()
         assert outcome == ["cancelled"]
     finally:
@@ -695,7 +696,7 @@ def test_gpu_inference_contention_records_live_and_completed_owner_timing():
     thread = threading.Thread(target=waiter)
     thread.start()
     try:
-        assert waiting.wait(timeout=1.0)
+        assert waiting.wait(timeout=synchronization_timeout(1.0))
         _wait_until(
             lambda: ledger.owner_timing("gpu-job")["wait_count"] == 1,
         )
@@ -705,8 +706,8 @@ def test_gpu_inference_contention_records_live_and_completed_owner_timing():
 
         holder.__exit__(None, None, None)
         holder_released = True
-        assert finished.wait(timeout=1.0)
-        thread.join(timeout=1.0)
+        assert finished.wait(timeout=synchronization_timeout(1.0))
+        thread.join(timeout=synchronization_timeout(1.0))
         assert not thread.is_alive()
         completed = ledger.owner_timing("gpu-job")
         assert completed["wait_count"] == 1
@@ -715,7 +716,7 @@ def test_gpu_inference_contention_records_live_and_completed_owner_timing():
     finally:
         if not holder_released:
             holder.__exit__(None, None, None)
-        thread.join(timeout=1.0)
+        thread.join(timeout=synchronization_timeout(1.0))
         resource_ledger._set_resource_ledger_for_tests(previous)
 
 
@@ -778,7 +779,7 @@ def test_gpu_acquire_race_with_cancel_releases_semaphore_and_raises():
         _GPU_SEMAPHORE.release()
         holder_released = True
 
-        thread.join(timeout=2.0)
+        thread.join(timeout=synchronization_timeout(2.0))
         assert not thread.is_alive(), (
             "waiter did not finish — check the timed-acquire loop"
         )
@@ -801,7 +802,7 @@ def test_gpu_acquire_race_with_cancel_releases_semaphore_and_raises():
         # doesn't leak across tests.
         if not holder_released:
             _GPU_SEMAPHORE.release()
-        thread.join(timeout=1.0)
+        thread.join(timeout=synchronization_timeout(1.0))
 
 
 def test_gpu_semaphore_released_before_pause_park_during_post_acquire():
@@ -856,7 +857,7 @@ def test_gpu_semaphore_released_before_pause_park_during_post_acquire():
         holder_released = True
         # Wait for the waiter to finish acquiring (should proceed
         # after post-acquire probe returns False and reacquires).
-        thread.join(timeout=3.0)
+        thread.join(timeout=synchronization_timeout(3.0))
         assert not thread.is_alive(), "waiter did not finish"
         assert outcome == ["acquired"], (
             f"Expected acquired outcome after pure-pause probe, got "
@@ -882,7 +883,7 @@ def test_gpu_semaphore_released_before_pause_park_during_post_acquire():
     finally:
         if not holder_released:
             _GPU_SEMAPHORE.release()
-        thread.join(timeout=1.0)
+        thread.join(timeout=synchronization_timeout(1.0))
 
 
 def test_acquire_gpu_if_session_uses_it_defaults_to_lock_when_providers_missing():
@@ -902,6 +903,7 @@ def _wait_until(predicate, timeout=1.0, interval=0.005):
     Replaces unbounded ``while not <cond>: time.sleep(...)`` loops that
     would otherwise hang the suite if a thread stalls.
     """
+    timeout = synchronization_timeout(timeout)
     deadline = time.time() + timeout
     while time.time() < deadline:
         if predicate():
@@ -919,7 +921,7 @@ def test_gpu_lock_serialises_two_threads():
     def first():
         with acquire_gpu():
             held.append("first-in")
-            second_started.wait(timeout=2.0)
+            second_started.wait(timeout=synchronization_timeout(2.0))
             time.sleep(0.05)  # ensure second is blocked, not racing
             held.append("first-out")
         # released
@@ -935,8 +937,8 @@ def test_gpu_lock_serialises_two_threads():
     t1.start()
     _wait_until(lambda: "first-in" in held)
     t2.start()
-    t1.join(timeout=3.0)
-    t2.join(timeout=3.0)
+    t1.join(timeout=synchronization_timeout(3.0))
+    t2.join(timeout=synchronization_timeout(3.0))
     assert not t1.is_alive(), "first thread did not finish"
     assert not t2.is_alive(), "second thread did not finish"
 
@@ -962,7 +964,7 @@ def test_workspace_regroup_lock_serialises_same_workspace():
     def first():
         with acquire_workspace_regroup(42):
             held.append("first-in")
-            second_started.wait(timeout=2.0)
+            second_started.wait(timeout=synchronization_timeout(2.0))
             time.sleep(0.05)
             held.append("first-out")
 
@@ -976,8 +978,8 @@ def test_workspace_regroup_lock_serialises_same_workspace():
     t1.start()
     _wait_until(lambda: "first-in" in held)
     t2.start()
-    t1.join(timeout=3.0)
-    t2.join(timeout=3.0)
+    t1.join(timeout=synchronization_timeout(3.0))
+    t2.join(timeout=synchronization_timeout(3.0))
     assert not t1.is_alive(), "first thread did not finish"
     assert not t2.is_alive(), "second thread did not finish"
 
@@ -996,7 +998,7 @@ def test_workspace_regroup_lock_does_not_block_other_workspaces():
         with acquire_workspace_regroup(1):
             held.append("first-in")
             first_holding.set()
-            let_first_go.wait(timeout=2.0)
+            let_first_go.wait(timeout=synchronization_timeout(2.0))
             held.append("first-out")
 
     def second():
@@ -1006,13 +1008,13 @@ def test_workspace_regroup_lock_does_not_block_other_workspaces():
     t1 = threading.Thread(target=first)
     t2 = threading.Thread(target=second)
     t1.start()
-    assert first_holding.wait(timeout=1.0)
+    assert first_holding.wait(timeout=synchronization_timeout(1.0))
     t2.start()
-    t2.join(timeout=1.0)
+    t2.join(timeout=synchronization_timeout(1.0))
     assert not t2.is_alive(), "second thread should not be blocked by a different workspace"
     assert "second-in" in held, "different workspace must not be blocked"
     let_first_go.set()
-    t1.join(timeout=2.0)
+    t1.join(timeout=synchronization_timeout(2.0))
     assert not t1.is_alive(), "first thread did not finish"
 
 
@@ -1043,8 +1045,8 @@ def test_photo_mask_lock_serialises_same_photo():
     t1.start()
     _wait_until(lambda: "first-in" in held)
     t2.start()
-    t1.join(timeout=3.0)
-    t2.join(timeout=3.0)
+    t1.join(timeout=synchronization_timeout(3.0))
+    t2.join(timeout=synchronization_timeout(3.0))
     assert not t1.is_alive() and not t2.is_alive()
     assert held == ["first-in", "first-out", "second-in"], held
 
@@ -1059,7 +1061,7 @@ def test_photo_mask_lock_does_not_block_different_photo():
         with acquire_photo_mask(1):
             held.append("first-in")
             first_holding.set()
-            let_first_go.wait(timeout=2.0)
+            let_first_go.wait(timeout=synchronization_timeout(2.0))
 
     def second():
         with acquire_photo_mask(2):
@@ -1068,13 +1070,13 @@ def test_photo_mask_lock_does_not_block_different_photo():
     t1 = threading.Thread(target=first)
     t2 = threading.Thread(target=second)
     t1.start()
-    assert first_holding.wait(timeout=1.0)
+    assert first_holding.wait(timeout=synchronization_timeout(1.0))
     t2.start()
-    t2.join(timeout=1.0)
+    t2.join(timeout=synchronization_timeout(1.0))
     assert not t2.is_alive(), "different photo must not be blocked"
     assert "second-in" in held
     let_first_go.set()
-    t1.join(timeout=2.0)
+    t1.join(timeout=synchronization_timeout(2.0))
 
 
 def test_photo_mask_lock_serialises_same_photo_across_variants():
@@ -1100,7 +1102,7 @@ def test_photo_mask_lock_serialises_same_photo_across_variants():
         with acquire_photo_mask(42):
             held.append("first-in")
             first_holding.set()
-            let_first_go.wait(timeout=2.0)
+            let_first_go.wait(timeout=synchronization_timeout(2.0))
             held.append("first-out")
 
     def second():
@@ -1110,7 +1112,7 @@ def test_photo_mask_lock_serialises_same_photo_across_variants():
     t1 = threading.Thread(target=first)
     t2 = threading.Thread(target=second)
     t1.start()
-    assert first_holding.wait(timeout=1.0)
+    assert first_holding.wait(timeout=synchronization_timeout(1.0))
     t2.start()
     # Second must block until first releases — even though semantically
     # the two pipelines might be working different variants.
@@ -1118,8 +1120,8 @@ def test_photo_mask_lock_serialises_same_photo_across_variants():
         "second thread ran while first held the photo lock"
     )
     let_first_go.set()
-    t1.join(timeout=2.0)
-    t2.join(timeout=2.0)
+    t1.join(timeout=synchronization_timeout(2.0))
+    t2.join(timeout=synchronization_timeout(2.0))
     assert held == ["first-in", "first-out", "second-in"], held
 
 
