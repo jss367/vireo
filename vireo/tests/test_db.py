@@ -23992,6 +23992,69 @@ def test_collection_extension_rule_matches_case_insensitively(tmp_path):
     assert names_not == ['raw.nef']
 
 
+def _raw_jpeg_pair_db(tmp_path):
+    """A RAW+JPEG pair (one photo row), a lone JPEG, and a lone NEF."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    pair = db.add_photo(folder_id=fid, filename='_D854674.NEF', extension='.nef',
+                        file_size=1, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET companion_path = ? WHERE id = ?",
+                    ('_D854674.JPG', pair))
+    db.conn.commit()
+    db.add_photo(folder_id=fid, filename='lone.jpg', extension='.jpg',
+                 file_size=1, file_mtime=1.0)
+    db.add_photo(folder_id=fid, filename='lone.nef', extension='.nef',
+                 file_size=1, file_mtime=1.0)
+    return db
+
+
+def test_extension_rule_matches_raw_jpeg_companion(tmp_path):
+    """A RAW+JPEG pair is cataloged as the RAW, with the JPEG only in
+    ``companion_path``. Filtering for JPGs must still find it, and
+    excluding JPGs must leave it out, or a photo shot RAW+JPEG is never a
+    JPG to the filter bar."""
+    import json
+
+    db = _raw_jpeg_pair_db(tmp_path)
+
+    def names(rule):
+        return sorted(p['filename'] for p in db.get_collection_photos(
+            db.add_collection('c', json.dumps([rule]))))
+
+    assert names({"field": "extension", "op": "is", "value": ".jpg"}) == [
+        '_D854674.NEF', 'lone.jpg']
+    assert names({"field": "extension", "op": "is not", "value": ".jpg"}) == [
+        'lone.nef']
+    assert names({"field": "extension", "op": "in", "value": [".JPG"]}) == [
+        '_D854674.NEF', 'lone.jpg']
+    assert names({"field": "extension", "op": "not_in", "value": [".jpg"]}) == [
+        'lone.nef']
+    # The pair still matches by its primary file.
+    assert names({"field": "extension", "op": "is", "value": ".nef"}) == [
+        '_D854674.NEF', 'lone.nef']
+    assert names({"field": "extension", "op": "is not", "value": ".nef"}) == [
+        'lone.jpg']
+
+
+def test_extension_facets_and_options_include_companion_format(tmp_path):
+    """The dropdown offers a companion-only format, and the facet count for
+    a format equals what the rule would return."""
+    db = _raw_jpeg_pair_db(tmp_path)
+    db.conn.execute("UPDATE photos SET extension = '.nef', companion_path = NULL"
+                    " WHERE filename = 'lone.jpg'")
+    db.conn.execute("UPDATE photos SET filename = 'lone2.nef'"
+                    " WHERE filename = 'lone.jpg'")
+    db.conn.commit()
+    # Only the pair carries a JPG now.
+    assert db.get_workspace_extensions() == ['.jpg', '.nef']
+    values = {v['value']: v['count'] for v in db.get_filter_field_values('extension')}
+    assert values == {'.nef': 3, '.jpg': 1}
+    assert db.count_photos_for_rules(
+        [{"field": "extension", "op": "is", "value": ".jpg"}]) == 1
+    assert [v['value'] for v in db.get_filter_field_values('extension', q='JP')] == ['.jpg']
+
+
 def test_get_workspace_extensions_excludes_missing_folders(tmp_path):
     """An extension only present in a missing folder must not appear in the
     dropdown.
