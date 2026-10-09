@@ -519,3 +519,126 @@ def test_bulk_decide_retry_preserves_hashes_that_bulk_resolve_skipped(
     trashed_in_retry = set(trash_calls[2])
     resolved_loser_ids = {loser_ids[i] for i in resolved_indices}
     assert trashed_in_first | trashed_in_retry == resolved_loser_ids
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_reveal_pending_survives_filter_rerender(live_server, page, tmp_path, failure):
+    folders = [str(tmp_path / "a"), str(tmp_path / "b")]
+    _seed_scan_with_buckets(live_server["db"], *folders, n_groups=2)
+    requests = []
+    page.route("**/api/folders/reveal", lambda route: requests.append(route))
+    page.goto(f"{live_server['url']}/duplicates")
+    button = page.locator(".bucket-card .reveal-btn")
+    label = button.inner_text()
+    button.click()
+    expect(button).to_be_disabled()
+    assert len(requests) == 1
+    old_button = button.element_handle()
+    page.locator(".vf-search input").fill("photo")
+    expect(page.locator(".dup-group")).to_have_count(2)
+    page.wait_for_function("button => !button.isConnected", arg=old_button)
+    expect(button).to_be_disabled()
+    expect(button).to_contain_text("Opening")
+    # Exercise the function guard too, bypassing the disabled DOM control.
+    page.evaluate("revealBucketFolders(0, document.querySelector('.reveal-btn'))")
+    assert len(requests) == 1
+    page.locator(".vf-search input").fill("no-match")
+    expect(button).to_have_count(0)
+    page.locator(".vf-search input").fill("")
+    expect(button).to_be_disabled()
+    if failure:
+        requests[0].abort("failed")
+    else:
+        requests[0].fulfill(status=200, content_type="application/json",
+                            body=json.dumps({"ok": True, "revealed": folders}))
+    expect(button).to_be_enabled()
+    expect(button).to_have_text(label)
+    expect(page.locator("#toastContainer [data-type]")).to_have_count(1)
+    button.click()
+    expect(button).to_be_disabled()
+    assert len(requests) == 2
+    requests[1].fulfill(status=200, content_type="application/json",
+                        body=json.dumps({"ok": True, "revealed": folders}))
+    expect(button).to_be_enabled()
+
+
+def test_reveal_refresh_leaves_applying_cards_locked(live_server, page, tmp_path):
+    """A reveal completing in one card must not re-enable the Reveal button
+    on a sibling card whose bulkResolveByFolder / retryBucketTrash flow has
+    disabled every action button via ``.applying``."""
+    folders = [str(tmp_path / "a"), str(tmp_path / "b")]
+    _seed_scan_with_buckets(live_server["db"], *folders, n_groups=2)
+    page.goto(f"{live_server['url']}/duplicates")
+    button = page.locator(".bucket-card .reveal-btn")
+    expect(button).to_be_enabled()
+    # Simulate the sibling flow mid-apply: card.applying with every action
+    # button disabled, as bulkResolveByFolder / retryBucketTrash leave them.
+    page.evaluate("""
+        var card = document.querySelector('.bucket-card');
+        card.classList.add('applying');
+        card.querySelectorAll('.bucket-actions button').forEach(function(b) {
+            b.disabled = true;
+        });
+        refreshBucketRevealButtons();
+    """)
+    expect(button).to_be_disabled()
+    # Releasing the sibling flow restores interactivity on the next refresh.
+    page.evaluate("""
+        document.querySelector('.bucket-card').classList.remove('applying');
+        refreshBucketRevealButtons();
+    """)
+    expect(button).to_be_enabled()
+
+
+@pytest.mark.parametrize("action", ["bulk", "retry"])
+@pytest.mark.parametrize("same_bucket", [False, True])
+def test_reveal_completion_preserves_applying_action_locks(
+    live_server, page, tmp_path, action, same_bucket,
+):
+    folders = [str(tmp_path / "a"), str(tmp_path / "b")]
+    _seed_scan_with_buckets(live_server["db"], *folders, n_groups=2)
+    reveals, actions = [], []
+    page.route("**/api/folders/reveal", lambda route: reveals.append(route))
+    page.route("**/api/duplicates/bulk-resolve", lambda route: actions.append(route))
+    page.route("**/api/duplicates/delete-loser-files", lambda route: actions.append(route))
+    page.on("dialog", lambda dialog: dialog.accept())
+    page.goto(f"{live_server['url']}/duplicates")
+    expect(page.locator(".bucket-card")).to_have_count(1)
+    if not same_bucket:
+        page.evaluate("""() => {
+          const second = JSON.parse(JSON.stringify(_lastScanResult.buckets[0]));
+          second.folders = second.folders.map(path => path + '-other');
+          _lastScanResult.buckets.push(second);
+          renderResults(_lastScanResult);
+        }""")
+    button = page.locator('.bucket-card[data-bi="0"] .reveal-btn')
+    label = button.inner_text()
+    button.click()
+    expect(button).to_be_disabled()
+    old_button = button.element_handle()
+    page.locator(".vf-search input").fill("photo")
+    page.wait_for_function("button => !button.isConnected", arg=old_button)
+    expect(button).to_be_disabled()
+    bi = 0 if same_bucket else 1
+    card = page.locator(f'.bucket-card[data-bi="{bi}"]')
+    if action == "bulk":
+        card.locator('.keep-btn:not(.reveal-btn)').first.click()
+    else:
+        card.evaluate("""card => {
+          card.setAttribute('data-pending-trash', '[999999]');
+          void retryBucketTrash(card.querySelector('.keep-btn'));
+        }""")
+    expect(card).to_have_class("bucket-card applying")
+    expect(card.locator('.reveal-btn')).to_be_disabled()
+    assert len(actions) == 1
+    reveals[0].fulfill(status=200, content_type="application/json",
+                       body=json.dumps({"ok": True, "revealed": folders}))
+    expect(button).to_have_text(label)
+    expect(card.locator('.reveal-btn')).to_be_disabled()
+    assert len(reveals) == 1
+    if action == "bulk":
+        response = {"ok": True, "resolved": [], "skipped": []}
+    else:
+        response = {"ok": True, "trashed": 0, "failed": [{"id": 999999, "error": "mock failure"}]}
+    actions[0].fulfill(status=200, content_type="application/json", body=json.dumps(response))
+    expect(card.locator('.reveal-btn')).to_be_enabled()
