@@ -112,3 +112,64 @@ def test_find_does_not_interrupt_shortcut_capture(live_server, page):
     expect(page.locator("#pageFindPanel")).to_be_hidden()
     expect(page.locator(".shortcut-key-btn.capturing")).to_have_count(0)
     assert page.evaluate("currentShortcuts.navigation.browse") == "ctrl+f"
+
+
+def test_find_updates_when_details_open_or_close(live_server, page):
+    page.goto(f"{live_server['url']}/life-list")
+    page.evaluate("""() => {
+        const details = document.createElement('details');
+        details.id = 'findTestDetails';
+        details.innerHTML = '<summary>Photo details</summary><p>CollapsedNeedle</p>';
+        document.body.appendChild(details);
+    }""")
+    page.keyboard.press("Control+F")
+    page.locator("#pageFindInput").fill("CollapsedNeedle")
+    expect(page.locator("#pageFindStatus")).to_have_text("0 results")
+    page.locator("#findTestDetails summary").click()
+    expect(page.locator("#pageFindStatus")).to_have_text("1 of 1")
+    page.locator("#findTestDetails summary").click()
+    expect(page.locator("#pageFindStatus")).to_have_text("0 results")
+
+
+@pytest.mark.parametrize("entry", ["Control+F", "native"])
+def test_find_works_on_standalone_setup_page(live_server, page, entry):
+    page.route("**/api/models/status", lambda route: route.fulfill(
+        json={"available_models": [], "classification": {"labels_ready": False}}
+    ))
+    page.goto(f"{live_server['url']}/welcome?force=1")
+    if entry == "native":
+        page.evaluate("handleNativeMenuCommand('find')")
+    else:
+        page.keyboard.press(entry)
+    field = page.locator("#pageFindInput")
+    expect(field).to_be_focused()
+    field.fill("wildlife")
+    expect(page.locator("#pageFindStatus")).not_to_have_text("0 results")
+    expect(page.locator(".page-find-mark").first).to_be_visible()
+    page.keyboard.press("Escape")
+    expect(page.locator("#pageFindPanel")).to_be_hidden()
+
+
+def test_find_preserves_unicode_offsets_and_literal_queries(live_server, page):
+    page.goto(f"{live_server['url']}/life-list")
+    page.evaluate("""() => {
+        const paragraph = document.createElement('p');
+        paragraph.id = 'findUnicodeText';
+        paragraph.textContent = 'İ Needle needle 🐦 [bird].* [bird].*';
+        document.body.appendChild(paragraph);
+    }""")
+    page.keyboard.press("Control+F")
+    field = page.locator("#pageFindInput")
+    field.fill("needle")
+    assert page.locator("#findUnicodeText .page-find-mark").all_text_contents() == [
+        "Needle", "needle"
+    ]
+    field.fill("[bird].*")
+    expect(page.locator("#pageFindStatus")).to_have_text("1 of 2")
+    assert page.locator("#findUnicodeText .page-find-mark").all_text_contents() == [
+        "[bird].*", "[bird].*"
+    ]
+    page.keyboard.press("Escape")
+    expect(page.locator("#findUnicodeText")).to_have_text(
+        "İ Needle needle 🐦 [bird].* [bird].*"
+    )

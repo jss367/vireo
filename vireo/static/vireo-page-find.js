@@ -23,7 +23,7 @@
     if (!panel.hidden && input.value.trim()) {
       observer.observe(document.body, {
         childList: true, subtree: true, characterData: true,
-        attributes: true, attributeFilter: ['class', 'style', 'hidden', 'aria-hidden'],
+        attributes: true, attributeFilter: ['class', 'style', 'hidden', 'aria-hidden', 'open'],
       });
     }
   }
@@ -45,6 +45,10 @@
     if (el.closest('#pageFindPanel, script, style, noscript, textarea, input, select, [contenteditable], svg title, svg desc')) return false;
     for (var current = el; current; current = current.parentElement) {
       if (current.hidden || current.getAttribute('aria-hidden') === 'true') return false;
+      if (current.tagName === 'DETAILS' && !current.open) {
+        var summary = current.querySelector(':scope > summary');
+        if (!summary || !summary.contains(el)) return false;
+      }
       var style = window.getComputedStyle(current);
       if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return false;
     }
@@ -79,10 +83,13 @@
       updateStatus();
       return;
     }
-    var lowerQuery = query.toLowerCase();
+    // Match against the original string: case conversion can expand Unicode
+    // characters, so offsets into a lowercased copy need not align with text.
+    var matcher = new RegExp(query.replace(/[.*+?^$(){}|[\]\\]/g, '\\$&'), 'giu');
     var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
       acceptNode: function(node) {
-        return node.nodeValue.toLowerCase().includes(lowerQuery) && visibleText(node)
+        matcher.lastIndex = 0;
+        return matcher.test(node.nodeValue) && visibleText(node)
           ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
       },
     });
@@ -90,21 +97,21 @@
     while (walker.nextNode()) nodes.push(walker.currentNode);
     nodes.forEach(function(node) {
       var text = node.nodeValue;
-      var lower = text.toLowerCase();
       var fragment = document.createDocumentFragment();
       var pos = 0;
-      var index = lower.indexOf(lowerQuery);
-      while (index !== -1) {
+      matcher.lastIndex = 0;
+      var match;
+      while ((match = matcher.exec(text)) !== null) {
+        var index = match.index;
         fragment.appendChild(document.createTextNode(text.slice(pos, index)));
         var mark = node.parentElement.namespaceURI === 'http://www.w3.org/2000/svg'
           ? document.createElementNS('http://www.w3.org/2000/svg', 'tspan')
           : document.createElement('mark');
         mark.setAttribute('class', 'page-find-mark');
-        mark.textContent = text.slice(index, index + query.length);
+        mark.textContent = match[0];
         marks.push(mark);
         fragment.appendChild(mark);
-        pos = index + query.length;
-        index = lower.indexOf(lowerQuery, pos);
+        pos = index + match[0].length;
       }
       fragment.appendChild(document.createTextNode(text.slice(pos)));
       node.parentNode.replaceChild(fragment, node);
@@ -164,4 +171,11 @@
     }
   }, true);
   window.VireoPageFind = {open: open, close: close};
+  // Standalone Setup has no navbar command dispatcher. The navbar replaces
+  // this fallback with its full dispatcher on pages that include it.
+  if (typeof window.handleNativeMenuCommand !== 'function') {
+    window.handleNativeMenuCommand = function(command) {
+      if (command === 'find') open();
+    };
+  }
 })();
