@@ -1,0 +1,2 @@
+include native/detail/Cargo.toml native/detail/Cargo.lock
+recursive-include native/detail/src *.rs

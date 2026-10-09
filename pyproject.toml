@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=77.0.3", "wheel"]
+requires = ["setuptools>=77.0.3", "setuptools-rust>=1.12", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,7 +7,7 @@ name = "vireo"
 version = "0.63.1"
 description = "AI-powered wildlife photo organizer"
 license = "MIT AND GPL-3.0-or-later"
-license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md", "vireo/data/denoise/LICENSE.txt", "vireo/data/denoise/NOTICE.txt"]
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md", "vireo/data/denoise/LICENSE.txt", "vireo/data/denoise/NOTICE.txt", "vireo/data/native-detail/THIRD_PARTY_LICENSES.txt"]
 requires-python = ">=3.14"
 dependencies = [
     "certifi>=2024.0.0",
@@ -55,6 +55,16 @@ dev = [
     "pre-commit>=3.5",
 ]
 
+# Source installs retain the NumPy fallback when Rust is unavailable. Desktop
+# release builds and native-filter CI explicitly require the extension.
+[[tool.setuptools-rust.ext-modules]]
+target = "vireo._native_detail"
+path = "native/detail/Cargo.toml"
+binding = "PyO3"
+optional = true
+debug = false
+cargo-manifest-args = ["--locked"]
+
 [tool.setuptools.packages.find]
 include = ["vireo*"]
 
@@ -68,6 +78,7 @@ include = ["vireo*"]
 vireo = [
     "data/**/*.json",
     "data/denoise/*.txt",
+    "data/native-detail/*.txt",
     "templates/**/*.html",
     "static/**/*",
 ]

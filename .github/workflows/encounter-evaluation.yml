@@ -31,8 +31,9 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.14'
-      - name: Install only the evaluation tool and its tests
-        run: pip install -e 'tools/encounter-evaluation[test]'
+      - name: Install the evaluation tool and packaging test dependencies
+        # The application wheel isolation test builds with --no-isolation.
+        run: pip install -e 'tools/encounter-evaluation[test]' 'setuptools-rust>=1.12'
       - name: Check tool code
         run: ruff check tools/encounter-evaluation
       - name: Test evaluation and packaging isolation
