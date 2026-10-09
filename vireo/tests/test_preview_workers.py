@@ -11,9 +11,17 @@ import pytest
 from services.preview_workers import PreviewWorkers, parse_request
 
 
+def publish_started_marker(path):
+    # exists() is a cross-process readiness signal: publish only a full PID.
+    marker = Path(path)
+    temporary = marker.with_name(marker.name + '.tmp')
+    temporary.write_text(str(os.getpid()))
+    os.replace(temporary, marker)
+
+
 def render_probe(payload, output):
     if payload.get('started'):
-        Path(payload['started']).write_text(str(os.getpid()))
+        publish_started_marker(payload['started'])
     if payload.get('crash'):
         os._exit(7)
     if payload.get('hang'):
@@ -30,7 +38,7 @@ def render_native_probe(payload, output):
     with detail_thread_budget(payload['threads']), filters_for_image(image.size) as filters:
         assert filters is not None
         if payload.get('started'):
-            Path(payload['started']).write_text(str(os.getpid()))
+            publish_started_marker(payload['started'])
         if payload.get('peer'):
             wait_until(lambda: Path(payload['peer']).exists())
         while True:
