@@ -615,17 +615,35 @@ body.sidebar-resizing {
   text-transform: uppercase;
   pointer-events: none;
 }
-.pair-source-badge {
+/* Wrap the format below the keywords when a thumbnail cannot fit both. */
+.grid-card-bottom-overlay {
   position: absolute;
-  left: 6px;
-  bottom: 6px;
-  background: rgba(10, 14, 17, 0.84);
-  color: #f4f7f8;
-  border: 1px solid rgba(255, 255, 255, 0.52);
-  font-size: 9px;
-  font-weight: 700;
+  left: 8px;
+  right: 8px;
+  bottom: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 4px 8px;
+  pointer-events: none;
+  z-index: 2;
+}
+.grid-card-bottom-overlay .species-badges {
+  position: static;
+  flex: 1 1 max-content;
+  min-width: 0;
+  max-width: 100%;
+}
+.pair-source-badge {
+  flex-shrink: 0;
+  margin-left: auto;
+  background: rgba(10, 14, 17, 0.68);
+  color: #e2e8eb;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  font-size: 8px;
+  font-weight: 600;
   letter-spacing: 0.02em;
-  padding: 3px 6px;
+  padding: 2px 5px;
   border-radius: 999px;
   pointer-events: none;
 }

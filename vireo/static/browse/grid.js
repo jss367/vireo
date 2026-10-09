@@ -118,7 +118,8 @@ function refreshCardBadgesAndInfo(card, p) {
   } else if (speciesBadges) {
     speciesBadges.remove();
   } else if (speciesBadgeHtml) {
-    wrap.insertAdjacentHTML('beforeend', speciesBadgeHtml);
+    var bottomOverlay = wrap.querySelector('.grid-card-bottom-overlay') || wrap;
+    bottomOverlay.insertAdjacentHTML('afterbegin', speciesBadgeHtml);
   }
   var existing = wrap.querySelector('.inat-badge');
   var shouldShow = !!inatSubmitted[String(p.id)];
