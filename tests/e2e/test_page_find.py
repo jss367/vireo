@@ -258,3 +258,22 @@ def test_find_takes_priority_over_configured_shortcuts(live_server, page, entry)
     page.keyboard.press(entry)
     expect(page.locator("#pageFindInput")).to_be_focused()
     assert page.evaluate("window.findConflictActions") == 0
+
+
+def test_find_excludes_transparent_highlight_controls(live_server, page):
+    page.goto(f"{live_server['url']}/highlights")
+    page.evaluate("""() => {
+        const card = document.createElement('div');
+        card.className = 'highlights-card';
+        card.innerHTML = '<div id="findOpacityControls" class="highlight-order">' +
+            '<button style="opacity:1">HiddenOpacityNeedle</button></div>' +
+            '<p>Visible card text</p>';
+        document.body.appendChild(card);
+    }""")
+    page.keyboard.press("Control+F")
+    page.locator("#pageFindInput").fill("HiddenOpacityNeedle")
+    expect(page.locator("#pageFindStatus")).to_have_text("0 results")
+    page.evaluate("document.getElementById('findOpacityControls').style.opacity = '0.5'")
+    expect(page.locator("#pageFindStatus")).to_have_text("1 of 1")
+    page.evaluate("document.getElementById('findOpacityControls').style.opacity = '0'")
+    expect(page.locator("#pageFindStatus")).to_have_text("0 results")

@@ -60,7 +60,7 @@
         if (!summary || !summary.contains(el)) return false;
       }
       var style = computedStyle(current, styles);
-      if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return false;
+      if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || style.opacity === '0') return false;
       // Collapsed panels can retain child layout boxes while clipping all
       // their content. Scrollable boxes still participate in page search.
       if (style.display !== 'inline' && style.display !== 'contents' && (
@@ -220,6 +220,11 @@
 
   function move(delta) { activate(activeIndex + delta, true); }
 
+  // A class/style mutation can be observed mid-fade; collect again once the
+  // effective opacity reaches its final value, including hover-only controls.
+  document.addEventListener('transitionend', function(e) {
+    if (e.propertyName === 'opacity' && !panel.hidden && input.value.trim()) refresh(false);
+  }, true);
   input.addEventListener('input', function() { activeIndex = 0; refresh(true); });
   input.addEventListener('keydown', function(e) {
     if (e.key === 'Enter') { e.preventDefault(); move(e.shiftKey ? -1 : 1); }
