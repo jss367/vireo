@@ -125,6 +125,8 @@ def test_find_updates_when_details_open_or_close(live_server, page):
         document.body.appendChild(details);
     }""")
     page.keyboard.press("Control+F")
+    page.locator("#pageFindInput").fill("Photo details")
+    expect(page.locator("#pageFindStatus")).to_have_text("1 of 1")
     page.locator("#pageFindInput").fill("CollapsedNeedle")
     expect(page.locator("#pageFindStatus")).to_have_text("0 results")
     page.locator("#findTestDetails summary").click()
@@ -175,3 +177,42 @@ def test_find_preserves_unicode_offsets_and_literal_queries(live_server, page):
     expect(page.locator("#findUnicodeText")).to_have_text(
         "İ Needle needle 🐦 [bird].* [bird].*"
     )
+
+
+def test_find_matches_across_inline_markup(live_server, page):
+    page.goto(f"{live_server['url']}/life-list")
+    page.evaluate("""() => {
+        const section = document.createElement('div');
+        section.id = 'findInlineText';
+        section.innerHTML = '<p>Click <b>Scan for duplicate files</b> to find photos.</p>' +
+            '<p>wild<span>life</span></p><p>separate</p><p>blocks</p>' +
+            '<p>Line<br>break</p><div>empty<div></div>boundary</div>';
+        document.body.appendChild(section);
+    }""")
+    page.keyboard.press("Control+F")
+    field = page.locator("#pageFindInput")
+    for query in ("Click Scan", "files to find", "wildlife", "Line break"):
+        field.fill(query)
+        expect(page.locator("#pageFindStatus")).to_have_text("1 of 1")
+        expect(page.locator("#findInlineText .page-find-mark.active")).to_have_count(2)
+    field.fill("separate blocks")
+    expect(page.locator("#pageFindStatus")).to_have_text("0 results")
+    field.fill("emptyboundary")
+    expect(page.locator("#pageFindStatus")).to_have_text("0 results")
+    field.fill("Scan for duplicate")
+    expect(page.locator("#findInlineText b .page-find-mark.active")).to_have_text(
+        "Scan for duplicate"
+    )
+    field.fill("Click Scan")
+    page.evaluate("""() => {
+        const p = document.createElement('p');
+        p.innerHTML = 'Click <b>Scan</b>';
+        document.getElementById('findInlineText').appendChild(p);
+    }""")
+    expect(page.locator("#pageFindStatus")).to_have_text("1 of 2")
+    page.keyboard.press("Enter")
+    expect(page.locator("#pageFindStatus")).to_have_text("2 of 2")
+    expect(page.locator("#findInlineText > p:last-child .page-find-mark.active")).to_have_count(2)
+    page.keyboard.press("Escape")
+    expect(page.locator("#findInlineText b").first).to_have_text("Scan for duplicate files")
+    expect(page.locator("#findInlineText .page-find-mark")).to_have_count(0)

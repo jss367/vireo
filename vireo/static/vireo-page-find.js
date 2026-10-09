@@ -8,7 +8,7 @@
   var panel = document.getElementById('pageFindPanel');
   var input = document.getElementById('pageFindInput');
   var status = document.getElementById('pageFindStatus');
-  var marks = [];
+  var marks = []; // One group of highlight fragments per logical match.
   var activeIndex = -1;
   var previousFocus = null;
   var escToken = null;
@@ -30,29 +30,88 @@
 
   function clearMarks() {
     observer.disconnect();
-    marks.forEach(function(mark) {
-      var parent = mark.parentNode;
-      if (!parent) return;
-      parent.replaceChild(document.createTextNode(mark.textContent), mark);
-      parent.normalize();
+    var parents = new Set();
+    marks.forEach(function(group) {
+      group.forEach(function(mark) {
+        var parent = mark.parentNode;
+        if (!parent) return;
+        parent.replaceChild(document.createTextNode(mark.textContent), mark);
+        parents.add(parent);
+      });
     });
+    parents.forEach(function(parent) { parent.normalize(); });
     marks = [];
   }
 
-  function visibleText(node) {
-    var el = node.parentElement;
-    if (!el || !node.nodeValue.trim()) return false;
+  function computedStyle(el, cache) {
+    if (!cache.has(el)) cache.set(el, window.getComputedStyle(el));
+    return cache.get(el);
+  }
+
+  function visibleForFind(node, styles) {
+    var el = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+    if (!el) return false;
     if (el.closest('#pageFindPanel, script, style, noscript, textarea, input, select, [contenteditable], svg title, svg desc')) return false;
     for (var current = el; current; current = current.parentElement) {
       if (current.hidden || current.getAttribute('aria-hidden') === 'true') return false;
-      if (current.tagName === 'DETAILS' && !current.open) {
+      if (current.tagName === 'DETAILS' && !current.open &&
+          (current !== el || node.nodeType === Node.TEXT_NODE)) {
         var summary = current.querySelector(':scope > summary');
         if (!summary || !summary.contains(el)) return false;
       }
-      var style = window.getComputedStyle(current);
+      var style = computedStyle(current, styles);
       if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return false;
     }
     return el.getClientRects().length > 0;
+  }
+
+  function collectTextRuns() {
+    var styles = new WeakMap();
+    var blocks = new WeakMap();
+    function textBlock(el) {
+      if (blocks.has(el)) return blocks.get(el);
+      var display = computedStyle(el, styles).display;
+      var block = el;
+      // Keep inline formatting together, but separate block content and
+      // independently positioned SVG labels.
+      if (el.parentElement && el.tagName.toLowerCase() !== 'text' &&
+          (display === 'inline' || display === 'contents')) {
+        block = textBlock(el.parentElement);
+      }
+      blocks.set(el, block);
+      return block;
+    }
+    var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT, {
+      acceptNode: function(node) {
+        if (!visibleForFind(node, styles)) return NodeFilter.FILTER_REJECT;
+        if (node.nodeType === Node.TEXT_NODE || node.tagName === 'BR') return NodeFilter.FILTER_ACCEPT;
+        var display = computedStyle(node, styles).display;
+        return node.tagName.toLowerCase() === 'text' || (display !== 'inline' && display !== 'contents')
+          ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
+      }
+    });
+    var runs = [];
+    var run = null;
+    while (walker.nextNode()) {
+      var node = walker.currentNode;
+      if (node.nodeType !== Node.TEXT_NODE && node.tagName !== 'BR') {
+        run = null;
+        continue;
+      }
+      var block = textBlock(node.parentElement);
+      if (!run || run.block !== block) {
+        run = {block: block, text: '', parts: []};
+        runs.push(run);
+      }
+      if (node.nodeType === Node.TEXT_NODE) {
+        run.parts.push({node: node, start: run.text.length, end: run.text.length + node.nodeValue.length});
+        run.text += node.nodeValue;
+      } else {
+        // A line break separates words without creating a text-node offset.
+        run.text += '\n';
+      }
+    }
+    return runs;
   }
 
   function updateStatus() {
@@ -63,12 +122,14 @@
 
   function activate(index, scroll) {
     observer.disconnect();
-    marks.forEach(function(mark) { mark.classList.remove('active'); });
+    marks.forEach(function(group) {
+      group.forEach(function(mark) { mark.classList.remove('active'); });
+    });
     activeIndex = marks.length ? ((index % marks.length) + marks.length) % marks.length : -1;
     if (activeIndex >= 0) {
       var active = marks[activeIndex];
-      active.classList.add('active');
-      if (scroll) active.scrollIntoView({block: 'center', inline: 'nearest'});
+      active.forEach(function(mark) { mark.classList.add('active'); });
+      if (scroll) active[0].scrollIntoView({block: 'center', inline: 'nearest'});
     }
     updateStatus();
     observe();
@@ -85,34 +146,48 @@
     }
     // Match against the original string: case conversion can expand Unicode
     // characters, so offsets into a lowercased copy need not align with text.
-    var matcher = new RegExp(query.replace(/[.*+?^$(){}|[\]\\]/g, '\\$&'), 'giu');
-    var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
-      acceptNode: function(node) {
-        matcher.lastIndex = 0;
-        return matcher.test(node.nodeValue) && visibleText(node)
-          ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
-      },
+    var pattern = query.split(/\s+/).map(function(word) {
+      return word.replace(/[.*+?^$(){}|[\]\\]/g, '\\$&');
+    }).join('\\s+');
+    var matcher = new RegExp(pattern, 'giu');
+    var segmentsByNode = new Map();
+    collectTextRuns().forEach(function(run) {
+      matcher.lastIndex = 0;
+      var partIndex = 0;
+      var match;
+      while ((match = matcher.exec(run.text)) !== null) {
+        var group = [];
+        marks.push(group);
+        var start = match.index;
+        var end = start + match[0].length;
+        while (partIndex < run.parts.length && run.parts[partIndex].end <= start) partIndex++;
+        for (var i = partIndex; i < run.parts.length && run.parts[i].start < end; i++) {
+          var part = run.parts[i];
+          if (part.end <= start) continue;
+          if (!segmentsByNode.has(part.node)) segmentsByNode.set(part.node, []);
+          segmentsByNode.get(part.node).push({
+            start: Math.max(start, part.start) - part.start,
+            end: Math.min(end, part.end) - part.start,
+            group: group
+          });
+        }
+      }
     });
-    var nodes = [];
-    while (walker.nextNode()) nodes.push(walker.currentNode);
-    nodes.forEach(function(node) {
+    segmentsByNode.forEach(function(segments, node) {
       var text = node.nodeValue;
       var fragment = document.createDocumentFragment();
       var pos = 0;
-      matcher.lastIndex = 0;
-      var match;
-      while ((match = matcher.exec(text)) !== null) {
-        var index = match.index;
-        fragment.appendChild(document.createTextNode(text.slice(pos, index)));
+      segments.forEach(function(segment) {
+        fragment.appendChild(document.createTextNode(text.slice(pos, segment.start)));
         var mark = node.parentElement.namespaceURI === 'http://www.w3.org/2000/svg'
           ? document.createElementNS('http://www.w3.org/2000/svg', 'tspan')
           : document.createElement('mark');
         mark.setAttribute('class', 'page-find-mark');
-        mark.textContent = match[0];
-        marks.push(mark);
+        mark.textContent = text.slice(segment.start, segment.end);
+        segment.group.push(mark);
         fragment.appendChild(mark);
-        pos = index + match[0].length;
-      }
+        pos = segment.end;
+      });
       fragment.appendChild(document.createTextNode(text.slice(pos)));
       node.parentNode.replaceChild(fragment, node);
     });
