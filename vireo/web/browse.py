@@ -758,7 +758,7 @@ def create_browse_blueprint(
                 "missing_count": 0,
             })
 
-        states = db.get_wildlife_excluded_states(photo_ids)
+        states = db.photo_review.wildlife_excluded_states(photo_ids)
         excluded = sum(1 for state in states.values() if state)
         included = len(states) - excluded
 

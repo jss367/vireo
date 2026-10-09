@@ -3278,7 +3278,7 @@ def create_media_blueprint(
                 img = crop
 
         if requested_detection is not None and request.args.get("suggested") == "1":
-            exposure_ev = db.get_detection_subject_exposure_ev(requested_detection)
+            exposure_ev = db.detections.subject_exposure_ev(requested_detection)
             if exposure_ev is not None:
                 from image_edits import apply_recipe
                 img = apply_recipe(img, {"adjustments": {"exposure": exposure_ev}})

@@ -5,6 +5,7 @@ import sqlite3
 
 import pytest
 from db import Database
+from repositories.photo_review import PhotoReviewRepository
 from repositories.sync import SyncRepository
 from web.location_edits import serialize_photo_location
 
@@ -114,13 +115,14 @@ def test_culling_failure_rolls_back_flags_queue_and_history(app_and_db, monkeypa
     app, db = app_and_db
     cfg.save({"sync_flags_to_xmp": True})
     pids = [row["id"] for row in db.get_photos()[:3]]
-    db.update_photo_flag(pids[2], "rejected")
+    db.photo_review.set_flag(pids[2], "rejected")
     db.queue_flag_change_if_enabled(pids[2], "rejected")
     before_flags = {pid: db.get_photo(pid)["flag"] for pid in pids}
     before_queue = [dict(row) for row in db.pending_changes.list_all()]
-    method = {"flag": "update_photo_flag", "queue": "queue_flag_change_if_enabled",
-              "history": "record_edit"}[failure]
-    original = getattr(Database, method)
+    owner, method = {"flag": (PhotoReviewRepository, "set_flag"),
+                     "queue": (Database, "queue_flag_change_if_enabled"),
+                     "history": (Database, "record_edit")}[failure]
+    original = getattr(owner, method)
     calls = []
 
     def fail(self, *args, **kwargs):
@@ -129,7 +131,7 @@ def test_culling_failure_rolls_back_flags_queue_and_history(app_and_db, monkeypa
             raise RuntimeError("injected failure")
         return original(self, *args, **kwargs)
 
-    monkeypatch.setattr(Database, method, fail)
+    monkeypatch.setattr(owner, method, fail)
     response = app.test_client().post(
         "/api/culling/apply", json={"keepers": [pids[0]], "rejects": [pids[1]], "unflag": [pids[2]]},
     )

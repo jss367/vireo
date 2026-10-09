@@ -879,7 +879,7 @@ def test_detect_batch_propagates_resource_wait_cancelled(tmp_path):
     (``ResourceWaitCancelled`` subclasses ``RuntimeError``).
 
     Codex P1: on the reclassify path the caller has already called
-    ``db.clear_detections(photo["id"])`` for this photo before
+    ``db.detections.clear(photo["id"])`` for this photo before
     invoking ``_detect_batch``. If the cancel is silently swallowed
     here, the classify recovery rebuilds predictions using the
     full-image fallback and lands a committed catalog change even
@@ -1629,7 +1629,7 @@ def test_reclassify_preserves_cache_on_model_load_failure(tmp_path, monkeypatch)
 def test_reclassify_skips_purge_when_cancelled_during_model_load(tmp_path, monkeypatch):
     """If the user cancels while model load / embedding computation is
     running, the destructive reclassify purge (clear_predictions /
-    clear_detections) MUST NOT execute. Without the pre-purge cancel
+    detections.clear) MUST NOT execute. Without the pre-purge cancel
     gate, the post-detection gate returns with predictions_stored=0 but
     the cache is already wiped.
     """
@@ -5576,7 +5576,7 @@ def test_detect_subjects_reclassify_keeps_state_when_detect_returns_none(tmp_pat
     failure / ONNX hiccup) must leave that photo's detections and
     predictions untouched and not queue it for a post-cancel rebuild.
 
-    ``_detect_subjects`` used to run the global ``clear_detections`` before
+    ``_detect_subjects`` used to run the global ``detections.clear`` before
     each photo's re-detection, so a ``None`` result stranded the photo and
     had to be patched over by always queueing it for rebuild. Detections
     are now replaced only when the new result lands, so there is nothing
@@ -5841,7 +5841,7 @@ def test_classify_photos_reclassify_clears_predictions_per_photo(tmp_path):
         # also be wiped in the fallback path, otherwise the
         # latest-fingerprint-per-detection filter in get_predictions
         # would surface them alongside the new fallback rows. The
-        # normal reclassify path's per-photo clear_detections cascade
+        # normal reclassify path's per-photo detections.clear cascade
         # has already wiped predictions across all fingerprints, so an
         # unfiltered clear here is a no-op repeat in that path.
         assert call.kwargs.get("labels_fingerprint") is None, (
@@ -6962,7 +6962,7 @@ def test_run_classify_job_reclassify_cancel_classifies_empty_scene_processed(tmp
     """End-to-end: a reclassify run cancelled after detection must still
     classify photos that were re-detected as empty scenes (no detections
     in detection_map). Their old detections+predictions were already
-    cascaded away by the per-photo ``clear_detections`` call in
+    cascaded away by the per-photo ``detections.clear`` call in
     ``_detect_subjects``; without a full-image fallback classify pass they
     would be stranded with cleared predictions and no replacement.
 
@@ -7079,7 +7079,7 @@ def test_run_classify_job_reclassify_cancel_classifies_empty_scene_processed(tmp
 
     assert detect_called["n"] == 1, "_detect_subjects must have been called"
     # The empty-scene photo (id 1) had its predictions cascaded away by
-    # _detect_subjects.clear_detections; the recovery path must classify
+    # _detect_subjects detections.clear; the recovery path must classify
     # it via the full-image fallback so it doesn't end up empty.
     assert mock_db_instance.add_prediction.call_count >= 1, (
         "Post-detect cancel on reclassify with an empty-scene processed "

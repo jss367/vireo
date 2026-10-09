@@ -13268,7 +13268,7 @@ def test_highlights_curation_filters_combine_independently(app_and_db):
     # Rejecting Alpha's selected photo leaves another eligible Alpha photo in
     # the bucket. The stored rank is retained for undo, but it must not make the
     # active-selection filter report that Alpha still has a chosen highlight.
-    db.update_photo_flag(photo_ids["Alpha Bird"], "rejected")
+    db.photo_review.set_flag(photo_ids["Alpha Bird"], "rejected")
     assert species_for(highlight_selection="yes") == {"Gamma Bird"}
     assert species_for(
         highlight_selection="no", species_representative="no"
@@ -13276,18 +13276,18 @@ def test_highlights_curation_filters_combine_independently(app_and_db):
     assert db.get_species_highlights("Alpha Bird") == {
         "Alpha Bird": {photo_ids["Alpha Bird"]: 1}
     }
-    db.update_photo_flag(photo_ids["Alpha Bird"], "none")
+    db.photo_review.set_flag(photo_ids["Alpha Bird"], "none")
     assert species_for(highlight_selection="yes") == {"Alpha Bird", "Gamma Bird"}
 
     # Representative preferences follow the same active-state rule while
     # keeping their stored row available for an un-reject.
-    db.update_photo_flag(photo_ids["Beta Bird"], "rejected")
+    db.photo_review.set_flag(photo_ids["Beta Bird"], "rejected")
     assert species_for(species_representative="yes") == {"Gamma Bird"}
     assert db.get_species_representatives() == {
         "Beta Bird": photo_ids["Beta Bird"],
         "Gamma Bird": photo_ids["Gamma Bird"],
     }
-    db.update_photo_flag(photo_ids["Beta Bird"], "none")
+    db.photo_review.set_flag(photo_ids["Beta Bird"], "none")
     assert species_for(species_representative="yes") == {"Beta Bird", "Gamma Bird"}
 
     response = client.get(

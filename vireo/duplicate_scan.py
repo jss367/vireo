@@ -273,7 +273,7 @@ def _attach_edit_recipes(db, proposals):
         )
     if not candidates:
         return proposals
-    recipe_map = db.get_photo_edit_recipes(
+    recipe_map = db.edits.get_photo_recipes(
         sorted({
             candidate["id"]
             for candidate in candidates

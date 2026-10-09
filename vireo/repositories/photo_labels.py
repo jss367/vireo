@@ -1,23 +1,28 @@
 """Persistence for workspace-scoped photo color labels.
 
 Color labels and their per-color descriptions are scoped to the active
-workspace, so ``Database`` builds the repository with ``self._ws_id()`` and
-this class holds the SQL. Descriptions ride in the workspace's
-``config_overrides`` JSON blob (see ``get_descriptions`` /
+workspace. ``Database`` builds the repository with ``self._ws_id`` uncalled,
+and every public method resolves it first, before validating its arguments
+or running any SQL, so with no workspace active each one raises
+``RuntimeError`` exactly where the old eager ``_ws_id()`` in the factory did
+(including the empty-input reads and writes). Descriptions ride in the
+workspace's ``config_overrides`` JSON blob (see ``get_descriptions`` /
 ``set_description``); the read fails soft — bad JSON or a stale schema
 returns ``{}`` rather than raising — so a corrupt override never blocks
 labelling. The color-name whitelist and description length cap
 (``VALID_COLOR_LABELS``, ``MAX_COLOR_LABEL_DESCRIPTION_LENGTH``) are module
 constants that ``Database`` re-exports so callers can validate before
-delegating. ``Database`` keeps the wrappers
-(``set_color_label``, ``remove_color_label``, ``get_color_label``,
-``get_color_labels_for_photos``, ``filter_photo_ids_in_workspace``,
-``batch_set_color_label``, ``get_color_label_descriptions``,
-``set_color_label_description``) as one-line delegations and calls in here
-for the SQL.
+delegating.
+
+Callers reach it as ``db.photo_labels`` (a fresh repository per access, see
+``Database.photo_labels``); there are no forwarding wrappers on
+``Database``. Every write commits. The workspace visibility filter that used
+to live here is ``db.photo_visibility.visible_photo_ids``.
 """
 
 import json
+import sqlite3
+from collections.abc import Callable, Collection
 
 VALID_COLOR_LABELS = ("red", "yellow", "green", "blue", "purple")
 MAX_COLOR_LABEL_DESCRIPTION_LENGTH = 120
@@ -25,20 +30,30 @@ _DESCRIPTIONS_CONFIG_KEY = "color_label_descriptions"
 
 
 class PhotoLabelRepository:
-    def __init__(self, conn, workspace_id, *, chunk_size=800):
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        workspace_id_fn: Callable[[], int],
+        *,
+        chunk_size: int = 800,
+    ) -> None:
         self.conn = conn
-        self.workspace_id = workspace_id
+        self.workspace_id_fn = workspace_id_fn
         self.chunk_size = chunk_size
 
-    def get(self, photo_id):
+    def get(self, photo_id: int) -> str | None:
+        """The photo's color label in the active workspace, or None."""
+        workspace_id = self.workspace_id_fn()
         row = self.conn.execute(
             "SELECT color FROM photo_color_labels "
             "WHERE photo_id = ? AND workspace_id = ?",
-            (photo_id, self.workspace_id),
+            (photo_id, workspace_id),
         ).fetchone()
         return row["color"] if row else None
 
-    def get_for_photos(self, photo_ids):
+    def get_for_photos(self, photo_ids: Collection[int]) -> dict[int, str]:
+        """``{photo_id: color}`` for the labelled photos among these, in the active workspace."""
+        workspace_id = self.workspace_id_fn()
         if not photo_ids:
             return {}
         labels = {}
@@ -47,27 +62,14 @@ class PhotoLabelRepository:
             rows = self.conn.execute(
                 "SELECT photo_id, color FROM photo_color_labels "
                 f"WHERE workspace_id = ? AND photo_id IN ({placeholders})",
-                [self.workspace_id, *chunk],
+                [workspace_id, *chunk],
             ).fetchall()
             labels.update({row["photo_id"]: row["color"] for row in rows})
         return labels
 
-    def visible_photo_ids(self, photo_ids):
-        """Return existing, workspace-visible IDs in caller order, deduplicated."""
-        requested = list(dict.fromkeys(photo_ids))
-        visible = set()
-        for chunk in self._chunks(requested):
-            placeholders = ",".join("?" for _ in chunk)
-            rows = self.conn.execute(
-                "SELECT p.id FROM photos p "
-                "JOIN photo_workspace_visibility wf ON wf.photo_id = p.id "
-                f"WHERE wf.workspace_id = ? AND p.id IN ({placeholders})",
-                [self.workspace_id, *chunk],
-            ).fetchall()
-            visible.update(row["id"] for row in rows)
-        return [photo_id for photo_id in requested if photo_id in visible]
-
-    def set(self, photo_id, color):
+    def set(self, photo_id: int, color: str) -> None:
+        """Set a photo's color label in the active workspace and commit."""
+        workspace_id = self.workspace_id_fn()
         if color not in VALID_COLOR_LABELS:
             raise ValueError(
                 f"Invalid color label: {color}. Must be one of {VALID_COLOR_LABELS}"
@@ -75,19 +77,23 @@ class PhotoLabelRepository:
         self.conn.execute(
             "INSERT OR REPLACE INTO photo_color_labels "
             "(photo_id, workspace_id, color) VALUES (?, ?, ?)",
-            (photo_id, self.workspace_id, color),
+            (photo_id, workspace_id, color),
         )
         self.conn.commit()
 
-    def remove(self, photo_id):
+    def remove(self, photo_id: int) -> None:
+        """Remove a photo's color label in the active workspace and commit."""
+        workspace_id = self.workspace_id_fn()
         self.conn.execute(
             "DELETE FROM photo_color_labels "
             "WHERE photo_id = ? AND workspace_id = ?",
-            (photo_id, self.workspace_id),
+            (photo_id, workspace_id),
         )
         self.conn.commit()
 
-    def set_many(self, photo_ids, color):
+    def set_many(self, photo_ids: Collection[int], color: str | None) -> None:
+        """Set (or, with ``color=None``, remove) several photos' color label and commit."""
+        workspace_id = self.workspace_id_fn()
         if not photo_ids:
             return
         if color is not None and color not in VALID_COLOR_LABELS:
@@ -100,21 +106,22 @@ class PhotoLabelRepository:
                 self.conn.execute(
                     "DELETE FROM photo_color_labels "
                     f"WHERE workspace_id = ? AND photo_id IN ({placeholders})",
-                    [self.workspace_id, *chunk],
+                    [workspace_id, *chunk],
                 )
         else:
             self.conn.executemany(
                 "INSERT OR REPLACE INTO photo_color_labels "
                 "(photo_id, workspace_id, color) VALUES (?, ?, ?)",
-                [(photo_id, self.workspace_id, color) for photo_id in photo_ids],
+                [(photo_id, workspace_id, color) for photo_id in photo_ids],
             )
         self.conn.commit()
 
-    def get_descriptions(self):
+    def get_descriptions(self) -> dict[str, str]:
         """Return the active workspace's valid, non-empty color descriptions."""
+        workspace_id = self.workspace_id_fn()
         row = self.conn.execute(
             "SELECT config_overrides FROM workspaces WHERE id = ?",
-            (self.workspace_id,),
+            (workspace_id,),
         ).fetchone()
         if not row or not row["config_overrides"]:
             return {}
@@ -135,8 +142,9 @@ class PhotoLabelRepository:
             and description.strip()
         }
 
-    def set_description(self, color, description):
+    def set_description(self, color: str, description: str) -> str:
         """Set or clear one color's description in workspace config metadata."""
+        workspace_id = self.workspace_id_fn()
         if color not in VALID_COLOR_LABELS:
             raise ValueError(
                 f"Invalid color label: {color}. Must be one of {VALID_COLOR_LABELS}"
@@ -152,7 +160,7 @@ class PhotoLabelRepository:
 
         row = self.conn.execute(
             "SELECT config_overrides FROM workspaces WHERE id = ?",
-            (self.workspace_id,),
+            (workspace_id,),
         ).fetchone()
         overrides = {}
         if row and row["config_overrides"]:
@@ -176,7 +184,7 @@ class PhotoLabelRepository:
             overrides.pop(_DESCRIPTIONS_CONFIG_KEY, None)
         self.conn.execute(
             "UPDATE workspaces SET config_overrides = ? WHERE id = ?",
-            (json.dumps(overrides) if overrides else None, self.workspace_id),
+            (json.dumps(overrides) if overrides else None, workspace_id),
         )
         self.conn.commit()
         return description

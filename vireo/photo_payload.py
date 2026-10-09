@@ -145,7 +145,7 @@ def attach_edit_recipes(db, photo_dicts):
     if not photo_dicts:
         return photo_dicts
     ids = [p["id"] for p in photo_dicts]
-    recipe_map = db.get_photo_edit_recipes(ids)
+    recipe_map = db.edits.get_photo_recipes(ids)
     for p in photo_dicts:
         recipe = recipe_map.get(p["id"])
         p["edit_recipe"] = recipe
@@ -174,7 +174,7 @@ def attach_nested_edit_recipes(db, payload):
     visit(payload)
     if not refs:
         return payload
-    recipe_map = db.get_photo_edit_recipes(sorted({pid for _, pid in refs}))
+    recipe_map = db.edits.get_photo_recipes(sorted({pid for _, pid in refs}))
     for photo, pid in refs:
         recipe = recipe_map.get(pid)
         photo["edit_recipe"] = recipe

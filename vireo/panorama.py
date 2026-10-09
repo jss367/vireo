@@ -69,7 +69,7 @@ def create_panorama(db, vireo_dir, *, photo_ids, destination, output_format, inp
     if not os.path.isdir(destination):
         raise ValueError("The destination folder is unavailable. Choose an existing folder.")
 
-    recipes = db.get_photo_edit_recipes(photo_ids)
+    recipes = db.edits.get_photo_recipes(photo_ids)
     exif = _get_photo_exif_data(db, photo_ids)
     images = []
     total = len(photo_ids) + 3

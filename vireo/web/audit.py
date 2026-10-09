@@ -195,7 +195,7 @@ def create_audit_blueprint(
         # Photos are global; resolving queues sidecar writes (or rewrites
         # keywords from the XMP) under the active workspace, so it may only
         # touch a photo that workspace can see -- the same set drift lists.
-        if photo_id not in db.filter_photo_ids_in_workspace([photo_id]):
+        if photo_id not in db.photo_visibility.visible_photo_ids([photo_id]):
             return json_error("photo not found", 404)
         from audit import resolve_drift
 

@@ -1024,7 +1024,7 @@ def create_highlights_blueprint(get_db, json_error):
         if any(isinstance(pid, bool) or not isinstance(pid, int) for pid in photo_ids):
             return json_error("photo_ids must be a list of integers")
         photo_ids = list(dict.fromkeys(photo_ids))
-        visible_ids = set(db.filter_photo_ids_in_workspace(photo_ids))
+        visible_ids = set(db.photo_visibility.visible_photo_ids(photo_ids))
         foreign = [pid for pid in photo_ids if pid not in visible_ids]
         if foreign:
             return json_error(

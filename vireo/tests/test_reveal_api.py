@@ -338,7 +338,7 @@ def test_reveal_duplicate_outside_workspace(app_and_db, rejected):
     other_fid = db.add_folder('/other/duplicates')
     pid = db.add_photo(folder_id=other_fid, filename='copy.jpg', extension='.jpg',
                        file_size=10, file_mtime=1.0, file_hash='REVEAL_DUPLICATE')
-    db.update_photo_flag(pid, 'rejected' if rejected else 'none')
+    db.photo_review.set_flag(pid, 'rejected' if rejected else 'none')
     db.set_active_workspace(default_ws)
 
     with app.test_client() as c, \

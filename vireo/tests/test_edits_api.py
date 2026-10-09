@@ -99,7 +99,7 @@ def test_set_color_label(app_and_db):
 
     resp = client.post(f'/api/photos/{pid}/color_label', json={'color': 'red'})
     assert resp.status_code == 200
-    assert db.get_color_label(pid) == 'red'
+    assert db.photo_labels.get(pid) == 'red'
 
 
 def test_remove_color_label(app_and_db):
@@ -112,7 +112,7 @@ def test_remove_color_label(app_and_db):
     client.post(f'/api/photos/{pid}/color_label', json={'color': 'blue'})
     resp = client.post(f'/api/photos/{pid}/color_label', json={'color': None})
     assert resp.status_code == 200
-    assert db.get_color_label(pid) is None
+    assert db.photo_labels.get(pid) is None
 
 
 def test_set_color_label_invalid(app_and_db):
@@ -135,8 +135,8 @@ def test_batch_color_label(app_and_db):
 
     resp = client.post('/api/batch/color_label', json={'photo_ids': pids, 'color': 'green'})
     assert resp.status_code == 200
-    assert db.get_color_label(pids[0]) == 'green'
-    assert db.get_color_label(pids[1]) == 'green'
+    assert db.photo_labels.get(pids[0]) == 'green'
+    assert db.photo_labels.get(pids[1]) == 'green'
 
 
 def test_get_color_labels(app_and_db):
@@ -145,7 +145,7 @@ def test_get_color_labels(app_and_db):
     client = app.test_client()
     photos = db.get_photos()
     pids = [photo['id'] for photo in photos[:2]]
-    db.set_color_label(pids[0], 'purple')
+    db.photo_labels.set(pids[0], 'purple')
 
     resp = client.get(
         f'/api/photos/color_labels?ids={pids[0]},{pids[1]},not-an-id'
@@ -172,7 +172,7 @@ def test_color_label_description_round_trip(app_and_db):
     assert client.get("/api/color-label-descriptions").get_json() == {
         "red": "Used for reptiles",
     }
-    assert db.get_color_label_descriptions() == {"red": "Used for reptiles"}
+    assert db.photo_labels.get_descriptions() == {"red": "Used for reptiles"}
 
     response = client.put(
         "/api/color-label-descriptions/red", json={"description": ""}

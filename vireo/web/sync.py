@@ -1017,7 +1017,7 @@ class _SyncPreviewPage:
         # The sync dialog needs edit recipes for correctly versioned rendered
         # thumbnails, but not the species/life-list enrichment performed by
         # _attach_nested_edit_recipes.
-        recipe_map = self.db.get_photo_edit_recipes(
+        recipe_map = self.db.edits.get_photo_recipes(
             [photo["photo_id"] for photo in self.photos]
         )
         for photo in self.photos:

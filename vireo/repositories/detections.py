@@ -9,7 +9,20 @@ pinned, and re-syncs the primary subject after id-based deletes. This
 repository owns the SQL those steps read and write, plus the one read of a
 detection's subject analysis (``detection_subjects.exposure_ev``) that the
 subject-crop preview applies; ``subjects`` still owns that table's writes.
+
+Callers reach the pass-through operations as ``db.detections`` (a fresh
+repository per access, see ``Database.detections``): ``upsert_rows``,
+``clear``, ``get_ids_for_photos``, ``confidence_summary`` and
+``subject_exposure_ev``. The rest stay behind the ``Database`` methods that
+add the steps above (``save_detections``, ``write_detection_batch``,
+``get_detections``, ``get_detections_for_photos``,
+``get_predictions_for_detection``, the misses methods and
+``delete_detections_by_ids``).
 """
+
+import sqlite3
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from typing import Any
 
 
 class DetectionsRepository:
@@ -20,19 +33,31 @@ class DetectionsRepository:
         "oof":        "miss_oof",
     }
 
-    def __init__(self, conn, *, chunk_size=800, commit_with_retry):
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        chunk_size: int = 800,
+        commit_with_retry: Callable[[sqlite3.Connection], None],
+    ) -> None:
         self.conn = conn
         self.chunk_size = chunk_size
         # ``db.commit_with_retry``, passed in so repositories import no
         # ``db`` code and a monkeypatch of the module function still applies.
         self.commit_with_retry = commit_with_retry
 
-    def commit(self):
+    def commit(self) -> None:
         self.conn.commit()
 
     # -- writes -------------------------------------------------------------
 
-    def save(self, photo_id, detections, detector_model, runtime_fingerprint):
+    def save(
+        self,
+        photo_id: int,
+        detections: Sequence[Mapping[str, Any]],
+        detector_model: str,
+        runtime_fingerprint: str,
+    ) -> list[int]:
         """Upsert one (photo, model)'s detections and commit; see ``Database.save_detections``."""
         ids = self.upsert_rows(
             photo_id, detector_model, detections, runtime_fingerprint,
@@ -42,11 +67,11 @@ class DetectionsRepository:
 
     def upsert_rows(
         self,
-        photo_id,
-        detector_model,
-        detections,
-        runtime_fingerprint="legacy",
-    ):
+        photo_id: int,
+        detector_model: str,
+        detections: Sequence[Mapping[str, Any]],
+        runtime_fingerprint: str = "legacy",
+    ) -> list[int]:
         """Content-addressed UPSERT of detection rows for one (photo, model).
 
         Returns the list of unique IDs in first-seen order. Does NOT commit —
@@ -137,15 +162,15 @@ class DetectionsRepository:
 
     def write_batch(
         self,
-        photo_id,
-        detector_model,
-        detections,
-        runtime_fingerprint,
-        input_fingerprint,
-        force_runtime_replace,
+        photo_id: int,
+        detector_model: str,
+        detections: Sequence[Mapping[str, Any]],
+        runtime_fingerprint: str,
+        input_fingerprint: str | None,
+        force_runtime_replace: bool,
         *,
-        is_pinned,
-    ):
+        is_pinned: Callable[[int, str], bool],
+    ) -> list[int]:
         """Replace detections and record the detector_runs row in one commit.
 
         ``is_pinned(photo_id, detector_model)`` is the façade's
@@ -220,8 +245,20 @@ class DetectionsRepository:
             self.conn.rollback()
             raise
 
-    def clear(self, photo_id, detector_model=None):
-        """Delete a photo's detections and detector_runs rows (one model or all) and commit."""
+    def clear(self, photo_id: int, detector_model: str | None = None) -> None:
+        """Remove detections (and cascaded predictions) for a photo and commit.
+
+        Also clears the matching ``detector_runs`` rows so a subsequent
+        non-reclassify pass actually re-runs MegaDetector. Without this,
+        a reclassify that clears detections but leaves the run key behind
+        (e.g. because model init then failed) would cause future runs to
+        skip detection forever — the gate in ``_detect_subjects`` treats
+        any ``detector_runs`` entry as authoritative.
+
+        Global: no workspace scoping. If ``detector_model`` is None, all
+        detector models for this photo are cleared; otherwise only the
+        rows for that model.
+        """
         if detector_model is None:
             self.conn.execute(
                 "DELETE FROM detections WHERE photo_id = ?", (photo_id,)
@@ -240,7 +277,7 @@ class DetectionsRepository:
             )
         self.conn.commit()
 
-    def delete_by_ids(self, detection_ids):
+    def delete_by_ids(self, detection_ids: Iterable[int]) -> set[int]:
         """Delete detection rows by id in chunks of 900, without committing.
 
         Returns the photo ids that had a ``photo_subject_state`` row before
@@ -265,7 +302,9 @@ class DetectionsRepository:
 
     # -- reads --------------------------------------------------------------
 
-    def get(self, photo_id, min_conf, detector_model=None):
+    def get(
+        self, photo_id: int, min_conf: float, detector_model: str | None = None,
+    ) -> list[sqlite3.Row]:
         """Return a photo's detections at or above ``min_conf``, primary first."""
         q = ("SELECT * FROM detections WHERE photo_id = ? "
              "AND detector_confidence >= ?")
@@ -279,7 +318,9 @@ class DetectionsRepository:
         q += " ORDER BY " + primary_order_sql()
         return self.conn.execute(q, params).fetchall()
 
-    def get_for_photos(self, photo_ids, min_conf, detector_model=None):
+    def get_for_photos(
+        self, photo_ids: Iterable[int], min_conf: float, detector_model: str | None = None,
+    ) -> dict[int, list[dict[str, Any]]]:
         """Return ``{photo_id: [det_dict, ...]}``; see ``Database.get_detections_for_photos``."""
         # Dedup-preserving-order: same id appearing in two chunks would
         # cause setdefault(...).append(...) below to emit each row twice.
@@ -314,8 +355,13 @@ class DetectionsRepository:
                 })
         return result
 
-    def get_predictions(self, detection_id, min_classifier_conf,
-                        classifier_model=None, labels_fingerprint=None):
+    def get_predictions(
+        self,
+        detection_id: int,
+        min_classifier_conf: float,
+        classifier_model: str | None = None,
+        labels_fingerprint: str | None = None,
+    ) -> list[sqlite3.Row]:
         """Return a detection's cached predictions at or above the floor, best first."""
         q = ("SELECT * FROM predictions WHERE detection_id = ? "
              "AND confidence >= ?")
@@ -329,8 +375,21 @@ class DetectionsRepository:
         q += " ORDER BY confidence DESC"
         return self.conn.execute(q, params).fetchall()
 
-    def get_ids_for_photos(self, photo_ids):
-        """Return ``{photo_id: set(detection_id, ...)}`` with no threshold, in chunks of 900."""
+    def get_ids_for_photos(self, photo_ids: Collection[int]) -> dict[int, set[int]]:
+        """Return ``{photo_id: set(detection_id, ...)}`` for the given photo IDs.
+
+        The detections table is global (no workspace_id). Used to snapshot
+        pre-run detection IDs so that a reclassify pass can delete only the
+        *stale* rows after fresh ones have been inserted, avoiding the
+        cascade-delete that would destroy other-model predictions.
+
+        No threshold filter: the caller needs to see every existing row,
+        including low-confidence ones, so they can all be cleaned up.
+
+        IDs are queried in chunks of at most 900 to stay safely under
+        SQLite's default bound-parameter limit (SQLITE_LIMIT_VARIABLE_NUMBER,
+        typically 999 in production builds).
+        """
         if not photo_ids:
             return {}
         result: dict = {}
@@ -348,7 +407,7 @@ class DetectionsRepository:
                 result.setdefault(row["photo_id"], set()).add(row["id"])
         return result
 
-    def confidence_summary(self, photo_ids):
+    def confidence_summary(self, photo_ids: Iterable[int]) -> list[sqlite3.Row]:
         """Rows (``photo_id``, ``max_conf``, ``n``) for the photos with detections.
 
         ``max_conf`` is the highest ``detector_confidence`` and ``n`` the
@@ -368,7 +427,7 @@ class DetectionsRepository:
             ).fetchall())
         return rows
 
-    def subject_exposure_ev(self, detection_id):
+    def subject_exposure_ev(self, detection_id: int) -> float | None:
         """The subject analysis's ``exposure_ev`` for one detection, or None if unanalysed."""
         row = self.conn.execute(
             "SELECT exposure_ev FROM detection_subjects WHERE detection_id=?",
@@ -378,11 +437,11 @@ class DetectionsRepository:
 
     # -- misses -------------------------------------------------------------
 
-    def miss_column(self, category):
+    def miss_column(self, category: str) -> str:
         """Return the ``photos`` column for a miss category; ``KeyError`` if unknown."""
         return self.MISS_COLUMNS[category]
 
-    def miss_where(self, category):
+    def miss_where(self, category: str | None) -> str:
         """Return the flag predicate for ``category`` (``None`` = any miss)."""
         if category is None:
             where = (
@@ -393,8 +452,14 @@ class DetectionsRepository:
             where = f"p.{col}=1"
         return where
 
-    def list_miss_photos(self, workspace_id, where, since, scope_clause,
-                         scope_params):
+    def list_miss_photos(
+        self,
+        workspace_id: int,
+        where: str,
+        since: str | None,
+        scope_clause: str,
+        scope_params: Sequence[Any],
+    ) -> list[dict[str, Any]]:
         """Return the workspace's non-rejected photos matching ``where``, newest first."""
         params = [workspace_id]
         if since:
@@ -420,7 +485,9 @@ class DetectionsRepository:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def attach_miss_detections(self, photos, min_conf):
+    def attach_miss_detections(
+        self, photos: list[dict[str, Any]], min_conf: float,
+    ) -> list[dict[str, Any]]:
         """Add each miss photo's primary and raw-best animal detection fields."""
         import json as _json
 
@@ -469,7 +536,7 @@ class DetectionsRepository:
                 p["detection_conf"] = None
         return photos
 
-    def clear_miss_flag(self, photo_id, category):
+    def clear_miss_flag(self, photo_id: int, category: str) -> None:
         """Zero one miss column on a photo and commit."""
         col = self.miss_column(category)
         self.conn.execute(
@@ -477,8 +544,14 @@ class DetectionsRepository:
         )
         self.conn.commit()
 
-    def reject_misses(self, col, workspace_id, since, scope_clause,
-                      scope_params):
+    def reject_misses(
+        self,
+        col: str,
+        workspace_id: int,
+        since: str | None,
+        scope_clause: str,
+        scope_params: Sequence[Any],
+    ) -> list[dict[str, Any]]:
         """Reject the workspace's non-rejected photos flagged in ``col``.
 
         Returns ``[{"photo_id", "old_value"}]`` for the changed photos and

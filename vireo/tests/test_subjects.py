@@ -82,7 +82,7 @@ def test_choice_remembered_when_detection_temporarily_disappears(db, subject_pho
     photo_id, ids, path = subject_photo
     select_primary(db, photo_id, ids[0])
     original = dict(db.get_detections(photo_id)[0])
-    db.clear_detections(photo_id)
+    db.detections.clear(photo_id)
     assert payload(db, photo_id)["choice_unavailable"]
     db.write_detection_batch(photo_id, original["detector_model"], [{
         "box": {k: original["box_" + k] for k in "xywh"}, "confidence": .95, "category": "animal"}])
@@ -329,7 +329,7 @@ def test_eye_stage_survives_floor_change_without_state_sync(db, subject_photo):
 def test_empty_redetection_clears_previous_subject_quality(db, subject_photo):
     photo_id, ids, path = subject_photo
     analyze_photo(db, photo_id, path)
-    db.clear_detections(photo_id)
+    db.detections.clear(photo_id)
     assert analyze_photo(db, photo_id, path) == 0
     assert db.conn.execute('SELECT quality_score FROM photos WHERE id=?', (photo_id,)).fetchone()[0] is None
 
@@ -348,7 +348,7 @@ def test_reclassify_cancellation_clears_previous_subject(db, subject_photo, monk
     db.conn.execute("UPDATE photos SET mask_path='old.png', eye_x=.7, dino_subject_embedding=X'01' WHERE id=?", (photo_id,))
     db.conn.commit()
     # Standalone Classify clears immediately before entering _detect_batch.
-    db.clear_detections(photo_id)
+    db.detections.clear(photo_id)
 
     def detect(_path):
         if cancel_during_detection:
@@ -404,7 +404,7 @@ def test_detectorless_cached_run_clears_ineligible_primary(db, subject_photo, mo
     analyze_photo(db, photo_id, path)
     db.conn.execute("UPDATE photos SET mask_path='old.png', eye_x=.7, dino_subject_embedding=X'01' WHERE id=?", (photo_id,))
     if empty:
-        db.clear_detections(photo_id)
+        db.detections.clear(photo_id)
         db.write_detection_batch(photo_id, "megadetector-v6", [])
     else:
         db.conn.execute("UPDATE detections SET detector_confidence=.1 WHERE photo_id=?", (photo_id,))

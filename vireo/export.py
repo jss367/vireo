@@ -656,7 +656,7 @@ def export_photos(db, vireo_dir, photo_ids, destination=None, options=None,
 
     # Get species keywords for all photos in one query
     species_map = db.get_species_keywords_for_photos(photo_ids)
-    edit_recipes = db.get_photo_edit_recipes(photo_ids)
+    edit_recipes = db.edits.get_photo_recipes(photo_ids)
 
     # Track sequence numbers per subdirectory
     seq_counters = {}
@@ -2114,7 +2114,7 @@ def preview_export(db, photo_ids, destination=None, options=None):
     folders = {folder["id"]: folder["path"] for folder in db.get_folder_tree()}
     species_map = db.get_species_keywords_for_photos(photo_ids)
     exif_data_map = _get_photo_exif_data(db, photo_ids)
-    edit_recipes = db.get_photo_edit_recipes(photo_ids)
+    edit_recipes = db.edits.get_photo_recipes(photo_ids)
     developed_index = _DevelopedDirIndex()
     seq_counters = {}
     destination_reservations = {}

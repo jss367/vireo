@@ -227,8 +227,8 @@ def create_photo_edit_recipes_blueprint(
         if not isinstance(ids, list) or not ids or any(type(pid) is not int for pid in ids):
             return json_error("photo_ids must be a non-empty list of integers")
         db = get_db()
-        visible_ids = db.filter_photo_ids_in_workspace(ids)
-        recipe_map = db.get_photo_edit_recipes(visible_ids)
+        visible_ids = db.photo_visibility.visible_photo_ids(ids)
+        recipe_map = db.edits.get_photo_recipes(visible_ids)
         recipes = [recipe_map.get(pid) for pid in visible_ids]
         values = {}
         for field in FIELDS:
@@ -320,9 +320,9 @@ def create_photo_edit_recipes_blueprint(
         has_local = bool(recipe.get("local")) and (fields is None or "local" in fields)
         vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
 
-        visible_ids = db.filter_photo_ids_in_workspace(ids)
+        visible_ids = db.photo_visibility.visible_photo_ids(ids)
         visible_set = set(visible_ids)
-        old_recipes = db.get_photo_edit_recipes(visible_ids)
+        old_recipes = db.edits.get_photo_recipes(visible_ids)
         # Slider edits need no photo metadata. Geometry and local masks use
         # dimensions, loaded in chunks only for those operations.
         needs_dimensions = has_local or bool(fields and {"rotation", "flip"}.intersection(fields))

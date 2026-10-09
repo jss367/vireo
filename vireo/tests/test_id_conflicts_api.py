@@ -252,7 +252,7 @@ def test_search_narrows_the_listed_rows(compare_collection):
 
 def test_excludes_are_applied_and_counted(compare_collection):
     app, db, cid, photo_ids = compare_collection
-    db.update_photo_flag(photo_ids[0], "rejected")
+    db.photo_review.set_flag(photo_ids[0], "rejected")
 
     payload = _get(app, cid, filter="all", exclude="rejected")
 

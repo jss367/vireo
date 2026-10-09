@@ -1557,17 +1557,17 @@ def create_pipeline_blueprint(
             for pid in picks:
                 old = old_flags.get(pid, "none")
                 if old != "flagged":
-                    db.update_photo_flag(pid, "flagged", _commit=False)
+                    db.photo_review.set_flag(pid, "flagged", _commit=False)
                     flag_items.append({"photo_id": pid, "old_value": old, "new_value": "flagged"})
             for pid in rejects:
                 old = old_flags.get(pid, "none")
                 if old != "rejected":
-                    db.update_photo_flag(pid, "rejected", _commit=False)
+                    db.photo_review.set_flag(pid, "rejected", _commit=False)
                     flag_items.append({"photo_id": pid, "old_value": old, "new_value": "rejected"})
             for pid in candidates:
                 old = old_flags.get(pid, "none")
                 if old in ("flagged", "rejected"):
-                    db.update_photo_flag(pid, "none", _commit=False)
+                    db.photo_review.set_flag(pid, "none", _commit=False)
                     flag_items.append({"photo_id": pid, "old_value": old, "new_value": "none"})
         except ValueError as e:
             return json_error(str(e), 403)

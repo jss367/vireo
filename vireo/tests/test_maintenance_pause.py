@@ -800,7 +800,7 @@ def test_sharpness_auto_flags_observe_pause_and_cancel(
     client_with_photo, monkeypatch, action,
 ):
     import sharpness
-    from db import Database
+    from repositories.photo_review import PhotoReviewRepository
 
     app, db, first = client_with_photo
     second = _second_photo(db, first)
@@ -809,7 +809,7 @@ def test_sharpness_auto_flags_observe_pause_and_cancel(
     entered = threading.Event()
     release = threading.Event()
     flagged = []
-    original = Database.update_photo_flag
+    original = PhotoReviewRepository.set_flag
 
     monkeypatch.setattr(sharpness, "score_collection_photos", lambda *args, **kwargs: {
         "results": [
@@ -818,14 +818,14 @@ def test_sharpness_auto_flags_observe_pause_and_cancel(
         ],
     })
 
-    def flag_photo(worker_db, photo_id, flag, **kwargs):
+    def flag_photo(review, photo_id, flag, **kwargs):
         if not flagged:
             entered.set()
             assert release.wait(5)
-        original(worker_db, photo_id, flag, **kwargs)
+        original(review, photo_id, flag, **kwargs)
         flagged.append(photo_id)
 
-    monkeypatch.setattr(Database, "update_photo_flag", flag_photo)
+    monkeypatch.setattr(PhotoReviewRepository, "set_flag", flag_photo)
     response = client.post("/api/jobs/sharpness", json={})
     assert response.status_code == 200
     job_id = response.get_json()["job_id"]

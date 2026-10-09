@@ -67,7 +67,7 @@ def seed_e2e_data(db, thumb_dir):
             os.path.join(thumb_dir, f"{pid}.jpg")
         )
 
-    db.update_photo_rating(photos[0], 4)
+    db.photo_review.set_rating(photos[0], 4)
 
     k1 = db.add_keyword("Red-tailed Hawk", is_species=True)
     k2 = db.add_keyword("American Robin", is_species=True)

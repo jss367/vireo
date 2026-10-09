@@ -20,9 +20,15 @@ from repositories import UNSET as _UNSET  # sentinel for "not provided" vs expli
 
 if TYPE_CHECKING:
     from repositories.caches import CachesRepository
+    from repositories.detections import DetectionsRepository
+    from repositories.edits import EditsRepository
+    from repositories.exif_search import ExifSearchRepository
     from repositories.job_history import JobHistoryRepository
     from repositories.local_folders import LocalFolderRepository
     from repositories.pending_archives import PendingArchiveRepository
+    from repositories.photo_labels import PhotoLabelRepository
+    from repositories.photo_review import PhotoReviewRepository
+    from repositories.photo_visibility import PhotoVisibilityRepository
     from repositories.sync import SyncRepository
 
 log = logging.getLogger(__name__)
@@ -1448,42 +1454,32 @@ class Database:
         return self._workspace_repository().unpin_tab(nav_id)
 
     def _photo_visibility_repository(self):
+        """Build the photo-visibility repository on this connection.
+
+        It receives ``self._ws_id`` uncalled: the grant and revoke writes take
+        their workspace id as an argument and never resolve it, while
+        ``visible_photo_ids``, ``affected_workspaces`` and
+        ``preserve_for_move`` resolve the active workspace (raising
+        ``RuntimeError`` when none is set) before running any SQL.
+        """
         from repositories.photo_visibility import PhotoVisibilityRepository
 
-        return PhotoVisibilityRepository(self.conn)
-
-    def grant_workspace_photos(self, workspace_id, photo_ids):
-        self._photo_visibility_repository().grant(workspace_id, photo_ids)
-
-    def revoke_workspace_photo_grants_for_folders(self, workspace_id, folder_ids):
-        self._photo_visibility_repository().revoke_for_folders(workspace_id, folder_ids)
-
-    def grant_verified_twin_photos(self, workspace_id, rows):
-        self._photo_visibility_repository().grant_verified_twins(workspace_id, rows)
-
-    def grant_verified_twin_photos_tracked(self, workspace_id, rows):
-        """Grant twins and report the fresh grants and promoted folders.
-
-        Returns ``(new_grant_ids, promoted_folder_ids)``. See
-        :meth:`PhotoVisibilityRepository.grant_verified_twins_tracked`.
-        """
-        return self._photo_visibility_repository().grant_verified_twins_tracked(
-            workspace_id, rows,
+        return PhotoVisibilityRepository(
+            self.conn, self._ws_id, chunk_size=_SQLITE_PARAM_CHUNK_SIZE,
         )
 
-    def revoke_photo_grants(self, workspace_id, photo_ids):
-        """Revoke the specified ``workspace_photos`` rows (no sibling expansion)."""
-        self._photo_visibility_repository().revoke_grants(workspace_id, photo_ids)
+    @property
+    def photo_visibility(self) -> PhotoVisibilityRepository:
+        """Photo-level workspace access: ``db.photo_visibility.visible_photo_ids(ids)`` and friends.
 
-    def demote_folders_to_missing(self, folder_ids):
-        """Revert folders to ``status='missing'`` (import mount-loss rollback)."""
-        self._photo_visibility_repository().demote_folders_to_missing(folder_ids)
-
-    def photo_move_affected_workspaces(self, photo_ids):
-        return self._photo_visibility_repository().affected_workspaces(photo_ids, self._ws_id())
-
-    def preserve_photo_visibility_for_move(self, photo_id, keep_visible):
-        self._photo_visibility_repository().preserve_for_move(photo_id, self._ws_id(), keep_visible)
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_photo_visibility_repository``, exactly as a
+        forwarding wrapper called at that moment would. Accessing it never
+        needs a workspace; the methods that act on the active workspace
+        resolve it when they run (and raise there when none is set). Do not
+        hold the returned repository across ``set_active_workspace``.
+        """
+        return self._photo_visibility_repository()
 
     def _workspace_repository(self, *, scoped=True):
         """Build the workspace repository on this connection.
@@ -4775,47 +4771,6 @@ class Database:
             folder_id, folder_subtree_ids=self.get_folder_subtree_ids,
         )
 
-    def update_photo_rating(self, photo_id, rating, verify_workspace=True):
-        """Set photo rating (0-5).
-
-        Args:
-            verify_workspace: when True (the default), raises ValueError if
-                the photo is not in the active workspace's folders.  Pass
-                False from background jobs that already scope their photo
-                lists, or from undo/redo where the edit history is already
-                workspace-scoped.
-        """
-        self._photo_review_repository().set_rating(
-            photo_id, rating, verify_workspace=verify_workspace
-        )
-
-    def batch_update_photo_rating(self, photo_ids, rating, verify_workspace=True):
-        """Set rating for multiple photos in a single transaction.
-
-        Args:
-            verify_workspace: when True, raises ValueError if any photo is
-                not in the active workspace.
-        """
-        self._photo_review_repository().set_ratings(
-            photo_ids, rating, verify_workspace=verify_workspace
-        )
-
-    def update_photo_flag(self, photo_id, flag, verify_workspace=True, _commit=True):
-        """Set photo flag ('none', 'flagged', 'rejected').
-
-        Args:
-            verify_workspace: when True (the default), raises ValueError if
-                the photo is not in the active workspace's folders.
-            _commit: If False, skip the internal commit (caller is responsible
-                     for committing the transaction). Callers that hold
-                     ``BEGIN IMMEDIATE`` — the prediction decision lock, for
-                     example — must pass False so the writer lock is not
-                     released mid-decision.
-        """
-        self._photo_review_repository().set_flag(
-            photo_id, flag, verify_workspace=verify_workspace, _commit=_commit
-        )
-
     def update_photo_wildlife_excluded(self, photo_id, excluded, verify_workspace=True,
                                        _commit=True):
         """Set whether a photo is excluded from wildlife detection/classification.
@@ -4828,25 +4783,6 @@ class Database:
             photo_id, excluded, _commit=_commit,
         )
 
-    def get_wildlife_excluded_states(self, photo_ids):
-        """``{photo_id: 0 or 1}`` for the named photos the active workspace can see.
-
-        Ids that don't exist or sit outside the workspace are absent. Raises
-        ``RuntimeError`` when no workspace is active.
-        """
-        return self._photo_review_repository().wildlife_excluded_states(photo_ids)
-
-    def batch_update_photo_flag(self, photo_ids, flag, verify_workspace=True):
-        """Set flag for multiple photos in a single transaction.
-
-        Args:
-            verify_workspace: when True, raises ValueError if any photo is
-                not in the active workspace.
-        """
-        self._photo_review_repository().set_flags(
-            photo_ids, flag, verify_workspace=verify_workspace
-        )
-
     def _photo_review_repository(self):
         from repositories.photo_review import PhotoReviewRepository
 
@@ -4856,48 +4792,52 @@ class Database:
             chunk_size=_SQLITE_PARAM_CHUNK_SIZE,
         )
 
+    @property
+    def photo_review(self) -> PhotoReviewRepository:
+        """Ratings and flags: ``db.photo_review.set_flag(photo_id, "flagged")`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_photo_review_repository``, exactly as a
+        forwarding wrapper called at that moment would, so it carries the
+        workspace active at the access (``None`` when unset; the
+        ``verify_workspace=True`` writes and ``wildlife_excluded_states``
+        raise ``RuntimeError`` then). Do not hold the returned repository
+        across ``set_active_workspace``.
+
+        The wildlife-exclusion toggle stays on ``Database`` as
+        ``update_photo_wildlife_excluded`` because its workspace check is
+        ``_verify_photo_in_workspace``, not the repository's.
+        """
+        return self._photo_review_repository()
+
     from repositories.photo_labels import VALID_COLOR_LABELS
 
-    def set_color_label(self, photo_id, color):
-        """Set a color label for a photo in the active workspace."""
-        self._photo_label_repository().set(photo_id, color)
-
-    def remove_color_label(self, photo_id):
-        """Remove the color label for a photo in the active workspace."""
-        self._photo_label_repository().remove(photo_id)
-
-    def get_color_label(self, photo_id):
-        """Return the color label for a photo in the active workspace, or None."""
-        return self._photo_label_repository().get(photo_id)
-
-    def get_color_labels_for_photos(self, photo_ids):
-        """Return a dict of {photo_id: color} for the active workspace."""
-        return self._photo_label_repository().get_for_photos(photo_ids)
-
-    def filter_photo_ids_in_workspace(self, photo_ids):
-        """Return existing, active-workspace photo IDs in input order."""
-        return self._photo_label_repository().visible_photo_ids(photo_ids)
-
-    def batch_set_color_label(self, photo_ids, color):
-        """Set or remove color label for multiple photos in the active workspace."""
-        self._photo_label_repository().set_many(photo_ids, color)
-
-    def get_color_label_descriptions(self):
-        """Return color-label descriptions for the active workspace."""
-        return self._photo_label_repository().get_descriptions()
-
-    def set_color_label_description(self, color, description):
-        """Set or clear one color-label description in the active workspace."""
-        return self._photo_label_repository().set_description(color, description)
-
     def _photo_label_repository(self):
+        """Build the color-label repository on this connection.
+
+        It receives ``self._ws_id`` uncalled, and every repository method
+        resolves it before doing anything else, so a call with no active
+        workspace raises ``RuntimeError`` where the eager resolution here
+        used to.
+        """
         from repositories.photo_labels import PhotoLabelRepository
 
         return PhotoLabelRepository(
             self.conn,
-            self._ws_id(),
+            self._ws_id,
             chunk_size=_SQLITE_PARAM_CHUNK_SIZE,
         )
+
+    @property
+    def photo_labels(self) -> PhotoLabelRepository:
+        """Workspace color labels: ``db.photo_labels.set(photo_id, "red")`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_photo_label_repository``. Accessing it never
+        needs a workspace; each method reads the one active when it runs.
+        Do not hold the returned repository across ``set_active_workspace``.
+        """
+        return self._photo_label_repository()
 
     def _edits_repository(self):
         """Build the edits repository on this connection.
@@ -4913,15 +4853,27 @@ class Database:
             preset_name_max=self.EDIT_PRESET_NAME_MAX,
         )
 
+    @property
+    def edits(self) -> EditsRepository:
+        """Edit recipes and presets: ``db.edits.get_photo_recipes(ids)``, ``db.edits.list_presets()``.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_edits_repository``. The domain is catalog-wide,
+        so it needs no active workspace.
+
+        The single-photo recipe reads and writes stay on ``Database``
+        (``get_photo_edit_recipe``, ``set_photo_edit_recipe``,
+        ``clear_photo_edit_recipe``) because they run the optional
+        active-workspace check first; call those, not the repository methods
+        behind them.
+        """
+        return self._edits_repository()
+
     def get_photo_edit_recipe(self, photo_id, verify_workspace=False):
         """Return the normalized edit recipe dict for a photo, or None."""
         if verify_workspace:
             self._verify_photo_in_workspace(photo_id)
         return self._edits_repository().get_photo_recipe(photo_id)
-
-    def get_photo_edit_recipes(self, photo_ids):
-        """Return {photo_id: normalized recipe dict} for the given photos."""
-        return self._edits_repository().get_photo_recipes(photo_ids)
 
     def set_photo_edit_recipe(self, photo_id, recipe, verify_workspace=True, _commit=True):
         """Set or clear a non-destructive edit recipe for a photo.
@@ -4945,30 +4897,6 @@ class Database:
     # --- edit presets (global reusable development settings) ----------------------
 
     EDIT_PRESET_NAME_MAX = 80
-
-    def list_edit_presets(self):
-        """Return all edit presets, sorted case-insensitively by name.
-
-        Presets are global (not workspace-scoped): they capture a look, and a
-        look is the same look in every workspace.
-        """
-        return self._edits_repository().list_presets()
-
-    def save_edit_preset(self, name, recipe, fields=None):
-        """Create or overwrite (by trimmed name) a global edit preset.
-
-        Explicit fields retain just the selected settings, including neutral
-        values. Legacy callers keep adjustments-only preset semantics.
-        Raises ValueError (or RecipeError, its subclass) for a blank or
-        overlong name or malformed settings. Legacy calls also require an
-        effective adjustment; explicit fields may store neutral resets.
-        Returns the stored preset dict.
-        """
-        return self._edits_repository().save_preset(name, recipe, fields=fields)
-
-    def delete_edit_preset(self, preset_id):
-        """Delete an edit preset. Returns True if a row was removed."""
-        return self._edits_repository().delete_preset(preset_id)
 
     def prune_pipeline_cache_for_ids(self, ids):
         """Remove ``ids`` from the workspace's pipeline review cache file.
@@ -6557,13 +6485,16 @@ class Database:
 
         return ExifSearchRepository(self.conn, commit_with_retry)
 
-    def count_exif_search_unindexed(self):
-        """Photos metadata search cannot prefilter by stored EXIF values yet."""
-        return self._exif_search_repository().count_unindexed()
+    @property
+    def exif_search(self) -> ExifSearchRepository:
+        """The EXIF search-text backfill: ``db.exif_search.index_batch(after_id, limit)``.
 
-    def index_exif_search_batch(self, after_id, limit):
-        """Store search text for the next unindexed photos; see ``ExifSearchRepository``."""
-        return self._exif_search_repository().index_batch(after_id, limit)
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_exif_search_repository``, so the connection and
+        the module's ``commit_with_retry`` are read per use. The domain is
+        catalog-wide, so it needs no active workspace.
+        """
+        return self._exif_search_repository()
 
     def untag_photo(self, photo_id, keyword_id, _commit=True):
         """Remove a keyword association from a photo.
@@ -8824,7 +8755,7 @@ class Database:
         """Build the detections repository on this connection.
 
         ``detections`` is catalog-wide, so the repository takes no workspace
-        id; the misses wrappers resolve ``_ws_id()`` and the scope clause and
+        id; the misses methods resolve ``_ws_id()`` and the scope clause and
         pass them in, and the readers resolve their confidence floors here.
         """
         from repositories.detections import DetectionsRepository
@@ -8834,6 +8765,25 @@ class Database:
             chunk_size=_SQLITE_PARAM_CHUNK_SIZE,
             commit_with_retry=commit_with_retry,
         )
+
+    @property
+    def detections(self) -> DetectionsRepository:
+        """Detector output: ``db.detections.get_ids_for_photos(ids)``, ``db.detections.clear(pid)`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_detections_repository``, so the connection and
+        the module's ``commit_with_retry`` are read per use. The table is
+        catalog-wide, so the accessor needs no active workspace.
+
+        Work that adds a check, a config lookup or a second step stays on
+        ``Database``: ``save_detections`` / ``write_detection_batch`` (the
+        required-model check and the pinned-run lookup), ``get_detections``,
+        ``get_detections_for_photos`` and ``get_predictions_for_detection``
+        (the effective confidence floors), the misses methods (workspace and
+        filter scope) and ``delete_detections_by_ids`` (the primary-subject
+        re-sync). Call those, not the repository methods behind them.
+        """
+        return self._detections_repository()
 
     def save_detections(
         self,
@@ -8864,23 +8814,6 @@ class Database:
             raise ValueError("detector_model is required")
         return self._detections_repository().save(
             photo_id, detections, detector_model, runtime_fingerprint,
-        )
-
-    def _upsert_detection_rows(
-        self,
-        photo_id,
-        detector_model,
-        detections,
-        runtime_fingerprint="legacy",
-    ):
-        """Content-addressed UPSERT of detection rows for one (photo, model).
-
-        Returns the list of unique IDs in first-seen order. Does NOT commit —
-        the caller controls the transaction so the detector_runs row can be
-        written in the same commit (see `write_detection_batch`).
-        """
-        return self._detections_repository().upsert_rows(
-            photo_id, detector_model, detections, runtime_fingerprint,
         )
 
     def write_detection_batch(
@@ -8942,14 +8875,6 @@ class Database:
             min_conf = effective.get("detector_confidence", 0.2)
         return self._detections_repository().get(photo_id, min_conf, detector_model)
 
-    def get_detection_confidence_summary(self, photo_ids):
-        """Rows (``photo_id``, ``max_conf``, ``n``): each photo's best detector confidence and detection count.
-
-        Over every detector model, with no confidence floor; photos with no
-        detection have no row.
-        """
-        return self._detections_repository().confidence_summary(photo_ids)
-
     def get_detections_for_photos(self, photo_ids, min_conf=None,
                                   detector_model=None):
         """Return {photo_id: [det_dict, ...]} for a batch of photos.
@@ -9003,22 +8928,6 @@ class Database:
         return self._detections_repository().get_predictions(
             detection_id, min_classifier_conf, classifier_model, labels_fingerprint,
         )
-
-    def clear_detections(self, photo_id, detector_model=None):
-        """Remove detections (and cascaded predictions) for a photo.
-
-        Also clears the matching ``detector_runs`` rows so a subsequent
-        non-reclassify pass actually re-runs MegaDetector. Without this,
-        a reclassify that clears detections but leaves the run key behind
-        (e.g. because model init then failed) would cause future runs to
-        skip detection forever — the gate in ``_detect_subjects`` treats
-        any ``detector_runs`` entry as authoritative.
-
-        Global: no workspace scoping. If `detector_model` is None, all
-        detector models for this photo are cleared; otherwise only the
-        rows for that model.
-        """
-        self._detections_repository().clear(photo_id, detector_model)
 
     def get_existing_detection_photo_ids(self, detector_model="megadetector-v6"):
         """Back-compat shim — prefer get_detector_run_photo_ids."""
@@ -9091,27 +9000,6 @@ class Database:
         ws_id = self._ws_id()
         scope_clause, scope_params = self._scope_clause(photo_ids)
         return repo.reject_misses(col, ws_id, since, scope_clause, scope_params)
-
-    def get_detection_subject_exposure_ev(self, detection_id):
-        """The subject analysis's ``exposure_ev`` for one detection, or None if unanalysed."""
-        return self._detections_repository().subject_exposure_ev(detection_id)
-
-    def get_detection_ids_for_photos(self, photo_ids):
-        """Return {photo_id: set(detection_id, ...)} for the given photo IDs.
-
-        The detections table is global (no workspace_id). Used to snapshot
-        pre-run detection IDs so that a reclassify pass can delete only the
-        *stale* rows after fresh ones have been inserted, avoiding the
-        cascade-delete that would destroy other-model predictions.
-
-        No threshold filter: the caller needs to see every existing row,
-        including low-confidence ones, so they can all be cleaned up.
-
-        IDs are queried in chunks of at most 900 to stay safely under
-        SQLite's default bound-parameter limit (SQLITE_LIMIT_VARIABLE_NUMBER,
-        typically 999 in production builds).
-        """
-        return self._detections_repository().get_ids_for_photos(photo_ids)
 
     def delete_detections_by_ids(self, detection_ids):
         """Delete specific detection rows by primary key.
@@ -9649,7 +9537,7 @@ class Database:
 
     def _edit_set_flag(self, pid, value):
         # Edit history is already workspace-scoped; skip re-verification
-        self.update_photo_flag(pid, value, verify_workspace=False)
+        self.photo_review.set_flag(pid, value, verify_workspace=False)
         self.queue_flag_change_if_enabled(pid, value)
 
     def _edit_set_wildlife_excluded(self, pid, value):
@@ -9659,9 +9547,9 @@ class Database:
 
     def _edit_set_color_label(self, pid, value):
         if value:
-            self.set_color_label(pid, value)
+            self.photo_labels.set(pid, value)
         else:
-            self.remove_color_label(pid)
+            self.photo_labels.remove(pid)
 
     def _edit_set_edit_recipe(self, pid, value):
         self.set_photo_edit_recipe(
@@ -9672,14 +9560,14 @@ class Database:
 
     def _undo_rating(self, entry, item):
         pid, old_val = item['photo_id'], item['old_value']
-        self.update_photo_rating(pid, int(old_val), verify_workspace=False)
+        self.photo_review.set_rating(pid, int(old_val), verify_workspace=False)
         if old_val != entry['new_value']:
             self.remove_pending_changes(pid, 'rating', entry['new_value'])
             self.queue_change(pid, 'rating', old_val)
 
     def _redo_rating(self, entry, item):
         pid, old_val, new_val = item['photo_id'], item['old_value'], item['new_value']
-        self.update_photo_rating(
+        self.photo_review.set_rating(
             pid, int(new_val) if new_val else 0, verify_workspace=False,
         )
         if old_val != new_val:

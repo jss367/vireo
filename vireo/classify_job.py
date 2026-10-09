@@ -1434,7 +1434,7 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
     except ResourceWaitCancelled as exc:
         # Cooperative cancellation during a MegaDetector inference-lease
         # wait — the reclassify Stop path. Must propagate: the caller
-        # already called ``clear_detections(photo["id"])`` for this
+        # already called ``db.detections.clear(photo["id"])`` for this
         # photo on the reclassify path (classify_job.py:1073), so if
         # this cancel were swallowed under the broad ``RuntimeError``
         # arm below, the classify recovery would then rebuild
@@ -1526,7 +1526,7 @@ def _analyze_subjects(photos, folders, db, reclassify, det_conf_threshold,
         # ``processed_ids`` only tracks photos whose detection loop reached
         # ``processed_ids.add(...)`` — i.e. detection ran to completion or
         # produced an empty scene. In a reclassify batch, ``_detect_subjects``
-        # calls ``clear_detections(photo["id"])`` *before* calling us, so a
+        # calls ``db.detections.clear(photo["id"])`` *before* calling us, so a
         # photo whose ``detect_animals()`` returned None (decode failure) or
         # raised a swallowed error is now absent from ``processed_ids`` AND
         # has no detections in the DB, yet its old mask, DINO embedding,
@@ -1758,7 +1758,7 @@ class _DetectSubjectsRun:
             and photo["id"] in self.already_detected_ids
         )
 
-        # No reclassify pre-clear. ``clear_detections`` is global: its
+        # No reclassify pre-clear. ``detections.clear`` is global: its
         # cascade took every classifier model's predictions and every
         # workspace's review state with it, before this run had written
         # anything to replace them, so a Stop anywhere after this point
@@ -2514,7 +2514,7 @@ class _ClassifyPhotosPass:
     def classify_photo(self, i, photo):
         """Clear, report progress for and classify or queue one photo."""
         # Per-photo reclassify predictions purge. Lives here (rather than
-        # alongside ``clear_detections`` in the detection loop) so that:
+        # alongside ``detections.clear`` in the detection loop) so that:
         #   1. A mid-classify cancel leaves the unprocessed tail with its
         #      old predictions intact — without this gate they'd already
         #      be cleared and the cancel would strand them with new
@@ -2565,7 +2565,7 @@ class _ClassifyPhotosPass:
             # its predictions, classifier_runs and match-score rows in
             # one transaction, and the call is a no-op when nothing
             # was there.
-            self.db.clear_detections(photo["id"], detector_model="full-image")
+            self.db.detections.clear(photo["id"], detector_model="full-image")
             return
 
         folder_path = self.folders.get(photo["folder_id"], "")

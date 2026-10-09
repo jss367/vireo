@@ -166,7 +166,7 @@ def _photo_ids_error(db, photo_ids, json_error):
     # Photos are global; a confirmation tags keywords and queues sidecar
     # writes under the active workspace, so it may only touch photos
     # that workspace can see.
-    visible_ids = set(db.filter_photo_ids_in_workspace(photo_ids))
+    visible_ids = set(db.photo_visibility.visible_photo_ids(photo_ids))
     foreign = [pid for pid in photo_ids if pid not in visible_ids]
     if foreign:
         return json_error(
@@ -187,7 +187,7 @@ def _low_confidence_photo_ids(db, photo_ids):
     import config as cfg
     effective_cfg = db.get_effective_config(cfg.load())
     det_conf_threshold = effective_cfg.get("detector_confidence", 0.2)
-    det_rows = db.get_detection_confidence_summary(photo_ids)
+    det_rows = db.detections.confidence_summary(photo_ids)
     return [
         r["photo_id"] for r in det_rows
         if r["n"] > 0 and (r["max_conf"] or 0) < det_conf_threshold

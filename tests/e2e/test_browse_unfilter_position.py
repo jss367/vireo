@@ -30,7 +30,7 @@ def _prepare(page, live_server, action, photo_link=False):
         if i < 120:
             db.tag_photo(photo_id, place)
         elif action == "color":
-            db.set_color_label(photo_id, "red")
+            db.photo_labels.set(photo_id, "red")
     with db.conn:
         db.conn.executemany(
             "UPDATE photos SET rating=5, flag='flagged' WHERE id=?",
@@ -225,7 +225,7 @@ def test_second_removal_during_reload_keeps_original_photo(live_server, page, se
 
 def test_removing_one_of_two_flags_can_exclude_selected_photo(live_server, page):
     ids = _prepare(page, live_server, "quick_flag")
-    live_server["db"].batch_update_photo_flag(ids[:120], "rejected")
+    live_server["db"].photo_review.set_flags(ids[:120], "rejected")
     page.click('.vf-shortcuts [data-value="rejected"]')
     page.wait_for_function("!loading && browseDatasetReady && totalPhotos === 180")
     # Select a Picked photo that will disappear when only Rejected remains.

@@ -2795,7 +2795,7 @@ class _PhotoMove:
                 db._add_workspace_folder_no_commit(
                     db.active_workspace_id, self.dest_folder_id, restore_removed=True,
                 )
-            db.preserve_photo_visibility_for_move(item.pid, self.keep_visible)
+            db.photo_visibility.preserve_for_move(item.pid, self.keep_visible)
             db.conn.execute(
                 "UPDATE photos SET folder_id = ?, "
                 "last_move_source_folder_path = ? WHERE id = ?",

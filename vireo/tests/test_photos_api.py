@@ -868,7 +868,7 @@ def test_api_best_batch_flags_records_single_undoable_edit(app_and_db):
     photos = db.get_photos()
     photo_ids = [p["id"] for p in photos]
     best_id, reject_id, keep_reject_id = photo_ids
-    db.update_photo_flag(reject_id, "flagged")
+    db.photo_review.set_flag(reject_id, "flagged")
 
     client = app.test_client()
     pre_history = db.get_edit_history()
@@ -1133,7 +1133,7 @@ def test_photo_detail_life_list_uses_primary_eligible_rep(app_and_db):
     db.tag_photo(p2, kid)
     db.set_species_representative("American Robin", p1)
     db.set_species_representative("American Robin", p2)
-    db.update_photo_flag(p2, "rejected")
+    db.photo_review.set_flag(p2, "rejected")
 
     data = client.get(f"/api/photos/{p1}").get_json()
 
@@ -1205,7 +1205,7 @@ def test_photo_detail_life_list_empty_for_rejected_photo(app_and_db):
     pid = db.get_photos()[0]["id"]
     kid = db.add_keyword("American Robin", is_species=True)
     db.tag_photo(pid, kid)
-    db.update_photo_flag(pid, "rejected")
+    db.photo_review.set_flag(pid, "rejected")
 
     data = client.get(f"/api/photos/{pid}").get_json()
     assert data["life_list"] == []
@@ -11436,7 +11436,7 @@ def test_color_label_rejects_cross_workspace_photo(app_and_db):
     resp = client.post(f'/api/photos/{hidden_pid}/color_label',
                        json={'color': 'red'})
     assert resp.status_code == 403
-    assert db.get_color_labels_for_photos([hidden_pid]) == {}
+    assert db.photo_labels.get_for_photos([hidden_pid]) == {}
 
 
 def test_batch_color_label_skips_stale_and_cross_workspace_ids(app_and_db):
@@ -11453,8 +11453,8 @@ def test_batch_color_label_skips_stale_and_cross_workspace_ids(app_and_db):
                              'color': 'green'})
     assert resp.status_code == 200
     assert resp.get_json()["updated"] == 1
-    assert db.get_color_label(valid_pid) == 'green'
-    assert db.get_color_labels_for_photos([hidden_pid]) == {}
+    assert db.photo_labels.get(valid_pid) == 'green'
+    assert db.photo_labels.get_for_photos([hidden_pid]) == {}
 
 
 def test_photo_detail_rejects_cross_workspace_photo(app_and_db):
@@ -12488,7 +12488,7 @@ def _seed_sortable_photos(db, count=12):
             timestamp=f"2024-03-{index + 1:02d}T00:00:00",
         )
         # Reverse the rating order relative to filename order.
-        db.update_photo_rating(photo_id, 5 if index >= count - 2 else 1)
+        db.photo_review.set_rating(photo_id, 5 if index >= count - 2 else 1)
         ids.append(photo_id)
     return folder, ids
 

@@ -208,7 +208,7 @@ def create_predictions_blueprint(
         results = []
         pred_dicts = [dict(p) for p in preds]
         attach_species_representatives(db, pred_dicts)
-        recipes_by_photo = db.get_photo_edit_recipes({
+        recipes_by_photo = db.edits.get_photo_recipes({
             p.get("photo_id") for p in pred_dicts if p.get("photo_id") is not None
         })
         # Same recomputation as the selection aggregator: the stored
@@ -333,7 +333,7 @@ def create_predictions_blueprint(
         """
         if not photos:
             return photos
-        recipes = db.get_photo_edit_recipes(
+        recipes = db.edits.get_photo_recipes(
             [photo["photo_id"] for photo in photos],
         )
         for photo in photos:
@@ -1850,7 +1850,7 @@ def create_predictions_blueprint(
                     )
                     added_picks = []
                     for pid in actionable_picks:
-                        db.update_photo_flag(pid, "flagged", _commit=False)
+                        db.photo_review.set_flag(pid, "flagged", _commit=False)
                         if pid in already_has_species:
                             continue
                         db.tag_photo(pid, kid, source="manual", _commit=False)
@@ -1865,11 +1865,11 @@ def create_predictions_blueprint(
                     already_has_species = set()
                     added_picks = []
                     for pid in actionable_picks:
-                        db.update_photo_flag(pid, "flagged", _commit=False)
+                        db.photo_review.set_flag(pid, "flagged", _commit=False)
 
                 # Reject rejects
                 for pid in actionable_rejects:
-                    db.update_photo_flag(pid, "rejected", _commit=False)
+                    db.photo_review.set_flag(pid, "rejected", _commit=False)
             except ValueError as e:
                 # ``prediction_decisions.under_prediction_decision_lock``'s
                 # finally will roll back the still-open transaction; returning

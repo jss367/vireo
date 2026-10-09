@@ -4,15 +4,26 @@ Neither table is workspace-scoped (a recipe belongs to its photo, a preset is
 a look that is the same in every workspace), so the repository takes no
 workspace id. The optional active-workspace check on recipe writes stays on
 ``Database``, which runs it before delegating here.
+
+Callers reach the batch recipe read and the presets as ``db.edits`` (a fresh
+repository per access, see ``Database.edits``); there are no forwarding
+wrappers on ``Database``. The single-photo recipe read, write and clear stay
+on ``Database`` (``get_photo_edit_recipe``, ``set_photo_edit_recipe``,
+``clear_photo_edit_recipe``) because they run that workspace check first.
 """
 
 import logging
+import sqlite3
+from collections.abc import Collection, Mapping
+from typing import Any
 
 log = logging.getLogger(__name__)
 
 
 class EditsRepository:
-    def __init__(self, conn, *, chunk_size=800, preset_name_max=80):
+    def __init__(
+        self, conn: sqlite3.Connection, *, chunk_size: int = 800, preset_name_max: int = 80,
+    ) -> None:
         self.conn = conn
         self.chunk_size = chunk_size
         self.preset_name_max = preset_name_max
@@ -26,7 +37,7 @@ class EditsRepository:
 
     # -- per-photo edit recipes ------------------------------------------------
 
-    def get_photo_recipe(self, photo_id):
+    def get_photo_recipe(self, photo_id: int) -> dict[str, Any] | None:
         """Return the normalized edit recipe dict for a photo, or None."""
         row = self.conn.execute(
             "SELECT recipe_json FROM photo_edit_recipes WHERE photo_id = ?",
@@ -41,7 +52,7 @@ class EditsRepository:
             log.warning("Invalid stored edit recipe for photo %s", photo_id, exc_info=True)
             return None
 
-    def get_photo_recipes(self, photo_ids):
+    def get_photo_recipes(self, photo_ids: Collection[int]) -> dict[int, dict[str, Any]]:
         """Return {photo_id: normalized recipe dict} for the given photos."""
         if not photo_ids:
             return {}
@@ -67,7 +78,9 @@ class EditsRepository:
                     out[row["photo_id"]] = recipe
         return out
 
-    def set_photo_recipe(self, photo_id, recipe, _commit=True):
+    def set_photo_recipe(
+        self, photo_id: int, recipe: Mapping[str, Any] | str | None, _commit: bool = True,
+    ) -> dict[str, Any] | None:
         """Set or clear a photo's edit recipe; see ``Database.set_photo_edit_recipe``."""
         from image_edits import copy_recipe, recipe_to_json
         recipe_json = recipe_to_json(recipe)
@@ -91,7 +104,7 @@ class EditsRepository:
             self.conn.commit()
         return copy_recipe(recipe_json)
 
-    def clear_photo_recipe(self, photo_id):
+    def clear_photo_recipe(self, photo_id: int) -> bool:
         """Remove a photo's edit recipe. Returns True if a row was removed."""
         cur = self.conn.execute(
             "DELETE FROM photo_edit_recipes WHERE photo_id = ?",
@@ -102,8 +115,12 @@ class EditsRepository:
 
     # -- edit presets (global reusable development settings) -------------------
 
-    def list_presets(self):
-        """Return all edit presets, sorted case-insensitively by name."""
+    def list_presets(self) -> list[dict[str, Any]]:
+        """Return all edit presets, sorted case-insensitively by name.
+
+        Presets are global (not workspace-scoped): they capture a look, and a
+        look is the same look in every workspace.
+        """
         from edit_batch import decode_preset
 
         rows = self.conn.execute(
@@ -129,10 +146,19 @@ class EditsRepository:
         out.sort(key=lambda p: p["name"].casefold())
         return out
 
-    def save_preset(self, name, recipe, fields=None):
+    def save_preset(
+        self,
+        name: str,
+        recipe: Mapping[str, Any] | str,
+        fields: Collection[str] | None = None,
+    ) -> dict[str, Any]:
         """Create or overwrite (by trimmed name) a global edit preset.
 
-        See ``Database.save_edit_preset`` for the validation rules.
+        Explicit fields retain just the selected settings, including neutral
+        values. Legacy callers keep adjustments-only preset semantics.
+        Raises ValueError (or RecipeError, its subclass) for a blank or
+        overlong name or malformed settings. Legacy calls also require an
+        effective adjustment; explicit fields may store neutral resets.
         Returns the stored preset dict.
         """
         from image_edits import (
@@ -189,7 +215,7 @@ class EditsRepository:
             "updated_at": row["updated_at"],
         }
 
-    def delete_preset(self, preset_id):
+    def delete_preset(self, preset_id: int) -> bool:
         """Delete an edit preset. Returns True if a row was removed."""
         cur = self.conn.execute(
             "DELETE FROM edit_presets WHERE id = ?", (preset_id,)

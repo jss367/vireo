@@ -79,7 +79,7 @@ def test_apply_clears_flag_when_photo_moved_to_candidates(app_and_db):
     app, db = app_and_db
     pids = _photo_ids(db)
     pid = pids[0]
-    db.update_photo_flag(pid, 'rejected')
+    db.photo_review.set_flag(pid, 'rejected')
     client = app.test_client()
 
     resp = client.post('/api/pipeline/group/apply', json={
@@ -97,7 +97,7 @@ def test_apply_is_idempotent_when_state_unchanged(app_and_db):
     app, db = app_and_db
     pids = _photo_ids(db)
     pid = pids[0]
-    db.update_photo_flag(pid, 'flagged')
+    db.photo_review.set_flag(pid, 'flagged')
     client = app.test_client()
 
     # Snapshot edit history count.
@@ -250,8 +250,8 @@ def test_state_endpoint_returns_current_flags_and_keyword_status(app_and_db):
     app, db = app_and_db
     pids = _photo_ids(db)
     flagged_id, rejected_id, neutral_id = pids[0], pids[1], pids[2]
-    db.update_photo_flag(flagged_id, 'flagged')
-    db.update_photo_flag(rejected_id, 'rejected')
+    db.photo_review.set_flag(flagged_id, 'flagged')
+    db.photo_review.set_flag(rejected_id, 'rejected')
     kid = db.add_keyword('Coyote', is_species=True)
     db.tag_photo(flagged_id, kid)
     client = app.test_client()
@@ -359,7 +359,7 @@ def test_state_endpoint_gates_representative_on_current_eligibility(app_and_db):
 
     # Make each stale in one of the two ways the shared payload attachers
     # already filter on. The preference rows themselves remain intact.
-    db.update_photo_flag(rejected_id, 'rejected')
+    db.photo_review.set_flag(rejected_id, 'rejected')
     db.untag_photo(untagged_id, kid_untagged)
 
     client = app.test_client()

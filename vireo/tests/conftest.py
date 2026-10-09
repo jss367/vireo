@@ -253,8 +253,8 @@ def app_and_db(tmp_path, monkeypatch):
     p3 = db.add_photo(folder_id=fid, filename='bird3.jpg', extension='.jpg',
                       file_size=3000, file_mtime=3.0, timestamp='2024-06-10T09:00:00')
 
-    db.update_photo_rating(p1, 3)
-    db.update_photo_rating(p3, 5)
+    db.photo_review.set_rating(p1, 3)
+    db.photo_review.set_rating(p3, 5)
 
     k1 = db.add_keyword('Cardinal')
     k2 = db.add_keyword('Sparrow')

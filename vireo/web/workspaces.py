@@ -601,7 +601,7 @@ def create_workspace_blueprint(
             db.remove_workspace_folder_tree(ws_id, folder_id)
             for descendant_id in descendant_root_ids:
                 mapped_ids = db.get_local_session_folder_ids(descendant_id)
-                db.revoke_workspace_photo_grants_for_folders(ws_id, mapped_ids)
+                db.photo_visibility.revoke_for_folders(ws_id, mapped_ids)
                 db.unlink_exact_workspace_folders_no_commit(ws_id, mapped_ids)
             if descendant_root_ids:
                 db.commit()
@@ -713,7 +713,7 @@ def create_workspace_blueprint(
                 for descendant_ids in descendant_root_ids_by_folder.values():
                     for descendant_id in descendant_ids:
                         mapped_ids = db.get_local_session_folder_ids(descendant_id)
-                        db.revoke_workspace_photo_grants_for_folders(ws_id, mapped_ids)
+                        db.photo_visibility.revoke_for_folders(ws_id, mapped_ids)
                         db.transfer_exact_workspace_folders_no_commit(
                             ws_id, target_ws_id, mapped_ids,
                         )

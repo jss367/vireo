@@ -20,6 +20,8 @@ import textwrap
 
 import pytest
 from db import Database
+from repositories.photo_labels import PhotoLabelRepository
+from repositories.photo_review import PhotoReviewRepository
 
 
 @contextlib.contextmanager
@@ -120,7 +122,7 @@ def test_record_edit_clears_only_this_workspaces_redo_stack(db, pids):
     first = _rating_edit(db, pids[0], 0, 1)
     second = _rating_edit(db, pids[0], 1, 2)
     foreign_undone = _raw_edit(db, "rating", "3", workspace_id=other, undone=1)
-    db.update_photo_rating(pids[0], 2)
+    db.photo_review.set_rating(pids[0], 2)
     db.undo_last_edit()
     assert _history_rows(db, "id = ?", (second,))[0]["undone"] == 1
 
@@ -247,7 +249,7 @@ def test_undo_returns_none_when_only_non_undoable_entries(db, pids):
 
 
 def test_undo_skips_non_undoable_and_marks_entry_undone(db, pids):
-    db.update_photo_rating(pids[0], 4)
+    db.photo_review.set_rating(pids[0], 4)
     target = _rating_edit(db, pids[0], 2, 4, desc="the rating")
     for action in ("prediction_reject", "discard", "location_set",
                    "location_gps_review", "prediction_reviewed",
@@ -276,7 +278,7 @@ def test_undo_picks_latest_and_redo_replays_oldest_first(db, pids):
                       items=[(pids[0], "0", "1")])
     second = _raw_edit(db, "rating", "2", created_at="2024-01-02 00:00:00",
                        items=[(pids[0], "1", "2")])
-    db.update_photo_rating(pids[0], 2)
+    db.photo_review.set_rating(pids[0], 2)
 
     assert db.undo_last_edit()["id"] == second
     assert db.undo_last_edit()["id"] == first
@@ -335,15 +337,28 @@ def test_undo_and_redo_route_through_apply_hooks(db, pids, monkeypatch):
 
 
 def test_field_setters_route_through_facade(db, pids, monkeypatch):
+    """Undo/redo replays each field through the façade or its domain accessor.
+
+    Flags and color labels go through ``db.photo_review`` /
+    ``db.photo_labels``, so those are recorded on the repository class (a
+    fresh repository is built per access); the rest stay ``Database``
+    methods and are recorded on ``db``.
+    """
     calls = []
 
     def recorder(name):
         return lambda *a, **k: calls.append((name, a, k))
 
-    for name in ("update_photo_flag", "queue_flag_change_if_enabled",
-                 "update_photo_wildlife_excluded", "set_color_label",
-                 "remove_color_label", "set_photo_edit_recipe"):
+    def repo_recorder(name):
+        return lambda _repo, *a, **k: calls.append((name, a, k))
+
+    for name in ("queue_flag_change_if_enabled", "update_photo_wildlife_excluded",
+                 "set_photo_edit_recipe"):
         monkeypatch.setattr(db, name, recorder(name))
+    for owner, name in ((PhotoReviewRepository, "set_flag"),
+                        (PhotoLabelRepository, "set"),
+                        (PhotoLabelRepository, "remove")):
+        monkeypatch.setattr(owner, name, repo_recorder(f"{owner.__name__}.{name}"))
     pid = pids[0]
     for action, old, new in (
         ("flag", "none", "flagged"),
@@ -361,16 +376,16 @@ def test_field_setters_route_through_facade(db, pids, monkeypatch):
 
     assert undo_calls == [
         ("set_photo_edit_recipe", (pid, None), {"verify_workspace": False}),
-        ("remove_color_label", (pid,), {}),
+        ("PhotoLabelRepository.remove", (pid,), {}),
         ("update_photo_wildlife_excluded", (pid, False), {"verify_workspace": False}),
-        ("update_photo_flag", (pid, "none"), {"verify_workspace": False}),
+        ("PhotoReviewRepository.set_flag", (pid, "none"), {"verify_workspace": False}),
         ("queue_flag_change_if_enabled", (pid, "none"), {}),
     ]
     assert calls == [
-        ("update_photo_flag", (pid, "flagged"), {"verify_workspace": False}),
+        ("PhotoReviewRepository.set_flag", (pid, "flagged"), {"verify_workspace": False}),
         ("queue_flag_change_if_enabled", (pid, "flagged"), {}),
         ("update_photo_wildlife_excluded", (pid, True), {"verify_workspace": False}),
-        ("set_color_label", (pid, "red"), {}),
+        ("PhotoLabelRepository.set", (pid, "red"), {}),
         ("set_photo_edit_recipe", (pid, '{"exposure": 1}'), {"verify_workspace": False}),
     ]
 

@@ -805,7 +805,7 @@ def test_move_folders_carries_color_labels(db, move_setup, cache):
         (pq, src): "yellow",       # unmoved folder untouched
     }
     db.set_active_workspace(target)
-    assert db.get_color_label(pb) == "red"
+    assert db.photo_labels.get(pb) == "red"
 
 
 def test_move_folders_marks_only_selected_folders_as_roots(db, cache):
