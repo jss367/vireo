@@ -1,0 +1,36 @@
+<!-- Browse Compare Overlay -->
+<div class="browse-compare-overlay" id="browseCompareOverlay" onclick="browseCompare.close(event)">
+  <div class="browse-compare-toolbar" onclick="event.stopPropagation()">
+    <span class="browse-compare-title">Compare</span>
+    <span class="browse-compare-count" id="browseCompareCount"></span>
+    <span class="browse-compare-hint">Scroll to zoom · drag to pan · double-click to toggle</span>
+    <span class="browse-compare-spacer"></span>
+    <button class="browse-compare-btn" onclick="browseCompare.resetViews()" title="Fit both photos to their panes">Reset views</button>
+    <button class="browse-compare-btn" id="browseComparePrev" onclick="browseCompare.step(-1)" title="Previous pair">Previous</button>
+    <button class="browse-compare-btn" id="browseCompareNext" onclick="browseCompare.step(1)" title="Next pair">Next</button>
+    <button class="browse-compare-close" onclick="browseCompare.close(event)" title="Close">&times;</button>
+  </div>
+  <div class="browse-compare-stage" onclick="event.stopPropagation()">
+    <div class="browse-compare-pane">
+      <div class="browse-compare-image-wrap" id="browseCompareWrapA" data-pane="A" title="Scroll to zoom, then drag to pan">
+        <span class="browse-compare-zoom-badge" id="browseCompareZoomA">Fit</span>
+        <img class="browse-compare-image" id="browseCompareImgA" src="" alt="" draggable="false">
+      </div>
+      <div class="browse-compare-meta">
+        <div class="browse-compare-name" id="browseCompareNameA"></div>
+        <div class="browse-compare-sub" id="browseCompareMetaA"></div>
+      </div>
+    </div>
+    <div class="browse-compare-pane">
+      <div class="browse-compare-image-wrap" id="browseCompareWrapB" data-pane="B" title="Scroll to zoom, then drag to pan">
+        <span class="browse-compare-zoom-badge" id="browseCompareZoomB">Fit</span>
+        <img class="browse-compare-image" id="browseCompareImgB" src="" alt="" draggable="false">
+      </div>
+      <div class="browse-compare-meta">
+        <div class="browse-compare-name" id="browseCompareNameB"></div>
+        <div class="browse-compare-sub" id="browseCompareMetaB"></div>
+      </div>
+
+    </div>
+  </div>
+</div>

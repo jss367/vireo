@@ -23,7 +23,7 @@ INLINE_SCRIPT_LINE_LIMITS = {
     "best_batch.html": 247,
     "browse.html": 4,
     "card_cleanup.html": 922,
-    "cull.html": 864,
+    "cull.html": 781,
     "duplicates.html": 1355,
     "highlights.html": 1155,
     "id_conflicts.html": 968,
