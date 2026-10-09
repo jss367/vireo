@@ -102,7 +102,7 @@
     if (_escStack.length === 0) return false;
     var top = _escStack.pop();
     e.preventDefault();
-    e.stopPropagation();
+    e.stopImmediatePropagation();
     try { top.handler(e); } catch (err) { console.error('Esc handler error', err); }
     return true;
   }
@@ -159,8 +159,8 @@
     }
   }
 
-  // Register in capture phase so the Esc-stack can stop propagation before any
-  // bubble-phase listeners on document.body fire (e.g. page-level Esc handlers).
+  // Register in capture phase so the Esc-stack stops later document capture
+  // listeners as well as bubble-phase page handlers from consuming the key.
   // This preserves the "Esc dismisses overlay without leaking to page" contract
   // that previously required individual capture-phase listeners per overlay.
   document.addEventListener('keydown', _dispatch, true);

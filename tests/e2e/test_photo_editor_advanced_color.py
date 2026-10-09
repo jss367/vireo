@@ -377,6 +377,21 @@ def test_curve_mouse_keyboard_and_legacy_promotion(live_server, page, color_phot
     assert page.evaluate('saveRecipe()') is True
 
 
+def test_find_escape_preserves_active_color_picker(live_server, page, color_photo):
+    page.goto(f"{live_server['url']}/edit/{color_photo}")
+    expect(page.locator('#editorFilename')).to_have_text('color-study.png')
+    _wait_color_preview(page)
+    page.locator('#pointColorPick').click()
+    expect(page.locator('#pointColorPick')).to_have_attribute('aria-pressed', 'true')
+    page.keyboard.press('Control+F')
+    expect(page.locator('#pageFindPanel')).to_be_visible()
+    page.keyboard.press('Escape')
+    expect(page.locator('#pageFindPanel')).to_be_hidden()
+    expect(page.locator('#pointColorPick')).to_have_attribute('aria-pressed', 'true')
+    page.keyboard.press('Escape')
+    expect(page.locator('#pointColorPick')).to_have_attribute('aria-pressed', 'false')
+
+
 def test_photo_color_picker_samples_before_point_color_and_cancels(live_server, page, color_photo):
     photo_id = color_photo
     page.goto(f"{live_server['url']}/edit/{photo_id}")
