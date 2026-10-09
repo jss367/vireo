@@ -144,7 +144,7 @@ def coerce_collection_id(raw):
 
 def collection_row(db, collection_id):
     """Return the (workspace-scoped) collection row or None."""
-    return db.collections.visual_scope_row(collection_id)
+    return db.collections.get(collection_id)
 
 
 def collection_rules_state(db, rules_json):

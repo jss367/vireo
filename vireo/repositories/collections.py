@@ -140,7 +140,7 @@ class CollectionRepository:
             (self.workspace_id,),
         ).fetchall()
 
-    def get(self, collection_id):
+    def get(self, collection_id: int) -> sqlite3.Row | None:
         """One collection row (``id``, ``name``, ``rules``, ``visual_json``), or None.
 
         None when the id is unknown or belongs to another workspace.
@@ -1648,12 +1648,6 @@ class CollectionRepository:
             (collection_id, self.workspace_id),
         ).fetchone()
 
-    def visual_scope_row(self, collection_id: int) -> sqlite3.Row | None:
-        return self.conn.execute(
-            "SELECT id, name, rules, visual_json FROM collections "
-            "WHERE id = ? AND workspace_id = ?",
-            (collection_id, self.workspace_id),
-        ).fetchone()
 
 
 _SQLITE_NUMERIC_TEXT_RE = re.compile(

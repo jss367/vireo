@@ -16,16 +16,16 @@ def test_collection_service_reads_resolve_workspace_at_use(db):
     first = db.active_workspace_id
     collection_id = db.add_collection("First workspace collection", "[]")
     repo = db.collections
-    assert repo.visual_scope_row(collection_id)["id"] == collection_id
+    assert repo.get(collection_id)["id"] == collection_id
     second = db.create_workspace("Second workspace")
     db.set_active_workspace(second)
-    assert repo.visual_scope_row(collection_id) is None
+    assert repo.get(collection_id) is None
     assert repo.visual_source_row(collection_id) is None
     db.set_active_workspace(first)
     assert repo.visual_source_row(collection_id)["id"] == collection_id
     db._active_workspace_id = None
     with pytest.raises(RuntimeError):
-        repo.visual_scope_row(collection_id)
+        repo.get(collection_id)
 
 
 @pytest.mark.parametrize("kind", ["folder", "workspace"])

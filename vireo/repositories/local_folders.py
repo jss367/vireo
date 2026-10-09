@@ -2,8 +2,8 @@
 
 A ``local_folders`` row is one folder subtree staged to local disk ("Work
 Locally"), keyed by its root folder and catalog-wide: every workspace that
-sees the folder shares the copy. This repository owns staging, sync and discard persistence, including the
-catalog path changes shared by folder- and workspace-local copies. Services
+sees the folder shares the copy. This repository owns staging, sync and discard
+persistence, including the catalog path changes shared by folder- and workspace-local copies. Services
 retain filesystem operations, locks and transaction boundaries; these methods
 never commit. Workspace ids are explicit where a read needs visibility.
 
