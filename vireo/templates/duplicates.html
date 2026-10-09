@@ -361,6 +361,7 @@
 
 <script src="/static/duplicates-card.js"></script>
 <script src="/static/duplicates-restore.js"></script>
+<script src="/static/duplicates-reveal.js"></script>
 <script>
   var _proposals = [];
   var _currentJobId = null;
@@ -990,8 +991,8 @@
         'Keep ' + escapeHtml(label) + ' for all ' + bucket.group_count +
         '</button>';
     });
-    html += '<button class="keep-btn reveal-btn" onclick="revealBucketFolders(' + bi + ')" ' +
-      'title="Open all bucket folders in your OS file manager">' +
+    html += '<button class="keep-btn reveal-btn" onclick="revealBucketFolders(' + bi + ', this)" ' +
+      'title="Reveal all bucket folders in your OS file manager">' +
       escapeHtml(window.VIREO_REVEAL_LABEL) + '</button>';
     html += '<label class="delete-toggle">' +
       '<input type="checkbox" data-bi="' + bi + '" data-delete-toggle> ' +
@@ -1000,29 +1001,6 @@
     html += '<div class="bucket-status" data-bi="' + bi + '" data-bucket-status></div>';
     html += '</div>';
     return html;
-  }
-
-  async function revealBucketFolders(bi) {
-    var bucket = (_lastScanResult && _lastScanResult.buckets || [])[bi];
-    if (!bucket || !bucket.folders || bucket.folders.length === 0) return;
-    try {
-      var data = await safeFetch('/api/folders/reveal', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ paths: bucket.folders }),
-      });
-      var revealed = (data.revealed || []).length;
-      var skipped = (data.skipped || []).length;
-      var failed = (data.failed || []).length;
-      if (failed > 0) {
-        showToast('Revealed ' + revealed + ', ' + failed + ' failed', 'error');
-      } else if (skipped > 0) {
-        showToast('Revealed ' + revealed + ', ' + skipped + ' unknown to Vireo', 'success');
-      }
-      // Silent on full success — Finder windows opening is feedback enough.
-    } catch (e) {
-      showToast('Reveal failed: ' + (e.message || 'error'), 'error');
-    }
   }
 
   function bulkResolveByFolderIdx(bi, fi) {
@@ -1117,8 +1095,8 @@
       '<button class="keep-btn" data-retry-trash onclick="retryBucketTrash(this)">' +
         'Retry ' + n + ' file' + (n === 1 ? '' : 's') + ' to Trash' +
       '</button>' +
-      '<button class="keep-btn reveal-btn" onclick="revealBucketFolders(' + bi + ')" ' +
-        'title="Open all bucket folders in your OS file manager">' +
+      '<button class="keep-btn reveal-btn" onclick="revealBucketFolders(' + bi + ', this)" ' +
+        'title="Reveal all bucket folders in your OS file manager">' +
         escapeHtml(window.VIREO_REVEAL_LABEL) +
       '</button>';
   }
