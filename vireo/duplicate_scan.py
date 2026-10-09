@@ -318,6 +318,61 @@ def _is_empty_file_group(file_hash, infos):
     )
 
 
+def catalog_cleanup_result(db):
+    """Show the banner's current cleanup candidates without needing a scan.
+
+    This reads catalog decisions, never checks files or changes flags. Omit
+    ``exists`` rather than claiming a file is present: the trash endpoint
+    revalidates every copy and kept anchor before deleting anything.
+    """
+    groups = {}
+    for row in db.duplicates.cleanup_rows():
+        group = groups.setdefault(row["file_hash"], {"kept": [], "losers": []})
+        info = {
+            "id": row["id"],
+            "filename": row["filename"],
+            "path": os.path.join(row["folder_path"] or "", row["filename"] or ""),
+            "mtime": row["file_mtime"],
+            "rating": row["rating"],
+            "file_size": row["file_size"],
+        }
+        if row["flag"] == "rejected":
+            info["rejected"] = True
+            group["losers"].append(info)
+        else:
+            group["kept"].append(info)
+    proposals = [
+        {
+            "file_hash": file_hash,
+            "status": "resolved",
+            "winner": group["kept"][0],
+            "other_kept": group["kept"][1:],
+            "losers": group["losers"],
+            "empty_file_group": _is_empty_file_group(
+                file_hash, group["kept"] + group["losers"],
+            ),
+        }
+        for file_hash, group in groups.items()
+    ]
+    _attach_edit_recipes(db, proposals)
+    attach_workspace_names(db, proposals)
+    # Additional kept anchors are shown too, with the same thumbnail edits
+    # and workspace labels as the primary kept copy.
+    extras = [p for proposal in proposals for p in proposal["other_kept"]]
+    extra_proposals = [{"winner": p} for p in extras]
+    _attach_edit_recipes(db, extra_proposals)
+    attach_workspace_names(db, extra_proposals)
+    return {
+        "catalog_cleanup": True,
+        "proposals": proposals,
+        "buckets": [],
+        "group_count": len(proposals),
+        "loser_count": 0,
+        "resolved_group_count": len(proposals),
+        "resolved_loser_count": sum(len(p["losers"]) for p in proposals),
+    }
+
+
 def _build_unresolved_proposal(db, group):
     """Return a proposal dict for an unresolved group, or None on race."""
     rows = _fetch_photo_rows(

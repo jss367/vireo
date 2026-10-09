@@ -19,9 +19,11 @@ function renderCard(photo, isWinner, reason, isResolvedLoser, winnerMissingProte
   var html = '<div class="dup-card ' + cls + '" data-photo-id="' +
              (photo.id != null ? photo.id : '') + '">';
   if (thumbUrl) {
-    html += '<img class="thumb" src="' + escapeHtml(thumbUrl) +
+    html += '<div class="thumb-wrap"><div class="thumb-placeholder">Loading thumbnail…</div>' +
+            '<img class="thumb" loading="lazy" decoding="async" width="180" height="135" src="' + escapeHtml(thumbUrl) +
             '" alt="' + escapeHtml(photo.filename || '') +
-            '" onerror="this.outerHTML=\'<div class=\\\'thumb-placeholder\\\'>No thumbnail</div>\'">';
+            '" onload="this.parentElement.classList.add(\'loaded\')"' +
+            ' onerror="this.previousElementSibling.textContent=\'No thumbnail\';this.remove()"></div>';
   } else {
     html += '<div class="thumb-placeholder">No thumbnail</div>';
   }

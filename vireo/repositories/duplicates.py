@@ -159,6 +159,30 @@ class DuplicatesRepository:
             """
         ).fetchone()
 
+    def cleanup_rows(self):
+        """Current rejected copies and all their kept anchors, without disk I/O.
+
+        Uses the same eligibility as ``loser_disk_summary``, including hashes
+        with several kept copies. A single statement keeps the members and
+        their flags consistent if another request resolves a group meanwhile.
+        """
+        return self.conn.execute(
+            """
+            SELECT p.id, p.filename, p.file_hash, p.file_mtime, p.rating,
+                   p.file_size, p.flag, f.path AS folder_path
+            FROM photos p LEFT JOIN folders f ON f.id = p.folder_id
+            WHERE p.file_hash IN (
+                SELECT r.file_hash FROM photos r
+                WHERE r.flag = 'rejected' AND r.file_hash IS NOT NULL
+                  AND EXISTS (
+                      SELECT 1 FROM photos k WHERE k.file_hash = r.file_hash
+                      AND (k.flag IS NULL OR k.flag != 'rejected')
+                  )
+            )
+            ORDER BY p.file_hash, p.id
+            """
+        ).fetchall()
+
     def find_groups(self, include_resolved=False):
         """Return duplicate groups; see ``Database.find_duplicate_groups``.
 

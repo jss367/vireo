@@ -45,6 +45,7 @@ GET          /api/darktable/status
 GET          /api/dashboard/options
 GET          /api/detection-cache/stats
 GET          /api/detections/<int:photo_id>
+GET          /api/duplicates/cleanup
 GET          /api/duplicates/disk-cleanup-summary
 GET          /api/duplicates/last-scan
 GET          /api/edit-fields

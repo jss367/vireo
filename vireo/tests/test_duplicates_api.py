@@ -686,6 +686,103 @@ def test_disk_cleanup_summary_zero_when_clean(app_and_db):
     assert body["total_size"] == 0
 
 
+def test_cleanup_matches_banner_without_saved_scan_or_disk_checks(app_and_db, monkeypatch):
+    """The banner's copies are reviewable even when no duplicate scan exists."""
+    import duplicate_scan
+
+    app, db = app_and_db
+    fid = db.add_folder("/tmp/cleanup-catalog")
+    kept, rejected = _seed_pair(db, "HCATALOG", fid)
+    db.conn.execute("UPDATE photos SET flag='rejected' WHERE id=?", (rejected,))
+    unrelated = db.add_photo(folder_id=fid, filename="unrelated.jpg", file_hash="HUNRELATED",
+                             extension=".jpg", file_size=1000, file_mtime=100.0)
+    db.conn.execute("UPDATE photos SET flag='rejected' WHERE id=?", (unrelated,))
+    db.conn.commit()
+
+    def no_disk_check(*args):
+        raise AssertionError("Loading catalog cleanup must not check disk availability")
+
+    monkeypatch.setattr(duplicate_scan, "_row_to_info", no_disk_check)
+    client = app.test_client()
+    assert client.get("/api/duplicates/last-scan").get_json() == {"found": False}
+    result = client.get("/api/duplicates/cleanup").get_json()
+    summary = client.get("/api/duplicates/disk-cleanup-summary").get_json()
+    assert result["catalog_cleanup"] is True
+    assert result["resolved_loser_count"] == summary["count"] == 1
+    proposal, = result["proposals"]
+    assert proposal["winner"]["id"] == kept
+    assert [p["id"] for p in proposal["losers"]] == [rejected]
+    assert "exists" not in proposal["winner"]
+    assert "exists" not in proposal["losers"][0]
+    assert db.get_photo(rejected)["flag"] == "rejected"
+    assert db.job_history.last_completed_with_result("duplicate-scan") is None
+
+
+def test_cleanup_includes_all_kept_anchors_and_refreshes_catalog(app_and_db):
+    """Rejected twins remain visible even with several non-rejected copies."""
+    app, db = app_and_db
+    fid = db.add_folder("/tmp/cleanup-multiple-kept")
+    a, b = _seed_pair(db, "HMULTIPLE", fid)
+    c = db.add_photo(folder_id=fid, filename="third.jpg", file_hash="HMULTIPLE",
+                     extension=".jpg", file_size=1000, file_mtime=100.0)
+    db.conn.execute("UPDATE photos SET flag='none' WHERE file_hash='HMULTIPLE'")
+    db.conn.execute("UPDATE photos SET flag='rejected' WHERE id=?", (c,))
+    db.conn.commit()
+    client = app.test_client()
+    result = client.get("/api/duplicates/cleanup").get_json()
+    proposal, = result["proposals"]
+    assert [proposal["winner"]["id"]] + [p["id"] for p in proposal["other_kept"]] == [a, b]
+    assert [p["id"] for p in proposal["losers"]] == [c]
+    assert result["resolved_loser_count"] == client.get(
+        "/api/duplicates/disk-cleanup-summary"
+    ).get_json()["count"]
+    # A rejection undone elsewhere disappears immediately on refresh.
+    db.conn.execute("UPDATE photos SET flag='none' WHERE id=?", (c,))
+    db.conn.commit()
+    assert client.get("/api/duplicates/cleanup").get_json()["proposals"] == []
+
+
+def test_catalog_cleanup_cannot_trash_last_surviving_copy(app_and_db, tmp_path):
+    """Catalog-only loading doesn't bypass disk revalidation at deletion."""
+    app, db = app_and_db
+    fid = db.add_folder(str(tmp_path))
+    kept, rejected = _seed_pair(db, "HMISSINGKEEP", fid)
+    copy = tmp_path / "x (2).jpg"
+    copy.write_bytes(b"surviving photo")
+    db.conn.execute("UPDATE photos SET flag='rejected' WHERE id=?", (rejected,))
+    db.conn.commit()
+    client = app.test_client()
+    proposal, = client.get("/api/duplicates/cleanup").get_json()["proposals"]
+    assert proposal["winner"]["id"] == kept
+    result = client.post("/api/duplicates/delete-loser-files", json={"photo_ids": [rejected]}).get_json()
+    assert result["trashed"] == 0
+    assert result["skipped"] == [{"id": rejected, "reason": "no verified distinct duplicate winner exists"}]
+    assert copy.read_bytes() == b"surviving photo"
+    assert db.get_photo(rejected) is not None
+
+
+def test_catalog_cleanup_shows_copies_from_other_workspaces(app_and_db):
+    app, db = app_and_db
+    original_ws = db.active_workspace_id
+    other_ws = db.create_workspace("Archive")
+    db.set_active_workspace(other_ws)
+    fid = db.add_folder("/archive/cleanup")
+    kept, rejected = _seed_pair(db, "HARCHIVE", fid)
+    db.conn.execute("UPDATE photos SET flag='rejected' WHERE id=?", (rejected,))
+    db.conn.commit()
+    db.set_photo_edit_recipe(rejected, {"rotation": 90})
+    db.set_active_workspace(original_ws)
+    assert db.get_photo(rejected, verify_workspace=True) is None
+
+    result = app.test_client().get("/api/duplicates/cleanup").get_json()
+    proposal, = result["proposals"]
+    assert proposal["winner"]["id"] == kept
+    assert proposal["winner"]["workspaces"] == ["Archive"]
+    assert proposal["losers"][0]["id"] == rejected
+    assert proposal["losers"][0]["workspaces"] == ["Archive"]
+    assert proposal["losers"][0]["edit_recipe"]["rotation"] == 90
+
+
 # ---------------------------------------------------------------------------
 # /api/duplicates/last-scan — restore the most recent completed scan's result
 # so navigating away from /duplicates and back doesn't force a rescan.
