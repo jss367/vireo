@@ -38,6 +38,7 @@ pub mod ids {
     pub const FILE_IMPORT_FOLDER: &str = "file_import_folder";
     pub const FILE_IMPORT_LIGHTROOM: &str = "file_import_lightroom";
     pub const FILE_EXPORT_SELECTED: &str = "file_export_selected";
+    pub const EDIT_FIND: &str = "edit_find";
 
     pub const PHOTO_OPEN_LIGHTBOX: &str = "photo_open_lightbox";
     pub const PHOTO_OPEN_BROWSE: &str = "photo_open_browse";
@@ -122,6 +123,7 @@ pub fn command_for_id(id: &str) -> Option<&'static str> {
         ids::FILE_IMPORT_PHOTOS => Some("import_photos"),
         ids::FILE_IMPORT_FOLDER => Some("import_folder"),
         ids::FILE_EXPORT_SELECTED => Some("export_selected"),
+        ids::EDIT_FIND => Some("find"),
         ids::PHOTO_OPEN_LIGHTBOX => Some("photo_open_lightbox"),
         ids::PHOTO_OPEN_BROWSE => Some("photo_open_browse"),
         ids::PHOTO_REVEAL => Some("photo_reveal"),
@@ -247,6 +249,12 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
         .copy()
         .paste()
         .select_all()
+        .separator()
+        .item(
+            &MenuItemBuilder::with_id(ids::EDIT_FIND, "Find...")
+                .accelerator("CmdOrCtrl+F")
+                .build(app)?,
+        )
         .build()?;
 
     // -- View menu (page navigation) --
@@ -373,11 +381,7 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
                 .build(app)?,
         )
         .separator()
-        .item(
-            &MenuItemBuilder::with_id(ids::PHOTO_FIND_SIMILAR, "Find Similar")
-                .accelerator("CmdOrCtrl+F")
-                .build(app)?,
-        )
+        .item(&MenuItemBuilder::with_id(ids::PHOTO_FIND_SIMILAR, "Find Similar").build(app)?)
         .item(&MenuItemBuilder::with_id(ids::PHOTO_COMPARE, "Compare Selected").build(app)?)
         .separator()
         .item(&MenuItemBuilder::with_id(ids::PHOTO_ADD_KEYWORD, "Add Keyword...").build(app)?)

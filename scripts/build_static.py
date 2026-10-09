@@ -15,12 +15,12 @@ INCLUDE_RE = re.compile(r"\{%\s*include\s+['\"]([^'\"]+)['\"]\s*%\}")
 
 
 def resolve_includes(content, template_dir):
-    """Replace {% include 'file' %} with the file's content."""
+    """Replace includes with their content, resolving nested shared partials."""
     def replacer(match):
         include_name = match.group(1)
         include_path = os.path.join(template_dir, include_name)
         with open(include_path, encoding="utf-8") as f:
-            return f.read()
+            return resolve_includes(f.read(), template_dir)
     return INCLUDE_RE.sub(replacer, content)
 
 
