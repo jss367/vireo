@@ -588,3 +588,57 @@ def test_reveal_refresh_leaves_applying_cards_locked(live_server, page, tmp_path
         refreshBucketRevealButtons();
     """)
     expect(button).to_be_enabled()
+
+
+@pytest.mark.parametrize("action", ["bulk", "retry"])
+@pytest.mark.parametrize("same_bucket", [False, True])
+def test_reveal_completion_preserves_applying_action_locks(
+    live_server, page, tmp_path, action, same_bucket,
+):
+    folders = [str(tmp_path / "a"), str(tmp_path / "b")]
+    _seed_scan_with_buckets(live_server["db"], *folders, n_groups=2)
+    reveals, actions = [], []
+    page.route("**/api/folders/reveal", lambda route: reveals.append(route))
+    page.route("**/api/duplicates/bulk-resolve", lambda route: actions.append(route))
+    page.route("**/api/duplicates/delete-loser-files", lambda route: actions.append(route))
+    page.on("dialog", lambda dialog: dialog.accept())
+    page.goto(f"{live_server['url']}/duplicates")
+    expect(page.locator(".bucket-card")).to_have_count(1)
+    if not same_bucket:
+        page.evaluate("""() => {
+          const second = JSON.parse(JSON.stringify(_lastScanResult.buckets[0]));
+          second.folders = second.folders.map(path => path + '-other');
+          _lastScanResult.buckets.push(second);
+          renderResults(_lastScanResult);
+        }""")
+    button = page.locator('.bucket-card[data-bi="0"] .reveal-btn')
+    label = button.inner_text()
+    button.click()
+    expect(button).to_be_disabled()
+    old_button = button.element_handle()
+    page.locator(".vf-search input").fill("photo")
+    page.wait_for_function("button => !button.isConnected", arg=old_button)
+    expect(button).to_be_disabled()
+    bi = 0 if same_bucket else 1
+    card = page.locator(f'.bucket-card[data-bi="{bi}"]')
+    if action == "bulk":
+        card.locator('.keep-btn:not(.reveal-btn)').first.click()
+    else:
+        card.evaluate("""card => {
+          card.setAttribute('data-pending-trash', '[999999]');
+          void retryBucketTrash(card.querySelector('.keep-btn'));
+        }""")
+    expect(card).to_have_class("bucket-card applying")
+    expect(card.locator('.reveal-btn')).to_be_disabled()
+    assert len(actions) == 1
+    reveals[0].fulfill(status=200, content_type="application/json",
+                       body=json.dumps({"ok": True, "revealed": folders}))
+    expect(button).to_have_text(label)
+    expect(card.locator('.reveal-btn')).to_be_disabled()
+    assert len(reveals) == 1
+    if action == "bulk":
+        response = {"ok": True, "resolved": [], "skipped": []}
+    else:
+        response = {"ok": True, "trashed": 0, "failed": [{"id": 999999, "error": "mock failure"}]}
+    actions[0].fulfill(status=200, content_type="application/json", body=json.dumps(response))
+    expect(card.locator('.reveal-btn')).to_be_enabled()

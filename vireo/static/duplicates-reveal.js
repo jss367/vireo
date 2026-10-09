@@ -18,15 +18,13 @@ function bucketRevealButton(bi) {
     escapeHtml(label) + '</button>';
 }
 
-function refreshBucketRevealButtons() {
+function refreshBucketRevealButtons(completedKey) {
   document.querySelectorAll('[data-reveal-bucket]').forEach(function(button) {
-    // bulkResolveByFolder and retryBucketTrash disable every action button
-    // on their applying card. Leaving those buttons alone keeps the card's
-    // controls locked while the sibling flow is still awaiting work.
+    var key = bucketRevealKey(Number(button.dataset.revealBucket));
+    if (completedKey !== undefined && key !== completedKey) return;
+    var pending = _pendingBucketReveals.has(key);
     var card = button.closest('.bucket-card');
-    if (card && card.classList.contains('applying')) return;
-    var pending = _pendingBucketReveals.has(bucketRevealKey(Number(button.dataset.revealBucket)));
-    button.disabled = pending;
+    button.disabled = pending || !!(card && card.classList.contains('applying'));
     button.textContent = pending
       ? 'Opening ' + (window.VIREO_FILE_MANAGER_NAME || 'file manager') + '\u2026'
       : window.VIREO_REVEAL_LABEL;
@@ -38,7 +36,6 @@ async function revealBucketFolders(bi, button) {
   var key = bucketRevealKey(bi);
   if (_pendingBucketReveals.has(key) || (button && button.disabled)) return;
   _pendingBucketReveals.add(key);
-  var originalLabel = button && button.textContent;
   var manager = window.VIREO_FILE_MANAGER_NAME || 'file manager';
   if (button) {
     button.disabled = true;
@@ -67,10 +64,6 @@ async function revealBucketFolders(bi, button) {
     showToast('Reveal failed: ' + (e.message || 'error'), 'error');
   } finally {
     _pendingBucketReveals.delete(key);
-    refreshBucketRevealButtons();
-    if (button) {
-      button.disabled = false;
-      button.textContent = originalLabel;
-    }
+    refreshBucketRevealButtons(key);
   }
 }

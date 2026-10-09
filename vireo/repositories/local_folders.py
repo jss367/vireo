@@ -6,14 +6,21 @@ sees the folder shares the copy. ``services/local_folder.py`` still runs the
 staging, sync and discard SQL itself; this repository holds the reads the
 ``/api/workspaces/active/local-folders`` routes run, starting with the
 per-root residency signature the blocker status reports.
+
+Callers reach it as ``db.local_folders`` (a fresh repository per access, see
+``Database.local_folders``); there are no forwarding wrappers on
+``Database``.
 """
+
+import sqlite3
+from collections.abc import Iterable
 
 
 class LocalFolderRepository:
-    def __init__(self, conn):
+    def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
 
-    def state_rows(self, root_folder_ids):
+    def state_rows(self, root_folder_ids: Iterable[int]) -> list[sqlite3.Row]:
         """Rows (``root_folder_id``, ``state``, ``activated_at``, ``created_at``).
 
         One statement over every id (no chunking), ordered by root folder id.

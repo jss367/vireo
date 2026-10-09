@@ -19,9 +19,11 @@ function renderCard(photo, isWinner, reason, isResolvedLoser, winnerMissingProte
   var html = '<div class="dup-card ' + cls + '" data-photo-id="' +
              (photo.id != null ? photo.id : '') + '">';
   if (thumbUrl) {
-    html += '<img class="thumb" src="' + escapeHtml(thumbUrl) +
+    html += '<div class="thumb-wrap"><div class="thumb-placeholder">Loading thumbnail…</div>' +
+            '<img class="thumb" loading="lazy" decoding="async" width="180" height="135" src="' + escapeHtml(thumbUrl) +
             '" alt="' + escapeHtml(photo.filename || '') +
-            '" onerror="this.outerHTML=\'<div class=\\\'thumb-placeholder\\\'>No thumbnail</div>\'">';
+            '" onload="this.parentElement.classList.add(\'loaded\')"' +
+            ' onerror="this.previousElementSibling.textContent=\'No thumbnail\';this.remove()"></div>';
   } else {
     html += '<div class="thumb-placeholder">No thumbnail</div>';
   }
@@ -58,3 +60,30 @@ function renderCard(photo, isWinner, reason, isResolvedLoser, winnerMissingProte
   html += '</div>';
   return html;
 }
+
+async function revealDuplicatePhoto(photoId) {
+  try {
+    var data = await safeFetch('/api/files/reveal', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ photo_id: photoId, scope: 'duplicates' }),
+    }, { toast: false });
+    showRevealFeedback(data);
+  } catch (err) {
+    showToast('Reveal failed: ' + (err.message || 'request failed'), 'error');
+  }
+}
+
+// Delegate so restored results, fresh scans, and filter re-renders all work.
+document.addEventListener('contextmenu', function(e) {
+  var card = e.target.closest('.dup-card[data-photo-id]');
+  var results = document.getElementById('results');
+  if (!card || !results || !results.contains(card)) return;
+  var photoId = Number(card.dataset.photoId);
+  if (!Number.isInteger(photoId) || photoId <= 0) return;
+  e.preventDefault();
+  openContextMenu(e, [{
+    label: window.VIREO_REVEAL_LABEL,
+    onClick: function() { revealDuplicatePhoto(photoId); },
+  }]);
+});

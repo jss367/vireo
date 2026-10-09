@@ -14,7 +14,7 @@ import json
 import logging
 import os
 
-from duplicate_scan import attach_workspace_names, revalidate_scan_result
+from duplicate_scan import attach_workspace_names, catalog_cleanup_result, revalidate_scan_result
 from flask import Blueprint, jsonify, request
 from photo_payload import attach_nested_edit_recipes
 from sql_chunks import chunked
@@ -315,6 +315,11 @@ def create_duplicates_blueprint(
             "skipped": skipped,
             "failed": failed,
         })
+
+    @blueprint.route("/api/duplicates/cleanup", methods=["GET"])
+    def api_duplicates_cleanup():
+        """Current catalog cleanup candidates, independent of saved scans."""
+        return jsonify(catalog_cleanup_result(get_db()))
 
     @blueprint.route("/api/duplicates/last-scan", methods=["GET"])
     def api_duplicates_last_scan():
