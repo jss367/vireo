@@ -3188,6 +3188,11 @@ class Database:
             self.conn, chunk_size=_SQLITE_PARAM_CHUNK_SIZE,
         )
 
+    @property
+    def duplicates(self):
+        """Catalog-wide duplicate reads and writes on the current connection."""
+        return self._duplicates_repository()
+
     def check_and_resolve_duplicates_for_hash(self, file_hash: str) -> dict | None:
         """Look up non-rejected photos sharing this hash; if >=2, resolve.
 
