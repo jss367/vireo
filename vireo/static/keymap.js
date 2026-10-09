@@ -139,6 +139,10 @@
     // Esc runs first — even if focus is in an input, an open modal should
     // still be dismissable with Esc from a field inside it.
     if (_handleEsc(e)) return;
+    // Find owns this chord before configurable actions can navigate or edit
+    // a photo. Its later capture listener handles the event; recording still
+    // takes priority via the pause check above.
+    if (window.VireoPageFind && matchesShortcut(e, 'ctrl+f')) return;
     if (isInputFocused()) return;
     var candidates = shortcutsForScope(_currentScope);
     for (var i = 0; i < candidates.length; i++) {

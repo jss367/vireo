@@ -243,3 +243,18 @@ def test_find_excludes_closed_bottom_panel(live_server, page):
     expect(page.locator("#pageFindStatus")).to_have_text("1 of 1")
     page.evaluate("document.getElementById('bottomPanel').classList.remove('open')")
     expect(page.locator("#pageFindStatus")).to_have_text("0 results")
+
+
+@pytest.mark.parametrize("entry", ["Control+F", "Meta+F"])
+def test_find_takes_priority_over_configured_shortcuts(live_server, page, entry):
+    page.goto(f"{live_server['url']}/life-list")
+    page.evaluate("""() => {
+        window.findConflictActions = 0;
+        Keymap.register(Keymap.getScope(), {
+            key: 'ctrl+f',
+            action: function() { window.findConflictActions++; }
+        });
+    }""")
+    page.keyboard.press(entry)
+    expect(page.locator("#pageFindInput")).to_be_focused()
+    assert page.evaluate("window.findConflictActions") == 0
