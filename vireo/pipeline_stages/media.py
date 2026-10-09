@@ -716,7 +716,7 @@ def previews_stage(
             if os.path.exists(cache_path):
                 cache_row = None
                 try:
-                    cache_row = thread_db.preview_cache_get(photo["id"], max_size)
+                    cache_row = thread_db.caches.preview_get(photo["id"], max_size)
                 except sqlite3.Error:
                     # Treated as untracked: an edited photo's preview is
                     # then re-rendered rather than trusted.
@@ -739,7 +739,7 @@ def previews_stage(
                     skipped += 1
                     try:
                         if cache_row is None:
-                            thread_db.preview_cache_insert(
+                            thread_db.caches.preview_insert(
                                 photo["id"],
                                 max_size,
                                 os.path.getsize(cache_path),

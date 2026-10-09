@@ -12532,7 +12532,7 @@ def test_previews_stage_uses_thumb_cache_dir_parent(tmp_path):
         "a custom thumb_cache_dir is configured"
     )
     # The preview_cache row must account for the file the app will serve.
-    assert db2.preview_cache_get(photo_id, 1920) is not None
+    assert db2.caches.preview_get(photo_id, 1920) is not None
 
 
 def test_pipeline_previews_honor_raw_failure_marker_after_source_selection(
@@ -12616,7 +12616,7 @@ def test_pipeline_previews_honor_raw_failure_marker_after_source_selection(
     assert previews["generated"] == 0
     assert previews["skipped"] == 1
     assert raw_loads == []
-    assert db.preview_cache_get(photo_id, 1920) is None
+    assert db.caches.preview_get(photo_id, 1920) is None
 
 
 def test_pipeline_previews_warm_unedited_raw_from_camera_rendered_source(

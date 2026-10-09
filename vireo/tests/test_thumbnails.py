@@ -859,7 +859,7 @@ def test_paired_photo_source_selection_defaults_cleanly_to_jpeg_pixels(
     assert raw_preview_rgb[0] > 180
     assert jpeg_preview_size == (800, 600)
     assert raw_preview_size == (600, 800)
-    assert db.preview_cache_get(pid, 1920) is None
+    assert db.caches.preview_get(pid, 1920) is None
 
     jpeg_original_url = f"/photos/{pid}/original?source=jpeg"
     raw_original_url = f"/photos/{pid}/original?source=raw"
@@ -887,7 +887,7 @@ def test_paired_photo_source_selection_defaults_cleanly_to_jpeg_pixels(
         cached_jpeg, "JPEG",
     )
     os.remove(os.path.join(folder, "bird.nef"))
-    db.offline_original_upsert(
+    db.caches.offline_original_upsert(
         pid,
         os.path.relpath(cached_raw, vireo_dir),
         None,

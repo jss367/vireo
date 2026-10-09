@@ -31,7 +31,7 @@ def test_prepare_full_resolution_caches_selected_original(client_with_photo):
     assert result["bytes"] > 0
     assert result["errors"] == []
 
-    cached = db.offline_original_get(photo_id)
+    cached = db.caches.offline_original_get(photo_id)
     assert cached is not None
     assert cached["status"] == "cached"
     cached_path = os.path.join(
@@ -523,13 +523,13 @@ def test_preparation_skips_concurrently_deleted_photos(
     assert result["ready"] == 1
     assert result["copied"] == 1
     assert result["reused"] == 0
-    assert result["bytes"] == db.offline_original_get(other_id)["bytes"]
+    assert result["bytes"] == db.caches.offline_original_get(other_id)["bytes"]
     assert result["failed"] == 0
     assert result["total"] == 2
     assert result["errors"] == []
     assert job["progress"]["current"] == 2
-    assert db.offline_original_get(photo_id) is None
-    assert db.offline_original_get(other_id)["status"] == "cached"
+    assert db.caches.offline_original_get(photo_id) is None
+    assert db.caches.offline_original_get(other_id)["status"] == "cached"
     for subdir in ("offline/originals", "originals"):
         directory = Path(vireo_dir) / subdir
         assert not list(directory.glob(f"{photo_id}.*"))
@@ -707,9 +707,9 @@ def test_preparation_rejects_recycled_photo_id(client_with_photo, monkeypatch, s
         assert db.get_photo(photo_id)["working_copy_path"] is None
     if stage == "before_turn":
         assert Path(replacement_cache[0]).read_bytes() == replacement_bytes[0]
-        assert db.offline_original_get(photo_id) is not None
+        assert db.caches.offline_original_get(photo_id) is not None
     else:
-        assert db.offline_original_get(photo_id) is None
+        assert db.caches.offline_original_get(photo_id) is None
     response = client.get(f"/photos/{photo_id}/original")
     assert response.status_code == 200
     assert response.data == replacement_bytes[0]
@@ -812,7 +812,7 @@ def test_replacement_cache_writer_waits_for_stale_preparation_cleanup(
     assert stale_job["result"]["skipped_deleted"] == 1
     assert replacement_job["status"] == "completed", replacement_job
     assert replacement_published.is_set()
-    cached = db.offline_original_get(photo_id)
+    cached = db.caches.offline_original_get(photo_id)
     assert cached["status"] == "cached"
     cached_path = Path(app.config["THUMB_CACHE_DIR"]).parent / cached["original_path"]
     assert cached_path.read_bytes() == replacement.read_bytes()
@@ -898,7 +898,7 @@ def test_preparation_warms_every_lightbox_fit_preview(client_with_photo, monkeyp
     preview_dir = Path(os.path.dirname(app.config["THUMB_CACHE_DIR"]), "previews")
     for size in (1920, 2560, 3840):
         assert (preview_dir / f"{photo_id}_{size}.jpg").is_file(), size
-        assert db.preview_cache_get(photo_id, size), size
+        assert db.caches.preview_get(photo_id, size), size
 
     # Flipping through the lightbox at fit is now a cache hit on every tier.
     def no_decode(*args, **kwargs):
@@ -1042,7 +1042,7 @@ def test_preview_publication_refused_after_photo_id_recycled(client_with_photo, 
     assert job["result"]["ready"] == 0
     # The old photo's pixels never reached the recycled ID's preview cache.
     assert not list(preview_dir.glob(f"{photo_id}_*.jpg"))
-    assert db.preview_cache_get(photo_id, 1920) is None
+    assert db.caches.preview_get(photo_id, 1920) is None
 
 
 def test_cross_photo_eviction_demotes_earlier_ready_photo(
@@ -1087,7 +1087,7 @@ def test_cross_photo_eviction_demotes_earlier_ready_photo(
         # Fire once, as soon as pid2 has published something — all of
         # pid1's tiers get evicted in bulk, mimicking an LRU pass over a
         # quota that only holds the current photo's tier set.
-        if not purged and db_arg.preview_cache_get(pid2, 2560):
+        if not purged and db_arg.caches.preview_get(pid2, 2560):
             import contextlib
             for size in (1920, 2560, 3840):
                 f = preview_dir / f"{pid1}_{size}.jpg"
@@ -1120,11 +1120,11 @@ def test_cross_photo_eviction_demotes_earlier_ready_photo(
     assert any("test.jpg" in e for e in result["errors"]), result
     # pid2's tiers survived.
     for size in (1920, 2560, 3840):
-        assert db.preview_cache_get(pid2, size), size
+        assert db.caches.preview_get(pid2, size), size
         assert (preview_dir / f"{pid2}_{size}.jpg").is_file(), size
     # pid1's tiers were evicted and the final pass caught it.
     for size in (1920, 2560, 3840):
-        assert db.preview_cache_get(pid1, size) is None, size
+        assert db.caches.preview_get(pid1, size) is None, size
         assert not (preview_dir / f"{pid1}_{size}.jpg").exists(), size
 
 
@@ -1178,7 +1178,7 @@ def test_preview_publication_refused_when_recipe_changes_mid_render(
     assert result["ready"] == 0, result
     assert result["failed"] == 1, result
     assert not list(preview_dir.glob(f"{photo_id}_*.jpg"))
-    assert db.preview_cache_get(photo_id, 1920) is None
+    assert db.caches.preview_get(photo_id, 1920) is None
 
 
 def test_preparation_guard_accepts_matching_recipe(client_with_photo):
@@ -1203,7 +1203,7 @@ def test_preparation_guard_accepts_matching_recipe(client_with_photo):
     assert result["failed"] == 0, result
     preview_dir = Path(os.path.dirname(app.config["THUMB_CACHE_DIR"]), "previews")
     for size in (1920, 2560, 3840):
-        assert db.preview_cache_get(photo_id, size), size
+        assert db.caches.preview_get(photo_id, size), size
         assert (preview_dir / f"{photo_id}_{size}.jpg").is_file(), size
 
 

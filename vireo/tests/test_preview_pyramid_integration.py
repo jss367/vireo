@@ -79,7 +79,7 @@ def test_full_pyramid_cycle(tmp_path, monkeypatch):
     client = app.test_client()
     resp = client.get(f"/photos/{pid_big}/preview?size=1920")
     assert resp.status_code == 200
-    assert db.preview_cache_get(pid_big, 1920) is not None, (
+    assert db.caches.preview_get(pid_big, 1920) is not None, (
         "preview_cache row should exist after /preview generates"
     )
     assert (vireo_dir / "previews" / f"{pid_big}_1920.jpg").exists()
@@ -92,7 +92,7 @@ def test_full_pyramid_cycle(tmp_path, monkeypatch):
     # 5. Shrinking the quota via /api/config immediately drains the cache.
     resp = client.post("/api/config", json={"preview_cache_max_mb": 0})
     assert resp.status_code == 200
-    assert db.preview_cache_total_bytes() == 0, (
+    assert db.caches.preview_total_bytes() == 0, (
         "saving preview_cache_max_mb=0 should evict every tracked entry"
     )
     assert not (vireo_dir / "previews" / f"{pid_big}_1920.jpg").exists(), (

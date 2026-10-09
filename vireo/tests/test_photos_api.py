@@ -2067,7 +2067,7 @@ def test_concurrent_preview_cache_misses_decode_once(
     cache_path = os.path.join(vireo_dir, "previews", f"{photo_id}_1920.jpg")
     with contextlib.suppress(OSError):
         os.unlink(cache_path)
-    db.preview_cache_delete(photo_id, 1920)
+    db.caches.preview_delete(photo_id, 1920)
 
     started = threading.Event()
     release = threading.Event()
@@ -2138,7 +2138,7 @@ def test_failed_preview_flight_wakes_waiter_and_next_request_retries(
     cache_path = os.path.join(vireo_dir, "previews", f"{photo_id}_1920.jpg")
     with contextlib.suppress(OSError):
         os.unlink(cache_path)
-    db.preview_cache_delete(photo_id, 1920)
+    db.caches.preview_delete(photo_id, 1920)
 
     started = threading.Event()
     release = threading.Event()
@@ -3935,7 +3935,7 @@ def test_preview_cache_miss_creates_row(client_with_photo):
     client = app.test_client()
     resp = client.get(f"/photos/{photo_id}/preview?size=1920")
     assert resp.status_code == 200
-    row = db.preview_cache_get(photo_id, 1920)
+    row = db.caches.preview_get(photo_id, 1920)
     assert row is not None
     assert row["bytes"] > 0
 
@@ -3946,10 +3946,10 @@ def test_preview_cache_hit_updates_last_access(client_with_photo):
     app, db, photo_id = client_with_photo
     client = app.test_client()
     client.get(f"/photos/{photo_id}/preview?size=1920")
-    row1 = db.preview_cache_get(photo_id, 1920)
+    row1 = db.caches.preview_get(photo_id, 1920)
     time.sleep(0.05)
     client.get(f"/photos/{photo_id}/preview?size=1920")
-    row2 = db.preview_cache_get(photo_id, 1920)
+    row2 = db.caches.preview_get(photo_id, 1920)
     assert row2["last_access_at"] > row1["last_access_at"]
 
 
@@ -3966,7 +3966,7 @@ def test_edit_recipe_api_invalidates_preview_cache_and_renders(client_with_photo
     vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
     preview_path = os.path.join(vireo_dir, "previews", f"{photo_id}_1920.jpg")
     assert os.path.exists(preview_path)
-    assert db.preview_cache_get(photo_id, 1920) is not None
+    assert db.caches.preview_get(photo_id, 1920) is not None
 
     resp = client.put(
         f"/api/photos/{photo_id}/edit-recipe",
@@ -3974,7 +3974,7 @@ def test_edit_recipe_api_invalidates_preview_cache_and_renders(client_with_photo
     )
     assert resp.status_code == 200
     assert resp.get_json()["recipe"] == {"version": 1, "rotation": 90}
-    assert db.preview_cache_get(photo_id, 1920) is None
+    assert db.caches.preview_get(photo_id, 1920) is None
     assert not os.path.exists(preview_path)
 
     rendered = client.get(f"/photos/{photo_id}/preview?size=1920")
@@ -4580,7 +4580,7 @@ def test_edit_recipe_api_invalidates_untracked_preview_file(client_with_photo):
     os.makedirs(preview_dir, exist_ok=True)
     untracked_path = os.path.join(preview_dir, f"{photo_id}_2560.jpg")
     Image.new("RGB", (10, 10), "purple").save(untracked_path, "JPEG")
-    assert db.preview_cache_get(photo_id, 2560) is None
+    assert db.caches.preview_get(photo_id, 2560) is None
 
     resp = client.put(
         f"/api/photos/{photo_id}/edit-recipe",
@@ -4608,7 +4608,7 @@ def test_edited_preview_does_not_adopt_stale_untracked_file_after_unlink_failure
     stale_path = os.path.join(preview_dir, f"{photo_id}_1920.jpg")
     Image.new("RGB", (10, 10), "purple").save(stale_path, "JPEG")
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
-    assert db.preview_cache_get(photo_id, 1920) is None
+    assert db.caches.preview_get(photo_id, 1920) is None
     original_remove = app_module.os.remove
 
     def locked_remove(path):
@@ -4642,7 +4642,7 @@ def test_cleared_recipe_does_not_adopt_stale_edited_preview_after_unlink_failure
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
     edited = client.get(f"/photos/{photo_id}/preview?size=1920")
     assert edited.status_code == 200
-    assert db.preview_cache_get(photo_id, 1920) is not None
+    assert db.caches.preview_get(photo_id, 1920) is not None
     with Image.open(io.BytesIO(edited.data)) as img:
         assert img.size == (600, 800)
 
@@ -4682,7 +4682,7 @@ def test_failed_preview_invalidation_survives_app_restart(
 
     original = client.get(f"/photos/{photo_id}/preview?size=1920")
     assert original.status_code == 200
-    assert db.preview_cache_get(photo_id, 1920) is not None
+    assert db.caches.preview_get(photo_id, 1920) is not None
     with Image.open(io.BytesIO(original.data)) as img:
         assert img.size == (800, 600)
 
@@ -4700,7 +4700,7 @@ def test_failed_preview_invalidation_survives_app_restart(
     )
     assert edited.status_code == 200
     assert os.path.exists(preview_path)
-    assert db.preview_cache_get(photo_id, 1920) is not None
+    assert db.caches.preview_get(photo_id, 1920) is not None
 
     monkeypatch.setattr(app_module.os, "remove", original_remove)
     restarted = app_module.create_app(
@@ -5623,12 +5623,12 @@ def test_preview_adopts_existing_file_on_first_access(client_with_photo):
     # Backdate mtime
     past = time.time() - 3600
     os.utime(cache_path, (past, past))
-    assert db.preview_cache_get(photo_id, 1920) is None
+    assert db.caches.preview_get(photo_id, 1920) is None
 
     client = app.test_client()
     resp = client.get(f"/photos/{photo_id}/preview?size=1920")
     assert resp.status_code == 200
-    row = db.preview_cache_get(photo_id, 1920)
+    row = db.caches.preview_get(photo_id, 1920)
     assert row is not None
     assert row["bytes"] == 12345
 
@@ -5746,8 +5746,8 @@ def test_paired_preview_shares_decode_across_warmup_and_visible(
         "shadow cache should have satisfied it"
     )
 
-    assert bool(db.paired_preview_cache_oldest_first()) == bool(quota_mb)
-    assert (db.preview_cache_total_bytes() > 0) == bool(quota_mb)
+    assert bool(db.caches.paired_preview_oldest_first()) == bool(quota_mb)
+    assert (db.caches.preview_total_bytes() > 0) == bool(quota_mb)
 
     # The distinct RAW variant is a separate flight and must not be served
     # from the JPEG paired shadow — pixel contamination is the exact
@@ -7245,7 +7245,7 @@ def test_eviction_removes_oldest_files_when_over_quota(tmp_path, monkeypatch):
     client.get(f"/photos/{pid2}/preview?size=1920")
 
     # Quota is 0 MB so after each write eviction drains everything.
-    assert db.preview_cache_total_bytes() == 0
+    assert db.caches.preview_total_bytes() == 0
     preview_dir = vireo_dir / "previews"
     assert not (preview_dir / f"{pid1}_1920.jpg").exists()
     assert not (preview_dir / f"{pid2}_1920.jpg").exists()
@@ -7269,13 +7269,13 @@ def test_reconcile_drops_ghost_rows_when_files_missing(tmp_path):
 
     # Row exists in table but no file on disk — exactly the drift state
     # observed in production (DB says ~2 GB tracked, disk has 0 bytes).
-    db.preview_cache_insert(pid, 1920, 450_000)
-    assert db.preview_cache_total_bytes() == 450_000
+    db.caches.preview_insert(pid, 1920, 450_000)
+    assert db.caches.preview_total_bytes() == 450_000
 
     dropped = reconcile_preview_cache(db, str(vireo_dir))
     assert dropped == 1
-    assert db.preview_cache_total_bytes() == 0
-    assert db.preview_cache_get(pid, 1920) is None
+    assert db.caches.preview_total_bytes() == 0
+    assert db.caches.preview_get(pid, 1920) is None
 
 
 def test_reconcile_keeps_live_rows(tmp_path):
@@ -7297,11 +7297,11 @@ def test_reconcile_keeps_live_rows(tmp_path):
 
     preview_file = preview_dir / f"{pid}_1920.jpg"
     Image.new("RGB", (1920, 1280), (10, 20, 30)).save(str(preview_file), "JPEG")
-    db.preview_cache_insert(pid, 1920, preview_file.stat().st_size)
+    db.caches.preview_insert(pid, 1920, preview_file.stat().st_size)
 
     dropped = reconcile_preview_cache(db, str(vireo_dir))
     assert dropped == 0
-    assert db.preview_cache_get(pid, 1920) is not None
+    assert db.caches.preview_get(pid, 1920) is not None
 
 
 def test_startup_reconciles_before_eviction(tmp_path, monkeypatch):
@@ -7335,14 +7335,14 @@ def test_startup_reconciles_before_eviction(tmp_path, monkeypatch):
                        file_size=1, file_mtime=1.0)
 
     # Seed a ghost row: bytes claimed but no file behind it.
-    db.preview_cache_insert(pid, 1920, 450_000)
+    db.caches.preview_insert(pid, 1920, 450_000)
     db.close()
 
     create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir),
                api_token="test-token-123")
 
     db2 = Database(db_path)
-    assert db2.preview_cache_total_bytes() == 0, (
+    assert db2.caches.preview_total_bytes() == 0, (
         "Startup must reconcile ghost rows so eviction operates on "
         "real bytes, not phantom accounting."
     )
@@ -7395,14 +7395,14 @@ def test_preview_cache_clear_removes_all(client_with_photo):
     app, db, photo_id = client_with_photo
     client = app.test_client()
     client.get(f"/photos/{photo_id}/preview?size=1920")
-    assert db.preview_cache_total_bytes() > 0
+    assert db.caches.preview_total_bytes() > 0
 
     resp = client.post("/api/preview-cache/clear")
     assert resp.status_code == 200
     data = resp.get_json()
     assert "files_removed" in data
 
-    assert db.preview_cache_total_bytes() == 0
+    assert db.caches.preview_total_bytes() == 0
     vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
     assert not os.path.exists(
         os.path.join(vireo_dir, "previews", f"{photo_id}_1920.jpg")
@@ -7423,7 +7423,7 @@ def test_preview_serves_bytes_when_quota_is_zero(client_with_photo, monkeypatch)
     assert resp.status_code == 200
     assert len(resp.data) > 100  # real JPEG, not empty
     # Eviction clears the table + file
-    assert db.preview_cache_total_bytes() == 0
+    assert db.caches.preview_total_bytes() == 0
 
 
 def test_legacy_full_cache_files_are_migrated_at_startup(tmp_path, monkeypatch):
@@ -7475,7 +7475,7 @@ def test_legacy_full_cache_files_are_migrated_at_startup(tmp_path, monkeypatch):
     assert not legacy.exists()
     new_path = preview_dir / f"{pid}_1920.jpg"
     assert new_path.exists()
-    row = db.preview_cache_get(pid, 1920)
+    row = db.caches.preview_get(pid, 1920)
     assert row is not None
     assert row["bytes"] == os.path.getsize(new_path)
 
@@ -7510,7 +7510,7 @@ def test_preview_job_writes_sized_filename_and_tracks(client_with_photo):
 
     # New naming + tracked
     assert os.path.exists(os.path.join(preview_dir, f"{photo_id}_1920.jpg"))
-    assert db.preview_cache_get(photo_id, 1920) is not None
+    assert db.caches.preview_get(photo_id, 1920) is not None
 
     # Legacy naming NOT produced
     assert not os.path.exists(os.path.join(preview_dir, f"{photo_id}.jpg"))
@@ -7531,7 +7531,7 @@ def test_interactive_preview_joins_background_warmer(
     )
     with contextlib.suppress(FileNotFoundError):
         os.unlink(preview_path)
-    db.preview_cache_delete(photo_id, 1920)
+    db.caches.preview_delete(photo_id, 1920)
 
     producer_started = threading.Event()
     release_producer = threading.Event()
@@ -7635,7 +7635,7 @@ def test_preview_job_applies_edit_recipe_to_warmed_file(
     assert data["status"] == "completed"
 
     assert seen_max_sizes == [1920]
-    assert db.preview_cache_get(photo_id, 1920) is not None
+    assert db.caches.preview_get(photo_id, 1920) is not None
     with Image.open(preview_path) as img:
         assert img.size == (600, 800)
 
@@ -7702,7 +7702,7 @@ def test_preview_job_honors_raw_failure_marker_after_source_selection(
     assert data["status"] == "completed"
     assert raw_loads == []
     vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
-    assert db.preview_cache_get(photo_id, 1920) is None
+    assert db.caches.preview_get(photo_id, 1920) is None
     assert not os.path.exists(
         os.path.join(vireo_dir, "previews", f"{photo_id}_1920.jpg"),
     )
@@ -7800,7 +7800,7 @@ def test_preview_job_does_not_adopt_untracked_edited_preview_after_unlink_failur
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
     with open(preview_path, "wb") as f:
         f.write(b"stale-preview")
-    assert db.preview_cache_get(photo_id, 1920) is None
+    assert db.caches.preview_get(photo_id, 1920) is None
 
     original_remove = app_module.os.remove
 
@@ -7828,7 +7828,7 @@ def test_preview_job_does_not_adopt_untracked_edited_preview_after_unlink_failur
     assert data["status"] == "completed"
 
     assert os.path.exists(preview_path)
-    assert db.preview_cache_get(photo_id, 1920) is None
+    assert db.caches.preview_get(photo_id, 1920) is None
 
 
 def test_preview_job_uses_detail_row_exif_for_cropped_source_selection(
@@ -7898,7 +7898,7 @@ def test_preview_job_uses_detail_row_exif_for_cropped_source_selection(
         if os.path.commonpath([source_dir, path]) == source_dir
     ]
     assert relevant_paths == [os.path.abspath(original_path)]
-    assert db.preview_cache_get(photo_id, 1920) is not None
+    assert db.caches.preview_get(photo_id, 1920) is not None
 
 
 def test_preview_job_preserves_existing_edited_preview_when_source_missing(
@@ -7940,7 +7940,7 @@ def test_preview_job_preserves_existing_edited_preview_when_source_missing(
         time.sleep(0.05)
     assert data["status"] == "completed"
 
-    assert db.preview_cache_get(photo_id, 1920) is not None
+    assert db.caches.preview_get(photo_id, 1920) is not None
     with Image.open(preview_path) as img:
         assert img.size == (600, 800)
 
@@ -7955,7 +7955,7 @@ def test_eviction_keeps_row_when_unlink_fails(client_with_photo, monkeypatch):
     app, db, photo_id = client_with_photo
     client = app.test_client()
     client.get(f"/photos/{photo_id}/preview?size=1920")
-    assert db.preview_cache_total_bytes() > 0
+    assert db.caches.preview_total_bytes() > 0
 
     # Simulate a permission error on unlink.
     real_remove = os.remove
@@ -7975,7 +7975,7 @@ def test_eviction_keeps_row_when_unlink_fails(client_with_photo, monkeypatch):
     # row should remain so a subsequent pass can retry.
     resp = client.post("/api/config", json={"preview_cache_max_mb": 0})
     assert resp.status_code == 200
-    assert db.preview_cache_get(photo_id, 1920) is not None
+    assert db.caches.preview_get(photo_id, 1920) is not None
 
 
 def test_startup_evicts_when_migration_pushes_over_quota(tmp_path, monkeypatch):
@@ -8025,7 +8025,7 @@ def test_startup_evicts_when_migration_pushes_over_quota(tmp_path, monkeypatch):
     # Creating the app runs migration (inserts row) then eviction (drains).
     create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))
 
-    assert db.preview_cache_total_bytes() == 0
+    assert db.caches.preview_total_bytes() == 0
     assert not legacy.exists()
     assert not (preview_dir / f"{pid}_1920.jpg").exists()
 
@@ -8106,14 +8106,14 @@ def test_legacy_sized_preview_files_are_backfilled_at_startup(tmp_path, monkeypa
     orphan = preview_dir / "999999_1920.jpg"
     orphan.write_bytes(b"\xff\xd8\xff\xe0orphan")
 
-    assert db.preview_cache_get(pid_kept, 1920) is None
-    assert db.preview_cache_get(pid_kept, 2560) is None
+    assert db.caches.preview_get(pid_kept, 1920) is None
+    assert db.caches.preview_get(pid_kept, 2560) is None
 
     create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))
 
     # Both real sized files are now tracked, with correct byte counts.
-    row_a = db.preview_cache_get(pid_kept, 1920)
-    row_b = db.preview_cache_get(pid_kept, 2560)
+    row_a = db.caches.preview_get(pid_kept, 1920)
+    row_b = db.caches.preview_get(pid_kept, 2560)
     assert row_a is not None and row_a["bytes"] == os.path.getsize(sized_a)
     assert row_b is not None and row_b["bytes"] == os.path.getsize(sized_b)
     # Orphan was removed; no row inserted (would have raised FK error).
@@ -8161,14 +8161,14 @@ def test_legacy_sized_preview_backfill_skips_already_tracked(tmp_path, monkeypat
     sized.write_bytes(b"\xff\xd8\xff\xe0" + b"x" * 1024)
 
     # Row already exists with a recent last_access_at and the real size.
-    db.preview_cache_insert(pid, 1920, os.path.getsize(sized))
-    original_access = db.preview_cache_get(pid, 1920)["last_access_at"]
+    db.caches.preview_insert(pid, 1920, os.path.getsize(sized))
+    original_access = db.caches.preview_get(pid, 1920)["last_access_at"]
 
     # Wait long enough that an unintended re-insert would change the timestamp.
     time.sleep(0.05)
     create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))
 
-    row = db.preview_cache_get(pid, 1920)
+    row = db.caches.preview_get(pid, 1920)
     assert row is not None
     assert row["last_access_at"] == original_access
 
@@ -8267,8 +8267,8 @@ def test_edit_math_version_bump_invalidates_edited_photo_caches(tmp_path, monkey
     edited_raw_thumb.write_bytes(b"stale raw")
     edited_jpeg_thumb.write_bytes(b"stale jpeg")
     plain_raw_thumb.write_bytes(b"plain raw")
-    db.preview_cache_insert(pid_edited, 1920, edited_preview.stat().st_size)
-    db.preview_cache_insert(pid_plain, 1920, plain_preview.stat().st_size)
+    db.caches.preview_insert(pid_edited, 1920, edited_preview.stat().st_size)
+    db.caches.preview_insert(pid_plain, 1920, plain_preview.stat().st_size)
     db.conn.execute(
         "UPDATE photos SET thumb_path = ? WHERE id = ?",
         (f"{pid_edited}.jpg", pid_edited),
@@ -8287,7 +8287,7 @@ def test_edit_math_version_bump_invalidates_edited_photo_caches(tmp_path, monkey
     assert not edited_thumb.exists()
     assert not edited_raw_thumb.exists()
     assert not edited_jpeg_thumb.exists()
-    assert db.preview_cache_get(pid_edited, 1920) is None
+    assert db.caches.preview_get(pid_edited, 1920) is None
     edited_row = db.conn.execute(
         "SELECT thumb_path FROM photos WHERE id = ?", (pid_edited,),
     ).fetchone()
@@ -8297,7 +8297,7 @@ def test_edit_math_version_bump_invalidates_edited_photo_caches(tmp_path, monkey
     assert plain_preview.exists()
     assert plain_thumb.exists()
     assert plain_raw_thumb.exists()
-    assert db.preview_cache_get(pid_plain, 1920) is not None
+    assert db.caches.preview_get(pid_plain, 1920) is not None
     plain_row = db.conn.execute(
         "SELECT thumb_path FROM photos WHERE id = ?", (pid_plain,),
     ).fetchone()
@@ -8307,10 +8307,10 @@ def test_edit_math_version_bump_invalidates_edited_photo_caches(tmp_path, monkey
     assert db.get_meta("edit_math_version") == str(EDIT_MATH_VERSION)
     new_preview = preview_dir / f"{pid_edited}_1920.jpg"
     new_preview.write_bytes(b"\xff\xd8\xff\xe0" + b"x" * 1024)
-    db.preview_cache_insert(pid_edited, 1920, new_preview.stat().st_size)
+    db.caches.preview_insert(pid_edited, 1920, new_preview.stat().st_size)
     create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))
     assert new_preview.exists()
-    assert db.preview_cache_get(pid_edited, 1920) is not None
+    assert db.caches.preview_get(pid_edited, 1920) is not None
 
 
 def test_edit_math_version_migration_leaves_version_on_failed_purge(
@@ -8595,11 +8595,11 @@ def test_storage_clear_previews_resets_preview_cache(client_with_photo):
     client = app.test_client()
     # Populate the cache
     client.get(f"/photos/{photo_id}/preview?size=1920")
-    assert db.preview_cache_total_bytes() > 0
+    assert db.caches.preview_total_bytes() > 0
 
     resp = client.post("/api/storage/clear", json={"type": "previews"})
     assert resp.status_code == 200
-    assert db.preview_cache_total_bytes() == 0
+    assert db.caches.preview_total_bytes() == 0
 
 
 def test_storage_delete_files_syncs_preview_cache(client_with_photo):
@@ -8608,7 +8608,7 @@ def test_storage_delete_files_syncs_preview_cache(client_with_photo):
     app, db, photo_id = client_with_photo
     client = app.test_client()
     client.get(f"/photos/{photo_id}/preview?size=1920")
-    assert db.preview_cache_get(photo_id, 1920) is not None
+    assert db.caches.preview_get(photo_id, 1920) is not None
 
     resp = client.post(
         "/api/storage/delete-files",
@@ -8617,7 +8617,7 @@ def test_storage_delete_files_syncs_preview_cache(client_with_photo):
     assert resp.status_code == 200
     data = resp.get_json()
     assert data["deleted"] == 1
-    assert db.preview_cache_get(photo_id, 1920) is None
+    assert db.caches.preview_get(photo_id, 1920) is None
 
 
 def test_storage_files_limit_returns_bounded_preview_listing(client_with_photo):
@@ -8816,14 +8816,14 @@ def test_preview_adoption_enforces_quota(client_with_photo, monkeypatch):
     cache_path = os.path.join(preview_dir, f"{photo_id}_1920.jpg")
     with open(cache_path, "wb") as f:
         f.write(b"\xff\xd8\xff\xe0" + b"x" * 4096)
-    assert db.preview_cache_get(photo_id, 1920) is None
+    assert db.caches.preview_get(photo_id, 1920) is None
 
     client = app.test_client()
     resp = client.get(f"/photos/{photo_id}/preview?size=1920")
     assert resp.status_code == 200
     assert len(resp.data) > 100  # served from memory
     # Quota is 0, so eviction drained the row and file after adoption.
-    assert db.preview_cache_total_bytes() == 0
+    assert db.caches.preview_total_bytes() == 0
     assert not os.path.exists(cache_path)
 
 
@@ -8843,7 +8843,7 @@ def test_preview_cache_clear_removes_untracked_and_legacy(client_with_photo):
     for p in (tracked, untracked, legacy):
         with open(p, "wb") as f:
             f.write(b"\xff\xd8\xff\xe0fake")
-    db.preview_cache_insert(photo_id, 1920, os.path.getsize(tracked))
+    db.caches.preview_insert(photo_id, 1920, os.path.getsize(tracked))
 
     client = app.test_client()
     resp = client.post("/api/preview-cache/clear")
@@ -8856,7 +8856,7 @@ def test_preview_cache_clear_removes_untracked_and_legacy(client_with_photo):
     assert not os.path.exists(tracked)
     assert not os.path.exists(untracked)
     assert not os.path.exists(legacy)
-    assert db.preview_cache_total_bytes() == 0
+    assert db.caches.preview_total_bytes() == 0
 
 
 def test_preview_cache_clear_handles_many_unlink_failures(client_with_photo, monkeypatch):
@@ -8879,7 +8879,7 @@ def test_preview_cache_clear_handles_many_unlink_failures(client_with_photo, mon
         p = os.path.join(preview_dir, f"{photo_id}_{size}.jpg")
         with open(p, "wb") as f:
             f.write(b"\xff\xd8\xff\xe0x")
-        db.preview_cache_insert(photo_id, size, os.path.getsize(p))
+        db.caches.preview_insert(photo_id, size, os.path.getsize(p))
         sized_files.append((p, photo_id, size))
 
     # Fail every unlink for these files — simulates a locked/read-only dir.
@@ -8906,7 +8906,7 @@ def test_preview_cache_clear_handles_many_unlink_failures(client_with_photo, mon
         "SELECT COUNT(*) AS c FROM preview_cache"
     ).fetchone()["c"]
     assert remaining == N
-    assert db.preview_cache_total_bytes() > 0
+    assert db.caches.preview_total_bytes() > 0
 
 
 def test_settings_save_triggers_eviction_when_quota_shrinks(client_with_photo):
@@ -8916,13 +8916,13 @@ def test_settings_save_triggers_eviction_when_quota_shrinks(client_with_photo):
 
     # Populate cache
     client.get(f"/photos/{photo_id}/preview?size=1920")
-    assert db.preview_cache_total_bytes() > 0
+    assert db.caches.preview_total_bytes() > 0
 
     # Shrink quota to 0 via the config endpoint (same path the UI uses)
     resp = client.post("/api/config", json={"preview_cache_max_mb": 0})
     assert resp.status_code == 200
 
-    assert db.preview_cache_total_bytes() == 0
+    assert db.caches.preview_total_bytes() == 0
 
 
 def test_full_respects_workspace_preview_max_size_override(client_with_photo):
@@ -8945,7 +8945,7 @@ def test_full_respects_workspace_preview_max_size_override(client_with_photo):
     assert preview.status_code == 200
     assert full.data == preview.data
     # Sanity: a row at size=2560 was created (not 1920).
-    assert db.preview_cache_get(photo_id, 2560) is not None
+    assert db.caches.preview_get(photo_id, 2560) is not None
 
 
 def test_preview_precompute_respects_workspace_preview_max_size_override(client_with_photo):
@@ -8977,8 +8977,8 @@ def test_preview_precompute_respects_workspace_preview_max_size_override(client_
 
     # Precompute must have warmed the workspace override tier (2560),
     # not the global default (1920).
-    assert db.preview_cache_get(photo_id, 2560) is not None
-    assert db.preview_cache_get(photo_id, 1920) is None
+    assert db.caches.preview_get(photo_id, 2560) is not None
+    assert db.caches.preview_get(photo_id, 1920) is None
 
 
 def test_zero_byte_cache_file_is_regenerated(client_with_photo):
@@ -9007,7 +9007,7 @@ def test_zero_byte_cache_file_is_regenerated(client_with_photo):
     # File was regenerated with real bytes.
     assert os.path.getsize(cache_path) > 0
     # And tracked in the cache.
-    row = db.preview_cache_get(photo_id, 1920)
+    row = db.caches.preview_get(photo_id, 1920)
     assert row is not None
     assert row["bytes"] > 0
 

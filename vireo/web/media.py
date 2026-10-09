@@ -228,7 +228,7 @@ def _sweep_stale_paired_previews(paired_dir):
 
 def _is_preview_cache_invalid(db, photo_id, size):
     ensure_preview_cache_invalidations_table(db)
-    return db.is_preview_cache_invalid(photo_id, size)
+    return db.caches.preview_invalidated(photo_id, size)
 
 def _full_resolution_render_signature(photo, recipe, file_state=None):
     """Describe every catalogued input to a cached inspection render.
@@ -645,7 +645,7 @@ class _OriginalPhotoRequest:
 
     def collect_file_state(self):
         photo = self.photo
-        offline_row = self.db.offline_original_get(self.photo_id)
+        offline_row = self.db.caches.offline_original_get(self.photo_id)
         cached_original = (
             os.path.join(self.vireo_dir, offline_row["original_path"])
             if offline_row and offline_row["original_path"]
@@ -775,7 +775,7 @@ class _OriginalPhotoRequest:
             return None
         companion_abs = os.path.join(folder_path, companion_path)
         if using_offline_cache:
-            offline_row = self.db.offline_original_get(self.photo_id)
+            offline_row = self.db.caches.offline_original_get(self.photo_id)
             if offline_row and offline_row["companion_path"]:
                 offline_companion = os.path.join(
                     self.vireo_dir, offline_row["companion_path"]
@@ -2834,7 +2834,7 @@ def create_media_blueprint(
 
         def _offline_path(column):
             try:
-                row = get_db().offline_original_get(photo["id"])
+                row = get_db().caches.offline_original_get(photo["id"])
             except Exception:
                 log.warning("Could not read offline original for photo %s", photo["id"], exc_info=True)
                 return None
@@ -3400,7 +3400,7 @@ def create_media_blueprint(
         ):
             with contextlib.suppress(OSError):
                 os.remove(cache_path)
-            db.preview_cache_delete(photo_id, size)  # no-op if no row
+            db.caches.preview_delete(photo_id, size)  # no-op if no row
 
         skip_untracked_preview_adoption = False
         stale_after_failed_invalidation = (
@@ -3424,18 +3424,18 @@ def create_media_blueprint(
             else:
                 invalid_preview_cache_paths.discard(cache_path)
                 clear_preview_cache_invalid(db, photo_id, size)
-                db.preview_cache_delete(photo_id, size)
+                db.caches.preview_delete(photo_id, size)
                 stale_after_failed_invalidation = False
         elif not bypass_cache and stale_after_failed_invalidation:
             invalid_preview_cache_paths.discard(cache_path)
             clear_preview_cache_invalid(db, photo_id, size)
-            db.preview_cache_delete(photo_id, size)
+            db.caches.preview_delete(photo_id, size)
             stale_after_failed_invalidation = False
         if (
             not bypass_cache
             and recipe
             and os.path.exists(cache_path)
-            and not db.preview_cache_get(photo_id, size)
+            and not db.caches.preview_get(photo_id, size)
         ):
             try:
                 os.remove(cache_path)
@@ -3453,15 +3453,15 @@ def create_media_blueprint(
         if (
             not bypass_cache
             and not stale_after_failed_invalidation
-            and db.preview_cache_get(photo_id, size)
+            and db.caches.preview_get(photo_id, size)
             and os.path.exists(cache_path)
         ):
             with contextlib.suppress(sqlite3.Error):
-                db.preview_cache_touch(photo_id, size)
+                db.caches.preview_touch(photo_id, size)
             return send_file(cache_path, mimetype="image/jpeg")
 
         # Cache hit (on-disk but untracked): lazy adoption.
-        # preview_cache_insert uses time.time() for last_access_at, so the
+        # caches.preview_insert uses time.time() for last_access_at, so the
         # adopted entry is ranked as freshly-accessed in the LRU in a single
         # commit (instead of insert-with-mtime-then-touch-to-now).
         # Read bytes into memory before evicting: eviction may delete the
@@ -3476,7 +3476,7 @@ def create_media_blueprint(
             with open(cache_path, "rb") as f:
                 data = f.read()
             try:
-                db.preview_cache_insert(photo_id, size, len(data))
+                db.caches.preview_insert(photo_id, size, len(data))
                 evict_preview_cache_if_over_quota(db, vireo_dir)
             except Exception:
                 # The bytes are already in memory; bookkeeping must not
@@ -3492,7 +3492,7 @@ def create_media_blueprint(
             and paired_preview_ready(db, paired_cache_path)
         ):
             with contextlib.suppress(sqlite3.Error):
-                db.paired_preview_cache_touch(os.path.basename(paired_cache_path))
+                db.caches.paired_preview_touch(os.path.basename(paired_cache_path))
             return send_file(paired_cache_path, mimetype="image/jpeg")
 
         # Cache miss: coordinate every durable preview producer in this
@@ -3589,7 +3589,7 @@ def create_media_blueprint(
                 # the old pixels to the new photo's durable cache entry.
                 with _preparation_publication(db, photo_id, photo):
                     atomic_write_bytes(rendered.data, paired_cache_path)
-                    db.paired_preview_cache_insert(
+                    db.caches.paired_preview_insert(
                         photo_id, os.path.basename(paired_cache_path), len(rendered.data),
                     )
                 evict_preview_cache_if_over_quota(db, vireo_dir)

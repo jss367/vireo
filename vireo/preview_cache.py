@@ -812,7 +812,7 @@ def paired_preview_ready(db, path):
     adopt untracked files: they may belong to an older incarnation of a
     recycled photo id, or to the pre-migration transient shadow cache.
     """
-    row = db.paired_preview_cache_get(os.path.basename(path))
+    row = db.caches.paired_preview_get(os.path.basename(path))
     if not row or row["bytes"] <= 0:
         return False
     try:
@@ -826,10 +826,10 @@ def _preview_entries(db):
     entries = [
         {**dict(row), "filename": f"{row['photo_id']}_{row['size']}.jpg",
          "paired": False}
-        for row in db.preview_cache_oldest_first()
+        for row in db.caches.preview_oldest_first()
     ]
     entries.extend({**dict(row), "paired": True}
-                   for row in db.paired_preview_cache_oldest_first())
+                   for row in db.caches.paired_preview_oldest_first())
     return sorted(entries, key=lambda row: row["last_access_at"])
 
 
@@ -839,7 +839,7 @@ def _entry_path(preview_dir, row):
 
 
 def _delete_preview_entries(db, rows):
-    db.preview_cache_delete_entries(
+    db.caches.preview_delete_entries(
         [(r["photo_id"], r["size"]) for r in rows if not r["paired"]],
         [r["filename"] for r in rows if r["paired"]],
     )
@@ -856,7 +856,7 @@ def evict_if_over_quota(db, vireo_dir):
     import config as cfg
 
     max_bytes = int(cfg.load().get("preview_cache_max_mb", 20480)) * 1024 * 1024
-    total = db.preview_cache_total_bytes()
+    total = db.caches.preview_total_bytes()
     if total <= max_bytes:
         return
     preview_dir = os.path.join(vireo_dir, "previews")
@@ -904,7 +904,7 @@ def reconcile_preview_cache(db, vireo_dir):
                 # the publisher's writer lock and recheck before unlinking.
                 with db.conn:
                     db.conn.execute("BEGIN IMMEDIATE")
-                    if db.paired_preview_cache_get(os.path.basename(path)) is None:
+                    if db.caches.paired_preview_get(os.path.basename(path)) is None:
                         os.remove(path)
             except OSError:
                 log.warning("Could not remove untracked paired preview %s", path,
