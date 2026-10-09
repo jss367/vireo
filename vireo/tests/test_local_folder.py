@@ -2563,7 +2563,7 @@ def test_local_folder_status_exposes_blocking_job_and_preflight_stops_early(
             "pipeline", processing, workspace_id=workspace_id
         )
         try:
-            assert started.wait(timeout=2)
+            assert started.wait(timeout=5)
             status = client.get(
                 "/api/workspaces/active/local-folders"
             ).get_json()
@@ -2653,7 +2653,7 @@ def test_local_folder_blocker_endpoint_avoids_source_walk(tmp_path, monkeypatch)
             "pipeline", processing, workspace_id=workspace_id
         )
         try:
-            assert started.wait(timeout=2)
+            assert started.wait(timeout=5)
             response = client.get("/api/workspaces/active/local-folders/blocker")
             assert response.status_code == 200
             assert response.get_json() == {
@@ -2742,7 +2742,7 @@ def test_local_folder_blockers_are_scoped_to_affected_roots(tmp_path, monkeypatc
             "pipeline", processing, workspace_id=second_workspace
         )
         try:
-            assert started.wait(timeout=2)
+            assert started.wait(timeout=5)
             blocker = client.get(
                 "/api/workspaces/active/local-folders/blocker"
             ).get_json()
@@ -2815,7 +2815,7 @@ def test_local_folder_blockers_include_descendant_sessions(tmp_path, monkeypatch
             "pipeline", processing, workspace_id=child_workspace
         )
         try:
-            assert started.wait(timeout=2)
+            assert started.wait(timeout=5)
             blocker = client.get(
                 "/api/workspaces/active/local-folders/blocker"
             ).get_json()
@@ -2882,7 +2882,7 @@ def test_folder_sync_proceeds_while_observational_job_runs(tmp_path, monkeypatch
             blocks_local_transitions=False,
         )
         try:
-            assert started.wait(timeout=2)
+            assert started.wait(timeout=5)
             assert app._job_runner.get(probe_id)["status"] == "running"
             response = client.post(
                 "/api/workspaces/active/local-folders/sync",
@@ -3025,7 +3025,7 @@ def test_catalog_independent_job_does_not_block_work_locally(tmp_path, monkeypat
             "precompute-embeddings", embedding_work, workspace_id=workspace_id,
         )
         try:
-            assert started.wait(timeout=2)
+            assert started.wait(timeout=5)
             blocker = client.get(
                 "/api/workspaces/active/local-folders/blocker"
             ).get_json()

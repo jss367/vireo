@@ -352,6 +352,31 @@ def test_report_issue_config_keeps_only_identifier_strings(app_and_db):
     )
 
 
+def test_report_issue_app_state_reports_the_active_workspace_and_counts(app_and_db):
+    """The report names the active workspace and the catalog counts.
+
+    Report Issue used to call a ``Database.get_active_workspace`` that never
+    existed; the AttributeError landed in the broad ``except`` and every
+    report said workspace "unknown" with zero folders, photos and predictions.
+    """
+    app, db = app_and_db
+    import config as cfg
+
+    current = cfg.load()
+    current["report_url"] = ""
+    cfg.save(current)
+
+    resp = app.test_client().post(
+        "/api/report-issue", json={"description": "state"},
+    )
+    state = resp.get_json()["diagnostics"]["app_state"]
+    assert state["workspace"] == db.workspaces.get(db.active_workspace_id)["name"]
+    assert state["folders"] == db.count_all_folders()
+    assert state["photos"] == db.count_catalog_photos()
+    assert state["predictions"] == db.count_workspace_predictions()
+    assert state["photos"] > 0
+
+
 def test_report_issue_config_redacts_out_of_schema_enum_string(app_and_db):
     """An enum key holding an unvalidated legacy value must not leak.
 
