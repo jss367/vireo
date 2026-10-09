@@ -82,6 +82,15 @@
 <!-- Load keymap.js before the navbar and page scripts below so window.Keymap
      (registry, dispatcher, Esc stack) is available when they run. -->
 <script src="/static/keymap.js"></script>
+<link rel="stylesheet" href="/static/vireo-page-find.css">
+<div id="pageFindPanel" class="page-find-panel" role="search" aria-label="Find in page" hidden>
+  <input type="search" id="pageFindInput" placeholder="Find in page" autocomplete="off" aria-label="Find in page">
+  <span id="pageFindStatus" role="status" aria-live="polite"></span>
+  <button type="button" id="pageFindPrevious" aria-label="Previous match" title="Previous match (Shift+Enter)">&#8593;</button>
+  <button type="button" id="pageFindNext" aria-label="Next match" title="Next match (Enter)">&#8595;</button>
+  <button type="button" id="pageFindClose" aria-label="Close find" title="Close find (Escape)">&times;</button>
+</div>
+<script src="/static/vireo-page-find.js"></script>
 
 <!-- Color Label Description Modal -->
 <div class="modal-overlay" id="colorLabelDescriptionModal"
