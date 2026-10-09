@@ -513,7 +513,7 @@ def test_dashboard_scope_rejects_foreign_collection(app_and_db):
     other_workspace = db.create_workspace("Other")
     db.set_active_workspace(other_workspace)
     foreign_collection = db.add_collection("Foreign", "[]")
-    db.set_active_workspace(db.get_workspaces()[0]["id"])
+    db.set_active_workspace(db.workspaces.list_all()[0]["id"])
 
     client = app.test_client()
     for path in ("/api/stats", "/api/coverage", "/api/photos", "/api/photos/ids"):
@@ -692,7 +692,7 @@ def test_api_photos_detections_honor_workspace_threshold(app_and_db):
 
     # Lower the workspace threshold via a per-workspace config override —
     # no detection rows are rewritten, only the read-time filter changes.
-    db.update_workspace(db._active_workspace_id,
+    db.workspaces.update(db._active_workspace_id,
                         config_overrides={"detector_confidence": 0.01})
 
     resp = client.get('/api/photos')
@@ -970,7 +970,7 @@ def test_api_photo_detail(app_and_db):
 def test_api_photo_detail_reports_full_resolution_preview_mode(app_and_db):
     """Photo detail tells the lightbox when /full already serves /original."""
     app, db = app_and_db
-    db.update_workspace(
+    db.workspaces.update(
         db._active_workspace_id,
         config_overrides={"preview_max_size": 0},
     )
@@ -987,7 +987,7 @@ def test_api_photo_detail_reports_full_resolution_preview_mode(app_and_db):
 def test_api_photo_detail_reports_workspace_preview_size(app_and_db, preview_size):
     """The lightbox receives the workspace override rather than the global cap."""
     app, db = app_and_db
-    db.update_workspace(db._active_workspace_id, config_overrides={"preview_max_size": preview_size})
+    db.workspaces.update(db._active_workspace_id, config_overrides={"preview_max_size": preview_size})
     pid = db.get_photos()[0]['id']
 
     data = app.test_client().get(f'/api/photos/{pid}').get_json()
@@ -5658,7 +5658,7 @@ def test_full_redirect_forwards_prefetch_flag_to_original(client_with_photo):
     on screen — the exact contention this PR is designed to prevent.
     """
     app, db, photo_id = client_with_photo
-    db.update_workspace(
+    db.workspaces.update(
         db._active_workspace_id,
         config_overrides={"preview_max_size": 0},
     )
@@ -8934,7 +8934,7 @@ def test_full_respects_workspace_preview_max_size_override(client_with_photo):
     """
     app, db, photo_id = client_with_photo
     # Write a workspace override for preview_max_size.
-    db.update_workspace(
+    db.workspaces.update(
         db._active_workspace_id,
         config_overrides={"preview_max_size": 2560},
     )
@@ -8958,7 +8958,7 @@ def test_preview_precompute_respects_workspace_preview_max_size_override(client_
     import time
 
     app, db, photo_id = client_with_photo
-    db.update_workspace(
+    db.workspaces.update(
         db._active_workspace_id,
         config_overrides={"preview_max_size": 2560},
     )

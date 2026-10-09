@@ -175,10 +175,10 @@ def _changes_since_scan(db, stored_proposals, shown_proposals):
     when a new scan would show the same copies with the same one kept: an
     unresolved group lists its non-rejected copies and the copy the resolver
     picks from current metadata, a resolved one every copy and the one kept,
-    as ``find_duplicate_groups`` reports them. A group dropped by
+    as ``db.duplicates.find_groups`` reports them. A group dropped by
     revalidation counts as changed only if its hash still forms a group.
     """
-    groups = db.find_duplicate_groups(include_resolved=True)
+    groups = db.duplicates.find_groups(include_resolved=True)
     shown_entries = {
         e.get("id"): e
         for p in shown_proposals
@@ -304,7 +304,7 @@ def attach_workspace_names(db, proposals):
         and isinstance(entry.get("id"), int)
         and not isinstance(entry.get("id"), bool)
     ]
-    names = db.photo_workspace_names(sorted({e["id"] for e in entries}))
+    names = db.duplicates.workspace_names(sorted({e["id"] for e in entries}))
     for entry in entries:
         entry["workspaces"] = names.get(entry["id"], [])
     return proposals
@@ -385,7 +385,7 @@ def _build_unresolved_proposal(db, group):
     info_by_id = {r["id"]: _row_to_info(r, r["folder_path"]) for r in rows}
     candidates = [_candidate(r, info_by_id[r["id"]]) for r in rows]
     if len(candidates) < 2:
-        # Race: rows could have been rejected between find_duplicate_groups
+        # Race: rows could have been rejected between duplicates.find_groups
         # and this lookup. Skip silently.
         return None
     winner_id, losers_with_reasons = resolve_duplicates(candidates)
@@ -452,8 +452,8 @@ def _build_resolved_proposal(db, group):
     kept = [r for r in rows if r["flag"] != "rejected"]
     rejected = [r for r in rows if r["flag"] == "rejected"]
     if len(kept) != 1 or not rejected:
-        # Race: another resolution ran between find_duplicate_groups and now,
-        # or the group's status changed shape. Skip — find_duplicate_groups
+        # Race: another resolution ran between duplicates.find_groups and now,
+        # or the group's status changed shape. Skip — duplicates.find_groups
         # will surface it again on the next scan.
         return None
 
@@ -466,13 +466,13 @@ def _build_resolved_proposal(db, group):
     # exactly like a deleted file, and reopening would propose rejecting
     # the archive original. And only rows the duplicate resolver rejected
     # can bring the group back; a sibling the user rejected by hand stays
-    # rejected (``reopen_duplicate_group`` skips it too).
+    # rejected (``db.duplicates.reopen`` skips it too).
     kept_info = info_by_id[kept[0]["id"]]
     if not kept_info["exists"] and not kept_info["volume_offline"] and any(
         r["duplicate_rejected"] and info_by_id[r["id"]]["exists"]
         for r in rejected
     ):
-        db.reopen_duplicate_group(group["file_hash"])
+        db.duplicates.reopen(group["file_hash"])
         return _build_unresolved_proposal(db, group)
 
     candidates = [_candidate(r, info_by_id[r["id"]]) for r in rows]
@@ -527,7 +527,7 @@ def run_duplicate_scan(job, db, include_resolved=True, cancel_check=None):
     files left on disk. The auto-resolve path during scan flags those rows
     as rejected silently, so without this they'd be invisible to the user.
     """
-    groups = db.find_duplicate_groups(include_resolved=include_resolved)
+    groups = db.duplicates.find_groups(include_resolved=include_resolved)
     total = len(groups)
     job["progress"] = {"current": 0, "total": total, "current_file": ""}
 

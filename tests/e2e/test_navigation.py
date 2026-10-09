@@ -167,7 +167,7 @@ def test_workspace_name_and_switch_skip_slow_folder_counts(live_server, page):
     """Slow full-workspace requests cannot leave navigation saying Default."""
     url = live_server["url"]
     db = live_server["db"]
-    field_id = next(ws["id"] for ws in db.get_workspaces() if ws["name"] == "Field Work")
+    field_id = next(ws["id"] for ws in db.workspaces.list_all() if ws["name"] == "Field Work")
     assert page.request.post(f"{url}/api/workspaces/{field_id}/activate").ok
     held_requests = []
     page.route("**/api/workspaces/active", lambda route: held_requests.append(route))

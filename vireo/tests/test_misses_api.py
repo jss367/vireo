@@ -611,7 +611,7 @@ def test_api_misses_recompute_preserves_custom_derived_thresholds(
     import config as cfg
 
     _, db, _ = db_with_misses
-    db.update_workspace(db._active_workspace_id, config_overrides={
+    db.workspaces.update(db._active_workspace_id, config_overrides={
         "pipeline": {
             "miss_det_confidence": 0.4,
             "miss_det_confidence_burst": 0.05,

@@ -29,15 +29,15 @@ def test_record_inat_submission(db):
     fid = db.add_folder('/photos', name='photos')
     pid = db.add_photo(folder_id=fid, filename='bird.jpg', extension='.jpg',
                        file_size=1000, file_mtime=1.0, timestamp='2024-06-01T10:00:00')
-    db.record_inat_submission(pid, 123456, "https://www.inaturalist.org/observations/123456")
-    subs = db.get_inat_submissions([pid])
+    db.inat.record_submission(pid, 123456, "https://www.inaturalist.org/observations/123456")
+    subs = db.inat.get_submissions([pid])
     assert len(subs) == 1
     assert subs[pid]['observation_id'] == 123456
     assert subs[pid]['observation_url'] == "https://www.inaturalist.org/observations/123456"
 
 
 def test_get_inat_submissions_empty(db):
-    subs = db.get_inat_submissions([999])
+    subs = db.inat.get_submissions([999])
     assert subs == {}
 
 
@@ -45,7 +45,7 @@ def test_inat_submission_cascades_on_photo_delete(db):
     fid = db.add_folder('/photos', name='photos')
     pid = db.add_photo(folder_id=fid, filename='bird.jpg', extension='.jpg',
                        file_size=1000, file_mtime=1.0, timestamp='2024-06-01T10:00:00')
-    db.record_inat_submission(pid, 111, "https://www.inaturalist.org/observations/111")
+    db.inat.record_submission(pid, 111, "https://www.inaturalist.org/observations/111")
     db.conn.execute("DELETE FROM photos WHERE id = ?", (pid,))
     db.conn.commit()
     row = db.conn.execute("SELECT * FROM inat_submissions WHERE photo_id = ?", (pid,)).fetchone()
@@ -313,7 +313,7 @@ def test_api_inat_prepare_includes_submission_status(app_and_db):
     assert data['already_submitted'] is False
 
     # After submission
-    db.record_inat_submission(pid, 999, "https://www.inaturalist.org/observations/999")
+    db.inat.record_submission(pid, 999, "https://www.inaturalist.org/observations/999")
     resp = client.get(f'/api/inat/prepare/{pid}')
     data = resp.get_json()
     assert data['already_submitted'] is True
@@ -916,7 +916,7 @@ def test_api_inat_submit_success(app_and_db):
     assert data['observation_url'] == "https://www.inaturalist.org/observations/12345"
 
     # Verify recorded in DB
-    subs = db.get_inat_submissions([pid])
+    subs = db.inat.get_submissions([pid])
     assert pid in subs
 
 
@@ -1012,7 +1012,7 @@ def test_api_inat_submit_reports_partial_upload(app_and_db):
     assert data["partial"] is True
     assert data["observation_id"] == 12345
     assert data["observation_url"] == "https://www.inaturalist.org/observations/12345"
-    assert pid not in db.get_inat_submissions([pid])
+    assert pid not in db.inat.get_submissions([pid])
 
 
 def test_api_inat_submit_uses_edited_render(app_and_db):
@@ -1314,7 +1314,7 @@ def test_api_inat_submit_batch_rejects_out_of_workspace_photo(app_and_db):
 
 def test_api_inat_submissions_lookup(app_and_db):
     app, db, pid = app_and_db
-    db.record_inat_submission(pid, 777, "https://www.inaturalist.org/observations/777")
+    db.inat.record_submission(pid, 777, "https://www.inaturalist.org/observations/777")
     client = app.test_client()
     resp = client.get(f'/api/inat/submissions?photo_ids={pid}')
     data = resp.get_json()

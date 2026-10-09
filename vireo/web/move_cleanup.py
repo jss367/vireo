@@ -49,7 +49,7 @@ def create_move_cleanup_blueprint(get_db, get_runner, json_error, trash_paths,
                     # Hold every workspace reservation through review and Trash,
                     # including workspaces created while reservations are acquired.
                     reserved = {db.active_workspace_id}
-                    while pending := {workspace["id"] for workspace in db.get_workspaces()} - reserved:
+                    while pending := {workspace["id"] for workspace in db.workspaces.list_all()} - reserved:
                         for workspace_id in sorted(pending):
                             reservations.enter_context(runner.workspace_mutation(
                                 workspace_id, exclusive=True, label=CLEANUP_LABEL))

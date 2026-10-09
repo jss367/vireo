@@ -1400,7 +1400,7 @@ def _queue_merge_keyword_add(db, photo_id, workspace_id, keyword_id, name, keywo
                 # A failed config read must not silently transfer ownership.
                 # The surrounding merge transaction rolls back on failure.
                 settings['global'] = cfg.load_strict()
-            workspace = db.get_workspace(workspace_id)
+            workspace = db.workspaces.get(workspace_id)
             overrides = json.loads(workspace['config_overrides'] or '{}') if workspace else {}
             if not isinstance(overrides, dict):
                 overrides = {}

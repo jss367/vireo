@@ -84,7 +84,7 @@ def create_audit_blueprint(
         from audit import check_drift
 
         drifts = check_drift(db)
-        db.record_audit_run("drift", len(drifts))
+        db.audit.record_run("drift", len(drifts))
         return jsonify(drifts)
 
     @blueprint.route("/api/audit/orphans")
@@ -93,7 +93,7 @@ def create_audit_blueprint(
         from audit import check_orphans
 
         orphans = check_orphans(db)
-        db.record_audit_run("orphans", len(orphans))
+        db.audit.record_run("orphans", len(orphans))
         return jsonify(orphans)
 
     def _audit_workspace_roots(db):
@@ -121,7 +121,7 @@ def create_audit_blueprint(
         from audit import check_untracked
 
         untracked = check_untracked(db, _audit_workspace_roots(db))
-        db.record_audit_run("untracked", len(untracked))
+        db.audit.record_run("untracked", len(untracked))
         return jsonify(untracked)
 
     @blueprint.route("/api/audit/sidecars")
@@ -130,7 +130,7 @@ def create_audit_blueprint(
         from audit import check_stray_sidecars
 
         strays = check_stray_sidecars(_audit_workspace_roots(db))
-        db.record_audit_run("sidecars", len(strays))
+        db.audit.record_run("sidecars", len(strays))
         return jsonify(strays)
 
     @blueprint.route("/api/audit/delete-sidecars", methods=["POST"])

@@ -87,7 +87,7 @@ def _review(db, prediction_id, status, individual=None):
 
 
 def _set_floor(db, value):
-    db.update_workspace(
+    db.workspaces.update(
         db._ws_id(), config_overrides={"detector_confidence": value},
     )
 

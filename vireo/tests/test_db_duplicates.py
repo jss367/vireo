@@ -1,9 +1,9 @@
 """Behavior pins for the exact-duplicate domain of ``Database``.
 
-The behavior tests exercise the duplicate methods only through the public
-``Database`` façade, so they hold whether the SQL lives in ``db.py`` or in
-``repositories/duplicates.py``; the structural tests at the end keep it in
-the repository. They cover the add-photo auto-resolve hook, group listing,
+The behavior tests exercise the duplicate reads and ``reopen`` through the
+``db.duplicates`` accessor and resolution through the ``Database`` methods
+that stay on the façade; the structural tests at the end keep the SQL in the
+repository and the old forwarding wrappers gone. They cover the add-photo auto-resolve hook, group listing,
 resolver-driven and folder-driven resolution, the winner/loser merge, and
 reopening a resolved group.
 
@@ -20,6 +20,7 @@ import textwrap
 
 import pytest
 from db import Database
+from repositories.duplicates import DuplicatesRepository
 
 
 def _photo(db, folder_id, filename, file_hash=None, *, file_mtime=100.0,
@@ -230,7 +231,7 @@ def test_add_photo_with_hash_runs_the_hook(db, folder, monkeypatch):
     assert seen == ["HOOK"]
 
 
-# -- find_duplicate_groups ------------------------------------------------------
+# -- duplicates.find_groups ----------------------------------------------------
 
 
 def _normalized(groups):
@@ -250,14 +251,14 @@ def test_find_duplicate_groups_returns_unresolved_only_by_default(db, folder):
     _photo(db, fid, "n1.jpg", None)
     _photo(db, fid, "n2.jpg", None)
 
-    groups = db.find_duplicate_groups()
+    groups = db.duplicates.find_groups()
 
     assert _normalized(groups) == [
         {"file_hash": "UNRES", "photo_ids": sorted([u1, u2]), "status": "unresolved"},
     ]
     assert u3 not in groups[0]["photo_ids"]
     assert all(isinstance(i, int) for i in groups[0]["photo_ids"])
-    assert db.find_duplicate_groups(include_resolved=False) == groups
+    assert db.duplicates.find_groups(include_resolved=False) == groups
 
 
 def test_find_duplicate_groups_include_resolved(db, folder):
@@ -278,7 +279,7 @@ def test_find_duplicate_groups_include_resolved(db, folder):
     _photo(db, fid, "n1.jpg", None)
     _photo(db, fid, "n2.jpg", None, flag="rejected")
 
-    groups = db.find_duplicate_groups(include_resolved=True)
+    groups = db.duplicates.find_groups(include_resolved=True)
 
     unresolved = [g for g in groups if g["status"] == "unresolved"]
     resolved = [g for g in groups if g["status"] == "resolved"]
@@ -299,8 +300,8 @@ def test_find_duplicate_groups_include_resolved(db, folder):
 
 
 def test_find_duplicate_groups_empty_catalog(db):
-    assert db.find_duplicate_groups() == []
-    assert db.find_duplicate_groups(include_resolved=True) == []
+    assert db.duplicates.find_groups() == []
+    assert db.duplicates.find_groups(include_resolved=True) == []
 
 
 # -- apply_duplicate_resolution -------------------------------------------------
@@ -825,7 +826,7 @@ def test_bulk_resolve_empty_batch(db):
     assert db.bulk_resolve_by_folder([], "/anywhere") == {"resolved": [], "skipped": []}
 
 
-# -- reopen_duplicate_group -----------------------------------------------------
+# -- duplicates.reopen ----------------------------------------------------------
 
 
 def _mark_duplicate_rejected(db, *ids):
@@ -844,7 +845,7 @@ def test_reopen_unrejects_only_that_hash_and_commits(db, folder):
     other = _photo(db, fid, "o.jpg", "OTHER", flag="rejected")
     _mark_duplicate_rejected(db, r1, r2, other)
 
-    assert db.reopen_duplicate_group("H") == 2
+    assert db.duplicates.reopen("H") == 2
 
     assert not db.conn.in_transaction
     assert _flags(db, [k, r1, r2, p, other]) == {
@@ -859,7 +860,7 @@ def test_reopen_leaves_hand_rejected_rows_rejected(db, folder):
     by_hand = _photo(db, fid, "r2.jpg", "H", flag="rejected")
     _mark_duplicate_rejected(db, by_resolver)
 
-    assert db.reopen_duplicate_group("H") == 1
+    assert db.duplicates.reopen("H") == 1
 
     assert _flags(db, [by_resolver, by_hand]) == {
         by_resolver: "none", by_hand: "rejected",
@@ -880,8 +881,8 @@ def test_resolution_records_which_rows_it_rejected(db, folder):
 def test_reopen_returns_zero_when_nothing_is_rejected(db, folder):
     fid, _ = folder
     _photo(db, fid, "k.jpg", "H")
-    assert db.reopen_duplicate_group("H") == 0
-    assert db.reopen_duplicate_group("UNKNOWN") == 0
+    assert db.duplicates.reopen("H") == 0
+    assert db.duplicates.reopen("UNKNOWN") == 0
     assert not db.conn.in_transaction
 
 
@@ -937,13 +938,13 @@ def test_get_live_duplicate_photo_ids_and_paths(db, folder):
     db.conn.commit()
     _photo(db, fid, "d.jpg", "H", flag="rejected")
     _photo(db, fid, "e.jpg", "OTHER")
-    assert sorted(db.get_live_duplicate_photo_ids("H")) == sorted([kept, picked, null_flag])
-    assert db.get_live_duplicate_photo_ids("NONE") == []
+    assert sorted(db.duplicates.live_ids_for_hash("H")) == sorted([kept, picked, null_flag])
+    assert db.duplicates.live_ids_for_hash("NONE") == []
 
     _orphan_folder(db, picked)
-    rows = db.get_live_duplicate_paths("H")
+    rows = db.duplicates.live_paths_for_hash("H")
     assert sorted(tuple(r) for r in rows) == [("a.jpg", path), ("c.jpg", path)]
-    assert db.get_live_duplicate_paths("NONE") == []
+    assert db.duplicates.live_paths_for_hash("NONE") == []
 
 
 def test_get_duplicate_loser_candidates_reads_named_rows_in_chunks_of_900(db, folder):
@@ -954,7 +955,7 @@ def test_get_duplicate_loser_candidates_reads_named_rows_in_chunks_of_900(db, fo
     _orphan_folder(db, homeless)
     statements = []
     db.conn.set_trace_callback(statements.append)
-    rows = db.get_duplicate_loser_candidates(
+    rows = db.duplicates.loser_candidate_rows(
         [loser] + list(range(100_000, 100_899)) + [homeless]
     )
     db.conn.set_trace_callback(None)
@@ -966,7 +967,7 @@ def test_get_duplicate_loser_candidates_reads_named_rows_in_chunks_of_900(db, fo
 
 def test_get_duplicate_loser_disk_summary(db, folder):
     fid, _ = folder
-    assert tuple(db.get_duplicate_loser_disk_summary()) == (0, 0)
+    assert tuple(db.duplicates.loser_disk_summary()) == (0, 0)
     _photo(db, fid, "keep.jpg", "H")
     loser1 = _photo(db, fid, "l1.jpg", "H", flag="rejected")
     loser2 = _photo(db, fid, "l2.jpg", "H", flag="rejected")
@@ -976,7 +977,7 @@ def test_get_duplicate_loser_disk_summary(db, folder):
     db.conn.execute("UPDATE photos SET file_size = 40 WHERE id = ?", (loser1,))
     db.conn.execute("UPDATE photos SET file_size = NULL WHERE id = ?", (loser2,))
     db.conn.commit()
-    row = db.get_duplicate_loser_disk_summary()
+    row = db.duplicates.loser_disk_summary()
     assert (row["n"], row["total_bytes"]) == (2, 40)
 
 
@@ -990,16 +991,22 @@ def test_get_duplicate_loser_disk_summary(db, folder):
 
 DUPLICATE_METHODS = [
     "check_and_resolve_duplicates_for_hash",
-    "find_duplicate_groups",
     "apply_duplicate_resolution",
     "_apply_winner_loser_merge",
     "bulk_resolve_by_folder",
-    "reopen_duplicate_group",
+]
+
+# The forwarding wrappers ``db.duplicates`` replaced.
+_REMOVED_DUPLICATE_WRAPPERS = (
+    "find_duplicate_groups",
     "get_live_duplicate_photo_ids",
     "get_live_duplicate_paths",
     "get_duplicate_loser_candidates",
     "get_duplicate_loser_disk_summary",
-]
+    "is_duplicate_group_member",
+    "photo_workspace_names",
+    "reopen_duplicate_group",
+)
 
 
 @pytest.mark.parametrize("name", DUPLICATE_METHODS)
@@ -1024,11 +1031,63 @@ def test_duplicate_method_delegates_to_repository(name):
 def test_facade_signatures_are_unchanged():
     expected = {
         "check_and_resolve_duplicates_for_hash": "(self, file_hash: str) -> dict | None",
-        "find_duplicate_groups": "(self, include_resolved=False)",
         "apply_duplicate_resolution": "(self, photo_ids)",
         "_apply_winner_loser_merge": "(self, winner_id, loser_ids)",
         "bulk_resolve_by_folder": "(self, file_hashes, keep_folder)",
-        "reopen_duplicate_group": "(self, file_hash)",
     }
     for name, sig in expected.items():
         assert str(inspect.signature(getattr(Database, name))) == sig, name
+
+
+def test_migrated_repository_signatures_match_the_old_wrappers():
+    """Callers moved off the wrappers keep passing the same arguments."""
+    def params(fn):
+        return [(p.name, p.default) for p in inspect.signature(fn).parameters.values()]
+
+    empty = inspect.Parameter.empty
+    assert params(DuplicatesRepository.find_groups) == [
+        ("self", empty), ("include_resolved", False),
+    ]
+    for name, arg in (
+        ("live_ids_for_hash", "file_hash"),
+        ("live_paths_for_hash", "file_hash"),
+        ("loser_candidate_rows", "photo_ids"),
+        ("is_group_member", "photo_id"),
+        ("workspace_names", "photo_ids"),
+        ("reopen", "file_hash"),
+    ):
+        assert params(getattr(DuplicatesRepository, name)) == [
+            ("self", empty), (arg, empty),
+        ], name
+    assert params(DuplicatesRepository.loser_disk_summary) == [("self", empty)]
+
+
+def test_duplicates_is_a_fresh_repository_on_the_connection_per_access(db):
+    """``db.duplicates`` builds a new repository each time, never a cached one.
+
+    Every method is catalog-wide, so it needs no active workspace.
+    """
+    first, second = db.duplicates, db.duplicates
+    assert isinstance(first, DuplicatesRepository)
+    assert first is not second
+    assert first.conn is db.conn
+    db.set_active_workspace(None)
+    assert db.duplicates.find_groups() == []
+    assert db.duplicates.reopen("NOPE") == 0
+
+
+def test_duplicates_has_no_forwarding_wrappers_on_database():
+    """The domain is reached through ``db.duplicates``; Database keeps no aliases."""
+    for name in _REMOVED_DUPLICATE_WRAPPERS:
+        assert not hasattr(Database, name), f"Database.{name} came back; call db.duplicates"
+    accessor = Database.__dict__["duplicates"]
+    assert isinstance(accessor, property)
+    attrs = {
+        node.attr
+        for node in ast.walk(ast.parse(textwrap.dedent(inspect.getsource(accessor.fget))))
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    }
+    assert "_duplicates_repository" in attrs
+    assert "conn" not in attrs

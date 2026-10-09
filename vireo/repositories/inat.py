@@ -1,19 +1,24 @@
 """Persistence for iNaturalist submissions.
 
 Submissions are catalog-wide (keyed by photo, not workspace), so the
-repository takes no workspace id. ``Database`` keeps its
-``record_inat_submission`` / ``get_inat_submissions`` methods as thin
-wrappers over this class.
+repository takes no workspace id. Callers reach it as ``db.inat`` (a fresh
+repository per access, see ``Database.inat``); there are no forwarding
+wrappers on ``Database``.
 """
+
+import sqlite3
+from collections.abc import Iterable
+from typing import Any
 
 
 class InatRepository:
-    def __init__(self, conn, *, chunk_size=800):
+    def __init__(self, conn: sqlite3.Connection, *, chunk_size: int = 800) -> None:
         self.conn = conn
         self.chunk_size = chunk_size
 
-    def record_submission(self, photo_id, observation_id, observation_url):
-        """Record a successful iNaturalist submission."""
+    def record_submission(self, photo_id: int, observation_id: int | str,
+                          observation_url: str) -> None:
+        """Record a successful iNaturalist submission and commit."""
         self.conn.execute(
             """INSERT OR IGNORE INTO inat_submissions
                (photo_id, observation_id, observation_url)
@@ -22,7 +27,7 @@ class InatRepository:
         )
         self.conn.commit()
 
-    def get_submissions(self, photo_ids):
+    def get_submissions(self, photo_ids: Iterable[int]) -> dict[int, dict[str, Any]]:
         """Return {photo_id: {observation_id, observation_url, submitted_at}} for given IDs."""
         if not photo_ids:
             return {}

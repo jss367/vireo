@@ -223,7 +223,7 @@ def test_activate_mask_survives_floor_change_without_state_sync(db, subject_phot
     # Raise the workspace's detector_confidence above ids[1]'s 0.7 so the
     # current effective primary flips to ids[0] (0.95) WITHOUT syncing
     # photo_subject_state, which still names ids[1].
-    db.update_workspace(db._ws_id(), config_overrides={'detector_confidence': 0.8})
+    db.workspaces.update(db._ws_id(), config_overrides={'detector_confidence': 0.8})
     det_lo = next(d for d in db.get_detections(photo_id, min_conf=0.8)
                   if d['id'] == ids[0])
     # A re-extraction under the new floor would rewrite the mask row with
@@ -303,7 +303,7 @@ def test_eye_stage_survives_floor_change_without_state_sync(db, subject_photo):
     # ids[1] — which now falls below the confidence join. Under the old
     # predicate every detection would be excluded; under the fix, ids[0]
     # surfaces once the mask has been regenerated for it.
-    db.update_workspace(db._ws_id(), config_overrides={'detector_confidence': 0.8})
+    db.workspaces.update(db._ws_id(), config_overrides={'detector_confidence': 0.8})
     # Before regeneration the cached mask still points at ids[1]'s
     # prompt, so the stale-mask predicate excludes the photo — the eye
     # stage will not run keypoint inference against a wrong-subject

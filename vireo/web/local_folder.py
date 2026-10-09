@@ -162,7 +162,7 @@ def create_local_folder_blueprint(
         except (TypeError, ValueError):
             return None, None, json_error("workspace_id must be an integer", 400)
         db = get_db()
-        if db.get_workspace(workspace_id) is None:
+        if db.workspaces.get(workspace_id) is None:
             return None, None, json_error("Workspace not found", 404)
         return db, workspace_id, None
 

@@ -2,45 +2,56 @@
 
 ``Database`` owns the active-workspace state; this repository owns the SQL.
 Methods that act on the active workspace (audit runs, the integrity
-queries) use ``self.workspace_id``, which the façade resolves with
-``Database._ws_id()`` when it builds the repository. The hash-check verdict
-write is catalog-wide and takes the photo id as an argument, matching the
-``Database`` method it backs.
+queries) resolve it through ``workspace_id_fn`` (``Database._ws_id``) before
+running any SQL, so with no workspace active they raise ``RuntimeError``
+having touched nothing; building the repository never resolves it. The
+hash-check verdict write is catalog-wide, takes the photo id as an argument
+and never resolves a workspace.
+
+Callers reach it as ``db.audit`` (a fresh repository per access, see
+``Database.audit``); there are no forwarding wrappers on ``Database``.
 """
 
+import sqlite3
+from collections.abc import Callable
 from datetime import datetime
+from typing import Any
 
 
 class AuditRepository:
-    def __init__(self, conn, workspace_id, *, chunk_size=800):
+    def __init__(self, conn: sqlite3.Connection,
+                 workspace_id_fn: Callable[[], int] | None, *,
+                 chunk_size: int = 800) -> None:
         self.conn = conn
-        self.workspace_id = workspace_id
+        self.workspace_id_fn = workspace_id_fn
         self.chunk_size = chunk_size
 
     # -- audit runs ----------------------------------------------------------
 
-    def record_run(self, check_name, problem_count):
+    def record_run(self, check_name: str, problem_count: int) -> None:
         """Record that an audit check ran now and what it found.
 
         One row per (workspace, check); re-running a check overwrites its
         previous row. The audit summary reads these to decide whether the
         archive can honestly be called intact.
         """
+        workspace_id = self.workspace_id_fn()
         self.conn.execute(
             "INSERT OR REPLACE INTO audit_runs "
             "(workspace_id, check_name, ran_at, problem_count) "
             "VALUES (?, ?, ?, ?)",
-            (self.workspace_id, check_name, datetime.now().isoformat(),
+            (workspace_id, check_name, datetime.now().isoformat(),
              int(problem_count)),
         )
         self.conn.commit()
 
-    def get_runs(self):
+    def get_runs(self) -> dict[str, dict[str, Any]]:
         """Return {check_name: {ran_at, problem_count}} for this workspace."""
+        workspace_id = self.workspace_id_fn()
         rows = self.conn.execute(
             "SELECT check_name, ran_at, problem_count FROM audit_runs "
             "WHERE workspace_id = ?",
-            (self.workspace_id,),
+            (workspace_id,),
         ).fetchall()
         return {
             r["check_name"]: {
@@ -52,8 +63,9 @@ class AuditRepository:
 
     # -- hash integrity ------------------------------------------------------
 
-    def get_integrity_photos(self):
+    def get_integrity_photos(self) -> list[dict[str, Any]]:
         """Return workspace photos with the fields hash verification needs."""
+        workspace_id = self.workspace_id_fn()
         rows = self.conn.execute(
             """SELECT p.id, p.filename, p.file_hash, p.file_mtime,
                       p.hash_status, p.hash_checked_at, f.path AS folder_path
@@ -63,12 +75,13 @@ class AuditRepository:
                JOIN folders f ON f.id = p.folder_id
                     AND f.status IN ('ok', 'partial')
                ORDER BY p.id""",
-            (self.workspace_id,),
+            (workspace_id,),
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def get_integrity_flagged(self):
+    def get_integrity_flagged(self) -> list[dict[str, Any]]:
         """Return workspace photos whose last hash check found a problem."""
+        workspace_id = self.workspace_id_fn()
         rows = self.conn.execute(
             """SELECT p.id AS photo_id, p.filename, p.hash_status,
                       p.hash_checked_at, f.path AS folder_path
@@ -79,17 +92,18 @@ class AuditRepository:
                     AND f.status IN ('ok', 'partial')
                WHERE p.hash_status IN ('modified', 'corrupt', 'unreadable')
                ORDER BY p.hash_status, p.filename""",
-            (self.workspace_id,),
+            (workspace_id,),
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def get_integrity_stats(self):
+    def get_integrity_stats(self) -> dict[str, int]:
         """Return hash-verification coverage for the active workspace.
 
         ``unchecked`` is load-bearing for the summary banner: photos added
         after the last verify run have hash_checked_at NULL, so a green
         light can't silently cover files that were never re-hashed.
         """
+        workspace_id = self.workspace_id_fn()
         row = self.conn.execute(
             """SELECT COUNT(*) AS total,
                       SUM(CASE WHEN p.hash_checked_at IS NOT NULL
@@ -102,7 +116,7 @@ class AuditRepository:
                     AND wf.workspace_id = ?
                JOIN folders f ON f.id = p.folder_id
                     AND f.status IN ('ok', 'partial')""",
-            (self.workspace_id,),
+            (workspace_id,),
         ).fetchone()
         total = row["total"] or 0
         checked = row["checked"] or 0
@@ -113,8 +127,9 @@ class AuditRepository:
             "flagged": row["flagged"] or 0,
         }
 
-    def update_photo_hash_check(self, photo_id, status, file_hash=None,
-                                commit=True, clear_file_hash=False):
+    def update_photo_hash_check(self, photo_id: int, status: str,
+                                file_hash: str | None = None, commit: bool = True,
+                                clear_file_hash: bool = False) -> None:
         """Record a hash-verification verdict for one photo.
 
         When ``file_hash`` is given the stored baseline is replaced too

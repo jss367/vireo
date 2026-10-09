@@ -1,12 +1,12 @@
 """Behavior pins for the audit domain of ``Database``.
 
-The behavior tests exercise the audit-run and hash-integrity methods only
-through the public ``Database`` façade, so they hold regardless of whether
-the SQL lives in ``db.py`` or in ``repositories/audit.py``; the structural
-test at the end keeps it in the repository. They cover audit-run records,
-the integrity photo/flagged/stats queries (workspace and folder-status
-scoping, ordering, return shapes), and hash-check verdict writes (the three
-update branches, argument validation, and commit boundaries).
+The behavior tests exercise the audit-run and hash-integrity methods through
+the ``db.audit`` accessor; the structural tests at the end pin the
+accessor's shape and keep the old forwarding wrappers gone. They cover
+audit-run records, the integrity photo/flagged/stats queries (workspace and
+folder-status scoping, ordering, return shapes), hash-check verdict writes
+(the three update branches, argument validation, and commit boundaries), and
+where the workspace is resolved.
 """
 
 import ast
@@ -17,6 +17,7 @@ from datetime import datetime
 
 import pytest
 from db import Database
+from repositories.audit import AuditRepository
 
 
 def _other_conn(db):
@@ -72,12 +73,12 @@ def library(db):
 
 
 def test_get_audit_runs_empty(db):
-    assert db.get_audit_runs() == {}
+    assert db.audit.get_runs() == {}
 
 
 def test_record_audit_run_commits_and_overwrites(db):
     before = datetime.now()
-    db.record_audit_run("verify", 3)
+    db.audit.record_run("verify", 3)
     assert not db.conn.in_transaction
 
     conn = _other_conn(db)
@@ -94,17 +95,17 @@ def test_record_audit_run_commits_and_overwrites(db):
     assert rows[0]["problem_count"] == 3
     assert datetime.fromisoformat(rows[0]["ran_at"]) >= before
 
-    db.record_audit_run("verify", 0)
-    runs = db.get_audit_runs()
+    db.audit.record_run("verify", 0)
+    runs = db.audit.get_runs()
     assert list(runs) == ["verify"]
     assert runs["verify"]["problem_count"] == 0
     assert set(runs["verify"]) == {"ran_at", "problem_count"}
 
 
 def test_record_audit_run_coerces_problem_count_to_int(db):
-    db.record_audit_run("drift", "7")
-    db.record_audit_run("orphans", 2.9)
-    runs = db.get_audit_runs()
+    db.audit.record_run("drift", "7")
+    db.audit.record_run("orphans", 2.9)
+    runs = db.audit.get_runs()
     assert runs["drift"]["problem_count"] == 7
     assert runs["orphans"]["problem_count"] == 2
     assert isinstance(runs["orphans"]["problem_count"], int)
@@ -112,28 +113,28 @@ def test_record_audit_run_coerces_problem_count_to_int(db):
 
 def test_record_audit_run_rejects_non_numeric_count(db):
     with pytest.raises(ValueError):
-        db.record_audit_run("drift", "many")
-    assert db.get_audit_runs() == {}
+        db.audit.record_run("drift", "many")
+    assert db.audit.get_runs() == {}
 
 
 def test_audit_runs_are_scoped_to_active_workspace(db):
     first = db._active_workspace_id
-    db.record_audit_run("verify", 1)
+    db.audit.record_run("verify", 1)
     other = db.create_workspace("Other")
     db.set_active_workspace(other)
-    assert db.get_audit_runs() == {}
-    db.record_audit_run("verify", 5)
-    assert db.get_audit_runs()["verify"]["problem_count"] == 5
+    assert db.audit.get_runs() == {}
+    db.audit.record_run("verify", 5)
+    assert db.audit.get_runs()["verify"]["problem_count"] == 5
     db.set_active_workspace(first)
-    assert db.get_audit_runs()["verify"]["problem_count"] == 1
+    assert db.audit.get_runs()["verify"]["problem_count"] == 1
 
 
 @pytest.mark.parametrize("call", [
-    lambda db: db.record_audit_run("verify", 0),
-    lambda db: db.get_audit_runs(),
-    lambda db: db.get_integrity_photos(),
-    lambda db: db.get_integrity_flagged(),
-    lambda db: db.get_integrity_stats(),
+    lambda db: db.audit.record_run("verify", 0),
+    lambda db: db.audit.get_runs(),
+    lambda db: db.audit.get_integrity_photos(),
+    lambda db: db.audit.get_integrity_flagged(),
+    lambda db: db.audit.get_integrity_stats(),
 ])
 def test_scoped_methods_require_active_workspace(db, call):
     db.set_active_workspace(None)
@@ -146,7 +147,7 @@ def test_scoped_methods_require_active_workspace(db, call):
 
 def test_get_integrity_photos_scope_order_and_shape(db, library):
     ids = library["ids"]
-    rows = db.get_integrity_photos()
+    rows = db.audit.get_integrity_photos()
     assert isinstance(rows, list)
     assert all(isinstance(r, dict) for r in rows)
     # ok + partial folders only; missing folder and foreign workspace excluded
@@ -168,24 +169,24 @@ def test_get_integrity_photos_scope_order_and_shape(db, library):
 
 def test_get_integrity_photos_in_other_workspace(db, library):
     db.set_active_workspace(library["other_ws"])
-    rows = db.get_integrity_photos()
+    rows = db.audit.get_integrity_photos()
     assert [r["id"] for r in rows] == [library["ids"]["e_foreign"]]
 
 
 def test_get_integrity_flagged_filters_and_orders(db, library):
     ids = library["ids"]
-    assert db.get_integrity_flagged() == []
-    db.update_photo_hash_check(ids["b_ok"], "modified")
-    db.update_photo_hash_check(ids["a_ok"], "modified")
-    db.update_photo_hash_check(ids["c_partial"], "corrupt")
-    db.update_photo_hash_check(ids["d_missing"], "unreadable")  # missing folder
-    db.update_photo_hash_check(ids["e_foreign"], "corrupt")  # other workspace
+    assert db.audit.get_integrity_flagged() == []
+    db.audit.update_photo_hash_check(ids["b_ok"], "modified")
+    db.audit.update_photo_hash_check(ids["a_ok"], "modified")
+    db.audit.update_photo_hash_check(ids["c_partial"], "corrupt")
+    db.audit.update_photo_hash_check(ids["d_missing"], "unreadable")  # missing folder
+    db.audit.update_photo_hash_check(ids["e_foreign"], "corrupt")  # other workspace
     extra = db.add_photo(library["folders"]["ok"], "z.jpg", ".jpg", 1, 9.0)
-    db.update_photo_hash_check(extra, "unreadable")
+    db.audit.update_photo_hash_check(extra, "unreadable")
     ok_photo = db.add_photo(library["folders"]["ok"], "y.jpg", ".jpg", 1, 9.0)
-    db.update_photo_hash_check(ok_photo, "ok")
+    db.audit.update_photo_hash_check(ok_photo, "ok")
 
-    rows = db.get_integrity_flagged()
+    rows = db.audit.get_integrity_flagged()
     assert [(r["hash_status"], r["filename"]) for r in rows] == [
         ("corrupt", "c.jpg"),
         ("modified", "a.jpg"),
@@ -203,21 +204,21 @@ def test_get_integrity_flagged_filters_and_orders(db, library):
 
 
 def test_get_integrity_stats_empty_workspace(db):
-    assert db.get_integrity_stats() == {
+    assert db.audit.get_integrity_stats() == {
         "total": 0, "checked": 0, "unchecked": 0, "flagged": 0,
     }
 
 
 def test_get_integrity_stats_counts(db, library):
     ids = library["ids"]
-    assert db.get_integrity_stats() == {
+    assert db.audit.get_integrity_stats() == {
         "total": 3, "checked": 0, "unchecked": 3, "flagged": 0,
     }
-    db.update_photo_hash_check(ids["a_ok"], "ok")
-    db.update_photo_hash_check(ids["b_ok"], "corrupt")
-    db.update_photo_hash_check(ids["d_missing"], "modified")
-    db.update_photo_hash_check(ids["e_foreign"], "modified")
-    assert db.get_integrity_stats() == {
+    db.audit.update_photo_hash_check(ids["a_ok"], "ok")
+    db.audit.update_photo_hash_check(ids["b_ok"], "corrupt")
+    db.audit.update_photo_hash_check(ids["d_missing"], "modified")
+    db.audit.update_photo_hash_check(ids["e_foreign"], "modified")
+    assert db.audit.get_integrity_stats() == {
         "total": 3, "checked": 2, "unchecked": 1, "flagged": 1,
     }
 
@@ -228,7 +229,7 @@ def test_get_integrity_stats_counts(db, library):
 def test_update_photo_hash_check_status_only_keeps_hash(db, library):
     pid = library["ids"]["a_ok"]
     before = datetime.now()
-    db.update_photo_hash_check(pid, "ok")
+    db.audit.update_photo_hash_check(pid, "ok")
     assert not db.conn.in_transaction
     row = _photo_row(db, pid)
     assert row["hash_status"] == "ok"
@@ -238,7 +239,7 @@ def test_update_photo_hash_check_status_only_keeps_hash(db, library):
 
 def test_update_photo_hash_check_replaces_hash(db, library):
     pid = library["ids"]["a_ok"]
-    db.update_photo_hash_check(pid, "ok", file_hash="h-new")
+    db.audit.update_photo_hash_check(pid, "ok", file_hash="h-new")
     row = _photo_row(db, pid)
     assert row["hash_status"] == "ok"
     assert row["file_hash"] == "h-new"
@@ -247,7 +248,7 @@ def test_update_photo_hash_check_replaces_hash(db, library):
 
 def test_update_photo_hash_check_clears_hash(db, library):
     pid = library["ids"]["a_ok"]
-    db.update_photo_hash_check(pid, "ok", clear_file_hash=True)
+    db.audit.update_photo_hash_check(pid, "ok", clear_file_hash=True)
     row = _photo_row(db, pid)
     assert row["hash_status"] == "ok"
     assert row["file_hash"] is None
@@ -260,7 +261,7 @@ def test_update_photo_hash_check_rejects_conflicting_hash_args(db, library):
         ValueError,
         match="clear_file_hash and file_hash are mutually exclusive",
     ):
-        db.update_photo_hash_check(pid, "ok", file_hash="h-x",
+        db.audit.update_photo_hash_check(pid, "ok", file_hash="h-x",
                                    clear_file_hash=True)
     assert not db.conn.in_transaction
     row = _photo_row(db, pid)
@@ -270,7 +271,7 @@ def test_update_photo_hash_check_rejects_conflicting_hash_args(db, library):
 
 def test_update_photo_hash_check_commit_false_defers(db, library):
     pid = library["ids"]["a_ok"]
-    db.update_photo_hash_check(pid, "modified", file_hash="h-z",
+    db.audit.update_photo_hash_check(pid, "modified", file_hash="h-z",
                                commit=False)
     assert db.conn.in_transaction
     assert _photo_row(db, pid)["hash_status"] is None
@@ -284,17 +285,17 @@ def test_update_photo_hash_check_is_catalog_wide(db, library):
     """The verdict write never consults the active workspace."""
     pid = library["ids"]["e_foreign"]
     db.set_active_workspace(None)
-    db.update_photo_hash_check(pid, "corrupt")
+    db.audit.update_photo_hash_check(pid, "corrupt")
     assert _photo_row(db, pid)["hash_status"] == "corrupt"
 
 
 def test_update_photo_hash_check_unknown_photo_is_noop(db):
-    db.update_photo_hash_check(999_999, "ok")
+    db.audit.update_photo_hash_check(999_999, "ok")
     assert not db.conn.in_transaction
 
 
 def test_update_photo_hash_check_signature_defaults():
-    params = inspect.signature(Database.update_photo_hash_check).parameters
+    params = inspect.signature(AuditRepository.update_photo_hash_check).parameters
     assert list(params) == [
         "self", "photo_id", "status", "file_hash", "commit",
         "clear_file_hash",
@@ -304,10 +305,55 @@ def test_update_photo_hash_check_signature_defaults():
     assert params["clear_file_hash"].default is False
 
 
+# -- workspace resolution ----------------------------------------------------
+
+
+def test_scoped_methods_raise_before_any_sql_without_a_workspace(db):
+    """The audit-run and integrity methods need a workspace, exactly where the
+    wrappers did: reaching ``db.audit`` is fine, and each scoped call raises
+    ``RuntimeError`` before touching the database (a non-numeric count included,
+    which used to fail on the workspace before ``int()`` ran)."""
+    db.audit.record_run("verify", 2)
+    db.set_active_workspace(None)
+    repo = db.audit
+    statements = []
+    db.conn.set_trace_callback(statements.append)
+    try:
+        for call in (
+            lambda: repo.record_run("verify", 0),
+            lambda: repo.record_run("verify", "many"),
+            repo.get_runs,
+            repo.get_integrity_photos,
+            repo.get_integrity_flagged,
+            repo.get_integrity_stats,
+        ):
+            with pytest.raises(RuntimeError, match="No active workspace set"):
+                call()
+    finally:
+        db.conn.set_trace_callback(None)
+    assert statements == []
+
+
+def test_scoped_methods_resolve_the_workspace_active_at_each_call(db, library):
+    """A switch between two ``db.audit`` calls is honored; and one repository
+    held across the switch reads the new workspace too, since it holds the
+    resolver rather than an id."""
+    db.audit.record_run("verify", 1)
+    held = db.audit
+    db.set_active_workspace(library["other_ws"])
+    assert db.audit.get_runs() == {}
+    assert held.get_runs() == {}
+    assert [p["id"] for p in db.audit.get_integrity_photos()] == [
+        library["ids"]["e_foreign"]
+    ]
+    db.set_active_workspace(library["ws"])
+    assert db.audit.get_runs()["verify"]["problem_count"] == 1
+
+
 # -- structure ---------------------------------------------------------------
 
-
-_DELEGATING_AUDIT_METHODS = (
+# The forwarding wrappers ``db.audit`` replaced.
+_REMOVED_AUDIT_WRAPPERS = (
     "record_audit_run",
     "get_audit_runs",
     "get_integrity_photos",
@@ -317,20 +363,32 @@ _DELEGATING_AUDIT_METHODS = (
 )
 
 
-@pytest.mark.parametrize("name", _DELEGATING_AUDIT_METHODS)
-def test_audit_method_delegates_to_repository(name):
-    source = textwrap.dedent(inspect.getsource(getattr(Database, name)))
-    fn = ast.parse(source).body[0]
+def test_audit_is_a_fresh_repository_on_the_connection_per_access(db):
+    """``db.audit`` builds a new repository each time, never a cached one.
+
+    The workspace is passed as ``Database._ws_id`` itself, uncalled, so
+    building the repository resolves nothing.
+    """
+    first, second = db.audit, db.audit
+    assert isinstance(first, AuditRepository)
+    assert first is not second
+    assert first.conn is db.conn
+    assert first.workspace_id_fn == db._ws_id
+
+
+def test_audit_has_no_forwarding_wrappers_on_database():
+    """The domain is reached through ``db.audit``; Database keeps no aliases."""
+    for name in _REMOVED_AUDIT_WRAPPERS:
+        assert not hasattr(Database, name), f"Database.{name} came back; call db.audit"
+    accessor = Database.__dict__["audit"]
+    assert isinstance(accessor, property)
+    source = textwrap.dedent(inspect.getsource(accessor.fget))
     attrs = {
         node.attr
-        for node in ast.walk(fn)
+        for node in ast.walk(ast.parse(source))
         if isinstance(node, ast.Attribute)
         and isinstance(node.value, ast.Name)
         and node.value.id == "self"
     }
-    assert "conn" not in attrs, (
-        f"Database.{name} touches self.conn; move the SQL to AuditRepository"
-    )
-    assert "_audit_repository" in attrs, (
-        f"Database.{name} no longer delegates to AuditRepository"
-    )
+    assert "_audit_repository" in attrs
+    assert "conn" not in attrs

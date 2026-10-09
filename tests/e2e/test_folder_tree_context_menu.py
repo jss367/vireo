@@ -1005,7 +1005,7 @@ def test_folder_tree_copy_path_fetches_folder(live_server, page):
 def test_folder_tree_shows_associated_workspaces(live_server, page):
     """The folder context menu opens a list of every linked workspace."""
     db = live_server["db"]
-    active_workspace = db.get_workspace(db._active_workspace_id)
+    active_workspace = db.workspaces.get(db._active_workspace_id)
     folder_id = db.get_folder_tree()[0]["id"]
     shared_workspace_id = db.create_workspace("Shared Bird Library")
     db.add_workspace_folder(shared_workspace_id, folder_id)

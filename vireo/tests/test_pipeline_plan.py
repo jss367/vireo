@@ -2593,7 +2593,7 @@ def test_regroup_plan_done_prior_when_cache_exists_and_no_upstream_work(tmp_path
     import config as cfg
     from pipeline import compute_group_fingerprint
     effective = db.get_effective_config(cfg.load())
-    db.set_workspace_group_state(
+    db.workspaces.set_group_state(
         db._active_workspace_id,
         fingerprint=compute_group_fingerprint(effective),
         when_ts=1714579200,
@@ -2657,7 +2657,7 @@ def test_regroup_plan_will_run_when_workspace_fingerprint_outdated(tmp_path, mon
         f.write('{"photos": []}')
 
     # Stamp a deliberately mismatched fingerprint.
-    db.set_workspace_group_state(
+    db.workspaces.set_group_state(
         db._active_workspace_id,
         fingerprint="old-fingerprint-from-prior-settings",
         when_ts=1714579200,
@@ -2712,7 +2712,7 @@ def test_regroup_plan_will_run_when_eye_detect_override_differs_from_workspace(
     import config as cfg
     from pipeline import compute_group_fingerprint
     effective = db.get_effective_config(cfg.load())
-    db.set_workspace_group_state(
+    db.workspaces.set_group_state(
         db._active_workspace_id,
         fingerprint=compute_group_fingerprint(effective),
         when_ts=1714579200,
@@ -2865,7 +2865,7 @@ def test_api_pipeline_plan_returns_per_stage_state(app_and_db):
 
 
 def _plan_process_id(db, name):
-    return next(p["id"] for p in db.get_saved_processes() if p["name"] == name)
+    return next(p["id"] for p in db.processes.list_all() if p["name"] == name)
 
 
 def test_api_pipeline_plan_identify_flags_show_species_review(

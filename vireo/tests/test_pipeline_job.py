@@ -7226,7 +7226,7 @@ def test_pipeline_snapshot_resolution_failure_does_not_hang(tmp_path, monkeypatc
     folder.mkdir()
     db.add_folder(str(folder))
     path = _drop_jpeg(str(folder), "IMG_001.JPG")
-    snap_id = db.create_new_images_snapshot([path])
+    snap_id = db.workspaces.create_new_images_snapshot([path])
 
     real_database = pipeline_job.Database
 
@@ -7461,7 +7461,7 @@ def test_pipeline_with_snapshot_scans_only_snapshot_folders(tmp_path):
     _drop_jpeg(str(folder_a), "IMG_001.JPG")
     _drop_jpeg(str(folder_b), "IMG_002.JPG")
 
-    snap_id = db.create_new_images_snapshot([str(folder_a / "IMG_001.JPG")])
+    snap_id = db.workspaces.create_new_images_snapshot([str(folder_a / "IMG_001.JPG")])
 
     params = PipelineParams(
         source_snapshot_id=snap_id,
@@ -7519,7 +7519,7 @@ def test_pipeline_snapshot_excludes_late_arriving_files(tmp_path, monkeypatch):
     Image.new("RGB", (16, 16), (10, 10, 10)).save(
         str(folder / "IMG_early.JPG")
     )
-    snap_id = db.create_new_images_snapshot([str(folder / "IMG_early.JPG")])
+    snap_id = db.workspaces.create_new_images_snapshot([str(folder / "IMG_early.JPG")])
 
     # "Late" file — arrives after the snapshot but before the pipeline runs.
     # The scanner must NOT catalog it — it lives in the same folder as the
@@ -7668,7 +7668,7 @@ def test_pipeline_snapshot_collapses_overlapping_scan_roots(tmp_path, monkeypatc
     _drop_jpeg(str(root), "a.jpg")
     _drop_jpeg(str(sub), "b.jpg")
 
-    snap_id = db.create_new_images_snapshot([str(top_path), str(sub_path)])
+    snap_id = db.workspaces.create_new_images_snapshot([str(top_path), str(sub_path)])
 
     # Spy on scanner.scan to count how many distinct roots it walks.
     import scanner as scanner_mod
@@ -8082,7 +8082,7 @@ def test_pipeline_regroup_invalidates_stamp_on_partial_run(tmp_path, monkeypatch
     # Pre-stamp a fingerprint as if a prior FULL workspace regroup had
     # completed cleanly. The partial run we're about to do must wipe
     # this, since save_results will overwrite the cache with subset output.
-    db.set_workspace_group_state(
+    db.workspaces.set_group_state(
         ws_id, fingerprint="pre-existing-from-full-run", when_ts=1714579200,
     )
 
@@ -8152,7 +8152,7 @@ def test_pipeline_regroup_does_not_stamp_when_eye_override_differs(
     # Pre-stamp a fingerprint as if a prior FULL default-off regroup had
     # completed cleanly. The one-off eye-on run must NOT overwrite this
     # with a fresh stamp — that would lie about workspace freshness.
-    db.set_workspace_group_state(
+    db.workspaces.set_group_state(
         ws_id, fingerprint="pre-existing-default-off", when_ts=1714579200,
     )
 

@@ -3691,11 +3691,11 @@ def test_pairing_transfers_inat_submissions(tmp_path):
                           file_size=2000, file_mtime=1.0)
 
     # JPEG was submitted to iNaturalist
-    db.record_inat_submission(jpeg_id, observation_id=12345,
+    db.inat.record_submission(jpeg_id, observation_id=12345,
                               observation_url="https://inaturalist.org/observations/12345")
 
     # Verify submission exists
-    subs_before = db.get_inat_submissions([jpeg_id])
+    subs_before = db.inat.get_submissions([jpeg_id])
     assert jpeg_id in subs_before
 
     # Run pairing
@@ -3707,7 +3707,7 @@ def test_pairing_transfers_inat_submissions(tmp_path):
 
     # Submission should be on the raw (primary) now, not lost
     raw_id_after = photos[0]["id"]
-    subs_after = db.get_inat_submissions([raw_id_after])
+    subs_after = db.inat.get_submissions([raw_id_after])
     assert raw_id_after in subs_after
     assert subs_after[raw_id_after]["observation_id"] == 12345
 
@@ -3729,12 +3729,12 @@ def test_pairing_deduplicates_inat_submissions(tmp_path):
 
     # Both photos submitted for the same observation (e.g., user submitted JPEG,
     # then raw was auto-submitted via a script)
-    db.record_inat_submission(jpeg_id, observation_id=12345,
+    db.inat.record_submission(jpeg_id, observation_id=12345,
                               observation_url="https://inaturalist.org/observations/12345")
-    db.record_inat_submission(raw_id, observation_id=12345,
+    db.inat.record_submission(raw_id, observation_id=12345,
                               observation_url="https://inaturalist.org/observations/12345")
     # JPEG also has a different observation
-    db.record_inat_submission(jpeg_id, observation_id=67890,
+    db.inat.record_submission(jpeg_id, observation_id=67890,
                               observation_url="https://inaturalist.org/observations/67890")
 
     # Should NOT raise IntegrityError

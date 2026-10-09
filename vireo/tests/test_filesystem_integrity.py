@@ -1383,7 +1383,7 @@ def test_unrejecting_a_duplicate_loser_forgets_that_the_resolver_rejected_it(
     db.conn.execute("UPDATE photos SET flag = 'rejected' WHERE id = ?", (loser,))
     db.conn.commit()
 
-    assert db.reopen_duplicate_group("H") == 0
+    assert db.duplicates.reopen("H") == 0
     assert _flag_map(db, [loser]) == {loser: "rejected"}
 
 

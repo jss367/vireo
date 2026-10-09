@@ -299,7 +299,7 @@ def create_keywords_blueprint(get_db, json_error):
                     ws_id = row["workspace_id"]
                     if ws_id in skip_keyword_requeue_by_ws:
                         continue
-                    ws = db.get_workspace(ws_id)
+                    ws = db.workspaces.get(ws_id)
                     raw = ws["config_overrides"] if ws else None
                     skip_keyword_requeue_by_ws[ws_id] = (
                         workspace_effective_setting(
