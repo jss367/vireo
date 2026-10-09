@@ -20,6 +20,8 @@ from repositories import UNSET as _UNSET  # sentinel for "not provided" vs expli
 
 if TYPE_CHECKING:
     from repositories.job_history import JobHistoryRepository
+    from repositories.local_folders import LocalFolderRepository
+    from repositories.pending_archives import PendingArchiveRepository
 
 log = logging.getLogger(__name__)
 
@@ -6680,9 +6682,16 @@ class Database:
 
         return LocalFolderRepository(self.conn)
 
-    def get_local_folder_states(self, root_folder_ids):
-        """``local_folders`` rows (root id, state, timestamps) for these roots, by root id."""
-        return self._local_folder_repository().state_rows(root_folder_ids)
+    @property
+    def local_folders(self) -> LocalFolderRepository:
+        """The folder-level local-copy domain: ``db.local_folders.state_rows(ids)``.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_local_folder_repository``, exactly as a
+        forwarding wrapper called at that moment would. The domain is
+        catalog-wide, so it needs no active workspace.
+        """
+        return self._local_folder_repository()
 
     def _exif_search_repository(self):
         """Build the (catalog-wide) EXIF search text backfill on this connection."""
@@ -11427,32 +11436,26 @@ class Database:
 
     # -- Pending NAS transfers --
 
-    def _pending_archive_repository(self, *, scoped=True):
+    def _pending_archive_repository(self):
         """Build the pending-NAS-transfer repository on this connection.
 
-        ``scoped=True`` binds it to the active workspace (raising
-        ``RuntimeError`` when none is set); ``set_pending_archive_state``
-        addresses a transfer by its unique id and passes ``scoped=False``.
+        It receives ``self._ws_id`` uncalled: the workspace-scoped listing and
+        discard resolve it (raising ``RuntimeError`` when no workspace is
+        active) before running any SQL, while ``set_state`` addresses a
+        transfer by its unique id and never resolves it.
         """
         from repositories.pending_archives import PendingArchiveRepository
 
-        return PendingArchiveRepository(
-            self.conn, self._ws_id() if scoped else None,
-        )
+        return PendingArchiveRepository(self.conn, self._ws_id)
 
-    def get_open_pending_archives(self):
-        """The active workspace's transfers not yet ``complete``, oldest first.
+    @property
+    def pending_archives(self) -> PendingArchiveRepository:
+        """The pending-NAS-transfer domain: ``db.pending_archives.delete(id)`` and friends.
 
-        Each row carries every ``pending_archives`` column plus
-        ``review_collection_id`` and ``collection_name`` (NULL when the
-        import's review collection is gone).
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_pending_archive_repository``. Accessing it never
+        needs a workspace; ``open_with_review_collection`` and ``delete`` are
+        scoped to the active workspace and raise ``RuntimeError`` when none is
+        set, and ``set_state`` works by id in any workspace.
         """
-        return self._pending_archive_repository().open_with_review_collection()
-
-    def delete_pending_archive(self, archive_id):
-        """Forget one of the active workspace's transfers (the row only) and commit."""
-        self._pending_archive_repository().delete(archive_id)
-
-    def set_pending_archive_state(self, archive_id, state, error=""):
-        """Set a transfer's ``state`` and ``error`` by id, in any workspace, and commit."""
-        self._pending_archive_repository(scoped=False).set_state(archive_id, state, error)
+        return self._pending_archive_repository()
