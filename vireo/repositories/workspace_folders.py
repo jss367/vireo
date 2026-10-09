@@ -19,6 +19,8 @@ existence checks, and the new-images cache invalidation all run in the
 façade wrappers, so monkeypatches of those ``Database`` methods still apply.
 """
 
+from repositories.collections import COMPANION_EXTENSION_SQL
+
 
 class WorkspaceFolderRepository:
     def __init__(self, conn, *, path_for_subtree_match, chunk_size=800):
@@ -509,16 +511,22 @@ class WorkspaceFolderRepository:
         return [row["path"] for row in rows]
 
     def extensions(self, workspace_id):
-        """Distinct lowercased extensions of the workspace's visible photos."""
+        """Distinct lowercased extensions of the workspace's visible photos.
+
+        A RAW+JPEG pair contributes its companion's extension too, since the
+        extension rule matches a photo by either file.
+        """
         rows = self.conn.execute(
-            """SELECT DISTINCT LOWER(p.extension) AS ext
+            f"""SELECT DISTINCT CASE ext_side.side
+                       WHEN 0 THEN LOWER(p.extension)
+                       ELSE {COMPANION_EXTENSION_SQL} END AS ext
                FROM photos p
                JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                JOIN folders f ON f.id = p.folder_id
                               AND f.status IN ('ok', 'partial')
+               JOIN (SELECT 0 AS side UNION ALL SELECT 1) ext_side
                WHERE wf.workspace_id = ?
-                 AND p.extension IS NOT NULL
-                 AND p.extension != ''
+                 AND COALESCE(ext, '') != ''
                ORDER BY ext""",
             (workspace_id,),
         ).fetchall()

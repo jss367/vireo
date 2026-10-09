@@ -1394,7 +1394,17 @@ class CollectionRepository:
         conditions = []
         extra_joins = ""
         extra_params = []
-        if field in self._SUGGEST_VALUE_EXPRS:
+        if field == "extension":
+            # Count each photo under both of its files' formats, so the
+            # ``.jpg`` facet counts RAW+JPEG pairs as the extension rule
+            # matches them. ``COUNT(DISTINCT p.id)`` folds a pair whose two
+            # files share a format.
+            extra_joins = " JOIN (SELECT 0 AS side UNION ALL SELECT 1) ext_side"
+            display_expr = group_expr = (
+                "(CASE ext_side.side WHEN 0 THEN LOWER(p.extension)"
+                f" ELSE {COMPANION_EXTENSION_SQL} END)"
+            )
+        elif field in self._SUGGEST_VALUE_EXPRS:
             display_expr, group_expr = self._SUGGEST_VALUE_EXPRS[field]
         elif field == "classifier_model":
             extra_joins = (
@@ -1468,7 +1478,11 @@ class CollectionRepository:
         conditions.append(f"{group_expr} IS NOT NULL")
         if q:
             conditions.append(f"{group_expr} LIKE ? ESCAPE '\\'")
-            q_norm = str(q).lower() if group_expr.startswith("LOWER(") else str(q)
+            q_norm = (
+                str(q).lower()
+                if group_expr.startswith("LOWER(") or field == "extension"
+                else str(q)
+            )
             extra_params.append(f"%{self._escape_like(q_norm)}%")
         joined = " AND ".join(conditions)
         # ``where`` from ``_build_query_from_rules`` is ``WHERE (A) OR (B)``
@@ -2162,6 +2176,18 @@ _TAXONOMY_RULE_FIELDS = (
 
 _TEXT_RULE_FIELDS = ("filename", "camera_make", "camera_model", "lens")
 
+# The lowercased extension (with its dot) of a photo's paired file, NULL when
+# it has none. A RAW+JPEG pair is one photo whose ``extension`` is the RAW's;
+# its JPEG lives only in ``companion_path`` (a bare filename). SQLite has no
+# "last index of", so trimming every non-dot character off the end finds the
+# last dot: ``rtrim`` strips trailing characters drawn from the name with its
+# dots removed.
+COMPANION_EXTENSION_SQL = (
+    "(CASE WHEN instr(p.companion_path, '.') > 0 THEN LOWER(substr("
+    "p.companion_path, length(rtrim(p.companion_path,"
+    " replace(p.companion_path, '.', ''))))) END)"
+)
+
 
 class _RuleQueryBuilder:
     """Compiles one validated rule tree for ``_build_query_from_rules``.
@@ -2696,18 +2722,25 @@ class _RuleQueryBuilder:
         return None
 
     def _extension_rule(self, field, op, value, rule):
-        if op in ("equals", "is"):
-            return "LOWER(p.extension) = LOWER(?)", [value]
-        if op == "is not":
-            return "LOWER(p.extension) != LOWER(?)", [value]
-        if op in ("in", "not_in"):
+        # A photo has a format when either of its files does: "is .jpg"
+        # finds a RAW+JPEG pair through its companion, and "is not .jpg"
+        # leaves the pair out.
+        if op in ("equals", "is", "is not"):
+            values = [value]
+        elif op in ("in", "not_in"):
             values = list(value or [])
             if not values:
                 return ("0" if op == "in" else "1"), []
-            placeholders = ",".join("LOWER(?)" for _ in values)
-            negate = "NOT " if op == "not_in" else ""
-            return f"LOWER(p.extension) {negate}IN ({placeholders})", values
-        return None
+        else:
+            return None
+        placeholders = ",".join("LOWER(?)" for _ in values)
+        has = (
+            f"(LOWER(p.extension) IN ({placeholders})"
+            f" OR (p.companion_path IS NOT NULL"
+            f" AND {COMPANION_EXTENSION_SQL} IN ({placeholders})))"
+        )
+        negate = "NOT " if op in ("is not", "not_in") else ""
+        return f"{negate}{has}", values + values
 
     def _taxonomy_rule(self, field, op, value, rule):
         col = f"pred.{field}"

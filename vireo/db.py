@@ -1838,7 +1838,8 @@ class Database:
         ``JPG`` instead of ``.jpg`` or vice versa. Lowercasing here means the
         UI never has to think about case, and storing-side variations
         (``.jpg`` vs ``.JPG`` from older imports) collapse into one option.
-        Empty/NULL extensions are skipped.
+        Empty/NULL extensions are skipped. A RAW+JPEG pair contributes both
+        formats, since the extension rule matches a photo by either file.
 
         Folders whose status is not ``'ok'`` or ``'partial'`` are excluded so
         the dropdown stays consistent with ``_build_collection_query``, which
@@ -11084,7 +11085,6 @@ class Database:
         "camera_make": ("MIN(p.camera_make)", "LOWER(p.camera_make)"),
         "camera_model": ("MIN(p.camera_model)", "LOWER(p.camera_model)"),
         "lens": ("MIN(p.lens)", "LOWER(p.lens)"),
-        "extension": ("LOWER(p.extension)", "LOWER(p.extension)"),
     }
 
     def get_filter_field_values(self, field, rules=None, q=None, limit=20,
