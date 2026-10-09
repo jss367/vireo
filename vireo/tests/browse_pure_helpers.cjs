@@ -48,6 +48,26 @@ test('formatFileSize picks the largest unit below the size', () => {
   assert.equal(formatFileSize(5 * 1073741824), '5.0 GB');
 });
 
+test('cardExtensionLabel names both files of a RAW+JPEG pair', () => {
+  const {cardExtensionLabel} = load({'cards.js': ['cardExtensionLabel']});
+  assert.equal(cardExtensionLabel({extension: '.nef'}), 'NEF');
+  assert.equal(cardExtensionLabel({extension: '.NEF', companion_path: '_D854674.jpg'}), 'NEF + JPG');
+  assert.equal(cardExtensionLabel({extension: '.dng', companion_path: 'a.b.JPEG'}), 'DNG + JPEG');
+  // Same format twice is one label.
+  assert.equal(cardExtensionLabel({extension: '.jpg', companion_path: 'x.JPG'}), 'JPG');
+  // Only the basename's extension counts, and a leading-dot name has none.
+  assert.equal(cardExtensionLabel({extension: '.nef', companion_path: '/archive.v1/sidecar'}), 'NEF');
+  assert.equal(cardExtensionLabel({extension: '.nef', companion_path: 'C:\\a.b\\x.jpg'}), 'NEF + JPG');
+  // POSIX basenames may contain line breaks; splitext still finds the suffix.
+  assert.equal(cardExtensionLabel({extension: '.nef', companion_path: 'a\nb.jpg'}), 'NEF + JPG');
+  assert.equal(cardExtensionLabel({extension: '.nef', companion_path: 'a\u2028b.jpg'}), 'NEF + JPG');
+  assert.equal(cardExtensionLabel({extension: '.nef', companion_path: 'a\u2029b.jpg'}), 'NEF + JPG');
+  assert.equal(cardExtensionLabel({extension: '.nef', companion_path: '.hidden'}), 'NEF');
+  assert.equal(cardExtensionLabel({extension: '.nef', companion_path: ''}), 'NEF');
+  assert.equal(cardExtensionLabel({extension: '', companion_path: 'x.jpg'}), 'JPG');
+  assert.equal(cardExtensionLabel({}), '');
+});
+
 test('keywordMatchScore ranks exact, prefix, word-prefix, then substring', () => {
   const {keywordMatchScore} = load({'keyword-autocomplete.js': ['keywordMatchScore']});
   assert.equal(keywordMatchScore('hawk', 'hawk'), 0);
