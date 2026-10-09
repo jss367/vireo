@@ -235,7 +235,9 @@
   function move(delta) { activate(activeIndex + delta, true); }
 
   document.addEventListener('close', function(e) {
-    if (ownerDialog && e.target === ownerDialog) close();
+    // Dialog close events are queued. An earlier close can arrive after the
+    // same dialog reopens; only clear Find when its owner is still closed.
+    if (ownerDialog && e.target === ownerDialog && !ownerDialog.open) close();
   }, true);
   // A class/style mutation can be observed mid-fade; collect again once the
   // effective opacity reaches its final value, including hover-only controls.
