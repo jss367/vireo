@@ -236,6 +236,26 @@ def test_cleanup_link_uses_current_catalog_instead_of_an_old_scan(live_server, p
     expect(page.locator("#restoredBanner")).not_to_be_visible()
 
 
+def test_empty_file_cleanup_counts_additional_kept_copies(live_server, page):
+    import hashlib
+
+    db = live_server["db"]
+    fid = db.add_folder("/photos/empty")
+    ids = [
+        db.add_photo(folder_id=fid, filename=name, extension=".jpg",
+                     file_size=0, file_mtime=100.0,
+                     file_hash=hashlib.sha256(b"").hexdigest())
+        for name in ("first.jpg", "second.jpg", "extra.jpg")
+    ]
+    db.conn.execute("UPDATE photos SET flag='none' WHERE id IN (?, ?)", ids[:2])
+    db.conn.execute("UPDATE photos SET flag='rejected' WHERE id=?", (ids[2],))
+    db.conn.commit()
+    page.goto(f"{live_server['url']}/duplicates?show=resolved")
+    expect(page.locator(".dup-group-header label")).to_have_text("3 zero-byte files detected")
+    expect(page.locator(".dup-card.winner")).to_have_count(2)
+    expect(page.locator(".dup-card.loser")).to_have_count(1)
+
+
 def test_normal_duplicates_page_also_finds_cleanup_without_history(live_server, page):
     _seed_catalog_cleanup(live_server["db"])
     page.goto(f"{live_server['url']}/duplicates")

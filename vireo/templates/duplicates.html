@@ -1392,7 +1392,7 @@
     html += '<div class="dup-group-header">';
     if (group.empty_file_group) {
       html += '<label style="cursor:default;">' +
-              (losers.length + 1) + ' zero-byte files detected</label>';
+              (losers.length + 1 + (group.other_kept || []).length) + ' zero-byte files detected</label>';
     } else {
       html += '<label style="cursor:default;">' +
               losers.length + ' extra ' +
