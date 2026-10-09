@@ -116,6 +116,7 @@
 
   function pauseDispatch() { _dispatchPaused = true; }
   function resumeDispatch() { _dispatchPaused = false; }
+  function isDispatchPaused() { return _dispatchPaused; }
 
   function _dispatch(e) {
     if (_dispatchPaused) return;
@@ -161,6 +162,7 @@
     lockBodyScroll: lockBodyScroll,
     unlockBodyScroll: unlockBodyScroll,
     pauseDispatch: pauseDispatch,
-    resumeDispatch: resumeDispatch
+    resumeDispatch: resumeDispatch,
+    isDispatchPaused: isDispatchPaused
   };
 })(window);

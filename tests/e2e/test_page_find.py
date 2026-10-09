@@ -96,3 +96,19 @@ def test_native_find_uses_existing_page_search(live_server, page, path):
     page.evaluate("handleNativeMenuCommand('find')")
     expect(page.locator(selector)).to_be_focused()
     expect(page.locator("#pageFindPanel")).to_be_hidden()
+
+
+def test_find_does_not_interrupt_shortcut_capture(live_server, page):
+    page.goto(f"{live_server['url']}/shortcuts")
+    button = page.locator(".shortcut-key-btn[onclick*=\"'navigation', 'browse'\"]")
+    expect(button).to_be_visible()
+    button.click()
+    expect(button).to_have_class(re.compile("capturing"))
+    # Native accelerators and browser key events must both yield to capture.
+    page.evaluate("handleNativeMenuCommand('find')")
+    expect(page.locator("#pageFindPanel")).to_be_hidden()
+    expect(button).to_have_class(re.compile("capturing"))
+    page.keyboard.press("Control+F")
+    expect(page.locator("#pageFindPanel")).to_be_hidden()
+    expect(page.locator(".shortcut-key-btn.capturing")).to_have_count(0)
+    assert page.evaluate("currentShortcuts.navigation.browse") == "ctrl+f"

@@ -125,6 +125,7 @@
   }
 
   function open() {
+    if (window.Keymap.isDispatchPaused()) return;
     if (typeof window.openSettingsFind === 'function') {
       window.openSettingsFind();
       return;
@@ -155,6 +156,7 @@
   document.getElementById('pageFindNext').addEventListener('click', function() { move(1); });
   document.getElementById('pageFindClose').addEventListener('click', close);
   document.addEventListener('keydown', function(e) {
+    if (window.Keymap.isDispatchPaused()) return;
     if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'f') {
       e.preventDefault();
       e.stopImmediatePropagation();
