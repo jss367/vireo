@@ -111,7 +111,8 @@ def test_closing_the_stream_cancels_running_walkers(monkeypatch):
     assert walker_started.wait(timeout=synchronization_timeout(5))
 
     gen.close()
-    assert walker_exited.wait(timeout=synchronization_timeout(5)), "walker kept running after close"
+    # Closing the stream must promptly stop the already-running walker.
+    assert walker_exited.wait(timeout=5), "walker kept running after close"
 
 
 def test_volume_lane_is_shared_across_preview_streams(monkeypatch):

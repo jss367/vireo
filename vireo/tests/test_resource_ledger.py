@@ -964,7 +964,8 @@ def test_explicit_cancel_check_overrides_bound_probe():
     assert thread.is_alive()
     assert outcome == []
     explicit_cancelled.set()
-    thread.join(timeout=synchronization_timeout(1.0))
+    # Cancellation must finish before the held resource is released.
+    thread.join(timeout=1.0)
     assert not thread.is_alive()
     assert outcome == ["cancelled"]
     holder.release()

@@ -40,8 +40,9 @@ python -m pytest vireo/tests/test_db.py -v
 Use `testing.waits.synchronization_timeout(seconds)` for bounded event waits,
 thread joins and job polling in tests. Windows CI gets at least 30 seconds
 (or three times the requested budget); local and other-platform budgets stay
-unchanged. Subsecond probes and assertions about a deliberate timeout retain
-their original deadlines. The shared `vireo/tests/wait.py` polling helpers
+unchanged. Subsecond probes, cancellation latency assertions and deliberate
+timeout assertions retain their original deadlines. The shared
+`vireo/tests/wait.py` polling helpers
 apply this policy automatically.
 
 Tests use temp databases. `vireo/tests/test_app.py` isolates config via `cfg.CONFIG_PATH = str(tmp_path / "config.json")` to avoid polluting `~/.vireo/config.json`.
