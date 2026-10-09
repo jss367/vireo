@@ -111,6 +111,34 @@ def test_workspace_dropdown_shows_current(live_server, page):
     expect(dropdown).to_contain_text("Default")
 
 
+def test_workspace_dropdown_scrolls_long_list(live_server, page):
+    """Long lists stay inside the window, with footer actions always reachable."""
+    for index in range(40):
+        live_server["db"].create_workspace(f"Workspace {index:02d}")
+
+    page.set_viewport_size({"width": 1280, "height": 720})
+    page.goto(f"{live_server['url']}/browse")
+    page.click("[data-testid='workspace-dropdown']")
+    expect(page.locator(".ws-menu-item")).to_have_count(42)
+    expect(page.locator(".ws-menu-item.active")).to_contain_text("Default")
+
+    # Resizing an open menu must preserve access to both its list and actions.
+    for height in (720, 320):
+        page.set_viewport_size({"width": 1280, "height": height})
+        menu_box = page.locator("#wsMenu").bounding_box()
+        assert menu_box["y"] + menu_box["height"] <= height - 8
+        for action in page.locator(".ws-menu-action").all():
+            expect(action).to_be_in_viewport(ratio=1)
+
+        page.locator("#wsMenuList").hover()
+        page.mouse.wheel(0, 5000)
+        last_workspace = page.locator(".ws-menu-item", has_text="Workspace 39")
+        expect(last_workspace).to_be_in_viewport(ratio=1)
+
+    last_workspace.click()
+    expect(page.locator("#wsCurrentName")).to_have_text("Workspace 39")
+
+
 def test_workspace_dropdown_does_not_wait_for_active_workspace(live_server, page):
     """Workspace names remain usable even when the identity lookup is pending."""
     url = live_server["url"]
