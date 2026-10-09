@@ -113,10 +113,26 @@
   // Both listeners run in the capture phase; this dispatcher is registered at
   // module load and would otherwise win the race.
   var _dispatchPaused = false;
+  var _captureKeyHandler = null;
 
-  function pauseDispatch() { _dispatchPaused = true; }
-  function resumeDispatch() { _dispatchPaused = false; }
+  function pauseDispatch(captureHandler) {
+    _dispatchPaused = true;
+    _captureKeyHandler = captureHandler || null;
+  }
+  function resumeDispatch() { _dispatchPaused = false; _captureKeyHandler = null; }
   function isDispatchPaused() { return _dispatchPaused; }
+
+  // Native menu accelerators can consume a key before the webview sees it.
+  // Deliver that shortcut directly to the recorder that paused dispatch.
+  function captureNativeShortcut(shortcut) {
+    if (!_dispatchPaused || !_captureKeyHandler) return false;
+    var parsed = parseShortcut(shortcut);
+    _captureKeyHandler(new KeyboardEvent('keydown', {
+      key: parsed.key, ctrlKey: parsed.ctrl, metaKey: parsed.meta,
+      shiftKey: parsed.shift, altKey: parsed.alt, cancelable: true
+    }));
+    return true;
+  }
 
   function _dispatch(e) {
     if (_dispatchPaused) return;
@@ -163,6 +179,7 @@
     unlockBodyScroll: unlockBodyScroll,
     pauseDispatch: pauseDispatch,
     resumeDispatch: resumeDispatch,
-    isDispatchPaused: isDispatchPaused
+    isDispatchPaused: isDispatchPaused,
+    captureNativeShortcut: captureNativeShortcut
   };
 })(window);

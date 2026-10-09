@@ -132,7 +132,10 @@
   }
 
   function open() {
-    if (window.Keymap.isDispatchPaused()) return;
+    if (window.Keymap.isDispatchPaused()) {
+      window.Keymap.captureNativeShortcut('ctrl+f');
+      return;
+    }
     if (typeof window.openSettingsFind === 'function') {
       window.openSettingsFind();
       return;
