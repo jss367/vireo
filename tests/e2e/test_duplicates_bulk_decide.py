@@ -161,18 +161,30 @@ def test_duplicates_reveal_reports_unrevealed_paths(
     expect(button).to_have_text(original_label)
 
 
-def test_duplicates_reveal_request_failure_allows_retry(live_server, page, tmp_path):
+@pytest.mark.parametrize("failure", ["http", "network"])
+def test_duplicates_reveal_request_failure_allows_retry(live_server, page, tmp_path, failure):
+    """HTTP and network errors show one notification and restore the reveal button."""
     folder_a, folder_b = str(tmp_path / "a"), str(tmp_path / "b")
     _seed_scan_with_buckets(live_server["db"], folder_a, folder_b, n_groups=2)
-    page.route("**/api/folders/reveal", lambda route: route.fulfill(
-        status=500, content_type="application/json", body='{"error": "Finder unavailable"}'
-    ))
+
+    def fail_request(route):
+        if failure == "network":
+            route.abort("connectionfailed")
+        else:
+            route.fulfill(
+                status=500, content_type="application/json", body='{"error": "Finder unavailable"}'
+            )
+
+    page.route("**/api/folders/reveal", fail_request)
     page.goto(f"{live_server['url']}/duplicates")
     button = page.locator(".bucket-card .reveal-btn")
     original_label = button.inner_text()
     button.click()
-    expect(page.locator('#toastContainer [data-type="error"]').last).to_contain_text(
-        "Reveal failed: Finder unavailable"
+    errors = page.locator('#toastContainer [data-type="error"]')
+    expect(errors.last).to_contain_text("Reveal failed:")
+    assert errors.count() == 1
+    expect(errors).to_contain_text(
+        "Couldn’t reach Vireo" if failure == "network" else "Finder unavailable"
     )
     expect(button).to_be_enabled()
     expect(button).to_have_text(original_label)

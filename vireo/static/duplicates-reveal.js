@@ -14,7 +14,7 @@ async function revealBucketFolders(bi, button) {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ paths: bucket.folders }),
-    });
+    }, {toast: false});
     var revealed = (data.revealed || []).length;
     var problems = (data.failed || []).concat(data.skipped || []);
     var message = 'Revealed ' + revealed + ' folder' + (revealed === 1 ? '' : 's') + ' in ' + manager;
