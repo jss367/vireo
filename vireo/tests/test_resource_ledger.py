@@ -835,8 +835,11 @@ def test_cancelled_wait_releases_waiter_accounting():
     # Wake the condition immediately; production cancellation otherwise gets
     # noticed by the bounded 200 ms poll.
     holder.release()
-    thread.join(timeout=synchronization_timeout(1.0))
-    assert not thread.is_alive()
+    try:
+        thread.join(timeout=1.0)
+        assert not thread.is_alive()
+    finally:
+        thread.join(timeout=synchronization_timeout(1.0))
     assert outcome == ["cancelled"]
     assert ledger.snapshot()["waiters"] == 0
 
@@ -871,8 +874,11 @@ def test_raising_cancel_check_releases_waiter_accounting():
     assert waiting.wait(timeout=synchronization_timeout(1.0))
     cancel_now.set()
     holder.release()
-    thread.join(timeout=synchronization_timeout(1.0))
-    assert not thread.is_alive()
+    try:
+        thread.join(timeout=1.0)
+        assert not thread.is_alive()
+    finally:
+        thread.join(timeout=synchronization_timeout(1.0))
     assert outcome == ["cancelled"]
     assert ledger.snapshot()["waiters"] == 0
 
@@ -916,8 +922,11 @@ def test_bound_cancel_check_wakes_waiter_without_explicit_argument():
     assert waiting.wait(timeout=synchronization_timeout(1.0))
     cancelled.set()
     holder.release()
-    thread.join(timeout=synchronization_timeout(1.0))
-    assert not thread.is_alive()
+    try:
+        thread.join(timeout=1.0)
+        assert not thread.is_alive()
+    finally:
+        thread.join(timeout=synchronization_timeout(1.0))
     assert outcome == ["cancelled"]
     assert ledger.snapshot()["waiters"] == 0
 

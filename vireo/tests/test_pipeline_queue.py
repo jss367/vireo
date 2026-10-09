@@ -320,15 +320,17 @@ def test_two_pipelines_run_concurrently_when_slot_cap_at_least_two(tmp_path):
     first_started = threading.Event()
     second_started = threading.Event()
     blocker = threading.Event()
+    first_finished = threading.Event()
 
     def first_work(job):
         first_started.set()
-        blocker.wait(timeout=synchronization_timeout(3.0))
+        blocker.wait(timeout=1.5 * synchronization_timeout(2.0))
+        first_finished.set()
         return {"first": True}
 
     def second_work(job):
         second_started.set()
-        blocker.wait(timeout=synchronization_timeout(3.0))
+        blocker.wait(timeout=1.5 * synchronization_timeout(2.0))
         return {"second": True}
 
     first_id = runner.enqueue_pipeline(
@@ -340,15 +342,19 @@ def test_two_pipelines_run_concurrently_when_slot_cap_at_least_two(tmp_path):
 
     # Both work_fns must be invoked WITHOUT either one finishing —
     # the second must NOT have waited for the first to terminate.
-    assert first_started.wait(timeout=synchronization_timeout(2.0)), "first pipeline did not start"
-    assert second_started.wait(timeout=synchronization_timeout(2.0)), (
-        "second pipeline did not start concurrently with first — "
-        "SLOT_CAP appears to still be 1 or the scheduler is serialising"
-    )
-
-    blocker.set()
-    wait_for_job_via_runner(runner, first_id)
-    wait_for_job_via_runner(runner, second_id)
+    try:
+        assert first_started.wait(timeout=synchronization_timeout(2.0)), "first pipeline did not start"
+        assert second_started.wait(timeout=synchronization_timeout(2.0)), (
+            "second pipeline did not start concurrently with first — "
+            "SLOT_CAP appears to still be 1 or the scheduler is serialising"
+        )
+        assert not first_finished.is_set(), "first pipeline finished before checking concurrency"
+        blocker.set()
+        wait_for_job_via_runner(runner, first_id)
+        wait_for_job_via_runner(runner, second_id)
+    finally:
+        blocker.set()
+        runner.shutdown()
 
 
 def test_startup_sweep_marks_orphan_running_rows_as_failed(tmp_path):
