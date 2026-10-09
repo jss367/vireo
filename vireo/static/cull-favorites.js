@@ -1,6 +1,7 @@
 /* Cull's scope, favorites and comparison presentation. Decisions are pinned
  * by cull.html and saved through its existing undoable Apply operation. */
 var cullSourceResults = null;
+var cullSourceCollectionId = null;
 var cullSelectedSpecies = new Set();
 var cullScopeFailed = false;
 var cullFavoriteReferences = Object.create(null);
@@ -131,7 +132,7 @@ function onCullScopeChange() {
     return;
   }
   cullScopeFailed = false;
-  if (cullSourceResults && cullScopePhotoIds().length) { cullScopeFailed = true; runCulling(); }
+  if (cullSourceCollectionId !== selectedCollectionId || (cullSourceResults && cullScopePhotoIds().length)) { cullScopeFailed = true; runCulling(); }
   else updateCullApplyButton();
 }
 
@@ -449,4 +450,47 @@ function initializeCullFavorites() {
     rebuildCullDataFromPipeline();
   });
   document.addEventListener('lightbox:photodeleted', function(e) { removeCullPhotos([e.detail.photoId]); });
+}
+
+async function recomputeCulling(endpoint, statusText, sourceOnly) {
+  if (cullBusy || (window.vireoHistoryBusy && window.vireoHistoryBusy())) {
+    showToast('Wait for the current edit to finish before recomputing culling.', 'info');
+    return;
+  }
+  sourceOnly = sourceOnly || cullSourceCollectionId !== selectedCollectionId;
+  var scoped = !sourceOnly && hasCullFilters();
+  if (scoped && !cullScopePhotoIds().length) {
+    document.getElementById('cullStatus').textContent = 'No photos match the selected species and dates.';
+    return;
+  }
+  var seq = ++cullAnalysisSeq;
+  if (sourceOnly && hasCullFilters()) cullScopeFailed = true;
+  cullAnalysisPending++;
+  updateCullApplyButton();
+  try {
+    var config = Object.assign({}, getGroupingConfig(), getScoringConfig());
+    var data = await safeFetch(endpoint, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(pipelineBody(config, sourceOnly)),
+    }, {toast: false});
+    if (seq === cullAnalysisSeq) {
+      setPipelineResults(data, statusText, scoped);
+      if (!scoped) cullSourceCollectionId = selectedCollectionId;
+      if (sourceOnly && hasCullFilters()) await recomputeCulling(endpoint, statusText);
+      else cullScopeFailed = false;
+    }
+  } catch (error) {
+    if (seq === cullAnalysisSeq) {
+      var status = document.getElementById('cullStatus');
+      status.textContent = 'Error: ' + error.message;
+      status.style.color = 'var(--danger)';
+    }
+  } finally {
+    cullAnalysisPending--;
+    updateCullApplyButton();
+    if (!cullAnalysisPending) {
+      var indicator = document.getElementById('reflowIndicator');
+      if (indicator) indicator.style.display = 'none';
+    }
+  }
 }

@@ -724,45 +724,6 @@ function updateCullApplyButton() {
   document.querySelectorAll('.cull-filters input, .cull-filters button, #cullCollection').forEach(function(el) { el.disabled = !!editing; });
 }
 
-async function recomputeCulling(endpoint, statusText, sourceOnly) {
-  if (cullBusy || (window.vireoHistoryBusy && window.vireoHistoryBusy())) {
-    showToast('Wait for the current edit to finish before recomputing culling.', 'info');
-    return;
-  }
-  var scoped = !sourceOnly && hasCullFilters();
-  if (scoped && !cullScopePhotoIds().length) {
-    document.getElementById('cullStatus').textContent = 'No photos match the selected species and dates.';
-    return;
-  }
-  var seq = ++cullAnalysisSeq;
-  cullAnalysisPending++;
-  updateCullApplyButton();
-  try {
-    var config = Object.assign({}, getGroupingConfig(), getScoringConfig());
-    var data = await safeFetch(endpoint, {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(pipelineBody(config, sourceOnly)),
-    }, {toast: false});
-    if (seq === cullAnalysisSeq) {
-      setPipelineResults(data, statusText, scoped);
-      cullScopeFailed = false;
-      if (sourceOnly && hasCullFilters()) await recomputeCulling(endpoint, statusText);
-    }
-  } catch (error) {
-    if (seq === cullAnalysisSeq) {
-      var status = document.getElementById('cullStatus');
-      status.textContent = 'Error: ' + error.message;
-      status.style.color = 'var(--danger)';
-    }
-  } finally {
-    cullAnalysisPending--;
-    updateCullApplyButton();
-    if (!cullAnalysisPending) {
-      var indicator = document.getElementById('reflowIndicator');
-      if (indicator) indicator.style.display = 'none';
-    }
-  }
-}
 
 function doReflow() {
   clearTimeout(_reflowTimer);
