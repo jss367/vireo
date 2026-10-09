@@ -2176,16 +2176,26 @@ _TAXONOMY_RULE_FIELDS = (
 
 _TEXT_RULE_FIELDS = ("filename", "camera_make", "camera_model", "lens")
 
-# The lowercased extension (with its dot) of a photo's paired file, NULL when
-# it has none. A RAW+JPEG pair is one photo whose ``extension`` is the RAW's;
-# its JPEG lives only in ``companion_path`` (a bare filename). SQLite has no
-# "last index of", so trimming every non-dot character off the end finds the
-# last dot: ``rtrim`` strips trailing characters drawn from the name with its
-# dots removed.
+# A companion can be a bare name or a POSIX/Windows path. Extract the basename
+# first, so dots in directories cannot become formats. SQLite has no last-index
+# operation: trimming every non-separator character finds the final separator.
+_COMPANION_PATH_SQL = "replace(p.companion_path, char(92), '/')"
+_COMPANION_BASENAME_SQL = (
+    f"substr({_COMPANION_PATH_SQL}, length(rtrim({_COMPANION_PATH_SQL},"
+    f" replace({_COMPANION_PATH_SQL}, '/', ''))) + 1)"
+)
+_COMPANION_LAST_DOT_SQL = (
+    f"length(rtrim({_COMPANION_BASENAME_SQL},"
+    f" replace({_COMPANION_BASENAME_SQL}, '.', '')))"
+)
+# Match splitext semantics: a final dot must follow a non-dot basename
+# character. Leading-dot names such as .hidden and ..hidden have no extension.
 COMPANION_EXTENSION_SQL = (
-    "(CASE WHEN instr(p.companion_path, '.') > 0 THEN LOWER(substr("
-    "p.companion_path, length(rtrim(p.companion_path,"
-    " replace(p.companion_path, '.', ''))))) END)"
+    f"(CASE WHEN {_COMPANION_LAST_DOT_SQL} >"
+    f" length({_COMPANION_BASENAME_SQL}) -"
+    f" length(ltrim({_COMPANION_BASENAME_SQL}, '.'))"
+    f" THEN LOWER(substr({_COMPANION_BASENAME_SQL},"
+    f" {_COMPANION_LAST_DOT_SQL})) END)"
 )
 
 

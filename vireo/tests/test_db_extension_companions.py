@@ -24,3 +24,27 @@ def test_multi_dot_unicode_and_same_format_count(tmp_path, companion):
     values={v['value']:v['count'] for v in db.get_filter_field_values('extension')}
     assert values=={'.jpg':2,'.nef':2}
     assert db.get_workspace_extensions()==['.jpg','.nef']
+
+@pytest.mark.parametrize('companion', [
+    '/archive.v1/sidecar', r'C:\archive.v1\sidecar',
+    '.hidden', '..hidden', '/archive.v1/.hidden', r'C:\archive.v1\.hidden',
+    '/archive.v1/photo.JPG', r'C:\archive.v1\photo.JPEG',
+    '/archive.v1/.hidden.JPG', '...photo.JPG', 'photo.edit.JpG',
+])
+def test_companion_extension_uses_basename_splitext(tmp_path, companion):
+    import posixpath
+
+    db = _raw_jpeg_pair_db(tmp_path)
+    db.conn.execute('UPDATE photos SET companion_path=? WHERE filename=?',
+                    (companion, '_D854674.NEF'))
+    db.conn.commit()
+    expected = posixpath.splitext(companion.replace('\\', '/').rsplit('/', 1)[-1])[1].lower()
+    expected_options = sorted({'.jpg', '.nef'} | ({expected} if expected else set()))
+    assert db.get_workspace_extensions() == expected_options
+    facets = {v['value']: v['count'] for v in db.get_filter_field_values('extension')}
+    counts = {'.jpg': 1, '.nef': 2}
+    if expected:
+        counts[expected] = counts.get(expected, 0) + 1
+    assert facets == counts
+    if not expected:
+        assert db.count_photos_for_rules([{'field': 'extension', 'op': 'is not', 'value': '.jpg'}]) == 2
