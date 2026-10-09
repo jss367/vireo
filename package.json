@@ -2,7 +2,7 @@
   "name": "vireo",
   "private": true,
   "license": "MIT",
-  "version": "0.63.2",
+  "version": "0.63.3",
   "scripts": {
     "tauri": "tauri",
     "lint:frontend": "eslint vireo/static",
