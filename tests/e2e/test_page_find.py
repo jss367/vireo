@@ -218,3 +218,28 @@ def test_find_matches_across_inline_markup(live_server, page):
     page.keyboard.press("Escape")
     expect(page.locator("#findInlineText b").first).to_have_text("Scan for duplicate files")
     expect(page.locator("#findInlineText .page-find-mark")).to_have_count(0)
+
+
+def test_find_matches_rendered_whitespace_on_process_page(live_server, page):
+    page.goto(f"{live_server['url']}/pipeline")
+    expect(page.get_by_test_id("source-import-hint")).to_be_visible()
+    page.keyboard.press("Control+F")
+    page.locator("#pageFindInput").fill("on the Import page")
+    expect(page.locator("#pageFindStatus")).to_have_text("1 of 1")
+    expect(page.get_by_test_id("source-import-hint").locator(".page-find-mark")).to_have_count(3)
+
+
+def test_find_excludes_closed_bottom_panel(live_server, page):
+    page.goto(f"{live_server['url']}/life-list")
+    page.evaluate("""() => {
+        const p = document.createElement('p');
+        p.textContent = 'BottomPanelNeedle';
+        document.getElementById('bottomPanel').prepend(p);
+    }""")
+    page.keyboard.press("Control+F")
+    page.locator("#pageFindInput").fill("BottomPanelNeedle")
+    expect(page.locator("#pageFindStatus")).to_have_text("0 results")
+    page.evaluate("document.getElementById('bottomPanel').classList.add('open')")
+    expect(page.locator("#pageFindStatus")).to_have_text("1 of 1")
+    page.evaluate("document.getElementById('bottomPanel').classList.remove('open')")
+    expect(page.locator("#pageFindStatus")).to_have_text("0 results")

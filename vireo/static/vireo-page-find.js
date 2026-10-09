@@ -61,6 +61,12 @@
       }
       var style = computedStyle(current, styles);
       if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return false;
+      // Collapsed panels can retain child layout boxes while clipping all
+      // their content. Scrollable boxes still participate in page search.
+      if (style.display !== 'inline' && style.display !== 'contents' && (
+        (/^(hidden|clip)$/.test(style.overflowY) && current.clientHeight === 0) ||
+        (/^(hidden|clip)$/.test(style.overflowX) && current.clientWidth === 0)
+      )) return false;
     }
     return el.getClientRects().length > 0;
   }
