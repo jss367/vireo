@@ -350,7 +350,7 @@ def test_reveal_duplicate_outside_workspace(app_and_db, rejected):
         resp = c.post("/api/files/reveal", json={"photo_id": pid, "scope": "duplicates"})
         assert resp.status_code == 200
         assert resp.get_json()["ok"] is True
-        assert run.call_args.args[0] == ["open", "-R", "--", '/other/duplicates/copy.jpg']
+        assert run.call_args.args[0] == ["open", "-R", "--", os.path.join('/other/duplicates', 'copy.jpg')]
 
 
 def test_reveal_duplicate_scope_rejects_nonmember(app_and_db):
