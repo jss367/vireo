@@ -189,7 +189,7 @@ def create_system_blueprint(
             # Duplicate results are library-wide. Match their thumbnail
             # membership guard without allowing arbitrary hidden photos.
             duplicate_scope = body.get("scope") == "duplicates"
-            if duplicate_scope and not db.is_duplicate_group_member(pid_int):
+            if duplicate_scope and not db.duplicates.is_group_member(pid_int):
                 return json_error("photo not found", 404)
             photo = db.get_photo(pid_int, verify_workspace=not duplicate_scope)
             if not photo:

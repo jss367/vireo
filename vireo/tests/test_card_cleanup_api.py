@@ -40,7 +40,7 @@ def _archive_photo(db, tmp_path, name="IMG_0001.NEF", content=b"raw-one",
         file_size=st.st_size, file_mtime=st.st_mtime,
         file_hash=_sha(str(f)),
     )
-    db.update_photo_hash_check(pid, "ok")
+    db.audit.update_photo_hash_check(pid, "ok")
     return f, pid
 
 
@@ -751,7 +751,7 @@ def test_hash_failed_callout_reason_stays_in_sync(app_and_db):
 def test_hash_failed_callout_states_audit_workspace_scope(app_and_db):
     """Second-order Codex P2 review: the audit remedy suggested by the
     hash-failed callout is only reachable when the failed row is in the
-    active workspace, because Database.get_integrity_flagged() filters
+    active workspace, because db.audit.get_integrity_flagged() filters
     to the active workspace but _load_catalog_by_hash() matches globally.
     The callout must say so up front so the user does not click through
     to an empty Audit page — mirroring the workspace-scope note added

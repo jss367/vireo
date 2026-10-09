@@ -1,9 +1,9 @@
 """Behavior pins for the stats domain of ``Database``.
 
 The behavior tests exercise the dashboard, coverage and per-stage
-pending/stale counters only through the public ``Database`` façade, so they
-hold whether the SQL lives in ``db.py`` or in ``repositories/stats.py``.
-They pin the exact counts over one seeded library that has an offline
+pending/stale counters through the coordinated ``Database`` methods, and the
+scope staging and sampled medians through the ``db.stats`` accessor. They
+pin the exact counts over one seeded library that has an offline
 folder, a folder linked only to another workspace, secondary and noise
 detections, full-image anchors, stale and incomplete classifier runs,
 masks under two SAM variants and eye keypoints, plus the scope clauses
@@ -20,6 +20,7 @@ import textwrap
 import config as cfg
 import pytest
 from db import Database
+from repositories.stats import StatsRepository
 
 MODEL = "bioclip"
 OTHER_MODEL = "other-model"
@@ -253,7 +254,7 @@ def test_coverage_stats_counts_label_embeddings_and_honors_the_floor(db, lib):
     db.conn.commit()
     stats = db.get_coverage_stats()
     assert stats["label_embedding"] == 1
-    db.update_workspace(lib["ws"], config_overrides={"detector_confidence": 0.95})
+    db.workspaces.update(lib["ws"], config_overrides={"detector_confidence": 0.95})
     stats = db.get_coverage_stats()
     # Only full-image anchors (confidence 1.0) clear 0.95.
     assert (stats["detected"], stats["classified"]) == (3, 0)
@@ -425,7 +426,7 @@ def test_dashboard_stats_whole_workspace(db, lib):
 
 
 def test_dashboard_stats_with_previews_disabled(db, lib):
-    db.update_workspace(lib["ws"], config_overrides={"preview_max_size": 0})
+    db.workspaces.update(lib["ws"], config_overrides={"preview_max_size": 0})
     statements = _trace(db)
     attention = db.get_dashboard_stats()["attention"]
     assert attention["missing_previews"] == 0
@@ -471,7 +472,7 @@ def test_detection_counts(db, lib):
     assert db.count_primary_detections_in_scope(min_conf=0.99) == {
         "photos_with_dets": 0, "total_dets": 0,
     }
-    db.update_workspace(lib["ws"], config_overrides={"detector_confidence": 0.6})
+    db.workspaces.update(lib["ws"], config_overrides={"detector_confidence": 0.6})
     assert db.count_real_detections_in_scope()["total_dets"] == 2
 
 
@@ -561,7 +562,7 @@ def test_extract_stale(db, lib):
     assert db.count_extract_stale("sam2-large") == 0
     assert db.count_extract_stale("sam2-small", detector_confidence=0.85) == 0
     assert db.count_extract_stale("sam2-small", photo_ids=[lib["p1"]]) == 0
-    db.update_workspace(lib["ws"], config_overrides={"detector_confidence": 0.85})
+    db.workspaces.update(lib["ws"], config_overrides={"detector_confidence": 0.85})
     assert db.count_extract_stale("sam2-small") == 0
 
 
@@ -578,7 +579,7 @@ def test_eye_keypoint_counts(db, lib):
     _set(db, lib["p1"], eye_kp_fingerprint="v0")
     db.conn.commit()
     assert db.count_eye_keypoint_stale() == 1
-    db.update_workspace(lib["ws"], config_overrides={"detector_confidence": 0.95})
+    db.workspaces.update(lib["ws"], config_overrides={"detector_confidence": 0.95})
     assert db.count_eye_keypoint_eligible() == 0
     assert db.count_eye_keypoint_stale() == 0
     assert db.count_eye_keypoint_attemptable(0.0) == 0
@@ -631,7 +632,7 @@ def test_classification_inventory_pair_without_predictions(db, lib):
 
 
 def test_classification_inventory_reads_the_target_workspace_floor(db, lib):
-    db.update_workspace(lib["other_ws"], config_overrides={"detector_confidence": 0.95})
+    db.workspaces.update(lib["other_ws"], config_overrides={"detector_confidence": 0.95})
     db.set_active_workspace(None)
     other = db.get_classification_inventory(lib["other_ws"])
     assert other["total_real_detections"] == 0
@@ -664,16 +665,16 @@ def test_classification_inventory_needs_no_active_workspace(db, lib):
 
 
 def test_sampled_top1_medians(db, lib):
-    assert db._sampled_top1_medians(lib["ws"], 0.2, 100) == {
+    assert db.stats.sampled_top1_medians(lib["ws"], 0.2, 100) == {
         (MODEL, FP): (pytest.approx(0.85), 2),
         (MODEL, OLD_FP): (0.5, 2),
         (OTHER_MODEL, "fpX"): (0.7, 1),
     }
-    capped = db._sampled_top1_medians(lib["ws"], 0.2, 1)
+    capped = db.stats.sampled_top1_medians(lib["ws"], 0.2, 1)
     assert {v[1] for v in capped.values()} == {1}
-    assert db._sampled_top1_medians(lib["ws"], 0.99, 100) == {}
+    assert db.stats.sampled_top1_medians(lib["ws"], 0.99, 100) == {}
     db.conn.execute("UPDATE predictions SET confidence = NULL")
-    assert db._sampled_top1_medians(lib["ws"], 0.2, 100) == {}
+    assert db.stats.sampled_top1_medians(lib["ws"], 0.2, 100) == {}
     db.conn.rollback()
 
 
@@ -710,20 +711,20 @@ def test_large_scope_counts_match_inline_scope(db, lib):
 def test_stage_scope_ids_rejects_unknown_table(db):
     statements = _trace(db)
     with pytest.raises(ValueError, match="Unknown scope table"):
-        db._stage_scope_ids("photos", [1])
+        db.stats.stage_scope_ids("photos", [1])
     assert statements == []
 
 
 def test_stage_scope_ids_replaces_and_supports_both_tables(db):
-    db._stage_scope_ids("missing_subtree_ids", [1, 2, 2])
-    db._stage_scope_ids("missing_subtree_ids", [5])
+    db.stats.stage_scope_ids("missing_subtree_ids", [1, 2, 2])
+    db.stats.stage_scope_ids("missing_subtree_ids", [5])
     rows = db.conn.execute("SELECT id FROM temp.missing_subtree_ids").fetchall()
     assert [r[0] for r in rows] == [5]
     assert not db.conn.in_transaction
 
 
 def test_stage_scope_ids_rolls_back_a_failed_stage(db, lib):
-    db._stage_scope_ids("scope_ids", [1, 2])
+    db.stats.stage_scope_ids("scope_ids", [1, 2])
 
     def ids():
         yield 3
@@ -731,7 +732,7 @@ def test_stage_scope_ids_rolls_back_a_failed_stage(db, lib):
 
     db.conn.execute("UPDATE photos SET rating = 3 WHERE id = ?", (lib["p2"],))
     with pytest.raises(KeyError):
-        db._stage_scope_ids("scope_ids", ids())
+        db.stats.stage_scope_ids("scope_ids", ids())
     # The failed stage is undone to the savepoint; the caller's own
     # uncommitted write and transaction survive.
     rows = db.conn.execute("SELECT id FROM temp.scope_ids ORDER BY id").fetchall()
@@ -774,6 +775,30 @@ def test_scoped_reader_requires_active_workspace(db, lib, name, args):
     statements = _trace(db)
     with pytest.raises(RuntimeError, match="No active workspace set"):
         getattr(db, name)(*args)
+    assert statements == []
+
+
+@pytest.mark.parametrize("name,args", SCOPED_READERS)
+def test_scoped_reader_checks_the_workspace_before_config_or_scope(
+    db, lib, monkeypatch, name, args,
+):
+    """With no workspace, a coordinated counter raises first thing.
+
+    ``_stats_repository`` resolves the workspace up front (as it did before
+    the repository took a lazy resolver), so the workspace-effective config is
+    never read and a large photo-id scope is never staged.
+    """
+    def no_config():
+        raise AssertionError("config read before the workspace check")
+
+    monkeypatch.setattr(cfg, "load", no_config)
+    kwargs = {}
+    if "photo_ids" in inspect.signature(getattr(Database, name)).parameters:
+        kwargs["photo_ids"] = range(1, 900)
+    db.set_active_workspace(None)
+    statements = _trace(db)
+    with pytest.raises(RuntimeError, match="No active workspace set"):
+        getattr(db, name)(*args, **kwargs)
     assert statements == []
 
 
@@ -835,7 +860,6 @@ STATS_METHODS = [
     "_dashboard_scope_clause",
     "get_coverage_stats",
     "get_folder_coverage_stats",
-    "_stage_scope_ids",
     "count_real_detections_in_scope",
     "count_primary_detections_in_scope",
     "count_classify_pending_pairs",
@@ -846,7 +870,6 @@ STATS_METHODS = [
     "count_full_image_classify_pending_pairs",
     "count_full_image_classify_stale",
     "get_classification_inventory",
-    "_sampled_top1_medians",
     "count_photos_pending_masks",
     "count_photos_missing_thumb",
     "count_photos_missing_preview",
@@ -876,3 +899,68 @@ def test_stats_method_delegates_to_repository(name):
     assert "_stats_repository" in attrs, (
         f"Database.{name} no longer delegates to StatsRepository"
     )
+
+
+# -- the ``db.stats`` accessor --------------------------------------------------
+
+# The forwarding wrappers ``db.stats`` replaced.
+_REMOVED_STATS_WRAPPERS = ("_stage_scope_ids", "_sampled_top1_medians")
+
+
+def test_stats_is_a_fresh_repository_on_the_connection_per_access(db):
+    """``db.stats`` builds a new repository each time, never a cached one.
+
+    The workspace is passed as ``Database._ws_id`` itself, uncalled, so
+    building the repository resolves nothing.
+    """
+    first, second = db.stats, db.stats
+    assert isinstance(first, StatsRepository)
+    assert first is not second
+    assert first.conn is db.conn
+    assert first.workspace_id_fn == db._ws_id
+    assert first.coverage_photo_columns is Database._COVERAGE_PHOTO_COLUMNS
+
+
+def test_stats_accessor_needs_a_workspace_only_for_scoped_reads(db, lib):
+    """Reaching ``db.stats`` and the unscoped methods work with no workspace;
+    a workspace-scoped read raises when called, before any SQL."""
+    db.set_active_workspace(None)
+    repo = db.stats
+    db.stats.stage_scope_ids("scope_ids", [1, 2])
+    assert db.stats.sampled_top1_medians(lib["ws"], 0.99, 100) == {}
+    statements = _trace(db)
+    with pytest.raises(RuntimeError, match="No active workspace set"):
+        repo.folder_linked(lib["f_root"])
+    with pytest.raises(RuntimeError, match="No active workspace set"):
+        repo.count_photos_missing_thumb("", [])
+    assert statements == []
+
+
+def test_stats_scoped_reads_follow_the_workspace_active_at_each_call(db, lib):
+    """A switch between two ``db.stats`` calls (or two calls on one held
+    repository) reads the new workspace."""
+    held = db.stats
+    assert db.stats.folder_linked(lib["f_root"]) is True
+    assert db.stats.folder_linked(lib["f_other"]) is False
+    db.set_active_workspace(lib["other_ws"])
+    assert db.stats.folder_linked(lib["f_root"]) is False
+    assert held.folder_linked(lib["f_other"]) is True
+    db.set_active_workspace(lib["ws"])
+    assert held.folder_linked(lib["f_root"]) is True
+
+
+def test_stats_has_no_forwarding_wrappers_on_database():
+    """The domain is reached through ``db.stats``; Database keeps no aliases."""
+    for name in _REMOVED_STATS_WRAPPERS:
+        assert not hasattr(Database, name), f"Database.{name} came back; call db.stats"
+    accessor = Database.__dict__["stats"]
+    assert isinstance(accessor, property)
+    attrs = {
+        node.attr
+        for node in ast.walk(ast.parse(textwrap.dedent(inspect.getsource(accessor.fget))))
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    }
+    assert "_stats_repository" in attrs
+    assert "conn" not in attrs

@@ -125,7 +125,7 @@ def test_get_tabs_drops_retired_nav_ids(app_and_db):
     )
     db.conn.commit()
 
-    assert db.get_tabs() == ["browse", "cull"]
+    assert db.workspaces.get_tabs() == ["browse", "cull"]
 
     client = app.test_client()
     body = client.get("/api/workspace/tabs").get_json()

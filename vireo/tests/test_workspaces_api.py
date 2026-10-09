@@ -143,7 +143,7 @@ def test_update_workspace(app_and_db):
 
 
 def _stored_overrides(db, ws_id):
-    raw = db.get_workspace(ws_id)["config_overrides"]
+    raw = db.workspaces.get(ws_id)["config_overrides"]
     return json.loads(raw) if raw else None
 
 
@@ -151,7 +151,7 @@ def test_create_workspace_rejects_string_location_keywords_override(app_and_db):
     """A string ``"false"`` would read back as True via bool(), so reject it."""
     app, db = app_and_db
     client = app.test_client()
-    before = {ws["id"] for ws in db.get_workspaces()}
+    before = {ws["id"] for ws in db.workspaces.list_all()}
 
     resp = client.post("/api/workspaces", json={
         "name": "Bad Override",
@@ -159,7 +159,7 @@ def test_create_workspace_rejects_string_location_keywords_override(app_and_db):
     })
     assert resp.status_code == 400
     assert "write_location_keywords_to_xmp" in resp.get_json()["error"]
-    assert {ws["id"] for ws in db.get_workspaces()} == before
+    assert {ws["id"] for ws in db.workspaces.list_all()} == before
 
 
 @pytest.mark.parametrize("value", [True, False])
@@ -198,7 +198,7 @@ def test_create_workspace_rejects_null_location_keywords_override(app_and_db):
     override a global True, so the key must be a boolean or omitted."""
     app, db = app_and_db
     client = app.test_client()
-    before = {ws["id"] for ws in db.get_workspaces()}
+    before = {ws["id"] for ws in db.workspaces.list_all()}
 
     resp = client.post("/api/workspaces", json={
         "name": "Null Override",
@@ -206,7 +206,7 @@ def test_create_workspace_rejects_null_location_keywords_override(app_and_db):
     })
     assert resp.status_code == 400
     assert "write_location_keywords_to_xmp" in resp.get_json()["error"]
-    assert {ws["id"] for ws in db.get_workspaces()} == before
+    assert {ws["id"] for ws in db.workspaces.list_all()} == before
 
 
 def test_update_workspace_rejects_null_location_keywords_override(app_and_db):
@@ -298,12 +298,12 @@ def test_delete_workspace_protects_pending_nas_originals(app_and_db, state):
     response = client.delete(f"/api/workspaces/{workspace_id}")
     if state == "complete":
         assert response.status_code == 200
-        assert db.get_workspace(workspace_id) is None
+        assert db.workspaces.get(workspace_id) is None
         assert db.conn.execute("SELECT 1 FROM pending_archives WHERE id = 'archive'").fetchone() is None
     else:
         assert response.status_code == 409
         assert "Send pending photos to NAS" in response.get_json()["error"]
-        assert db.get_workspace(workspace_id) is not None
+        assert db.workspaces.get(workspace_id) is not None
         assert db.conn.execute("SELECT 1 FROM pending_archives WHERE id = 'archive'").fetchone()
 
 
@@ -436,7 +436,7 @@ def test_activate_saves_and_restores_path(app_and_db):
     ws_b_id = create_resp.get_json()["id"]
 
     # Set ui_state on WS-B with a last_path
-    db.update_workspace(ws_b_id, ui_state={"last_path": "/browse?folder=5"})
+    db.workspaces.update(ws_b_id, ui_state={"last_path": "/browse?folder=5"})
 
     # Activate WS-B while sending current_path for the old workspace
     resp = client.post(
@@ -448,9 +448,9 @@ def test_activate_saves_and_restores_path(app_and_db):
     assert data["restore_path"] == "/browse?folder=5"
 
     # Verify the old workspace had /review saved
-    old_ws = db.get_workspace(db.get_workspaces()[-1]["id"])
+    old_ws = db.workspaces.get(db.workspaces.list_all()[-1]["id"])
     # Find the Default workspace (the one we just left)
-    all_ws = db.get_workspaces()
+    all_ws = db.workspaces.list_all()
     default_ws = [w for w in all_ws if w["name"] == "Default"][0]
     ui = json.loads(default_ws["ui_state"]) if default_ws["ui_state"] else {}
     assert ui.get("last_path") == "/review"

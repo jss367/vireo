@@ -2989,7 +2989,7 @@ class _RuleQueryBuilder:
         return (has if _truthy(value) else f"NOT {has}"), []
 
     def _is_duplicate_rule(self, field, op, value, rule):
-        """Catalog-wide by file_hash to match find_duplicate_groups()
+        """Catalog-wide by file_hash to match ``db.duplicates.find_groups()``
         and apply_duplicate_resolution — a photo whose only duplicate
         lives in another workspace is still a duplicate here (the
         Duplicates workflow will act on it), so Browse must not hide
@@ -3022,7 +3022,7 @@ class _RuleQueryBuilder:
 
     def _duplicate_group_rule(self, field, op, value, rule):
         """Duplicate groups have no id table; membership is identity
-        on file_hash (see find_duplicate_groups).
+        on file_hash (see ``DuplicatesRepository.find_groups``).
         """
         if op in ("equals", "is"):
             return "p.file_hash = ?", [value]

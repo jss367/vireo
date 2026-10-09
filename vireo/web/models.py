@@ -647,7 +647,7 @@ def create_models_blueprint(
         # one: a selection naming a deleted file blocks classification and
         # no checkbox can clear it, because the UI lists only files it can
         # find.
-        get_db().forget_label_file(labels_file)
+        get_db().workspaces.forget_label_file(labels_file)
         return jsonify({"ok": True})
 
     @blueprint.route("/api/labels/active", methods=["POST"])

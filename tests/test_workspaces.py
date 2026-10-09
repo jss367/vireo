@@ -35,7 +35,7 @@ def test_pending_changes_has_workspace_id(db):
 def test_create_workspace(db):
     ws_id = db.create_workspace("Kenya 2025")
     assert ws_id is not None
-    ws = db.get_workspace(ws_id)
+    ws = db.workspaces.get(ws_id)
     assert ws["name"] == "Kenya 2025"
 
 
@@ -48,7 +48,7 @@ def test_create_workspace_duplicate_name_raises(db):
 def test_get_workspaces(db):
     db.create_workspace("A")
     db.create_workspace("B")
-    workspaces = db.get_workspaces()
+    workspaces = db.workspaces.list_all()
     names = [w["name"] for w in workspaces]
     assert "A" in names
     assert "B" in names
@@ -56,15 +56,15 @@ def test_get_workspaces(db):
 
 def test_update_workspace(db):
     ws_id = db.create_workspace("Old Name")
-    db.update_workspace(ws_id, name="New Name")
-    ws = db.get_workspace(ws_id)
+    db.workspaces.update(ws_id, name="New Name")
+    ws = db.workspaces.get(ws_id)
     assert ws["name"] == "New Name"
 
 
 def test_delete_workspace(db):
     ws_id = db.create_workspace("Temp")
     db.delete_workspace(ws_id)
-    assert db.get_workspace(ws_id) is None
+    assert db.workspaces.get(ws_id) is None
 
 
 def test_workspace_folders(db):
@@ -380,7 +380,7 @@ def test_set_active_workspace(db):
 
 def test_ensure_default_workspace(db):
     ws_id = db.ensure_default_workspace()
-    ws = db.get_workspace(ws_id)
+    ws = db.workspaces.get(ws_id)
     assert ws["name"] == "Default"
     # Calling again returns same id
     assert db.ensure_default_workspace() == ws_id
@@ -934,7 +934,7 @@ def test_set_workspace_active_labels_preserves_other_overrides(db):
     result = db.get_workspace_active_labels()
     assert result == ["/path/to/labels.txt"]
     # Check threshold is still there
-    overrides = json.loads(db.get_workspace(ws)["config_overrides"])
+    overrides = json.loads(db.workspaces.get(ws)["config_overrides"])
     assert overrides["threshold"] == 0.5
 
 
@@ -2740,7 +2740,7 @@ def test_get_tabs_returns_default_for_new_workspace(db):
     from db import DEFAULT_TABS
     ws_id = db.create_workspace("Fresh")
     db.set_active_workspace(ws_id)
-    assert db.get_tabs() == DEFAULT_TABS
+    assert db.workspaces.get_tabs() == DEFAULT_TABS
 
 
 def test_get_tabs_upgrades_legacy_compare_nav_id(db):
@@ -2754,7 +2754,7 @@ def test_get_tabs_upgrades_legacy_compare_nav_id(db):
         (json.dumps(["browse", "compare", "settings"]), ws_id),
     )
     db.conn.commit()
-    assert db.get_tabs() == ["browse", "id_conflicts", "settings"]
+    assert db.workspaces.get_tabs() == ["browse", "id_conflicts", "settings"]
 
 
 def test_get_tabs_dedupes_when_alias_collides(db):
@@ -2768,24 +2768,24 @@ def test_get_tabs_dedupes_when_alias_collides(db):
         (json.dumps(["compare", "browse", "id_conflicts"]), ws_id),
     )
     db.conn.commit()
-    assert db.get_tabs() == ["id_conflicts", "browse"]
+    assert db.workspaces.get_tabs() == ["id_conflicts", "browse"]
 
 
 def test_pin_tab_appends(db):
     from db import DEFAULT_TABS
     ws_id = db.create_workspace("Fresh")
     db.set_active_workspace(ws_id)
-    result = db.pin_tab("logs")
+    result = db.workspaces.pin_tab("logs")
     assert result == DEFAULT_TABS + ["logs"]
-    assert db.get_tabs() == DEFAULT_TABS + ["logs"]
+    assert db.workspaces.get_tabs() == DEFAULT_TABS + ["logs"]
 
 
 def test_pin_tab_idempotent(db):
     ws_id = db.create_workspace("Fresh")
     db.set_active_workspace(ws_id)
-    db.pin_tab("logs")
-    db.pin_tab("logs")
-    assert db.get_tabs().count("logs") == 1
+    db.workspaces.pin_tab("logs")
+    db.workspaces.pin_tab("logs")
+    assert db.workspaces.get_tabs().count("logs") == 1
 
 
 def test_pin_tab_rejects_unknown_id(db):
@@ -2793,7 +2793,7 @@ def test_pin_tab_rejects_unknown_id(db):
     ws_id = db.create_workspace("Fresh")
     db.set_active_workspace(ws_id)
     with pytest.raises(ValueError):
-        db.pin_tab("not_a_real_page")
+        db.workspaces.pin_tab("not_a_real_page")
 
 
 def test_all_registered_pages_are_valid_tab_ids():
@@ -2807,25 +2807,25 @@ def test_all_registered_pages_are_valid_tab_ids():
 def test_unpin_tab_removes(db):
     ws_id = db.create_workspace("Fresh")
     db.set_active_workspace(ws_id)
-    db.unpin_tab("settings")
-    assert "settings" not in db.get_tabs()
+    db.workspaces.unpin_tab("settings")
+    assert "settings" not in db.workspaces.get_tabs()
 
 
 def test_unpin_tab_idempotent_when_not_pinned(db):
     ws_id = db.create_workspace("Fresh")
     db.set_active_workspace(ws_id)
-    db.unpin_tab("logs")  # not in defaults
-    db.unpin_tab("logs")  # again
-    assert "logs" not in db.get_tabs()
+    db.workspaces.unpin_tab("logs")  # not in defaults
+    db.workspaces.unpin_tab("logs")  # again
+    assert "logs" not in db.workspaces.get_tabs()
 
 
 def test_set_tabs_replaces_full_list(db):
     ws_id = db.create_workspace("Fresh")
     db.set_active_workspace(ws_id)
     new_order = ["cull", "review", "browse"]
-    result = db.set_tabs(new_order)
+    result = db.workspaces.set_tabs(new_order)
     assert result == new_order
-    assert db.get_tabs() == new_order
+    assert db.workspaces.get_tabs() == new_order
 
 
 def test_set_tabs_rejects_unknown_id(db):
@@ -2833,7 +2833,7 @@ def test_set_tabs_rejects_unknown_id(db):
     ws_id = db.create_workspace("Fresh")
     db.set_active_workspace(ws_id)
     with pytest.raises(ValueError):
-        db.set_tabs(["browse", "not_a_real_page"])
+        db.workspaces.set_tabs(["browse", "not_a_real_page"])
 
 
 def test_set_tabs_rejects_duplicates(db):
@@ -2841,7 +2841,7 @@ def test_set_tabs_rejects_duplicates(db):
     ws_id = db.create_workspace("Fresh")
     db.set_active_workspace(ws_id)
     with pytest.raises(ValueError):
-        db.set_tabs(["browse", "browse", "review"])
+        db.workspaces.set_tabs(["browse", "browse", "review"])
 
 
 def test_tabs_are_per_workspace(db):
@@ -2849,11 +2849,11 @@ def test_tabs_are_per_workspace(db):
     ws1 = db.create_workspace("WS1")
     ws2 = db.create_workspace("WS2")
     db.set_active_workspace(ws1)
-    db.pin_tab("logs")
-    assert "logs" in db.get_tabs()
+    db.workspaces.pin_tab("logs")
+    assert "logs" in db.workspaces.get_tabs()
     db.set_active_workspace(ws2)
-    assert db.get_tabs() == DEFAULT_TABS
-    assert "logs" not in db.get_tabs()
+    assert db.workspaces.get_tabs() == DEFAULT_TABS
+    assert "logs" not in db.workspaces.get_tabs()
 
 
 # ---------------------------------------------------------------------------

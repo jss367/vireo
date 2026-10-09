@@ -550,7 +550,7 @@ def test_verify_hashes_ok_and_baseline(tmp_path):
         "WHERE filename = 'nohash.jpg'").fetchone()
     assert row['file_hash'] is not None
     assert row['hash_status'] == 'ok'
-    runs = db.get_audit_runs()
+    runs = db.audit.get_runs()
     assert runs['integrity']['problem_count'] == 0
 
 
@@ -625,8 +625,8 @@ def test_verify_hashes_flags_corruption_when_mtime_unchanged(tmp_path):
         "SELECT hash_status FROM photos WHERE filename = 'rot.jpg'"
     ).fetchone()
     assert row['hash_status'] == 'corrupt'
-    assert db.get_audit_runs()['integrity']['problem_count'] == 1
-    flagged = db.get_integrity_flagged()
+    assert db.audit.get_runs()['integrity']['problem_count'] == 1
+    flagged = db.audit.get_integrity_flagged()
     assert len(flagged) == 1
     assert flagged[0]['filename'] == 'rot.jpg'
 
@@ -677,14 +677,14 @@ def test_accept_current_hash_clears_flag(tmp_path):
     st = os.stat(path)
     os.utime(path, (st.st_atime, st.st_mtime + 10))
     verify_hashes(db)
-    assert len(db.get_integrity_flagged()) == 1
+    assert len(db.audit.get_integrity_flagged()) == 1
 
     pid = db.conn.execute(
         "SELECT id FROM photos WHERE filename = 'edited.jpg'").fetchone()['id']
     accepted = accept_current_hash(db, [pid])
 
     assert accepted == 1
-    assert db.get_integrity_flagged() == []
+    assert db.audit.get_integrity_flagged() == []
     # Re-verifying immediately is clean: the new baseline matches disk.
     stats = verify_hashes(db)
     assert stats['ok'] == 1 and stats['modified'] == 0
@@ -762,14 +762,14 @@ def test_rescan_resets_hash_coverage_after_external_edit(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     scan(root, db)
     verify_hashes(db)
-    assert db.get_integrity_stats()['unchecked'] == 0
+    assert db.audit.get_integrity_stats()['unchecked'] == 0
 
     # Touch-only rescan: mtime moves but bytes are identical, so the
     # recomputed hash matches the verified baseline — coverage survives.
     st = os.stat(path)
     os.utime(path, (st.st_atime, st.st_mtime + 5))
     scan(root, db)
-    assert db.get_integrity_stats()['unchecked'] == 0
+    assert db.audit.get_integrity_stats()['unchecked'] == 0
 
     # External edit + rescan: the scanner adopts a new baseline that this
     # audit never verified, so the verdict and coverage must reset.
@@ -783,7 +783,7 @@ def test_rescan_resets_hash_coverage_after_external_edit(tmp_path):
         "WHERE filename = 'edited.jpg'").fetchone()
     assert row['hash_checked_at'] is None
     assert row['hash_status'] is None
-    stats = db.get_integrity_stats()
+    stats = db.audit.get_integrity_stats()
     assert stats['unchecked'] == 1
     assert stats['checked'] == 0
 
@@ -808,7 +808,7 @@ def test_build_summary_states(tmp_path):
 
     # Four checks ran clean but hashes never verified: still not intact
     for name in ('drift', 'orphans', 'untracked', 'sidecars'):
-        db.record_audit_run(name, 0)
+        db.audit.record_run(name, 0)
     s = build_summary(db)
     assert s['status'] == 'unverified'
 
@@ -821,13 +821,13 @@ def test_build_summary_states(tmp_path):
     # A new photo lands after the verify run: clean but stale
     Image.new('RGB', (60, 60)).save(os.path.join(root, 'new.jpg'))
     scan(root, db, incremental=True)
-    db.record_audit_run('untracked', 0)
+    db.audit.record_run('untracked', 0)
     s = build_summary(db)
     assert s['status'] == 'stale'
     assert s['integrity']['unchecked'] == 1
 
     # A check with findings: problems
-    db.record_audit_run('drift', 3)
+    db.audit.record_run('drift', 3)
     s = build_summary(db)
     assert s['status'] == 'problems'
     assert s['problem_count'] == 3
@@ -850,7 +850,7 @@ def test_verify_hashes_missing_file_updates_orphans_verdict(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     scan(root, db)
     for name in ('drift', 'orphans', 'untracked', 'sidecars'):
-        db.record_audit_run(name, 0)
+        db.audit.record_run(name, 0)
     verify_hashes(db)
     assert build_summary(db)['status'] == 'intact'
 
@@ -860,7 +860,7 @@ def test_verify_hashes_missing_file_updates_orphans_verdict(tmp_path):
     assert stats['missing'] == 1
 
     # The missing file lands on the orphans verdict, not integrity's.
-    runs = db.get_audit_runs()
+    runs = db.audit.get_runs()
     assert runs['orphans']['problem_count'] == 1
     assert runs['integrity']['problem_count'] == 0
 
@@ -874,7 +874,7 @@ def test_verify_hashes_missing_file_updates_orphans_verdict(tmp_path):
         "UPDATE photos SET file_hash = NULL WHERE filename = 'gone.jpg'")
     db.conn.commit()
     verify_hashes(db)
-    assert db.get_audit_runs()['orphans']['problem_count'] == 0
+    assert db.audit.get_runs()['orphans']['problem_count'] == 0
     assert build_summary(db)['status'] == 'intact'
 
 
@@ -894,7 +894,7 @@ def test_build_summary_missing_folder_blocks_intact(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     scan(root, db)
     for name in ('drift', 'orphans', 'untracked', 'sidecars'):
-        db.record_audit_run(name, 0)
+        db.audit.record_run(name, 0)
     verify_hashes(db)
     assert build_summary(db)['status'] == 'intact'
 
@@ -973,7 +973,7 @@ def test_untracked_and_sidecar_endpoints_use_workspace_roots(
     assert len(strays) == 1
     assert strays[0]['path'].endswith('ghost.xmp')
 
-    runs = db.get_audit_runs()
+    runs = db.audit.get_runs()
     assert runs['untracked']['problem_count'] == 1
     assert runs['sidecars']['problem_count'] == 1
 

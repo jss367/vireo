@@ -1495,7 +1495,7 @@ def test_expanded_stack_paints_its_members_once(live_server, page):
     # A hidden member only learns its iNat state from the request the
     # expansion fires, so this badge appearing is proof that metadata landed
     # on a card that was already on screen.
-    db.record_inat_submission(
+    db.inat.record_submission(
         hidden_member_id, 12345, "https://www.inaturalist.org/observations/12345"
     )
 

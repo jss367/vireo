@@ -1910,7 +1910,7 @@ def _stamp_landed_and_validate_catalog(state, batch_st, db, params, rel, *,
             continue
         if row["file_hash"] == verified_hash:
             if attests_bytes:
-                db.update_photo_hash_check(
+                db.audit.update_photo_hash_check(
                     row["id"], "ok", commit=False,
                 )
             state.imported_photo_ids.add(row["id"])
@@ -1941,7 +1941,7 @@ def _stamp_landed_and_validate_catalog(state, batch_st, db, params, rel, *,
                 # EMPTY would recreate the every-empty-file
                 # collision the convention exists to prevent).
                 if attests_bytes:
-                    db.update_photo_hash_check(
+                    db.audit.update_photo_hash_check(
                         row["id"], "ok",
                         file_hash=(
                             verified_hash

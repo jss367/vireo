@@ -2747,7 +2747,7 @@ def test_browse_lightbox_does_not_preload_when_full_already_uses_original(
 ):
     """Full-resolution preview mode must not request the original twice."""
     db = live_server["db"]
-    db.update_workspace(
+    db.workspaces.update(
         db._active_workspace_id,
         config_overrides={"preview_max_size": 0},
     )

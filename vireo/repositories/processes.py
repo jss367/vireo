@@ -3,18 +3,25 @@
 Saved processes are global: the table is shared across workspaces, so the
 repository takes no workspace id. ``delete`` also clears any workspace's
 ``pipeline.default_process_id`` override that pointed at the deleted row.
-``Database`` keeps the existence checks (``get_saved_process``) on the
-façade and calls in here for the SQL.
+
+Callers reach it as ``db.processes`` (a fresh repository per access, see
+``Database.processes``) for :meth:`list_all`, :meth:`get` and
+:meth:`create`; there are no forwarding wrappers on ``Database``.
+``Database.update_saved_process`` and ``Database.delete_saved_process`` stay
+on the façade: each checks the row exists through :meth:`get` before calling
+:meth:`update` / :meth:`delete`, so call those rather than the repository
+methods.
 """
 
 import json
 import sqlite3
+from typing import Any
 
 from repositories import UNSET
 
 
 class ProcessesRepository:
-    def __init__(self, conn):
+    def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
 
     @staticmethod
@@ -32,14 +39,14 @@ class ProcessesRepository:
             "sort_order": row["sort_order"],
         }
 
-    def list_all(self):
+    def list_all(self) -> list[dict[str, Any]]:
         """Return all saved processes ordered for display (sort_order, id)."""
         rows = self.conn.execute(
             "SELECT * FROM saved_processes ORDER BY sort_order, id"
         ).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
-    def get(self, process_id):
+    def get(self, process_id: int) -> dict[str, Any] | None:
         """Return one saved process as a dict, or None if it doesn't exist."""
         row = self.conn.execute(
             "SELECT * FROM saved_processes WHERE id = ?", (process_id,)
@@ -65,10 +72,10 @@ class ProcessesRepository:
             review_mode,
         )
 
-    def create(self, name, *, skip_classify=False,
-               skip_extract_masks=False, skip_eye_keypoints=False,
-               skip_regroup=False, miss_enabled=True,
-               review_mode=None):
+    def create(self, name: str, *, skip_classify: bool = False,
+               skip_extract_masks: bool = False, skip_eye_keypoints: bool = False,
+               skip_regroup: bool = False, miss_enabled: bool = True,
+               review_mode: str | None = None) -> int:
         """Insert a saved process, commit, and return its id.
 
         Raises ValueError on a blank/duplicate name or a bad review_mode.
@@ -96,10 +103,12 @@ class ProcessesRepository:
         self.conn.commit()
         return cur.lastrowid
 
-    def update(self, process_id, current, *, name=None,
-               skip_classify=None, skip_extract_masks=None,
-               skip_eye_keypoints=None, skip_regroup=None,
-               miss_enabled=None, review_mode=UNSET):
+    def update(self, process_id: int, current: dict[str, Any], *,
+               name: str | None = None, skip_classify: bool | None = None,
+               skip_extract_masks: bool | None = None,
+               skip_eye_keypoints: bool | None = None,
+               skip_regroup: bool | None = None, miss_enabled: bool | None = None,
+               review_mode: Any = UNSET) -> bool:
         """Merge the given fields over ``current`` (the existing row as a
         dict), write them, commit, and return True.
 
@@ -135,7 +144,7 @@ class ProcessesRepository:
         self.conn.commit()
         return True
 
-    def delete(self, process_id):
+    def delete(self, process_id: int) -> bool:
         """Delete a saved process, null every workspace default pointing at
         it, commit, and return True. The caller checks that it exists.
         """

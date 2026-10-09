@@ -25,6 +25,7 @@ import unicodedata
 import db as db_module
 import pytest
 from db import Database, MissingPhotosCancelled
+from repositories.stats import StatsRepository
 
 
 class _RecordingCache:
@@ -612,9 +613,9 @@ def test_get_missing_photos_large_subtree_uses_temp_table(db, tmp_path, monkeypa
     froot, fsub, ids = _ghost_setup(db, tmp_path)
     monkeypatch.setattr(db_module, "_SQLITE_PARAM_CHUNK_SIZE", 1)
     staged = []
-    real = Database._stage_scope_ids
+    real = StatsRepository.stage_scope_ids
     monkeypatch.setattr(
-        Database, "_stage_scope_ids",
+        StatsRepository, "stage_scope_ids",
         lambda self, name, values: (staged.append((name, sorted(values))), real(self, name, values))[1],
     )
     got = [r["id"] for r in db.get_missing_photos(folder_id=froot)]

@@ -101,7 +101,7 @@ def regroup_stage(run: PipelineRun):
                 # longer contains any triage output. Invalidate the
                 # stamp so a subsequent full run is correctly shown
                 # as will-run.
-                thread_db.set_workspace_group_state(
+                thread_db.workspaces.set_group_state(
                     workspace_id=run.workspace_id,
                     fingerprint=None,
                     when_ts=None,
@@ -226,7 +226,7 @@ def regroup_stage(run: PipelineRun):
                 and not per_run_eye_override_differs
             )
             if covered_full_workspace:
-                thread_db.set_workspace_group_state(
+                thread_db.workspaces.set_group_state(
                     workspace_id=run.workspace_id,
                     fingerprint=compute_group_fingerprint(effective_cfg),
                     when_ts=int(time.time()),
@@ -238,7 +238,7 @@ def regroup_stage(run: PipelineRun):
                 # no longer reflects the full workspace. Invalidate so
                 # the pipeline page surfaces the staleness as will-run
                 # instead of falsely reporting done-prior.
-                thread_db.set_workspace_group_state(
+                thread_db.workspaces.set_group_state(
                     workspace_id=run.workspace_id,
                     fingerprint=None,
                     when_ts=None,
