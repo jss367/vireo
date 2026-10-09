@@ -4,6 +4,7 @@ resolves all groups in the bucket.
 """
 import json
 
+import pytest
 from playwright.sync_api import expect
 
 
@@ -106,21 +107,87 @@ def test_duplicates_bulk_decide_reveal_in_finder_posts_bucket_folders(live_serve
     def handle(route):
         req = route.request
         captured["body"] = req.post_data_json
-        route.fulfill(
-            status=200,
-            content_type="application/json",
-            body='{"ok": true, "revealed": ["' + folder_a + '", "' + folder_b +
-                 '"], "skipped": [], "failed": []}',
-        )
+        captured["route"] = route
 
     page.route("**/api/folders/reveal", handle)
     page.goto(f"{live_server['url']}/duplicates")
     expect(page.locator(".bucket-card")).to_have_count(1)
 
-    page.locator(".bucket-card .reveal-btn").click()
-    # Locator-style waiting: the request body should land before this returns.
-    expect(page.locator(".bucket-card")).to_have_count(1)  # still there
+    button = page.locator(".bucket-card .reveal-btn")
+    original_label = button.inner_text()
+    button.click()
+    expect(button).to_be_disabled()
+    expect(button).to_contain_text("Opening")
     assert captured.get("body", {}).get("paths") == sorted([folder_a, folder_b])
+    captured["route"].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps({"ok": True, "revealed": [folder_a, folder_b],
+                         "skipped": [], "failed": []}),
+    )
+    expect(page.locator('#toastContainer [data-type="success"]')).to_contain_text(
+        "Revealed 2 folders in"
+    )
+    expect(button).to_be_enabled()
+    expect(button).to_have_text(original_label)
+    expect(page.locator(".bucket-card")).to_have_count(1)
+
+
+@pytest.mark.parametrize("outcome, partial, toast_type", [
+    ("failed", False, "error"),
+    ("skipped", False, "error"),
+    ("failed", True, "warning"),
+])
+def test_duplicates_reveal_reports_unrevealed_paths(
+    live_server, page, tmp_path, outcome, partial, toast_type
+):
+    folder_a, folder_b = str(tmp_path / "a"), str(tmp_path / "b")
+    _seed_scan_with_buckets(live_server["db"], folder_a, folder_b, n_groups=2)
+    response = {"ok": True, "revealed": [folder_a] if partial else [],
+                "failed": [], "skipped": []}
+    response[outcome] = [{"path": folder_b, "reason": "not a known folder"
+                          if outcome == "skipped" else "reveal command exited 1"}]
+    page.route("**/api/folders/reveal", lambda route: route.fulfill(
+        status=200, content_type="application/json", body=json.dumps(response)
+    ))
+    page.goto(f"{live_server['url']}/duplicates")
+    button = page.locator(".bucket-card .reveal-btn")
+    original_label = button.inner_text()
+    button.click()
+    toast = page.locator(f'#toastContainer [data-type="{toast_type}"]')
+    expect(toast).to_contain_text(folder_b)
+    expect(toast).to_contain_text(response[outcome][0]["reason"])
+    expect(button).to_be_enabled()
+    expect(button).to_have_text(original_label)
+
+
+@pytest.mark.parametrize("failure", ["http", "network"])
+def test_duplicates_reveal_request_failure_allows_retry(live_server, page, tmp_path, failure):
+    """HTTP and network errors show one notification and restore the reveal button."""
+    folder_a, folder_b = str(tmp_path / "a"), str(tmp_path / "b")
+    _seed_scan_with_buckets(live_server["db"], folder_a, folder_b, n_groups=2)
+
+    def fail_request(route):
+        if failure == "network":
+            route.abort("connectionfailed")
+        else:
+            route.fulfill(
+                status=500, content_type="application/json", body='{"error": "Finder unavailable"}'
+            )
+
+    page.route("**/api/folders/reveal", fail_request)
+    page.goto(f"{live_server['url']}/duplicates")
+    button = page.locator(".bucket-card .reveal-btn")
+    original_label = button.inner_text()
+    button.click()
+    errors = page.locator('#toastContainer [data-type="error"]')
+    expect(errors.last).to_contain_text("Reveal failed:")
+    assert errors.count() == 1
+    expect(errors).to_contain_text(
+        "Couldn’t reach Vireo" if failure == "network" else "Finder unavailable"
+    )
+    expect(button).to_be_enabled()
+    expect(button).to_have_text(original_label)
 
 
 def test_duplicates_bulk_decide_keep_folder_resolves_all_groups(live_server, page):
