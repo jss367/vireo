@@ -17,6 +17,16 @@ def test_duplicate_image_reveal_targets_clicked_copy(live_server, page, tmp_path
     )
     if resolved:
         db.update_photo_flag(losers[0], "rejected")
+        row = db.conn.execute(
+            "SELECT result FROM job_history WHERE id='duplicate-scan-bulk-test'"
+        ).fetchone()
+        result = json.loads(row["result"])
+        result["proposals"][0]["status"] = "resolved"
+        db.conn.execute(
+            "UPDATE job_history SET result=? WHERE id='duplicate-scan-bulk-test'",
+            (json.dumps(result),),
+        )
+        db.commit()
     for pid in winners + losers:
         Image.new("RGB", (100, 100), color="green").save(
             f"{live_server['app'].config['THUMB_CACHE_DIR']}/{pid}.jpg"
