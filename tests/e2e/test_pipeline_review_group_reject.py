@@ -2854,6 +2854,8 @@ def test_culling_can_be_undone_without_leaving_the_page(live_server, page):
     # the page shows it as a keeper instead of the fresh REJECT suggestion,
     # and applying leaves the flag alone rather than overwriting it.
     expect(page.locator(f'.cull-card[data-photo-id="{ids[0]}"]')).to_have_class(re.compile(r'\bkeep\b'))
+    for pid in ids[2:]:
+        page.locator(f'.cull-card[data-photo-id="{pid}"]').get_by_role('button', name='Reject', exact=True).click()
     page.locator('#applyBtn').click()
     expect(page.locator('#cullStatus')).to_contain_text('Applied!')
     expect(page.locator('#historyUndoBtn')).to_be_enabled()
@@ -2867,7 +2869,7 @@ def test_culling_can_be_undone_without_leaving_the_page(live_server, page):
     expect(page.locator(f'.cull-card[data-photo-id="{ids[0]}"]')).to_have_class(re.compile(r'\bkeep\b'))
     expect(page.locator(f'.cull-card[data-photo-id="{ids[1]}"]')).to_have_class(re.compile(r'\bkeep\b'))
     for pid in ids[2:]:
-        expect(page.locator(f'.cull-card[data-photo-id="{pid}"]')).to_have_class(re.compile(r'\breject\b'))
+        expect(page.locator(f'.cull-card[data-photo-id="{pid}"]')).to_have_class(re.compile(r'\breview\b'))
     expect(page.locator('#historyRedoBtn')).to_be_enabled()
     page.locator('#historyRedoBtn').click()
     expect(page.locator('#cullStatus')).to_contain_text('Redone: Culling')
@@ -2875,6 +2877,8 @@ def test_culling_can_be_undone_without_leaving_the_page(live_server, page):
 
     page.locator('#historyUndoBtn').click()
     expect(page.locator('#cullStatus')).to_contain_text('Undone: Culling')
+    for pid in ids[2:]:
+        page.locator(f'.cull-card[data-photo-id="{pid}"]').get_by_role('button', name='Reject', exact=True).click()
     page.locator('#applyBtn').click()
     expect(page.locator('#cullStatus')).to_contain_text('Applied!')
     assert _flags(db, ids) == ['flagged', 'flagged', 'rejected', 'rejected']
@@ -2993,7 +2997,7 @@ def test_cull_history_preserves_analysis_scope_and_unrelated_suggestions(live_se
     # Undoing an unrelated edit — a rating or one photo's flag — leaves both
     # cards on this run's suggestion. Neither photo carries a saved flag once
     # the undo lands, so nothing overrides the analysis.
-    actions = ['keep', 'reject']
+    actions = ['keep', 'review']
     for pid, action in zip(ids[:2], actions, strict=True):
         expect(page.locator(f'.cull-card[data-photo-id="{pid}"]')).to_have_class(re.compile(r'\b' + action + r'\b'))
     assert page.evaluate('JSON.stringify(pipelineResults.encounters) === window.cullAnalysisBefore')
@@ -3036,13 +3040,12 @@ def test_cull_apply_keeps_saved_decisions_after_rating_undo(live_server, page, s
       if (scoped) selectedCollectionId = 123;
       rebuildCullDataFromPipeline();
     }''', {'scoped': scoped})
-    # Decide by clicking, the way the user does, so the decisions are pinned:
-    # every card starts on REJECT, one click moves it to Keep, two to Review.
-    page.click(f'.cull-card[data-photo-id="{ids[0]}"] .cull-card-action')
+    # AI rejection labels stay undecided. Explicit choices are pinned and
+    # survive undoing an unrelated rating edit.
+    page.locator(f'.cull-card[data-photo-id="{ids[0]}"]').get_by_role('button', name='Add favorite', exact=True).click()
     expect(page.locator(f'.cull-card[data-photo-id="{ids[0]}"]')).to_have_class(re.compile(r'\bkeep\b'))
     for pid in ids[1:]:
-        page.click(f'.cull-card[data-photo-id="{pid}"] .cull-card-action')
-        page.click(f'.cull-card[data-photo-id="{pid}"] .cull-card-action')
+        page.evaluate('id => setCullAction(id, "review")', pid)
         expect(page.locator(f'.cull-card[data-photo-id="{pid}"]')).to_have_class(re.compile(r'\breview\b'))
     page.on('dialog', lambda dialog: dialog.accept())
     page.locator('#applyBtn').click()

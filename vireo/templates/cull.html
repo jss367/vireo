@@ -6,6 +6,7 @@
 <link rel="icon" type="image/png" href="/favicon.ico">
 <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
 <link rel="stylesheet" href="/static/vireo-base.css">
+<link rel="stylesheet" href="/static/vireo-browse-compare.css">
 <title>Vireo - Cull</title>
 <style>
 body { padding-bottom: 36px; }
@@ -256,6 +257,7 @@ body { padding-bottom: 36px; }
   color: var(--accent);
 }
 </style>
+<link rel="stylesheet" href="/static/cull.css">
 </head>
 <body>
 
@@ -264,10 +266,24 @@ body { padding-bottom: 36px; }
 <div class="content">
   <h2 style="margin-bottom:8px;font-size:20px;">Cull Photos</h2>
   <p style="font-size:13px;color:var(--text-dim);margin-bottom:20px;">
-    AI analyzes your photos to find redundant shots and suggest the best keepers.
-    Photos are grouped by species and scene — you keep the best of each unique moment.
+    Choose a species or several, and narrow by date if you like. Compare the remaining photos
+    with your picks and suggested favorites, then decide what to keep or reject.
   </p>
 
+  <div class="cull-filters" aria-label="Photos to cull">
+    <details id="cullSpeciesPicker">
+      <summary id="cullSpeciesSummary">All species</summary>
+      <div class="cull-species-menu">
+        <input type="search" id="cullSpeciesSearch" aria-label="Search species" placeholder="Search species" oninput="renderCullSpeciesOptions()">
+        <button class="summary-link" onclick="clearCullSpecies()">All species</button>
+        <div id="cullSpeciesOptions"></div>
+      </div>
+    </details>
+    <label>From <input type="date" id="cullDateFrom" onchange="onCullScopeChange()"></label>
+    <label>Through <input type="date" id="cullDateTo" onchange="onCullScopeChange()"></label>
+    <button class="summary-link" onclick="clearCullFilters()">Clear filters</button>
+  </div>
+  <p id="cullScope" class="cull-hint" aria-live="polite"></p>
   <div class="action-bar">
     <select id="cullCollection" class="btn btn-secondary" style="font-size:13px;">
       <option value="">All photos</option>
@@ -284,11 +300,11 @@ body { padding-bottom: 36px; }
     <div style="font-size:13px;color:var(--text-primary);font-weight:500;margin-bottom:12px;">Pipeline Culling Settings</div>
     <div class="reflow-indicator" id="reflowIndicator">Recomputing...</div>
 
-    <div class="slider-section-header">Hard Reject Floors</div>
-    <div class="slider-section-hint">Auto-reject photos that fail any of these quality floors</div>
+    <div class="slider-section-header">Quality floors</div>
+    <div class="slider-section-hint">Exclude photos below these quality floors from suggested favorites</div>
     <div class="slider-group">
       <div class="slider-row">
-        <span class="slider-label" title="Min visible subject in frame - rejects birds clipped by edges">Crop complete</span>
+        <span class="slider-label" title="Minimum visible subject in frame for suggested favorites">Crop complete</span>
         <input type="range" min="0" max="100" value="60" step="1" id="slRejectCrop" oninput="onScoringChange(this)">
         <span class="slider-val" id="valRejectCrop">0.60</span>
       </div>
@@ -309,7 +325,7 @@ body { padding-bottom: 36px; }
       </div>
     </div>
 
-    <div class="slider-section-header">MMR Selection</div>
+    <div class="slider-section-header">Quality and variety</div>
     <div class="slider-section-hint">Pick the best photos from each group while keeping variety</div>
     <div class="slider-group">
       <div class="slider-row">
@@ -433,11 +449,23 @@ body { padding-bottom: 36px; }
   <div id="cullSummary" style="display:none;"></div>
   <div id="cullContent">
     <div style="text-align:center;padding:60px 20px;color:var(--text-dim);">
-      Click "Analyze for Culling" to find redundant photos and suggest keepers.
+      Choose your species and dates, then analyze to find suggested favorites. Existing flagged picks are always included.
     </div>
   </div>
 </div>
 
+<dialog id="cullRejectedDialog">
+  <h3>Review rejected photos</h3>
+  <p id="cullRejectedCount" class="cull-hint"></p>
+  <div id="cullRejectedPhotos"></div>
+  <div class="cull-dialog-actions">
+    <button class="btn btn-secondary" onclick="closeCullRejected()">Back to culling</button>
+    <button class="btn btn-danger" id="cullDeleteRejected" onclick="deleteCullRejected()">Delete rejected photos…</button>
+  </div>
+</dialog>
+{% include '_photo_compare.html' %}
+<script src="/static/vireo-browse-compare.js"></script>
+<script src="/static/cull-favorites.js"></script>
 <script>
 var cullData = null;
 var cullBusy = false;
@@ -453,9 +481,7 @@ var cullManualDecisions = {};
 // stays after Apply (otherwise the card would snap back to the suggestion
 // the moment you saved it) — it just no longer counts as unsaved work.
 var cullAppliedDecisions = {};
-// Saved photo flags are decisions you already applied. Honor them over the
-// algorithm's fresh label unless you ask to see the raw suggestions again.
-var cullHonorSavedFlags = true;
+// Saved photo flags always outrank suggestions.
 var pipelineResults = null;
 var selectedCollectionId = null;
 var expandedSpecies = {};
@@ -512,8 +538,9 @@ async function onCullCollectionChange() {
   // labels are computed against the selected collection's photos only.
   // Filtering the existing workspace-wide results client-side would
   // leave the labels influenced by photos outside the collection.
-  if (pipelineResults) {
-    runCulling();
+  if (pipelineResults || cullSourceResults) {
+    cullScopeFailed = true;
+    recomputeCulling('/api/pipeline/regroup-live', 'Analysis complete!', true);
   }
 }
 
@@ -658,8 +685,10 @@ function onGroupingChange(slider) {
   updateCullApplyButton();
 }
 
-function setPipelineResults(data, statusText) {
+function setPipelineResults(data, statusText, scoped) {
   pipelineResults = data;
+  if (!scoped) cullSourceResults = data;
+  renderCullSpeciesOptions();
   rebuildCullDataFromPipeline();
   cullDirty = unappliedPinCount() > 0;
   var kept = cullData ? (cullData.pinned_count || 0) : 0;
@@ -675,24 +704,34 @@ function setPipelineResults(data, statusText) {
   }
 }
 
-function pipelineBody(config) {
-  var body = {config: config};
-  if (selectedCollectionId != null) body.collection_id = selectedCollectionId;
+function pipelineBody(config, sourceOnly) {
+  var body = {config: config, save_cache: false};
+  if (!sourceOnly && hasCullFilters()) body.photo_ids = cullScopePhotoIds();
+  else if (selectedCollectionId != null) body.collection_id = selectedCollectionId;
   return body;
 }
 
 function cullOperationPending() {
-  return cullBusy || cullAnalysisPending > 0 || _reflowTimer != null || _regroupTimer != null
+  return cullBusy || cullScopeFailed || cullAnalysisPending > 0 || _reflowTimer != null || _regroupTimer != null
+    || !!document.querySelector('#deleteModal.open')
     || (window.vireoHistoryBusy && window.vireoHistoryBusy());
 }
 
 function updateCullApplyButton() {
   document.getElementById('applyBtn').disabled = !!cullOperationPending();
+  var editing = cullBusy || (window.vireoHistoryBusy && window.vireoHistoryBusy()) ||
+    !!document.querySelector('#deleteModal.open');
+  document.querySelectorAll('.cull-filters input, .cull-filters button, #cullCollection').forEach(function(el) { el.disabled = !!editing; });
 }
 
-async function recomputeCulling(endpoint, statusText) {
+async function recomputeCulling(endpoint, statusText, sourceOnly) {
   if (cullBusy || (window.vireoHistoryBusy && window.vireoHistoryBusy())) {
     showToast('Wait for the current edit to finish before recomputing culling.', 'info');
+    return;
+  }
+  var scoped = !sourceOnly && hasCullFilters();
+  if (scoped && !cullScopePhotoIds().length) {
+    document.getElementById('cullStatus').textContent = 'No photos match the selected species and dates.';
     return;
   }
   var seq = ++cullAnalysisSeq;
@@ -702,9 +741,13 @@ async function recomputeCulling(endpoint, statusText) {
     var config = Object.assign({}, getGroupingConfig(), getScoringConfig());
     var data = await safeFetch(endpoint, {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(pipelineBody(config)),
+      body: JSON.stringify(pipelineBody(config, sourceOnly)),
     }, {toast: false});
-    if (seq === cullAnalysisSeq) setPipelineResults(data, statusText);
+    if (seq === cullAnalysisSeq) {
+      setPipelineResults(data, statusText, scoped);
+      cullScopeFailed = false;
+      if (sourceOnly && hasCullFilters()) await recomputeCulling(endpoint, statusText);
+    }
   } catch (error) {
     if (seq === cullAnalysisSeq) {
       var status = document.getElementById('cullStatus');
@@ -744,7 +787,7 @@ async function runCulling() {
   var status = document.getElementById('cullStatus');
   status.textContent = 'Analyzing pipeline...';
   status.style.color = 'var(--text-dim)';
-  return recomputeCulling('/api/pipeline/regroup-live', 'Analysis complete!');
+  return recomputeCulling('/api/pipeline/regroup-live', 'Analysis complete!', !cullSourceResults);
 }
 
 window.beforeHistoryChange = function() {
@@ -764,30 +807,33 @@ window.afterHistoryChange = async function(result) {
   document.getElementById('applyBtn').disabled = true;
   try {
     var results;
-    if (selectedCollectionId != null && pipelineResults) {
-      // Collection grouping and scores were computed for this exact scope.
-      // Keep that analysis and refresh only its persisted photo flags.
+    if (pipelineResults) {
+      // Cull analysis is ephemeral, including unfiltered runs. Keep this
+      // grouping and refresh flags rather than restoring an older cache.
       results = JSON.parse(JSON.stringify(pipelineResults));
       var state = await safeFetch('/api/pipeline/group/state', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({photo_ids: results.photos.map(function(photo) { return photo.id; })}),
+        body: JSON.stringify({photo_ids: Array.from(new Set((cullSourceResults && cullSourceResults.photos || []).concat(results.photos).map(function(photo) { return photo.id; })))}),
       }, {toast: false});
-      results.photos.forEach(function(photo) {
-        if (state.photos[photo.id]) photo.flag = state.photos[photo.id].flag;
+      [results, cullSourceResults].forEach(function(source) {
+        (source && source.photos || []).forEach(function(photo) {
+          if (state.photos[photo.id]) photo.flag = state.photos[photo.id].flag;
+        });
       });
     } else {
       var data = await safeFetch('/api/pipeline/page-init', {}, {toast: false});
       results = data && data.results;
     }
+    syncCullSourceFlags(results);
     setPipelineResults(results,
-      result.undone ? 'Undone: ' + result.undone : 'Redone: ' + result.redone);
+      result.undone ? 'Undone: ' + result.undone : 'Redone: ' + result.redone, hasCullFilters());
   } catch (error) {
     cullData = null;
     renderCulling();
     throw error;
   } finally {
     cullBusy = false;
-    document.getElementById('applyBtn').disabled = false;
+    updateCullApplyButton();
   }
 };
 
@@ -854,25 +900,27 @@ function unappliedPinCount() {
 }
 
 // Resolve one photo's decision: your hand edit wins, then the flag you
-// already applied, then the analysis label. Returns the action plus where
+// already applied. Other photos stay undecided until chosen as a favorite
+// or explicitly rejected. Returns the action plus where
 // it came from so the card can show it.
 function resolveCullDecision(photo) {
   var suggested = actionForLabel(photo.label);
   var manual = cullManualDecisions[photo.id];
   if (manual) return {action: manual, source: 'manual', suggested: suggested};
   var confirmed = actionForFlag(photo.flag);
-  if (confirmed && cullHonorSavedFlags) {
+  if (confirmed) {
     return {action: confirmed, source: 'confirmed', suggested: suggested};
   }
-  return {action: suggested, source: 'auto', suggested: suggested};
+  return {action: 'review', source: 'auto', suggested: suggested};
 }
 
 function encounterLabel(enc, idx, count) {
   var label = 'Encounter ' + (idx + 1) + ' (' + count + ' photos)';
   if (enc.time_range && enc.time_range[0]) {
+    var day = enc.time_range[0].substring(0, 10);
     var start = (enc.time_range[0].split('T')[1] || enc.time_range[0]).substring(0, 8);
     var end = enc.time_range[1] ? (enc.time_range[1].split('T')[1] || enc.time_range[1]).substring(0, 8) : '';
-    label = 'Encounter ' + (idx + 1) + ' - ' + start + (end ? ' to ' + end : '') + ' (' + count + ' photos)';
+    label = day + ' · Encounter ' + (idx + 1) + ' - ' + start + (end ? ' to ' + end : '') + ' (' + count + ' photos)';
   }
   if (enc.burst_count) label += ' / ' + enc.burst_count + ' bursts';
   return label;
@@ -883,7 +931,7 @@ function pipelineToCullData(results) {
   var photoMap = {};
   results.photos.forEach(function(p) { photoMap[p.id] = p; });
 
-  var speciesMap = {};
+  var speciesMap = Object.create(null);
   var total = 0;
   var keep = 0;
   var review = 0;
@@ -898,66 +946,81 @@ function pipelineToCullData(results) {
     });
     if (!encIds.length) return;
 
-    var species = speciesForEncounter(enc, photoMap);
-    if (!speciesMap[species]) {
-      speciesMap[species] = {
-        species: species,
-        photo_count: 0,
-        keepers: 0,
-        reviews: 0,
-        rejects: 0,
-        scene_groups: [],
-      };
-    }
-
-    var groupPhotos = [];
-    var burstOrder = [];
-    (enc.bursts || []).forEach(function(burst) {
-      (burst.photo_ids || burst || []).forEach(function(pid) {
-        if (encIds.indexOf(pid) >= 0 && burstOrder.indexOf(pid) < 0) burstOrder.push(pid);
-      });
-    });
+    var bySpecies = Object.create(null);
     encIds.forEach(function(pid) {
-      if (burstOrder.indexOf(pid) < 0) burstOrder.push(pid);
-    });
-
-    burstOrder.forEach(function(pid) {
       var p = photoMap[pid];
-      var decision = resolveCullDecision(p);
-      var action = decision.action;
-      if (decision.source === 'manual') pinned++;
-      else if (decision.source === 'confirmed') confirmed++;
-      if (actionForFlag(p.flag)) saved++;
-      groupPhotos.push({
-        photo_id: pid,
-        quality: p.quality_composite || 0,
-        quality_score: p.quality_composite != null ? p.quality_composite : null,
-        sharpness: p.subject_sharpness != null ? p.subject_sharpness : null,
-        filename: p.filename || '',
-        action: action,
-        decision_source: decision.source,
-        suggested_action: decision.suggested,
-        pipeline_label: p.label || 'REVIEW',
-      });
-      total++;
-      if (action === 'keep') keep++;
-      else if (action === 'reject') reject++;
-      else review++;
+      var species = cullPhotoSpecies(p, enc, photoMap);
+      if (!cullPhotoMatches(p, species)) return;
+      (bySpecies[species] || (bySpecies[species] = [])).push(pid);
     });
+    Object.keys(bySpecies).forEach(function(species) {
+      encIds = bySpecies[species];
+      if (!speciesMap[species]) {
+        speciesMap[species] = {
+          species: species,
+          photo_count: 0,
+          keepers: 0,
+          reviews: 0,
+          rejects: 0,
+          scene_groups: [],
+        };
+      }
 
-    var sg = speciesMap[species];
-    sg.photo_count += groupPhotos.length;
-    sg.keepers += groupPhotos.filter(function(p) { return p.action === 'keep'; }).length;
-    sg.reviews += groupPhotos.filter(function(p) { return p.action === 'review'; }).length;
-    sg.rejects += groupPhotos.filter(function(p) { return p.action === 'reject'; }).length;
-    sg.scene_groups.push({
-      scene_id: ei,
-      label: encounterLabel(enc, ei, groupPhotos.length),
-      photos: groupPhotos,
+      var groupPhotos = [];
+      var burstOrder = [];
+      (enc.bursts || []).forEach(function(burst) {
+        (burst.photo_ids || burst || []).forEach(function(pid) {
+          if (encIds.indexOf(pid) >= 0 && burstOrder.indexOf(pid) < 0) burstOrder.push(pid);
+        });
+      });
+      encIds.forEach(function(pid) {
+        if (burstOrder.indexOf(pid) < 0) burstOrder.push(pid);
+      });
+
+      burstOrder.forEach(function(pid) {
+        var p = photoMap[pid];
+        var decision = resolveCullDecision(p);
+        var action = decision.action;
+        if (decision.source === 'manual') pinned++;
+        else if (decision.source === 'confirmed') confirmed++;
+        if (actionForFlag(p.flag)) saved++;
+        groupPhotos.push({
+          photo_id: pid,
+          quality: p.quality_composite || 0,
+          quality_score: p.quality_composite != null ? p.quality_composite : null,
+          sharpness: p.subject_sharpness != null ? p.subject_sharpness : null,
+          filename: p.filename || '',
+          timestamp: p.timestamp || null,
+          day: cullPhotoDay(p),
+          burst_id: cullBurstId(enc, pid, ei),
+          action: action,
+          decision_source: decision.source,
+          suggested_action: decision.suggested,
+          pipeline_label: p.label || 'REVIEW',
+        });
+        total++;
+        if (action === 'keep') keep++;
+        else if (action === 'reject') reject++;
+        else review++;
+      });
+
+      var sg = speciesMap[species];
+      sg.photo_count += groupPhotos.length;
+      sg.keepers += groupPhotos.filter(function(p) { return p.action === 'keep'; }).length;
+      sg.reviews += groupPhotos.filter(function(p) { return p.action === 'review'; }).length;
+      sg.rejects += groupPhotos.filter(function(p) { return p.action === 'reject'; }).length;
+      sg.scene_groups.push({
+        scene_id: ei,
+        label: encounterLabel(enc, ei, groupPhotos.length),
+        photos: groupPhotos,
+      });
     });
   });
 
   var speciesGroups = Object.keys(speciesMap).map(function(k) { return speciesMap[k]; });
+  speciesGroups.forEach(assignCullFavorites);
+  keep = speciesGroups.reduce(function(n, sg) { return n + sg.keepers; }, 0);
+  review = speciesGroups.reduce(function(n, sg) { return n + sg.reviews; }, 0);
   speciesGroups.sort(function(a, b) { return b.photo_count - a.photo_count || a.species.localeCompare(b.species); });
   return {
     species_groups: speciesGroups,
@@ -1007,17 +1070,6 @@ function cullDecisionActionsHtml() {
     }
     buttons.push('<button class="summary-link" title="' + escapeAttr(title) +
       '" onclick="clearPinnedDecisions()">' + escapeHtml(label) + '</button>');
-  }
-  var saved = cullData.saved_flag_count || 0;
-  if (saved) {
-    buttons.push(cullHonorSavedFlags
-      ? '<button class="summary-link" title="' + escapeAttr(
-          'Show the fresh suggestion for the ' + saved + ' photos you already flagged. ' +
-          'Their saved flags stay in the database until you apply again.') +
-        '" onclick="toggleHonorSavedFlags()">Ignore ' + saved + ' saved flags</button>'
-      : '<button class="summary-link" title="' + escapeAttr(
-          'Go back to showing the saved flag for the ' + saved + ' photos you already flagged.') +
-        '" onclick="toggleHonorSavedFlags()">Honor ' + saved + ' saved flags</button>');
   }
   if (!buttons.length) return '';
   return '<div class="summary-actions">' + buttons.join('') + '</div>';
@@ -1098,7 +1150,7 @@ document.addEventListener('keydown', function(e) {
   if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
   if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
   if (cullKeyTargetIsEditable(e.target)) return;
-  if (document.querySelector('.lightbox-overlay.active, .pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .inspect-overlay.open, .shortcuts-overlay.open, .help-overlay.active, .report-overlay.active')) return;
+  if (document.querySelector('.lightbox-overlay.active, .pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .inspect-overlay.open, .shortcuts-overlay.open, .help-overlay.active, .report-overlay.active, .browse-compare-overlay.active, #deleteModal.open, #cullRejectedDialog[open]')) return;
   if (moveFocusedCullGroup(e.key === 'ArrowRight' ? 1 : -1)) {
     e.preventDefault();
   }
@@ -1109,7 +1161,8 @@ function renderCulling() {
     document.getElementById('cullSummary').style.display = 'none';
     document.getElementById('applyBtn').style.display = 'none';
     document.getElementById('cullContent').innerHTML =
-      '<div style="text-align:center;padding:40px;color:var(--text-dim);">No pipeline results for this view. Run Analyze for Culling after extracting pipeline features.</div>';
+      '<div class="cull-empty">' + (cullSourceResults && hasCullFilters() ? 'No photos match these species and dates. Try changing the filters.' : 'No pipeline results for this view. Run Analyze for Culling after extracting pipeline features.') + '</div>';
+    renderCullScope();
     focusedCullGroup = { speciesIdx: null, groupIdx: null };
     return;
   }
@@ -1117,16 +1170,21 @@ function renderCulling() {
     expandedSpecies[0] = true;
   }
   normalizeFocusedCullGroup();
+  renderCullScope();
+  var rawPhotoMap = {};
+  (pipelineResults.photos || []).forEach(function(p) { rawPhotoMap[p.id] = p; });
 
   // Summary bar
   var summaryHtml = '<div class="summary-bar">' +
     '<div class="summary-stat"><div class="num">' + cullData.total_photos + '</div><div class="label">Photos</div></div>' +
-    '<div class="summary-stat"><div class="num" style="color:var(--accent);">' + cullData.suggested_keepers + '</div><div class="label">Keepers</div></div>' +
-    '<div class="summary-stat"><div class="num" style="color:var(--warning);">' + (cullData.suggested_reviews || 0) + '</div><div class="label">Review</div></div>' +
+    '<div class="summary-stat"><div class="num" style="color:var(--accent);">' + cullData.suggested_keepers + '</div><div class="label">Favorites</div></div>' +
+    '<div class="summary-stat"><div class="num" style="color:var(--warning);">' + (cullData.suggested_reviews || 0) + '</div><div class="label">Undecided</div></div>' +
     '<div class="summary-stat"><div class="num" style="color:var(--danger);">' + cullData.suggested_rejects + '</div><div class="label">Reject</div></div>' +
     '<div class="summary-stat"><div class="num">' + cullData.species_groups.length + '</div><div class="label">Species</div></div>' +
     cullDecisionStatsHtml() +
     cullDecisionActionsHtml() +
+    '<button class="summary-link" id="cullReviewRejected" onclick="reviewCullRejected()"' +
+      (cullData.suggested_rejects ? '' : ' disabled') + '>Review rejected (' + cullData.suggested_rejects + ')</button>' +
   '</div>';
   document.getElementById('cullSummary').innerHTML = summaryHtml;
   document.getElementById('cullSummary').style.display = '';
@@ -1143,8 +1201,8 @@ function renderCulling() {
     html += '<div class="species-header" onclick="toggleSpecies(' + si + ')">';
     html += '<span class="species-name">' + escapeHtml(sg.species) + '</span>';
     html += '<span class="species-stats">' + sg.photo_count + ' photos &middot; ';
-    html += '<span class="species-keep">' + keepCount + ' keep</span> &middot; ';
-    html += '<span style="color:var(--warning);">' + reviewCount + ' review</span> &middot; ';
+    html += '<span class="species-keep">' + keepCount + ' favorites</span> &middot; ';
+    html += '<span style="color:var(--warning);">' + reviewCount + ' undecided</span> &middot; ';
     html += '<span class="species-reject">' + rejectCount + ' reject</span>';
     html += '</span></div>';
 
@@ -1152,71 +1210,22 @@ function renderCulling() {
     html += '<div class="species-body" id="speciesBody' + si + '" style="display:' + (isExpanded ? '' : 'none') + ';">';
 
     var groups = cullGroupsForSpecies(sg);
+    html += cullFavoritesHtml(sg, si);
+    html += '<div class="cull-remaining-heading">Remaining photos <span class="cull-hint">Add a favorite, keep undecided, or reject.</span></div>';
     groups.forEach(function(pg, pi) {
       var groupFocused = focusedCullGroup.speciesIdx === si && focusedCullGroup.groupIdx === pi;
       html += '<div class="pose-group' + (groupFocused ? ' focused' : '') + '" data-species-index="' + si + '" data-group-index="' + pi + '">';
-      if (groups.length > 1) {
-        var groupLabel = pg.label || ('Scene ' + (pi + 1) + ' (' + pg.photos.length + ' photos)');
-        html += '<div class="pose-label">' + escapeHtml(groupLabel) + '</div>';
-      }
+      var groupLabel = pg.label || ('Scene ' + (pi + 1) + ' (' + pg.photos.length + ' photos)');
+      html += '<div class="pose-label">' + escapeHtml(groupLabel) + '</div>';
 
       // Store photo list for lightbox navigation
       var poseKey = 'cullPose_' + si + '_' + pi;
-      window[poseKey] = pg.photos.map(function(p) { return {id: p.photo_id, filename: p.filename || ''}; });
+      window[poseKey] = pg.photos.map(function(p) { return rawPhotoMap[p.photo_id] || {id: p.photo_id, filename: p.filename || ''}; });
 
       html += '<div class="pose-strip">';
-
-      pg.photos.forEach(function(photo) {
-        var cardClass = 'cull-card ' + photo.action;
-        var bestQuality = Math.max.apply(null, pg.photos.map(function(p) { return p.quality || 0; }));
-        if (photo.action === 'keep' && photo.quality === bestQuality) {
-          cardClass += ' best';
-        }
-        var badge;
-        if (photo.action === 'keep') {
-          badge = '<div class="cull-card-action keep-badge" onclick="event.stopPropagation(); toggleCullAction(' + si + ',' + pi + ',' + photo.photo_id + ')">&#10003;</div>';
-        } else if (photo.action === 'reject') {
-          badge = '<div class="cull-card-action reject-badge" onclick="event.stopPropagation(); toggleCullAction(' + si + ',' + pi + ',' + photo.photo_id + ')">&#10005;</div>';
-        } else {
-          badge = '<div class="cull-card-action review-badge" onclick="event.stopPropagation(); toggleCullAction(' + si + ',' + pi + ',' + photo.photo_id + ')">?</div>';
-        }
-
-        var sourceChip = '';
-        if (photo.decision_source === 'manual') {
-          sourceChip = '<div class="cull-card-source manual" title="' + escapeAttr(
-            'You set this to ' + photo.action.toUpperCase() + '. The analysis suggests ' +
-            (photo.suggested_action || 'review').toUpperCase() +
-            '. Recomputing keeps your call; click to release it.') +
-            '" onclick="event.stopPropagation(); releaseCullDecision(' + photo.photo_id + ')"' +
-            ' ondblclick="event.stopPropagation()" onmousedown="event.stopPropagation()">Pinned</div>';
-        } else if (photo.decision_source === 'confirmed') {
-          sourceChip = '<div class="cull-card-source confirmed" title="' + escapeAttr(
-            'Saved flag from a previous Apply. The analysis suggests ' +
-            (photo.suggested_action || 'review').toUpperCase() + '.') +
-            '">Applied</div>';
-        }
-
-        var qScore = photo.quality_score != null ? photo.quality_score.toFixed(2) : (photo.sharpness != null ? Math.round(photo.sharpness) : '-');
-
-        // Filename rides in a data attribute: interpolating it into the
-        // onclick JS string broke on double quotes (attribute terminator,
-        // which escapeHtml doesn't encode) and trailing backslashes.
-        var thumbUrl = window.vireoThumbnailUrl
-          ? window.vireoThumbnailUrl(photo)
-          : '/thumbnails/' + photo.photo_id + '.jpg';
-        html += '<div class="' + cardClass + '" data-photo-id="' + photo.photo_id + '" ' +
-          'data-filename="' + escapeAttr(photo.filename || '') + '" ' +
-          'onclick="openLightbox(' + photo.photo_id + ', this.dataset.filename, window.' + poseKey + ')" ' +
-          'ondblclick="toggleCullAction(' + si + ',' + pi + ',' + photo.photo_id + ')">' +
-          badge +
-          sourceChip +
-          '<img src="' + escapeAttr(thumbUrl) + '" loading="lazy">' +
-          '<div class="cull-card-info">' +
-            '<div class="cull-quality">' + (photo.pipeline_label || photo.action.toUpperCase()) + ' &middot; Q: ' + qScore + '</div>' +
-            '<div class="cull-filename" onclick="event.stopPropagation()" onmousedown="event.stopPropagation()">' + escapeHtml(photo.filename || '') + '</div>' +
-          '</div>' +
-        '</div>';
-      });
+      var remaining = pg.photos.filter(function(p) { return !p.favorite; });
+      remaining.forEach(function(photo) { html += cullCardHtml(photo, si, pi, poseKey, false); });
+      if (!remaining.length) html += '<p class="cull-hint">All photos in this encounter are in Favorites above.</p>';
       html += '</div></div>';
     });
 
@@ -1241,32 +1250,15 @@ function toggleCullAction(speciesIdx, poseIdx, photoId) {
   var photo = pg.photos.find(function(p) { return p.photo_id === photoId; });
   if (!photo) return;
 
-  function dec(action) {
-    if (action === 'keep') { sg.keepers--; cullData.suggested_keepers--; }
-    else if (action === 'reject') { sg.rejects--; cullData.suggested_rejects--; }
-    else { sg.reviews--; cullData.suggested_reviews--; }
-  }
-  function inc(action) {
-    if (action === 'keep') { sg.keepers++; cullData.suggested_keepers++; }
-    else if (action === 'reject') { sg.rejects++; cullData.suggested_rejects++; }
-    else { sg.reviews++; cullData.suggested_reviews++; }
-  }
   var next = photo.action === 'keep' ? 'review' : (photo.action === 'review' ? 'reject' : 'keep');
-  dec(photo.action);
-  photo.action = next;
-  // Pin it: a later reflow/regroup rebuilds every other card from the fresh
-  // labels but reads this photo's action back out of cullManualDecisions.
-  if (photo.decision_source !== 'manual') {
-    cullData.pinned_count = (cullData.pinned_count || 0) + 1;
-    if (photo.decision_source === 'confirmed') {
-      cullData.confirmed_count = Math.max(0, (cullData.confirmed_count || 0) - 1);
-    }
-  }
-  photo.decision_source = 'manual';
-  cullManualDecisions[photoId] = next;
+  setCullAction(photoId, next);
+}
+
+function setCullAction(photoId, action) {
+  if (cullOperationPending()) return;
+  cullManualDecisions[photoId] = action;
   cullDirty = unappliedPinCount() > 0;
-  inc(next);
-  renderCulling();
+  rebuildCullDataFromPipeline();
 }
 
 function releaseCullDecision(photoId) {
@@ -1288,19 +1280,6 @@ function clearPinnedDecisions() {
   var status = document.getElementById('cullStatus');
   if (status) {
     status.textContent = 'Pinned decisions cleared \u2014 showing the current suggestions.';
-    status.style.color = 'var(--text-dim)';
-  }
-}
-
-function toggleHonorSavedFlags() {
-  if (cullOperationPending()) return;
-  cullHonorSavedFlags = !cullHonorSavedFlags;
-  rebuildCullDataFromPipeline();
-  var status = document.getElementById('cullStatus');
-  if (status) {
-    status.textContent = cullHonorSavedFlags
-      ? 'Showing saved flags where photos were already applied.'
-      : 'Showing fresh suggestions for every photo, including ones you already applied.';
     status.style.color = 'var(--text-dim)';
   }
 }
@@ -1372,7 +1351,7 @@ async function applyCulling() {
         delete cullAppliedDecisions[pid];
       }
     });
-    cullHonorSavedFlags = true;
+    syncCullSourceFlags(pipelineResults);
     cullDirty = unappliedPinCount() > 0;
     rebuildCullDataFromPipeline();
     document.getElementById('cullStatus').textContent = 'Applied! ' + keepers.length +
@@ -1383,10 +1362,11 @@ async function applyCulling() {
     document.getElementById('cullStatus').textContent = 'Error: ' + e.message;
   } finally {
     cullBusy = false;
-    document.getElementById('applyBtn').disabled = false;
+    updateCullApplyButton();
   }
 }
 
+initializeCullFavorites();
 </script>
 
 </body>

@@ -175,6 +175,14 @@
         ensureBrowseCompareOriginal(prefix);
       }
       applyBrowseCompareView(prefix);
+      if (options.syncZoom) {
+        var other = prefix === 'A' ? 'B' : 'A';
+        browseCompareViews[other].zoom = nextZoom;
+        browseCompareViews[other].panX = view.panX;
+        browseCompareViews[other].panY = view.panY;
+        if (nextZoom > 1.001) ensureBrowseCompareOriginal(other);
+        applyBrowseCompareView(other);
+      }
     }
 
     function resetBrowseCompareView(prefix) {
