@@ -277,3 +277,37 @@ def test_find_excludes_transparent_highlight_controls(live_server, page):
     expect(page.locator("#pageFindStatus")).to_have_text("1 of 1")
     page.evaluate("document.getElementById('findOpacityControls').style.opacity = '0'")
     expect(page.locator("#pageFindStatus")).to_have_text("0 results")
+
+
+@pytest.mark.parametrize("entry", ["Control+F", "native"])
+def test_find_works_inside_native_modal_dialog(live_server, page, entry):
+    page.goto(f"{live_server['url']}/keywords")
+    page.evaluate("""() => {
+        const background = document.createElement('p');
+        background.textContent = 'Merge selected keywords';
+        document.body.appendChild(background);
+        document.getElementById('kwMergeDialog').showModal();
+    }""")
+    if entry == "native":
+        page.evaluate("handleNativeMenuCommand('find')")
+    else:
+        page.keyboard.press(entry)
+    field = page.locator("#pageFindInput")
+    expect(field).to_be_focused()
+    field.fill("Merge selected keywords")
+    expect(page.locator("#pageFindStatus")).to_have_text("1 of 1")
+    page.keyboard.press("Escape")
+    expect(page.locator("#pageFindPanel")).to_be_hidden()
+    assert page.locator("#kwMergeDialog").evaluate("dialog => dialog.open")
+    page.keyboard.press("Escape")
+    expect(page.locator("#kwMergeDialog")).to_be_hidden()
+
+    # Closing the dialog by another control must also clean up its Find panel.
+    page.evaluate("document.getElementById('kwMergeDialog').showModal()")
+    page.evaluate("handleNativeMenuCommand('find')")
+    field.fill("Merge selected keywords")
+    page.evaluate("document.getElementById('kwMergeDialog').close()")
+    expect(page.locator("#pageFindPanel")).to_be_hidden()
+    expect(page.locator(".page-find-mark")).to_have_count(0)
+    page.keyboard.press("Control+F")
+    expect(field).to_be_focused()

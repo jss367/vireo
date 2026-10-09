@@ -6,6 +6,8 @@
   'use strict';
 
   var panel = document.getElementById('pageFindPanel');
+  var panelHome = panel.parentNode;
+  var ownerDialog = null;
   var input = document.getElementById('pageFindInput');
   var status = document.getElementById('pageFindStatus');
   var marks = []; // One group of highlight fragments per logical match.
@@ -97,7 +99,8 @@
       Array.prototype.forEach.call(node.childNodes, collect);
       if (boundary) run = null;
     }
-    collect(document.body);
+    // A modal's backdrop obscures the rest of the page.
+    collect(ownerDialog || document.body);
     return runs;
   }
 
@@ -186,6 +189,8 @@
     clearTimeout(refreshTimer);
     clearMarks();
     panel.hidden = true;
+    if (panel.parentNode !== panelHome) panelHome.appendChild(panel);
+    ownerDialog = null;
     input.value = '';
     activeIndex = -1;
     if (escToken !== null) window.Keymap.popEsc(escToken);
@@ -198,16 +203,25 @@
       window.Keymap.captureNativeShortcut('ctrl+f');
       return;
     }
-    if (typeof window.openSettingsFind === 'function') {
+    var modal = document.querySelector('dialog:modal');
+    if (!modal && typeof window.openSettingsFind === 'function') {
       window.openSettingsFind();
       return;
     }
     var filterInput = document.querySelector('.vf-search input');
-    if (filterInput && filterInput.getClientRects().length) {
+    if (!modal && filterInput && filterInput.getClientRects().length) {
       filterInput.focus();
       filterInput.select();
       return;
     }
+    // The native dialog top layer makes its siblings inert. Keep Find inside
+    // that dialog so its input can receive focus and its panel stays visible.
+    if (panel.parentNode !== (modal || panelHome)) {
+      previousFocus = document.activeElement;
+      observer.disconnect();
+      (modal || panelHome).appendChild(panel);
+    }
+    ownerDialog = modal;
     if (panel.hidden) {
       previousFocus = document.activeElement;
       panel.hidden = false;
@@ -220,6 +234,9 @@
 
   function move(delta) { activate(activeIndex + delta, true); }
 
+  document.addEventListener('close', function(e) {
+    if (ownerDialog && e.target === ownerDialog) close();
+  }, true);
   // A class/style mutation can be observed mid-fade; collect again once the
   // effective opacity reaches its final value, including hover-only controls.
   document.addEventListener('transitionend', function(e) {
