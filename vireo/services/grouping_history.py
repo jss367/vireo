@@ -144,14 +144,9 @@ def split_grouping_change(change):
 def store_grouping_snapshot(db, edit_id, snapshot):
     """Attach ``snapshot`` to history row ``edit_id`` (replacing any prior one)."""
     if not snapshot:
-        db.conn.execute(
-            "DELETE FROM edit_history_payloads WHERE edit_id = ?", (edit_id,),
-        )
+        db.edit_history.delete_grouping_payload(edit_id)
         return
-    db.conn.execute(
-        "INSERT OR REPLACE INTO edit_history_payloads (edit_id, payload) VALUES (?, ?)",
-        (edit_id, json.dumps(snapshot)),
-    )
+    db.edit_history.store_grouping_payload(edit_id, json.dumps(snapshot))
 
 
 def record_grouping_edit(db, description, change, items=(), *, _commit=False):
@@ -166,7 +161,7 @@ def record_grouping_edit(db, description, change, items=(), *, _commit=False):
     )
     store_grouping_snapshot(db, edit_id, snapshot)
     if _commit:
-        db.conn.commit()
+        db.commit()
         db._prune_edit_history()
     return edit_id
 
@@ -174,10 +169,7 @@ def record_grouping_edit(db, description, change, items=(), *, _commit=False):
 def convert_to_grouping_edit(db, edit_id, change):
     """Rewrite an existing photo edit as the grouping edit that wraps it."""
     meta, snapshot = split_grouping_change(change)
-    db.conn.execute(
-        "UPDATE edit_history SET action_type = 'pipeline_grouping', new_value = ? WHERE id = ?",
-        (json.dumps(meta), edit_id),
-    )
+    db.edit_history.convert_to_grouping(edit_id, json.dumps(meta))
     store_grouping_snapshot(db, edit_id, snapshot)
 
 
@@ -191,10 +183,7 @@ def load_grouping_change(db, entry):
     change = json.loads(entry["new_value"] or "{}")
     if change.get("photo_only") or any(k in change for k in GROUPING_SNAPSHOT_KEYS):
         return change
-    row = db.conn.execute(
-        "SELECT payload FROM edit_history_payloads WHERE edit_id = ?",
-        (entry["id"],),
-    ).fetchone()
+    row = db.edit_history.grouping_payload(entry["id"])
     if row is not None:
         change.update(json.loads(row[0]))
     return change
@@ -222,9 +211,9 @@ def save_grouping_edit(db, before, after, description, *, photo_edit=None, items
     try:
         save_results_raw(after, cache_dir, db.require_workspace_id())
         saved = True
-        db.conn.commit()
+        db.commit()
     except Exception:
-        db.conn.rollback()
+        db.rollback()
         if saved:
             save_results_raw(before, cache_dir, db.require_workspace_id())
         raise
@@ -423,8 +412,8 @@ def restore_species_confirm_cache_edit(db, entry, *, undo):
         try:
             yield
         except Exception:
-            if db.conn.in_transaction:
-                db.conn.rollback()
+            if db.in_transaction:
+                db.rollback()
             save_results_raw(current, cache_dir, db.require_workspace_id())
             raise
     finally:
@@ -486,8 +475,8 @@ def restore_grouping_edit(db, entry, *, undo):
             # putting the cache back — otherwise a later commit on this
             # connection could flush the undone flag without the matching
             # grouping state on disk and leave history desynchronized.
-            if db.conn.in_transaction:
-                db.conn.rollback()
+            if db.in_transaction:
+                db.rollback()
             save_results_raw(current, cache_dir, db.require_workspace_id())
             raise
     finally:

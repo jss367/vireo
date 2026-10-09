@@ -83,7 +83,7 @@ class StartupTasks:
             pruned = db.prune_collection_ids_of_missing_photos()
         except Exception:
             log.exception("Could not check collections for deleted photos")
-            db.conn.rollback()
+            db.rollback()
             return []
         if not pruned:
             return []
@@ -182,7 +182,7 @@ class StartupTasks:
             imported = backfill_embedded_keywords(db)
         except Exception:
             log.exception("Embedded keyword backfill failed; will retry next start")
-            db.conn.rollback()
+            db.rollback()
             return 0
         if imported:
             log.info(
@@ -445,44 +445,7 @@ def metadata_repair_count(db, workspace_id, root_paths=None):
     # scoped count reflects only what the repair pass would actually
     # process. ``None`` preserves the unscoped legacy shape for any
     # future caller that wants a workspace-wide figure.
-    params = [workspace_id]
-    where_extra = ""
-    if root_paths is not None:
-        if not root_paths:
-            return 0
-        normalized_roots = [
-            r.replace("\\", "/").rstrip("/") for r in root_paths if r
-        ]
-        if not normalized_roots:
-            return 0
-        clauses = []
-        for norm in normalized_roots:
-            prefix = norm + "/"
-            # Match ``f.path`` normalized to forward slashes either
-            # exactly against the root or as a boundary-preserving
-            # prefix. ``substr(...)=prefix`` avoids the wildcard
-            # collision LIKE would introduce (e.g. a folder called
-            # ``photos_backup`` incorrectly matching a reachable
-            # ``photos`` root because ``_`` matches any character
-            # in LIKE without ESCAPE).
-            clauses.append(
-                "(REPLACE(f.path, '\\', '/') = ? "
-                "OR substr(REPLACE(f.path, '\\', '/'), 1, ?) = ?)"
-            )
-            params.extend([norm, len(prefix), prefix])
-        where_extra = " AND (" + " OR ".join(clauses) + ")"
-    rows = db.conn.execute(
-        "SELECT DISTINCT p.id, p.filename, "
-        "f.id AS folder_id, f.path AS folder_path "
-        "FROM photos p "
-        "JOIN folders f ON f.id = p.folder_id "
-        "JOIN photo_workspace_visibility wf ON wf.photo_id = p.id "
-        "WHERE wf.workspace_id = ? "
-        "AND p.exif_data IS NULL"
-        + where_extra
-        + " ORDER BY f.path, p.filename",
-        params,
-    ).fetchall()
+    rows = db.photo_visibility.metadata_repair_rows(workspace_id, root_paths)
 
     # A database row is only repairable when its original still exists.
     # The incremental repair scan discovers files from disk, so counting

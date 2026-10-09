@@ -103,9 +103,7 @@ def local_copy_preflight(
         if cancel_check and cancel_check():
             raise LocalWorkspaceCancelled("Folder scan cancelled")
         root_folder_id = int(raw_root_id)
-        row = db.conn.execute(
-            "SELECT path FROM folders WHERE id=?", (root_folder_id,)
-        ).fetchone()
+        row = db.get_folder(root_folder_id)
         if row is None:
             raise LocalWorkspaceError(f"Folder {root_folder_id} was not found")
         source_path = row["path"]
@@ -220,43 +218,23 @@ def _remove_folder_dir(
 
 
 def folder_state(db, root_folder_id: int) -> dict | None:
-    row = db.conn.execute(
-        """SELECT root_folder_id, state, created_at, activated_at
-           FROM local_folders WHERE root_folder_id=?""",
-        (root_folder_id,),
-    ).fetchone()
+    row = db.local_folders.get_state(root_folder_id)
     return dict(row) if row else None
 
 
 def _mappings(db, root_folder_id: int) -> list[dict]:
-    rows = db.conn.execute(
-        """SELECT root_folder_id, folder_id, source_path, local_path,
-                  original_status, is_root
-           FROM local_folder_mappings
-           WHERE root_folder_id=?
-           ORDER BY is_root DESC, source_path""",
-        (root_folder_id,),
-    ).fetchall()
+    rows = db.local_folders.mappings(root_folder_id)
     return [dict(row) for row in rows]
 
 
 def _root_mapping(db, root_folder_id: int) -> dict | None:
-    row = db.conn.execute(
-        """SELECT root_folder_id, folder_id, source_path, local_path,
-                  original_status, is_root
-           FROM local_folder_mappings
-           WHERE root_folder_id=? AND is_root=1""",
-        (root_folder_id,),
-    ).fetchone()
+    row = db.local_folders.root_mapping(root_folder_id)
     return dict(row) if row else None
 
 
 def local_root_for_folder(db, folder_id: int) -> int | None:
     """Return the local-session root covering ``folder_id``, if any."""
-    row = db.conn.execute(
-        "SELECT root_folder_id FROM local_folder_mappings WHERE folder_id=?",
-        (folder_id,),
-    ).fetchone()
+    row = db.local_folders.root_for_folder(folder_id)
     return int(row["root_folder_id"]) if row else None
 
 
@@ -272,16 +250,12 @@ def local_roots_under_folder(db, folder_id: int) -> list[int]:
     unlink cleanup) use this; guards that only need to refuse on any
     match use :func:`local_root_under_folder` for a cheap short-circuit.
     """
-    row = db.conn.execute(
-        "SELECT path FROM folders WHERE id=?", (folder_id,)
-    ).fetchone()
+    row = db.get_folder(folder_id)
     if row is None or not row["path"]:
         return []
     folder_path = row["path"]
     result: set[int] = set()
-    for entry in db.conn.execute(
-        "SELECT root_folder_id, source_path FROM local_folder_mappings WHERE is_root=1"
-    ).fetchall():
+    for entry in db.local_folders.source_roots():
         source = entry["source_path"]
         if not source or source == folder_path:
             continue
@@ -318,10 +292,7 @@ def _load_staged_source_index(db) -> list[tuple[int, str, str | None]]:
     repeating the DB query or the ``realpath`` walk.
     """
     entries: list[tuple[int, str, str | None]] = []
-    for row in db.conn.execute(
-        "SELECT root_folder_id, source_path FROM local_folder_mappings "
-        "WHERE is_root=1 ORDER BY root_folder_id"
-    ).fetchall():
+    for row in db.local_folders.ordered_source_roots():
         source = row["source_path"]
         if not source:
             continue
@@ -365,14 +336,7 @@ def _staged_root_visible_to_workspace(
     """Whether a staged root's mappings sit under a folder the workspace sees."""
     if workspace_id is None:
         return False
-    row = db.conn.execute(
-        """SELECT 1
-           FROM workspace_folders wf
-           JOIN local_folder_mappings lfm ON lfm.folder_id = wf.folder_id
-           WHERE wf.workspace_id=? AND lfm.root_folder_id=?
-           LIMIT 1""",
-        (int(workspace_id), int(root_folder_id)),
-    ).fetchone()
+    row = db.local_folders.workspace_has_root(workspace_id, root_folder_id)
     return row is not None
 
 
@@ -518,10 +482,7 @@ def stage_pending_source_paths(list_jobs, db) -> list[str]:
                 continue
         for root_id in sorted(root_ids):
             if root_id not in folder_paths:
-                row = db.conn.execute(
-                    "SELECT path FROM folders WHERE id=?",
-                    (root_id,),
-                ).fetchone()
+                row = db.get_folder(root_id)
                 folder_paths[root_id] = row["path"] if row and row["path"] else None
             path = folder_paths[root_id]
             if path and (path, job_ws, status) not in seen_sources:
@@ -609,14 +570,7 @@ def folder_has_local_copy(db, folder_id: int) -> bool:
 
 
 def workspace_local_root_ids(db, workspace_id: int) -> list[int]:
-    rows = db.conn.execute(
-        """SELECT DISTINCT lfm.root_folder_id
-           FROM workspace_folders wf
-           JOIN local_folder_mappings lfm ON lfm.folder_id = wf.folder_id
-           WHERE wf.workspace_id=?
-           ORDER BY lfm.root_folder_id""",
-        (workspace_id,),
-    ).fetchall()
+    rows = db.local_folders.workspace_root_ids(workspace_id)
     return [int(row["root_folder_id"]) for row in rows]
 
 
@@ -624,15 +578,7 @@ def _workspace_local_session_photo_count(
     db, workspace_id: int, root_folder_id: int
 ) -> int:
     """Count workspace-visible photos covered by one local session."""
-    row = db.conn.execute(
-        """SELECT COUNT(*) AS photo_count
-           FROM photos p
-           JOIN photo_workspace_visibility wf
-             ON wf.photo_id = p.id AND wf.workspace_id = ?
-           JOIN local_folder_mappings lfm ON lfm.folder_id = p.folder_id
-           WHERE lfm.root_folder_id = ?""",
-        (int(workspace_id), int(root_folder_id)),
-    ).fetchone()
+    row = db.local_folders.visible_photo_count(workspace_id, root_folder_id)
     return int(row["photo_count"] or 0)
 
 
@@ -641,14 +587,7 @@ def workspace_has_local_folders(db, workspace_id: int) -> bool:
 
 
 def affected_workspace_ids(db, root_folder_id: int) -> list[int]:
-    rows = db.conn.execute(
-        """SELECT DISTINCT wf.workspace_id
-           FROM local_folder_mappings lfm
-           JOIN workspace_visible_folders wf ON wf.folder_id = lfm.folder_id
-           WHERE lfm.root_folder_id=?
-           ORDER BY wf.workspace_id""",
-        (root_folder_id,),
-    ).fetchall()
+    rows = db.local_folders.affected_workspace_ids(root_folder_id)
     return [int(row["workspace_id"]) for row in rows]
 
 
@@ -659,15 +598,11 @@ def workspace_ids_for_folder_tree(db, root_folder_id: int) -> list[int]:
     mapping rows are inserted, so stage validation can see jobs running in a
     different workspace that shares the source folder.
     """
-    root = db.conn.execute("SELECT path FROM folders WHERE id=?", (root_folder_id,)).fetchone()
+    root = db.get_folder(root_folder_id)
     if root is None:
         return []
     workspace_ids = set()
-    rows = db.conn.execute(
-        """SELECT wf.workspace_id, f.path
-           FROM workspace_folders wf
-           JOIN folders f ON f.id = wf.folder_id"""
-    ).fetchall()
+    rows = db.workspace_folders.all_linked_paths()
     for row in rows:
         # Intersection is symmetric: a workspace root that contains the local
         # root shares the same catalog subtree as a workspace root nested
@@ -698,9 +633,7 @@ def _invalidate_new_images_for_source(
         # works while the original share is offline. Conservatively drop
         # all linked workspace snapshots instead of resolving filesystem
         # paths after the catalog commit.
-        ids.update(int(row["workspace_id"]) for row in db.conn.execute(
-            "SELECT DISTINCT workspace_id FROM workspace_folders"
-        ).fetchall())
+        ids.update(int(row["workspace_id"]) for row in db.workspace_folders.all_linked_workspace_ids())
     for workspace_id in sorted(ids):
         db.invalidate_new_images_cache_for_workspace(workspace_id)
 
@@ -709,11 +642,7 @@ def workspace_summaries_for_ids(db, workspace_ids: list[int]) -> list[dict]:
     """Return lightweight workspace details in the same order as the IDs."""
     if not workspace_ids:
         return []
-    placeholders = ",".join("?" for _workspace_id in workspace_ids)
-    rows = db.conn.execute(
-        f"SELECT id, name FROM workspaces WHERE id IN ({placeholders})",
-        tuple(workspace_ids),
-    ).fetchall()
+    rows = db.workspaces.summaries_for_ids(workspace_ids)
     workspaces_by_id = {
         int(row["id"]): {"id": int(row["id"]), "name": row["name"]}
         for row in rows
@@ -768,9 +697,7 @@ def _load_sync_recovery(vireo_dir: str, root_folder_id: int) -> set | None:
 def _catalog_records(
     db, root_folder_id: int, local_base: Path, vireo_dir: str
 ) -> tuple[list[dict], list[dict]]:
-    row = db.conn.execute(
-        "SELECT id, path, status FROM folders WHERE id=?", (root_folder_id,)
-    ).fetchone()
+    row = db.get_folder(root_folder_id)
     if row is None:
         raise LocalWorkspaceError("Folder not found")
     source_path = row["path"]
@@ -780,9 +707,7 @@ def _catalog_records(
     # overlapping tree.  A requested broader root over an existing narrower
     # session must be resolved first because two manifests cannot safely own
     # the same catalog rows.
-    for existing in db.conn.execute(
-        "SELECT root_folder_id, source_path FROM local_folder_mappings WHERE is_root=1"
-    ).fetchall():
+    for existing in db.local_folders.source_roots():
         if _is_within(source_path, existing["source_path"]) or _is_within(
             existing["source_path"], source_path
         ):
@@ -792,9 +717,7 @@ def _catalog_records(
 
     # Do not overlap a legacy v0.24 workspace session. It remains usable for
     # sync/discard, but new folder sessions wait until it is resolved.
-    for existing in db.conn.execute(
-        "SELECT workspace_id, source_path FROM local_workspace_folders WHERE is_root=1"
-    ).fetchall():
+    for existing in db.local_workspaces.source_roots():
         if _is_within(source_path, existing["source_path"]) or _is_within(
             existing["source_path"], source_path
         ):
@@ -812,21 +735,17 @@ def _catalog_records(
         )
     catalog_source_paths = {
         row["path"]
-        for row in db.conn.execute("SELECT path FROM folders").fetchall()
+        for row in db.local_folders.catalog_paths()
         if row["path"]
     }
     catalog_source_paths.update(
         row["source_path"]
-        for row in db.conn.execute(
-            "SELECT source_path FROM local_folder_mappings"
-        ).fetchall()
+        for row in db.local_folders.source_paths()
         if row["source_path"]
     )
     catalog_source_paths.update(
         row["source_path"]
-        for row in db.conn.execute(
-            "SELECT source_path FROM local_workspace_folders"
-        ).fetchall()
+        for row in db.local_workspaces.source_paths()
         if row["source_path"]
     )
     for catalog_source in catalog_source_paths:
@@ -853,9 +772,7 @@ def _catalog_records(
             raise LocalWorkspaceError(
                 f"Local destination overlaps Vireo session storage: {session_root}"
             )
-    for existing in db.conn.execute(
-        "SELECT root_folder_id, local_path FROM local_folder_mappings WHERE is_root=1"
-    ).fetchall():
+    for existing in db.local_folders.local_roots():
         if _physical_is_within(str(local_root), existing["local_path"]) or _physical_is_within(
             existing["local_path"], str(local_root)
         ):
@@ -873,7 +790,7 @@ def _catalog_records(
         "local_path": str(local_root),
     }
     folders = []
-    for folder in db.conn.execute("SELECT id, path, status FROM folders ORDER BY path").fetchall():
+    for folder in db.local_folders.catalog_rows_by_path():
         if not _is_within(folder["path"], source_path):
             continue
         folders.append(
@@ -891,8 +808,8 @@ def _catalog_records(
 
 
 def _delete_state_rows(db, root_folder_id: int) -> None:
-    db.conn.execute("DELETE FROM local_folder_mappings WHERE root_folder_id=?", (root_folder_id,))
-    db.conn.execute("DELETE FROM local_folders WHERE root_folder_id=?", (root_folder_id,))
+    db.local_folders.delete_mappings(root_folder_id)
+    db.local_folders.delete_state(root_folder_id)
 
 
 def _materialize_ancestor_workspaces(db, source_path: str, folders: list[dict]) -> None:
@@ -913,11 +830,7 @@ def _materialize_ancestor_workspaces(db, source_path: str, folders: list[dict]) 
     """
     if not folders:
         return
-    rows = db.conn.execute(
-        """SELECT DISTINCT wf.workspace_id, f.path
-           FROM workspace_folders wf
-           JOIN folders f ON f.id = wf.folder_id"""
-    ).fetchall()
+    rows = db.workspace_folders.distinct_linked_paths()
     ancestor_ws_ids = sorted({
         int(row["workspace_id"])
         for row in rows
@@ -930,16 +843,8 @@ def _materialize_ancestor_workspaces(db, source_path: str, folders: list[dict]) 
     # Staging in another workspace is automatic discovery, not an explicit
     # restore. Check removals in the INSERT so even a concurrent unlink
     # cannot be undone by clearing its removal record in the link trigger.
-    db.conn.executemany(
-        """INSERT OR IGNORE INTO workspace_folders
-           (workspace_id, folder_id, is_root)
-           SELECT ?, ?, 0 WHERE NOT EXISTS (
-               SELECT 1 FROM workspace_removed_folders
-               WHERE workspace_id = ? AND folder_id = ?
-           )""",
-        [(ws_id, folder_id, ws_id, folder_id) for ws_id, folder_id in pairs],
-    )
-    db.conn.commit()
+    db.workspace_folders.materialize_local_copy_links(pairs)
+    db.commit()
     for ws_id in ancestor_ws_ids:
         db._new_images_cache.invalidate_workspaces(db._db_path, [ws_id])
 
@@ -985,29 +890,13 @@ def stage_folder(
                     f"Could not create the local destination {local_root}: {exc}"
                 ) from exc
             try:
-                db.conn.execute("BEGIN IMMEDIATE")
-                db.conn.execute(
-                    "INSERT INTO local_folders (root_folder_id, state, created_at) VALUES (?, 'staging', ?)",
-                    (root_folder_id, time.time()),
-                )
+                db.begin_immediate()
+                db.local_folders.create_staging(root_folder_id, time.time())
                 for folder in folders:
-                    db.conn.execute(
-                        """INSERT INTO local_folder_mappings
-                           (root_folder_id, folder_id, source_path, local_path,
-                            original_status, is_root)
-                           VALUES (?, ?, ?, ?, ?, ?)""",
-                        (
-                            root_folder_id,
-                            folder["folder_id"],
-                            folder["source_path"],
-                            folder["local_path"],
-                            folder["status"],
-                            1 if folder["is_root"] else 0,
-                        ),
-                    )
-                db.conn.commit()
+                    db.local_folders.add_mapping(root_folder_id, folder)
+                db.commit()
             except BaseException:
-                db.conn.rollback()
+                db.rollback()
                 _remove_folder_dir(vireo_dir, root_folder_id, local_root)
                 raise
             # From here the New Images walk leaves the source out.
@@ -1056,24 +945,18 @@ def stage_folder(
             # ancestor root. Must run before the UPDATE below.
             _materialize_ancestor_workspaces(db, roots[0]["source_path"], folders)
 
-            db.conn.execute("BEGIN IMMEDIATE")
+            db.begin_immediate()
             try:
                 for folder in folders:
-                    db.conn.execute(
-                        "UPDATE folders SET path=? WHERE id=? AND path=?",
-                        (folder["local_path"], folder["folder_id"], folder["source_path"]),
-                    )
-                    if db.conn.execute("SELECT changes()").fetchone()[0] != 1:
+                    db.local_folders.rebase_folder_if_unchanged(folder)
+                    if db.local_folders.last_change_count() != 1:
                         raise LocalWorkspaceError(
                             f"Catalog folder changed while staging: {folder['source_path']}"
                         )
-                db.conn.execute(
-                    "UPDATE local_folders SET state='active', activated_at=? WHERE root_folder_id=?",
-                    (time.time(), root_folder_id),
-                )
-                db.conn.commit()
+                db.local_folders.activate(root_folder_id, time.time())
+                db.commit()
             except BaseException:
-                db.conn.rollback()
+                db.rollback()
                 raise
             _invalidate_new_images_for_source(
                 db, roots[0]["source_path"],
@@ -1094,7 +977,7 @@ def stage_folder(
                     vireo_dir, root_folder_id, root["local_path"] if root else None
                 )
                 _delete_state_rows(db, root_folder_id)
-                db.conn.commit()
+                db.commit()
                 # The source is no longer staged: walks cached while it
                 # was must not keep leaving it out.
                 _invalidate_new_images_for_source(db, roots[0]["source_path"])
@@ -1106,7 +989,7 @@ def folder_status(db, root_folder_id: int, vireo_dir: str) -> dict:
     root_folder_id = int(root_folder_id)
     covering = local_root_for_folder(db, root_folder_id)
     if covering is None:
-        row = db.conn.execute("SELECT path FROM folders WHERE id=?", (root_folder_id,)).fetchone()
+        row = db.get_folder(root_folder_id)
         source_path = row["path"] if row else None
         workspace_ids = workspace_ids_for_folder_tree(db, root_folder_id)
         return {
@@ -1248,9 +1131,7 @@ def _derive_folder_name(path: str) -> str:
 
 
 def _folder_name_for(db, folder_id: int, fallback_path: str) -> str:
-    row = db.conn.execute(
-        "SELECT name FROM folders WHERE id=?", (int(folder_id),)
-    ).fetchone()
+    row = db.get_folder(int(folder_id))
     if row and row["name"]:
         return row["name"]
     return _derive_folder_name(fallback_path)
@@ -1268,24 +1149,7 @@ def _nearest_visible_ancestor(db, folder_id: int, workspace_id: int) -> int | No
     rendered tree. Callers can attach the LOCAL ISSUE recovery badge to this
     ancestor instead so users still see the affected subtree flagged.
     """
-    row = db.conn.execute(
-        """WITH RECURSIVE anc(id, parent_id, depth) AS (
-             SELECT id, parent_id, 0 FROM folders WHERE id = ?
-             UNION ALL
-             SELECT f.id, f.parent_id, anc.depth + 1
-             FROM folders f
-             JOIN anc ON f.id = anc.parent_id
-           )
-           SELECT anc.id AS id
-           FROM anc
-           JOIN folders af ON af.id = anc.id
-           JOIN workspace_folders wf
-             ON wf.folder_id = anc.id AND wf.workspace_id = ?
-           WHERE anc.depth > 0 AND af.status IN ('ok', 'partial')
-           ORDER BY anc.depth ASC
-           LIMIT 1""",
-        (int(folder_id), int(workspace_id)),
-    ).fetchone()
+    row = db.workspace_folders.nearest_visible_ancestor(folder_id, workspace_id)
     return int(row["id"]) if row else None
 
 
@@ -1295,48 +1159,37 @@ def _restore_catalog(db, root_folder_id: int) -> None:
     root = next((item for item in mappings if item["is_root"]), None)
     if root is None:
         raise LocalWorkspaceError("Local folder mapping is missing its root")
-    db.conn.execute("BEGIN IMMEDIATE")
+    db.begin_immediate()
     try:
         for mapping in mappings:
-            conflict = db.conn.execute(
-                "SELECT id FROM folders WHERE path=? AND id != ?",
-                (mapping["source_path"], mapping["folder_id"]),
-            ).fetchone()
+            conflict = db.local_folders.path_conflict(mapping["source_path"], mapping["folder_id"])
             if conflict and conflict["id"] not in mapped_ids:
                 db._merge_into_existing(
                     conflict["id"], mapping["folder_id"], mapping["source_path"], commit=False
                 )
         for mapping in mappings:
-            db.conn.execute(
-                "UPDATE folders SET path=? WHERE id=?",
-                (f"__vireo_local_folder_restore__/{root_folder_id}/{mapping['folder_id']}", mapping["folder_id"]),
-            )
+            db.local_folders.set_catalog_path(f"__vireo_local_folder_restore__/{root_folder_id}/{mapping['folder_id']}", mapping["folder_id"])
         for mapping in mappings:
-            db.conn.execute(
-                "UPDATE folders SET path=?, status=? WHERE id=?",
-                (mapping["source_path"], mapping["original_status"], mapping["folder_id"]),
-            )
+            db.local_folders.restore_catalog_folder(mapping)
 
         relinked = list(mapped_ids)
-        for row in db.conn.execute("SELECT id, path, status FROM folders").fetchall():
+        for row in db.local_folders.catalog_rows():
             if row["id"] in mapped_ids or not _is_within(row["path"], root["local_path"]):
                 continue
             target = os.path.normpath(
                 os.path.join(root["source_path"], _relative(row["path"], root["local_path"]))
             )
-            existing = db.conn.execute(
-                "SELECT id FROM folders WHERE path=? AND id != ?", (target, row["id"])
-            ).fetchone()
+            existing = db.local_folders.path_conflict(target, row["id"])
             if existing:
                 db._merge_into_existing(row["id"], existing["id"], target, commit=False)
             else:
-                db.conn.execute("UPDATE folders SET path=? WHERE id=?", (target, row["id"]))
+                db.local_folders.set_catalog_path(target, row["id"])
                 relinked.append(row["id"])
         db._relink_parents_by_path(relinked)
         _delete_state_rows(db, root_folder_id)
-        db.conn.commit()
+        db.commit()
     except BaseException:
-        db.conn.rollback()
+        db.rollback()
         raise
 
 
@@ -1484,10 +1337,8 @@ def sync_folder(
             raise LocalWorkspaceCancelled("Local folder sync cancelled")
         if not resuming:
             _write_sync_recovery(vireo_dir, root_folder_id, deleted)
-            db.conn.execute(
-                "UPDATE local_folders SET state='syncing' WHERE root_folder_id=?", (root_folder_id,)
-            )
-            db.conn.commit()
+            db.local_folders.mark_syncing(root_folder_id)
+            db.commit()
         elif fresh_confirmation:
             _write_sync_recovery(vireo_dir, root_folder_id, deleted)
 
@@ -1537,7 +1388,7 @@ def discard_folder(db, root_folder_id: int, vireo_dir: str, *, acknowledge_publi
                 vireo_dir, root_folder_id, root["local_path"] if root else None
             )
             _delete_state_rows(db, root_folder_id)
-            db.conn.commit()
+            db.commit()
             _invalidate_new_images_for_source(
                 db, root["source_path"] if root else None,
             )

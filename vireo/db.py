@@ -21,6 +21,7 @@ from repositories import UNSET as _UNSET  # sentinel for "not provided" vs expli
 if TYPE_CHECKING:
     from repositories.audit import AuditRepository
     from repositories.caches import CachesRepository
+    from repositories.collections import CollectionRepository
     from repositories.detections import DetectionsRepository
     from repositories.duplicates import DuplicatesRepository
     from repositories.edit_history import EditHistoryRepository
@@ -28,7 +29,9 @@ if TYPE_CHECKING:
     from repositories.exif_search import ExifSearchRepository
     from repositories.inat import InatRepository
     from repositories.job_history import JobHistoryRepository
+    from repositories.keywords import KeywordRepository
     from repositories.local_folders import LocalFolderRepository
+    from repositories.local_workspaces import LocalWorkspaceRepository
     from repositories.masks_features import MasksFeaturesRepository
     from repositories.model_runs import ModelRunsRepository
     from repositories.pending_archives import PendingArchiveRepository
@@ -5177,6 +5180,15 @@ class Database:
 
     # -- Keywords --
 
+    @property
+    def keywords(self) -> KeywordRepository:
+        """Fresh domain API; scoped methods resolve the workspace at use.
+
+        Existing coordinated façade methods and their bound callbacks stay
+        in place. Do not retain this repository across a workspace switch.
+        """
+        return self._keyword_repository()
+
     def _keyword_repository(self):
         """Build the keyword repository on this connection.
 
@@ -6116,6 +6128,17 @@ class Database:
     def set_meta(self, key, value, _commit=True):
         """Upsert a db_meta row."""
         self._meta_repository().set(key, value, _commit=_commit)
+
+    def _local_workspace_repository(self) -> LocalWorkspaceRepository:
+        """Build local-copy persistence on the live catalog connection."""
+        from repositories.local_workspaces import LocalWorkspaceRepository
+
+        return LocalWorkspaceRepository(self.conn)
+
+    @property
+    def local_workspaces(self) -> LocalWorkspaceRepository:
+        """Fresh API for workspace-local copies; ids are explicit per call."""
+        return self._local_workspace_repository()
 
     def _local_folder_repository(self):
         """Build the (catalog-wide) folder-level local-copy repository on this connection."""
@@ -9324,6 +9347,15 @@ class Database:
         self._edit_history_repository().prune(max_entries, preserve_wildlife_discard)
 
     # -- Collections --
+
+    @property
+    def collections(self) -> CollectionRepository:
+        """Fresh domain API; scoped methods resolve the workspace at use.
+
+        Existing coordinated façade methods and their bound callbacks stay
+        in place. Do not retain this repository across a workspace switch.
+        """
+        return self._collection_repository()
 
     def _collection_repository(self):
         """Build the collections repository on this connection.

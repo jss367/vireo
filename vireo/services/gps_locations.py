@@ -47,14 +47,7 @@ def location_keyword_photo_ids(db, photo_ids):
         return set()
     found = set()
     for chunk in gps_location_chunks(photo_ids):
-        placeholders = ",".join("?" for _ in chunk)
-        rows = db.conn.execute(
-            "SELECT DISTINCT pk.photo_id "
-            "FROM photo_keywords pk "
-            "JOIN keywords k ON k.id = pk.keyword_id "
-            f"WHERE k.type = 'location' AND pk.photo_id IN ({placeholders})",
-            chunk,
-        ).fetchall()
+        rows = db.keywords.location_photo_rows(chunk)
         found.update(row["photo_id"] for row in rows)
     return found
 
@@ -261,11 +254,7 @@ class BulkGpsLocations:
         if collection_id is None:
             return None, json_error("photo_ids or collection_id required", 400)
 
-        row = db.conn.execute(
-            "SELECT id, visual_json FROM collections "
-            "WHERE id = ? AND workspace_id = ?",
-            (collection_id, db.require_workspace_id()),
-        ).fetchone()
+        row = db.collections.visual_source_row(collection_id)
         if row is None:
             return None, json_error("collection not found", 404)
         # get_collection_photo_ids evaluates ``rules`` only; a visual-only

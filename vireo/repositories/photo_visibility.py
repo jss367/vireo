@@ -185,6 +185,88 @@ class PhotoVisibilityRepository:
                 (photo_id, active_workspace),
             )
 
+    def active_path_rows(self, workspace_id: int) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            """SELECT p.id, p.filename, p.companion_path,
+                      f.path AS folder_path
+               FROM photos p
+               JOIN folders f ON f.id = p.folder_id
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
+               WHERE wf.workspace_id = ?""",
+            (workspace_id,),
+        ).fetchall()
+
+    def folder_rows_for_photos(self, chunk: Sequence[int]) -> list[sqlite3.Row]:
+        ph = ",".join("?" for _ in chunk)
+        return self.conn.execute(
+        "SELECT DISTINCT f.id, f.path FROM photos p "
+        "JOIN folders f ON f.id = p.folder_id "
+        f"WHERE p.id IN ({ph})", chunk).fetchall()
+
+    def fingerprint_rows(self, chunk: Sequence[int]) -> list[sqlite3.Row]:
+        placeholders = ",".join("?" for _ in chunk)
+        return self.conn.execute(
+            f"""SELECT p.id AS id,
+                       f.path AS folder_path,
+                       p.filename AS filename
+                FROM photos p
+                JOIN folders f ON f.id = p.folder_id
+                WHERE p.id IN ({placeholders})""",
+            list(chunk),
+        ).fetchall()
+
+    def deletion_identity_rows(self, chunk: Sequence[int]) -> list[sqlite3.Row]:
+        placeholders = ",".join("?" for _ in chunk)
+        return self.conn.execute(
+            f"SELECT p.id, p.folder_id, p.filename, "
+            f"p.companion_path, f.path AS folder_path "
+            f"FROM photos p "
+            f"JOIN folders f ON f.id = p.folder_id "
+            f"WHERE p.id IN ({placeholders})",
+            list(chunk),
+        ).fetchall()
+
+    def metadata_repair_rows(self, workspace_id: int, root_paths: Sequence[str] | None) -> list[sqlite3.Row]:
+        """Visible photos missing EXIF under exact, normalized root prefixes."""
+        params = [workspace_id]
+        where_extra = ""
+        if root_paths is not None:
+            if not root_paths:
+                return []
+            normalized_roots = [
+                r.replace("\\", "/").rstrip("/") for r in root_paths if r
+            ]
+            if not normalized_roots:
+                return []
+            clauses = []
+            for norm in normalized_roots:
+                prefix = norm + "/"
+                # Match ``f.path`` normalized to forward slashes either
+                # exactly against the root or as a boundary-preserving
+                # prefix. ``substr(...)=prefix`` avoids the wildcard
+                # collision LIKE would introduce (e.g. a folder called
+                # ``photos_backup`` incorrectly matching a reachable
+                # ``photos`` root because ``_`` matches any character
+                # in LIKE without ESCAPE).
+                clauses.append(
+                    "(REPLACE(f.path, '\\', '/') = ? "
+                    "OR substr(REPLACE(f.path, '\\', '/'), 1, ?) = ?)"
+                )
+                params.extend([norm, len(prefix), prefix])
+            where_extra = " AND (" + " OR ".join(clauses) + ")"
+        return self.conn.execute(
+            "SELECT DISTINCT p.id, p.filename, "
+            "f.id AS folder_id, f.path AS folder_path "
+            "FROM photos p "
+            "JOIN folders f ON f.id = p.folder_id "
+            "JOIN photo_workspace_visibility wf ON wf.photo_id = p.id "
+            "WHERE wf.workspace_id = ? "
+            "AND p.exif_data IS NULL"
+            + where_extra
+            + " ORDER BY f.path, p.filename",
+            params,
+        ).fetchall()
+
 
 def remap_photo_visibility(conn, mapping):
     """Keep each workspace's photo-only access when catalog identities fold."""

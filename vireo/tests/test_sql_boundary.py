@@ -12,8 +12,8 @@ active-workspace state:
   ``db.set_active_workspace``.
 - ``<expr>.conn`` outside the data layer (``db.conn.execute(...)``,
   ``self.db.conn``, ``thread_db.conn.commit()``, a stored ``self.conn``) may only shrink. Each file is
-  capped at its current count; move the SQL into a repository method behind a
-  ``Database`` wrapper and lower the cap. Aliasing the connection to a local
+  capped at its current count; move the SQL into a repository method through a
+  domain accessor and lower the cap. Aliasing the connection to a local
   (``conn = db.conn``) to get under the cap defeats the point: the SQL still
   runs outside the data layer.
 
@@ -71,20 +71,6 @@ CONN_USE_LIMITS = {
     "render_source.py": 2,
     "scanner.py": 97,
     "schema.py": 1,
-    "services/folder_moves.py": 3,
-    "services/gps_locations.py": 2,
-    "services/grouping_history.py": 11,
-    "services/import_in_place.py": 1,
-    "services/import_photos.py": 4,
-    "services/imports.py": 13,
-    "services/local_folder.py": 57,
-    "services/local_workspace.py": 32,
-    "services/missing_originals.py": 1,
-    "services/pending_changes.py": 1,
-    "services/photo_deletion.py": 4,
-    "services/render_cache.py": 7,
-    "services/startup_tasks.py": 3,
-    "services/visual_scope.py": 1,
     "site_export.py": 3,
     "species_identity.py": 5,
     "species_identity_repair.py": 3,
@@ -142,7 +128,7 @@ def test_connection_use_outside_data_layer_only_shrinks():
     assert not grown, (
         "Catalog connection use outside the data layer grew past its limit "
         f"(uses, limit): {grown}. Put the SQL in a vireo/repositories/ module "
-        "behind a Database method and call that instead."
+        "through a Database domain accessor and call that instead."
     )
     shrunk = {
         name: (actual.get(name, 0), limit)

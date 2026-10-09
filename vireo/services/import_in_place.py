@@ -657,15 +657,7 @@ class _InPlaceImportRun:
 
     def _active_photo_ids_by_path(self):
         """Map primary and companion paths to active photo records."""
-        rows = self.thread_db.conn.execute(
-            """SELECT p.id, p.filename, p.companion_path,
-                      f.path AS folder_path
-               FROM photos p
-               JOIN folders f ON f.id = p.folder_id
-               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-               WHERE wf.workspace_id = ?""",
-            (self.plan.active_ws,),
-        ).fetchall()
+        rows = self.thread_db.photo_visibility.active_path_rows(self.plan.active_ws)
         result = {}
         for row in rows:
             result[
