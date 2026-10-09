@@ -504,7 +504,7 @@ function _vireoHashString(s) {
 // seeing the old bytes from their own browser cache until they expire.
 // test_edit_math_version_template_constant_matches_python locks the two
 // constants together.
-var _VIREO_EDIT_MATH_VERSION = 7;
+var _VIREO_EDIT_MATH_VERSION = 8;
 
 // Stable stringify: sort object keys at every depth so a fingerprint tracks
 // the recipe's *content*. Two payloads can serialize the same recipe with

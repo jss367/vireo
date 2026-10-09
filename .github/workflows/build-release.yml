@@ -66,6 +66,19 @@ jobs:
           fi
           python scripts/sync_version.py "$TAG"
 
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-target }}
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri
+            native/detail
+          shared-key: ${{ matrix.label }}
+
       # ── Python & sidecar ──────────────────────────────────
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -176,18 +189,6 @@ jobs:
 
       - name: Install Node.js dependencies
         run: npm ci
-
-      # ── Rust toolchain ────────────────────────────────────
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.rust-target }}
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
-          shared-key: ${{ matrix.label }}
 
       # ── Platform-specific system deps (Linux) ─────────────
       - name: Install Linux system dependencies
