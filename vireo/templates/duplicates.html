@@ -1003,9 +1003,7 @@
         'Keep ' + escapeHtml(label) + ' for all ' + bucket.group_count +
         '</button>';
     });
-    html += '<button class="keep-btn reveal-btn" onclick="revealBucketFolders(' + bi + ', this)" ' +
-      'title="Reveal all bucket folders in your OS file manager">' +
-      escapeHtml(window.VIREO_REVEAL_LABEL) + '</button>';
+    html += bucketRevealButton(bi);
     html += '<label class="delete-toggle">' +
       '<input type="checkbox" data-bi="' + bi + '" data-delete-toggle> ' +
       'Also move extras to Trash</label>';
@@ -1107,10 +1105,7 @@
       '<button class="keep-btn" data-retry-trash onclick="retryBucketTrash(this)">' +
         'Retry ' + n + ' file' + (n === 1 ? '' : 's') + ' to Trash' +
       '</button>' +
-      '<button class="keep-btn reveal-btn" onclick="revealBucketFolders(' + bi + ', this)" ' +
-        'title="Reveal all bucket folders in your OS file manager">' +
-        escapeHtml(window.VIREO_REVEAL_LABEL) +
-      '</button>';
+      bucketRevealButton(Number(bi));
   }
 
   async function retryBucketTrash(btn) {
