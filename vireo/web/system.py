@@ -650,7 +650,8 @@ def create_system_blueprint(
         db = None
         try:
             db = get_db()
-            ws = db.get_active_workspace()
+            ws_id = db.active_workspace_id
+            ws = db.workspaces.get(ws_id) if ws_id is not None else None
             ws_name = ws["name"] if ws else "unknown"
             folder_count = db.count_all_folders()
             photo_count = db.count_catalog_photos()
