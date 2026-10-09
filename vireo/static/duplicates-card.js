@@ -60,3 +60,30 @@ function renderCard(photo, isWinner, reason, isResolvedLoser, winnerMissingProte
   html += '</div>';
   return html;
 }
+
+async function revealDuplicatePhoto(photoId) {
+  try {
+    var data = await safeFetch('/api/files/reveal', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ photo_id: photoId, scope: 'duplicates' }),
+    }, { toast: false });
+    showRevealFeedback(data);
+  } catch (err) {
+    showToast('Reveal failed: ' + (err.message || 'request failed'), 'error');
+  }
+}
+
+// Delegate so restored results, fresh scans, and filter re-renders all work.
+document.addEventListener('contextmenu', function(e) {
+  var card = e.target.closest('.dup-card[data-photo-id]');
+  var results = document.getElementById('results');
+  if (!card || !results || !results.contains(card)) return;
+  var photoId = Number(card.dataset.photoId);
+  if (!Number.isInteger(photoId) || photoId <= 0) return;
+  e.preventDefault();
+  openContextMenu(e, [{
+    label: window.VIREO_REVEAL_LABEL,
+    onClick: function() { revealDuplicatePhoto(photoId); },
+  }]);
+});
