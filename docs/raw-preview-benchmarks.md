@@ -106,6 +106,13 @@ scenarios and every individual timing sample.
 
 ## Native-resolution filtering optimization
 
+The [Rust photo editing filter experiment](photo-editing-rust-experiment.md)
+compares an isolated Rust prototype with NumPy, SciPy, and OpenCV for recipes that
+also include standard noise reduction and sharpening. It includes numerical
+fidelity checks and measurements through the supervised preview endpoint.
+Those detail-filter results measure a different recipe from the basic tone-only
+reference tables below.
+
 Profiling the 46 MP endpoint identified the tone pass, particularly spatial
 Shadows/Highlights, as the main rendering cost. Its one-million-pixel row strips
 were only 120 rows tall at 8,288 pixels wide, with up to 96 extra rows of filter

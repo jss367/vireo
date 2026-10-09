@@ -2735,6 +2735,7 @@ def render_edit_preview_job(payload, output_path):
     import config as cfg
     import cv2
     from db import Database
+    from detail_backend import detail_thread_budget
     from float_image import FloatImage
     from image_edits import RecipeError
 
@@ -2756,7 +2757,8 @@ def render_edit_preview_job(payload, output_path):
         source_kind = 'linear' if isinstance(source, FloatImage) and source.encoding == 'linear' else 'srgb'
         rendered = None
         try:
-            rendered = edit.render(source)
+            with detail_thread_budget(payload.get("threads", 2)):
+                rendered = edit.render(source)
             rendered.save(output_path, format='JPEG', quality=payload['quality'])
         except RecipeError as error:
             return 400, str(error), ''

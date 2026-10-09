@@ -1,0 +1,637 @@
+{
+  "schema": 1,
+  "kind": "warm in-process editing and JPEG encoding",
+  "environment": {
+    "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+    "python": "3.14.3",
+    "numpy": "2.4.2",
+    "scipy": "1.17.1",
+    "opencv": "4.11.0",
+    "pillow": "12.1.1",
+    "threads": 4,
+    "cpu_count": 16
+  },
+  "source_revision": "0397939396cfe36c2820d9bff18acc45a4557430",
+  "working_tree_dirty": true,
+  "source_hashes": {
+    "tools/detail-performance/benchmark.py": "89523e57f57bb4fa981811d1468e49c86a764315708aa16dcca82ac505e84a30",
+    "vireo/detail.py": "60c148f1103cbdd266e7a62da3637677f44c1dd32ecc963dc4f16763765c5b70",
+    "vireo/tone.py": "697cbb617d42fb6835ea1420ad3bc37e4c7a2521a96f3238e7314ca5d595570e",
+    "vireo/image_edits.py": "809663e666379488a61c7e85b2a3e450ecefffca9c7ebb86cb797c5632add2f2",
+    "tools/detail-performance/src/lib.rs": "efef467e6e7172d8d4c47cdc8823a468ffd6e7beb9e1c64330ac7ff63844cdd6"
+  },
+  "results": [
+    {
+      "source": "camera-24mp",
+      "backend": "original",
+      "recipe": "detail",
+      "dimensions": [
+        6016,
+        4016
+      ],
+      "samples_ms": [
+        10986.91,
+        10987.88,
+        11108.66
+      ],
+      "median_ms": 10987.88,
+      "p95_ms": 11108.66,
+      "warm_baseline_rss_mib": 3619.81,
+      "peak_rss_mib": 3780.53,
+      "fidelity": {
+        "max_float_error": 0.0,
+        "changed_8bit_channels": 0,
+        "max_8bit_error": 0,
+        "changed_16bit_channels": 0,
+        "max_16bit_error": 0,
+        "rmse": 0.0,
+        "passes": true
+      },
+      "profile": [
+        {
+          "file": "image_edits.py",
+          "line": 944,
+          "function": "apply_recipe_to_loaded_image",
+          "calls": 1,
+          "own_ms": 1.7,
+          "cumulative_ms": 10861.28
+        },
+        {
+          "file": "image_edits.py",
+          "line": 806,
+          "function": "_apply_recipe_impl",
+          "calls": 1,
+          "own_ms": 0.01,
+          "cumulative_ms": 5466.56
+        },
+        {
+          "file": "image_edits.py",
+          "line": 586,
+          "function": "_apply_adjustments",
+          "calls": 1,
+          "own_ms": 36.81,
+          "cumulative_ms": 5466.54
+        },
+        {
+          "file": "tone.py",
+          "line": 583,
+          "function": "apply_adjustments",
+          "calls": 35,
+          "own_ms": 73.11,
+          "cumulative_ms": 5395.62
+        },
+        {
+          "file": "detail.py",
+          "line": 190,
+          "function": "apply_detail",
+          "calls": 1,
+          "own_ms": 23.56,
+          "cumulative_ms": 5392.96
+        },
+        {
+          "file": "detail.py",
+          "line": 166,
+          "function": "_run_detail",
+          "calls": 7,
+          "own_ms": 372.03,
+          "cumulative_ms": 5356.41
+        },
+        {
+          "file": "detail.py",
+          "line": 98,
+          "function": "_bilateral",
+          "calls": 7,
+          "own_ms": 3893.74,
+          "cumulative_ms": 3911.18
+        },
+        {
+          "file": "tone.py",
+          "line": 316,
+          "function": "_apply_range_adjustments_linear",
+          "calls": 35,
+          "own_ms": 709.11,
+          "cumulative_ms": 3627.4
+        },
+        {
+          "file": "tone.py",
+          "line": 133,
+          "function": "_spatial_range_level",
+          "calls": 35,
+          "own_ms": 302.31,
+          "cumulative_ms": 1732.95
+        },
+        {
+          "file": "tone.py",
+          "line": 272,
+          "function": "_scene_to_display_linear",
+          "calls": 35,
+          "own_ms": 521.29,
+          "cumulative_ms": 1211.79
+        },
+        {
+          "file": "detail.py",
+          "line": 92,
+          "function": "_gaussian_blur",
+          "calls": 14,
+          "own_ms": 6.98,
+          "cumulative_ms": 904.49
+        },
+        {
+          "file": "detail.py",
+          "line": 78,
+          "function": "_blur_axis",
+          "calls": 28,
+          "own_ms": 824.64,
+          "cumulative_ms": 897.11
+        },
+        {
+          "file": "tone.py",
+          "line": 164,
+          "function": "linear_to_srgb",
+          "calls": 140,
+          "own_ms": 780.2,
+          "cumulative_ms": 857.15
+        },
+        {
+          "file": "tone.py",
+          "line": 256,
+          "function": "_compress_linear_gamut",
+          "calls": 35,
+          "own_ms": 362.78,
+          "cumulative_ms": 624.15
+        },
+        {
+          "file": "tone.py",
+          "line": 92,
+          "function": "_range_log_base",
+          "calls": 35,
+          "own_ms": 167.21,
+          "cumulative_ms": 620.66
+        },
+        {
+          "file": "tone.py",
+          "line": 106,
+          "function": "box",
+          "calls": 140,
+          "own_ms": 0.14,
+          "cumulative_ms": 412.64
+        },
+        {
+          "file": "tone.py",
+          "line": 158,
+          "function": "srgb_to_linear",
+          "calls": 105,
+          "own_ms": 385.58,
+          "cumulative_ms": 385.62
+        },
+        {
+          "file": "tone.py",
+          "line": 123,
+          "function": "_shadow_highlight_levels",
+          "calls": 70,
+          "own_ms": 3.96,
+          "cumulative_ms": 326.94
+        },
+        {
+          "file": "tone.py",
+          "line": 221,
+          "function": "_shadow_level_curve",
+          "calls": 70,
+          "own_ms": 298.11,
+          "cumulative_ms": 321.64
+        },
+        {
+          "file": "tone.py",
+          "line": 186,
+          "function": "smoothstep",
+          "calls": 105,
+          "own_ms": 116.85,
+          "cumulative_ms": 149.7
+        }
+      ],
+      "source_sha256": "696318ab924b5fd5260281b0686d015776ef50d10d736dab210abb89a7ee6f53"
+    },
+    {
+      "source": "camera-24mp",
+      "backend": "scipy",
+      "recipe": "detail",
+      "dimensions": [
+        6016,
+        4016
+      ],
+      "samples_ms": [
+        10716.17,
+        11171.57,
+        11963.11
+      ],
+      "median_ms": 11171.57,
+      "p95_ms": 11963.11,
+      "warm_baseline_rss_mib": 3600.42,
+      "peak_rss_mib": 3767.73,
+      "fidelity": {
+        "max_float_error": 2.980232238769531e-07,
+        "changed_8bit_channels": 243,
+        "max_8bit_error": 1,
+        "changed_16bit_channels": 63957,
+        "max_16bit_error": 1,
+        "rmse": 2.2738328941303327e-08,
+        "passes": true
+      },
+      "profile": null,
+      "source_sha256": "696318ab924b5fd5260281b0686d015776ef50d10d736dab210abb89a7ee6f53"
+    },
+    {
+      "source": "camera-24mp",
+      "backend": "opencv",
+      "recipe": "detail",
+      "dimensions": [
+        6016,
+        4016
+      ],
+      "samples_ms": [
+        10983.6,
+        10967.54,
+        11064.09
+      ],
+      "median_ms": 10983.6,
+      "p95_ms": 11064.09,
+      "warm_baseline_rss_mib": 3602.77,
+      "peak_rss_mib": 3746.31,
+      "fidelity": {
+        "max_float_error": 2.384185791015625e-07,
+        "changed_8bit_channels": 203,
+        "max_8bit_error": 1,
+        "changed_16bit_channels": 55125,
+        "max_16bit_error": 1,
+        "rmse": 2.0770430741757212e-08,
+        "passes": true
+      },
+      "profile": null,
+      "source_sha256": "696318ab924b5fd5260281b0686d015776ef50d10d736dab210abb89a7ee6f53"
+    },
+    {
+      "source": "camera-24mp",
+      "backend": "rust",
+      "recipe": "detail",
+      "dimensions": [
+        6016,
+        4016
+      ],
+      "samples_ms": [
+        8392.98,
+        8061.25,
+        7698.82
+      ],
+      "median_ms": 8061.25,
+      "p95_ms": 8392.98,
+      "warm_baseline_rss_mib": 3320.56,
+      "peak_rss_mib": 3683.69,
+      "fidelity": {
+        "max_float_error": 0.0,
+        "changed_8bit_channels": 0,
+        "max_8bit_error": 0,
+        "changed_16bit_channels": 0,
+        "max_16bit_error": 0,
+        "rmse": 0.0,
+        "passes": true
+      },
+      "profile": null,
+      "source_sha256": "696318ab924b5fd5260281b0686d015776ef50d10d736dab210abb89a7ee6f53"
+    },
+    {
+      "source": "camera-24mp",
+      "backend": "rust-opencv",
+      "recipe": "detail",
+      "dimensions": [
+        6016,
+        4016
+      ],
+      "samples_ms": [
+        7258.67,
+        7206.54,
+        9128.1
+      ],
+      "median_ms": 7258.67,
+      "p95_ms": 9128.1,
+      "warm_baseline_rss_mib": 3329.09,
+      "peak_rss_mib": 3612.86,
+      "fidelity": {
+        "max_float_error": 2.384185791015625e-07,
+        "changed_8bit_channels": 203,
+        "max_8bit_error": 1,
+        "changed_16bit_channels": 55125,
+        "max_16bit_error": 1,
+        "rmse": 2.0770430741757212e-08,
+        "passes": true
+      },
+      "profile": null,
+      "source_sha256": "696318ab924b5fd5260281b0686d015776ef50d10d736dab210abb89a7ee6f53"
+    },
+    {
+      "source": "camera-46mp",
+      "backend": "original",
+      "recipe": "detail",
+      "dimensions": [
+        8288,
+        5520
+      ],
+      "samples_ms": [
+        21968.57,
+        21272.16,
+        21322.13
+      ],
+      "median_ms": 21322.13,
+      "p95_ms": 21968.57,
+      "warm_baseline_rss_mib": 3812.94,
+      "peak_rss_mib": 5045.05,
+      "fidelity": {
+        "max_float_error": 0.0,
+        "changed_8bit_channels": 0,
+        "max_8bit_error": 0,
+        "changed_16bit_channels": 0,
+        "max_16bit_error": 0,
+        "rmse": 0.0,
+        "passes": true
+      },
+      "profile": [
+        {
+          "file": "image_edits.py",
+          "line": 944,
+          "function": "apply_recipe_to_loaded_image",
+          "calls": 1,
+          "own_ms": 4.97,
+          "cumulative_ms": 22168.94
+        },
+        {
+          "file": "detail.py",
+          "line": 190,
+          "function": "apply_detail",
+          "calls": 1,
+          "own_ms": 48.68,
+          "cumulative_ms": 11394.98
+        },
+        {
+          "file": "detail.py",
+          "line": 166,
+          "function": "_run_detail",
+          "calls": 12,
+          "own_ms": 772.28,
+          "cumulative_ms": 11311.03
+        },
+        {
+          "file": "image_edits.py",
+          "line": 806,
+          "function": "_apply_recipe_impl",
+          "calls": 1,
+          "own_ms": 0.49,
+          "cumulative_ms": 10768.92
+        },
+        {
+          "file": "image_edits.py",
+          "line": 586,
+          "function": "_apply_adjustments",
+          "calls": 1,
+          "own_ms": 76.89,
+          "cumulative_ms": 10768.42
+        },
+        {
+          "file": "tone.py",
+          "line": 583,
+          "function": "apply_adjustments",
+          "calls": 54,
+          "own_ms": 149.53,
+          "cumulative_ms": 10621.19
+        },
+        {
+          "file": "detail.py",
+          "line": 98,
+          "function": "_bilateral",
+          "calls": 12,
+          "own_ms": 8122.52,
+          "cumulative_ms": 8164.3
+        },
+        {
+          "file": "tone.py",
+          "line": 316,
+          "function": "_apply_range_adjustments_linear",
+          "calls": 54,
+          "own_ms": 1373.87,
+          "cumulative_ms": 7131.79
+        },
+        {
+          "file": "tone.py",
+          "line": 133,
+          "function": "_spatial_range_level",
+          "calls": 54,
+          "own_ms": 595.39,
+          "cumulative_ms": 3417.88
+        },
+        {
+          "file": "tone.py",
+          "line": 272,
+          "function": "_scene_to_display_linear",
+          "calls": 54,
+          "own_ms": 1032.67,
+          "cumulative_ms": 2392.07
+        },
+        {
+          "file": "detail.py",
+          "line": 92,
+          "function": "_gaussian_blur",
+          "calls": 24,
+          "own_ms": 16.77,
+          "cumulative_ms": 2007.42
+        },
+        {
+          "file": "detail.py",
+          "line": 78,
+          "function": "_blur_axis",
+          "calls": 48,
+          "own_ms": 1822.2,
+          "cumulative_ms": 1989.85
+        },
+        {
+          "file": "tone.py",
+          "line": 164,
+          "function": "linear_to_srgb",
+          "calls": 216,
+          "own_ms": 1526.98,
+          "cumulative_ms": 1681.82
+        },
+        {
+          "file": "tone.py",
+          "line": 92,
+          "function": "_range_log_base",
+          "calls": 54,
+          "own_ms": 359.37,
+          "cumulative_ms": 1229.45
+        },
+        {
+          "file": "tone.py",
+          "line": 256,
+          "function": "_compress_linear_gamut",
+          "calls": 54,
+          "own_ms": 709.98,
+          "cumulative_ms": 1210.31
+        },
+        {
+          "file": "tone.py",
+          "line": 106,
+          "function": "box",
+          "calls": 216,
+          "own_ms": 0.25,
+          "cumulative_ms": 784.53
+        },
+        {
+          "file": "tone.py",
+          "line": 158,
+          "function": "srgb_to_linear",
+          "calls": 162,
+          "own_ms": 748.59,
+          "cumulative_ms": 748.66
+        },
+        {
+          "file": "tone.py",
+          "line": 123,
+          "function": "_shadow_highlight_levels",
+          "calls": 108,
+          "own_ms": 8.99,
+          "cumulative_ms": 651.94
+        },
+        {
+          "file": "tone.py",
+          "line": 221,
+          "function": "_shadow_level_curve",
+          "calls": 108,
+          "own_ms": 592.78,
+          "cumulative_ms": 640.26
+        },
+        {
+          "file": "tone.py",
+          "line": 186,
+          "function": "smoothstep",
+          "calls": 162,
+          "own_ms": 247.05,
+          "cumulative_ms": 311.78
+        }
+      ],
+      "source_sha256": "2cddc889352b6d6ec2231955563390f82ce116b09b108259ae6e66fe0046e71f"
+    },
+    {
+      "source": "camera-46mp",
+      "backend": "scipy",
+      "recipe": "detail",
+      "dimensions": [
+        8288,
+        5520
+      ],
+      "samples_ms": [
+        21588.19,
+        21838.6,
+        21326.75
+      ],
+      "median_ms": 21588.19,
+      "p95_ms": 21838.6,
+      "warm_baseline_rss_mib": 3877.81,
+      "peak_rss_mib": 5088.33,
+      "fidelity": {
+        "max_float_error": 2.980232238769531e-07,
+        "changed_8bit_channels": 425,
+        "max_8bit_error": 1,
+        "changed_16bit_channels": 105198,
+        "max_16bit_error": 1,
+        "rmse": 1.916039614115616e-08,
+        "passes": true
+      },
+      "profile": null,
+      "source_sha256": "2cddc889352b6d6ec2231955563390f82ce116b09b108259ae6e66fe0046e71f"
+    },
+    {
+      "source": "camera-46mp",
+      "backend": "opencv",
+      "recipe": "detail",
+      "dimensions": [
+        8288,
+        5520
+      ],
+      "samples_ms": [
+        22861.59,
+        22033.79,
+        21881.4
+      ],
+      "median_ms": 22033.79,
+      "p95_ms": 22861.59,
+      "warm_baseline_rss_mib": 3924.84,
+      "peak_rss_mib": 5068.38,
+      "fidelity": {
+        "max_float_error": 2.384185791015625e-07,
+        "changed_8bit_channels": 352,
+        "max_8bit_error": 1,
+        "changed_16bit_channels": 88973,
+        "max_16bit_error": 1,
+        "rmse": 1.7366401681617508e-08,
+        "passes": true
+      },
+      "profile": null,
+      "source_sha256": "2cddc889352b6d6ec2231955563390f82ce116b09b108259ae6e66fe0046e71f"
+    },
+    {
+      "source": "camera-46mp",
+      "backend": "rust",
+      "recipe": "detail",
+      "dimensions": [
+        8288,
+        5520
+      ],
+      "samples_ms": [
+        23776.17,
+        16776.42,
+        16313.17
+      ],
+      "median_ms": 16776.42,
+      "p95_ms": 23776.17,
+      "warm_baseline_rss_mib": 3554.73,
+      "peak_rss_mib": 4849.55,
+      "fidelity": {
+        "max_float_error": 0.0,
+        "changed_8bit_channels": 0,
+        "max_8bit_error": 0,
+        "changed_16bit_channels": 0,
+        "max_16bit_error": 0,
+        "rmse": 0.0,
+        "passes": true
+      },
+      "profile": null,
+      "source_sha256": "2cddc889352b6d6ec2231955563390f82ce116b09b108259ae6e66fe0046e71f"
+    },
+    {
+      "source": "camera-46mp",
+      "backend": "rust-opencv",
+      "recipe": "detail",
+      "dimensions": [
+        8288,
+        5520
+      ],
+      "samples_ms": [
+        32376.93,
+        17180.31,
+        15714.97
+      ],
+      "median_ms": 17180.31,
+      "p95_ms": 32376.93,
+      "warm_baseline_rss_mib": 3611.11,
+      "peak_rss_mib": 4840.83,
+      "fidelity": {
+        "max_float_error": 2.384185791015625e-07,
+        "changed_8bit_channels": 352,
+        "max_8bit_error": 1,
+        "changed_16bit_channels": 88973,
+        "max_16bit_error": 1,
+        "rmse": 1.7366401681617508e-08,
+        "passes": true
+      },
+      "profile": null,
+      "source_sha256": "2cddc889352b6d6ec2231955563390f82ce116b09b108259ae6e66fe0046e71f"
+    }
+  ]
+}

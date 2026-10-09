@@ -1,0 +1,533 @@
+{
+  "schema": 1,
+  "kind": "Two-thread production photo-filter integration",
+  "notes": [
+    "Warm-source HTTP requests, three timed samples per scenario; shared machine, not release budgets.",
+    "The native baseline report also contains the isolated Rust prototype for comparison.",
+    "Browser display is excluded. Full float fidelity is checked separately at exposure +0.3."
+  ],
+  "native_preview_baseline": {
+    "schema": 1,
+    "kind": "experimental RAW preview HTTP endpoint",
+    "base_benchmark_schema": 2,
+    "environment": {
+      "machine_label": "arm64",
+      "system": "Darwin",
+      "machine": "arm64",
+      "cpu_count": 16,
+      "python": "3.14.3",
+      "threads": 2,
+      "rawpy": "0.26.1",
+      "libraw": [
+        0,
+        22,
+        0
+      ],
+      "numpy": "2.4.2",
+      "pillow": "12.1.1",
+      "scipy": "1.17.1",
+      "opencv": "4.11.0",
+      "cpu_model": "Apple M3 Max",
+      "accelerator_mode": "cpu",
+      "preview_worker_limit": 2
+    },
+    "provenance": {
+      "source_revision": "0397939396cfe36c2820d9bff18acc45a4557430",
+      "working_tree_dirty": true,
+      "command": [
+        "python",
+        "scripts/benchmark_raw_previews.py",
+        "--manifest",
+        "<local manifest>",
+        "--extension-dir",
+        ".context/detail-extension",
+        "--backends",
+        "original",
+        "rust",
+        "--views",
+        "native",
+        "--threads",
+        "2",
+        "--samples",
+        "3",
+        "--output",
+        "<local output>"
+      ],
+      "command_paths_redacted": true
+    },
+    "source_hashes": {
+      "tools/detail-performance/endpoint.py": "f8475faa6fd1beff2f763b281182e0dfd9de8c4e85a594419494e91d263367eb",
+      "tools/detail-performance/benchmark.py": "89523e57f57bb4fa981811d1468e49c86a764315708aa16dcca82ac505e84a30",
+      "tools/detail-performance/src/lib.rs": "efef467e6e7172d8d4c47cdc8823a468ffd6e7beb9e1c64330ac7ff63844cdd6",
+      "scripts/benchmark_raw_previews.py": "cb05df2a60bfd8b7a3e2b8ef18cfde236ee963f2425c434b14c773995c4d42b5",
+      "vireo/detail.py": "60c148f1103cbdd266e7a62da3637677f44c1dd32ecc963dc4f16763765c5b70"
+    },
+    "samples": 3,
+    "results": [
+      {
+        "scenario": "camera-24mp/native/warm/detail/original",
+        "sha256": "696318ab924b5fd5260281b0686d015776ef50d10d736dab210abb89a7ee6f53",
+        "source_dimensions": [
+          6016,
+          4016
+        ],
+        "requested_size": 6016,
+        "output_dimensions": [
+          6016,
+          4016
+        ],
+        "samples_ms": [
+          12784.94,
+          12707.23,
+          12670.61
+        ],
+        "p50_ms": 12707.23,
+        "p95_ms": 12784.94,
+        "peak_rss_mib": 3633.56
+      },
+      {
+        "scenario": "camera-24mp/native/warm/detail/rust",
+        "sha256": "696318ab924b5fd5260281b0686d015776ef50d10d736dab210abb89a7ee6f53",
+        "source_dimensions": [
+          6016,
+          4016
+        ],
+        "requested_size": 6016,
+        "output_dimensions": [
+          6016,
+          4016
+        ],
+        "samples_ms": [
+          9774.59,
+          9890.5,
+          10048.81
+        ],
+        "p50_ms": 9890.5,
+        "p95_ms": 10048.81,
+        "peak_rss_mib": 3666.47
+      },
+      {
+        "scenario": "camera-46mp/native/warm/detail/original",
+        "sha256": "2cddc889352b6d6ec2231955563390f82ce116b09b108259ae6e66fe0046e71f",
+        "source_dimensions": [
+          8288,
+          5520
+        ],
+        "requested_size": 8288,
+        "output_dimensions": [
+          8288,
+          5520
+        ],
+        "samples_ms": [
+          23844.87,
+          22801.91,
+          22888.1
+        ],
+        "p50_ms": 22888.1,
+        "p95_ms": 23844.87,
+        "peak_rss_mib": 5208.58
+      },
+      {
+        "scenario": "camera-46mp/native/warm/detail/rust",
+        "sha256": "2cddc889352b6d6ec2231955563390f82ce116b09b108259ae6e66fe0046e71f",
+        "source_dimensions": [
+          8288,
+          5520
+        ],
+        "requested_size": 8288,
+        "output_dimensions": [
+          8288,
+          5520
+        ],
+        "samples_ms": [
+          19025.78,
+          19082.78,
+          19143.28
+        ],
+        "p50_ms": 19082.78,
+        "p95_ms": 19143.28,
+        "peak_rss_mib": 4924.86
+      }
+    ]
+  },
+  "small_preview_baseline": {
+    "schema": 1,
+    "kind": "experimental RAW preview HTTP endpoint",
+    "base_benchmark_schema": 2,
+    "environment": {
+      "machine_label": "arm64",
+      "system": "Darwin",
+      "machine": "arm64",
+      "cpu_count": 16,
+      "python": "3.14.3",
+      "threads": 2,
+      "rawpy": "0.26.1",
+      "libraw": [
+        0,
+        22,
+        0
+      ],
+      "numpy": "2.4.2",
+      "pillow": "12.1.1",
+      "scipy": "1.17.1",
+      "opencv": "4.11.0",
+      "cpu_model": "Apple M3 Max",
+      "accelerator_mode": "cpu",
+      "preview_worker_limit": 2
+    },
+    "provenance": {
+      "source_revision": "0397939396cfe36c2820d9bff18acc45a4557430",
+      "working_tree_dirty": true,
+      "command": [
+        "python",
+        "scripts/benchmark_raw_previews.py",
+        "--manifest",
+        "<local manifest>",
+        "--backends",
+        "original",
+        "--views",
+        "quick",
+        "fit",
+        "--threads",
+        "2",
+        "--samples",
+        "3",
+        "--output",
+        "<local output>"
+      ],
+      "command_paths_redacted": true
+    },
+    "source_hashes": {
+      "tools/detail-performance/endpoint.py": "65076763b7878bc6f1eb18097627b159c31407304924644d4d192c05d72f096c",
+      "tools/detail-performance/benchmark.py": "4fd545aab4b985a1ff968655ccfcb1f9046e86b942c2b0afb8c6280c97d18b70",
+      "tools/detail-performance/src/lib.rs": "efef467e6e7172d8d4c47cdc8823a468ffd6e7beb9e1c64330ac7ff63844cdd6",
+      "scripts/benchmark_raw_previews.py": "cb05df2a60bfd8b7a3e2b8ef18cfde236ee963f2425c434b14c773995c4d42b5",
+      "vireo/detail.py": "39d63a1763fd70c5154d8c3d50f82355517c367a7c64b585e65560df18b25cfc",
+      "vireo/detail_backend.py": "96336bcc79b41af9ea9ada95817c1b8a30c037e2615e5b8f1c9b5461f7a999ba",
+      "native/detail/src/lib.rs": "d983c1ee6cd3c8198409043865d9a811f0ba21b3cc47e3dec1bb6d4e3c4100e2"
+    },
+    "samples": 3,
+    "results": [
+      {
+        "scenario": "camera-24mp/quick/warm/detail/original",
+        "sha256": "696318ab924b5fd5260281b0686d015776ef50d10d736dab210abb89a7ee6f53",
+        "source_dimensions": [
+          6016,
+          4016
+        ],
+        "requested_size": 1024,
+        "output_dimensions": [
+          1024,
+          684
+        ],
+        "samples_ms": [
+          228.49,
+          241.22,
+          254.23
+        ],
+        "p50_ms": 241.22,
+        "p95_ms": 254.23,
+        "peak_rss_mib": 1335.94
+      },
+      {
+        "scenario": "camera-24mp/fit/warm/detail/original",
+        "sha256": "696318ab924b5fd5260281b0686d015776ef50d10d736dab210abb89a7ee6f53",
+        "source_dimensions": [
+          6016,
+          4016
+        ],
+        "requested_size": 2048,
+        "output_dimensions": [
+          2048,
+          1367
+        ],
+        "samples_ms": [
+          1007.28,
+          1043.52,
+          1004.38
+        ],
+        "p50_ms": 1007.28,
+        "p95_ms": 1043.52,
+        "peak_rss_mib": 1865.59
+      },
+      {
+        "scenario": "camera-46mp/quick/warm/detail/original",
+        "sha256": "2cddc889352b6d6ec2231955563390f82ce116b09b108259ae6e66fe0046e71f",
+        "source_dimensions": [
+          8288,
+          5520
+        ],
+        "requested_size": 1024,
+        "output_dimensions": [
+          1024,
+          682
+        ],
+        "samples_ms": [
+          237.81,
+          228.45,
+          250.55
+        ],
+        "p50_ms": 237.81,
+        "p95_ms": 250.55,
+        "peak_rss_mib": 1593.55
+      },
+      {
+        "scenario": "camera-46mp/fit/warm/detail/original",
+        "sha256": "2cddc889352b6d6ec2231955563390f82ce116b09b108259ae6e66fe0046e71f",
+        "source_dimensions": [
+          8288,
+          5520
+        ],
+        "requested_size": 2048,
+        "output_dimensions": [
+          2048,
+          1364
+        ],
+        "samples_ms": [
+          909.54,
+          956.9,
+          914.88
+        ],
+        "p50_ms": 914.88,
+        "p95_ms": 956.9,
+        "peak_rss_mib": 2000.05
+      }
+    ]
+  },
+  "production_previews": {
+    "schema": 1,
+    "kind": "experimental RAW preview HTTP endpoint",
+    "base_benchmark_schema": 2,
+    "environment": {
+      "machine_label": "arm64",
+      "system": "Darwin",
+      "machine": "arm64",
+      "cpu_count": 16,
+      "python": "3.14.3",
+      "threads": 2,
+      "rawpy": "0.26.1",
+      "libraw": [
+        0,
+        22,
+        0
+      ],
+      "numpy": "2.4.2",
+      "pillow": "12.1.1",
+      "scipy": "1.17.1",
+      "opencv": "4.11.0",
+      "cpu_model": "Apple M3 Max",
+      "accelerator_mode": "cpu",
+      "preview_worker_limit": 2
+    },
+    "provenance": {
+      "source_revision": "0397939396cfe36c2820d9bff18acc45a4557430",
+      "working_tree_dirty": true,
+      "command": [
+        "python",
+        "scripts/benchmark_raw_previews.py",
+        "--manifest",
+        "<local manifest>",
+        "--backends",
+        "production",
+        "--views",
+        "quick",
+        "fit",
+        "native",
+        "--threads",
+        "2",
+        "--samples",
+        "3",
+        "--output",
+        "<local output>"
+      ],
+      "command_paths_redacted": true
+    },
+    "source_hashes": {
+      "tools/detail-performance/endpoint.py": "f8475faa6fd1beff2f763b281182e0dfd9de8c4e85a594419494e91d263367eb",
+      "tools/detail-performance/benchmark.py": "8376364de2b666084797863a6096353c4cc0768dbdb9ebfa789bca5ed1d0016e",
+      "tools/detail-performance/src/lib.rs": "efef467e6e7172d8d4c47cdc8823a468ffd6e7beb9e1c64330ac7ff63844cdd6",
+      "scripts/benchmark_raw_previews.py": "cb05df2a60bfd8b7a3e2b8ef18cfde236ee963f2425c434b14c773995c4d42b5",
+      "vireo/detail.py": "39d63a1763fd70c5154d8c3d50f82355517c367a7c64b585e65560df18b25cfc"
+    },
+    "samples": 3,
+    "results": [
+      {
+        "scenario": "camera-24mp/quick/warm/detail/production",
+        "sha256": "696318ab924b5fd5260281b0686d015776ef50d10d736dab210abb89a7ee6f53",
+        "source_dimensions": [
+          6016,
+          4016
+        ],
+        "requested_size": 1024,
+        "output_dimensions": [
+          1024,
+          684
+        ],
+        "samples_ms": [
+          226.28,
+          241.9,
+          236.14
+        ],
+        "p50_ms": 236.14,
+        "p95_ms": 241.9,
+        "peak_rss_mib": 1324.16
+      },
+      {
+        "scenario": "camera-24mp/fit/warm/detail/production",
+        "sha256": "696318ab924b5fd5260281b0686d015776ef50d10d736dab210abb89a7ee6f53",
+        "source_dimensions": [
+          6016,
+          4016
+        ],
+        "requested_size": 2048,
+        "output_dimensions": [
+          2048,
+          1367
+        ],
+        "samples_ms": [
+          908.53,
+          913.4,
+          941.05
+        ],
+        "p50_ms": 913.4,
+        "p95_ms": 941.05,
+        "peak_rss_mib": 1946.19
+      },
+      {
+        "scenario": "camera-24mp/native/warm/detail/production",
+        "sha256": "696318ab924b5fd5260281b0686d015776ef50d10d736dab210abb89a7ee6f53",
+        "source_dimensions": [
+          6016,
+          4016
+        ],
+        "requested_size": 6016,
+        "output_dimensions": [
+          6016,
+          4016
+        ],
+        "samples_ms": [
+          9923.69,
+          10047.29,
+          9913.74
+        ],
+        "p50_ms": 9923.69,
+        "p95_ms": 10047.29,
+        "peak_rss_mib": 3649.47
+      },
+      {
+        "scenario": "camera-46mp/quick/warm/detail/production",
+        "sha256": "2cddc889352b6d6ec2231955563390f82ce116b09b108259ae6e66fe0046e71f",
+        "source_dimensions": [
+          8288,
+          5520
+        ],
+        "requested_size": 1024,
+        "output_dimensions": [
+          1024,
+          682
+        ],
+        "samples_ms": [
+          233.23,
+          230.99,
+          252.14
+        ],
+        "p50_ms": 233.23,
+        "p95_ms": 252.14,
+        "peak_rss_mib": 1645.0
+      },
+      {
+        "scenario": "camera-46mp/fit/warm/detail/production",
+        "sha256": "2cddc889352b6d6ec2231955563390f82ce116b09b108259ae6e66fe0046e71f",
+        "source_dimensions": [
+          8288,
+          5520
+        ],
+        "requested_size": 2048,
+        "output_dimensions": [
+          2048,
+          1364
+        ],
+        "samples_ms": [
+          953.91,
+          880.8,
+          925.0
+        ],
+        "p50_ms": 925.0,
+        "p95_ms": 953.91,
+        "peak_rss_mib": 2120.06
+      },
+      {
+        "scenario": "camera-46mp/native/warm/detail/production",
+        "sha256": "2cddc889352b6d6ec2231955563390f82ce116b09b108259ae6e66fe0046e71f",
+        "source_dimensions": [
+          8288,
+          5520
+        ],
+        "requested_size": 8288,
+        "output_dimensions": [
+          8288,
+          5520
+        ],
+        "samples_ms": [
+          18865.34,
+          18811.29,
+          18836.37
+        ],
+        "p50_ms": 18836.37,
+        "p95_ms": 18865.34,
+        "peak_rss_mib": 5043.98
+      }
+    ]
+  },
+  "production_fidelity": {
+    "threads": 2,
+    "recipe": {
+      "adjustments": {
+        "exposure": 0.3,
+        "shadows": 15,
+        "sharpen": 55,
+        "sharpen_radius": 1.8,
+        "noise_reduction": 45
+      }
+    },
+    "results": [
+      {
+        "source": "camera-24mp",
+        "dimensions": [
+          6016,
+          4016
+        ],
+        "fidelity": {
+          "max_float_error": 0.0,
+          "changed_8bit_channels": 0,
+          "max_8bit_error": 0,
+          "changed_16bit_channels": 0,
+          "max_16bit_error": 0,
+          "rmse": 0.0,
+          "passes": true
+        }
+      },
+      {
+        "source": "camera-46mp",
+        "dimensions": [
+          8288,
+          5520
+        ],
+        "fidelity": {
+          "max_float_error": 0.0,
+          "changed_8bit_channels": 0,
+          "max_8bit_error": 0,
+          "changed_16bit_channels": 0,
+          "max_16bit_error": 0,
+          "rmse": 0.0,
+          "passes": true
+        }
+      }
+    ],
+    "source_hashes": {
+      "vireo/detail.py": "39d63a1763fd70c5154d8c3d50f82355517c367a7c64b585e65560df18b25cfc",
+      "vireo/detail_backend.py": "96336bcc79b41af9ea9ada95817c1b8a30c037e2615e5b8f1c9b5461f7a999ba",
+      "native/detail/src/lib.rs": "d983c1ee6cd3c8198409043865d9a811f0ba21b3cc47e3dec1bb6d4e3c4100e2"
+    }
+  }
+}
