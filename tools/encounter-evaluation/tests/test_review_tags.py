@@ -192,7 +192,7 @@ def test_http_save_updates_tags_and_reports_retriable_failure(writable_queue, mo
 
 def test_individually_shared_photo_can_sync_review_tags(writable_queue):
     queue, db, pid, old, preserved = writable_queue
-    db.grant_workspace_photos(db._ws_id(), [pid])
+    db.photo_visibility.grant(db._ws_id(), [pid])
     db.conn.execute('DELETE FROM workspace_folders')
     db.conn.commit()
     result = save_and_sync(queue, pid, ['inat:102'])

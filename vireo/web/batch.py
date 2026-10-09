@@ -383,7 +383,7 @@ def create_batch_blueprint(
         for pid in photo_ids:
             new_flag = desired_flags[pid]
             old_flag = photos_map[pid]["flag"]
-            db.update_photo_flag(pid, new_flag, verify_workspace=False, _commit=False)
+            db.photo_review.set_flag(pid, new_flag, verify_workspace=False, _commit=False)
             db.queue_flag_change_if_enabled(pid, new_flag, _commit=False)
             items.append({
                 "photo_id": pid,
@@ -505,7 +505,7 @@ def create_batch_blueprint(
                 photo_ids.append(raw)
                 seen.add(raw)
 
-        accessible_state = db.get_wildlife_excluded_states(photo_ids)
+        accessible_state = db.photo_review.wildlife_excluded_states(photo_ids)
         accessible_ids = [pid for pid in photo_ids if pid in accessible_state]
         skipped_count = len(photo_ids) - len(accessible_ids)
 

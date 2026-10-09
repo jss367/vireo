@@ -612,9 +612,9 @@ def test_enum_shortcuts_preserve_advanced_root(live_server, page, mode, field, v
     db = live_server["db"]
     photo_id = live_server["data"]["photos"][0]
     if field == "flag":
-        db.update_photo_flag(photo_id, value)
+        db.photo_review.set_flag(photo_id, value)
     else:
-        db.set_color_label(photo_id, value)
+        db.photo_labels.set(photo_id, value)
     _open_browse(page, live_server)
     original = {"mode": mode, "rules": [
         {"field": field, "op": "is", "value": value},

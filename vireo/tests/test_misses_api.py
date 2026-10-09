@@ -140,9 +140,9 @@ def test_api_misses_filters_by_collection_and_browse_attributes(
             "value": [ids["no_subject"], ids["clipped"]],
         }]),
     )
-    db.update_photo_rating(ids["no_subject"], 2)
-    db.update_photo_rating(ids["clipped"], 5)
-    db.set_color_label(ids["clipped"], "red")
+    db.photo_review.set_rating(ids["no_subject"], 2)
+    db.photo_review.set_rating(ids["clipped"], 5)
+    db.photo_labels.set(ids["clipped"], "red")
     keyword_id = db.add_keyword("keeper")
     db.tag_photo(ids["clipped"], keyword_id)
 
@@ -159,8 +159,8 @@ def test_api_misses_filters_by_collection_and_browse_attributes(
 
 def test_api_misses_accepts_universal_filter_rules(client, db_with_misses):
     _, db, ids = db_with_misses
-    db.update_photo_rating(ids["no_subject"], 2)
-    db.update_photo_rating(ids["clipped"], 5)
+    db.photo_review.set_rating(ids["no_subject"], 2)
+    db.photo_review.set_rating(ids["clipped"], 5)
     rules = {
         "mode": "all",
         "rules": [

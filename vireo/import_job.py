@@ -752,7 +752,7 @@ class _ImportBatchState:
     companion_siblings: dict = field(default_factory=dict)
     companion_slots: dict = field(default_factory=dict)
     # Workspace-photo grants this batch newly inserted via
-    # ``grant_verified_twin_photos_tracked``, with the folders it promoted
+    # ``photo_visibility.grant_verified_twins_tracked``, with the folders it promoted
     # from ``status='missing'`` to ``'ok'`` in the same call. A mount-loss
     # rollback reverts both — the twins the grants rested on may be shadow
     # files on the detached mount stub, so a failed batch must not change
@@ -1323,7 +1323,7 @@ def _rollback_on_mount_loss(state, batch_st, attests_bytes,
     ``db`` and ``workspace_id`` are passed by the batch loop and used to
     revoke the ``workspace_photos`` grants (and demote the
     status-promoted folders) this batch's accepted duplicates created
-    via :meth:`Database.grant_verified_twin_photos_tracked`. Pre-existing
+    via :meth:`PhotoVisibilityRepository.grant_verified_twins_tracked`. Pre-existing
     grants are deliberately not touched: the tracked grant path recorded
     only the ids this batch inserted anew.
     """
@@ -1360,9 +1360,9 @@ def _rollback_on_mount_loss(state, batch_st, attests_bytes,
     # untouched.
     if db is not None and workspace_id is not None:
         if batch_st.dup_granted_photo_ids:
-            db.revoke_photo_grants(workspace_id, batch_st.dup_granted_photo_ids)
+            db.photo_visibility.revoke_grants(workspace_id, batch_st.dup_granted_photo_ids)
         if batch_st.dup_promoted_folder_ids:
-            db.demote_folders_to_missing(batch_st.dup_promoted_folder_ids)
+            db.photo_visibility.demote_folders_to_missing(batch_st.dup_promoted_folder_ids)
         if batch_st.dup_granted_photo_ids or batch_st.dup_promoted_folder_ids:
             db.conn.commit()
     batch_st.dup_granted_photo_ids = []
@@ -1454,7 +1454,7 @@ def _duplicate_gate(state, batch_st, *, source_file, rel, checker, db,
         )
         if likely_rows:
             try:
-                new_grants, promoted = db.grant_verified_twin_photos_tracked(
+                new_grants, promoted = db.photo_visibility.grant_verified_twins_tracked(
                     db.active_workspace_id, likely_rows,
                 )
                 db.conn.commit()
@@ -1586,7 +1586,7 @@ def _duplicate_gate(state, batch_st, *, source_file, rel, checker, db,
         return _GATE_CANCELLED
     if accept:
         try:
-            new_grants, promoted = db.grant_verified_twin_photos_tracked(
+            new_grants, promoted = db.photo_visibility.grant_verified_twins_tracked(
                 db.active_workspace_id, verified_twin_rows,
             )
             db.conn.commit()

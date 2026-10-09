@@ -286,7 +286,7 @@ def export_env(tmp_path):
                        file_size=2000, file_mtime=2.0,
                        timestamp="2024-06-16T09:00:00")
 
-    db.update_photo_rating(p1, 5)
+    db.photo_review.set_rating(p1, 5)
 
     # Add a species keyword to p1
     k = db.add_keyword("Red-tailed Hawk", is_species=True)

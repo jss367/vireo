@@ -58,7 +58,7 @@ def catalog(tmp_path, monkeypatch):
     ).lastrowid
     db.conn.execute("UPDATE keywords SET taxon_id=? WHERE name='Barn Owl'", (taxon_id,))
     db.conn.execute("UPDATE photos SET exif_data='broken json' WHERE id=?", (ids["empty"],))
-    db.set_color_label(ids["robin"], "purple")
+    db.photo_labels.set(ids["robin"], "purple")
     db.conn.commit()
     yield db, ids
     db.close()

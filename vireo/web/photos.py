@@ -112,7 +112,7 @@ def _map_selection_summary(db, selection_ids, shown, *, filtered):
     or missing, or it is no longer in this workspace (deleted, or the
     selection came from another tab before a workspace switch).
     """
-    visible = db.filter_photo_ids_in_workspace(selection_ids)
+    visible = db.photo_visibility.visible_photo_ids(selection_ids)
     statuses = db.get_photo_location_statuses(visible)
     located = {pid for pid in visible if statuses.get(pid, "none") != "none"}
     if filtered:

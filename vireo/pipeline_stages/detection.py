@@ -189,9 +189,11 @@ class _DetectPass:
             already_detected: set = set()
             detector_runtime = None
             photo_ids_list = [p["id"] for p in self.photos]
-            pre_run_det_ids: dict = getattr(
-                thread_db, "get_detection_ids_for_photos", lambda _: {}
-            )(photo_ids_list)
+            detections = getattr(thread_db, "detections", None)
+            pre_run_det_ids: dict = (
+                detections.get_ids_for_photos(photo_ids_list)
+                if detections is not None else {}
+            )
         else:
             try:
                 from computation_cache import megadetector_runtime_fingerprint

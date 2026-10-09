@@ -2,21 +2,59 @@
 
 Sync-only grants remain separate: this table intentionally grants browse,
 edit and library visibility to a selected photo without exposing its siblings.
+
+Callers reach it as ``db.photo_visibility`` (a fresh repository per access,
+see ``Database.photo_visibility``); there are no forwarding wrappers on
+``Database``. The grant, revoke and folder-status writes take the workspace
+id as an argument and never resolve the active one; they run in the caller's
+transaction and do not commit. ``visible_photo_ids``, ``affected_workspaces``
+and ``preserve_for_move`` act on the active workspace, which they resolve
+through ``workspace_id_fn`` (``Database._ws_id``) before running any SQL, so
+with no workspace active they raise ``RuntimeError`` having touched nothing.
 """
+
+import sqlite3
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from typing import Any
 
 
 class PhotoVisibilityRepository:
-    def __init__(self, conn):
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        workspace_id_fn: Callable[[], int] | None = None,
+        *,
+        chunk_size: int = 800,
+    ) -> None:
         self.conn = conn
+        self.workspace_id_fn = workspace_id_fn
+        self.chunk_size = chunk_size
 
-    def grant(self, workspace_id, photo_ids):
+    def visible_photo_ids(self, photo_ids: Iterable[int]) -> list[int]:
+        """Existing, active-workspace-visible ids in caller order, deduplicated."""
+        workspace_id = self.workspace_id_fn()
+        requested = list(dict.fromkeys(photo_ids))
+        visible = set()
+        for start in range(0, len(requested), self.chunk_size):
+            chunk = requested[start:start + self.chunk_size]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self.conn.execute(
+                "SELECT p.id FROM photos p "
+                "JOIN photo_workspace_visibility wf ON wf.photo_id = p.id "
+                f"WHERE wf.workspace_id = ? AND p.id IN ({placeholders})",
+                [workspace_id, *chunk],
+            ).fetchall()
+            visible.update(row["id"] for row in rows)
+        return [photo_id for photo_id in requested if photo_id in visible]
+
+    def grant(self, workspace_id: int, photo_ids: Iterable[int]) -> None:
         for photo_id in dict.fromkeys(photo_ids):
             self.conn.execute(
                 "INSERT OR IGNORE INTO workspace_photos (workspace_id, photo_id) VALUES (?, ?)",
                 (workspace_id, photo_id),
             )
 
-    def revoke_for_folders(self, workspace_id, folder_ids):
+    def revoke_for_folders(self, workspace_id: int, folder_ids: Iterable[int]) -> None:
         """Revoke only this workspace's grants in the caller's transaction."""
         ids = list(dict.fromkeys(folder_ids))
         for start in range(0, len(ids), 800):
@@ -28,7 +66,9 @@ class PhotoVisibilityRepository:
                 [workspace_id, *chunk],
             )
 
-    def grant_verified_twins(self, workspace_id, rows):
+    def grant_verified_twins(
+        self, workspace_id: int, rows: Sequence[Mapping[str, Any]],
+    ) -> None:
         self.grant(workspace_id, [row["id"] for row in rows])
         for row in rows:
             if row["folder_status"] == "missing":
@@ -37,7 +77,9 @@ class PhotoVisibilityRepository:
                     "(SELECT folder_id FROM photos WHERE id = ?)", (row["id"],),
                 )
 
-    def grant_verified_twins_tracked(self, workspace_id, rows):
+    def grant_verified_twins_tracked(
+        self, workspace_id: int, rows: Sequence[Mapping[str, Any]],
+    ) -> tuple[list[int], list[int]]:
         """Like :meth:`grant_verified_twins`, but report what this call changed.
 
         Returns ``(new_grant_ids, promoted_folder_ids)``:
@@ -75,7 +117,7 @@ class PhotoVisibilityRepository:
                         promoted_folder_ids.append(folder_row["folder_id"])
         return new_grant_ids, list(dict.fromkeys(promoted_folder_ids))
 
-    def revoke_grants(self, workspace_id, photo_ids):
+    def revoke_grants(self, workspace_id: int, photo_ids: Iterable[int]) -> None:
         """Delete ``workspace_photos`` rows for exactly these photo ids.
 
         Unlike :meth:`revoke_for_folders`, this does not expand to siblings
@@ -92,7 +134,7 @@ class PhotoVisibilityRepository:
                 [workspace_id, *chunk],
             )
 
-    def demote_folders_to_missing(self, folder_ids):
+    def demote_folders_to_missing(self, folder_ids: Iterable[int]) -> None:
         """Revert folders to ``status = 'missing'``.
 
         Only used by the import rollback to undo a status promotion that
@@ -109,7 +151,9 @@ class PhotoVisibilityRepository:
                 chunk,
             )
 
-    def affected_workspaces(self, photo_ids, active_workspace):
+    def affected_workspaces(self, photo_ids: Iterable[int]) -> list[dict[str, Any]]:
+        """Other workspaces that can see any of these photos, with how many each sees."""
+        active_workspace = self.workspace_id_fn()
         counts = {}
         ids = list(dict.fromkeys(photo_ids))
         for start in range(0, len(ids), 800):
@@ -126,7 +170,9 @@ class PhotoVisibilityRepository:
         return [{"id": key[0], "name": key[1], "photo_count": count}
                 for key, count in sorted(counts.items(), key=lambda item: (item[0][1], item[0][0]))]
 
-    def preserve_for_move(self, photo_id, active_workspace, keep_visible):
+    def preserve_for_move(self, photo_id: int, keep_visible: bool) -> None:
+        """Keep (or drop) other workspaces' access to a photo moving out of the active one."""
+        active_workspace = self.workspace_id_fn()
         if keep_visible:
             self.conn.execute(
                 "INSERT OR IGNORE INTO workspace_photos (workspace_id, photo_id) "

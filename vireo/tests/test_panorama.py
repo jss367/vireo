@@ -131,7 +131,9 @@ def test_missing_destination_not_recreated(panorama_env):
 def test_stitch_uses_edited_render_and_bounds_each_input(panorama_env, monkeypatch):
     db, folder, ids = panorama_env
     recipe = {"exposure": 1}
-    monkeypatch.setattr(db, "get_photo_edit_recipes", lambda _: {ids[0]: recipe})
+    from repositories.edits import EditsRepository
+
+    monkeypatch.setattr(EditsRepository, "get_photo_recipes", lambda _self, _ids: {ids[0]: recipe})
     loader = Mock(side_effect=lambda *args, **kwargs: Image.new("RGB", (5000, 100), "red"))
     monkeypatch.setattr(panorama, "load_export_image", loader)
     stitcher = Mock()

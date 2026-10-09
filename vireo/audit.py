@@ -718,7 +718,7 @@ def confirmed_orphan_ids(db, photo_ids):
     import stat
 
     confirmed = []
-    for pid in db.filter_photo_ids_in_workspace(photo_ids):
+    for pid in db.photo_visibility.visible_photo_ids(photo_ids):
         row = db.conn.execute(
             "SELECT p.filename, f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
             (pid,),

@@ -284,7 +284,7 @@ def test_set_progress_handler_interrupts_and_clears(db):
 # never raise it. Methods that coordinate more than one call (``add_photo``
 # resolving duplicates after the insert, cross-domain composition) are not
 # forwarders and are not counted.
-FORWARDING_WRAPPER_LIMIT = 379
+FORWARDING_WRAPPER_LIMIT = 347
 
 
 def _is_forwarding_wrapper(fn):

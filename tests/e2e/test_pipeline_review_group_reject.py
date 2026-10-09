@@ -79,7 +79,7 @@ def _flags(db, photo_ids):
 def test_reject_burst_and_undo_restores_prior_flags(live_server, page):
     db = live_server["db"]
     photo_ids = live_server["data"]["photos"][:4]
-    db.update_photo_flag(photo_ids[0], "flagged")
+    db.photo_review.set_flag(photo_ids[0], "flagged")
     _write_grouped_pipeline_cache(live_server, photo_ids)
 
     page.goto(f"{live_server['url']}/pipeline/review")
@@ -341,7 +341,7 @@ def test_clear_rejects_reads_live_db_flags(live_server, page):
     # Simulate a live pick made in another Browse tab: the DB updates but the
     # already-rendered pipelineResults cache does not. The bulk button still
     # reads "Clear rejects" even though the first photo is now a pick.
-    db.update_photo_flag(photo_ids[0], "flagged")
+    db.photo_review.set_flag(photo_ids[0], "flagged")
     expect(burst_buttons.first).to_have_attribute("aria-label", "Clear rejects")
 
     burst_buttons.first.click()
@@ -2839,7 +2839,7 @@ def test_text_undo_does_not_undo_photos(live_server, page):
 def test_culling_can_be_undone_without_leaving_the_page(live_server, page):
     db = live_server['db']
     ids = live_server['data']['photos'][:4]
-    db.update_photo_flag(ids[0], 'flagged')
+    db.photo_review.set_flag(ids[0], 'flagged')
     _write_grouped_pipeline_cache(live_server, ids)
     path = os.path.join(os.path.dirname(db._db_path), f'pipeline_results_ws{db._ws_id()}.json')
     with open(path) as cache_file:

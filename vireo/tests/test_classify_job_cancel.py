@@ -115,7 +115,7 @@ def test_cancelled_reclassify_keeps_unreached_photos_predictions(db, tmp_path):
     """A Stop mid-classify must leave the photos the loop never reached with
     their old predictions, including other models' rows on the same box.
 
-    Before the fix, ``_detect_subjects`` ran the global ``clear_detections``
+    Before the fix, ``_detect_subjects`` ran the global ``detections.clear``
     on every photo up front; its cascade wiped all predictions (every model,
     every workspace) before the classify loop rebuilt any of them.
     """

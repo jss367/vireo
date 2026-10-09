@@ -504,7 +504,7 @@ def apply_grouping_photo_edit(db, entry, items, *, undo):
         pid = item["photo_id"]
         if action == "flag":
             value = item["old_value" if undo else "new_value"]
-            db.update_photo_flag(pid, value, _commit=False)
+            db.photo_review.set_flag(pid, value, _commit=False)
             db.queue_flag_change_if_enabled(pid, value, _commit=False)
             continue
         if action not in ("keyword_add", "species_replace"):

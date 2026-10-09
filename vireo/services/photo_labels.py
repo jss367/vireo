@@ -6,13 +6,13 @@ class PhotoLabelService:
         self.db = db
 
     def labels_for_photos(self, photo_ids):
-        return self.db.get_color_labels_for_photos(photo_ids)
+        return self.db.photo_labels.get_for_photos(photo_ids)
 
     def descriptions(self):
-        return self.db.get_color_label_descriptions()
+        return self.db.photo_labels.get_descriptions()
 
     def set_description(self, color, description):
-        return self.db.set_color_label_description(color, description)
+        return self.db.photo_labels.set_description(color, description)
 
     def set_label(self, photo_id, color):
         photo = self.db.get_photo(photo_id)
@@ -20,12 +20,12 @@ class PhotoLabelService:
             raise LookupError("not found")
         self.db._verify_photo_in_workspace(photo_id)
 
-        old_color = self.db.get_color_label(photo_id) or ""
+        old_color = self.db.photo_labels.get(photo_id) or ""
         new_color = color or ""
         if color:
-            self.db.set_color_label(photo_id, color)
+            self.db.photo_labels.set(photo_id, color)
         else:
-            self.db.remove_color_label(photo_id)
+            self.db.photo_labels.remove(photo_id)
         self.db.record_edit(
             "color_label",
             f'Set color to {color or "none"}',
@@ -38,10 +38,10 @@ class PhotoLabelService:
         )
 
     def set_labels(self, photo_ids, color):
-        valid_ids = self.db.filter_photo_ids_in_workspace(photo_ids)
-        old_labels = self.db.get_color_labels_for_photos(valid_ids)
+        valid_ids = self.db.photo_visibility.visible_photo_ids(photo_ids)
+        old_labels = self.db.photo_labels.get_for_photos(valid_ids)
         new_color = color or ""
-        self.db.batch_set_color_label(valid_ids, color)
+        self.db.photo_labels.set_many(valid_ids, color)
         items = [
             {
                 "photo_id": photo_id,

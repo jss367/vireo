@@ -1011,7 +1011,7 @@ def _rekey_companion_detections_onto_primary(db, primary, companion):
     box would then either collide on the stale id (if SQLite reused the
     companion's rowid for a new photo) or, more commonly, never match and
     so the stale row would be reaped by the stale-cleanup DELETE in
-    `_upsert_detection_rows`, cascading away its predictions. Recompute
+    `db.detections.upsert_rows`, cascading away its predictions. Recompute
     the id, redirect predictions to the new id, then drop the stale row.
     """
     from detection_id import detection_id as _detection_id

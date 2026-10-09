@@ -36,7 +36,7 @@ def scoped(app_and_db, tmp_path):
     # Database restores it.
     time.sleep(0.01)
     db.set_active_workspace(default_ws)
-    assert db.filter_photo_ids_in_workspace([foreign_pid]) == []
+    assert db.photo_visibility.visible_photo_ids([foreign_pid]) == []
 
     return {
         "app": app,

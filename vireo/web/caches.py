@@ -381,7 +381,7 @@ def create_caches_blueprint(get_db, json_error, db_path, config):
             flag_items = []
             for photo_ids, flag in ((keepers, "flagged"), (rejects, "rejected"), (cleared, "none")):
                 for pid in photo_ids:
-                    db.update_photo_flag(pid, flag, _commit=False)
+                    db.photo_review.set_flag(pid, flag, _commit=False)
                     db.queue_flag_change_if_enabled(pid, flag, _commit=False)
                     flag_items.append({"photo_id": pid, "old_value": old_flags[pid], "new_value": flag})
 

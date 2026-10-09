@@ -45,7 +45,7 @@ def create_export_blueprint(
             return json_error(str(exc))
         db = get_db()
         ids = options["photo_ids"]
-        if set(db.filter_photo_ids_in_workspace(ids)) != set(ids):
+        if set(db.photo_visibility.visible_photo_ids(ids)) != set(ids):
             return json_error("Every selected photo must be available in the current workspace")
         if options["destination"] and not os.path.isdir(options["destination"]):
             return json_error("Choose an existing destination folder")
@@ -194,7 +194,7 @@ def create_export_blueprint(
             return json_error(str(exc))
 
         db = get_db()
-        visible_set = set(db.filter_photo_ids_in_workspace(photo_ids))
+        visible_set = set(db.photo_visibility.visible_photo_ids(photo_ids))
         photo_ids = [pid for pid in photo_ids if pid in visible_set]
         if not photo_ids:
             return json_error("no exportable photos in current workspace")
@@ -288,7 +288,7 @@ def create_export_blueprint(
 
         # Filter to only photos visible in the active workspace,
         # preserving the caller's original ordering (and any repeats).
-        visible_set = set(db.filter_photo_ids_in_workspace(photo_ids))
+        visible_set = set(db.photo_visibility.visible_photo_ids(photo_ids))
         photo_ids = [pid for pid in photo_ids if pid in visible_set]
         if not photo_ids:
             return json_error("no exportable photos in current workspace")

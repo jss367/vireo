@@ -1142,7 +1142,7 @@ def create_job_launchers_blueprint(
         # With none active nothing is visible, as the inline query binding a
         # NULL workspace id behaved, so the route answers its 400, not a 500.
         visible_set = (
-            set(db.filter_photo_ids_in_workspace(photo_ids))
+            set(db.photo_visibility.visible_photo_ids(photo_ids))
             if ctx.workspace_id is not None else set()
         )
         photo_ids = [pid for pid in photo_ids if pid in visible_set]
@@ -1269,7 +1269,7 @@ def create_job_launchers_blueprint(
         # With none active nothing is visible, as the inline query binding a
         # NULL workspace id behaved, so the route answers its 400, not a 500.
         visible_set = (
-            set(db.filter_photo_ids_in_workspace(photo_ids))
+            set(db.photo_visibility.visible_photo_ids(photo_ids))
             if ctx.workspace_id is not None else set()
         )
         photo_ids = [photo_id for photo_id in photo_ids if photo_id in visible_set]

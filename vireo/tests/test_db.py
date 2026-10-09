@@ -433,8 +433,8 @@ def test_get_photos_filter_by_rating(tmp_path):
     fid = db.add_folder('/photos', name='photos')
     p1 = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     p2 = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    db.update_photo_rating(p1, 3)
-    db.update_photo_rating(p2, 5)
+    db.photo_review.set_rating(p1, 3)
+    db.photo_review.set_rating(p2, 5)
 
     results = db.get_photos(rating_min=4)
     assert len(results) == 1
@@ -455,8 +455,8 @@ def test_get_photos_filter_by_flag(tmp_path):
     db.add_photo(folder_id=fid, filename='plain.jpg', extension='.jpg',
                  file_size=100, file_mtime=3.0,
                  timestamp='2024-01-03T10:00:00')
-    db.update_photo_flag(picked, 'flagged')
-    db.update_photo_flag(rejected, 'rejected')
+    db.photo_review.set_flag(picked, 'flagged')
+    db.photo_review.set_flag(rejected, 'rejected')
 
     picks = db.get_photos(flag='flagged')
     rejects = db.get_photos(flag='rejected')
@@ -603,7 +603,7 @@ def test_update_photo_rating(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
     pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    db.update_photo_rating(pid, 4)
+    db.photo_review.set_rating(pid, 4)
     photo = db.get_photo(pid)
     assert photo['rating'] == 4
 
@@ -614,7 +614,7 @@ def test_update_photo_flag(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
     pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    db.update_photo_flag(pid, 'flagged')
+    db.photo_review.set_flag(pid, 'flagged')
     photo = db.get_photo(pid)
     assert photo['flag'] == 'flagged'
 
@@ -1037,8 +1037,8 @@ def test_collection_photos_rating_rule(tmp_path):
     fid = db.add_folder('/photos', name='photos')
     p1 = db.add_photo(folder_id=fid, filename='good.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     p2 = db.add_photo(folder_id=fid, filename='bad.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    db.update_photo_rating(p1, 5)
-    db.update_photo_rating(p2, 2)
+    db.photo_review.set_rating(p1, 5)
+    db.photo_review.set_rating(p2, 2)
 
     rules = [{"field": "rating", "op": ">=", "value": 4}]
     cid = db.add_collection('Best', json.dumps(rules))
@@ -1096,9 +1096,9 @@ def test_collection_photo_ids_honors_sort(tmp_path):
     p_c = db.add_photo(folder_id=fid, filename='c.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0,
                        timestamp='2024-03-01T00:00:00')
-    db.update_photo_rating(p_a, 2)
-    db.update_photo_rating(p_b, 5)
-    db.update_photo_rating(p_c, 4)
+    db.photo_review.set_rating(p_a, 2)
+    db.photo_review.set_rating(p_b, 5)
+    db.photo_review.set_rating(p_c, 4)
 
     rules = [{"field": "rating", "op": ">=", "value": 0}]
     cid = db.add_collection('All', json.dumps(rules))
@@ -1478,9 +1478,9 @@ def test_count_photos_for_rules_unsaved(tmp_path):
                       file_size=100, file_mtime=1.0)
     p3 = db.add_photo(folder_id=fid, filename='bad.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
-    db.update_photo_rating(p1, 5)
-    db.update_photo_rating(p2, 4)
-    db.update_photo_rating(p3, 1)
+    db.photo_review.set_rating(p1, 5)
+    db.photo_review.set_rating(p2, 4)
+    db.photo_review.set_rating(p3, 1)
 
     # No rules -> matches every photo in the workspace.
     assert db.count_photos_for_rules([]) == 3
@@ -4599,7 +4599,7 @@ def test_clear_detections_also_clears_detector_runs(tmp_path):
     db.record_detector_run(pids[0], "megadetector-v6", box_count=1)
     assert pids[0] in db.get_detector_run_photo_ids("megadetector-v6")
 
-    db.clear_detections(pids[0])
+    db.detections.clear(pids[0])
 
     assert pids[0] not in db.get_detector_run_photo_ids("megadetector-v6"), (
         "clear_detections left a stale run key — _detect_subjects would "
@@ -5258,8 +5258,8 @@ def _make_calendar_db(tmp_path):
     p3 = db.add_photo(folder_id=fid, filename='bird3.jpg', extension='.jpg',
                       file_size=3000, file_mtime=3.0, timestamp='2024-06-10T09:00:00')
 
-    db.update_photo_rating(p1, 3)
-    db.update_photo_rating(p3, 5)
+    db.photo_review.set_rating(p1, 3)
+    db.photo_review.set_rating(p3, 5)
 
     return db
 
@@ -5345,8 +5345,8 @@ def test_get_geolocated_photos_filters(tmp_path):
                       file_size=100, file_mtime=1.0, timestamp='2024-06-15T10:00:00')
     db.conn.execute("UPDATE photos SET latitude=1.0, longitude=2.0 WHERE id IN (?,?)", (p1, p2))
     db.conn.commit()
-    db.update_photo_rating(p1, 2)
-    db.update_photo_rating(p2, 5)
+    db.photo_review.set_rating(p1, 2)
+    db.photo_review.set_rating(p2, 5)
 
     # Metadata filtering flows exclusively through the universal-filter
     # rules tree (legacy per-field params removed in Phase 5).
@@ -6276,7 +6276,7 @@ def test_undo_last_edit_rating(tmp_path):
     pid = pids[0]
     original_rating = db.get_photo(pid)['rating']
 
-    db.update_photo_rating(pid, 5)
+    db.photo_review.set_rating(pid, 5)
     db.record_edit('rating', 'Set rating to 5', '5',
                    [{'photo_id': pid, 'old_value': str(original_rating), 'new_value': '5'}])
 
@@ -6292,7 +6292,7 @@ def test_undo_last_edit_flag(tmp_path):
     db, pids = _make_db_with_photos(tmp_path)
     pid = pids[0]
 
-    db.update_photo_flag(pid, 'flagged')
+    db.photo_review.set_flag(pid, 'flagged')
     db.record_edit('flag', 'Set flag to flagged', 'flagged',
                    [{'photo_id': pid, 'old_value': 'none', 'new_value': 'flagged'}])
 
@@ -6351,7 +6351,7 @@ def test_undo_last_edit_batch(tmp_path):
 
     items = []
     for pid, old_r in original_ratings.items():
-        db.update_photo_rating(pid, 5)
+        db.photo_review.set_rating(pid, 5)
         items.append({'photo_id': pid, 'old_value': str(old_r), 'new_value': '5'})
     db.record_edit('rating', 'Set rating to 5 on 2 photos', '5', items, is_batch=True)
 
@@ -7120,7 +7120,7 @@ def test_clear_detections(tmp_path):
         (det_ids[0], "bioclip", "legacy", "Elk", 0.9),
     )
     db.conn.commit()
-    db.clear_detections(pid)
+    db.detections.clear(pid)
     assert db.conn.execute("SELECT COUNT(*) FROM detections WHERE photo_id = ?", (pid,)).fetchone()[0] == 0
     assert db.conn.execute("SELECT COUNT(*) FROM predictions").fetchone()[0] == 0
 
@@ -8436,7 +8436,7 @@ def test_get_detector_run_photo_ids_excludes_torn_state(tmp_path):
          "category": "animal"},
     ], detector_model="megadetector-v6")
     db.record_detector_run(torn, "megadetector-v6", box_count=1)
-    db.clear_detections(torn)
+    db.detections.clear(torn)
 
     # Legit empty scene: run recorded with box_count=0, no detections.
     db.record_detector_run(empty, "megadetector-v6", box_count=0)
@@ -10661,8 +10661,8 @@ def test_dashboard_stats_metadata_survives_missing_folders(tmp_path):
     p2 = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
                       file_size=1000, file_mtime=1.0,
                       timestamp="2024-02-15T12:00:00")
-    db.update_photo_rating(p1, 4)
-    db.update_photo_rating(p2, 3)
+    db.photo_review.set_rating(p1, 4)
+    db.photo_review.set_rating(p2, 3)
 
     # Sanity: stats populated when folder is ok.
     stats = db.get_dashboard_stats()
@@ -11083,19 +11083,19 @@ def test_bulk_photo_id_apis_chunk_param_lists(tmp_path):
 
     huge = [pid] + list(range(10_000_000, 10_033_000))  # > 32766 ids
 
-    db.batch_update_photo_rating(huge, 4, verify_workspace=False)
-    db.batch_update_photo_flag(huge, "flagged", verify_workspace=False)
+    db.photo_review.set_ratings(huge, 4, verify_workspace=False)
+    db.photo_review.set_flags(huge, "flagged", verify_workspace=False)
     # The set path inserts per-id (no IN clause); only the lookup and
     # removal paths take id lists into one statement.
-    db.batch_set_color_label([pid], "red")
-    labels = db.get_color_labels_for_photos(huge)
-    db.batch_set_color_label(huge, None)
+    db.photo_labels.set_many([pid], "red")
+    labels = db.photo_labels.get_for_photos(huge)
+    db.photo_labels.set_many(huge, None)
 
     photo = db.get_photo(pid)
     assert photo["rating"] == 4
     assert photo["flag"] == "flagged"
     assert labels == {pid: "red"}
-    assert db.get_color_labels_for_photos([pid]) == {}  # removal applied
+    assert db.photo_labels.get_for_photos([pid]) == {}  # removal applied
 
     # Scope-clause consumers and the reclassify purge must not raise either.
     counts = db.count_real_detections_in_scope(photo_ids=huge, min_conf=0.2)
@@ -15391,8 +15391,8 @@ def test_set_color_label(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
     pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    db.set_color_label(pid, 'red')
-    assert db.get_color_label(pid) == 'red'
+    db.photo_labels.set(pid, 'red')
+    assert db.photo_labels.get(pid) == 'red'
 
 
 def test_set_color_label_replaces(tmp_path):
@@ -15401,9 +15401,9 @@ def test_set_color_label_replaces(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
     pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    db.set_color_label(pid, 'red')
-    db.set_color_label(pid, 'blue')
-    assert db.get_color_label(pid) == 'blue'
+    db.photo_labels.set(pid, 'red')
+    db.photo_labels.set(pid, 'blue')
+    assert db.photo_labels.get(pid) == 'blue'
 
 
 def test_remove_color_label(tmp_path):
@@ -15412,9 +15412,9 @@ def test_remove_color_label(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
     pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    db.set_color_label(pid, 'green')
-    db.remove_color_label(pid)
-    assert db.get_color_label(pid) is None
+    db.photo_labels.set(pid, 'green')
+    db.photo_labels.remove(pid)
+    assert db.photo_labels.get(pid) is None
 
 
 def test_color_label_invalid_color(tmp_path):
@@ -15425,7 +15425,7 @@ def test_color_label_invalid_color(tmp_path):
     fid = db.add_folder('/photos', name='photos')
     pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     with pytest.raises(ValueError):
-        db.set_color_label(pid, 'orange')
+        db.photo_labels.set(pid, 'orange')
 
 
 def test_color_label_workspace_scoped(tmp_path):
@@ -15437,18 +15437,18 @@ def test_color_label_workspace_scoped(tmp_path):
 
     # Default workspace
     ws1 = db._active_workspace_id
-    db.set_color_label(pid, 'red')
+    db.photo_labels.set(pid, 'red')
 
     # Create second workspace and add the folder
     ws2 = db.create_workspace('Second')
     db.set_active_workspace(ws2)
     db.add_workspace_folder(ws2, fid)
-    db.set_color_label(pid, 'blue')
+    db.photo_labels.set(pid, 'blue')
 
     # Verify each workspace has its own label
-    assert db.get_color_label(pid) == 'blue'
+    assert db.photo_labels.get(pid) == 'blue'
     db.set_active_workspace(ws1)
-    assert db.get_color_label(pid) == 'red'
+    assert db.photo_labels.get(pid) == 'red'
 
 
 def test_color_label_descriptions_are_workspace_scoped(tmp_path):
@@ -15456,16 +15456,16 @@ def test_color_label_descriptions_are_workspace_scoped(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws1 = db._active_workspace_id
-    db.set_color_label_description("red", "Reptiles")
+    db.photo_labels.set_description("red", "Reptiles")
 
     ws2 = db.create_workspace("Second")
     db.set_active_workspace(ws2)
-    assert db.get_color_label_descriptions() == {}
-    db.set_color_label_description("red", "Needs review")
-    assert db.get_color_label_descriptions() == {"red": "Needs review"}
+    assert db.photo_labels.get_descriptions() == {}
+    db.photo_labels.set_description("red", "Needs review")
+    assert db.photo_labels.get_descriptions() == {"red": "Needs review"}
 
     db.set_active_workspace(ws1)
-    assert db.get_color_label_descriptions() == {"red": "Reptiles"}
+    assert db.photo_labels.get_descriptions() == {"red": "Reptiles"}
 
 
 def test_color_label_description_preserves_other_workspace_config(tmp_path):
@@ -15480,7 +15480,7 @@ def test_color_label_description_preserves_other_workspace_config(tmp_path):
         config_overrides={"detector_confidence": 0.15, "active_labels": ["birds.txt"]},
     )
 
-    db.set_color_label_description("blue", "Waterbirds")
+    db.photo_labels.set_description("blue", "Waterbirds")
     overrides = json.loads(db.get_workspace(ws_id)["config_overrides"])
     assert overrides == {
         "detector_confidence": 0.15,
@@ -15488,7 +15488,7 @@ def test_color_label_description_preserves_other_workspace_config(tmp_path):
         "color_label_descriptions": {"blue": "Waterbirds"},
     }
 
-    db.set_color_label_description("blue", "")
+    db.photo_labels.set_description("blue", "")
     overrides = json.loads(db.get_workspace(ws_id)["config_overrides"])
     assert overrides == {
         "detector_confidence": 0.15,
@@ -15502,14 +15502,14 @@ def test_color_label_description_validation(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
 
-    assert db.set_color_label_description("green", "  Confirmed\n wildlife  ") == "Confirmed wildlife"
-    assert db.get_color_label_descriptions() == {"green": "Confirmed wildlife"}
+    assert db.photo_labels.set_description("green", "  Confirmed\n wildlife  ") == "Confirmed wildlife"
+    assert db.photo_labels.get_descriptions() == {"green": "Confirmed wildlife"}
     with pytest.raises(ValueError, match="120 characters or fewer"):
-        db.set_color_label_description("green", "x" * 121)
+        db.photo_labels.set_description("green", "x" * 121)
     with pytest.raises(ValueError, match="Invalid color label"):
-        db.set_color_label_description("orange", "Mammals")
+        db.photo_labels.set_description("orange", "Mammals")
     with pytest.raises(ValueError, match="must be a string"):
-        db.set_color_label_description("green", None)
+        db.photo_labels.set_description("green", None)
 
 
 def test_batch_set_color_label(tmp_path):
@@ -15519,9 +15519,9 @@ def test_batch_set_color_label(tmp_path):
     fid = db.add_folder('/photos', name='photos')
     p1 = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     p2 = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    db.batch_set_color_label([p1, p2], 'yellow')
-    assert db.get_color_label(p1) == 'yellow'
-    assert db.get_color_label(p2) == 'yellow'
+    db.photo_labels.set_many([p1, p2], 'yellow')
+    assert db.photo_labels.get(p1) == 'yellow'
+    assert db.photo_labels.get(p2) == 'yellow'
 
 
 def test_batch_remove_color_label(tmp_path):
@@ -15531,10 +15531,10 @@ def test_batch_remove_color_label(tmp_path):
     fid = db.add_folder('/photos', name='photos')
     p1 = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     p2 = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    db.batch_set_color_label([p1, p2], 'yellow')
-    db.batch_set_color_label([p1, p2], None)
-    assert db.get_color_label(p1) is None
-    assert db.get_color_label(p2) is None
+    db.photo_labels.set_many([p1, p2], 'yellow')
+    db.photo_labels.set_many([p1, p2], None)
+    assert db.photo_labels.get(p1) is None
+    assert db.photo_labels.get(p2) is None
 
 
 def test_get_photos_filter_by_color_label(tmp_path):
@@ -15545,8 +15545,8 @@ def test_get_photos_filter_by_color_label(tmp_path):
     p1 = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     p2 = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     p3 = db.add_photo(folder_id=fid, filename='c.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    db.set_color_label(p1, 'red')
-    db.set_color_label(p2, 'blue')
+    db.photo_labels.set(p1, 'red')
+    db.photo_labels.set(p2, 'blue')
 
     results = db.get_photos(color_label='red')
     assert len(results) == 1
@@ -15560,7 +15560,7 @@ def test_count_filtered_photos_with_color_label(tmp_path):
     fid = db.add_folder('/photos', name='photos')
     p1 = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     p2 = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    db.set_color_label(p1, 'green')
+    db.photo_labels.set(p1, 'green')
 
     count = db.count_filtered_photos(color_label='green')
     assert count == 1
@@ -15574,11 +15574,11 @@ def test_get_photos_filter_color_label_combined_with_rating(tmp_path):
     p1 = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     p2 = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     p3 = db.add_photo(folder_id=fid, filename='c.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    db.update_photo_rating(p1, 4)
-    db.update_photo_rating(p2, 4)
-    db.update_photo_rating(p3, 2)
-    db.set_color_label(p1, 'red')
-    db.set_color_label(p3, 'red')
+    db.photo_review.set_rating(p1, 4)
+    db.photo_review.set_rating(p2, 4)
+    db.photo_review.set_rating(p3, 2)
+    db.photo_labels.set(p1, 'red')
+    db.photo_labels.set(p3, 'red')
 
     # Only p1 has both rating >= 4 AND color_label red
     results = db.get_photos(rating_min=4, color_label='red')
@@ -15598,8 +15598,8 @@ def test_collection_color_label_rule(tmp_path):
     fid = db.add_folder('/photos', name='photos')
     p1 = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     p2 = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    db.set_color_label(p1, 'red')
-    db.set_color_label(p2, 'blue')
+    db.photo_labels.set(p1, 'red')
+    db.photo_labels.set(p2, 'blue')
 
     rules = json.dumps([{"field": "color_label", "op": "equals", "value": "red"}])
     cid = db.add_collection("Reds", rules)
@@ -15618,8 +15618,8 @@ def test_collection_color_label_not_equals_rule(tmp_path):
     p1 = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     p2 = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     p3 = db.add_photo(folder_id=fid, filename='c.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    db.set_color_label(p1, 'red')
-    db.set_color_label(p2, 'blue')
+    db.photo_labels.set(p1, 'red')
+    db.photo_labels.set(p2, 'blue')
 
     rules = json.dumps([{"field": "color_label", "op": "is not", "value": "red"}])
     cid = db.add_collection("Not Red", rules)
@@ -15733,13 +15733,13 @@ def test_undo_color_label(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
     pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    db.set_color_label(pid, 'red')
+    db.photo_labels.set(pid, 'red')
     db.record_edit('color_label', 'Set color to red', 'red',
                    [{'photo_id': pid, 'old_value': '', 'new_value': 'red'}])
 
     result = db.undo_last_edit()
     assert result is not None
-    assert db.get_color_label(pid) is None
+    assert db.photo_labels.get(pid) is None
 
 
 def test_redo_color_label(tmp_path):
@@ -15748,15 +15748,15 @@ def test_redo_color_label(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
     pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
-    db.set_color_label(pid, 'red')
+    db.photo_labels.set(pid, 'red')
     db.record_edit('color_label', 'Set color to red', 'red',
                    [{'photo_id': pid, 'old_value': '', 'new_value': 'red'}])
 
     db.undo_last_edit()
-    assert db.get_color_label(pid) is None
+    assert db.photo_labels.get(pid) is None
 
     db.redo_last_undo()
-    assert db.get_color_label(pid) == 'red'
+    assert db.photo_labels.get(pid) == 'red'
 
 
 def test_dino_embedding_variant_column_exists(tmp_path):
@@ -24302,9 +24302,9 @@ def test_workspace_active_labels_survive_non_dict_overrides(tmp_path):
 def test_edit_presets_crud_strips_geometry(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
-    assert db.list_edit_presets() == []
+    assert db.edits.list_presets() == []
 
-    preset = db.save_edit_preset(
+    preset = db.edits.save_preset(
         "High-ISO forest",
         {
             "rotation": 90,
@@ -24318,7 +24318,7 @@ def test_edit_presets_crud_strips_geometry(tmp_path):
         "adjustments": {"exposure": 0.5, "noise_reduction": 40.0},
     }
 
-    listed = db.list_edit_presets()
+    listed = db.edits.list_presets()
     assert len(listed) == 1
     assert listed[0]["id"] == preset["id"]
     assert listed[0]["recipe"]["adjustments"]["noise_reduction"] == 40.0
@@ -24328,14 +24328,14 @@ def test_edit_preset_upserts_by_trimmed_name(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
 
-    first = db.save_edit_preset("Backlit  ", {"adjustments": {"exposure": 1}})
-    second = db.save_edit_preset(
+    first = db.edits.save_preset("Backlit  ", {"adjustments": {"exposure": 1}})
+    second = db.edits.save_preset(
         " Backlit", {"adjustments": {"shadows": 30}}
     )
 
     assert first["name"] == "Backlit"
     assert second["id"] == first["id"]
-    listed = db.list_edit_presets()
+    listed = db.edits.list_presets()
     assert len(listed) == 1
     assert listed[0]["recipe"]["adjustments"] == {"shadows": 30.0}
 
@@ -24344,9 +24344,9 @@ def test_edit_presets_list_sorted_by_name(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     for name in ("zebra dusk", "Backlit", "high-ISO forest"):
-        db.save_edit_preset(name, {"adjustments": {"contrast": 10}})
+        db.edits.save_preset(name, {"adjustments": {"contrast": 10}})
 
-    names = [p["name"] for p in db.list_edit_presets()]
+    names = [p["name"] for p in db.edits.list_presets()]
     assert names == sorted(names, key=str.casefold)
 
 
@@ -24356,12 +24356,12 @@ def test_edit_preset_rejects_empty_or_geometry_only(tmp_path):
     db = Database(str(tmp_path / "test.db"))
 
     with pytest.raises(ValueError):
-        db.save_edit_preset("Nothing", {})
+        db.edits.save_preset("Nothing", {})
     with pytest.raises(ValueError):
-        db.save_edit_preset("Geometry only", {"rotation": 90})
+        db.edits.save_preset("Geometry only", {"rotation": 90})
     with pytest.raises(ValueError):
-        db.save_edit_preset("Zeroed", {"adjustments": {"exposure": 0}})
-    assert db.list_edit_presets() == []
+        db.edits.save_preset("Zeroed", {"adjustments": {"exposure": 0}})
+    assert db.edits.list_presets() == []
 
 
 def test_edit_preset_rejects_blank_or_overlong_name(tmp_path):
@@ -24370,19 +24370,19 @@ def test_edit_preset_rejects_blank_or_overlong_name(tmp_path):
     db = Database(str(tmp_path / "test.db"))
 
     with pytest.raises(ValueError):
-        db.save_edit_preset("   ", {"adjustments": {"exposure": 1}})
+        db.edits.save_preset("   ", {"adjustments": {"exposure": 1}})
     with pytest.raises(ValueError):
-        db.save_edit_preset("x" * 200, {"adjustments": {"exposure": 1}})
+        db.edits.save_preset("x" * 200, {"adjustments": {"exposure": 1}})
 
 
 def test_delete_edit_preset(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
-    preset = db.save_edit_preset("Doomed", {"adjustments": {"exposure": 1}})
+    preset = db.edits.save_preset("Doomed", {"adjustments": {"exposure": 1}})
 
-    assert db.delete_edit_preset(preset["id"]) is True
-    assert db.delete_edit_preset(preset["id"]) is False
-    assert db.list_edit_presets() == []
+    assert db.edits.delete_preset(preset["id"]) is True
+    assert db.edits.delete_preset(preset["id"]) is False
+    assert db.edits.list_presets() == []
 
 
 def test_import_tab_in_nav_registries(tmp_path):
@@ -24611,7 +24611,7 @@ def test_life_list_uncounted_filter_targets_only_unsuppressed_photos(db):
     db.tag_photo(species_photo, family_kw)
     db.tag_photo(species_photo, species_kw)
     db.tag_photo(rejected_photo, family_kw)
-    db.update_photo_flag(rejected_photo, 'rejected')
+    db.photo_review.set_flag(rejected_photo, 'rejected')
     db.conn.commit()
 
     rows = db.get_life_list_uncounted_identifications()
@@ -24640,7 +24640,7 @@ def test_life_list_taxon_ids_excludes_rejected(db):
     db.conn.execute("UPDATE keywords SET is_species=1, taxon_id=? WHERE id=?",
                     (ids['Melospiza melodia'], k))
     db.conn.commit()
-    db.update_photo_flag(p, 'rejected')
+    db.photo_review.set_flag(p, 'rejected')
     assert db.get_life_list_taxon_ids() == set()
 
 
@@ -26153,8 +26153,8 @@ def test_universal_filter_numeric_fields_and_between(tmp_path):
     assert count([{"field": "aperture", "op": "is", "value": 2.8}]) == 1
     assert count([{"field": "shutter_speed", "op": "<", "value": 0.001}]) == 1
     # rating between rides the same generalized numeric path
-    db.update_photo_rating(small, 2)
-    db.update_photo_rating(big, 5)
+    db.photo_review.set_rating(small, 2)
+    db.photo_review.set_rating(big, 5)
     assert count([{"field": "rating", "op": "between", "value": [4, 5]}]) == 1
 
 
@@ -26236,7 +26236,7 @@ def test_universal_filter_empty_in_preserves_any_none_semantics(tmp_path):
     db, fid = _filter_db(tmp_path)
     p = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
                      file_size=100, file_mtime=1.0)
-    db.update_photo_rating(p, 5)
+    db.photo_review.set_rating(p, 5)
 
     count = db.count_photos_for_rules
     # any(in [], rating >= 4): first clause false, second true -> matches
@@ -27008,7 +27008,7 @@ def test_query_photos_sort_and_paging(tmp_path):
         pid = db.add_photo(folder_id=fid, filename=name, extension='.jpg',
                            file_size=100, file_mtime=1.0,
                            timestamp=f'2024-01-0{i + 1} 10:00:00')
-        db.update_photo_rating(pid, rating)
+        db.photo_review.set_rating(pid, rating)
 
     rows = db.query_photos([], sort="rating")
     assert [r["filename"] for r in rows] == ['b.jpg', 'c.jpg', 'a.jpg']
@@ -27078,7 +27078,7 @@ def test_query_browse_stacks_collapses_duplicates_and_bursts(tmp_path):
 
     # Filters apply before projection. Once only one burst member matches,
     # it returns as an ordinary result rather than dragging hidden members in.
-    db.update_photo_rating(ids["burst-best.jpg"], 5)
+    db.photo_review.set_rating(ids["burst-best.jpg"], 5)
     filtered = db.query_browse_stacks([
         {"field": "rating", "op": ">=", "value": 5},
     ])
@@ -27301,8 +27301,8 @@ def test_browse_stacks_filter_before_projection_can_split_a_run(tmp_path):
     keep_a = _timed_photo(db, fid, "a.jpg", "2024-01-01T09:00:00")
     drop = _timed_photo(db, fid, "b.jpg", "2024-01-01T09:00:03")
     keep_b = _timed_photo(db, fid, "c.jpg", "2024-01-01T09:00:06")
-    db.update_photo_rating(keep_a, 5)
-    db.update_photo_rating(keep_b, 5)
+    db.photo_review.set_rating(keep_a, 5)
+    db.photo_review.set_rating(keep_b, 5)
     db.conn.commit()
 
     assert _stack_shape(db) == [("burst", [keep_a, drop, keep_b])]
@@ -27955,7 +27955,7 @@ def test_get_filter_field_values_counts_respect_rules(tmp_path):
     ]:
         pid = db.add_photo(folder_id=fid, filename=name, extension='.jpg',
                            file_size=100, file_mtime=1.0)
-        db.update_photo_rating(pid, rating)
+        db.photo_review.set_rating(pid, rating)
         if model:
             db.conn.execute("UPDATE photos SET camera_model=? WHERE id=?", (model, pid))
         ids.append(pid)
@@ -28012,7 +28012,7 @@ def test_get_filter_field_values_counts_wrap_or_rules(tmp_path):
     ]:
         pid = db.add_photo(folder_id=fid, filename=name, extension='.jpg',
                            file_size=100, file_mtime=1.0)
-        db.update_photo_rating(pid, rating)
+        db.photo_review.set_rating(pid, rating)
         if model:
             db.conn.execute(
                 "UPDATE photos SET camera_model=? WHERE id=?", (model, pid))

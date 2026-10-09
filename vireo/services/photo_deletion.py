@@ -96,7 +96,7 @@ class PhotoDeletion:
             if isinstance(raw_id, bool) or not isinstance(raw_id, int):
                 raise ValueError("photo_ids must be integers")
             requested_ids.append(raw_id)
-        photo_ids = db.filter_photo_ids_in_workspace(requested_ids)
+        photo_ids = db.photo_visibility.visible_photo_ids(requested_ids)
         if not photo_ids:
             run.emit("Finishing", 1, 1)
             return _catalog_only_result(0)

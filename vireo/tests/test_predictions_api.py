@@ -531,7 +531,7 @@ def test_list_predictions_gates_representative_on_current_eligibility(app_and_db
 
     # Make each stale in one of the two ways the eligibility gate covers.
     # Preference rows themselves remain intact (undo-friendly).
-    db.update_photo_flag(rejected_pid, 'rejected')
+    db.photo_review.set_flag(rejected_pid, 'rejected')
     db.untag_photo(photos[2]['id'], kid_untagged)
 
     client = app.test_client()

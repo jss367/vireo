@@ -3,10 +3,13 @@
 Triggers on ``photos`` (``metadata_search.exif_search_text_triggers``) keep a
 row current for every EXIF write; this repository only fills in photos
 written before the table existed or before its definition last changed.
-Catalog-wide, so it takes no workspace id. ``Database`` keeps
-``count_exif_search_unindexed`` / ``index_exif_search_batch`` as thin
-wrappers over this class.
+Catalog-wide, so it takes no workspace id. Callers reach it as
+``db.exif_search`` (a fresh repository per access, see
+``Database.exif_search``); there are no forwarding wrappers on ``Database``.
 """
+
+import sqlite3
+from collections.abc import Callable
 
 from metadata_search import EXIF_SEARCH_TEXT_TABLE, exif_search_text
 
@@ -17,17 +20,21 @@ _UNINDEXED = (
 
 
 class ExifSearchRepository:
-    def __init__(self, conn, commit_with_retry):
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        commit_with_retry: Callable[[sqlite3.Connection], None],
+    ) -> None:
         self.conn = conn
         self._commit_with_retry = commit_with_retry
 
-    def count_unindexed(self):
-        """Photos with no search text row yet."""
+    def count_unindexed(self) -> int:
+        """Photos with no search text row yet (metadata search cannot prefilter them by EXIF)."""
         return self.conn.execute(
             f"SELECT COUNT(*) FROM photos p WHERE {_UNINDEXED}"
         ).fetchone()[0]
 
-    def index_batch(self, after_id, limit):
+    def index_batch(self, after_id: int, limit: int) -> tuple[int, int] | None:
         """Index up to ``limit`` unindexed photos with ids above ``after_id``.
 
         Returns ``(last_id, indexed)``, or ``None`` once no photo is left.
