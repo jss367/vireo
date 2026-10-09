@@ -20,6 +20,11 @@ function bucketRevealButton(bi) {
 
 function refreshBucketRevealButtons() {
   document.querySelectorAll('[data-reveal-bucket]').forEach(function(button) {
+    // bulkResolveByFolder and retryBucketTrash disable every action button
+    // on their applying card. Leaving those buttons alone keeps the card's
+    // controls locked while the sibling flow is still awaiting work.
+    var card = button.closest('.bucket-card');
+    if (card && card.classList.contains('applying')) return;
     var pending = _pendingBucketReveals.has(bucketRevealKey(Number(button.dataset.revealBucket)));
     button.disabled = pending;
     button.textContent = pending

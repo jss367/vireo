@@ -560,3 +560,31 @@ def test_reveal_pending_survives_filter_rerender(live_server, page, tmp_path, fa
     requests[1].fulfill(status=200, content_type="application/json",
                         body=json.dumps({"ok": True, "revealed": folders}))
     expect(button).to_be_enabled()
+
+
+def test_reveal_refresh_leaves_applying_cards_locked(live_server, page, tmp_path):
+    """A reveal completing in one card must not re-enable the Reveal button
+    on a sibling card whose bulkResolveByFolder / retryBucketTrash flow has
+    disabled every action button via ``.applying``."""
+    folders = [str(tmp_path / "a"), str(tmp_path / "b")]
+    _seed_scan_with_buckets(live_server["db"], *folders, n_groups=2)
+    page.goto(f"{live_server['url']}/duplicates")
+    button = page.locator(".bucket-card .reveal-btn")
+    expect(button).to_be_enabled()
+    # Simulate the sibling flow mid-apply: card.applying with every action
+    # button disabled, as bulkResolveByFolder / retryBucketTrash leave them.
+    page.evaluate("""
+        var card = document.querySelector('.bucket-card');
+        card.classList.add('applying');
+        card.querySelectorAll('.bucket-actions button').forEach(function(b) {
+            b.disabled = true;
+        });
+        refreshBucketRevealButtons();
+    """)
+    expect(button).to_be_disabled()
+    # Releasing the sibling flow restores interactivity on the next refresh.
+    page.evaluate("""
+        document.querySelector('.bucket-card').classList.remove('applying');
+        refreshBucketRevealButtons();
+    """)
+    expect(button).to_be_enabled()
