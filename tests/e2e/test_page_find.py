@@ -320,6 +320,47 @@ def test_find_works_inside_native_modal_dialog(live_server, page, entry):
     expect(field).to_be_focused()
 
 
+@pytest.mark.parametrize("close_find_first", [False, True])
+def test_find_survives_delayed_close_event_after_dialog_reopens(
+    live_server, page, close_find_first
+):
+    _open_desktop_page(page, f"{live_server['url']}/keywords")
+    # close() queues its event. Reopen in the same task so the old close
+    # notification is guaranteed to arrive after the new Find panel opens.
+    page.evaluate("""async closeFindFirst => {
+        const dialog = document.getElementById('kwMergeDialog');
+        dialog.showModal();
+        handleNativeMenuCommand('find');
+        if (closeFindFirst) VireoPageFind.close();
+        const closed = new Promise(resolve =>
+            dialog.addEventListener('close', resolve, {once: true}));
+        dialog.close();
+        dialog.showModal();
+        handleNativeMenuCommand('find');
+        await closed;
+    }""", close_find_first)
+
+    field = page.locator("#pageFindInput")
+    expect(field).to_be_visible()
+    expect(field).to_be_focused()
+    field.fill("Merge selected keywords")
+    expect(page.locator("#pageFindStatus")).to_have_text("1 of 1")
+
+    # A current close still clears the panel and its search highlights.
+    page.evaluate("""async () => {
+        const dialog = document.getElementById('kwMergeDialog');
+        const closed = new Promise(resolve =>
+            dialog.addEventListener('close', resolve, {once: true}));
+        dialog.close();
+        await closed;
+    }""")
+    expect(page.locator("#pageFindPanel")).to_be_hidden()
+    expect(page.locator(".page-find-mark")).to_have_count(0)
+    page.keyboard.press("Control+F")
+    expect(field).to_be_focused()
+    assert field.evaluate("input => input.closest('dialog')") is None
+
+
 @pytest.mark.parametrize("modifier", ["ctrlKey", "metaKey"])
 def test_regular_browser_preserves_native_find(live_server, page, modifier):
     page.goto(f"{live_server['url']}/life-list")
