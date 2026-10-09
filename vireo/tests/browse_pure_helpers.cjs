@@ -58,6 +58,10 @@ test('cardExtensionLabel names both files of a RAW+JPEG pair', () => {
   // Only the basename's extension counts, and a leading-dot name has none.
   assert.equal(cardExtensionLabel({extension: '.nef', companion_path: '/archive.v1/sidecar'}), 'NEF');
   assert.equal(cardExtensionLabel({extension: '.nef', companion_path: 'C:\\a.b\\x.jpg'}), 'NEF + JPG');
+  // POSIX basenames may contain line breaks; splitext still finds the suffix.
+  assert.equal(cardExtensionLabel({extension: '.nef', companion_path: 'a\nb.jpg'}), 'NEF + JPG');
+  assert.equal(cardExtensionLabel({extension: '.nef', companion_path: 'a\u2028b.jpg'}), 'NEF + JPG');
+  assert.equal(cardExtensionLabel({extension: '.nef', companion_path: 'a\u2029b.jpg'}), 'NEF + JPG');
   assert.equal(cardExtensionLabel({extension: '.nef', companion_path: '.hidden'}), 'NEF');
   assert.equal(cardExtensionLabel({extension: '.nef', companion_path: ''}), 'NEF');
   assert.equal(cardExtensionLabel({extension: '', companion_path: 'x.jpg'}), 'JPG');

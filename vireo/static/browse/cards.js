@@ -17,7 +17,7 @@ function formatFileSize(bytes) {
 function cardExtensionLabel(p) {
   var label = p.extension ? String(p.extension).replace(/^\./, '').toUpperCase() : '';
   var base = p.companion_path ? String(p.companion_path).split(/[\\/]/).pop() : '';
-  var m = base.match(/^\.*[^.].*(\.[^.]+)$/);
+  var m = base.match(/^\.*[^.][\s\S]*(\.[^.]+)$/);
   var companion = m ? m[1].slice(1).toUpperCase() : '';
   if (!companion || companion === label) return label;
   return label ? label + ' + ' + companion : companion;
