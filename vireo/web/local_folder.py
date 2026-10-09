@@ -495,7 +495,7 @@ def create_local_folder_blueprint(
                 visible.add(int(covering))
         if not visible:
             return ""
-        rows = db.get_local_folder_states(sorted(visible))
+        rows = db.local_folders.state_rows(sorted(visible))
         parts = [
             "{root}:{state}:{activated}:{created}".format(
                 root=row["root_folder_id"],
