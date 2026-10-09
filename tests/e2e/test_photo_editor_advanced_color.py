@@ -383,6 +383,7 @@ def test_find_escape_preserves_active_color_picker(live_server, page, color_phot
     _wait_color_preview(page)
     page.locator('#pointColorPick').click()
     expect(page.locator('#pointColorPick')).to_have_attribute('aria-pressed', 'true')
+    page.evaluate('window.__TAURI_INTERNALS__ = {}')
     page.keyboard.press('Control+F')
     expect(page.locator('#pageFindPanel')).to_be_visible()
     page.keyboard.press('Escape')

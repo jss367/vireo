@@ -142,7 +142,7 @@
     // Find owns this chord before configurable actions can navigate or edit
     // a photo. Its later capture listener handles the event; recording still
     // takes priority via the pause check above.
-    if (window.VireoPageFind && matchesShortcut(e, 'ctrl+f')) return;
+    if (window.__TAURI_INTERNALS__ && window.VireoPageFind && matchesShortcut(e, 'ctrl+f')) return;
     if (isInputFocused()) return;
     var candidates = shortcutsForScope(_currentScope);
     for (var i = 0; i < candidates.length; i++) {

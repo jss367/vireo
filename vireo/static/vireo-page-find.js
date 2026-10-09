@@ -250,6 +250,7 @@
   document.getElementById('pageFindNext').addEventListener('click', function() { move(1); });
   document.getElementById('pageFindClose').addEventListener('click', close);
   document.addEventListener('keydown', function(e) {
+    if (!window.__TAURI_INTERNALS__) return;
     if (window.Keymap.isDispatchPaused()) return;
     if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'f') {
       e.preventDefault();

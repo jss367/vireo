@@ -9,6 +9,13 @@ from playwright.sync_api import expect
 from e2e.test_life_list_explorer import _seed_hummingbird_tree
 
 
+def _open_desktop_page(page, url):
+    page.goto(url)
+    # Model the Tauri marker for shortcut delivery after normal page startup;
+    # Flask endpoints still provide the real application content for the test.
+    page.evaluate("window.__TAURI_INTERNALS__ = {}")
+
+
 def test_native_find_shortcut_is_reserved_for_text_search():
     menu = (Path(__file__).parents[2] / "src-tauri/src/menu.rs").read_text()
     accelerator_items = re.findall(
@@ -24,7 +31,7 @@ def test_native_find_shortcut_is_reserved_for_text_search():
 @pytest.mark.parametrize("entry", ["Control+F", "Meta+F", "native"])
 def test_find_searches_life_list_explorer(live_server, page, entry):
     _seed_hummingbird_tree(live_server["db"])
-    page.goto(f"{live_server['url']}/life-list?view=explorer")
+    _open_desktop_page(page, f"{live_server['url']}/life-list?view=explorer")
     card = page.locator(".ll-card", has_text="Swifts and Hummingbirds")
     expect(card).to_be_visible()
     if entry == "native":
@@ -68,7 +75,7 @@ def test_find_searches_life_list_explorer(live_server, page, entry):
 
 
 def test_find_ignores_hidden_text_and_clears_old_matches(live_server, page):
-    page.goto(f"{live_server['url']}/life-list")
+    _open_desktop_page(page, f"{live_server['url']}/life-list")
     page.evaluate("""() => {
         const section = document.createElement('div');
         section.innerHTML = '<p>Needle needle</p><p hidden>needle</p>' +
@@ -89,7 +96,7 @@ def test_find_ignores_hidden_text_and_clears_old_matches(live_server, page):
 
 @pytest.mark.parametrize("path", ["/browse", "/settings"])
 def test_native_find_uses_existing_page_search(live_server, page, path):
-    page.goto(f"{live_server['url']}{path}")
+    _open_desktop_page(page, f"{live_server['url']}{path}")
     selector = ".vf-search input" if path == "/browse" else "#settingsFindInput"
     if path == "/browse":
         expect(page.locator(selector)).to_be_visible()
@@ -100,7 +107,7 @@ def test_native_find_uses_existing_page_search(live_server, page, path):
 
 @pytest.mark.parametrize("entry", ["Control+F", "Meta+F", "native"])
 def test_find_does_not_interrupt_shortcut_capture(live_server, page, entry):
-    page.goto(f"{live_server['url']}/shortcuts")
+    _open_desktop_page(page, f"{live_server['url']}/shortcuts")
     button = page.locator(".shortcut-key-btn[onclick*=\"'navigation', 'browse'\"]")
     expect(button).to_be_visible()
     button.click()
@@ -117,7 +124,7 @@ def test_find_does_not_interrupt_shortcut_capture(live_server, page, entry):
 
 
 def test_find_updates_when_details_open_or_close(live_server, page):
-    page.goto(f"{live_server['url']}/life-list")
+    _open_desktop_page(page, f"{live_server['url']}/life-list")
     page.evaluate("""() => {
         const details = document.createElement('details');
         details.id = 'findTestDetails';
@@ -140,7 +147,7 @@ def test_find_works_on_standalone_setup_page(live_server, page, entry):
     page.route("**/api/models/status", lambda route: route.fulfill(
         json={"available_models": [], "classification": {"labels_ready": False}}
     ))
-    page.goto(f"{live_server['url']}/welcome?force=1")
+    _open_desktop_page(page, f"{live_server['url']}/welcome?force=1")
     if entry == "native":
         page.evaluate("handleNativeMenuCommand('find')")
     else:
@@ -155,7 +162,7 @@ def test_find_works_on_standalone_setup_page(live_server, page, entry):
 
 
 def test_find_preserves_unicode_offsets_and_literal_queries(live_server, page):
-    page.goto(f"{live_server['url']}/life-list")
+    _open_desktop_page(page, f"{live_server['url']}/life-list")
     page.evaluate("""() => {
         const paragraph = document.createElement('p');
         paragraph.id = 'findUnicodeText';
@@ -180,7 +187,7 @@ def test_find_preserves_unicode_offsets_and_literal_queries(live_server, page):
 
 
 def test_find_matches_across_inline_markup(live_server, page):
-    page.goto(f"{live_server['url']}/life-list")
+    _open_desktop_page(page, f"{live_server['url']}/life-list")
     page.evaluate("""() => {
         const section = document.createElement('div');
         section.id = 'findInlineText';
@@ -221,7 +228,7 @@ def test_find_matches_across_inline_markup(live_server, page):
 
 
 def test_find_matches_rendered_whitespace_on_process_page(live_server, page):
-    page.goto(f"{live_server['url']}/pipeline")
+    _open_desktop_page(page, f"{live_server['url']}/pipeline")
     expect(page.get_by_test_id("source-import-hint")).to_be_visible()
     page.keyboard.press("Control+F")
     page.locator("#pageFindInput").fill("on the Import page")
@@ -230,7 +237,7 @@ def test_find_matches_rendered_whitespace_on_process_page(live_server, page):
 
 
 def test_find_excludes_closed_bottom_panel(live_server, page):
-    page.goto(f"{live_server['url']}/life-list")
+    _open_desktop_page(page, f"{live_server['url']}/life-list")
     page.evaluate("""() => {
         const p = document.createElement('p');
         p.textContent = 'BottomPanelNeedle';
@@ -247,7 +254,7 @@ def test_find_excludes_closed_bottom_panel(live_server, page):
 
 @pytest.mark.parametrize("entry", ["Control+F", "Meta+F"])
 def test_find_takes_priority_over_configured_shortcuts(live_server, page, entry):
-    page.goto(f"{live_server['url']}/life-list")
+    _open_desktop_page(page, f"{live_server['url']}/life-list")
     page.evaluate("""() => {
         window.findConflictActions = 0;
         Keymap.register(Keymap.getScope(), {
@@ -261,7 +268,7 @@ def test_find_takes_priority_over_configured_shortcuts(live_server, page, entry)
 
 
 def test_find_excludes_transparent_highlight_controls(live_server, page):
-    page.goto(f"{live_server['url']}/highlights")
+    _open_desktop_page(page, f"{live_server['url']}/highlights")
     page.evaluate("""() => {
         const card = document.createElement('div');
         card.className = 'highlights-card';
@@ -281,7 +288,7 @@ def test_find_excludes_transparent_highlight_controls(live_server, page):
 
 @pytest.mark.parametrize("entry", ["Control+F", "native"])
 def test_find_works_inside_native_modal_dialog(live_server, page, entry):
-    page.goto(f"{live_server['url']}/keywords")
+    _open_desktop_page(page, f"{live_server['url']}/keywords")
     page.evaluate("""() => {
         const background = document.createElement('p');
         background.textContent = 'Merge selected keywords';
@@ -311,3 +318,17 @@ def test_find_works_inside_native_modal_dialog(live_server, page, entry):
     expect(page.locator(".page-find-mark")).to_have_count(0)
     page.keyboard.press("Control+F")
     expect(field).to_be_focused()
+
+
+@pytest.mark.parametrize("modifier", ["ctrlKey", "metaKey"])
+def test_regular_browser_preserves_native_find(live_server, page, modifier):
+    page.goto(f"{live_server['url']}/life-list")
+    prevented = page.evaluate("""modifier => {
+        const event = new KeyboardEvent('keydown', {
+            key: 'f', [modifier]: true, bubbles: true, cancelable: true
+        });
+        document.dispatchEvent(event);
+        return event.defaultPrevented;
+    }""", modifier)
+    assert prevented is False
+    expect(page.locator("#pageFindPanel")).to_be_hidden()

@@ -35,7 +35,7 @@ function setup(text='Needle needle') {
  const timers=new Map();let token=0;
  class KeyboardEvent {constructor(type,init){Object.assign(this,init);this.type=type;}preventDefault(){}stopPropagation(){}}
  class Observer{constructor(fn){this.fn=fn;observer=this;}observe(){this.active=true;}disconnect(){this.active=false;}}
- const ctx={KeyboardEvent,document:doc,MutationObserver:Observer,NodeFilter:{SHOW_TEXT:4,FILTER_ACCEPT:1,FILTER_REJECT:2},setTimeout:fn=>{timers.set(++token,fn);return token;},clearTimeout:t=>timers.delete(t),console};ctx.window=ctx;ctx.getComputedStyle=e=>({display:e.style.display??(['B','SPAN','EM','STRONG','I','MARK','BR','TSPAN'].includes(e.tagName)?'inline':'block'),visibility:e.style.visibility??'visible'});
+ const ctx={KeyboardEvent,document:doc,MutationObserver:Observer,NodeFilter:{SHOW_TEXT:4,FILTER_ACCEPT:1,FILTER_REJECT:2},setTimeout:fn=>{timers.set(++token,fn);return token;},clearTimeout:t=>timers.delete(t),console};ctx.window=ctx;ctx.__TAURI_INTERNALS__={};ctx.getComputedStyle=e=>({display:e.style.display??(['B','SPAN','EM','STRONG','I','MARK','BR','TSPAN'].includes(e.tagName)?'inline':'block'),visibility:e.style.visibility??'visible'});
  vm.createContext(ctx);for(const f of ['keymap.js','vireo-page-find.js'])vm.runInContext(fs.readFileSync(root+'/'+f,'utf8'),ctx);
  function key(mod={}){const e={key:'f',ctrlKey:true,metaKey:false,altKey:false,shiftKey:false,preventDefault(){this.prevented=true;},stopPropagation(){},stopImmediatePropagation(){this.stopped=true;},...mod};for(const fn of doc.listeners){fn(e);if(e.stopped)break;}return e;}
  function change(q){elements.pageFindInput.value=q;elements.pageFindInput.fire('input');}
