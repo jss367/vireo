@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.benchmark_raw_previews import SCHEMA, compare_reports, environment, provenance, summarize
+from scripts.benchmark_raw_previews import SCHEMA, compare_reports, corpus_entries, environment, provenance, summarize
 
 
 def report():
@@ -70,6 +70,20 @@ def test_benchmark_runs_real_raw_endpoint_in_isolated_process(tmp_path):
         assert len(row['sha256']) == 64
     assert compare_reports(data, data) == []
     assert str(tmp_path) not in output.read_text()  # reports omit local paths
+
+
+def test_corpus_entries_rejects_duplicate_resolved_paths(tmp_path):
+    from vireo.tests.test_raw_precision import write_dng
+
+    source = tmp_path / 'single.dng'
+    write_dng(source)
+    manifest = tmp_path / 'corpus.json'
+    manifest.write_text(json.dumps([
+        {'name': 'first', 'path': source.name},
+        {'name': 'second', 'path': './' + source.name},
+    ]))
+    with pytest.raises(ValueError, match='already used by another entry'):
+        list(corpus_entries(manifest))
 
 
 def test_benchmark_refuses_an_eight_bit_preview_source(tmp_path):

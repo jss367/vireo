@@ -132,13 +132,19 @@ def corpus_entries(manifest):
     entries = json.loads(manifest.read_text())
     if not isinstance(entries, list) or not entries:
         raise ValueError('Manifest must be a nonempty list of {name, path} entries')
-    names = set()
+    names, paths = set(), set()
     for entry in entries:
         name = entry['name']
         if not isinstance(name, str) or not name or name in names:
             raise ValueError('Each corpus entry needs a unique, nonempty name')
         names.add(name)
         path = (manifest.parent / Path(entry['path']).expanduser()).resolve()
+        # Distinct names resolving to one RAW collapse to a single row in
+        # Database.add_photo (filename is unique per folder), so navigation
+        # and multi-tab scenarios would silently reuse one photo id.
+        if str(path) in paths:
+            raise ValueError(f'Corpus entry {name!r} resolves to {path}, already used by another entry')
+        paths.add(str(path))
         with path.open('rb') as stream:
             digest = hashlib.file_digest(stream, 'sha256').hexdigest()
         with rawpy.imread(str(path)) as raw:
