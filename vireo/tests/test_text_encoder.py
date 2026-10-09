@@ -314,7 +314,8 @@ def test_text_session_cache_wait_honors_cancellation(monkeypatch):
             "acquired the lock without blocking"
         )
         cancelled.set()
-        assert finished.wait(timeout=synchronization_timeout(1.0))
+        # This deadline verifies cancellation latency, not worker scheduling.
+        assert finished.wait(timeout=1.0)
         thread.join(timeout=synchronization_timeout(1.0))
         assert not thread.is_alive()
         assert outcome == ["cancelled"]
