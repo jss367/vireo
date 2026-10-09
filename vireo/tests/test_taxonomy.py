@@ -9,6 +9,7 @@ import tempfile
 import weakref
 
 import pytest
+from testing.waits import synchronization_timeout
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -988,7 +989,7 @@ def test_download_with_resume_cancel_interrupts_stalled_read(tmp_path):
             self.wfile.flush()
             # Hold the connection open until the test releases it — this is
             # what makes resp.read block on the client side.
-            stop_hanging.wait(timeout=30)
+            stop_hanging.wait(timeout=synchronization_timeout(30))
 
         def log_message(self, *a):
             pass

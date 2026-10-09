@@ -3,6 +3,7 @@ import sys
 import threading
 
 import pytest
+from testing.waits import synchronization_timeout
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -586,15 +587,15 @@ def test_cpu_and_lane_claim_waits_without_partial_allocation():
 
     thread = threading.Thread(target=claim_both)
     thread.start()
-    assert waiting.wait(timeout=1.0)
+    assert waiting.wait(timeout=synchronization_timeout(1.0))
     assert ledger.snapshot()["cpu"]["allocated"] == 0
     assert not acquired.is_set()
 
     with ledger.acquire(ResourceRequest(cpu=CpuRequest(2, 2, 2))):
         assert ledger.snapshot()["cpu"]["allocated"] == 2
     lane_holder.release()
-    assert acquired.wait(timeout=1.0)
-    thread.join(timeout=1.0)
+    assert acquired.wait(timeout=synchronization_timeout(1.0))
+    thread.join(timeout=synchronization_timeout(1.0))
     assert not thread.is_alive()
 
 
@@ -622,7 +623,7 @@ def test_cpu_reserve_applies_across_concurrent_flexible_claims():
     thread = threading.Thread(target=acquire_second_scan)
     thread.start()
     try:
-        assert second_waiting.wait(timeout=1.0)
+        assert second_waiting.wait(timeout=synchronization_timeout(1.0))
         with ledger.acquire(ResourceRequest(
             cpu=CpuRequest(8, 8, 8),
             lanes=("cpu_ml",),
@@ -633,8 +634,8 @@ def test_cpu_reserve_applies_across_concurrent_flexible_claims():
     finally:
         first_scan.release()
 
-    assert second_acquired.wait(timeout=1.0)
-    thread.join(timeout=1.0)
+    assert second_acquired.wait(timeout=synchronization_timeout(1.0))
+    thread.join(timeout=synchronization_timeout(1.0))
     assert not thread.is_alive()
 
 
@@ -675,11 +676,11 @@ def test_owner_wait_timing_uses_injected_clock():
 
     thread = threading.Thread(target=waiter)
     thread.start()
-    assert waiting.wait(timeout=1.0)
+    assert waiting.wait(timeout=synchronization_timeout(1.0))
     now[0] = 12.5
     holder.release()
-    assert acquired.wait(timeout=1.0)
-    thread.join(timeout=1.0)
+    assert acquired.wait(timeout=synchronization_timeout(1.0))
+    thread.join(timeout=synchronization_timeout(1.0))
 
     assert ledger.owner_timing("job-1") == {
         "wait_seconds": 2.5, "wait_count": 1,
@@ -789,7 +790,7 @@ def test_owner_timing_includes_active_wait_before_grant():
     thread = threading.Thread(target=waiter)
     thread.start()
     try:
-        assert waiting.wait(timeout=1.0)
+        assert waiting.wait(timeout=synchronization_timeout(1.0))
         now[0] = 13.5
         # Wait has not returned yet, but owner_timing must already reflect
         # the 3.5s the job has been blocked.
@@ -803,8 +804,8 @@ def test_owner_timing_includes_active_wait_before_grant():
     finally:
         now[0] = 15.0
         holder.release()
-        assert acquired.wait(timeout=1.0)
-        thread.join(timeout=1.0)
+        assert acquired.wait(timeout=synchronization_timeout(1.0))
+        thread.join(timeout=synchronization_timeout(1.0))
 
     final = ledger.owner_timing("job-2")
     assert final == {"wait_seconds": 5.0, "wait_count": 1}
@@ -829,13 +830,16 @@ def test_cancelled_wait_releases_waiter_accounting():
 
     thread = threading.Thread(target=waiter)
     thread.start()
-    assert waiting.wait(timeout=1.0)
+    assert waiting.wait(timeout=synchronization_timeout(1.0))
     cancelled.set()
     # Wake the condition immediately; production cancellation otherwise gets
     # noticed by the bounded 200 ms poll.
     holder.release()
-    thread.join(timeout=1.0)
-    assert not thread.is_alive()
+    try:
+        thread.join(timeout=1.0)
+        assert not thread.is_alive()
+    finally:
+        thread.join(timeout=synchronization_timeout(1.0))
     assert outcome == ["cancelled"]
     assert ledger.snapshot()["waiters"] == 0
 
@@ -867,11 +871,14 @@ def test_raising_cancel_check_releases_waiter_accounting():
 
     thread = threading.Thread(target=waiter)
     thread.start()
-    assert waiting.wait(timeout=1.0)
+    assert waiting.wait(timeout=synchronization_timeout(1.0))
     cancel_now.set()
     holder.release()
-    thread.join(timeout=1.0)
-    assert not thread.is_alive()
+    try:
+        thread.join(timeout=1.0)
+        assert not thread.is_alive()
+    finally:
+        thread.join(timeout=synchronization_timeout(1.0))
     assert outcome == ["cancelled"]
     assert ledger.snapshot()["waiters"] == 0
 
@@ -912,11 +919,14 @@ def test_bound_cancel_check_wakes_waiter_without_explicit_argument():
 
     thread = threading.Thread(target=waiter)
     thread.start()
-    assert waiting.wait(timeout=1.0)
+    assert waiting.wait(timeout=synchronization_timeout(1.0))
     cancelled.set()
     holder.release()
-    thread.join(timeout=1.0)
-    assert not thread.is_alive()
+    try:
+        thread.join(timeout=1.0)
+        assert not thread.is_alive()
+    finally:
+        thread.join(timeout=synchronization_timeout(1.0))
     assert outcome == ["cancelled"]
     assert ledger.snapshot()["waiters"] == 0
 
@@ -954,15 +964,16 @@ def test_explicit_cancel_check_overrides_bound_probe():
 
     thread = threading.Thread(target=waiter)
     thread.start()
-    assert waiting.wait(timeout=1.0)
+    assert waiting.wait(timeout=synchronization_timeout(1.0))
     # Flip the bound probe first. If bind took precedence, this would
     # cancel the waiter; the assertions below prove it did not.
     explicit_polled.clear()
     bound_cancelled.set()
-    assert explicit_polled.wait(timeout=1.0)
+    assert explicit_polled.wait(timeout=synchronization_timeout(1.0))
     assert thread.is_alive()
     assert outcome == []
     explicit_cancelled.set()
+    # Cancellation must finish before the held resource is released.
     thread.join(timeout=1.0)
     assert not thread.is_alive()
     assert outcome == ["cancelled"]

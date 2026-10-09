@@ -17,6 +17,7 @@ from services.local_folder import (
     sync_folder,
     workspace_status,
 )
+from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client
 
 
@@ -689,7 +690,7 @@ def test_preflight_cancel_endpoint_stops_matching_scan(tmp_path, monkeypatch):
         _db, _root_ids, _vireo_dir, *, destination_bases=None, cancel_check=None
     ):
         started.set()
-        assert release.wait(5), "test did not release the fake preflight"
+        assert release.wait(synchronization_timeout(5)), "test did not release the fake preflight"
         if cancel_check and cancel_check():
             raise LocalWorkspaceCancelled("cancelled")
         return {"folder_count": 1, "total_bytes": 0, "can_copy": True,
@@ -716,7 +717,7 @@ def test_preflight_cancel_endpoint_stops_matching_scan(tmp_path, monkeypatch):
 
     thread = threading.Thread(target=request_preflight)
     thread.start()
-    assert started.wait(5), "preflight did not start"
+    assert started.wait(synchronization_timeout(5)), "preflight did not start"
     with app.test_client() as client:
         assert client.post(
             f"/api/workspaces/{other_workspace_id}/activate", json={}
@@ -729,7 +730,7 @@ def test_preflight_cancel_endpoint_stops_matching_scan(tmp_path, monkeypatch):
             },
         )
     release.set()
-    thread.join(5)
+    thread.join(synchronization_timeout(5))
 
     assert not thread.is_alive()
     assert cancelled.status_code == 200
@@ -856,7 +857,7 @@ def test_preflight_precancelled_newer_request_stops_intervening_older_scan(
             call_number = calls
         if call_number == 1:
             older_started.set()
-            assert release_older.wait(5), "test did not release the older scan"
+            assert release_older.wait(synchronization_timeout(5)), "test did not release the older scan"
         if cancel_check and cancel_check():
             raise LocalWorkspaceCancelled("cancelled")
         return {"folder_count": 1, "total_bytes": 1, "can_copy": True,
@@ -881,7 +882,7 @@ def test_preflight_precancelled_newer_request_stops_intervening_older_scan(
 
     thread = threading.Thread(target=request_older)
     thread.start()
-    assert older_started.wait(5), "older preflight did not start"
+    assert older_started.wait(synchronization_timeout(5)), "older preflight did not start"
     with app.test_client() as client:
         cancel = client.post(
             "/api/workspaces/active/local-folders/preflight/cancel",
@@ -897,7 +898,7 @@ def test_preflight_precancelled_newer_request_stops_intervening_older_scan(
             },
         )
     release_older.set()
-    thread.join(5)
+    thread.join(synchronization_timeout(5))
 
     assert not thread.is_alive()
     assert cancel.get_json() == {"cancelled": False}
@@ -942,7 +943,7 @@ def test_preflight_cancel_stops_destination_probing(tmp_path, monkeypatch):
         probe_paths.append(final_path)
         if len(probe_paths) == 1:
             first_probe_started.set()
-            assert release_probe.wait(5), "test did not release the destination probe"
+            assert release_probe.wait(synchronization_timeout(5)), "test did not release the destination probe"
         # Emulate the real probe honouring the cancellation callback so we
         # exercise ``LocalWorkspaceCancelled`` propagating out of the probe
         # (as opposed to only checking the loop's between-iteration check).
@@ -994,14 +995,14 @@ def test_preflight_cancel_stops_destination_probing(tmp_path, monkeypatch):
 
     thread = threading.Thread(target=request_preflight)
     thread.start()
-    assert first_probe_started.wait(5), "first destination probe did not start"
+    assert first_probe_started.wait(synchronization_timeout(5)), "first destination probe did not start"
     with app.test_client() as client:
         cancelled = client.post(
             "/api/workspaces/active/local-folders/preflight/cancel",
             json={"preflight_id": "probe-cancel"},
         )
     release_probe.set()
-    thread.join(5)
+    thread.join(synchronization_timeout(5))
 
     assert not thread.is_alive()
     assert cancelled.status_code == 200
@@ -1051,7 +1052,7 @@ def test_preflight_cancel_after_workspace_switch_stops_scan(tmp_path, monkeypatc
         _db, _root_ids, _vireo_dir, *, destination_bases=None, cancel_check=None
     ):
         started.set()
-        assert release.wait(5), "test did not release the fake preflight"
+        assert release.wait(synchronization_timeout(5)), "test did not release the fake preflight"
         if cancel_check and cancel_check():
             raise LocalWorkspaceCancelled("cancelled after workspace switch")
         return {"folder_count": 1, "total_bytes": 0, "can_copy": True,
@@ -1076,7 +1077,7 @@ def test_preflight_cancel_after_workspace_switch_stops_scan(tmp_path, monkeypatc
 
     thread = threading.Thread(target=request_preflight)
     thread.start()
-    assert started.wait(5), "preflight did not start under first workspace"
+    assert started.wait(synchronization_timeout(5)), "preflight did not start under first workspace"
 
     with app.test_client() as client:
         assert client.post(
@@ -1087,7 +1088,7 @@ def test_preflight_cancel_after_workspace_switch_stops_scan(tmp_path, monkeypatc
             json={"preflight_id": "scan-in-first"},
         )
     release.set()
-    thread.join(5)
+    thread.join(synchronization_timeout(5))
 
     assert not thread.is_alive()
     assert cancelled.status_code == 200
@@ -1129,7 +1130,7 @@ def test_older_seq_arrival_cannot_supersede_newer_registered_scan(tmp_path, monk
             call_number = calls
         assert call_number == 1, "older seq arrival should not run a scan"
         newer_started.set()
-        assert release_newer.wait(5), "test did not release the newer preflight"
+        assert release_newer.wait(synchronization_timeout(5)), "test did not release the newer preflight"
         if cancel_check and cancel_check():
             raise LocalWorkspaceCancelled("newer was superseded")
         return {"folder_count": 1, "total_bytes": 999, "can_copy": True,
@@ -1154,7 +1155,7 @@ def test_older_seq_arrival_cannot_supersede_newer_registered_scan(tmp_path, monk
 
     thread = threading.Thread(target=request_newer)
     thread.start()
-    assert newer_started.wait(5), "newer preflight did not start"
+    assert newer_started.wait(synchronization_timeout(5)), "newer preflight did not start"
     with app.test_client() as client:
         older = client.post(
             "/api/workspaces/active/local-folders/preflight",
@@ -1166,7 +1167,7 @@ def test_older_seq_arrival_cannot_supersede_newer_registered_scan(tmp_path, monk
             },
         )
     release_newer.set()
-    thread.join(5)
+    thread.join(synchronization_timeout(5))
 
     assert not thread.is_alive()
     # Older arrival is rejected with the same 409 the client already knows
@@ -1198,7 +1199,7 @@ def test_sequence_cache_does_not_evict_active_client(tmp_path, monkeypatch):
             call_number = calls
         if call_number == 1:
             active_started.set()
-            assert release_active.wait(5), "test did not release the active scan"
+            assert release_active.wait(synchronization_timeout(5)), "test did not release the active scan"
             if cancel_check and cancel_check():
                 raise LocalWorkspaceCancelled("active scan was superseded")
         return {"folder_count": 1, "total_bytes": call_number, "can_copy": True,
@@ -1223,7 +1224,7 @@ def test_sequence_cache_does_not_evict_active_client(tmp_path, monkeypatch):
 
     thread = threading.Thread(target=request_active)
     thread.start()
-    assert active_started.wait(5), "active preflight did not start"
+    assert active_started.wait(synchronization_timeout(5)), "active preflight did not start"
     with app.test_client() as client:
         for index in range(64):
             response = client.post(
@@ -1246,7 +1247,7 @@ def test_sequence_cache_does_not_evict_active_client(tmp_path, monkeypatch):
             },
         )
     release_active.set()
-    thread.join(5)
+    thread.join(synchronization_timeout(5))
 
     assert not thread.is_alive()
     assert older.status_code == 409
@@ -1305,7 +1306,7 @@ def test_preflights_from_different_browser_clients_do_not_cancel_each_other(
             call_number = calls
         if call_number == 1:
             first_started.set()
-            assert release_first.wait(5), "test did not release the first page"
+            assert release_first.wait(synchronization_timeout(5)), "test did not release the first page"
         assert not (cancel_check and cancel_check())
         return {"folder_count": 1, "total_bytes": call_number, "can_copy": True,
                 "folders": [], "volumes": []}
@@ -1329,7 +1330,7 @@ def test_preflights_from_different_browser_clients_do_not_cancel_each_other(
 
     thread = threading.Thread(target=request_first_page)
     thread.start()
-    assert first_started.wait(5), "first page preflight did not start"
+    assert first_started.wait(synchronization_timeout(5)), "first page preflight did not start"
     with app.test_client() as client:
         second = client.post(
             "/api/workspaces/active/local-folders/preflight",
@@ -1341,7 +1342,7 @@ def test_preflights_from_different_browser_clients_do_not_cancel_each_other(
             },
         )
     release_first.set()
-    thread.join(5)
+    thread.join(synchronization_timeout(5))
 
     assert not thread.is_alive()
     assert second.status_code == 200
@@ -1403,7 +1404,7 @@ def test_new_preflight_supersedes_old_scan(tmp_path, monkeypatch):
             call_number = calls
         if call_number == 1:
             first_started.set()
-            assert release_first.wait(5), "test did not release the first preflight"
+            assert release_first.wait(synchronization_timeout(5)), "test did not release the first preflight"
             if cancel_check and cancel_check():
                 raise LocalWorkspaceCancelled("superseded")
         return {"folder_count": 1, "total_bytes": call_number, "can_copy": True,
@@ -1423,14 +1424,14 @@ def test_new_preflight_supersedes_old_scan(tmp_path, monkeypatch):
 
     thread = threading.Thread(target=request_first)
     thread.start()
-    assert first_started.wait(5), "first preflight did not start"
+    assert first_started.wait(synchronization_timeout(5)), "first preflight did not start"
     with app.test_client() as client:
         second = client.post(
             "/api/workspaces/active/local-folders/preflight",
             json={"folder_ids": [folder_id], "preflight_id": "second"},
         )
     release_first.set()
-    thread.join(5)
+    thread.join(synchronization_timeout(5))
 
     assert not thread.is_alive()
     assert second.status_code == 200
@@ -1465,7 +1466,7 @@ def test_reloaded_page_supersedes_obsolete_scan_under_same_client_id(
             call_number = calls
         if call_number == 1:
             first_started.set()
-            assert release_first.wait(5), "test did not release the first preflight"
+            assert release_first.wait(synchronization_timeout(5)), "test did not release the first preflight"
             if cancel_check and cancel_check():
                 raise LocalWorkspaceCancelled("superseded by reload")
         return {"folder_count": 1, "total_bytes": call_number, "can_copy": True,
@@ -1490,7 +1491,7 @@ def test_reloaded_page_supersedes_obsolete_scan_under_same_client_id(
 
     thread = threading.Thread(target=request_original)
     thread.start()
-    assert first_started.wait(5), "original preflight did not start"
+    assert first_started.wait(synchronization_timeout(5)), "original preflight did not start"
     with app.test_client() as client:
         reloaded = client.post(
             "/api/workspaces/active/local-folders/preflight",
@@ -1502,7 +1503,7 @@ def test_reloaded_page_supersedes_obsolete_scan_under_same_client_id(
             },
         )
     release_first.set()
-    thread.join(5)
+    thread.join(synchronization_timeout(5))
 
     assert not thread.is_alive()
     assert reloaded.status_code == 200
@@ -2547,7 +2548,7 @@ def test_local_folder_status_exposes_blocking_job_and_preflight_stops_early(
 
     def processing(_job):
         started.set()
-        assert release.wait(timeout=10)
+        assert release.wait(timeout=synchronization_timeout(10))
         return {"ok": True}
 
     def unexpected_preflight(*_args, **_kwargs):
@@ -2563,7 +2564,7 @@ def test_local_folder_status_exposes_blocking_job_and_preflight_stops_early(
             "pipeline", processing, workspace_id=workspace_id
         )
         try:
-            assert started.wait(timeout=5)
+            assert started.wait(timeout=synchronization_timeout(5))
             status = client.get(
                 "/api/workspaces/active/local-folders"
             ).get_json()
@@ -2642,7 +2643,7 @@ def test_local_folder_blocker_endpoint_avoids_source_walk(tmp_path, monkeypatch)
 
     def processing(_job):
         started.set()
-        assert release.wait(timeout=10)
+        assert release.wait(timeout=synchronization_timeout(10))
         return {"ok": True}
 
     with app.test_client() as client:
@@ -2653,7 +2654,7 @@ def test_local_folder_blocker_endpoint_avoids_source_walk(tmp_path, monkeypatch)
             "pipeline", processing, workspace_id=workspace_id
         )
         try:
-            assert started.wait(timeout=5)
+            assert started.wait(timeout=synchronization_timeout(5))
             response = client.get("/api/workspaces/active/local-folders/blocker")
             assert response.status_code == 200
             assert response.get_json() == {
@@ -2731,7 +2732,7 @@ def test_local_folder_blockers_are_scoped_to_affected_roots(tmp_path, monkeypatc
 
     def processing(_job):
         started.set()
-        assert release.wait(timeout=10)
+        assert release.wait(timeout=synchronization_timeout(10))
         return {"ok": True}
 
     with app.test_client() as client:
@@ -2742,7 +2743,7 @@ def test_local_folder_blockers_are_scoped_to_affected_roots(tmp_path, monkeypatc
             "pipeline", processing, workspace_id=second_workspace
         )
         try:
-            assert started.wait(timeout=5)
+            assert started.wait(timeout=synchronization_timeout(5))
             blocker = client.get(
                 "/api/workspaces/active/local-folders/blocker"
             ).get_json()
@@ -2804,7 +2805,7 @@ def test_local_folder_blockers_include_descendant_sessions(tmp_path, monkeypatch
 
     def processing(_job):
         started.set()
-        assert release.wait(timeout=10)
+        assert release.wait(timeout=synchronization_timeout(10))
         return {"ok": True}
 
     with app.test_client() as client:
@@ -2815,7 +2816,7 @@ def test_local_folder_blockers_include_descendant_sessions(tmp_path, monkeypatch
             "pipeline", processing, workspace_id=child_workspace
         )
         try:
-            assert started.wait(timeout=5)
+            assert started.wait(timeout=synchronization_timeout(5))
             blocker = client.get(
                 "/api/workspaces/active/local-folders/blocker"
             ).get_json()
@@ -2868,7 +2869,7 @@ def test_folder_sync_proceeds_while_observational_job_runs(tmp_path, monkeypatch
 
     def observational_probe(_job):
         started.set()
-        assert release.wait(timeout=10)
+        assert release.wait(timeout=synchronization_timeout(10))
         return {"ok": True}
 
     with app.test_client() as client:
@@ -2882,7 +2883,7 @@ def test_folder_sync_proceeds_while_observational_job_runs(tmp_path, monkeypatch
             blocks_local_transitions=False,
         )
         try:
-            assert started.wait(timeout=5)
+            assert started.wait(timeout=synchronization_timeout(5))
             assert app._job_runner.get(probe_id)["status"] == "running"
             response = client.post(
                 "/api/workspaces/active/local-folders/sync",
@@ -3014,7 +3015,7 @@ def test_catalog_independent_job_does_not_block_work_locally(tmp_path, monkeypat
 
     def embedding_work(_job):
         started.set()
-        assert release.wait(timeout=10)
+        assert release.wait(timeout=synchronization_timeout(10))
         return {"labels": 3}
 
     with app.test_client() as client:
@@ -3025,7 +3026,7 @@ def test_catalog_independent_job_does_not_block_work_locally(tmp_path, monkeypat
             "precompute-embeddings", embedding_work, workspace_id=workspace_id,
         )
         try:
-            assert started.wait(timeout=5)
+            assert started.wait(timeout=synchronization_timeout(5))
             blocker = client.get(
                 "/api/workspaces/active/local-folders/blocker"
             ).get_json()

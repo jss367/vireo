@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 from services.preview_workers import PreviewWorkers, parse_request
+from testing.waits import synchronization_timeout
 
 
 def publish_started_marker(path):
@@ -218,7 +219,7 @@ def test_cancel_abandons_blocked_working_copy_guard(pool):
 
     with ThreadPoolExecutor(1) as threads, working_copy_publication_guard():
         blocked = threads.submit(pool.render, {}, 'a', 1, guard=guard)
-        assert waiting.wait(10)
+        assert waiting.wait(synchronization_timeout(10))
         pool.cancel('a', 2)
         assert blocked.result()[0] == 409
         # The next job can run before the cache publisher releases its lock.

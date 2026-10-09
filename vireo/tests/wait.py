@@ -21,6 +21,7 @@ hang is diagnosable instead of just a silent assertion failure on
 import time
 
 import pytest
+from testing.waits import synchronization_timeout
 
 _DEFAULT_TERMINAL = ("completed", "failed", "cancelled")
 
@@ -47,6 +48,7 @@ def wait_for_job(fetch, *, timeout=30.0, poll=0.05,
         before ``timeout``. The message includes the last observed state so
         a real hang is diagnosable.
     """
+    timeout = synchronization_timeout(timeout)
     deadline = time.monotonic() + timeout
     last = None
     while True:
@@ -111,6 +113,7 @@ def wait_for_job_phase(runner, job_id, phase, *, timeout=30.0, poll=0.01):
     HTTP response that returned the job id. 30s matches wait_for_job's
     default and never bites a healthy run.
     """
+    timeout = synchronization_timeout(timeout)
     deadline = time.monotonic() + timeout
     last_phase = None
     while True:

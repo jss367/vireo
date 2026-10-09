@@ -12,6 +12,7 @@ import threading
 import time
 
 from db import Database
+from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_runner
 
 
@@ -144,7 +145,7 @@ def test_enqueue_pipeline_promotes_immediately_when_slot_free(tmp_path):
     job_id = runner.enqueue_pipeline(
         work_fn=work, config={}, workspace_id=1,
     )
-    assert completed.wait(timeout=2.0), "work_fn was never invoked"
+    assert completed.wait(timeout=synchronization_timeout(2.0)), "work_fn was never invoked"
     job = wait_for_job_via_runner(runner, job_id)
     assert job["status"] == "completed"
     assert job["result"] == {"ok": True}
@@ -166,7 +167,7 @@ def test_enqueue_beyond_slot_cap_stays_queued(tmp_path):
     def make_blocking_work(started_event):
         def work(job):
             started_event.set()
-            blocker.wait(timeout=3.0)
+            blocker.wait(timeout=synchronization_timeout(3.0))
             return {}
         return work
 
@@ -200,7 +201,7 @@ def test_enqueue_beyond_slot_cap_stays_queued(tmp_path):
     blocker.set()
     for jid in occupant_ids:
         wait_for_job_via_runner(runner, jid)
-    assert extra_started.wait(timeout=2.0), (
+    assert extra_started.wait(timeout=synchronization_timeout(2.0)), (
         "extra pipeline did not promote after slots cleared"
     )
     wait_for_job_via_runner(runner, extra_id)
@@ -274,7 +275,7 @@ def test_terminal_pipeline_status_can_precede_queue_promotion(tmp_path, monkeypa
     def blocked_persistence(job, duration):
         if job["id"] in persistence_entered and job["status"] == "completed":
             persistence_entered[job["id"]].set()
-            assert release_persistence.wait(timeout=30), "test did not release persistence"
+            assert release_persistence.wait(timeout=synchronization_timeout(30)), "test did not release persistence"
         return original(job, duration)
 
     monkeypatch.setattr(runner, "_persist_job", blocked_persistence)
@@ -319,15 +320,17 @@ def test_two_pipelines_run_concurrently_when_slot_cap_at_least_two(tmp_path):
     first_started = threading.Event()
     second_started = threading.Event()
     blocker = threading.Event()
+    first_finished = threading.Event()
 
     def first_work(job):
         first_started.set()
-        blocker.wait(timeout=3.0)
+        blocker.wait(timeout=1.5 * synchronization_timeout(2.0))
+        first_finished.set()
         return {"first": True}
 
     def second_work(job):
         second_started.set()
-        blocker.wait(timeout=3.0)
+        blocker.wait(timeout=1.5 * synchronization_timeout(2.0))
         return {"second": True}
 
     first_id = runner.enqueue_pipeline(
@@ -339,15 +342,19 @@ def test_two_pipelines_run_concurrently_when_slot_cap_at_least_two(tmp_path):
 
     # Both work_fns must be invoked WITHOUT either one finishing —
     # the second must NOT have waited for the first to terminate.
-    assert first_started.wait(timeout=2.0), "first pipeline did not start"
-    assert second_started.wait(timeout=2.0), (
-        "second pipeline did not start concurrently with first — "
-        "SLOT_CAP appears to still be 1 or the scheduler is serialising"
-    )
-
-    blocker.set()
-    wait_for_job_via_runner(runner, first_id)
-    wait_for_job_via_runner(runner, second_id)
+    try:
+        assert first_started.wait(timeout=synchronization_timeout(2.0)), "first pipeline did not start"
+        assert second_started.wait(timeout=synchronization_timeout(2.0)), (
+            "second pipeline did not start concurrently with first — "
+            "SLOT_CAP appears to still be 1 or the scheduler is serialising"
+        )
+        assert not first_finished.is_set(), "first pipeline finished before checking concurrency"
+        blocker.set()
+        wait_for_job_via_runner(runner, first_id)
+        wait_for_job_via_runner(runner, second_id)
+    finally:
+        blocker.set()
+        runner.shutdown()
 
 
 def test_startup_sweep_marks_orphan_running_rows_as_failed(tmp_path):
@@ -1206,7 +1213,7 @@ def test_sse_subscribers_attached_while_queued_receive_post_promotion_events(tmp
 
     def second_work(job):
         runner.push_event(job["id"], "progress", {"phase": "started"})
-        let_second_finish.wait(timeout=3.0)
+        let_second_finish.wait(timeout=synchronization_timeout(3.0))
         return {"ok": True}
 
     filler_ids, blocker = _fill_slots(runner)

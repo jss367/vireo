@@ -17,6 +17,7 @@ from resource_ledger import (
     ResourceWaitCancelled,
     bind_resource_cancel_check,
 )
+from testing.waits import synchronization_timeout
 
 
 @pytest.fixture
@@ -178,7 +179,7 @@ def test_concurrent_passes_wait_for_cpu_grant(native, monkeypatch):
     with ThreadPoolExecutor(1) as executor:
         with backend.filters_for_image(1_000_000):
             pending = executor.submit(second)
-            assert entered.wait(5)
+            assert entered.wait(synchronization_timeout(5))
             assert not pending.done()
         pending.result(timeout=5)
     assert ledger.snapshot()["cpu"]["allocated"] == 0

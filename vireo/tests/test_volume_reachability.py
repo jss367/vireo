@@ -2,6 +2,8 @@ import errno
 import os
 import sys
 
+from testing.waits import synchronization_timeout
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
@@ -300,7 +302,7 @@ def test_generic_probe_times_out_as_offline(monkeypatch):
     release = threading.Event()
 
     def slow_isdir(path):
-        release.wait(5)
+        release.wait(synchronization_timeout(5))
         return True
 
     monkeypatch.setattr(vr.os.path, "isdir", slow_isdir)
@@ -342,7 +344,7 @@ def test_generic_probe_reuses_wedged_thread_instead_of_stacking(monkeypatch):
 
     def slow_isdir(path):
         started.append(path)
-        release.wait(5)
+        release.wait(synchronization_timeout(5))
         return True
 
     monkeypatch.setattr(vr.os.path, "isdir", slow_isdir)
@@ -363,7 +365,7 @@ def test_generic_probe_global_cap_fails_closed(monkeypatch):
     import threading
 
     release = threading.Event()
-    monkeypatch.setattr(vr.os.path, "isdir", lambda p: release.wait(5) or True)
+    monkeypatch.setattr(vr.os.path, "isdir", lambda p: release.wait(synchronization_timeout(5)) or True)
     monkeypatch.setattr(vr, "_GENERIC_PROBES", {})
     monkeypatch.setattr(vr, "_MAX_GENERIC_PROBES", 2)
     try:
@@ -507,7 +509,7 @@ def test_record_known_mount_roots_serializes_concurrent_merges(tmp_path, monkeyp
         for worker in workers:
             worker.start()
         for worker in workers:
-            worker.join(timeout=5)
+            worker.join(timeout=synchronization_timeout(5))
         assert not any(worker.is_alive() for worker in workers)
         assert original_load(first) == {"/srv/photos", "/archive/nas"}
     finally:
@@ -534,7 +536,7 @@ def test_bounded_link_target_reads_local_symlink_and_times_out_on_wedged_mount(t
 
     import threading
     release = threading.Event()
-    monkeypatch.setattr(vr.os.path, "islink", lambda p: release.wait(5) or False)
+    monkeypatch.setattr(vr.os.path, "islink", lambda p: release.wait(synchronization_timeout(5)) or False)
     monkeypatch.setattr(vr, "_BOUNDED_LINK_PROBES", {})
     monkeypatch.setattr(vr, "_ABANDONED_LINK_PROBES", set())
     try:
@@ -612,7 +614,7 @@ def test_bounded_link_target_global_cap(monkeypatch):
     import threading
 
     release = threading.Event()
-    monkeypatch.setattr(vr.os.path, "islink", lambda p: release.wait(5) or False)
+    monkeypatch.setattr(vr.os.path, "islink", lambda p: release.wait(synchronization_timeout(5)) or False)
     monkeypatch.setattr(vr, "_BOUNDED_LINK_PROBES", {})
     monkeypatch.setattr(vr, "_ABANDONED_LINK_PROBES", set())
     monkeypatch.setattr(vr, "_MAX_BOUNDED_LINK_PROBES", 2)
@@ -636,7 +638,7 @@ def test_bounded_link_target_waits_for_healthy_same_path_probe(monkeypatch):
     def slow_islink(path):
         calls.append(path)
         started.set()
-        assert release.wait(2)
+        assert release.wait(synchronization_timeout(2))
         return False
 
     monkeypatch.setattr(vr.os.path, "islink", slow_islink)
@@ -652,14 +654,14 @@ def test_bounded_link_target_waits_for_healthy_same_path_probe(monkeypatch):
         target=lambda: results.append(vr._bounded_link_target("/home", timeout=1)),
     )
     first.start()
-    assert started.wait(1)
+    assert started.wait(synchronization_timeout(1))
     second.start()
     time.sleep(0.05)
     assert second.is_alive()
     assert calls == ["/home"]
     release.set()
-    first.join(2)
-    second.join(2)
+    first.join(synchronization_timeout(2))
+    second.join(synchronization_timeout(2))
 
     assert not first.is_alive() and not second.is_alive()
     assert results == [None, None]
@@ -875,7 +877,7 @@ def test_bounded_process_probe_waits_for_healthy_same_root_probe(monkeypatch):
         def communicate(self, timeout=None):
             if self.first:
                 first_started.set()
-                assert release_first.wait(2)
+                assert release_first.wait(synchronization_timeout(2))
             return "ok", ""
 
         def kill(self):
@@ -897,14 +899,14 @@ def test_bounded_process_probe_waits_for_healthy_same_root_probe(monkeypatch):
     first = threading.Thread(target=probe)
     second = threading.Thread(target=probe)
     first.start()
-    assert first_started.wait(1)
+    assert first_started.wait(synchronization_timeout(1))
     second.start()
     time.sleep(0.05)
     assert second.is_alive()
     assert len(created) == 1, "same-root contender must wait before spawning"
     release_first.set()
-    first.join(2)
-    second.join(2)
+    first.join(synchronization_timeout(2))
+    second.join(synchronization_timeout(2))
 
     assert results == [True, True]
     assert len(created) == 2
@@ -919,7 +921,7 @@ def test_abandoned_probe_wakes_same_root_waiter(monkeypatch):
 
     class Process:
         def communicate(self):
-            release_reaper.wait(2)
+            release_reaper.wait(synchronization_timeout(2))
             return "", ""
 
         def kill(self):
@@ -938,7 +940,7 @@ def test_abandoned_probe_wakes_same_root_waiter(monkeypatch):
 
     waiter = threading.Thread(target=wait_for_root)
     waiter.start()
-    assert started.wait(1)
+    assert started.wait(synchronization_timeout(1))
     time.sleep(0.05)
     try:
         vr._abandon_network_probe(root, process)
@@ -1051,7 +1053,7 @@ def test_clear_discards_a_probe_that_was_already_running():
         probes.append(root)
         if len(probes) == 1:
             started.set()
-            release.wait(5)
+            release.wait(synchronization_timeout(5))
             return False
         return True
 
@@ -1060,11 +1062,11 @@ def test_clear_discards_a_probe_that_was_already_running():
         target=lambda: gate.root_reachable("/Volumes/NAS"), daemon=True,
     )
     worker.start()
-    assert started.wait(2)
+    assert started.wait(synchronization_timeout(2))
 
     gate.clear()
     release.set()
-    worker.join(5)
+    worker.join(synchronization_timeout(5))
     assert not worker.is_alive()
 
     # The in-flight answer was dropped rather than written back...
@@ -1089,7 +1091,7 @@ class _WedgedProcess:
         return 0 if self.released.is_set() else None
 
     def communicate(self, timeout=None):
-        self.released.wait(10)
+        self.released.wait(synchronization_timeout(10))
         return ("", "")
 
 
@@ -1129,7 +1131,7 @@ def test_invalidate_caches_lets_a_wedged_generic_probe_be_retried(monkeypatch):
 
     root = "/mnt/wedged"
     release = threading.Event()
-    stuck = threading.Thread(target=lambda: release.wait(10), daemon=True)
+    stuck = threading.Thread(target=lambda: release.wait(synchronization_timeout(10)), daemon=True)
     stuck.start()
     monkeypatch.setattr(vr, "_system_mount_roots", lambda **kwargs: set())
     monkeypatch.setattr(vr, "_classify_generic_root", lambda r: True)
@@ -1144,7 +1146,7 @@ def test_invalidate_caches_lets_a_wedged_generic_probe_be_retried(monkeypatch):
         assert stuck in vr._FORGOTTEN_GENERIC_PROBES
     finally:
         release.set()
-        stuck.join(5)
+        stuck.join(synchronization_timeout(5))
         with vr._GENERIC_PROBE_LOCK:
             vr._GENERIC_PROBES.pop(root, None)
             vr._FORGOTTEN_GENERIC_PROBES.discard(stuck)
@@ -1207,7 +1209,7 @@ def test_a_generic_probe_started_before_the_recheck_does_not_block_it(monkeypatc
 
     root = "/mnt/late"
     release = threading.Event()
-    stuck = threading.Thread(target=lambda: release.wait(10), daemon=True)
+    stuck = threading.Thread(target=lambda: release.wait(synchronization_timeout(10)), daemon=True)
     stuck.start()
     monkeypatch.setattr(vr, "_system_mount_roots", lambda **kwargs: set())
     monkeypatch.setattr(vr, "_classify_generic_root", lambda r: True)
@@ -1222,7 +1224,7 @@ def test_a_generic_probe_started_before_the_recheck_does_not_block_it(monkeypatc
         assert vr._probe_root_generic(root, 2) is True
     finally:
         release.set()
-        stuck.join(5)
+        stuck.join(synchronization_timeout(5))
         with vr._GENERIC_PROBE_LOCK:
             vr._GENERIC_PROBES.pop(root, None)
             vr._GENERIC_PROBE_EPOCHS.pop(root, None)

@@ -15,6 +15,7 @@ import card_cleanup
 import pytest
 from page_scripts import page_with_scripts
 from scanner import compute_file_hash as _sha
+from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client
 
 
@@ -342,7 +343,7 @@ def test_delete_concurrent_delete_409(app_and_db, tmp_path, monkeypatch, status)
     def blocking_delete_verified(db_, manifest, progress_cb=None,
                                  should_cancel=None):
         started.set()
-        release.wait(timeout=15)
+        release.wait(timeout=synchronization_timeout(15))
         if should_cancel:
             should_cancel()
         return {
@@ -364,7 +365,7 @@ def test_delete_concurrent_delete_409(app_and_db, tmp_path, monkeypatch, status)
                   "manifest_revision": manifest["revision"]})
         assert resp1.status_code == 200
         job1_id = resp1.get_json()["job_id"]
-        assert started.wait(timeout=15)
+        assert started.wait(timeout=synchronization_timeout(15))
 
         runner = app._job_runner
 
@@ -526,7 +527,7 @@ def test_verify_pauses_while_rechecking_manifest(
             checked.append(str(path))
             if len(checked) == 1:
                 entered.set()
-                assert release.wait(5)
+                assert release.wait(synchronization_timeout(5))
         return st
 
     monkeypatch.setattr(card_cleanup.os, "lstat", lstat)

@@ -3,6 +3,7 @@ import sys
 import threading
 
 import pytest
+from testing.waits import synchronization_timeout
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -448,7 +449,7 @@ def test_api_inat_token_only_saves_latest_overlapping_request(app_and_db):
     def validate(token):
         if token == "older-token":
             old_started.set()
-            assert release_old.wait(timeout=5)
+            assert release_old.wait(timeout=synchronization_timeout(5))
             return {"login": "older-user"}
         return {"login": "newer-user"}
 
@@ -460,12 +461,12 @@ def test_api_inat_token_only_saves_latest_overlapping_request(app_and_db):
     with patch("inat.validate_token", side_effect=validate):
         old_thread = threading.Thread(target=send_old_request)
         old_thread.start()
-        assert old_started.wait(timeout=5)
+        assert old_started.wait(timeout=synchronization_timeout(5))
         newer = app.test_client().post(
             "/api/inat/token", json={"token": "newer-token"},
         )
         release_old.set()
-        old_thread.join(timeout=5)
+        old_thread.join(timeout=synchronization_timeout(5))
 
     assert not old_thread.is_alive()
     assert newer.status_code == 200
@@ -483,7 +484,7 @@ def test_api_inat_token_does_not_overwrite_settings_write(app_and_db):
 
     def validate(_token):
         validation_started.set()
-        assert release_validation.wait(timeout=5)
+        assert release_validation.wait(timeout=synchronization_timeout(5))
         return {"login": "modal-user"}
 
     def send_modal_request():
@@ -494,12 +495,12 @@ def test_api_inat_token_does_not_overwrite_settings_write(app_and_db):
     with patch("inat.validate_token", side_effect=validate):
         modal_thread = threading.Thread(target=send_modal_request)
         modal_thread.start()
-        assert validation_started.wait(timeout=5)
+        assert validation_started.wait(timeout=synchronization_timeout(5))
         settings = app.test_client().post(
             "/api/config", json={"inat_token": "settings-token"},
         )
         release_validation.set()
-        modal_thread.join(timeout=5)
+        modal_thread.join(timeout=synchronization_timeout(5))
 
     assert not modal_thread.is_alive()
     assert settings.status_code == 200
@@ -518,7 +519,7 @@ def test_api_inat_token_rejects_aba_settings_writes(app_and_db):
 
     def validate(_token):
         validation_started.set()
-        assert release_validation.wait(timeout=5)
+        assert release_validation.wait(timeout=synchronization_timeout(5))
         return {"login": "modal-user"}
 
     def send_modal_request():
@@ -529,7 +530,7 @@ def test_api_inat_token_rejects_aba_settings_writes(app_and_db):
     with patch("inat.validate_token", side_effect=validate):
         modal_thread = threading.Thread(target=send_modal_request)
         modal_thread.start()
-        assert validation_started.wait(timeout=5)
+        assert validation_started.wait(timeout=synchronization_timeout(5))
         first_write = app.test_client().post(
             "/api/config", json={"inat_token": "temporary-token"},
         )
@@ -537,7 +538,7 @@ def test_api_inat_token_rejects_aba_settings_writes(app_and_db):
             "/api/config", json={"inat_token": "original-token"},
         )
         release_validation.set()
-        modal_thread.join(timeout=5)
+        modal_thread.join(timeout=synchronization_timeout(5))
 
     assert not modal_thread.is_alive()
     assert first_write.status_code == 200
@@ -564,7 +565,7 @@ def test_api_inat_token_superseded_by_settings_patch(app_and_db):
 
     def validate(_token):
         validation_started.set()
-        assert release_validation.wait(timeout=5)
+        assert release_validation.wait(timeout=synchronization_timeout(5))
         return {"login": "modal-user"}
 
     def send_modal_request():
@@ -575,7 +576,7 @@ def test_api_inat_token_superseded_by_settings_patch(app_and_db):
     with patch("inat.validate_token", side_effect=validate):
         modal_thread = threading.Thread(target=send_modal_request)
         modal_thread.start()
-        assert validation_started.wait(timeout=5)
+        assert validation_started.wait(timeout=synchronization_timeout(5))
         client = app.test_client()
         first_write = client.patch(
             "/api/settings/global",
@@ -586,7 +587,7 @@ def test_api_inat_token_superseded_by_settings_patch(app_and_db):
             json={"key": "inat_token", "value": "original-token"},
         )
         release_validation.set()
-        modal_thread.join(timeout=5)
+        modal_thread.join(timeout=synchronization_timeout(5))
 
     assert not modal_thread.is_alive()
     assert first_write.status_code == 200
@@ -620,7 +621,7 @@ def test_settings_write_that_keeps_the_token_does_not_supersede_modal(
 
     def validate(_token):
         validation_started.set()
-        assert release_validation.wait(timeout=5)
+        assert release_validation.wait(timeout=synchronization_timeout(5))
         return {"login": "modal-user"}
 
     def send_modal_request():
@@ -631,10 +632,10 @@ def test_settings_write_that_keeps_the_token_does_not_supersede_modal(
     with patch("inat.validate_token", side_effect=validate):
         modal_thread = threading.Thread(target=send_modal_request)
         modal_thread.start()
-        assert validation_started.wait(timeout=5)
+        assert validation_started.wait(timeout=synchronization_timeout(5))
         settings = app.test_client().post(path, json=body)
         release_validation.set()
-        modal_thread.join(timeout=5)
+        modal_thread.join(timeout=synchronization_timeout(5))
 
     assert not modal_thread.is_alive()
     assert settings.status_code == 200, settings.get_json()

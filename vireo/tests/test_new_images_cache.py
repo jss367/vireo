@@ -2,6 +2,8 @@ import os
 import sys
 import threading
 
+from testing.waits import synchronization_timeout
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
@@ -236,11 +238,11 @@ def test_kickoff_compute_reuses_in_flight_for_current_generation():
     def slow_compute():
         call_count[0] += 1
         started.set()
-        proceed.wait(timeout=5.0)
+        proceed.wait(timeout=synchronization_timeout(5.0))
         return {"new_count": 3}
 
     e1 = cache.kickoff_compute(DB, 1, slow_compute)
-    assert started.wait(timeout=10.0)
+    assert started.wait(timeout=synchronization_timeout(10.0))
     e2 = cache.kickoff_compute(DB, 1, slow_compute)
     assert e1 is e2, "concurrent kickoff for same generation must reuse in-flight"
     proceed.set()
@@ -265,11 +267,11 @@ def test_kickoff_compute_coalesces_stale_generation_into_deferred_rerun():
 
     def stale_compute():
         stale_started.set()
-        stale_proceed.wait(timeout=5.0)
+        stale_proceed.wait(timeout=synchronization_timeout(5.0))
         return {"new_count": 999}  # stale value — must be dropped
 
     e1 = cache.kickoff_compute(DB, 1, stale_compute)
-    assert stale_started.wait(timeout=10.0)
+    assert stale_started.wait(timeout=synchronization_timeout(10.0))
 
     # Invalidation advances the generation while the compute is still running.
     cache.invalidate_workspaces(DB, [1])
@@ -298,7 +300,7 @@ def test_kickoff_compute_coalesces_stale_generation_into_deferred_rerun():
     # its finally block runs.
     stale_proceed.set()
     assert e1.wait(timeout=10.0)
-    assert fresh_called.wait(timeout=10.0), (
+    assert fresh_called.wait(timeout=synchronization_timeout(10.0)), (
         "deferred rerun must spawn fresh compute after stale finishes"
     )
 
@@ -326,11 +328,11 @@ def test_kickoff_compute_coalesces_repeated_invalidations_into_single_rerun():
     def stale_compute():
         stale_calls[0] += 1
         stale_started.set()
-        stale_proceed.wait(timeout=5.0)
+        stale_proceed.wait(timeout=synchronization_timeout(5.0))
         return {"new_count": 0}
 
     cache.kickoff_compute(DB, 1, stale_compute)
-    assert stale_started.wait(timeout=10.0)
+    assert stale_started.wait(timeout=synchronization_timeout(10.0))
 
     # Several rounds of invalidation + kickoff with different compute_fns;
     # only the last one's result should ultimately land in the cache.
@@ -383,11 +385,11 @@ def test_kickoff_compute_stale_thread_clears_inflight_slot_for_rerun():
 
     def stale_compute():
         stale_started.set()
-        stale_proceed.wait(timeout=5.0)
+        stale_proceed.wait(timeout=synchronization_timeout(5.0))
         return {"new_count": 1}
 
     cache.kickoff_compute(DB, 1, stale_compute)
-    assert stale_started.wait(timeout=10.0)
+    assert stale_started.wait(timeout=synchronization_timeout(10.0))
     cache.invalidate_workspaces(DB, [1])
 
     rerun_done = threading.Event()
@@ -399,7 +401,7 @@ def test_kickoff_compute_stale_thread_clears_inflight_slot_for_rerun():
     cache.kickoff_compute(DB, 1, rerun_compute)
     stale_proceed.set()
 
-    assert rerun_done.wait(timeout=10.0), (
+    assert rerun_done.wait(timeout=synchronization_timeout(10.0)), (
         "rerun must run after stale thread finishes and frees the in-flight slot"
     )
 

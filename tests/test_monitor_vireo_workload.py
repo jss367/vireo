@@ -6,6 +6,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
+from testing.waits import synchronization_timeout
 
 from scripts.monitor_vireo_workload import (
     ProcessTreeSampler,
@@ -1301,7 +1302,7 @@ def test_api_client_establishes_browser_cookie_before_reading_jobs():
         sample = client.sample()
     finally:
         server.shutdown()
-        thread.join(timeout=2)
+        thread.join(timeout=synchronization_timeout(2))
         server.server_close()
 
     assert sample["status"] == 200

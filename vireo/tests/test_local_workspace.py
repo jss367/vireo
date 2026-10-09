@@ -17,6 +17,7 @@ from services.local_workspace import (
     sync_back,
     workspace_dir,
 )
+from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client
 
 
@@ -1597,11 +1598,11 @@ def test_work_locally_http_job_flow(tmp_path, monkeypatch):
 
         def slow_start(*args, **kwargs):
             start_entered.set()
-            assert allow_start.wait(timeout=5)
+            assert allow_start.wait(timeout=synchronization_timeout(5))
             return original_start(*args, **kwargs)
 
         def slow_stage(*args, **kwargs):
-            assert allow_job.wait(timeout=5)
+            assert allow_job.wait(timeout=synchronization_timeout(5))
             return {"ok": True, "files": 0, "bytes": 0, "local_path": ""}
 
         responses = []
@@ -1617,11 +1618,11 @@ def test_work_locally_http_job_flow(tmp_path, monkeypatch):
             first = threading.Thread(target=submit_stage)
             second = threading.Thread(target=submit_stage)
             first.start()
-            assert start_entered.wait(timeout=5)
+            assert start_entered.wait(timeout=synchronization_timeout(5))
             second.start()
             allow_start.set()
-            first.join(timeout=5)
-            second.join(timeout=5)
+            first.join(timeout=synchronization_timeout(5))
+            second.join(timeout=synchronization_timeout(5))
             assert sorted(code for code, _body in responses) == [202, 409]
             job_id = next(body["job_id"] for code, body in responses if code == 202)
             # A fresh status read while the job runs must report the live
@@ -1973,7 +1974,7 @@ def test_status_endpoint_does_not_surface_unrelated_workspace_jobs(tmp_path, mon
 
     def slow_scan(_job):
         started.set()
-        assert hold.wait(timeout=5)
+        assert hold.wait(timeout=synchronization_timeout(5))
         return {"ok": True}
 
     with app.test_client() as client:
@@ -1984,7 +1985,7 @@ def test_status_endpoint_does_not_surface_unrelated_workspace_jobs(tmp_path, mon
             "scan", slow_scan, workspace_id=workspace_id
         )
         try:
-            assert started.wait(timeout=5)
+            assert started.wait(timeout=synchronization_timeout(5))
             payload = client.get("/api/workspaces/active/local-workspace").get_json()
             # No "job" key: the scan is not a Work Locally transfer, so the
             # panel must not report it as one.
@@ -2226,7 +2227,7 @@ def test_scan_endpoint_refuses_while_transition_job_is_pending(tmp_path, monkeyp
 
     def slow_transition(_job):
         started.set()
-        assert hold.wait(timeout=5)
+        assert hold.wait(timeout=synchronization_timeout(5))
         return {"ok": True}
 
     with app.test_client() as client:
@@ -2238,7 +2239,7 @@ def test_scan_endpoint_refuses_while_transition_job_is_pending(tmp_path, monkeyp
             "work-locally-stage", slow_transition, workspace_id=workspace_id
         )
         try:
-            assert started.wait(timeout=5)
+            assert started.wait(timeout=synchronization_timeout(5))
 
             other = tmp_path / "nas" / "other"
             other.mkdir()
@@ -2285,7 +2286,7 @@ def test_move_folder_endpoint_refuses_while_transition_job_is_pending(tmp_path, 
 
     def slow_transition(_job):
         started.set()
-        assert hold.wait(timeout=5)
+        assert hold.wait(timeout=synchronization_timeout(5))
         return {"ok": True}
 
     destination = tmp_path / "nas" / "moved"
@@ -2295,7 +2296,7 @@ def test_move_folder_endpoint_refuses_while_transition_job_is_pending(tmp_path, 
             "work-locally-stage", slow_transition, workspace_id=workspace_id
         )
         try:
-            assert started.wait(timeout=5)
+            assert started.wait(timeout=synchronization_timeout(5))
 
             blocked = client.post(
                 "/api/jobs/move-folder",
@@ -2401,7 +2402,7 @@ def test_workspace_sync_proceeds_while_observational_job_runs(
 
     def observational_probe(_job):
         started.set()
-        assert release.wait(timeout=10)
+        assert release.wait(timeout=synchronization_timeout(10))
         return {"ok": True}
 
     with app.test_client() as client:
@@ -2412,7 +2413,7 @@ def test_workspace_sync_proceeds_while_observational_job_runs(
             blocks_local_transitions=False,
         )
         try:
-            assert started.wait(timeout=2)
+            assert started.wait(timeout=synchronization_timeout(2))
             assert app._job_runner.get(probe_id)["status"] == "running"
             response = client.post(
                 "/api/workspaces/active/local-workspace/sync",

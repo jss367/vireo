@@ -37,6 +37,14 @@ python -m pytest vireo/tests/test_db.py -v
 
 **Local runs share one machine — cap the workers.** Several agents often run tests at the same time on a 64 GB Mac, and each xdist worker grows to ~3 GB over a full-suite run. Never pass `-n auto` locally (it starts 16 workers): use `-n 4` at most. Run the impact-selected subset below, not the full suite; `main` runs the full suite after merge, and the `ci-full-suite` label runs it on a PR. Five concurrent `-n auto` full-suite runs once pushed the machine into ~49 GB of swap, and every run stalled.
 
+Use `testing.waits.synchronization_timeout(seconds)` for bounded event waits,
+thread joins and job polling in tests. Windows CI gets at least 30 seconds
+(or three times the requested budget); local and other-platform budgets stay
+unchanged. Subsecond probes, cancellation latency assertions and deliberate
+timeout assertions retain their original deadlines. The shared
+`vireo/tests/wait.py` polling helpers
+apply this policy automatically.
+
 Tests use temp databases. `vireo/tests/test_app.py` isolates config via `cfg.CONFIG_PATH = str(tmp_path / "config.json")` to avoid polluting `~/.vireo/config.json`.
 
 ### Impact-selected runs

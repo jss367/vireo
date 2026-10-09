@@ -6,6 +6,7 @@ import threading
 import time
 
 import pytest
+from testing.waits import synchronization_timeout
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, os.path.dirname(__file__))
@@ -43,7 +44,7 @@ def test_workspace_transfer_reservation_blocks_job_admission(admission):
     release = threading.Event()
     called = threading.Event()
     transfer, _, _ = runner.start_singleton(
-        "send-to-nas", lambda job: release.wait(10), singleton_key="archive",
+        "send-to-nas", lambda job: release.wait(synchronization_timeout(10)), singleton_key="archive",
         workspace_id=1, exclusive_workspace=True,
     )
 
@@ -78,7 +79,7 @@ def test_workspace_transfer_reservation_covers_pipeline_persistence(monkeypatch)
 
     def persist(*args, **kwargs):
         entered.set()
-        assert release.wait(10)
+        assert release.wait(synchronization_timeout(10))
         raise OSError("database unavailable")
 
     monkeypatch.setattr(runner, "_enqueue_pipeline_admitted", persist)
@@ -92,13 +93,13 @@ def test_workspace_transfer_reservation_covers_pipeline_persistence(monkeypatch)
     thread = threading.Thread(target=enqueue)
     thread.start()
     try:
-        assert entered.wait(10)
+        assert entered.wait(synchronization_timeout(10))
         with pytest.raises(WorkspaceBusyError, match="a pipeline being added to the queue"):
             runner.start_singleton("send-to-nas", lambda job: None, singleton_key="archive",
                                    workspace_id=1, exclusive_workspace=True)
     finally:
         release.set()
-        thread.join(timeout=10)
+        thread.join(timeout=synchronization_timeout(10))
     assert errors == ["database unavailable"]
     assert not runner._pipeline_admissions
     transfer, _, _ = runner.start_singleton("send-to-nas", lambda job: None, singleton_key="archive",
@@ -157,7 +158,7 @@ def test_automatic_transfer_can_cancel_while_waiting_for_processing():
 
     runner = JobRunner()
     release = threading.Event()
-    parent = runner.start("pipeline", lambda job: release.wait(10), workspace_id=1)
+    parent = runner.start("pipeline", lambda job: release.wait(synchronization_timeout(10)), workspace_id=1)
     entered = threading.Event()
 
     def transfer(job):
@@ -223,7 +224,7 @@ def test_busy_rejection_names_long_running_request_and_logs_its_stack(monkeypatc
     def hold():
         with runner.workspace_mutation(1, label="the request POST /api/hung"):
             holder_entered.set()
-            release.wait(10)
+            release.wait(synchronization_timeout(10))
 
     thread = threading.Thread(target=hold)
     thread.start()
@@ -236,7 +237,7 @@ def test_busy_rejection_names_long_running_request_and_logs_its_stack(monkeypatc
                                        workspace_id=1, exclusive_workspace=True)
     finally:
         release.set()
-        thread.join(timeout=10)
+        thread.join(timeout=synchronization_timeout(10))
     assert "stuck" not in str(excinfo.value)
     assert "restart" not in str(excinfo.value)
     # The holder's current stack remains available for diagnosis.
@@ -250,7 +251,7 @@ def test_busy_rejection_names_running_jobs():
 
     runner = JobRunner()
     release = threading.Event()
-    export = runner.start("export", lambda job: release.wait(10), workspace_id=1)
+    export = runner.start("export", lambda job: release.wait(synchronization_timeout(10)), workspace_id=1)
     try:
         with pytest.raises(WorkspaceBusyError, match=r"busy with the export job \(running"):
             runner.start_singleton("send-to-nas", lambda job: None, singleton_key="archive",
@@ -290,7 +291,7 @@ def test_job_runner_shutdown_cancels_and_joins_workers():
         return {}
 
     job_id = runner.start("test", work)
-    assert started.wait(timeout=2)
+    assert started.wait(timeout=synchronization_timeout(2))
     with runner._lock:
         runner._schedule_promotion_retry_locked()
 
@@ -334,6 +335,7 @@ def test_job_runner_shutdown_joins_after_queued_cancel_failure(monkeypatch):
 
 
 def _wait_for_status(runner, job_id, status, timeout=3.0):
+    timeout = synchronization_timeout(timeout)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         job = runner.get(job_id)
@@ -357,14 +359,14 @@ def test_pause_during_final_work_is_honored_before_completion(action):
     def work(job):
         try:
             started.set()
-            assert release.wait(3)
+            assert release.wait(synchronization_timeout(3))
             return {"items": 1}
         finally:
             resources_released.set()
 
     job_id = runner.start("test", work, pausable=True)
     try:
-        assert started.wait(3)
+        assert started.wait(synchronization_timeout(3))
         assert runner.pause_job(job_id)
         release.set()
         _wait_for_status(runner, job_id, "paused")
@@ -449,7 +451,7 @@ def test_pipeline_pause_gate_waits_for_every_active_worker():
                 # Simulate a model/GPU batch that cannot be interrupted until
                 # it reaches its next safe boundary.
                 slow_worker_started.set()
-                assert release_slow_worker.wait(timeout=3)
+                assert release_slow_worker.wait(timeout=synchronization_timeout(3))
                 while True:
                     if gate.checkpoint("slow") or stop.is_set():
                         return
@@ -465,12 +467,12 @@ def test_pipeline_pause_gate_waits_for_every_active_worker():
         for thread in threads:
             thread.start()
         for thread in threads:
-            thread.join(timeout=5)
+            thread.join(timeout=synchronization_timeout(5))
             assert not thread.is_alive()
         return dict(counts)
 
     job_id = runner.start("pipeline", work, pausable=True)
-    assert slow_worker_started.wait(timeout=2)
+    assert slow_worker_started.wait(timeout=synchronization_timeout(2))
     deadline = time.monotonic() + 2
     while counts["fast"] < 3 and time.monotonic() < deadline:
         time.sleep(0.01)
@@ -507,33 +509,33 @@ def test_pause_status_events_stay_ordered_through_completion():
         original_publish(job, status)
         if status == "pausing":
             pausing_published.set()
-            assert release_pausing.wait(timeout=2)
+            assert release_pausing.wait(timeout=synchronization_timeout(2))
 
     runner._publish_status_locked = controlled_publish
 
     def work(job):
         work_started.set()
-        assert enter_checkpoint.wait(timeout=2)
+        assert enter_checkpoint.wait(timeout=synchronization_timeout(2))
         checkpoint_reached.set()
         runner.is_cancelled(job["id"])
         return {}
 
     job_id = runner.start("scan", work, pausable=True)
-    assert work_started.wait(timeout=2)
+    assert work_started.wait(timeout=synchronization_timeout(2))
 
     pause_result = []
     pause_thread = threading.Thread(
         target=lambda: pause_result.append(runner.pause_job(job_id))
     )
     pause_thread.start()
-    assert pausing_published.wait(timeout=2)
+    assert pausing_published.wait(timeout=synchronization_timeout(2))
 
     # Let the worker race for the same lock while the pausing transition is
     # still publishing. It must not overtake that event with "paused".
     enter_checkpoint.set()
-    assert checkpoint_reached.wait(timeout=2)
+    assert checkpoint_reached.wait(timeout=synchronization_timeout(2))
     release_pausing.set()
-    pause_thread.join(timeout=2)
+    pause_thread.join(timeout=synchronization_timeout(2))
     assert not pause_thread.is_alive()
     assert pause_result == [True]
 
@@ -584,7 +586,7 @@ def test_non_pausable_job_rejects_pause():
     release = threading.Event()
 
     def work(_job):
-        release.wait(timeout=2)
+        release.wait(timeout=synchronization_timeout(2))
         return {}
 
     job_id = runner.start("test", work)
@@ -958,7 +960,7 @@ def test_start_singleton_returns_existing_when_active():
 
     def work(job):
         workers.append(job['id'])
-        assert release.wait(timeout=5), "worker never released"
+        assert release.wait(timeout=synchronization_timeout(5)), "worker never released"
         return {'ok': True}
 
     first_id, first_joined, first_snap = runner.start_singleton(
@@ -1029,7 +1031,7 @@ def test_start_singleton_check_and_start_are_atomic_under_thread_pressure():
     def work(job):
         with workers_lock:
             workers.append(job['id'])
-        assert release.wait(timeout=10), "worker never released"
+        assert release.wait(timeout=synchronization_timeout(10)), "worker never released"
         return {'ok': True}
 
     ids = []
@@ -1070,7 +1072,7 @@ def test_start_singleton_isolates_different_keys():
     release = threading.Event()
 
     def hold(job):
-        assert release.wait(timeout=5)
+        assert release.wait(timeout=synchronization_timeout(5))
         return {'ok': True}
 
     a_id, a_joined, _ = runner.start_singleton(
@@ -1099,7 +1101,7 @@ def test_start_singleton_does_not_match_plain_start_jobs_without_a_key():
     release = threading.Event()
 
     def hold(job):
-        assert release.wait(timeout=5)
+        assert release.wait(timeout=synchronization_timeout(5))
         return {'ok': True}
 
     plain_id = runner.start('download-x', hold)
@@ -1297,7 +1299,7 @@ def test_jobs_count_for_badge_by_default():
     release = threading.Event()
 
     def work(job):
-        release.wait(timeout=2)
+        release.wait(timeout=synchronization_timeout(2))
 
     job_id = runner.start("scan", work)
     try:
@@ -1316,7 +1318,7 @@ def test_job_can_opt_out_of_badge_counting():
     release = threading.Event()
 
     def work(job):
-        release.wait(timeout=2)
+        release.wait(timeout=synchronization_timeout(2))
 
     job_id = runner.start("new_images_walk", work, counts_for_badge=False)
     try:
@@ -1617,7 +1619,7 @@ def test_push_event_mirrors_progress_onto_job(tmp_path):
             "total": 843,
             "current_file": "Computing label embeddings (150/843)...",
         })
-        gate.wait(timeout=2)
+        gate.wait(timeout=synchronization_timeout(2))
         return {}
 
     job_id = runner.start("test", work, workspace_id=1)
@@ -1681,11 +1683,11 @@ def test_running_job_has_history_row_and_checkpoint_records_work(tmp_path):
             "current": 40, "total": 120, "current_file": "IMG_0040.jpg",
         })
         started.set()
-        release.wait(timeout=5)
+        release.wait(timeout=synchronization_timeout(5))
         return {"classified": 120}
 
     job_id = runner.start("pipeline", work, config={"root": "/photos"})
-    assert started.wait(timeout=5)
+    assert started.wait(timeout=synchronization_timeout(5))
 
     row = _history_row(db, job_id)
     assert row is not None and row["status"] == "running", (
@@ -1746,14 +1748,14 @@ def test_checkpoint_persists_partial_result_until_the_real_result(tmp_path):
     def work(job):
         job["partial_result"] = {"photo_ids": [1, 2]}
         published.set()
-        republish.wait(timeout=5)
+        republish.wait(timeout=synchronization_timeout(5))
         job["partial_result"] = {"photo_ids": [1, 2, 3]}
         republished.set()
-        release.wait(timeout=5)
+        release.wait(timeout=synchronization_timeout(5))
         return {"photo_ids": [1, 2, 3], "ok": True}
 
     job_id = runner.start("import", work)
-    assert published.wait(timeout=5)
+    assert published.wait(timeout=synchronization_timeout(5))
     assert "partial_result" not in runner.get(job_id)
     assert all("partial_result" not in j for j in runner.list_jobs())
 
@@ -1771,7 +1773,7 @@ def test_checkpoint_persists_partial_result_until_the_real_result(tmp_path):
     assert json.loads(_history_row(db, job_id)["result"]) == {"marker": 1}
 
     republish.set()
-    assert republished.wait(timeout=5)
+    assert republished.wait(timeout=synchronization_timeout(5))
     assert runner.checkpoint_live_jobs() == 1
     assert json.loads(_history_row(db, job_id)["result"]) == {
         "photo_ids": [1, 2, 3],
@@ -1825,11 +1827,11 @@ def test_checkpoint_snapshot_and_write_serialize_across_callers(tmp_path):
     def work(job):
         job["partial_result"] = {"photo_ids": [1]}
         started.set()
-        release.wait(timeout=5)
+        release.wait(timeout=synchronization_timeout(5))
         return {"photo_ids": [1, 2], "ok": True}
 
     job_id = runner.start("import", work)
-    assert started.wait(timeout=5)
+    assert started.wait(timeout=synchronization_timeout(5))
 
     # Simulate a slow, already-in-flight timer checkpoint by grabbing the
     # write lock ourselves; ``checkpoint_live_jobs`` from another thread
@@ -1847,7 +1849,7 @@ def test_checkpoint_snapshot_and_write_serialize_across_callers(tmp_path):
         # the first (this thread) still holds it.
         t = threading.Thread(target=concurrent_checkpoint)
         t.start()
-        assert entered.wait(timeout=5)
+        assert entered.wait(timeout=synchronization_timeout(5))
         # Give the thread a chance to reach the lock acquisition; if it
         # blocks correctly it stays parked past this sleep.
         time.sleep(0.05)
@@ -1860,7 +1862,7 @@ def test_checkpoint_snapshot_and_write_serialize_across_callers(tmp_path):
         # the job's live entry directly to avoid touching the worker.
         with runner._lock:
             runner._jobs[job_id]["partial_result"] = {"photo_ids": [1, 2, 3]}
-    t.join(timeout=5)
+    t.join(timeout=synchronization_timeout(5))
     assert not t.is_alive()
 
     # The second (only) checkpoint saw the newer scope and persisted it.
@@ -1938,11 +1940,11 @@ def test_ephemeral_job_is_never_checkpointed(tmp_path):
 
     def work(job):
         started.set()
-        release.wait(timeout=5)
+        release.wait(timeout=synchronization_timeout(5))
         return {}
 
     job_id = runner.start("walk", work, ephemeral=True)
-    assert started.wait(timeout=5)
+    assert started.wait(timeout=synchronization_timeout(5))
     assert runner.checkpoint_live_jobs() == 0
     assert _history_row(db, job_id) is None
     release.set()
@@ -1965,7 +1967,7 @@ def test_checkpoint_thread_runs_on_timer_and_exits_when_idle(tmp_path, monkeypat
 
     def work(job):
         runner.push_event(job["id"], "progress", {"current": 7, "total": 9})
-        release.wait(timeout=5)
+        release.wait(timeout=synchronization_timeout(5))
         return {}
 
     job_id = runner.start("scan", work)
@@ -2204,7 +2206,7 @@ def test_admission_guard_blocks_terminal_transition_and_allows_registration():
     returning = threading.Event()
 
     def work(job):
-        assert release.wait(5)
+        assert release.wait(synchronization_timeout(5))
         returning.set()
         return {"ok": True}
 
@@ -2212,7 +2214,7 @@ def test_admission_guard_blocks_terminal_transition_and_allows_registration():
     try:
         with runner.admission_guard():
             release.set()
-            assert returning.wait(5)
+            assert returning.wait(synchronization_timeout(5))
             # Even after the work returns, terminal publication uses this lock.
             assert runner.get(job_id)["status"] == "running"
             other_id = runner.start("import", lambda job: {"ok": True})

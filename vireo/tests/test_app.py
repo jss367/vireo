@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from page_scripts import page_with_scripts as _page_with_scripts
+from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client
 
 
@@ -6432,7 +6433,7 @@ def test_network_root_reachable_does_not_wait_to_reap_timeout(monkeypatch):
             if timeout is not None:
                 raise subprocess.TimeoutExpired(["stat"], timeout)
             reaper_started.set()
-            release_reaper.wait(timeout=2)
+            release_reaper.wait(timeout=synchronization_timeout(2))
             reaper_finished.set()
             return "", ""
 
@@ -6443,9 +6444,9 @@ def test_network_root_reachable_does_not_wait_to_reap_timeout(monkeypatch):
         "/Volumes/NAS", popen=lambda *args, **kwargs: WedgedProcess(),
     ) is False
     assert not reaper_finished.is_set()
-    assert reaper_started.wait(timeout=1)
+    assert reaper_started.wait(timeout=synchronization_timeout(1))
     release_reaper.set()
-    assert reaper_finished.wait(timeout=1)
+    assert reaper_finished.wait(timeout=synchronization_timeout(1))
 
 
 def test_network_root_reachable_reuses_abandoned_probe(monkeypatch):
@@ -6466,7 +6467,7 @@ def test_network_root_reachable_reuses_abandoned_probe(monkeypatch):
         def communicate(self, timeout=None):
             if timeout is not None:
                 raise subprocess.TimeoutExpired(["stat"], timeout)
-            release_reaper.wait(timeout=2)
+            release_reaper.wait(timeout=synchronization_timeout(2))
             return "", ""
 
         def kill(self):
@@ -6526,7 +6527,7 @@ def test_network_root_reachable_caps_abandoned_probes(monkeypatch):
         def communicate(self, timeout=None):
             if timeout is not None:
                 raise subprocess.TimeoutExpired(["stat"], timeout)
-            release_reapers.wait(timeout=2)
+            release_reapers.wait(timeout=synchronization_timeout(2))
             return "", ""
 
         def kill(self):
@@ -11132,7 +11133,7 @@ def test_api_photos_missing_stale_in_flight_result_is_discarded(
         # fired the batch delete that bumps the generation counter.
         photos = list(real_get_missing(self, *args, **kwargs))
         snapshot_captured.set()
-        assert release.wait(timeout=5.0)
+        assert release.wait(timeout=synchronization_timeout(5.0))
         return photos
 
     monkeypatch.setattr(Database, "get_missing_photos", slow_get_missing)
@@ -11140,7 +11141,7 @@ def test_api_photos_missing_stale_in_flight_result_is_discarded(
     started = client.post("/api/photos/missing/check", json={})
     assert started.status_code == 202
     job_id = started.get_json()["job_id"]
-    assert snapshot_captured.wait(timeout=5.0)
+    assert snapshot_captured.wait(timeout=synchronization_timeout(5.0))
 
     # Batch delete the ghost row. This drops it from the DB and fires
     # _invalidate_missing_originals_cache, which bumps the in-flight
@@ -11184,7 +11185,7 @@ def test_api_photos_missing_automatic_skips_during_heavy_job(app_and_db):
     release = threading.Event()
 
     def _hold_running(job):
-        release.wait(timeout=5.0)
+        release.wait(timeout=synchronization_timeout(5.0))
         return {"ok": True}
 
     scan_job = app._job_runner.start(
@@ -11239,7 +11240,7 @@ def test_api_photos_missing_automatic_skips_during_missing_originals_scan(app_an
     release = threading.Event()
 
     def _hold_running(job):
-        release.wait(timeout=5.0)
+        release.wait(timeout=synchronization_timeout(5.0))
         return {"ok": True}
 
     scan_job = app._job_runner.start(
@@ -11654,7 +11655,7 @@ def test_api_photos_missing_cancel_does_not_write_ready_cache(
     # background job thread after ``/api/photos/missing/check`` returns, and
     # a 1s deadline occasionally beat the worker there, tripping this
     # assertion before the scan even entered ``get_missing_photos``.
-    assert scan_entered.wait(timeout=5.0)
+    assert scan_entered.wait(timeout=synchronization_timeout(5.0))
 
     cancelled = client.post(f"/api/jobs/{job_id}/cancel")
     assert cancelled.status_code == 200, cancelled.get_json()
@@ -18016,7 +18017,7 @@ def test_remote_targets_list_bounds_aggregate_probe_time(
         def check(self, path):
             if path in dead_roots:
                 # A hung probe: far longer than the budget.
-                release.wait(5)
+                release.wait(synchronization_timeout(5))
                 return dead_roots[path], False
             return None, True
 
@@ -20707,7 +20708,7 @@ def test_batch_accept_checks_and_writes_are_one_transaction(
             fired.append(True)
             thread = threading.Thread(target=_competing_reject)
             thread.start()
-            thread.join(timeout=30)
+            thread.join(timeout=synchronization_timeout(30))
             assert not thread.is_alive()
         return original_accept(self, *args, **kwargs)
 
@@ -24762,7 +24763,7 @@ def test_single_reject_serializes_with_concurrent_batch_accept(
             fired.append(True)
             thread = threading.Thread(target=_competing_accept)
             thread.start()
-            thread.join(timeout=30)
+            thread.join(timeout=synchronization_timeout(30))
             assert not thread.is_alive()
         return original_update(self, this_pred_id, status, *args, **kwargs)
 

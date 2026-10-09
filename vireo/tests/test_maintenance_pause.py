@@ -8,6 +8,7 @@ import traceback
 
 import pytest
 from PIL import Image
+from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client
 
 
@@ -28,7 +29,7 @@ def _isolate_unrelated_job_startup(monkeypatch):
 
 
 def _wait_for_boundary(entered, runner, job_id):
-    if entered.wait(5):
+    if entered.wait(synchronization_timeout(5)):
         return
     frames = sys._current_frames()
     stacks = []
@@ -79,7 +80,7 @@ def test_move_pause_reconciles_folder_counts(client_with_photo, monkeypatch, tmp
         copies.append(src)
         if len(copies) == 1:
             entered.set()
-            assert release.wait(5)
+            assert release.wait(synchronization_timeout(5))
         return original(src, dst)
 
     monkeypatch.setattr(move, "_copy_and_verify", copy)
@@ -138,7 +139,7 @@ def test_culling_pauses_during_metadata_loading(client_with_photo, monkeypatch, 
                 queries.append(query)
                 if len(queries) == 1:
                     entered.set()
-                    assert release.wait(5)
+                    assert release.wait(synchronization_timeout(5))
             return self.conn.execute(query, *args)
 
     def thread_db(ctx):
@@ -189,7 +190,7 @@ def test_lightroom_import_pauses_during_catalog_read(client_with_photo, monkeypa
         processed.append(True)
         if len(processed) == 1:
             entered.set()
-            assert release.wait(5)
+            assert release.wait(synchronization_timeout(5))
         return original(*args)
 
     monkeypatch.setattr(catalog, "_build_hierarchy_path", hierarchy)
@@ -233,7 +234,7 @@ def test_previews_pause_before_eviction(client_with_photo, monkeypatch, action):
 
     def materialize(*args, **kwargs):
         entered.set()
-        assert release.wait(5)
+        assert release.wait(synchronization_timeout(5))
         return original(*args, **kwargs)
 
     monkeypatch.setattr(launchers_module, "materialize_preview", materialize)
@@ -279,7 +280,7 @@ def test_full_import_pauses_between_phases(client_with_photo, monkeypatch, phase
 
     def finish_phase():
         entered.set()
-        assert release.wait(5)
+        assert release.wait(synchronization_timeout(5))
 
     def scan(*args, **kwargs):
         if phase == "scan":
@@ -333,7 +334,7 @@ def test_card_scan_pauses_during_discovery(app_and_db, monkeypatch, tmp_path, ac
 
     def walk(path, *, cancel_check=None, **kwargs):
         entered.set()
-        assert release.wait(5)
+        assert release.wait(synchronization_timeout(5))
         assert cancel_check is not None
         if cancel_check():
             raise card_cleanup.ScanCancelled("cancelled")
@@ -398,7 +399,7 @@ def test_staging_verification_pauses_during_enumeration(
                     enumerated.append(entry.name)
                     if len(enumerated) == 1:
                         entered.set()
-                        assert release.wait(5)
+                        assert release.wait(synchronization_timeout(5))
                     yield entry
 
             yield delayed_entries()
@@ -445,7 +446,7 @@ def test_culling_pauses_before_publishing_final_result(client_with_photo, monkey
     def analyze(*args, pause_callback, **kwargs):
         pause_callback()
         entered.set()
-        assert release.wait(5)
+        assert release.wait(synchronization_timeout(5))
         return result
 
     monkeypatch.setattr(culling, "analyze_for_culling", analyze)
@@ -495,7 +496,7 @@ def test_cache_pause_finishes_current_photo_and_preserves_progress(
         calls.append(args[1]["id"])
         if len(calls) == 1:
             entered.set()
-            assert release.wait(5)
+            assert release.wait(synchronization_timeout(5))
         return original(*args, **kwargs)
 
     monkeypatch.setattr(offline_cache, "cache_photo_original", cache)
@@ -551,7 +552,7 @@ def test_hash_verification_commits_before_pause(
         calls.append(path)
         if len(calls) == 1:
             entered.set()
-            assert release.wait(5)
+            assert release.wait(synchronization_timeout(5))
         return original(path, *args, **kwargs)
 
     monkeypatch.setattr(scanner, "compute_file_hash", hash_file)
@@ -594,7 +595,7 @@ def test_final_file_write_pauses_after_completion(
     def finish_write():
         writing.set()
         entered.set()
-        assert release.wait(5)
+        assert release.wait(synchronization_timeout(5))
         writing.clear()
 
     if endpoint == "capture-time":
@@ -686,7 +687,7 @@ def test_previews_pause_after_final_photo_defers_eviction(
         materialized_ids.append(photo["id"])
         if len(materialized_ids) == 2:
             entered.set()
-            assert release.wait(5)
+            assert release.wait(synchronization_timeout(5))
         return real_materialize(*args, **kwargs)
 
     def evict(*_args, **_kwargs):
@@ -742,7 +743,7 @@ def test_callback_checkpoint_retains_state_and_unwinds_on_cancel(app_and_db, act
         try:
             steps.append("first")
             entered.set()
-            assert release.wait(5)
+            assert release.wait(synchronization_timeout(5))
             ctx.checkpoint(job)
             steps.append("second")
             return {"steps": steps}
@@ -761,7 +762,7 @@ def test_callback_checkpoint_retains_state_and_unwinds_on_cancel(app_and_db, act
         expected = "completed" if action == "resume" else "cancelled"
         finished = _wait_status(runner, job_id, expected)
         assert steps == (["first", "second"] if action == "resume" else ["first"])
-        assert cleaned_up.wait(5)
+        assert cleaned_up.wait(synchronization_timeout(5))
         assert finished["errors"] == []
     finally:
         release.set()
@@ -827,7 +828,7 @@ def test_sharpness_auto_flags_observe_pause_and_cancel(
     def flag_photo(review, photo_id, flag, **kwargs):
         if not flagged:
             entered.set()
-            assert release.wait(5)
+            assert release.wait(synchronization_timeout(5))
         original(review, photo_id, flag, **kwargs)
         flagged.append(photo_id)
 
@@ -879,7 +880,7 @@ def test_export_observes_pause_after_metadata_finishes(
 
     def metadata_batch(jobs, cancel_check=None):
         entered.set()
-        assert release.wait(5)
+        assert release.wait(synchronization_timeout(5))
         # The live subprocess's probe must not park its parent.
         assert cancel_check() is False
         reaped.set()
@@ -921,7 +922,7 @@ def test_ingest_can_pause_during_discovery(app_and_db, monkeypatch, tmp_path):
 
     def walk(path, *, cancel_check=None, **kwargs):
         entered.set()
-        assert release.wait(5)
+        assert release.wait(synchronization_timeout(5))
         assert cancel_check is not None
         assert cancel_check() is False
         continued.set()
@@ -972,7 +973,7 @@ def test_ingest_pauses_between_metadata_batches(
         batches.append(list(files))
         if len(batches) == 1:
             entered.set()
-            assert release.wait(5)
+            assert release.wait(synchronization_timeout(5))
         return {f: datetime(2026, 8, 1, 12, 30) for f in files}
 
     # Duplicate preparation and folder planning use the same reader through
@@ -1093,7 +1094,7 @@ def test_import_photos_checkpoints_before_after_import_chain(
         # (with no tags configured) does not probe the runner and the new
         # pre-chain checkpoint is the first place the pause is observed.
         entered.set()
-        assert release.wait(5)
+        assert release.wait(synchronization_timeout(5))
         return {
             "ok": True,
             "photo_ids": [photo_id],
@@ -1159,7 +1160,7 @@ def test_import_handoff_rejects_late_parent_pause(request, monkeypatch, tmp_path
 
     def add_collection(database, *args, **kwargs):
         entered.set()
-        assert release.wait(5)
+        assert release.wait(synchronization_timeout(5))
         return original_add(database, *args, **kwargs)
 
     monkeypatch.setattr(Database, "add_collection", add_collection)

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from PIL import Image
+from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client
 
 
@@ -768,7 +769,7 @@ def test_replacement_cache_writer_waits_for_stale_preparation_cleanup(
         if os.path.basename(src) == selected["filename"]:
             old_bytes = Path(src).read_bytes()
             old_copy_waiting.set()
-            assert release_old_copy.wait(10)
+            assert release_old_copy.wait(synchronization_timeout(10))
             # Publish after the deletion and recycled-ID cleanup have run.
             Path(dst).parent.mkdir(parents=True, exist_ok=True)
             Path(dst).write_bytes(old_bytes)
@@ -788,7 +789,7 @@ def test_replacement_cache_writer_waits_for_stale_preparation_cleanup(
     client = app.test_client()
     first = client.post("/api/jobs/prepare-full-resolution", json={"photo_ids": [photo_id]})
     try:
-        assert old_copy_waiting.wait(10)
+        assert old_copy_waiting.wait(synchronization_timeout(10))
         deleted = db.delete_photos([photo_id])
         cleanup_cached_files_for_deleted_photos(app.config["THUMB_CACHE_DIR"], deleted["files"])
         replacement = Path(folder) / "replacement.jpg"
@@ -802,7 +803,7 @@ def test_replacement_cache_writer_waits_for_stale_preparation_cleanup(
         replacement_created.set()
         second = client.post(f"/api/jobs/{replacement_endpoint}", json={"photo_ids": [photo_id]})
         assert second.status_code == 200
-        assert replacement_attempted.wait(10)
+        assert replacement_attempted.wait(synchronization_timeout(10))
         assert not replacement_published.wait(0.1)
     finally:
         release_old_copy.set()

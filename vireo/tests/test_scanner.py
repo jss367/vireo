@@ -6,6 +6,7 @@ import sys
 import time
 
 import pytest
+from testing.waits import synchronization_timeout
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -5242,13 +5243,14 @@ def test_scan_worker_wait_uses_bound_cancel_probe_without_explicit_callback(
             time.sleep(0.01)
         assert ledger.snapshot()["waiters"] == 1
         cancelled.set()
+        # Preserve the cancellation deadline while the resource stays held.
         assert finished.wait(timeout=1.0)
-        thread.join(timeout=1.0)
+        thread.join(timeout=synchronization_timeout(1.0))
         assert not thread.is_alive()
         assert outcome == ["cancelled"]
     finally:
         holder.release()
-        thread.join(timeout=1.0)
+        thread.join(timeout=synchronization_timeout(1.0))
         resource_ledger._set_resource_ledger_for_tests(previous)
 
 
@@ -5283,13 +5285,13 @@ def test_concurrent_scanners_preserve_inference_reserve(monkeypatch):
             try:
                 with scanner._claim_worker_count(list(range(100))):
                     first_ready.set()
-                    assert release_first.wait(timeout=5.0)
+                    assert release_first.wait(timeout=synchronization_timeout(5.0))
             except BaseException as exc:  # pragma: no cover - diagnostic
                 errors.append(exc)
 
         def second_scanner():
             try:
-                assert first_ready.wait(timeout=5.0)
+                assert first_ready.wait(timeout=synchronization_timeout(5.0))
                 second_ready.set()
                 # Would block until the first scanner releases; we don't
                 # care about the eventual grant, only that it doesn't
@@ -5304,8 +5306,8 @@ def test_concurrent_scanners_preserve_inference_reserve(monkeypatch):
         t1.start()
         t2.start()
         try:
-            assert first_ready.wait(timeout=5.0)
-            assert second_ready.wait(timeout=5.0)
+            assert first_ready.wait(timeout=synchronization_timeout(5.0))
+            assert second_ready.wait(timeout=synchronization_timeout(5.0))
             # Give the second scanner a moment to reach its acquire and
             # block on the exhausted reserve slice.
             time.sleep(0.1)
@@ -5337,8 +5339,8 @@ def test_concurrent_scanners_preserve_inference_reserve(monkeypatch):
                 assert inference.cpu_permits == inference_threads
         finally:
             release_first.set()
-            t1.join(timeout=5.0)
-            t2.join(timeout=5.0)
+            t1.join(timeout=synchronization_timeout(5.0))
+            t2.join(timeout=synchronization_timeout(5.0))
 
         assert not errors, errors
     finally:
@@ -5395,7 +5397,7 @@ def test_scan_releases_cpu_permits_while_paused(tmp_path, monkeypatch):
             # here. Use a short wait so the test still fails obviously if
             # the fix regresses (the resume_event will be set by the
             # background thread below), rather than hanging forever.
-            resume_event.wait(timeout=5.0)
+            resume_event.wait(timeout=synchronization_timeout(5.0))
             pause_state["active"] = False
         return False
 
@@ -5503,7 +5505,7 @@ def test_scan_does_not_construct_worker_pool_while_pause_remains_pending(
             pause_check=pause_active.is_set,
         )
     finally:
-        resume_thread.join(timeout=2.0)
+        resume_thread.join(timeout=synchronization_timeout(2.0))
         resource_ledger._set_resource_ledger_for_tests(previous)
 
     assert pool_pause_states == [False]
@@ -5576,7 +5578,7 @@ def test_scan_cancel_only_check_prevents_parking_inside_lease(tmp_path):
         # emulated by waiting on resume_event when pause is pending.
         parking_call_allocs.append(ledger.snapshot()["cpu"]["allocated"])
         if pause_pending.is_set():
-            resume_event.wait(timeout=5.0)
+            resume_event.wait(timeout=synchronization_timeout(5.0))
             pause_pending.clear()
         return False
 
@@ -5695,7 +5697,7 @@ def test_scan_pause_while_waiting_for_permits_suspends_wait_timing(
                 break
             time.sleep(0.01)
         pause_state["active"] = True
-        park_completed.wait(timeout=5.0)
+        park_completed.wait(timeout=synchronization_timeout(5.0))
         blocker.release()
 
     try:

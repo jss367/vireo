@@ -1,6 +1,8 @@
 import os
 import sys
 
+from testing.waits import synchronization_timeout
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
@@ -1676,7 +1678,7 @@ def test_count_abandons_stalled_walk_and_reports_root_offline(db_with_workspace,
     def walk_that_hangs(top, onerror=None, **kwargs):
         if top == str(wedged):
             yield top, [], ["a.jpg"]
-            release.wait(10)  # simulates an uninterruptible SMB stall
+            release.wait(synchronization_timeout(10))  # simulates an uninterruptible SMB stall
             yield top, [], []
             return
         yield from real_walk(top, onerror=onerror, **kwargs)
@@ -1734,7 +1736,7 @@ def test_count_caps_stalled_walks_globally(db_with_workspace, monkeypatch):
     def walk_that_hangs(top, **_kwargs):
         started.append(top)
         yield top, [], ["a.jpg"]
-        release.wait(10)
+        release.wait(synchronization_timeout(10))
         yield top, [], []
 
     monkeypatch.setattr(new_images_module, "safe_scan_walk", walk_that_hangs)
@@ -1784,7 +1786,7 @@ def test_overlapping_healthy_walk_waits_without_marking_offline(tmp_path, monkey
         yield top, [], ["a.jpg"]
         if len(calls) == 1:
             first_paused.set()
-            release_first.wait(5)
+            release_first.wait(synchronization_timeout(5))
 
     monkeypatch.setattr(new_images_module, "safe_scan_walk", overlapping_walk)
     monkeypatch.setattr(new_images_module, "_STALLED_WALKS", {})
@@ -1801,14 +1803,14 @@ def test_overlapping_healthy_walk_waits_without_marking_offline(tmp_path, monkey
     first = threading.Thread(target=invoke, args=(gates[0],))
     second = threading.Thread(target=invoke, args=(gates[1],))
     first.start()
-    assert first_paused.wait(2)
+    assert first_paused.wait(synchronization_timeout(2))
     second.start()
     time.sleep(0.1)
     assert second.is_alive(), "the overlapping caller should wait for the active walk"
     assert gates[1].marked_offline == []
     release_first.set()
-    first.join(2)
-    second.join(2)
+    first.join(synchronization_timeout(2))
+    second.join(synchronization_timeout(2))
 
     assert not first.is_alive() and not second.is_alive()
     assert len(calls) == 2
@@ -1849,7 +1851,7 @@ def test_overlapping_waiter_rechecks_offline_verdict_before_second_walk(
         calls.append(top)
         if len(calls) == 1:
             first_started.set()
-            release_first.wait(5)
+            release_first.wait(synchronization_timeout(5))
             onerror(OSError(errno.ENOTCONN, "offline", top))
         if False:
             yield None
@@ -1869,12 +1871,12 @@ def test_overlapping_waiter_rechecks_offline_verdict_before_second_walk(
     first = threading.Thread(target=invoke)
     second = threading.Thread(target=invoke)
     first.start()
-    assert first_started.wait(2)
+    assert first_started.wait(synchronization_timeout(2))
     second.start()
     time.sleep(0.1)
     release_first.set()
-    first.join(2)
-    second.join(2)
+    first.join(synchronization_timeout(2))
+    second.join(synchronization_timeout(2))
 
     assert not first.is_alive() and not second.is_alive()
     assert results == [None, None]
@@ -1999,7 +2001,7 @@ def test_forget_stalled_walks_lets_a_wedged_root_be_rewalked(tmp_path, monkeypat
     monkeypatch.setattr(new_images_module, "_FORGOTTEN_STALLED_WALKS", set())
 
     release = threading.Event()
-    wedged = threading.Thread(target=lambda: release.wait(10), daemon=True)
+    wedged = threading.Thread(target=lambda: release.wait(synchronization_timeout(10)), daemon=True)
     wedged.start()
     new_images_module._STALLED_WALKS[root_path] = wedged
     new_images_module._STALLED_WALK_PATHS.add(root_path)
@@ -2021,7 +2023,7 @@ def test_forget_stalled_walks_lets_a_wedged_root_be_rewalked(tmp_path, monkeypat
         assert wedged in new_images_module._FORGOTTEN_STALLED_WALKS
     finally:
         release.set()
-        wedged.join(5)
+        wedged.join(synchronization_timeout(5))
 
 
 def test_walk_quotes_the_reachability_generation_it_started_under(
@@ -2085,7 +2087,7 @@ def test_a_walk_that_stalls_during_the_recheck_does_not_block_it(
     monkeypatch.setattr(new_images_module, "_FORGOTTEN_STALLED_WALKS", set())
 
     release = threading.Event()
-    wedged = threading.Thread(target=lambda: release.wait(10), daemon=True)
+    wedged = threading.Thread(target=lambda: release.wait(synchronization_timeout(10)), daemon=True)
     wedged.start()
     epoch_at_walk_start = new_images_module._current_walk_epoch()
 
@@ -2105,7 +2107,7 @@ def test_a_walk_that_stalls_during_the_recheck_does_not_block_it(
         assert wedged in new_images_module._FORGOTTEN_STALLED_WALKS
     finally:
         release.set()
-        wedged.join(5)
+        wedged.join(synchronization_timeout(5))
 
 
 def test_staged_exclusion_resolves_an_alias_below_a_mount(monkeypatch, tmp_path):

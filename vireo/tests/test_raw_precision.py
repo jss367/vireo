@@ -13,6 +13,7 @@ from float_image import FloatImage
 from image_edits import apply_recipe_to_loaded_image
 from image_loader import RAW_DECODE_LINEAR, load_image
 from PIL import Image
+from testing.waits import synchronization_timeout
 from tone import apply_adjustments, linear_to_srgb
 
 
@@ -189,7 +190,7 @@ def test_concurrent_sized_raw_misses_share_one_decode(dng, monkeypatch):
     def decode(raw):
         calls.append(True)
         started.set()
-        assert release.wait(10)
+        assert release.wait(synchronization_timeout(10))
         return original(raw)
 
     monkeypatch.setattr(image_loader, '_postprocess_raw_linear', decode)
@@ -201,12 +202,12 @@ def test_concurrent_sized_raw_misses_share_one_decode(dng, monkeypatch):
 
     leader = threading.Thread(target=load, args=(0,))
     leader.start()
-    assert started.wait(10)
+    assert started.wait(synchronization_timeout(10))
     followers = [threading.Thread(target=load, args=(i,)) for i in range(1, 4)]
     for t in followers:
         t.start()
     # Followers must be parked on the flight before the decode finishes.
-    assert waiting.wait(10)
+    assert waiting.wait(synchronization_timeout(10))
     release.set()
     for t in [leader, *followers]:
         t.join(10)
@@ -231,7 +232,7 @@ def test_sized_raw_followers_share_the_leader_failure(dng, monkeypatch):
     def decode(raw):
         calls.append(True)
         started.set()
-        assert release.wait(10)
+        assert release.wait(synchronization_timeout(10))
         raise MemoryError('leader decode failed')
 
     monkeypatch.setattr(image_loader, '_postprocess_raw_linear', decode)
@@ -243,11 +244,11 @@ def test_sized_raw_followers_share_the_leader_failure(dng, monkeypatch):
 
     leader = threading.Thread(target=load, args=(0,))
     leader.start()
-    assert started.wait(10)
+    assert started.wait(synchronization_timeout(10))
     followers = [threading.Thread(target=load, args=(i,)) for i in range(1, 4)]
     for t in followers:
         t.start()
-    assert waiting.wait(10)
+    assert waiting.wait(synchronization_timeout(10))
     release.set()
     for t in [leader, *followers]:
         t.join(10)
@@ -295,7 +296,7 @@ def test_followers_of_an_uncacheable_decode_share_it(dng, monkeypatch):
     def decode(raw):
         calls.append(True)
         started.set()
-        assert release.wait(10)
+        assert release.wait(synchronization_timeout(10))
         return original(raw)
 
     monkeypatch.setattr(image_loader, '_postprocess_raw_linear', decode)
@@ -307,11 +308,11 @@ def test_followers_of_an_uncacheable_decode_share_it(dng, monkeypatch):
 
     leader = threading.Thread(target=load, args=(0,))
     leader.start()
-    assert started.wait(10)
+    assert started.wait(synchronization_timeout(10))
     followers = [threading.Thread(target=load, args=(i,)) for i in (1, 2)]
     for t in followers:
         t.start()
-    assert waiting.wait(10)
+    assert waiting.wait(synchronization_timeout(10))
     release.set()
     for t in [leader, *followers]:
         t.join(10)
@@ -508,7 +509,7 @@ def test_late_follower_joins_during_uncacheable_snapshot_copy(dng, monkeypatch):
         late = threading.Thread(target=load)
         threads.append(late)
         late.start()
-        assert second_waiter.wait(3)
+        assert second_waiter.wait(synchronization_timeout(3))
     finally:
         release_decode.set()
         release_copy.set()

@@ -4,6 +4,7 @@ import sys
 import time
 
 import pytest
+from testing.waits import synchronization_timeout
 
 
 def test_api_darktable_status(app_and_db):
@@ -1018,7 +1019,7 @@ def test_api_job_download_darktable_joins_a_running_job_instead_of_starting_a_se
         started.set()
         # Block until the second POST has had its chance.  Any test-timeout
         # would surface here, not as a mystery hang.
-        assert can_finish.wait(timeout=10), "test never released the download"
+        assert can_finish.wait(timeout=synchronization_timeout(10)), "test never released the download"
         return "/tmp/d.dmg", "ok"
 
     _stub_happy_path(monkeypatch, download=slow_download)
@@ -1026,7 +1027,7 @@ def test_api_job_download_darktable_joins_a_running_job_instead_of_starting_a_se
     client = app.test_client()
     first = client.post('/api/jobs/download-darktable').get_json()
     first_id = first['job_id']
-    assert started.wait(timeout=5), "the first download never started"
+    assert started.wait(timeout=synchronization_timeout(5)), "the first download never started"
 
     second = client.post('/api/jobs/download-darktable').get_json()
 
@@ -1281,7 +1282,7 @@ def test_api_job_download_darktable_handoff_phase_is_uncancellable(
         # Signal that we are past the cancellation gate; hold long enough
         # for the test's cancel_job() call to land.
         in_handoff.set()
-        assert can_finish_handoff.wait(timeout=10), "hand_off never released"
+        assert can_finish_handoff.wait(timeout=synchronization_timeout(10)), "hand_off never released"
         return {"action": "opened-installer", "location": path, "bin_path": None}
 
     _stub_happy_path(monkeypatch)
@@ -1291,7 +1292,7 @@ def test_api_job_download_darktable_handoff_phase_is_uncancellable(
     job_id = client.post('/api/jobs/download-darktable').get_json()['job_id']
 
     # Wait until the worker is inside hand_off, then request cancellation.
-    assert in_handoff.wait(timeout=5), "hand_off was never entered"
+    assert in_handoff.wait(timeout=synchronization_timeout(5)), "hand_off was never entered"
     cancel_accepted = app._job_runner.cancel_job(job_id)
     # begin_uncancellable() has already fired, so the cancel is a no-op.
     assert cancel_accepted is False, (
@@ -1322,7 +1323,7 @@ def test_api_job_download_darktable_rejects_a_join_for_a_different_artifact(
 
     def slow_download(asset, byte_callback=None, should_cancel=None):
         running.set()
-        assert release_download.wait(timeout=10), "download never released"
+        assert release_download.wait(timeout=synchronization_timeout(10)), "download never released"
         return "/tmp/d.dmg", "ok"
 
     # First job resolves to 5.6.0.
@@ -1339,7 +1340,7 @@ def test_api_job_download_darktable_rejects_a_join_for_a_different_artifact(
         }),
         content_type='application/json',
     ).get_json()['job_id']
-    assert running.wait(timeout=5), "the first download never started"
+    assert running.wait(timeout=synchronization_timeout(5)), "the first download never started"
 
     # Second POST confirms a DIFFERENT artifact (a newer release the tab saw
     # from a separate /install/available call).  Even though a singleton is
@@ -1380,7 +1381,7 @@ def test_api_job_download_darktable_second_join_matches_when_artifacts_align(
 
     def slow_download(asset, byte_callback=None, should_cancel=None):
         running.set()
-        assert release_download.wait(timeout=10), "download never released"
+        assert release_download.wait(timeout=synchronization_timeout(10)), "download never released"
         return "/tmp/d.dmg", "ok"
 
     release = _fake_release("5.6.0")
@@ -1396,7 +1397,7 @@ def test_api_job_download_darktable_second_join_matches_when_artifacts_align(
         '/api/jobs/download-darktable',
         data=json.dumps(body), content_type='application/json',
     ).get_json()['job_id']
-    assert running.wait(timeout=5)
+    assert running.wait(timeout=synchronization_timeout(5))
 
     second = client.post(
         '/api/jobs/download-darktable',
@@ -1429,7 +1430,7 @@ def test_api_job_download_darktable_join_rejects_size_mismatch_for_digestless_as
 
     def slow_download(asset, byte_callback=None, should_cancel=None):
         running.set()
-        assert release_download.wait(timeout=10), "download never released"
+        assert release_download.wait(timeout=synchronization_timeout(10)), "download never released"
         return "/tmp/d.dmg", "ok"
 
     first_release = _fake_release("5.6.0")
@@ -1447,7 +1448,7 @@ def test_api_job_download_darktable_join_rejects_size_mismatch_for_digestless_as
         }),
         content_type='application/json',
     ).get_json()['job_id']
-    assert running.wait(timeout=5)
+    assert running.wait(timeout=synchronization_timeout(5))
 
     # Same name+version, no digest, different size — the republished-asset
     # case.  Without the size guard this would silently return
@@ -1487,7 +1488,7 @@ def test_api_job_download_darktable_singleton_check_and_start_are_atomic(
     def slow_download(asset, byte_callback=None, should_cancel=None):
         with workers_lock:
             workers_started.append(1)
-        assert release_download.wait(timeout=10), "download never released"
+        assert release_download.wait(timeout=synchronization_timeout(10)), "download never released"
         return "/tmp/d.dmg", "ok"
 
     _stub_happy_path(monkeypatch, download=slow_download)

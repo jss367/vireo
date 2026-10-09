@@ -8,6 +8,8 @@ import os
 import sys
 import threading
 
+from testing.waits import synchronization_timeout
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -131,7 +133,7 @@ def test_overlapping_long_jobs_share_one_assertion(runner_with_recorder):
 
     def slow(job):
         first_running.set()
-        let_first_finish.wait(timeout=5)
+        let_first_finish.wait(timeout=synchronization_timeout(5))
         return {"ok": True}
 
     def quick(job):
@@ -140,7 +142,7 @@ def test_overlapping_long_jobs_share_one_assertion(runner_with_recorder):
         return {"ok": True}
 
     first = runner.start("import", slow)
-    assert first_running.wait(timeout=5)
+    assert first_running.wait(timeout=synchronization_timeout(5))
 
     second = runner.start("scan", quick)
     wait_for_job_via_runner(runner, second)

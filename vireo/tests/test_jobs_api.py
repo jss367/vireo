@@ -8,10 +8,12 @@ import time
 import pytest
 from page_scripts import page_with_scripts
 from PIL import Image
+from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client, wait_for_job_via_runner
 
 
 def _wait_for_runner_status(runner, job_id, status, timeout=3.0):
+    timeout = synchronization_timeout(timeout)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         job = runner.get(job_id)
@@ -1994,7 +1996,7 @@ def test_job_pause_api_rejects_unsupported_job(app_and_db):
     release = threading.Event()
 
     def work(_job):
-        release.wait(timeout=2)
+        release.wait(timeout=synchronization_timeout(2))
         return {}
 
     job_id = runner.start("test", work)
@@ -2862,7 +2864,7 @@ def test_extract_masks_pauses_without_holding_photo_lock(
             acquired = lock.acquire(timeout=timeout)
             if acquired and pause_during == "acquisition":
                 entered.set()
-                assert release.wait(5)
+                assert release.wait(synchronization_timeout(5))
             return acquired
 
         def release(self):
@@ -2873,7 +2875,7 @@ def test_extract_masks_pauses_without_holding_photo_lock(
     client = app.test_client()
     job_id = client.post("/api/jobs/extract-masks", json={}).get_json()["job_id"]
     try:
-        assert entered.wait(5)
+        assert entered.wait(synchronization_timeout(5))
         assert runner.pause_job(job_id)
         release.set()
         _wait_for_runner_status(runner, job_id, "paused")
@@ -4486,14 +4488,14 @@ def test_jobs_regroup_pause_does_not_hold_workspace_regroup_lock(
 
     def _blocking_load(*a, **k):
         entered.set()
-        assert proceed.wait(10)
+        assert proceed.wait(synchronization_timeout(10))
         return [{"id": 1}]
 
     monkeypatch.setattr(pipeline, "load_photo_features", _blocking_load)
     lock = acquire_workspace_regroup(db._active_workspace_id)
     with app.test_client() as client:
         job_id = client.post("/api/jobs/regroup", json={}).get_json()["job_id"]
-        assert entered.wait(10), "regroup never reached the feature load"
+        assert entered.wait(synchronization_timeout(10)), "regroup never reached the feature load"
         assert runner.pause_job(job_id) is True
         proceed.set()
         # The job must finish its locked section and release the lock
@@ -5333,12 +5335,12 @@ def test_automatic_staged_transfer_reserves_workspace_after_processing(app_and_d
     entered, release = threading.Event(), threading.Event()
     existing_release = threading.Event()
     runner = app._job_runner
-    existing = runner.start("export", lambda job: existing_release.wait(10), workspace_id=db._ws_id())
+    existing = runner.start("export", lambda job: existing_release.wait(synchronization_timeout(10)), workspace_id=db._ws_id())
     monkeypatch.setattr(pipeline_job, "run_pipeline_job", lambda *a, **kw: {"ok": True})
 
     def copy(source, destination, *args, **kwargs):
         entered.set()
-        assert release.wait(10)
+        assert release.wait(synchronization_timeout(10))
         shutil.copytree(source, destination, dirs_exist_ok=True)
         return 0, "", False
 
@@ -5356,7 +5358,7 @@ def test_automatic_staged_transfer_reserves_workspace_after_processing(app_and_d
         assert not entered.is_set()
         existing_release.set()
         wait_for_job_via_client(client, existing)
-        assert entered.wait(10)
+        assert entered.wait(synchronization_timeout(10))
         assert client.post(f"/api/workspaces/{other_workspace}/activate").status_code == 200
         delete_workspace = client.delete(f"/api/workspaces/{original_workspace}")
         assert delete_workspace.status_code == 409, delete_workspace.get_json()
@@ -6175,14 +6177,14 @@ def test_pending_archive_send_rejects_a_conflicting_sync_option(app_and_db, tmp_
 
     def slow_transfer(*a, **kw):
         entered.set()
-        assert release.wait(10)
+        assert release.wait(synchronization_timeout(10))
         raise FileNotFoundError()
 
     monkeypatch.setattr(move, "_run_rsync_streamed", slow_transfer)
     first = client.post(f"/api/import/pending-archives/{archive_id}/send")
     assert first.status_code == 200, first.get_json()
     try:
-        assert entered.wait(10)
+        assert entered.wait(synchronization_timeout(10))
         # Same intent joins the running job, as before.
         assert client.post(
             f"/api/import/pending-archives/{archive_id}/send"
@@ -6248,7 +6250,7 @@ def test_pending_archive_missing_transfer_can_be_forgotten(app_and_db, tmp_path,
     assert client.post(url, json={"confirmed": "true"}).status_code == 400
 
     release = threading.Event()
-    job_id = app._job_runner.start("export", lambda job: release.wait(10), workspace_id=workspace_id)
+    job_id = app._job_runner.start("export", lambda job: release.wait(synchronization_timeout(10)), workspace_id=workspace_id)
     try:
         assert client.post(url, json={"confirmed": True}).status_code == 409
     finally:
@@ -6279,14 +6281,14 @@ def test_pending_archive_failed_send_is_retryable_and_double_click_joins(app_and
 
     def failed_transfer(*a, **kw):
         entered.set()
-        assert release.wait(10)
+        assert release.wait(synchronization_timeout(10))
         return 1, "NAS offline", False
 
     monkeypatch.setattr(move, "_run_rsync_streamed", failed_transfer)
     first = client.post(f"/api/import/pending-archives/{archive_id}/send")
     assert first.status_code == 200, first.get_json()
     try:
-        assert entered.wait(10)
+        assert entered.wait(synchronization_timeout(10))
         second = client.post(f"/api/import/pending-archives/{archive_id}/send")
         assert second.get_json()["job_id"] == first.get_json()["job_id"]
         staging = imported["config"]["managed_staging"]["destination"]
@@ -6328,7 +6330,7 @@ def test_pending_archive_waits_for_synchronous_delete(app_and_db, tmp_path, monk
 
     def blocking_delete(self, *args, **kwargs):
         entered.set()
-        assert release.wait(10)
+        assert release.wait(synchronization_timeout(10))
         return delete(self, *args, **kwargs)
 
     monkeypatch.setattr(Database, "delete_photos", blocking_delete)
@@ -6342,12 +6344,12 @@ def test_pending_archive_waits_for_synchronous_delete(app_and_db, tmp_path, monk
     thread = threading.Thread(target=request_delete)
     thread.start()
     try:
-        assert entered.wait(10)
+        assert entered.wait(synchronization_timeout(10))
         sent = app.test_client().post(f"/api/import/pending-archives/{imported['config']['pending_archive_id']}/send")
         assert sent.status_code == 409, sent.get_json()
     finally:
         release.set()
-        thread.join(timeout=10)
+        thread.join(timeout=synchronization_timeout(10))
     assert responses[0].status_code == 200, responses[0].get_json()
     assert not app._job_runner._workspace_mutations
 
@@ -6357,7 +6359,7 @@ def test_pending_archive_waits_for_running_work(app_and_db, tmp_path, monkeypatc
     imported = _import_for_review(app, db, tmp_path, monkeypatch)
     client = app.test_client()
     release = threading.Event()
-    job_id = app._job_runner.start("export", lambda job: release.wait(10), workspace_id=db._ws_id())
+    job_id = app._job_runner.start("export", lambda job: release.wait(synchronization_timeout(10)), workspace_id=db._ws_id())
     try:
         item = client.get("/api/import/pending-archives").get_json()["items"][0]
         assert item["state"] == "waiting"
@@ -7650,7 +7652,7 @@ def test_chain_cancel_while_waiting_for_serialize_lock(app_and_db, tmp_path, mon
         if first:
             # Hold the chain lock until the test releases us, pinning the
             # other move job in its lock-wait loop.
-            assert release.wait(timeout=30), "test never released the holder"
+            assert release.wait(timeout=synchronization_timeout(30)), "test never released the holder"
         return {"moved": 1, "errors": []}
 
     monkeypatch.setattr(move_mod, "move_folder", fake_move_folder)
@@ -7731,7 +7733,7 @@ def test_chain_cancel_landing_between_lock_release_and_post_check(
         calls.append(folder_id)
         if len(calls) == 1:
             holder_running.set()
-            assert release_holder.wait(timeout=30), (
+            assert release_holder.wait(timeout=synchronization_timeout(30)), (
                 "test never released the holder")
         return {"moved": 1, "errors": []}
 
@@ -7764,7 +7766,7 @@ def test_chain_cancel_landing_between_lock_release_and_post_check(
     assert len(move_ids) == 2, process_job["result"]
 
     try:
-        assert holder_running.wait(timeout=10), (
+        assert holder_running.wait(timeout=synchronization_timeout(10)), (
             "holder never entered fake_move_folder")
         assert len(calls) == 1, calls
         waiting = [mid for mid in move_ids
@@ -7846,7 +7848,7 @@ def test_chain_cancel_late_thread_skips_wait_loop_entirely(
 
                     def waited():
                         second_thread_started.set()
-                        assert release_second_thread.wait(timeout=30), (
+                        assert release_second_thread.wait(timeout=synchronization_timeout(30)), (
                             "test never released the second thread")
                         original_target(*original_args, **original_kwargs)
 
@@ -7884,7 +7886,7 @@ def test_chain_cancel_late_thread_skips_wait_loop_entirely(
     try:
         # Wait until the second thread has entered _run_job and is
         # blocked in front of the work function.
-        assert second_thread_started.wait(timeout=10), (
+        assert second_thread_started.wait(timeout=synchronization_timeout(10)), (
             "second move-folder thread never started")
         # The first move-folder thread ran to completion (no wait loop,
         # no contention). Confirm it finished before the second thread
@@ -7993,7 +7995,7 @@ def test_import_pause_waits_for_tag_transaction_to_commit(
             assert runner.pause_job(job_id) is True
             pause_requested.set()
             tag_written.set()
-            assert release_tag_write.wait(timeout=2)
+            assert release_tag_write.wait(timeout=synchronization_timeout(2))
 
     monkeypatch.setattr(import_job, "run_import_job", imported_result)
     monkeypatch.setattr(Database, "tag_photo", pause_after_uncommitted_tag)
@@ -8005,7 +8007,7 @@ def test_import_pause_waits_for_tag_transaction_to_commit(
     })
     assert response.status_code == 200, response.get_json()
     job_id = response.get_json()["job_id"]
-    assert tag_written.wait(timeout=2)
+    assert tag_written.wait(timeout=synchronization_timeout(2))
     assert runner.get(job_id)["status"] == "pausing"
 
     release_tag_write.set()
@@ -9621,7 +9623,7 @@ def test_concurrent_snapshot_imports_serialize_and_report_one_replay(
             "after_import": None,
         })
         assert first.status_code == 200, first.get_json()
-        assert first_scan_entered.wait(timeout=2.0)
+        assert first_scan_entered.wait(timeout=synchronization_timeout(2.0))
 
         second = client.post("/api/jobs/import-in-place", json={
             "source_snapshot_id": snap_id,
@@ -10942,7 +10944,7 @@ def test_import_photos_retry_rejects_second_concurrent_retry(
         release_first_retry = threading.Event()
 
         def blocking_result(job, runner, db_path, workspace_id, params):
-            assert release_first_retry.wait(timeout=5)
+            assert release_first_retry.wait(timeout=synchronization_timeout(5))
             return {
                 "ok": True, "cancelled": False, "photo_ids": [],
                 "discovered": 0, "copied": 0, "verified": 0,
@@ -11002,7 +11004,7 @@ def test_import_photos_retry_rejects_second_retry_while_first_is_pausing(
 
         def blocking_result(job, runner, db_path, workspace_id, params):
             first_retry_running.set()
-            assert release_first_retry.wait(timeout=5)
+            assert release_first_retry.wait(timeout=synchronization_timeout(5))
             return {
                 "ok": True, "cancelled": False, "photo_ids": [],
                 "discovered": 0, "copied": 0, "verified": 0,
@@ -11025,7 +11027,7 @@ def test_import_photos_retry_rejects_second_retry_while_first_is_pausing(
         # Wait until the worker is running, then request a pause. The
         # worker is still blocked in ``blocking_result``, so the job
         # sits in ``pausing`` (never advances to ``paused``).
-        assert first_retry_running.wait(timeout=5)
+        assert first_retry_running.wait(timeout=synchronization_timeout(5))
         assert app._job_runner.pause_job(first_retry_id) is True
         assert app._job_runner.get(first_retry_id)["status"] == "pausing"
 

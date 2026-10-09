@@ -5,6 +5,7 @@ import subprocess
 import sys
 
 import pytest
+from testing.waits import synchronization_timeout
 
 _WINDOWS = sys.platform == "win32"
 
@@ -894,7 +895,7 @@ def test_acquire_is_atomic_across_concurrent_calls(tmp_path, monkeypatch):
         t.start()
     start.set()
     for t in threads:
-        t.join(timeout=5)
+        t.join(timeout=synchronization_timeout(5))
 
     assert not errors
     statuses = sorted(s for s, _ in results)

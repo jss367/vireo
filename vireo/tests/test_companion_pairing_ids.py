@@ -15,6 +15,7 @@ import sqlite3
 
 import pytest
 from PIL import Image
+from testing.waits import synchronization_timeout
 
 
 def _collection_photo_ids(db, collection_id):
@@ -1260,7 +1261,7 @@ def test_attach_companion_pipeline_wait_does_not_hold_writer(tmp_path, wait_kind
         resume.set()
         if wait_kind != "pause":
             shared.scan_to_thumb.get_nowait()
-        thread.join(timeout=10)
+        thread.join(timeout=synchronization_timeout(10))
         consumer.close()
     assert not thread.is_alive()
     assert errors == []
