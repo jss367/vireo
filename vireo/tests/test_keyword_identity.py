@@ -2451,7 +2451,7 @@ def test_location_merge_rename_preserves_sidecar_ownership(
     monkeypatch.setattr(cfg, 'load_strict', lambda: settings)
     enabled = global_enabled if workspace_override is None else workspace_override
     if workspace_override is not None:
-        db.update_workspace(db._ws_id(), config_overrides={
+        db.workspaces.update(db._ws_id(), config_overrides={
             'write_location_keywords_to_xmp': workspace_override,
         })
     folder = tmp_path / 'photos'

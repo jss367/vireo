@@ -889,7 +889,7 @@ def test_query_move_rule_matches_reads_config_only_for_has_predictions(
     assert db.query_move_rule_matches({"has_predictions": True}) == [p["hi"]]
     assert len(calls) == 1
     # A workspace override above the detection's confidence hides it.
-    db.update_workspace(db._active_workspace_id,
+    db.workspaces.update(db._active_workspace_id,
                         config_overrides={"detector_confidence": 0.6})
     assert db.query_move_rule_matches({"has_predictions": True}) == []
     assert p["hi"] in db.query_move_rule_matches({"has_predictions": False})

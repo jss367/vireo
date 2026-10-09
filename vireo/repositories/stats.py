@@ -8,15 +8,28 @@ photo scope (``_scope_clause`` / ``_dashboard_scope_clause``, which reach
 into the folder and collection domains), and passes the resulting SQL
 fragment and parameters in. The query text is unchanged from ``db.py``; the
 large-library budgets in ``docs/ARCHITECTURE.md`` depend on it.
+
+The active workspace is resolved lazily through ``workspace_id_fn``
+(``Database._ws_id``): each workspace-scoped read resolves it before running
+any SQL and raises ``RuntimeError`` when none is set, while
+``stage_scope_ids`` and the readers taking an explicit ``workspace_id`` never
+resolve it. Callers reach the repository as ``db.stats`` (a fresh repository
+per access, see ``Database.stats``); there are no forwarding wrappers on
+``Database``.
 """
+
+import sqlite3
+from collections.abc import Callable, Iterable, Sequence
 
 from keyword_identity import identity_sql
 
 
 class StatsRepository:
-    def __init__(self, conn, workspace_id, *, coverage_photo_columns):
+    def __init__(self, conn: sqlite3.Connection,
+                 workspace_id_fn: Callable[[], int] | None, *,
+                 coverage_photo_columns: Sequence[tuple[str, str]]) -> None:
         self.conn = conn
-        self.workspace_id = workspace_id
+        self.workspace_id_fn = workspace_id_fn
         # ``Database._COVERAGE_PHOTO_COLUMNS``: the (key, predicate) pairs
         # behind the coverage SELECT fragment, in result order.
         self.coverage_photo_columns = coverage_photo_columns
@@ -26,13 +39,13 @@ class StatsRepository:
         linked = self.conn.execute(
             "SELECT 1 FROM workspace_visible_folders "
             "WHERE workspace_id = ? AND folder_id = ?",
-            (self.workspace_id, folder_id),
+            (self.workspace_id_fn(), folder_id),
         ).fetchone()
         return bool(linked)
 
     def get_coverage(self, min_conf, scope_sql, scope_params, select_fragment):
         """Per-stage coverage counts over accessible workspace photos."""
-        ws = self.workspace_id
+        ws = self.workspace_id_fn()
         photo_row = self.conn.execute(
             f"""SELECT
                 COUNT(*) AS total,
@@ -76,7 +89,7 @@ class StatsRepository:
         photo_scope_params, folder_subtree, select_fragment,
     ):
         """Per-folder coverage rows; ``folder_subtree`` limits the folders."""
-        ws = self.workspace_id
+        ws = self.workspace_id_fn()
         folder_filter_sql = ""
         folder_filter_params = []
         if folder_subtree is not None:
@@ -142,7 +155,7 @@ class StatsRepository:
             out.append(entry)
         return out
 
-    def stage_scope_ids(self, table, ids):
+    def stage_scope_ids(self, table: str, ids: Iterable[int]) -> None:
         """Stage a read scope without opening or committing a caller transaction."""
         if table not in {"scope_ids", "missing_subtree_ids"}:
             raise ValueError("Unknown scope table")
@@ -164,7 +177,7 @@ class StatsRepository:
 
     def count_real_detections_in_scope(self, min_conf, scope_sql, scope_params):
         """Count photos with real detections and the detections themselves."""
-        ws = self.workspace_id
+        ws = self.workspace_id_fn()
         row = self.conn.execute(
             f"""SELECT COUNT(*) AS total_dets,
                        COUNT(DISTINCT d.photo_id) AS photos_with_dets
@@ -183,7 +196,7 @@ class StatsRepository:
 
     def count_primary_detections_in_scope(self, min_conf, scope_sql, scope_params):
         """Count photos whose primary real detection is pipeline-classifiable."""
-        ws = self.workspace_id
+        ws = self.workspace_id_fn()
         row = self.conn.execute(
             f"""WITH ranked AS (
                     SELECT d.id, d.photo_id,
@@ -215,7 +228,7 @@ class StatsRepository:
         scope_params,
     ):
         """Count real detections with no complete run for (model, fp)."""
-        ws = self.workspace_id
+        ws = self.workspace_id_fn()
         row = self.conn.execute(
             f"""SELECT COUNT(*) AS pending
                 FROM detections d
@@ -239,7 +252,7 @@ class StatsRepository:
         scope_params,
     ):
         """Count primary detections lacking a classifier run for (model, fp)."""
-        ws = self.workspace_id
+        ws = self.workspace_id_fn()
         row = self.conn.execute(
             f"""WITH ranked AS (
                     SELECT d.id, d.photo_id,
@@ -273,7 +286,7 @@ class StatsRepository:
         scope_params,
     ):
         """Count real detections with only stale runs for ``classifier_model``."""
-        ws = self.workspace_id
+        ws = self.workspace_id_fn()
         row = self.conn.execute(
             f"""SELECT COUNT(DISTINCT d.id) AS n
                 FROM detections d
@@ -304,7 +317,7 @@ class StatsRepository:
         scope_params,
     ):
         """Count stale classifier runs on primary detections only."""
-        ws = self.workspace_id
+        ws = self.workspace_id_fn()
         row = self.conn.execute(
             f"""WITH ranked AS (
                     SELECT d.id, d.photo_id,
@@ -344,7 +357,7 @@ class StatsRepository:
         self, detector_model, min_conf, scope_sql, scope_params,
     ):
         """Count photos eligible for full-image fallback classification."""
-        ws = self.workspace_id
+        ws = self.workspace_id_fn()
         row = self.conn.execute(
             f"""SELECT COUNT(*) AS n
                   FROM photos p
@@ -373,7 +386,7 @@ class StatsRepository:
         scope_sql, scope_params,
     ):
         """Count fallback photos lacking a classifier run for (model, fp)."""
-        ws = self.workspace_id
+        ws = self.workspace_id_fn()
         row = self.conn.execute(
             f"""WITH full_anchor AS (
                     SELECT photo_id, MIN(id) AS detection_id
@@ -423,7 +436,7 @@ class StatsRepository:
         scope_sql, scope_params,
     ):
         """Count fallback anchors with stale runs and no current run."""
-        ws = self.workspace_id
+        ws = self.workspace_id_fn()
         row = self.conn.execute(
             f"""WITH full_anchor AS (
                     SELECT photo_id, MIN(id) AS detection_id
@@ -533,7 +546,9 @@ class StatsRepository:
         }
         return total_real_detections, pair_rows, pred_counts
 
-    def sampled_top1_medians(self, workspace_id, min_conf, sample_per_pair):
+    def sampled_top1_medians(
+        self, workspace_id: int, min_conf: float, sample_per_pair: int,
+    ) -> dict[tuple[str, str], tuple[float | None, int]]:
         """Return {(model, fingerprint): (median, sample_size)} from a sampled
         set of top-1-per-detection prediction confidences.
 
@@ -607,7 +622,7 @@ class StatsRepository:
         self, min_conf, sam2_variant, scope_sql, scope_params,
     ):
         """Return (pending, eligible) for the extract-masks stage."""
-        ws = self.workspace_id
+        ws = self.workspace_id_fn()
         if sam2_variant:
             row = self.conn.execute(
                 f"""SELECT
@@ -653,7 +668,7 @@ class StatsRepository:
 
     def count_photos_missing_thumb(self, scope_sql, scope_params):
         """Return (eligible, pending) for the thumbnails substage."""
-        ws = self.workspace_id
+        ws = self.workspace_id_fn()
         row = self.conn.execute(
             f"""SELECT
                   COUNT(*) AS eligible,
@@ -672,7 +687,7 @@ class StatsRepository:
 
     def count_photos_missing_preview(self, size, scope_sql, scope_params):
         """Return (eligible, pending) for the previews substage at ``size``."""
-        ws = self.workspace_id
+        ws = self.workspace_id_fn()
         row = self.conn.execute(
             f"""SELECT
                   COUNT(*) AS eligible,
@@ -693,7 +708,7 @@ class StatsRepository:
 
     def count_photos_missing_thumb_or_preview(self, size, scope_sql, scope_params):
         """Return (eligible, pending) over photos missing a thumb or preview."""
-        ws = self.workspace_id
+        ws = self.workspace_id_fn()
         row = self.conn.execute(
             f"""SELECT
                   COUNT(*) AS eligible,
@@ -717,7 +732,7 @@ class StatsRepository:
         self, sam2_variant, detector_confidence, scope_sql, scope_params,
     ):
         """Count done-looking masks whose prompt no longer matches the primary."""
-        ws = self.workspace_id
+        ws = self.workspace_id_fn()
         from subjects import primary_order_sql
         row = self.conn.execute(
             f"""SELECT COUNT(DISTINCT pm.photo_id) AS n
@@ -760,7 +775,7 @@ class StatsRepository:
     def count_eye_keypoint_eligible(self, min_conf, scope_sql, scope_params):
         """Count photos eligible for the eye-keypoint stage."""
         from subjects import primary_order_sql
-        ws = self.workspace_id
+        ws = self.workspace_id_fn()
         row = self.conn.execute(
             f"""SELECT COUNT(DISTINCT p.id) AS n
                 FROM photos p
@@ -797,7 +812,7 @@ class StatsRepository:
         """Count eligible photos stamped under a non-current eye fingerprint."""
         from pipeline import EYE_KP_FINGERPRINT_VERSION
         from subjects import primary_order_sql
-        ws = self.workspace_id
+        ws = self.workspace_id_fn()
         row = self.conn.execute(
             f"""SELECT COUNT(DISTINCT p.id) AS n
                 FROM photos p
@@ -838,7 +853,7 @@ class StatsRepository:
     ):
         """Count photos whose winning prediction the eye stage would attempt."""
         from subjects import primary_order_sql
-        ws = self.workspace_id
+        ws = self.workspace_id_fn()
         # Window function pins the same per-photo prediction the stage
         # would pick (taxonomy-present first, then detector_conf desc,
         # then species_conf desc) so the attemptable filter is applied to
@@ -918,7 +933,7 @@ class StatsRepository:
         ``location_conditions`` is the Browse "no location" predicate list
         (``Database._append_location_status_filter(..., "none")``).
         """
-        ws = self.workspace_id
+        ws = self.workspace_id_fn()
 
         overview = self.conn.execute(
             f"""SELECT COUNT(DISTINCT p.id) AS total_photos,

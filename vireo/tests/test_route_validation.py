@@ -101,7 +101,7 @@ def test_stored_bad_workspace_override_inherits_global(app_and_db):
     import config as cfg
 
     app, db = app_and_db
-    db.update_workspace(
+    db.workspaces.update(
         db._active_workspace_id,
         config_overrides={"detector_confidence": "abc"},
     )
@@ -123,7 +123,7 @@ def test_workspace_config_rejects_unusable_values(app_and_db, body):
     app, db = app_and_db
     resp = app.test_client().post("/api/workspaces/active/config", json=body)
     assert resp.status_code == 400
-    ws = db.get_workspace(db._active_workspace_id)
+    ws = db.workspaces.get(db._active_workspace_id)
     assert not ws["config_overrides"]
 
 
@@ -150,7 +150,7 @@ def test_workspace_config_round_trips_a_previously_stored_value(app_and_db):
     A bad value stored before validation existed must not block that save.
     """
     app, db = app_and_db
-    db.update_workspace(
+    db.workspaces.update(
         db._active_workspace_id,
         config_overrides={"classification_threshold": "abc"},
     )
@@ -173,7 +173,7 @@ def test_pipeline_config_rejects_unusable_values(app_and_db, body):
     app, db = app_and_db
     resp = app.test_client().post("/api/pipeline/config", json=body)
     assert resp.status_code == 400
-    ws = db.get_workspace(db._active_workspace_id)
+    ws = db.workspaces.get(db._active_workspace_id)
     assert not ws["config_overrides"]
 
 
@@ -193,7 +193,7 @@ def test_rename_workspace_to_taken_name_is_409(app_and_db):
     # Keeping its own name is not a conflict.
     resp = client.put(f"/api/workspaces/{other}", json={"name": " Other "})
     assert resp.status_code == 200
-    assert db.get_workspace(other)["name"] == "Other"
+    assert db.workspaces.get(other)["name"] == "Other"
 
 
 @pytest.mark.parametrize("name", ["", "   ", 5, None])
@@ -202,7 +202,7 @@ def test_rename_workspace_rejects_blank_or_non_string(app_and_db, name):
     ws_id = db._active_workspace_id
     resp = app.test_client().put(f"/api/workspaces/{ws_id}", json={"name": name})
     assert resp.status_code == 400
-    assert db.get_workspace(ws_id)["name"] == "Default"
+    assert db.workspaces.get(ws_id)["name"] == "Default"
 
 
 def test_create_workspace_with_taken_name_is_409(app_and_db):

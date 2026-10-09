@@ -84,7 +84,7 @@ def _row(db, photo_id):
 
 
 def _set_floor(db, value):
-    db.update_workspace(
+    db.workspaces.update(
         db._ws_id(), config_overrides={"detector_confidence": value},
     )
 
@@ -1146,7 +1146,7 @@ def test_scoped_selectors_read_the_workspace_active_at_the_call(db):
     _mask(db, mine, "large")
     _mask(db, foreign, "large")
     assert db.masks_features.workspace_photo_ids_with_variant("large") == [mine]
-    other = next(w["id"] for w in db.get_workspaces() if w["id"] != home)
+    other = next(w["id"] for w in db.workspaces.list_all() if w["id"] != home)
     db.set_active_workspace(other)
     assert db.masks_features.workspace_photo_ids_with_variant("large") == [foreign]
     # Even a repository held across the switch reads the workspace per call.

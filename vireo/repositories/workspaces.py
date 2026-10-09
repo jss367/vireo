@@ -2,23 +2,42 @@
 
 ``Database`` owns the active-workspace state and the process-wide new-images
 cache; this repository owns the SQL. Methods that act on the active
-workspace (tabs, new-images snapshots) use ``self.workspace_id``, which the
-façade resolves with ``Database._ws_id()`` when it builds the repository.
-Catalog-wide methods take the workspace id as an argument, matching the
-``Database`` method they back.
+workspace (tabs, new-images snapshots) resolve it through
+``workspace_id_fn`` (``Database._ws_id``) before they validate anything or
+run any SQL, so with no workspace active they raise ``RuntimeError`` having
+touched nothing. Building the repository never resolves it. Catalog-wide
+methods take the workspace id as an argument and work with none active.
+
+Callers reach it as ``db.workspaces`` (a fresh repository per access, see
+``Database.workspaces``); there are no forwarding wrappers on ``Database``.
+``create_workspace``, ``delete_workspace`` and ``ensure_default_workspace``
+stay on ``Database`` because they also maintain the new-images cache (or
+create the row through ``create_workspace``); call those rather than
+:meth:`create` / :meth:`delete`. ``get_new_images_snapshot`` stays there too,
+for its id range check.
 """
 
 import json
 import sqlite3
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from typing import Any
 
 from repositories import UNSET
 
 
 class WorkspaceRepository:
-    def __init__(self, conn, workspace_id, *, allowed_nav_ids, default_tabs,
-                 nav_id_aliases=None, chunk_size=800):
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        workspace_id_fn: Callable[[], int] | None,
+        *,
+        allowed_nav_ids: Iterable[str],
+        default_tabs: Sequence[str],
+        nav_id_aliases: Mapping[str, str] | None = None,
+        chunk_size: int = 800,
+    ) -> None:
         self.conn = conn
-        self.workspace_id = workspace_id
+        self.workspace_id_fn = workspace_id_fn
         self.allowed_nav_ids = allowed_nav_ids
         self.default_tabs = list(default_tabs)
         # Map of retired nav id -> current nav id, so a saved tab written
@@ -29,28 +48,28 @@ class WorkspaceRepository:
 
     # -- workspace rows ------------------------------------------------------
 
-    def most_recently_opened_id(self):
+    def most_recently_opened_id(self) -> int | None:
         """Return the id of the last-opened workspace, or None if none exist."""
         last = self.conn.execute(
             "SELECT id FROM workspaces ORDER BY CASE WHEN last_opened_at IS NULL THEN 0 ELSE 1 END DESC, last_opened_at DESC, id ASC LIMIT 1"
         ).fetchone()
         return None if last is None else last[0]
 
-    def default_id(self):
+    def default_id(self) -> int | None:
         """Return the id of the workspace named 'Default', or None."""
         row = self.conn.execute(
             "SELECT id FROM workspaces WHERE name = 'Default'"
         ).fetchone()
         return row[0] if row else None
 
-    def id_for_name(self, name):
+    def id_for_name(self, name: str) -> int | None:
         """Return the id of the workspace named exactly ``name``, or None."""
         row = self.conn.execute(
             "SELECT id FROM workspaces WHERE name = ?", (name,),
         ).fetchone()
         return None if row is None else row["id"]
 
-    def ids_for_folders(self, folder_ids):
+    def ids_for_folders(self, folder_ids: Iterable[int]) -> set[int]:
         """Return the set of workspace ids linked to any of ``folder_ids``."""
         # Chunk to stay well under SQLite's SQLITE_MAX_VARIABLE_NUMBER (default 999).
         # A scan of a deep tree can auto-register thousands of descendant folders;
@@ -70,8 +89,13 @@ class WorkspaceRepository:
             ws_ids.update(r["workspace_id"] for r in rows)
         return ws_ids
 
-    def create(self, name, config_overrides=None, ui_state=None):
-        """Insert a workspace with the default tabs and commit. Returns its id."""
+    def create(self, name: str, config_overrides: dict | None = None,
+               ui_state: dict | None = None) -> int:
+        """Insert a workspace with the default tabs and commit. Returns its id.
+
+        Call ``Database.create_workspace`` instead: it also clears any stale
+        new-images cache entry for a reused rowid.
+        """
         cur = self.conn.execute(
             """INSERT INTO workspaces (name, config_overrides, ui_state, tabs)
                VALUES (?, ?, ?, ?)""",
@@ -83,21 +107,28 @@ class WorkspaceRepository:
         self.conn.commit()
         return cur.lastrowid
 
-    def get(self, workspace_id):
+    def get(self, workspace_id: int | None) -> sqlite3.Row | None:
+        """Return a single workspace by id, or None."""
         return self.conn.execute(
             "SELECT * FROM workspaces WHERE id = ?", (workspace_id,)
         ).fetchone()
 
-    def list_all(self):
+    def list_all(self) -> list[sqlite3.Row]:
         """Return all workspaces, pinned first then alphabetical."""
         return self.conn.execute(
             "SELECT * FROM workspaces "
             "ORDER BY (pinned_at IS NULL), LOWER(name)"
         ).fetchall()
 
-    def update(self, workspace_id, name=None, config_overrides=UNSET,
-               ui_state=UNSET, last_opened_at=None, pinned_at=UNSET):
-        """Update the provided fields; ``None`` clears the JSON/pin columns."""
+    def update(self, workspace_id: int, name: str | None = None,
+               config_overrides: Any = UNSET, ui_state: Any = UNSET,
+               last_opened_at: str | None = None, pinned_at: Any = UNSET) -> None:
+        """Update the provided fields and commit; nothing given, nothing written.
+
+        For ``config_overrides``, ``ui_state`` and ``pinned_at``, pass None to
+        clear the column (set it NULL), or omit the argument to leave it
+        unchanged.
+        """
         updates = []
         params = []
         if name is not None:
@@ -123,8 +154,11 @@ class WorkspaceRepository:
         )
         self.conn.commit()
 
-    def delete(self, workspace_id):
+    def delete(self, workspace_id: int) -> None:
         """Delete a workspace (cascading its scoped rows) and commit.
+
+        Call ``Database.delete_workspace`` instead: it also drops the
+        workspace's cached new-images payload.
 
         A pending NAS transfer blocks the delete through a trigger; that
         refusal is raised as ``ValueError`` so routes can show it.
@@ -137,7 +171,13 @@ class WorkspaceRepository:
             raise
         self.conn.commit()
 
-    def set_group_state(self, workspace_id, fingerprint, when_ts):
+    def set_group_state(self, workspace_id: int, fingerprint: str | None,
+                        when_ts: int | None) -> None:
+        """Record that grouping completed for ``workspace_id`` at ``when_ts``
+        with the given ``fingerprint``, and commit. The pipeline page treats
+        a fingerprint mismatch as "Outdated" so the user knows a regroup is
+        pending.
+        """
         self.conn.execute(
             "UPDATE workspaces SET last_grouped_at = ?, last_group_fingerprint = ? "
             "WHERE id = ?",
@@ -147,10 +187,14 @@ class WorkspaceRepository:
 
     # -- config overrides ----------------------------------------------------
 
-    def forget_label_file(self, labels_file):
+    def forget_label_file(self, labels_file: str) -> int:
         """Drop ``labels_file`` from every workspace's active_labels override.
 
-        Returns the number of workspaces changed; commits only if any did.
+        Deleting a set in Settings removes the file and the global active
+        list, but a workspace override pointing at it used to survive: a
+        selection naming a file that no longer exists, which no checkbox can
+        clear because the UI only lists files it can find. Returns the number
+        of workspaces changed; commits only if any did.
         """
         rows = self.conn.execute(
             "SELECT id, config_overrides FROM workspaces "
@@ -181,9 +225,10 @@ class WorkspaceRepository:
 
     # -- active workspace: new-images snapshots ------------------------------
 
-    def create_new_images_snapshot(self, file_paths):
-        """Persist a deduplicated, sorted snapshot of paths. Returns its id."""
-        ws_id = self.workspace_id
+    def create_new_images_snapshot(self, file_paths: Iterable[str] | None) -> int:
+        """Persist a deduplicated, sorted snapshot of paths for the active
+        workspace, and commit. Returns its id."""
+        ws_id = self.workspace_id_fn()
         unique_paths = sorted(set(file_paths or []))
         cur = self.conn.execute(
             "INSERT INTO new_image_snapshots (workspace_id, created_at, file_count) "
@@ -199,16 +244,18 @@ class WorkspaceRepository:
         self.conn.commit()
         return snap_id
 
-    def get_new_images_snapshot(self, snapshot_id):
+    def get_new_images_snapshot(self, snapshot_id: int) -> dict[str, Any] | None:
         """Return the active workspace's snapshot metadata and paths, or None.
 
         ``snapshot_id`` must already be within SQLite's signed 64-bit range;
-        the façade checks that before it resolves the active workspace.
+        ``Database.get_new_images_snapshot`` checks that before this resolves
+        the active workspace.
         """
+        ws_id = self.workspace_id_fn()
         row = self.conn.execute(
             "SELECT id, workspace_id, created_at, file_count "
             "FROM new_image_snapshots WHERE id = ? AND workspace_id = ?",
-            (snapshot_id, self.workspace_id),
+            (snapshot_id, ws_id),
         ).fetchone()
         if row is None:
             return None
@@ -230,9 +277,22 @@ class WorkspaceRepository:
 
     # -- active workspace: navigation tabs -----------------------------------
 
-    def get_tabs(self):
+    def get_tabs(self) -> list[str]:
+        """Return the active workspace's ordered list of pinned tab nav-ids.
+
+        Entries not in ``allowed_nav_ids`` (``ALL_NAV_IDS``) are dropped so
+        that pages retired in past releases (e.g. ``zoom_test``) don't leave
+        dead slots in the navbar's ``TABS`` array — a dead id makes
+        cmd+number reserve a slot that renders nothing and makes
+        ``adjacentTabId()`` return an id that ``pageById`` doesn't know, which
+        throws on close-adjacent. Retired ids with a successor in
+        ``nav_id_aliases`` are upgraded instead.
+        """
+        return self._read_tabs(self.workspace_id_fn())
+
+    def _read_tabs(self, workspace_id):
         row = self.conn.execute(
-            "SELECT tabs FROM workspaces WHERE id=?", (self.workspace_id,),
+            "SELECT tabs FROM workspaces WHERE id=?", (workspace_id,),
         ).fetchone()
         if not row or not row["tabs"]:
             return list(self.default_tabs)
@@ -253,7 +313,15 @@ class WorkspaceRepository:
                 result.append(tab)
         return result
 
-    def set_tabs(self, tabs):
+    def set_tabs(self, tabs: list[str]) -> list[str]:
+        """Replace the active workspace's tabs with the given ordered list.
+
+        Validates every entry against ``allowed_nav_ids`` and rejects
+        duplicates (``ValueError``), so the UI invariant "each pinned page
+        appears exactly once" is enforced at the storage layer. Commits and
+        returns the new list.
+        """
+        workspace_id = self.workspace_id_fn()
         if not isinstance(tabs, list):
             raise ValueError("tabs must be a list")
         seen = set()
@@ -267,33 +335,45 @@ class WorkspaceRepository:
             if nav_id in seen:
                 raise ValueError(f"{nav_id!r} appears more than once")
             seen.add(nav_id)
-        self._write(tabs)
+        self._write(workspace_id, tabs)
         return list(tabs)
 
-    def pin_tab(self, nav_id):
+    def pin_tab(self, nav_id: str) -> list[str]:
+        """Append ``nav_id`` to the active workspace's tabs if not present.
+
+        Raises ``ValueError`` if ``nav_id`` is not a known nav id. Returns the
+        new list (committing only when it changed).
+        """
+        workspace_id = self.workspace_id_fn()
         self._validate_nav_id(nav_id)
-        tabs = self.get_tabs()
+        tabs = self._read_tabs(workspace_id)
         if nav_id not in tabs:
             tabs.append(nav_id)
-            self._write(tabs)
+            self._write(workspace_id, tabs)
         return tabs
 
-    def unpin_tab(self, nav_id):
+    def unpin_tab(self, nav_id: str) -> list[str]:
+        """Remove ``nav_id`` from the active workspace's tabs if present.
+
+        Raises ``ValueError`` if ``nav_id`` is not a known nav id. Returns the
+        new list (committing only when it changed).
+        """
+        workspace_id = self.workspace_id_fn()
         self._validate_nav_id(nav_id)
-        tabs = self.get_tabs()
+        tabs = self._read_tabs(workspace_id)
         if nav_id in tabs:
             tabs = [tab for tab in tabs if tab != nav_id]
-            self._write(tabs)
+            self._write(workspace_id, tabs)
         return tabs
 
     def _validate_nav_id(self, nav_id):
         if nav_id not in self.allowed_nav_ids:
             raise ValueError(f"{nav_id!r} is not a known nav id")
 
-    def _write(self, tabs):
+    def _write(self, workspace_id, tabs):
         self.conn.execute(
             "UPDATE workspaces SET tabs=? WHERE id=?",
-            (json.dumps(tabs), self.workspace_id),
+            (json.dumps(tabs), workspace_id),
         )
         self.conn.commit()
 

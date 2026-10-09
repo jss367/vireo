@@ -966,7 +966,7 @@ _DELEGATING_COLLECTION_METHODS = (
 )
 
 # No SQL of their own: they compose other façade methods, so monkeypatches of
-# those (``query_photo_position_first``, ``get_workspaces``, ...) still apply.
+# those (``query_photo_position_first``, ``workspaces.list_all``, ...) still apply.
 _COMPOSING_COLLECTION_METHODS = {
     "rules_resolvable": "_build_query_from_rules",
     "query_photo_position": "query_photo_position_first",

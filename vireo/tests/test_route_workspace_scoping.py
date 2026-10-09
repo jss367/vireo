@@ -501,7 +501,7 @@ def test_snapshot_import_refuses_paths_inside_staged_source(staged):
     # workspace root, exactly like the "captured before staging" case.
     db.add_folder(staged["archive"], name="archive")
     frozen = os.path.join(staged["source"], "a.jpg")
-    snap_id = db.create_new_images_snapshot([frozen])
+    snap_id = db.workspaces.create_new_images_snapshot([frozen])
 
     resp = staged["client"].post(
         "/api/jobs/import-in-place",
@@ -664,7 +664,7 @@ def test_import_in_place_conflict_rolls_back_new_workspace(
     """
     db = staged["db"]
     active_before = db._active_workspace_id
-    workspaces_before = {int(ws["id"]) for ws in db.get_workspaces()}
+    workspaces_before = {int(ws["id"]) for ws in db.workspaces.list_all()}
     # A source outside the staged tree so the pre-flight passes; the
     # simulated race makes the atomic final check reject it anyway.
     fresh_source = tmp_path / "unrelated"
@@ -690,10 +690,10 @@ def test_import_in_place_conflict_rolls_back_new_workspace(
     )
     assert resp.status_code == 409
     assert "simulated race" in resp.get_json()["error"]
-    workspaces_after = {int(ws["id"]) for ws in db.get_workspaces()}
+    workspaces_after = {int(ws["id"]) for ws in db.workspaces.list_all()}
     assert workspaces_after == workspaces_before
     assert not any(
-        ws["name"] == "Orphan In-Place" for ws in db.get_workspaces()
+        ws["name"] == "Orphan In-Place" for ws in db.workspaces.list_all()
     )
     # A per-request Database is instantiated by the app, so re-check active
     # workspace through the API rather than the fixture db.
@@ -711,7 +711,7 @@ def test_import_photos_conflict_rolls_back_new_workspace(
     """
     db = staged["db"]
     active_before = db._active_workspace_id
-    workspaces_before = {int(ws["id"]) for ws in db.get_workspaces()}
+    workspaces_before = {int(ws["id"]) for ws in db.workspaces.list_all()}
     card = tmp_path / "card"
     card.mkdir()
     (card / "DSC_0001.jpg").write_bytes(b"jpg")
@@ -733,10 +733,10 @@ def test_import_photos_conflict_rolls_back_new_workspace(
 
     assert resp.status_code == 409
     assert "simulated race" in resp.get_json()["error"]
-    workspaces_after = {int(ws["id"]) for ws in db.get_workspaces()}
+    workspaces_after = {int(ws["id"]) for ws in db.workspaces.list_all()}
     assert workspaces_after == workspaces_before
     assert not any(
-        ws["name"] == "Orphan Photos" for ws in db.get_workspaces()
+        ws["name"] == "Orphan Photos" for ws in db.workspaces.list_all()
     )
     active = staged["client"].get("/api/workspaces/active").get_json()
     assert int(active["id"]) == int(active_before)

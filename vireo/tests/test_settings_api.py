@@ -105,7 +105,7 @@ def test_get_values_workspace_empty_when_no_overrides(app_and_db):
 
 def test_get_values_workspace_reflects_overrides(app_and_db):
     app, db = app_and_db
-    db.update_workspace(
+    db.workspaces.update(
         db._active_workspace_id,
         config_overrides={"classification_threshold": 0.9},
     )
@@ -131,7 +131,7 @@ def test_get_values_effective_falls_through_layers(app_and_db):
     assert values["global"]["similarity_threshold"] == 0.5
 
     # Override per-workspace — wins over global.
-    db.update_workspace(
+    db.workspaces.update(
         db._active_workspace_id,
         config_overrides={"similarity_threshold": 0.95},
     )
@@ -160,7 +160,7 @@ def test_get_values_workspace_layer_filters_global_only_keys(app_and_db):
     layer, so the values endpoint must not surface them as workspace-effective
     or the UI will mislead the user."""
     app, db = app_and_db
-    db.update_workspace(
+    db.workspaces.update(
         db._active_workspace_id,
         config_overrides={
             "hf_token": "leaked-from-bad-payload",          # scope=global
@@ -181,7 +181,7 @@ def test_get_values_workspace_layer_filters_global_only_keys(app_and_db):
 def test_get_values_workspace_excludes_non_schema_keys(app_and_db):
     """Internal keys stored in config_overrides (e.g. active_labels) are not exposed."""
     app, db = app_and_db
-    db.update_workspace(
+    db.workspaces.update(
         db._active_workspace_id,
         config_overrides={"active_labels": ["birds.txt"], "classification_threshold": 0.6},
     )
@@ -370,7 +370,7 @@ def _ws_overrides(db):
     """Return the active workspace's config_overrides as a dict."""
     import json as _json
 
-    ws = db.get_workspace(db._active_workspace_id)
+    ws = db.workspaces.get(db._active_workspace_id)
     if not ws or not ws["config_overrides"]:
         return {}
     raw = ws["config_overrides"]
@@ -436,7 +436,7 @@ def test_patch_workspace_rejects_out_of_range(app_and_db):
 def test_patch_workspace_preserves_active_labels(app_and_db):
     """Existing non-schema keys (e.g. active_labels) survive a schema-driven write."""
     app, db = app_and_db
-    db.update_workspace(
+    db.workspaces.update(
         db._active_workspace_id,
         config_overrides={"active_labels": ["birds.txt"]},
     )
@@ -458,7 +458,7 @@ def test_patch_workspace_does_not_affect_other_workspaces(app_and_db):
         "/api/settings/workspace",
         json={"key": "classification_threshold", "value": 0.55},
     )
-    other = db.get_workspace(other_ws)
+    other = db.workspaces.get(other_ws)
     assert not other["config_overrides"]
 
 
@@ -600,7 +600,7 @@ def test_import_translates_legacy_default_strategy(app_and_db):
     app, db = app_and_db
     client = app.test_client()
     identify_id = next(
-        p["id"] for p in db.get_saved_processes() if p["name"] == "Identify birds"
+        p["id"] for p in db.processes.list_all() if p["name"] == "Identify birds"
     )
     payload = {"pipeline": {"default_strategy": "identify"}}
     resp = client.post(
@@ -638,7 +638,7 @@ def test_import_prefers_default_process_id_over_legacy_key(app_and_db):
     app, db = app_and_db
     client = app.test_client()
     full_id = next(
-        p["id"] for p in db.get_saved_processes() if p["name"] == "Full"
+        p["id"] for p in db.processes.list_all() if p["name"] == "Full"
     )
     payload = {
         "pipeline": {
@@ -663,7 +663,7 @@ def test_export_includes_default_process_name(app_and_db):
     id alone would collide (seed ids 1-4 or coincidental custom ids) and
     silently activate a different process on restore."""
     app, db = app_and_db
-    full_id = next(p["id"] for p in db.get_saved_processes() if p["name"] == "Full")
+    full_id = next(p["id"] for p in db.processes.list_all() if p["name"] == "Full")
     import config as cfg
     cfg.set("pipeline", {**cfg.load()["pipeline"], "default_process_id": full_id})
     client = app.test_client()
@@ -691,7 +691,7 @@ def test_import_translates_default_process_name_to_target_id(app_and_db):
     at a different process, but the name is a portable identity."""
     app, db = app_and_db
     cull_ready_id = next(
-        p["id"] for p in db.get_saved_processes() if p["name"] == "Cull-ready"
+        p["id"] for p in db.processes.list_all() if p["name"] == "Cull-ready"
     )
     client = app.test_client()
     # Payload's raw id is a random stale value; the name should still resolve.
@@ -740,7 +740,7 @@ def test_import_default_process_name_missing_in_target_falls_back_to_null(app_an
 def test_import_default_process_name_null_clears_id(app_and_db):
     """A payload with explicit null ``default_process_name`` clears the id."""
     app, db = app_and_db
-    full_id = next(p["id"] for p in db.get_saved_processes() if p["name"] == "Full")
+    full_id = next(p["id"] for p in db.processes.list_all() if p["name"] == "Full")
     client = app.test_client()
     payload = {
         "pipeline": {
@@ -763,7 +763,7 @@ def test_export_includes_default_process_flags(app_and_db):
     verify the target's same-named row means the same thing (see
     test_import_flag_mismatch_falls_back_to_null)."""
     app, db = app_and_db
-    full = next(p for p in db.get_saved_processes() if p["name"] == "Full")
+    full = next(p for p in db.processes.list_all() if p["name"] == "Full")
     import config as cfg
 
     cfg.set("pipeline", {**cfg.load()["pipeline"], "default_process_id": full["id"]})
@@ -787,7 +787,7 @@ def test_import_flag_match_translates_to_target_id(app_and_db):
     default is set to the target's id — the name+flag pair is a portable
     identity that survives DB-local id collisions."""
     app, db = app_and_db
-    cull_ready = next(p for p in db.get_saved_processes() if p["name"] == "Cull-ready")
+    cull_ready = next(p for p in db.processes.list_all() if p["name"] == "Cull-ready")
     client = app.test_client()
     payload = {
         "pipeline": {
@@ -820,7 +820,7 @@ def test_import_flag_mismatch_falls_back_to_null(app_and_db):
     exporter's, the default falls back to null. Silently linking to the local
     row would misattribute the after-import default to a divergent process."""
     app, db = app_and_db
-    full = next(p for p in db.get_saved_processes() if p["name"] == "Full")
+    full = next(p for p in db.processes.list_all() if p["name"] == "Full")
     client = app.test_client()
     payload = {
         "pipeline": {
@@ -896,7 +896,7 @@ def test_import_passes_through_non_schema_keys(app_and_db):
 def test_import_preserves_workspace_overrides(app_and_db):
     """Workspace overrides survive a global-config import."""
     app, db = app_and_db
-    db.update_workspace(
+    db.workspaces.update(
         db._active_workspace_id,
         config_overrides={"classification_threshold": 0.9},
     )
@@ -1211,7 +1211,7 @@ def test_import_rejects_empty_object_at_nested_schema_leaf(app_and_db):
 
 def test_delete_workspace_preserves_active_labels(app_and_db):
     app, db = app_and_db
-    db.update_workspace(
+    db.workspaces.update(
         db._active_workspace_id,
         config_overrides={
             "active_labels": ["birds.txt"],
@@ -1236,7 +1236,7 @@ def test_patch_workspace_recovers_from_non_dict_overrides(app_and_db):
     app, db = app_and_db
     # Simulate a malformed override row (e.g. from a hand-edited DB or a
     # legacy code path) by writing a non-object JSON value.
-    db.update_workspace(db._active_workspace_id, config_overrides=5)
+    db.workspaces.update(db._active_workspace_id, config_overrides=5)
     client = app.test_client()
     resp = client.patch(
         "/api/settings/workspace",
@@ -1250,7 +1250,7 @@ def test_patch_workspace_recovers_from_non_dict_overrides(app_and_db):
 def test_delete_workspace_recovers_from_non_dict_overrides(app_and_db):
     """A list payload in config_overrides must not crash the schema DELETE."""
     app, db = app_and_db
-    db.update_workspace(db._active_workspace_id, config_overrides=["junk"])
+    db.workspaces.update(db._active_workspace_id, config_overrides=["junk"])
     client = app.test_client()
     resp = client.delete("/api/settings/workspace/classification_threshold")
     assert resp.status_code == 200

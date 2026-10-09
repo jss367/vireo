@@ -84,7 +84,7 @@ def test_api_v1_keywords(app_and_db):
 def test_api_v1_workspace_activate(app_and_db):
     app, db = app_and_db
     client = app.test_client()
-    ws_id = db.get_workspaces()[0]["id"]
+    ws_id = db.workspaces.list_all()[0]["id"]
     resp = client.post(
         f"/api/v1/workspaces/{ws_id}/activate", headers=_auth(app)
     )

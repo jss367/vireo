@@ -100,7 +100,7 @@ def create_misses_blueprint(
 
     def _save_miss_threshold_overrides(db, values, pipeline):
         with settings_write_lock:
-            ws = db.get_workspace(db.active_workspace_id)
+            ws = db.workspaces.get(db.active_workspace_id)
             overrides = {}
             if ws and ws["config_overrides"]:
                 try:
@@ -128,7 +128,7 @@ def create_misses_blueprint(
                 existing_pipeline[key] = pipeline[key]
             overrides["pipeline"] = existing_pipeline
             overrides["detector_confidence"] = values["detector_confidence"]
-            db.update_workspace(db.active_workspace_id, config_overrides=overrides)
+            db.workspaces.update(db.active_workspace_id, config_overrides=overrides)
 
     @blueprint.route("/api/misses/config")
     def api_misses_config():

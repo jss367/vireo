@@ -337,7 +337,7 @@ class PipelineChain:
                         model_dir=model.get("weights_path"),
                     )
                 except RuntimeError:
-                    saved_process = thread_db.get_saved_process(process_id)
+                    saved_process = thread_db.processes.get(process_id)
                     process_name = (
                         saved_process["name"] if saved_process
                         else "the selected process"

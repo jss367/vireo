@@ -752,8 +752,8 @@ class ImportService:
             self.invalidate_missing_originals(workspace_ids=[ws_id])
             db.create_default_collections(workspace_id=ws_id)
             db.set_active_workspace(ws_id)
-            db.update_workspace(ws_id, last_opened_at=datetime.now().isoformat())
-            ws = db.get_workspace(ws_id)
+            db.workspaces.update(ws_id, last_opened_at=datetime.now().isoformat())
+            ws = db.workspaces.get(ws_id)
             return (
                 ws_id,
                 dict(ws) if ws else {"id": ws_id, "name": name},
@@ -1447,7 +1447,7 @@ class ImportService:
                 "after_import must be a process id or null, got "
                 f"{type(value).__name__}"
             )
-        if not allow_missing and db.get_saved_process(value) is None:
+        if not allow_missing and db.processes.get(value) is None:
             return ImportFailure(f"unknown process id: {value}")
         return None
 

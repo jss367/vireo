@@ -416,7 +416,7 @@ def test_grant_only_folder_read_scopes_keep_siblings_hidden(app_and_db, tmp_path
     assert resolve_folder_id(db, folder) == folder
     assert db.get_folder_coverage_stats(folder_id=folder)[0]['total'] == 1
     assert db.query_photo_ids([], folder_id=folder) == [photo]
-    assert b in db._workspace_repository(scoped=False).ids_for_folders([folder])
+    assert b in db.workspaces.ids_for_folders([folder])
     from web.pipeline import _PipelineLaunch
 
     launch = _PipelineLaunch({}, lambda: db, lambda *args: pytest.fail(str(args)))

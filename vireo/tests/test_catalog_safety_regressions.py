@@ -327,10 +327,10 @@ def test_classifier_partial_flush_is_not_a_cache_hit(db, tmp_path):
 def test_failed_folder_transfer_leaves_no_workspace(app_and_db):
     app, db = app_and_db
     child = db.conn.execute("SELECT id FROM folders WHERE parent_id IS NOT NULL LIMIT 1").fetchone()[0]
-    before = len(db.get_workspaces())
+    before = len(db.workspaces.list_all())
     response = app.test_client().post(f"/api/workspaces/{db._ws_id()}/move-folders", json={"folder_ids": [child], "new_workspace_name": "Failed transfer destination"})
     assert response.status_code == 400, response.json
-    assert len(db.get_workspaces()) == before
+    assert len(db.workspaces.list_all()) == before
 
 
 def test_staging_lock_failure_allows_retry(db, tmp_path):

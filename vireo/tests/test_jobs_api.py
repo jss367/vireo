@@ -3518,7 +3518,7 @@ def _fake_active_model(monkeypatch):
 
 
 def _process_id(db, name):
-    return next(p["id"] for p in db.get_saved_processes() if p["name"] == name)
+    return next(p["id"] for p in db.processes.list_all() if p["name"] == name)
 
 
 def test_pipeline_process_id_expands_flags(app_and_db):
@@ -4324,7 +4324,7 @@ def test_jobs_regroup_collection_scope_clears_group_fingerprint(app_and_db, monk
     pipeline page keeps reporting Group as done-prior for a partial cache."""
     app, db = app_and_db
     ws_id = db._active_workspace_id
-    db.set_workspace_group_state(workspace_id=ws_id, fingerprint="stale", when_ts=1)
+    db.workspaces.set_group_state(workspace_id=ws_id, fingerprint="stale", when_ts=1)
     first = db.conn.execute("SELECT MIN(id) FROM photos").fetchone()[0]
     col_id = db.add_collection(
         "Subset", json.dumps([{"field": "photo_ids", "value": [first]}]),
@@ -4515,7 +4515,7 @@ def test_jobs_regroup_coverage_uses_photo_snapshot(app_and_db, monkeypatch):
     fingerprint for a cache that in fact excluded the newly-eligible photo."""
     app, db = app_and_db
     ws_id = db._active_workspace_id
-    db.set_workspace_group_state(workspace_id=ws_id, fingerprint="stale", when_ts=1)
+    db.workspaces.set_group_state(workspace_id=ws_id, fingerprint="stale", when_ts=1)
     all_ids = [
         row["id"] for row in db.conn.execute(
             "SELECT id FROM photos ORDER BY id"
@@ -5089,7 +5089,7 @@ def test_import_photos_happy_path(app_and_db, tmp_path):
     dest = str(tmp_path / "archive")
 
     cull_ready_id = next(
-        pr["id"] for pr in db.get_saved_processes() if pr["name"] == "Cull-ready")
+        pr["id"] for pr in db.processes.list_all() if pr["name"] == "Cull-ready")
     resp = client.post("/api/jobs/import-photos", json={
         "sources": [card],
         "destination": dest,
@@ -5360,7 +5360,7 @@ def test_automatic_staged_transfer_reserves_workspace_after_processing(app_and_d
         assert client.post(f"/api/workspaces/{other_workspace}/activate").status_code == 200
         delete_workspace = client.delete(f"/api/workspaces/{original_workspace}")
         assert delete_workspace.status_code == 409, delete_workspace.get_json()
-        assert db.get_workspace(original_workspace) is not None
+        assert db.workspaces.get(original_workspace) is not None
         assert client.post(f"/api/workspaces/{original_workspace}/activate").status_code == 200
         deleted = client.post("/api/batch/delete", json={
             "photo_ids": imported["result"]["photo_ids"], "mode": "disk_permanent",
@@ -5981,7 +5981,7 @@ def test_pending_archive_sends_when_a_workspace_declines_to_write_flags(app_and_
     imported = _import_for_review(app, db, tmp_path, monkeypatch)
     client = app.test_client()
     archive_id = imported["config"]["pending_archive_id"]
-    db.update_workspace(db._ws_id(), config_overrides={"sync_flags_to_xmp": False})
+    db.workspaces.update(db._ws_id(), config_overrides={"sync_flags_to_xmp": False})
     db.queue_change(imported["result"]["photo_ids"][0], "flag", "flagged")
 
     monkeypatch.setattr(move, "_run_rsync_streamed",
@@ -7268,7 +7268,7 @@ def test_after_process_move_failure_does_not_create_workspace(
     _save_nas_target(tmp_path, local_root=tmp_path / "archive")
     card = _import_card(tmp_path)
     cull_ready_id = _process_id(db, "Cull-ready")
-    before = {w["id"] for w in db.get_workspaces()}
+    before = {w["id"] for w in db.workspaces.list_all()}
     old_ws = db._active_workspace_id
 
     # Destination outside the target's local_archive_root — validated by
@@ -7282,11 +7282,11 @@ def test_after_process_move_failure_does_not_create_workspace(
     })
     assert resp.status_code == 400, resp.get_json()
 
-    after = {w["id"] for w in db.get_workspaces()}
+    after = {w["id"] for w in db.workspaces.list_all()}
     assert after == before, (
         "workspace was created before after_process_move validation ran")
     assert db._active_workspace_id == old_ws
-    names = {w["name"] for w in db.get_workspaces()}
+    names = {w["name"] for w in db.workspaces.list_all()}
     assert "Should Not Exist" not in names
 
 
@@ -7333,7 +7333,7 @@ def _run_chained_import(client, tmp_path, cull_ready_id):
 def test_chain_happy_path_enqueues_moves(app_and_db, tmp_path, stub_move):
     app, db = app_and_db
     client = app.test_client()
-    cull_ready_id = next(p["id"] for p in db.get_saved_processes()
+    cull_ready_id = next(p["id"] for p in db.processes.list_all()
                          if p["name"] == "Cull-ready")
     import_job = _run_chained_import(client, tmp_path, cull_ready_id)
     assert import_job["status"] == "completed"
@@ -7381,7 +7381,7 @@ def test_chain_moves_even_when_process_raises(app_and_db, tmp_path, stub_move, m
     monkeypatch.setattr(pipeline_job, "run_pipeline_job", boom)
     app, db = app_and_db
     client = app.test_client()
-    cull_ready_id = next(p["id"] for p in db.get_saved_processes()
+    cull_ready_id = next(p["id"] for p in db.processes.list_all()
                          if p["name"] == "Cull-ready")
     import_job = _run_chained_import(client, tmp_path, cull_ready_id)
     assert import_job["status"] == "completed"
@@ -7433,7 +7433,7 @@ def test_chain_moves_when_process_preblocked_on_missing_labels(
 
     app, db = app_and_db
     client = app.test_client()
-    cull_ready_id = next(p["id"] for p in db.get_saved_processes()
+    cull_ready_id = next(p["id"] for p in db.processes.list_all()
                          if p["name"] == "Cull-ready")
     import_job = _run_chained_import(client, tmp_path, cull_ready_id)
     assert import_job["status"] == "completed"
@@ -7468,7 +7468,7 @@ def test_chain_skips_move_on_cancelled_process(app_and_db, tmp_path, stub_move, 
                         lambda *a, **k: {"cancelled": True, "stages": {}})
     app, db = app_and_db
     client = app.test_client()
-    cull_ready_id = next(p["id"] for p in db.get_saved_processes()
+    cull_ready_id = next(p["id"] for p in db.processes.list_all()
                          if p["name"] == "Cull-ready")
     import_job = _run_chained_import(client, tmp_path, cull_ready_id)
     assert import_job["status"] == "completed"
@@ -7498,7 +7498,7 @@ def test_chain_root_level_import_reports_honest_skip(app_and_db, tmp_path, stub_
     not a bare "no folders to move"."""
     app, db = app_and_db
     client = app.test_client()
-    cull_ready_id = next(p["id"] for p in db.get_saved_processes()
+    cull_ready_id = next(p["id"] for p in db.processes.list_all()
                          if p["name"] == "Cull-ready")
     card = _import_card(tmp_path)
     dest = str(tmp_path / "archive")
@@ -7579,7 +7579,7 @@ def test_chain_accepts_case_alias_destination(app_and_db, tmp_path, stub_move):
 
     app, db = app_and_db
     client = app.test_client()
-    cull_ready_id = next(p["id"] for p in db.get_saved_processes()
+    cull_ready_id = next(p["id"] for p in db.processes.list_all()
                          if p["name"] == "Cull-ready")
     card = _import_card(tmp_path)
     local_root = tmp_path / "Archive"
@@ -7618,7 +7618,7 @@ def test_chain_move_enqueue_failure_surfaces_as_step(app_and_db, tmp_path, monke
 
     app, db = app_and_db
     client = app.test_client()
-    cull_ready_id = next(p["id"] for p in db.get_saved_processes()
+    cull_ready_id = next(p["id"] for p in db.processes.list_all()
                          if p["name"] == "Cull-ready")
     import_job = _run_chained_import(client, tmp_path, cull_ready_id)
     assert import_job["status"] == "completed"
@@ -7659,7 +7659,7 @@ def test_chain_cancel_while_waiting_for_serialize_lock(app_and_db, tmp_path, mon
 
     app, db = app_and_db
     client = app.test_client()
-    cull_ready_id = next(p["id"] for p in db.get_saved_processes()
+    cull_ready_id = next(p["id"] for p in db.processes.list_all()
                          if p["name"] == "Cull-ready")
 
     # Two photos whose (mtime-derived) dates differ land in two archive
@@ -7741,7 +7741,7 @@ def test_chain_cancel_landing_between_lock_release_and_post_check(
 
     app, db = app_and_db
     client = app.test_client()
-    cull_ready_id = next(p["id"] for p in db.get_saved_processes()
+    cull_ready_id = next(p["id"] for p in db.processes.list_all()
                          if p["name"] == "Cull-ready")
 
     card = _import_card(tmp_path, ("DSC_0001.jpg", "DSC_0002.jpg"))
@@ -7859,7 +7859,7 @@ def test_chain_cancel_late_thread_skips_wait_loop_entirely(
 
     app, db = app_and_db
     client = app.test_client()
-    cull_ready_id = next(p["id"] for p in db.get_saved_processes()
+    cull_ready_id = next(p["id"] for p in db.processes.list_all()
                          if p["name"] == "Cull-ready")
 
     card = _import_card(tmp_path, ("DSC_0001.jpg", "DSC_0002.jpg"))
@@ -9230,7 +9230,7 @@ def test_import_in_place_snapshot_rejects_replaced_restricted_directory(
     first_raw.write_bytes(b"first")
     second_raw.write_bytes(b"second")
     db.add_folder(str(root), name="registered")
-    snap_id = db.create_new_images_snapshot([
+    snap_id = db.workspaces.create_new_images_snapshot([
         str(first_raw), str(second_raw),
     ])
     first_identity_calls = 0
@@ -9362,7 +9362,7 @@ def test_import_in_place_snapshot_admits_only_frozen_files(
             (db._active_workspace_id,),
         )
     }
-    snap_id = db.create_new_images_snapshot([str(captured)])
+    snap_id = db.workspaces.create_new_images_snapshot([str(captured)])
     # Arrived after discovery: it belongs to the next snapshot, not this one.
     Image.new("RGB", (16, 16), "blue").save(late)
 
@@ -9426,7 +9426,7 @@ def test_import_in_place_snapshot_reports_missing_without_processing(
     root_id = db.add_folder(str(root), name="registered")
     vanished = root / "vanished.jpg"
     Image.new("RGB", (16, 16), "red").save(vanished)
-    snap_id = db.create_new_images_snapshot([str(vanished)])
+    snap_id = db.workspaces.create_new_images_snapshot([str(vanished)])
     quick_look_id = _process_id(db, "Quick look")
     vanished.unlink()
     db.conn.execute(
@@ -9466,7 +9466,7 @@ def test_import_in_place_snapshot_normalizes_raw_companion_and_replay(
     raw_id = db.add_photo(
         root_id, raw.name, ".nef", raw.stat().st_size, raw.stat().st_mtime,
     )
-    snap_id = db.create_new_images_snapshot([str(companion)])
+    snap_id = db.workspaces.create_new_images_snapshot([str(companion)])
 
     with app.test_client() as client:
         first = client.post("/api/jobs/import-in-place", json={
@@ -9518,7 +9518,7 @@ def test_import_in_place_snapshot_rejects_path_outside_registered_roots(
     db.add_folder(str(root), name="registered")
     path = outside / "bird.jpg"
     Image.new("RGB", (16, 16), "red").save(path)
-    snap_id = db.create_new_images_snapshot([str(path)])
+    snap_id = db.workspaces.create_new_images_snapshot([str(path)])
 
     with app.test_client() as client:
         resp = client.post("/api/jobs/import-in-place", json={
@@ -9545,7 +9545,7 @@ def test_import_in_place_snapshot_preserves_registered_root_spelling(
     root_parent_before = db.conn.execute(
         "SELECT parent_id FROM folders WHERE id = ?", (root_id,),
     ).fetchone()["parent_id"]
-    snap_id = db.create_new_images_snapshot([captured])
+    snap_id = db.workspaces.create_new_images_snapshot([captured])
 
     with app.test_client() as client:
         resp = client.post("/api/jobs/import-in-place", json={
@@ -9588,7 +9588,7 @@ def test_concurrent_snapshot_imports_serialize_and_report_one_replay(
     captured = root / "captured.jpg"
     Image.new("RGB", (16, 16), "red").save(captured)
     db.add_folder(str(root), name="registered")
-    snap_id = db.create_new_images_snapshot([str(captured)])
+    snap_id = db.workspaces.create_new_images_snapshot([str(captured)])
     quick_look_id = _process_id(db, "Quick look")
 
     original_scan = scanner.scan
@@ -9748,9 +9748,9 @@ def test_import_photos_after_import_defaults_from_workspace(
     app, db = app_and_db
     client = app.test_client()
     ws_id = db._active_workspace_id
-    pid = next(p["id"] for p in db.get_saved_processes()
+    pid = next(p["id"] for p in db.processes.list_all()
                if p["name"] == "Cull-ready")
-    db.update_workspace(ws_id, config_overrides={
+    db.workspaces.update(ws_id, config_overrides={
         "pipeline": {"default_process_id": pid},
     })
     resp = client.post("/api/jobs/import-photos", json={
@@ -9771,8 +9771,8 @@ def test_import_photos_new_workspace_ignores_old_default_process(
     app, db = app_and_db
     client = app.test_client()
     old_ws = db._active_workspace_id
-    pid = db.get_saved_processes()[0]["id"]
-    db.update_workspace(old_ws, config_overrides={
+    pid = db.processes.list_all()[0]["id"]
+    db.workspaces.update(old_ws, config_overrides={
         "pipeline": {"default_process_id": pid},
     })
     resp = client.post("/api/jobs/import-photos", json={
@@ -9833,7 +9833,7 @@ def test_import_photos_persists_after_import_snapshot(app_and_db, tmp_path):
     app, db = app_and_db
     client = app.test_client()
     quick_look_id = next(
-        pr["id"] for pr in db.get_saved_processes() if pr["name"] == "Quick look")
+        pr["id"] for pr in db.processes.list_all() if pr["name"] == "Quick look")
     resp = client.post("/api/jobs/import-photos", json={
         "sources": [_import_card(tmp_path)],
         "destination": str(tmp_path / "archive"),
@@ -9861,7 +9861,7 @@ def test_import_photos_retry_reuses_parent_after_import_snapshot(
     app, db = app_and_db
     with app.test_client() as client:
         quick_look_id = next(
-            pr["id"] for pr in db.get_saved_processes()
+            pr["id"] for pr in db.processes.list_all()
             if pr["name"] == "Quick look")
         parent_id = _post_import(client, _import_card(tmp_path),
                                  tmp_path / "archive", quick_look_id)
@@ -9898,7 +9898,7 @@ def test_import_photos_retry_survives_deleted_process(app_and_db, tmp_path):
     app, db = app_and_db
     with app.test_client() as client:
         quick_look_id = next(
-            pr["id"] for pr in db.get_saved_processes()
+            pr["id"] for pr in db.processes.list_all()
             if pr["name"] == "Quick look")
         parent_id = _post_import(client, _import_card(tmp_path),
                                  tmp_path / "archive", quick_look_id)
@@ -10437,7 +10437,7 @@ def test_import_photos_parent_job_wrong_workspace_rejected(
     # last_opened_at; nudge each in turn to switch what /api/jobs/*
     # sees as active.
     now = datetime.now()
-    db.update_workspace(
+    db.workspaces.update(
         other_ws, last_opened_at=(now + timedelta(seconds=10)).isoformat())
     with app.test_client() as client:
         parent_id = _post_import(client, _import_card(tmp_path),
@@ -10445,7 +10445,7 @@ def test_import_photos_parent_job_wrong_workspace_rejected(
         parent_result = wait_for_job_via_client(client, parent_id)["result"]
         parent_photo_ids = list(parent_result["photo_ids"])
         assert parent_photo_ids
-    db.update_workspace(
+    db.workspaces.update(
         original_ws, last_opened_at=(now + timedelta(seconds=20)).isoformat())
     with app.test_client() as client:
         resp = client.post("/api/jobs/import-photos", json={
@@ -10571,8 +10571,8 @@ def test_import_in_place_new_workspace_ignores_old_default_process(
     app, db = app_and_db
     client = app.test_client()
     old_ws = db._active_workspace_id
-    pid = db.get_saved_processes()[0]["id"]
-    db.update_workspace(old_ws, config_overrides={
+    pid = db.processes.list_all()[0]["id"]
+    db.workspaces.update(old_ws, config_overrides={
         "pipeline": {"default_process_id": pid},
     })
     resp = client.post("/api/jobs/import-in-place", json={
@@ -11197,7 +11197,7 @@ def test_import_chains_process_job(app_and_db, tmp_path):
     card = _chain_card(tmp_path)
     with app.test_client() as client:
         quick_look_id = next(
-            pr["id"] for pr in db.get_saved_processes()
+            pr["id"] for pr in db.processes.list_all()
             if pr["name"] == "Quick look")
         job_id = _post_import(client, card, tmp_path / "arch", quick_look_id)
         job = wait_for_job_via_client(client, job_id)
@@ -11232,7 +11232,7 @@ def test_import_retry_chains_carried_photo_ids(app_and_db, tmp_path):
 
     app, db = app_and_db
     quick_look_id = next(
-        pr["id"] for pr in db.get_saved_processes()
+        pr["id"] for pr in db.processes.list_all()
         if pr["name"] == "Quick look")
     card = _chain_card(tmp_path)
     with app.test_client() as client:
@@ -11299,7 +11299,7 @@ def test_interrupted_import_resumes_with_the_photos_it_landed(
     app, db = app_and_db
     runner = app._job_runner
     quick_look_id = next(
-        pr["id"] for pr in db.get_saved_processes()
+        pr["id"] for pr in db.processes.list_all()
         if pr["name"] == "Quick look")
     card = _chain_card(tmp_path)
     archive = tmp_path / "arch"
@@ -11613,7 +11613,7 @@ def test_resume_recovers_landings_its_parent_checkpoint_missed(
     """
     app, db = app_and_db
     quick_look_id = next(
-        pr["id"] for pr in db.get_saved_processes()
+        pr["id"] for pr in db.processes.list_all()
         if pr["name"] == "Quick look")
     card = _chain_card(tmp_path, n=4)
     for i, color in enumerate(("red", "green", "blue", "white")):
@@ -11910,7 +11910,7 @@ def test_resume_refuses_a_parent_that_already_chained_processing(
     twice."""
     app, db = app_and_db
     quick_look_id = next(
-        pr["id"] for pr in db.get_saved_processes()
+        pr["id"] for pr in db.processes.list_all()
         if pr["name"] == "Quick look")
     card = _chain_card(tmp_path)
     with app.test_client() as client:
@@ -11942,7 +11942,7 @@ def test_resume_allows_a_parent_whose_chained_pipeline_never_started(
     """
     app, db = app_and_db
     quick_look_id = next(
-        pr["id"] for pr in db.get_saved_processes()
+        pr["id"] for pr in db.processes.list_all()
         if pr["name"] == "Quick look")
     card = _chain_card(tmp_path)
     with app.test_client() as client:
@@ -12335,7 +12335,7 @@ def test_resume_replays_tags_when_chain_ran_but_tags_owed(
 
     app, db = app_and_db
     quick_look_id = next(
-        pr["id"] for pr in db.get_saved_processes()
+        pr["id"] for pr in db.processes.list_all()
         if pr["name"] == "Quick look")
     card = _chain_card(tmp_path)
     tag_name = "Kenya trip"
@@ -12576,7 +12576,7 @@ def test_failed_import_does_not_chain(app_and_db, tmp_path):
 
     app, db = app_and_db
     quick_look_id = next(
-        pr["id"] for pr in db.get_saved_processes() if pr["name"] == "Quick look")
+        pr["id"] for pr in db.processes.list_all() if pr["name"] == "Quick look")
     card = _chain_card(tmp_path)
     unreadable = card / "DSC_9999.jpg"
     Image.new("RGB", (16, 16), "blue").save(str(unreadable))
@@ -12619,7 +12619,7 @@ def test_cancelled_import_does_not_create_collection(
 
     monkeypatch.setattr(import_job, "run_import_job", cancelled_result)
     quick_look_id = next(
-        pr["id"] for pr in db.get_saved_processes() if pr["name"] == "Quick look")
+        pr["id"] for pr in db.processes.list_all() if pr["name"] == "Quick look")
     card = _chain_card(tmp_path, n=1)
     with app.test_client() as client:
         job_id = _post_import(
@@ -12639,7 +12639,7 @@ def test_duplicates_only_import_skips_chaining(app_and_db, tmp_path):
 
     app, db = app_and_db
     quick_look_id = next(
-        pr["id"] for pr in db.get_saved_processes() if pr["name"] == "Quick look")
+        pr["id"] for pr in db.processes.list_all() if pr["name"] == "Quick look")
     card = _chain_card(tmp_path)
     with app.test_client() as client:
         first = _post_import(client, card, tmp_path / "arch", None)
@@ -12661,7 +12661,7 @@ def test_chained_run_surfaces_model_warning(app_and_db, tmp_path):
 
     app, db = app_and_db
     cull_ready_id = next(
-        pr["id"] for pr in db.get_saved_processes() if pr["name"] == "Cull-ready")
+        pr["id"] for pr in db.processes.list_all() if pr["name"] == "Cull-ready")
     card = _chain_card(tmp_path)
     with app.test_client() as client:
         job_id = _post_import(client, card, tmp_path / "arch", cull_ready_id)
@@ -12697,9 +12697,9 @@ def test_chained_process_snapshot_survives_mid_import_edit(
     # Snapshot the "Full" seed and then flip skip_regroup=True after the
     # import request returns. Any live-resolve would show skip_regroup=True
     # in the chained job config; the enqueue-time snapshot keeps it False.
-    full_id = next(pr["id"] for pr in db.get_saved_processes()
+    full_id = next(pr["id"] for pr in db.processes.list_all()
                    if pr["name"] == "Full")
-    original = db.get_saved_process(full_id)
+    original = db.processes.get(full_id)
     assert original["skip_regroup"] is False, original
 
     _fake_active_model(monkeypatch)

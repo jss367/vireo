@@ -6,6 +6,7 @@ import pytest
 from db import Database
 from jobs import JobRunner
 from PIL import Image
+from repositories.processes import ProcessesRepository
 from services.imports import ImportFailure, ImportService
 from wait import wait_for_job_via_runner
 
@@ -131,7 +132,7 @@ def test_snapshot_replay_without_flask_context(import_service, tmp_path):
     photo = source / "bird.jpg"
     Image.new("RGB", (32, 32), "blue").save(photo)
     db.add_folder(str(source), name="registered")
-    snapshot_id = db.create_new_images_snapshot([str(photo)])
+    snapshot_id = db.workspaces.create_new_images_snapshot([str(photo)])
     body = {"source_snapshot_id": snapshot_id, "after_import": None}
 
     def launch():
@@ -186,7 +187,7 @@ def _source_body(tmp_path, method, name):
 
 def _assert_workspace_rolled_back(db, runner, name, original_workspace):
     """A rejected new-workspace import leaves no workspace and no switch."""
-    assert not any(ws["name"] == name for ws in db.get_workspaces())
+    assert not any(ws["name"] == name for ws in db.workspaces.list_all())
     assert db._active_workspace_id == original_workspace
     assert runner.list_jobs() == []
 
@@ -217,7 +218,7 @@ def test_in_place_process_snapshot_failure_rolls_back_new_workspace(
     makes ``resolve_process`` raise after the switch; roll the workspace back."""
     service, db, runner = import_service
     original_workspace = db._active_workspace_id
-    monkeypatch.setattr(db, "get_saved_process", lambda pid: {"id": pid})
+    monkeypatch.setattr(ProcessesRepository, "get", lambda self, pid: {"id": pid})
 
     def gone(pid):
         raise ValueError(f"process {pid} was deleted")
@@ -308,5 +309,5 @@ def test_started_import_keeps_new_workspace(import_service, tmp_path, method):
 
     assert isinstance(response, dict)
     wait_for_job_via_runner(runner, response["job_id"], wait_for_history=True)
-    assert any(ws["name"] == "Kept" for ws in db.get_workspaces())
+    assert any(ws["name"] == "Kept" for ws in db.workspaces.list_all())
     assert db._active_workspace_id == response["workspace"]["id"]

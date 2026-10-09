@@ -356,7 +356,7 @@ def create_pipeline_blueprint(
     def api_list_processes():
         """List all saved processes (global; ordered for the pickers)."""
         db = get_db()
-        return jsonify(db.get_saved_processes())
+        return jsonify(db.processes.list_all())
 
     @blueprint.route("/api/processes", methods=["POST"])
     def api_create_process():
@@ -366,10 +366,10 @@ def create_pipeline_blueprint(
         if err is not None:
             return json_error(err)
         try:
-            pid = db.create_saved_process(**kwargs)
+            pid = db.processes.create(**kwargs)
         except ValueError as e:
             return json_error(str(e))
-        return jsonify(db.get_saved_process(pid))
+        return jsonify(db.processes.get(pid))
 
     @blueprint.route("/api/processes/<int:process_id>", methods=["PUT"])
     def api_update_process(process_id):
@@ -384,7 +384,7 @@ def create_pipeline_blueprint(
             return json_error(str(e))
         if not existed:
             return json_error("process not found", 404)
-        return jsonify(db.get_saved_process(process_id))
+        return jsonify(db.processes.get(process_id))
 
     @blueprint.route("/api/processes/<int:process_id>", methods=["DELETE"])
     def api_delete_process(process_id):
@@ -576,7 +576,7 @@ def create_pipeline_blueprint(
         # autosave can't read this same overrides snapshot and overwrite the
         # pipeline change with stale data.
         with settings_write_lock:
-            ws = db.get_workspace(db.active_workspace_id)
+            ws = db.workspaces.get(db.active_workspace_id)
             current_overrides = {}
             if ws and ws["config_overrides"]:
                 with contextlib.suppress(json.JSONDecodeError, TypeError):
@@ -590,7 +590,7 @@ def create_pipeline_blueprint(
             pipeline_section.update(pipeline_updates)
             current_overrides["pipeline"] = pipeline_section
 
-            db.update_workspace(db.active_workspace_id, config_overrides=current_overrides)
+            db.workspaces.update(db.active_workspace_id, config_overrides=current_overrides)
 
         return jsonify({"pipeline": pipeline_section, "status": "saved"})
 
@@ -726,7 +726,7 @@ def create_pipeline_blueprint(
                 for p in results.get("photos", [])
                 if p.get("id") is not None
             }
-            row = db.get_workspace(db.active_workspace_id)
+            row = db.workspaces.get(db.active_workspace_id)
             last_group_fp = row["last_group_fingerprint"] if row else None
             current_group_fp = compute_group_fingerprint(effective_cfg)
             if not last_group_fp:
@@ -769,7 +769,7 @@ def create_pipeline_blueprint(
                     review_readiness["enhancing_missing"].insert(0, "masks_partial")
             review_readiness["missing_required"] = []
 
-        ws = db.get_workspace(db.active_workspace_id)
+        ws = db.workspaces.get(db.active_workspace_id)
         ws_overrides = {}
         if ws and ws["config_overrides"]:
             try:

@@ -566,14 +566,14 @@ def test_hash_verification_commits_before_pause(
         assert db.conn.execute(
             "SELECT COUNT(*) FROM photos WHERE hash_status='ok'",
         ).fetchone()[0] == 1
-        assert not db.get_audit_runs()
+        assert not db.audit.get_runs()
         db.conn.execute("UPDATE photos SET rating=4 WHERE id=?", (first,))
         db.conn.commit()
         assert client.post(f"/api/jobs/{job_id}/{action}").status_code == 200
         finished = wait_for_job_via_client(client, job_id)
         assert finished["status"] == ("completed" if action == "resume" else "cancelled")
         assert len(calls) == (photo_count if action == "resume" else 1)
-        assert bool(db.get_audit_runs()) == (action == "resume")
+        assert bool(db.audit.get_runs()) == (action == "resume")
     finally:
         release.set()
         runner.cancel_job(job_id)
@@ -1037,7 +1037,7 @@ def test_snapshot_backed_import_in_place_is_not_pausable(app_and_db, tmp_path):
     frozen = snap_root / "frozen.jpg"
     Image.new("RGB", (8, 8), "red").save(frozen)
     db.add_folder(str(snap_root), name="snap")
-    snap_id = db.create_new_images_snapshot([str(frozen)])
+    snap_id = db.workspaces.create_new_images_snapshot([str(frozen)])
     snap_resp = client.post("/api/jobs/import-in-place", json={
         "source_snapshot_id": snap_id,
         "after_import": None,
@@ -1080,7 +1080,7 @@ def test_import_photos_checkpoints_before_after_import_chain(
         "SELECT COUNT(*) FROM collections",
     ).fetchone()[0]
     cull_ready_id = next(
-        pr["id"] for pr in db.get_saved_processes()
+        pr["id"] for pr in db.processes.list_all()
         if pr["name"] == "Cull-ready"
     )
 
@@ -1167,7 +1167,7 @@ def test_import_handoff_rejects_late_parent_pause(request, monkeypatch, tmp_path
         "ok": True, "photo_ids": [photo_id], "discovered": 1,
         "copied": 1, "failed": 0, "total": 1,
     })
-    process_id = next(p["id"] for p in db.get_saved_processes() if p["name"] == "Cull-ready")
+    process_id = next(p["id"] for p in db.processes.list_all() if p["name"] == "Cull-ready")
     source = tmp_path / "card-handoff"
     source.mkdir()
     Image.new("RGB", (8, 8), "blue").save(source / "new.jpg")

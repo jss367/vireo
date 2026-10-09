@@ -706,7 +706,7 @@ def test_api_folder_workspaces_lists_inherited_and_direct_memberships(app_and_db
     """
     app, db = app_and_db
     client = app.test_client()
-    active_ws = db.get_workspace(db._active_workspace_id)
+    active_ws = db.workspaces.get(db._active_workspace_id)
     root = db.conn.execute(
         "SELECT id FROM folders WHERE path = '/photos/2024'"
     ).fetchone()
@@ -4668,7 +4668,7 @@ def test_api_photo_pipeline_diagnoses_full_image_predictions(app_and_db):
     """Synthetic full-image anchors are not below-threshold detector boxes."""
     app, db = app_and_db
     pid = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
-    db.update_workspace(db._active_workspace_id, config_overrides={
+    db.workspaces.update(db._active_workspace_id, config_overrides={
         "detector_confidence": 0.0,
     })
     det_id = db.save_detections(pid, [
@@ -8264,14 +8264,14 @@ def test_deleting_a_label_set_clears_it_from_every_workspace(app_and_db, tmp_pat
         labels_mod.LABELS_DIR = orig
 
     assert db.get_workspace_active_labels() == []
-    assert _json.loads(db.get_workspace(other)["config_overrides"])["active_labels"] == []
+    assert _json.loads(db.workspaces.get(other)["config_overrides"])["active_labels"] == []
 
 
 def test_pipeline_page_init_includes_workspace_overrides(app_and_db):
     """page-init response includes workspace config overrides."""
     app, db = app_and_db
     # Set a workspace override first
-    db.update_workspace(db._active_workspace_id, config_overrides={"review_min_confidence": 25})
+    db.workspaces.update(db._active_workspace_id, config_overrides={"review_min_confidence": 25})
     with app.test_client() as c:
         resp = c.get("/api/pipeline/page-init")
         assert resp.status_code == 200
@@ -8303,7 +8303,7 @@ def test_workspace_config_post_preserves_non_whitelisted_keys(app_and_db):
     preserving keys not in the whitelist (e.g. active_labels)."""
     app, db = app_and_db
     # Pre-set overrides with a non-whitelisted key
-    db.update_workspace(db._active_workspace_id,
+    db.workspaces.update(db._active_workspace_id,
                         config_overrides={"active_labels": ["/path/to/birds.txt"],
                                           "classification_threshold": 0.5})
     with app.test_client() as c:
@@ -9729,7 +9729,7 @@ def test_api_browse_photo_counts_leaves_out_folders_past_request_budget(
 def _read_workspace_overrides(db, ws_id):
     """Helper: read and JSON-decode the config_overrides column for ws_id."""
     import json
-    ws = db.get_workspace(ws_id)
+    ws = db.workspaces.get(ws_id)
     raw = ws["config_overrides"] if ws else None
     if not raw:
         return {}
@@ -9804,7 +9804,7 @@ def test_put_subject_types_preserves_other_overrides(app_and_db):
     """Setting subject_types must not clobber other config_overrides keys."""
     app, db = app_and_db
     ws_id = db.create_workspace("ws-subject-5")
-    db.update_workspace(ws_id, config_overrides={"classification_threshold": 0.42})
+    db.workspaces.update(ws_id, config_overrides={"classification_threshold": 0.42})
     client = app.test_client()
     resp = client.put(
         f"/api/workspaces/{ws_id}/subject-types",
@@ -9866,9 +9866,9 @@ def test_put_subject_types_normalizes_non_dict_config_overrides(app_and_db):
     The endpoint must coerce it back to {} before assigning subject_types."""
     app, db = app_and_db
     ws_id = db.create_workspace("ws-subject-non-dict")
-    # Plant a list-shaped config_overrides directly via update_workspace,
+    # Plant a list-shaped config_overrides directly via workspaces.update,
     # which json.dumps()es whatever it receives.
-    db.update_workspace(ws_id, config_overrides=["unexpected", "list"])
+    db.workspaces.update(ws_id, config_overrides=["unexpected", "list"])
     client = app.test_client()
     resp = client.put(
         f"/api/workspaces/{ws_id}/subject-types",
@@ -10789,7 +10789,7 @@ def test_get_active_subject_types_workspace_override_wins(app_and_db, tmp_path, 
     app, db = app_and_db
     # Override the active workspace to include genre too
     ws_id = db._active_workspace_id
-    db.update_workspace(ws_id, config_overrides={"subject_types": ["taxonomy", "genre"]})
+    db.workspaces.update(ws_id, config_overrides={"subject_types": ["taxonomy", "genre"]})
     client = app.test_client()
     resp = client.get("/api/workspaces/active/subject-types")
     assert resp.status_code == 200
@@ -17373,7 +17373,7 @@ def test_collection_preview_does_not_mask_db_failures(app_and_db, monkeypatch):
 
 def test_update_workspace_unknown_id_returns_404(app_and_db):
     """PUT /api/workspaces/<id> must 404 for an unknown workspace instead of
-    crashing on dict(None) after update_workspace silently no-ops."""
+    crashing on dict(None) after workspaces.update silently no-ops."""
     app, _db = app_and_db
     client = app.test_client()
     resp = client.put('/api/workspaces/999999', json={"name": "ghost"})
@@ -19281,8 +19281,8 @@ def test_selection_prediction_suggestions_applies_confidence_threshold(app_and_d
     photo_a, _ = _seed_prediction_photo(db, "thr-a.jpg", "Bald Eagle", 0.91)
     photo_b, _ = _seed_prediction_photo(db, "thr-b.jpg", "Black Saddlebags", 0.02)
 
-    ws_id = db.get_workspaces()[0]["id"]
-    db.update_workspace(ws_id, config_overrides={"classifier_confidence": 0.5})
+    ws_id = db.workspaces.list_all()[0]["id"]
+    db.workspaces.update(ws_id, config_overrides={"classifier_confidence": 0.5})
 
     resp = client.post(
         "/api/selection/prediction-suggestions",
@@ -19979,8 +19979,8 @@ def test_selection_prediction_suggestions_keeps_bucket_when_matching_row_above_t
     import json as _json
 
     app, db = app_and_db
-    ws_id = db.get_workspaces()[0]["id"]
-    db.update_workspace(ws_id, config_overrides={"classifier_confidence": 0.80})
+    ws_id = db.workspaces.list_all()[0]["id"]
+    db.workspaces.update(ws_id, config_overrides={"classifier_confidence": 0.80})
 
     client = app.test_client()
     folder_id = db.get_folder_tree()[0]["id"]

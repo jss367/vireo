@@ -2328,7 +2328,7 @@ def test_import_new_workspace_forwards_explicit_after_import(live_server, page):
     url = live_server["url"]
     db = live_server["db"]
     identify_id = next(
-        p["id"] for p in db.get_saved_processes() if p["name"] == "Identify birds"
+        p["id"] for p in db.processes.list_all() if p["name"] == "Identify birds"
     )
     captured = {}
 
@@ -2368,7 +2368,7 @@ def test_import_new_workspace_forwards_explicit_after_import(live_server, page):
 
 
 def test_mounted_nas_offers_managed_local_processing(live_server, page):
-    identify_id = next(p["id"] for p in live_server["db"].get_saved_processes()
+    identify_id = next(p["id"] for p in live_server["db"].processes.list_all()
                        if p["name"] == "Identify birds")
     page.route("**/api/remote-targets", lambda route: route.fulfill(
         status=200, content_type="application/json", body=json.dumps({
@@ -2495,7 +2495,7 @@ def test_import_after_move_hint_blames_the_right_field(live_server, page):
     url = live_server["url"]
     db = live_server["db"]
     identify_id = next(
-        p["id"] for p in db.get_saved_processes() if p["name"] == "Identify birds"
+        p["id"] for p in db.processes.list_all() if p["name"] == "Identify birds"
     )
 
     def remote_targets(route):
@@ -2643,7 +2643,7 @@ def test_import_after_move_recovers_when_archive_root_is_created(
     url = live_server["url"]
     db = live_server["db"]
     identify_id = next(
-        p["id"] for p in db.get_saved_processes() if p["name"] == "Identify birds"
+        p["id"] for p in db.processes.list_all() if p["name"] == "Identify birds"
     )
     state = {"present": False, "fetches": 0}
 
@@ -2706,7 +2706,7 @@ def test_import_after_move_recovers_when_archive_root_is_corrected(
     url = live_server["url"]
     db = live_server["db"]
     identify_id = next(
-        p["id"] for p in db.get_saved_processes() if p["name"] == "Identify birds"
+        p["id"] for p in db.processes.list_all() if p["name"] == "Identify birds"
     )
     state = {
         "id": "photo@nas.local:/volume1/Photography",
@@ -2779,7 +2779,7 @@ def test_import_after_move_refresh_recovers_failed_initial_target_load(
     url = live_server["url"]
     db = live_server["db"]
     identify_id = next(
-        p["id"] for p in db.get_saved_processes() if p["name"] == "Identify birds"
+        p["id"] for p in db.processes.list_all() if p["name"] == "Identify birds"
     )
     state = {"calls": 0}
 
@@ -2840,7 +2840,7 @@ def test_import_after_move_drops_eligibility_when_root_changes_elsewhere(
     url = live_server["url"]
     db = live_server["db"]
     identify_id = next(
-        p["id"] for p in db.get_saved_processes() if p["name"] == "Identify birds"
+        p["id"] for p in db.processes.list_all() if p["name"] == "Identify birds"
     )
     state = {"root": "/Users/me/Pictures/Vireo Archive"}
 
@@ -2982,7 +2982,7 @@ def test_import_after_move_target_pick_survives_refresh_or_unchecks(
     url = live_server["url"]
     db = live_server["db"]
     identify_id = next(
-        p["id"] for p in db.get_saved_processes() if p["name"] == "Identify birds"
+        p["id"] for p in db.processes.list_all() if p["name"] == "Identify birds"
     )
     state = {"nas2_id": "photo@backup.local:/volume1/Backup", "nas2": True}
 
@@ -3112,7 +3112,7 @@ def test_import_slow_initial_target_load_does_not_overwrite_newer_refresh(
     url = live_server["url"]
     db = live_server["db"]
     identify_id = next(
-        p["id"] for p in db.get_saved_processes() if p["name"] == "Identify birds"
+        p["id"] for p in db.processes.list_all() if p["name"] == "Identify birds"
     )
     state = {"calls": 0, "held": None}
 
@@ -3175,7 +3175,7 @@ def test_import_after_move_destination_change_unchecks_instead_of_retargeting(
     url = live_server["url"]
     db = live_server["db"]
     identify_id = next(
-        p["id"] for p in db.get_saved_processes() if p["name"] == "Identify birds"
+        p["id"] for p in db.processes.list_all() if p["name"] == "Identify birds"
     )
 
     def target(tid, port, root):
@@ -3233,7 +3233,7 @@ def test_import_new_workspace_shows_target_default_in_after_import_display(
     (possibly-overridden) prefilled selection."""
     url = live_server["url"]
     db = live_server["db"]
-    procs_by_name = {p["name"]: p["id"] for p in db.get_saved_processes()}
+    procs_by_name = {p["name"]: p["id"] for p in db.processes.list_all()}
     identify_id = procs_by_name["Identify birds"]
     quick_look_id = procs_by_name["Quick look"]
 

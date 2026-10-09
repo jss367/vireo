@@ -385,7 +385,7 @@ def test_load_photo_features_subject_absent_ignores_non_mdv6_detections(tmp_path
     # Lower the workspace's detector_confidence to 0.0 so a confidence=0
     # synthetic full-image row WOULD pass the threshold if not filtered.
     ws_id = db._active_workspace_id
-    db.update_workspace(ws_id, config_overrides={"detector_confidence": 0.0})
+    db.workspaces.update(ws_id, config_overrides={"detector_confidence": 0.0})
 
     pid = db.add_photo(fid, "x.jpg", ".jpg", 100, 1.0)
     # MDV6: empty-scene run (canonical "detector confirmed empty")
@@ -3406,7 +3406,7 @@ def test_load_photo_features_honors_workspace_detector_threshold(tmp_path):
     # (helper sorts by confidence DESC), but if we drop the high-conf box
     # the low-conf one now surfaces — proving the read-time filter actually
     # changed behavior without any detection-row writes.
-    db.update_workspace(ws_id,
+    db.workspaces.update(ws_id,
                         config_overrides={"detector_confidence": 0.01})
 
     # Delete just the high-conf detection to confirm the low-conf one now
@@ -3428,7 +3428,7 @@ def test_load_photo_features_honors_workspace_detector_threshold(tmp_path):
 
     # Raise the threshold back above 0.05 — the low-conf box disappears
     # again, purely through read-time filtering.
-    db.update_workspace(ws_id,
+    db.workspaces.update(ws_id,
                         config_overrides={"detector_confidence": 0.5})
     photos = load_photo_features(db)
     assert photos[0]["detection_box"] is None

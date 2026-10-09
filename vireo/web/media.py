@@ -2943,7 +2943,7 @@ def create_media_blueprint(
             return "", 404
 
         db = get_db()
-        if not db.is_duplicate_group_member(photo_id):
+        if not db.duplicates.is_group_member(photo_id):
             return "", 404
         photo = db.get_photo(photo_id)
         if not photo:
