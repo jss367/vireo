@@ -2737,7 +2737,7 @@ class _RuleQueryBuilder:
         has = (
             f"(LOWER(p.extension) IN ({placeholders})"
             f" OR (p.companion_path IS NOT NULL"
-            f" AND {COMPANION_EXTENSION_SQL} IN ({placeholders})))"
+            f" AND COALESCE({COMPANION_EXTENSION_SQL} IN ({placeholders}), 0)))"
         )
         negate = "NOT " if op in ("is not", "not_in") else ""
         return f"{negate}{has}", values + values
